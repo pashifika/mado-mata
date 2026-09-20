@@ -85,7 +85,9 @@ def validate_event(event_name, event, repository, ref=None):
         if event.get("ref") != ref:
             raise ValueError("push event ref does not match GITHUB_REF")
     elif event.get("ref") != short_ref:
-        raise ValueError("workflow_dispatch event ref does not match GITHUB_REF")
+        raise ValueError(
+            f"workflow_dispatch event ref {event.get('ref')!r} does not match GITHUB_REF {ref!r}"
+        )
     return f"Valid {event_name} context: {ref}; PR routing is not applicable."
 
 
