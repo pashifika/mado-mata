@@ -1,6 +1,6 @@
 # ADR 0001: bounded runtime comparison without native authority substitution
 
-- Status: accepted for the comparison; production runtime adoption blocked
+- Status: accepted; QuickJS/TypeScript selected for macOS manual development; full native qualification incomplete
 - Date: 2026-09-20
 - Change: `m0-runtime-comparison`
 - Integration: `change/m0-runtime-comparison` → `dev/runtime-comparison`
@@ -100,3 +100,36 @@ numerical budgets before any `Adopt(candidate)` decision. Until then the result
 is `Blocked(reason)` even when all available CI checks pass. See
 [usage and evidence boundaries](../runtime-comparison.md) and
 [native setup](../runtime-native.md).
+
+## macOS-first development selection
+
+On 2026-09-20 the operator changed the delivery priority: finish a manually
+testable implementation instead of extending automated both-OS qualification.
+Select JavaScript on QuickJS through `rquickjs` for that development, with
+TypeScript as the preferred authoring language. This supersedes the requirement
+to complete the entire native comparison before choosing a development runtime.
+It does not turn unexecuted Windows/native cases into passing release evidence.
+
+The choice uses existing implementation evidence:
+
+- JavaScript completed the authorized six-step macOS game workflow, including
+  recognition postconditions and cleanup.
+- Both candidate VMs and the TypeScript authoring path pass controlled and real
+  recorded-frame workloads. TypeScript additionally provides verified schema/SDK
+  type checking, completion metadata, and original-source diagnostics.
+- Reusing one JavaScript VM and its TypeScript compiler avoids another product
+  SDK. Lua remains a comparison adapter, not a second product runtime.
+- The small replay sample does not establish a meaningful speed winner; neither
+  the choice nor the manual interface depends on such a claim.
+
+Keep the current pinned versions and shared Rust host. Add one manual invocation
+to the existing supervisor, with explicit Start, operator Stop, bounded cleanup,
+and a private result file. Do not build another runner or a desktop shell for
+this step. Native execution still requires a reviewed finite plan; no implicit
+game launch, focus change, elevation, fallback, or retry is introduced.
+
+The machine-readable comparison's `Blocked(reason)` continues to describe
+incomplete native qualification, not a prohibition on the selected macOS
+development path. Preserve historical failures and resume platform qualification
+when it serves the manually testable product. MadoPilot-side changes are retained
+in its private `local_docs/` for later separately scoped Change authoring.

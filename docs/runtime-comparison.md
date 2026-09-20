@@ -6,11 +6,11 @@ application. Controlled checks exercise actual interpreters and owned processes;
 their input sink is **non-native**. They do not capture a screen, launch a game,
 change focus, request permissions, or send operating-system input.
 
-**Runtime adoption remains blocked.** Exact-path/process-lifetime native binding
-and real SDK input are implemented, but complete both-OS workload, lifecycle, and
-performance evidence is still required. Invocation-only input receipts do not
-prove application effect. See [native prerequisites](runtime-native.md) and the
-[decision record](adr/0001-runtime-comparison-boundaries.md).
+**macOS development uses JavaScript on QuickJS with TypeScript authoring.**
+The [selection decision](adr/0001-runtime-comparison-boundaries.md#macos-first-development-selection)
+allows manual development before full both-OS qualification. Native qualification
+remains incomplete; invocation-only receipts do not prove application effect.
+See [native prerequisites](runtime-native.md) before any real capture or input.
 
 ## Setup and commands
 
@@ -52,6 +52,40 @@ silently become successful samples.
 `child`, `parent-probe`, `parent-stop-probe`, and `target-probe` are harness-internal
 modes. The last is an inert owned process used to prove that containment and
 intentional supervisor exit do not terminate the separate target.
+
+## Manual script testing
+
+After the setup above, start one controlled TypeScript invocation:
+
+```sh
+mkdir -p .cache/runtime-comparison
+cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- manual tools/runtime-comparison/fixtures/manual-plan.json tools/runtime-comparison/fixtures/typescript .cache/runtime-comparison/manual-result.json
+```
+
+Review the candidate, lane, and limits, then enter `start`. While it runs, enter
+`stop` to request cancellation. Closing the control input also requests Stop.
+The supervisor keeps its normal cleanup and containment deadlines; a Stop request
+is not a physical-cleanup confirmation. An invocation that finishes first retains
+its actual outcome. Use the reported cleanup fields, not the prompt, to determine
+whether cleanup completed.
+
+Manual mode executes exactly once without warmups or repetitions. It does not
+expand native authority or retry failed input. It captures an immutable package
+before Start; edit the source and invoke the command again for another test.
+The destination must not already exist and must be outside the package; choose
+a new filename for each invocation. Results use the same private version-1
+`runs` format as `run`, and can be summarized with `report`.
+Declining Start saves an empty `runs` array with `CancelledBeforeStart`, not an
+executed run. Only a completed passing invocation exits 0; cancellation and
+failed or blocked invocations exit 1 while preserving their distinct outcomes.
+
+The shipped plan has a **non-native controlled input sink**. It does not operate
+a game or need an OCR installation. Use an engine-enabled executable and a
+separately reviewed private plan/package for real replay or native testing.
+Confirming Start for a native plan authorizes only that plan's exact target,
+route, and finite operation limits, not automatic focus, elevation, or fallback.
+Scripts must evaluate their postconditions explicitly; `Submitted` alone is not
+application success. Raw result files can contain private execution details.
 
 ## Package and host contracts
 
@@ -153,17 +187,17 @@ Result statuses are `PASS`, `FAIL`, `BLOCKED`, `UNEXECUTED`, and
 underlying execution remains `FAIL`; both are retained. Missing native authority
 is `BLOCKED`, not a skipped success. Language-only inapplicability does not waive
 shared host or lifecycle obligations.
-The catalog is exhaustive, but the current executable corpus is not: unmapped
-controlled requirements remain `UNEXECUTED`. A green CI job means its executed
-oracles passed, not that every controlled or native acceptance row passed.
+The catalog retains requirements beyond the currently qualified lanes. A green
+CI job means its executed oracles passed, not that every native acceptance row
+passed.
 
 Keep raw plans, model/runtime paths, screenshots, OCR text, loader diagnostics,
 and full execution records in private evidence storage. The `report` command
 emits aggregate, content-identified results rather than raw native diagnostics.
 Do not publish raw `run` output merely because it is JSON.
 
-The comparison does not select a production runtime from compilation or hosted
-checks. Initial M0 qualification still needs Windows and Apple Silicon macOS.
-After that gate and an explicit runtime decision, primary-OS M1–M4 iteration can
-follow its separate policy. Keeping comparison adapters here does not require a
+Full native qualification still needs Windows and Apple Silicon macOS evidence.
+The separately approved macOS development selection is JavaScript/QuickJS with
+TypeScript authoring; remaining qualification does not prevent manual development.
+It does not promise untested platform support or turn the comparison into a
 multi-runtime desktop product.

@@ -209,7 +209,8 @@ M0 acceptance still requires explicitly authorized native Windows and Apple
 Silicon macOS evidence for capture, template recognition, OCR, input, lifecycle,
 and runtime adoption. Controlled success proves none of those native scenarios.
 Missing authority, permissions, models, dependencies, or an OS lane leaves native
-acceptance `BLOCKED` or `UNEXECUTED`, not passed. A recommendation must remain
+acceptance `BLOCKED` or `UNEXECUTED`, not passed. The qualification report remains
 `Blocked(reason)` when neither candidate has the required native and budget
-evidence. Later primary-OS product iteration does not remove M0's initial
-two-platform acceptance requirements.
+evidence. The [macOS-first development selection](adr/0001-runtime-comparison-boundaries.md#macos-first-development-selection)
+allows manual development to proceed separately; it does not waive native
+acceptance requirements or authorize hosted game operations.

@@ -105,12 +105,14 @@ Each recorded frame, PNG template, and MadoPilot package manifest must be a
 - `replay.templates` maps host recognition asset aliases to template IDs declared
   by that engine manifest. Neither map grants filesystem access.
 
-The ordinary workflow consumes one readiness frame, one decision frame, and one
-newer postcondition frame. Supply at least those three observations; unmatched
-query waits can consume additional frames. Set the profile ROI to the recorded dimensions.
+The supplied workload consumes four observations: the host's readiness guard,
+the package readiness routine, the workflow decision, and a strictly newer
+postcondition. Supply those four acquisitions in order; unmatched query waits
+can consume additional frames. Set the profile ROI to the recorded dimensions.
 Keep the complete package within `limits.snapshot_files` and
-`limits.snapshot_bytes`; three 320-by-160 RGBA frames occupy 614400 bytes before
-other package files. For qualification, use real observations appropriate to the
+`limits.snapshot_bytes`; three distinct 320-by-160 RGBA assets occupy 614400 bytes
+before other package files, even when a frame asset is referenced more than once.
+For qualification, use real observations appropriate to the
 declared oracle, not generated success pixels or pre-filled OCR results.
 
 A separately labeled integration smoke may use an identified generated upstream
@@ -152,8 +154,9 @@ resource lengths must be positive and at most 1 GiB.
     "corpus_id": "reviewed-corpus-v1",
     "frames": [
       {"asset":"ready_frame","width":320,"height":160,"pixel_format":"rgba8","captured_ns":0,"discontinuous":false,"placement":null},
-      {"asset":"decision_frame","width":320,"height":160,"pixel_format":"rgba8","captured_ns":100000000,"discontinuous":false,"placement":null},
-      {"asset":"after_frame","width":320,"height":160,"pixel_format":"rgba8","captured_ns":200000000,"discontinuous":false,"placement":null}
+      {"asset":"ready_frame","width":320,"height":160,"pixel_format":"rgba8","captured_ns":100000000,"discontinuous":false,"placement":null},
+      {"asset":"decision_frame","width":320,"height":160,"pixel_format":"rgba8","captured_ns":200000000,"discontinuous":false,"placement":null},
+      {"asset":"after_frame","width":320,"height":160,"pixel_format":"rgba8","captured_ns":300000000,"discontinuous":false,"placement":null}
     ],
     "package_entries": {
       "madopilot-package.json": "engine_manifest",

@@ -2,14 +2,21 @@
 
 ## Decision
 
+**Development selection: JavaScript on QuickJS, with TypeScript authoring,
+for macOS manual development.**
+
+**Full native qualification:**
 `Blocked(incomplete automated-native and both-OS qualification)`.
-No runtime is selected for production. This delivery provides executable controlled
-comparison paths, real recognition smoke evidence, and a strict native bridge.
+The operator-approved macOS-first decision is recorded in the
+[ADR](adr/0001-runtime-comparison-boundaries.md#macos-first-development-selection).
+It reuses the working host/compiler and does not claim Windows input support or
+completed release qualification.
 The initial macOS process-directed probes failed. A separately authorized system
 route later completed the requested roundtrip with approved image verification;
 the OCR failures and a pre-correction native shutdown crash remain failed records.
-Windows game execution and representative recorded-gameplay qualification remain
-unexecuted.
+The Windows system-route acceptance attempt was refused before submitting any
+input event. Recorded-frame replay now exercises all four authoring/control paths
+on both OSes; neither that replay nor one native workflow establishes adoption.
 
 ## Initial local evidence
 
@@ -190,22 +197,126 @@ The operator also confirmed visible workflow success.
 
 This is one real, bounded macOS workflow smoke, not representative performance,
 Windows qualification, runtime adoption, or proof of a future editor integration.
-The OS privacy-indicator animation was not independently recorded. Windows game
-execution remains unexecuted pending an explicitly approved executable path and
-its own target-specific preparation.
+The OS privacy-indicator animation was not independently recorded. The subsequent
+Windows preparation and refused native attempt are recorded below.
+
+## Windows preparation and closed native attempt
+
+An operator supplied an exact executable, process lifetime, window, and native
+placement. Authorized reference captures established Windows-specific regions,
+independent switch-state templates, and the full selected-character OCR field.
+No assumed aspect ratio or fixed portrait index was used. Ten original reference
+images are retained privately as lossless PNGs; archive CRCs and reconstructed
+RGBA hashes were independently verified.
+
+The script's initial-state guard requires either a verified menu or a matching
+idle-state template on the same frame as the single dismissal request. Missing
+menu OCR alone never authorizes input. Eight actual-JavaScript boundary cases
+passed with a nonnative host that intercepts submission before any backend.
+
+The sole authorized `system` / `require_focused` acceptance attempt reached
+readiness and verified the idle state. Its first dismissal request returned
+`PolicyRefused`, `Unexecuted`, and zero submitted events. No later workflow stage
+or post-refusal capture ran. The final visible application state is unverified.
+The outer process exited 1 without timeout or forced containment; session close
+and physical cleanup completed with zero attempt/native/script owners. The
+runner-scoped engine/model baseline was still visible before process teardown.
+
+No retry, focus change, elevation, or route fallback occurred. An earlier
+`window_message` refusal remains separate evidence. The receipt does not identify
+the exact rejecting policy check or measured token levels; static analysis is
+not a runtime root-cause determination. Both native execution slots are closed.
+
+## Recorded replay and ownership qualification
+
+The current pinned facade recognizes two authorized recorded frame crops under
+an explicit four-acquisition schedule. Repeated references and replay timestamps
+are synthetic ordering, not recorded frame rate or application response latency.
+Template-first and OCR-first profiles select independently expected controlled
+actions and verify the later recorded full-field postcondition.
+
+On both macOS and Windows, Rust, JavaScript, Lua, and TypeScript-to-JavaScript
+each passed both profiles: one warmup plus five measured cold-child invocations
+per profile. All 48 invocations per OS closed physically with zero attempt
+owners. Independent oracles verify decisions, ordered controlled effects, and
+explicit postcondition results; a successful script return alone is insufficient.
+Both OSes used matching package inventory identities and comparison-source
+identity, with separately identified platform-local OCR configurations. No native
+capture or input occurred. Five samples support p50, not p95 or p99.
+
+The macOS release-build workflow p50 values are:
+
+| Path | Template-first (ms) | OCR-first (ms) |
+| --- | ---: | ---: |
+| Direct Rust | 220.876 | 222.721 |
+| JavaScript | 231.442 | 232.288 |
+| Lua | 232.503 | 235.005 |
+| TypeScript to JavaScript | 231.587 | 231.707 |
+
+The separately sampled Windows debug-build workflow p50 values are:
+
+| Path | Template-first (ms) | OCR-first (ms) |
+| --- | ---: | ---: |
+| Direct Rust | 418.108 | 416.114 |
+| JavaScript | 529.829 | 537.155 |
+| Lua | 529.205 | 526.077 |
+| TypeScript to JavaScript | 533.462 | 529.050 |
+
+Compare candidates with the direct-Rust control within each OS/build cohort.
+The differing build profiles, hardware, and native libraries do not support a
+cross-OS speed comparison; the report keeps those identities separate.
+
+These include recognition and host work, not isolated interpreter overhead.
+The release validation used process-local `RUSTFLAGS="-C strip=none"` after
+macOS 27 rejected a stripped Rust proc-macro library. Optimization was unchanged;
+the failed build and workaround remain recorded separately.
+
+A separate same-process probe passed ten real-replay attempts, retained-query
+access after the original observation was released, cancellation observed during
+real OCR, and runner-resource release. Replacing fixture-owned model or runtime
+content at the same path refused reuse; restoring the original bytes permitted
+the original configuration again. The eight post-warmup RSS samples grew by
+1,196,032 bytes within the predeclared 32 MiB bound. This is a scoped replay
+ownership result, not live-target lifecycle or general leak qualification.
+
+The Windows owned-copy probe also completed ten attempts, retained-query and
+in-flight OCR cancellation checks, and model-content replacement refusal. Runtime
+replacement then failed with `AccessDenied`; its disposable restoration guard
+also panicked. That probe is a retained failure, not a complete Windows ownership
+pass. Runtime replacement, restoration, and runner-release phases were not
+reached. Installed resource hashes remained unchanged. The observed file-operation
+refusal does not establish its exact OS cause or a product/SDK cleanup defect.
+
+Eight prerequisite cases preserved unset, malformed, missing, unsupported,
+content-mismatch, and initialization-stage failures before workflow admission.
+An owned copy of the actual executable, linked to an intentionally absent
+fixture dependency, failed in the OS loader before Rust startup. The outer
+invocation retained the loader diagnostic and process cleanup; dependent native
+scenarios remained blocked. Installed libraries and game processes were untouched.
+
+Preparation failures remain retained: an incorrect engine-manifest entry and
+an insufficient frame schedule were corrected before successful sampling. The
+initial TypeScript fixture stored its postcondition without exposing evidence;
+its later revision emits the result explicitly and was sampled separately.
 
 ## Coverage, not just case count
 
 The catalog contains 112 requirement scenarios across four capabilities. The
-local result expands them into candidate/lane/OS rows. Its Apple Silicon
-controlled coverage has 76 passing JavaScript rows and 70 passing Lua rows;
-two controlled rows per candidate remain `UNEXECUTED`. Language-specific
-inapplicability is separate. Several checks support more than one requirement;
-163 passing checks do not mean 112 requirements passed.
+current local executable corpus passes 192 checks on each of macOS and Windows.
+Each OS has 78 passing JavaScript controlled requirement rows and 72 passing Lua
+rows, with no remaining applicable controlled row unexecuted. Language-specific
+inapplicability is separate; case counts are not requirement counts.
 
-The remaining controlled rows require target-PID reuse injection and a scheduled
-recovery transition racing with Stop. Those comparison interfaces do not exist;
-same harness PID or a hand-written conditional is not substitute evidence.
+Behavioral success does not waive prospective performance bounds. The combined
+report retains three macOS controlled cleanup-budget failures: 1,000,926,
+1,000,874, and 1,001,092 microseconds against a 1,000,000-microsecond limit.
+Missing instrumentation remains `UNEXECUTED`, not a budget pass.
+
+The added shared-host PID-reuse injection changes only the observed lifetime,
+not PID, attempt, session, or geometry. The explicit successor scheduler exercises
+Stop before queueing, while queued, and after admission before VM entry; it
+cannot reopen cancelled admission or bypass incomplete cleanup. These are
+controlled seams, not actual OS PID recycling or production game recovery.
 Windows and native rows cannot inherit local macOS outcomes. The initial
 [hosted run](https://github.com/pashifika/mado-mata/actions/runs/35492214355)
 independently passed the original 111-case corpus. The expanded
@@ -216,26 +327,27 @@ installed game or private OCR configuration.
 
 Live-native qualification remains incomplete despite the exact-target contract
 and assisted macOS roundtrip. The initial failed probes, later OCR failures, and
-native shutdown abort remain evidence, not discarded samples. Windows game
-execution awaits exact target authority, and representative per-OS budgets and
-sufficient comparable samples remain absent. Representative replay still needs
-identified recorded frames beyond the generated static fixture. Validated
-model/runtime identities support only the scoped evidence above; raw execution
+native shutdown abort remain evidence, not discarded samples. Windows native
+input was refused; later workflow postconditions and the remaining both-OS
+native lifecycle matrix are unexecuted. The recorded-crop replay above is not
+representative end-to-end game performance. Required per-OS native budgets,
+tail samples, and some instrumentation remain unavailable. Raw execution
 records and machine-local paths remain private.
 
 ## Candidate and authoring observations
 
 | Path | Verified characteristics | Unresolved comparison |
 | --- | --- | --- |
-| Direct Rust | Independent expected decisions and shared-host oracle | Real recognition/input costs and native ownership |
-| JavaScript | ES module caching/live cycles, bounded jobs, interruptible computation, frozen options | Native application effect, full lifecycle corpus, representative performance |
-| Lua | Restricted secondary loading, coroutine interruption, cycle refusal, readonly values | Native workload coverage, recovery/PID-reuse cases, representative performance |
+| Direct Rust | Independent decisions, shared-host safety, real recorded template/OCR and newer-frame postconditions | Representative native input costs and full live-target ownership matrix |
+| JavaScript | ES module caching/live cycles, bounded jobs, interruptible computation, frozen options, recorded replay | Full native lifecycle corpus and representative performance |
+| Lua | Restricted secondary loading, coroutine interruption, cycle refusal, readonly values, recorded replay | Native workload coverage and representative performance |
 | TypeScript to JavaScript | Inventory-bound compiler, strict SDK/schema types, actual completions, original helper source locations | Separate compiler CPU/RSS are not included in runtime-child measurements |
 
-The observations do not establish a winner. Timings are cold-child measurements;
-warm engine reuse is not qualified. RSS is sampled rather than a platform peak;
-VM allocation and live-owner values are endpoints. Missing measurements remain
-unavailable. Controlled plan ceilings are not retroactively chosen native budgets.
+The timings alone do not establish a speed winner. Corpus timings are cold-child
+measurements; the separate ownership probe establishes only its scoped warm
+engine reuse. RSS is sampled rather than a platform peak; VM allocation and
+live-owner values are endpoints. Missing measurements remain unavailable.
+Controlled or replay ceilings are not retroactively chosen native budgets.
 
 ## Corrections and handoff
 
@@ -253,8 +365,9 @@ telemetry correction addresses the diagnosed uploader lifecycle without claiming
 a general SDK, OCR, or game repair. The [native guide](runtime-native.md) records
 the current strict admission, startup environment, and receipt contracts.
 
-Complete the remaining controlled rows, resolve unattended native OCR verification,
-supply representative replay/native inputs, and collect both-OS
-evidence before choosing a runtime. Only then does a primary-OS M1–M4 development
-plan become the subsequent policy; retaining comparison adapters does not impose
-a multi-runtime desktop product.
+Proceed with the selected JavaScript/TypeScript path and the
+[manual runner](runtime-comparison.md#manual-script-testing). Remaining native
+qualification is deferred, not a blocker on this macOS development path and not
+silently passed. Preserve the Windows refusal and the measurement limitations.
+Lua remains available in the comparison tool; no multi-runtime product
+requirement is introduced.
