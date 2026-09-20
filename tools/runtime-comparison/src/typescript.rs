@@ -1,5 +1,5 @@
 use crate::inventory::Inventory;
-use crate::model::{Fault, Limits};
+use crate::model::{Control, Fault, Limits};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -52,7 +52,15 @@ impl Drop for CompilerChild {
     }
 }
 
-fn transport(request: &Value, limit: usize, deadline: Instant) -> Result<Value, Fault> {
+fn transport(
+    request: &Value,
+    limit: usize,
+    deadline: Instant,
+    control: Option<&Control>,
+) -> Result<Value, Fault> {
+    if let Some(control) = control {
+        control.check()?;
+    }
     let input = serde_json::to_vec(request)
         .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
     if input.len() >= limit {
@@ -62,10 +70,7 @@ fn transport(request: &Value, limit: usize, deadline: Instant) -> Result<Value, 
         ));
     }
     if Instant::now() >= deadline {
-        return Err(Fault::new(
-            "Timeout",
-            "TypeScript compilation deadline expired",
-        ));
+        return Err(Fault::new("Timeout", "compiler worker deadline expired"));
     }
     if !std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -183,13 +188,16 @@ fn transport(request: &Value, limit: usize, deadline: Instant) -> Result<Value, 
             Ok(None) => {}
             Err(error) => failure = Some(Fault::new("CompilerTransport", error.to_string())),
         }
+        if failure.is_none() {
+            failure = control.and_then(|control| control.check().err());
+        }
         if failure.is_some() || (status.is_some() && finished == 3) {
             break;
         }
         if Instant::now() >= deadline {
             failure = Some(Fault::new(
                 "Timeout",
-                "TypeScript compilation exceeded its deadline",
+                "compiler worker exceeded its deadline",
             ));
             break;
         }
@@ -246,6 +254,52 @@ fn transport(request: &Value, limit: usize, deadline: Instant) -> Result<Value, 
         .ok_or_else(|| Fault::new("CompilerProtocol", "compiler response has no value"))
 }
 
+/// Inspect JavaScript with the pinned parser without type checking or emitting.
+/// The worker shares the attempt's remaining deadline and cancellation latch.
+pub(crate) fn validate_javascript_imports(
+    inventory: &Inventory,
+    limits: &Limits,
+    control: &Control,
+) -> Result<Value, Fault> {
+    control.check()?;
+    let remaining_us = limits
+        .duration_ms
+        .saturating_mul(1000)
+        .saturating_sub(control.elapsed_us());
+    let deadline = Instant::now() + Duration::from_micros(remaining_us);
+    let limit = limits
+        .snapshot_bytes
+        .saturating_mul(8)
+        .saturating_add(1024 * 1024)
+        .min(MAX_COMPILER_BYTES);
+    // Declaration-suffixed sources can also be requested by the runtime loader;
+    // inspect them without treating their type-only syntax as executable imports.
+    let request = json!({"operation": "inspect-javascript", "sources": inventory.sources});
+    let inspection: Inspection =
+        serde_json::from_value(transport(&request, limit, deadline, Some(control))?)
+            .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
+    control.check()?;
+    for import in inspection.imports {
+        control.check()?;
+        inventory
+            .resolve(&import.from, &import.specifier)
+            .map_err(|mut fault| {
+                fault.context["module"] = json!(import.from);
+                fault.context["line"] = json!(import.line);
+                fault.context["column"] = json!(import.column);
+                fault.context["kind"] = json!(import.kind);
+                fault.context["parser"] = inspection.identity.clone();
+                fault
+            })?;
+    }
+    Ok(json!({
+        "identity": inspection.identity,
+        "transport_bytes": limit,
+        "heap_mib": COMPILER_HEAP_MIB,
+        "deadline": "remaining-attempt",
+    }))
+}
+
 /// Compile only the immutable inventory, before creating the JavaScript VM.
 pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Fault> {
     inventory.validate()?;
@@ -270,7 +324,7 @@ pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Faul
         fault
     };
     let inspection: Inspection =
-        serde_json::from_value(transport(&request, limit, deadline).map_err(&attribute)?)
+        serde_json::from_value(transport(&request, limit, deadline, None).map_err(&attribute)?)
             .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     let mut resolutions: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for import in inspection.imports {
@@ -295,7 +349,7 @@ pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Faul
         .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     request["compiler_identity"] = inspection.identity;
     let compilation: Compilation =
-        serde_json::from_value(transport(&request, limit, deadline).map_err(&attribute)?)
+        serde_json::from_value(transport(&request, limit, deadline, None).map_err(&attribute)?)
             .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     let mut compiled = inventory.clone();
     compiled.metadata["original_sources"] = serde_json::to_value(&inventory.sources)

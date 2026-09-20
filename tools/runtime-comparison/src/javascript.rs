@@ -345,6 +345,16 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
             "VM memory and job limits must be positive",
         ));
     }
+    // COMPILE_ONLY resolves static declarations, but not literal import() calls.
+    // Inspect every captured JS module (including transitive/runtime-loaded ones)
+    // before any package evaluation, using the same immutable inventory resolver.
+    let parser =
+        crate::typescript::validate_javascript_imports(&inventory, &limits, &host.control())
+            .map_err(|fault| {
+                let fault = annotate(fault, &inventory, "<loader>", "loading", None);
+                host.fail(fault.clone());
+                fault
+            })?;
     let runtime = Runtime::new().map_err(|error| Fault::new("Runtime", error.to_string()))?;
     // Requires the default QuickJS allocator, not rquickjs's rust-alloc feature.
     runtime.set_memory_limit(limits.vm_bytes);
@@ -354,7 +364,13 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
     let control = host.control();
     let interrupt_halted = halted.clone();
     let interrupt_deadline = deadline.clone();
+    let vm_hook = Arc::new(AtomicBool::new(false));
+    let interrupt_hook = vm_hook.clone();
+    let hook_host = host.clone();
     runtime.set_interrupt_handler(Some(Box::new(move || {
+        if interrupt_hook.load(Ordering::Acquire) && interrupt_hook.swap(false, Ordering::AcqRel) {
+            crate::runner::emit_vm_hook_reached(&hook_host);
+        }
         interrupt_halted.load(Ordering::Acquire)
             || control.check().is_err()
             || control.elapsed_us() >= interrupt_deadline.load(Ordering::Acquire)
@@ -454,7 +470,7 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
             })();
         "#).map_err(|error| exception_fault(&ctx, error, &inventory, "<host>", "setup"))?;
 
-        // QuickJS resolves the static closure even in COMPILE_ONLY mode.
+        // QuickJS resolves static declarations even in COMPILE_ONLY mode.
         // Track recursive loader calls so preflight never declares a second
         // module instance under the same normalized identity.
         for name in inventory.sources.keys() {
@@ -464,6 +480,8 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
                     .map_err(|error| exception_fault(&ctx, error, &inventory, name, "syntax"))?;
             }
         }
+        // Only an actual hook reached while package code runs proves VM entry.
+        vm_hook.store(true, Ordering::Release);
         let mut entries = Vec::new();
         for entry in [&inventory.entries.readiness, &inventory.entries.workflow] {
             let promise = Module::import(&ctx, entry.module.as_str())
@@ -514,7 +532,7 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
         vm_bytes: usize::try_from(runtime.memory_usage().memory_used_size).ok(),
         jobs_executed: jobs,
         source_diagnostic: Some(
-            json!({"runtime":"rquickjs 0.14.0", "cycles":"ECMAScript live bindings", "detached_jobs":"discarded at entry settlement", "promise_limit":limits.max_actions, "job_limit":limits.max_actions}),
+            json!({"runtime":"rquickjs 0.14.0", "import_parser":parser, "cycles":"ECMAScript live bindings", "detached_jobs":"discarded at entry settlement", "promise_limit":limits.max_actions, "job_limit":limits.max_actions}),
         ),
     })
 }

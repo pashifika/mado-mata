@@ -31,7 +31,7 @@ pub use enabled::{Engine, release_runner_resources};
 #[cfg(feature = "engine")]
 mod enabled {
     use super::*;
-    use crate::host::{Action, PointerButton};
+    use crate::host::{Action, HandleBudget, HandlePermit, Managed, PointerButton};
     use crate::model::Limits;
     use mado_pilot as mp;
     use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -230,9 +230,9 @@ mod enabled {
     struct State {
         attempt_id: String,
         session: Option<mp::Session>,
-        observations: BTreeMap<String, Observation>,
-        results: BTreeMap<String, Retained>,
-        queries: BTreeMap<String, Query>,
+        observations: BTreeMap<String, Managed<Observation>>,
+        results: BTreeMap<String, Managed<Retained>>,
+        queries: BTreeMap<String, Managed<Query>>,
         active_queries: usize,
         latest: Option<mp::FrameStamp>,
         serial: u64,
@@ -313,16 +313,18 @@ mod enabled {
         closing: AtomicBool,
         in_flight: AtomicUsize,
         handles: AtomicUsize,
+        handle_budget: Arc<HandleBudget>,
         native: Option<NativeConfig>,
     }
 
     impl Engine {
-        pub fn new(
+        pub(crate) fn new(
             plan: &Plan,
             assets: &BTreeMap<String, Vec<u8>>,
             control: Arc<Control>,
             attempt_id: &str,
             attempt: u64,
+            handle_budget: Arc<HandleBudget>,
         ) -> Result<Self, Fault> {
             let raw = plan.native_config.as_ref().ok_or_else(|| {
                 blocked(
@@ -543,7 +545,7 @@ mod enabled {
             let session = resources
                 .engine
                 .open_session(target, &request, &operation)
-                .map_err(|error| engine_error("session_open", error))?;
+                .map_err(|error| session_open_error(config.native.is_some(), error))?;
             Ok(Self {
                 resources,
                 state: Mutex::new(State {
@@ -570,8 +572,79 @@ mod enabled {
                 closing: AtomicBool::new(false),
                 in_flight: AtomicUsize::new(0),
                 handles: AtomicUsize::new(0),
+                handle_budget,
                 native: config.native,
             })
+        }
+
+        #[cfg(test)]
+        pub(crate) fn replay_for_test(
+            plan: &Plan,
+            control: Arc<Control>,
+            attempt_id: &str,
+            attempt: u64,
+            handle_budget: Arc<HandleBudget>,
+        ) -> Self {
+            // Public replay only: no desktop, OCR models, permission probes, or OS input.
+            let descriptor =
+                mp::FrameDescriptor::packed(mp::PixelExtent::new(8, 8), mp::PixelFormat::Rgba8)
+                    .expect("replay descriptor");
+            let frames = (0..4)
+                .map(|index| {
+                    mp::replay::ReplayFrame::new(
+                        descriptor,
+                        mp::MonotonicInstant::from_origin(Duration::from_nanos(index)),
+                        mp::Continuity::Continuous,
+                        None,
+                        vec![0; descriptor.byte_len()].into_boxed_slice(),
+                    )
+                    .expect("replay frame")
+                })
+                .collect();
+            let source = mp::replay::ReplaySource::from_targets(vec![
+                mp::replay::ReplayTarget::new("shared-budget", frames).expect("replay target"),
+            ])
+            .expect("replay source");
+            let engine = mp::replay_engine(source).expect("replay engine");
+            let operation = mp::OperationContext::new();
+            let targets = engine.discover(&operation).expect("replay discovery");
+            let session = engine
+                .open(targets[0].id(), &mp::OpenRequest::new(), &operation)
+                .expect("replay session");
+            Self {
+                resources: Arc::new(Resources {
+                    identity: "shared-budget-test".into(),
+                    engine,
+                    templates: BTreeMap::new(),
+                    facts: json!({"backend":"public-replay-test"}),
+                }),
+                state: Mutex::new(State {
+                    attempt_id: attempt_id.into(),
+                    session: Some(session),
+                    observations: BTreeMap::new(),
+                    results: BTreeMap::new(),
+                    queries: BTreeMap::new(),
+                    active_queries: 0,
+                    latest: None,
+                    serial: 0,
+                    cleanup: None,
+                    process_lifetime: attempt_id.into(),
+                    captured_frames: 0,
+                    last_capture: None,
+                    input_events: 0,
+                    input_cleanup_incomplete: false,
+                }),
+                bridge: CancellationBridge::new(Arc::clone(&control), None).expect("bridge"),
+                control,
+                limits: plan.limits.clone(),
+                run: plan.id.clone(),
+                attempt,
+                closing: AtomicBool::new(false),
+                in_flight: AtomicUsize::new(0),
+                handles: AtomicUsize::new(0),
+                handle_budget,
+                native: None,
+            }
         }
 
         pub fn call(&self, method: &str, args: Value) -> Result<Value, Fault> {
@@ -579,6 +652,9 @@ mod enabled {
                 self.check()?;
             }
             let mut state = self.lock()?;
+            if method != "release" {
+                self.check_session(&state)?;
+            }
             let result = match method {
                 "observe" => {
                     empty(&args)?;
@@ -625,19 +701,23 @@ mod enabled {
                         .frame
                         .clone();
                     request.roi.rect(&source)?;
-                    self.capacity(&state, 2)?;
+                    let mut permits = self.handle_budget.reserve(2)?;
                     let id = next_id(&mut state, "query")?;
                     let deadline = Instant::now()
                         .checked_add(Duration::from_millis(self.limits.wait_ms))
                         .ok_or_else(|| argument("query deadline is not representable"))?;
-                    request.observation = self.retain_observation(&mut state, source)?;
+                    request.observation =
+                        self.retain_observation(&mut state, source, permits.split_one())?;
                     state.queries.insert(
                         id.clone(),
-                        Query {
-                            request,
-                            deadline,
-                            terminal: None,
-                        },
+                        Managed::new(
+                            Query {
+                                request,
+                                deadline,
+                                terminal: None,
+                            },
+                            permits,
+                        ),
                     );
                     Ok(json!({"id":id}))
                 }
@@ -689,6 +769,21 @@ mod enabled {
             Ok(())
         }
 
+        fn check_session(&self, state: &State) -> Result<(), Fault> {
+            self.check()?;
+            let session = state
+                .session
+                .as_ref()
+                .ok_or_else(|| Fault::new("Closed", "session closed"))?;
+            // is_closed only proves completed closure in this pin. Capture
+            // Closing/TargetLost is not publicly exposed, so this gate cannot
+            // qualify the mid-recognition terminal race.
+            if session.is_closed() {
+                return Err(Fault::new("Closed", "native session finished closing"));
+            }
+            Ok(())
+        }
+
         fn lock(&self) -> Result<MutexGuard<'_, State>, Fault> {
             self.state
                 .lock()
@@ -716,18 +811,8 @@ mod enabled {
             InFlight(&self.in_flight)
         }
 
-        fn capacity(&self, state: &State, additional: usize) -> Result<(), Fault> {
-            if owner_count(state).saturating_add(additional) > self.limits.handles {
-                return Err(Fault::new(
-                    "LimitExceeded",
-                    "engine managed-handle limit exceeded",
-                ));
-            }
-            Ok(())
-        }
-
         fn observe(&self, state: &mut State, wait_ms: u64) -> Result<Value, Fault> {
-            self.capacity(state, 1)?;
+            let permit = self.handle_budget.reserve(1)?;
             let started = Instant::now();
             let wait_ms = self
                 .native
@@ -743,7 +828,7 @@ mod enabled {
                 while state.last_capture.is_some_and(|last| {
                     last.elapsed() < Duration::from_millis(native.capture.interval_ms)
                 }) {
-                    self.check()?;
+                    self.check_session(state)?;
                     if started.elapsed() >= Duration::from_millis(wait_ms) {
                         return Err(Fault::new(
                             "Timeout",
@@ -787,12 +872,17 @@ mod enabled {
                     ));
                 }
             }
-            self.check()?;
+            self.check_session(state)?;
             state.latest = Some(frame.stamp());
-            self.retain_observation(state, frame)
+            self.retain_observation(state, frame, permit)
         }
 
-        fn retain_observation(&self, state: &mut State, frame: mp::Frame) -> Result<Value, Fault> {
+        fn retain_observation(
+            &self,
+            state: &mut State,
+            frame: mp::Frame,
+            permit: HandlePermit,
+        ) -> Result<Value, Fault> {
             let stamp = frame.stamp();
             let id = next_id(state, "observation")?;
             let extent = frame.descriptor().extent();
@@ -803,10 +893,13 @@ mod enabled {
                 "width":extent.width(),"height":extent.height(),"coordinate_space":"capture-pixels"});
             state.observations.insert(
                 id,
-                Observation {
-                    frame,
-                    value: value.clone(),
-                },
+                Managed::new(
+                    Observation {
+                        frame,
+                        value: value.clone(),
+                    },
+                    permit,
+                ),
             );
             Ok(value)
         }
@@ -849,7 +942,7 @@ mod enabled {
             request: &RecognitionRequest,
             wait_ms: u64,
         ) -> Result<Value, Fault> {
-            self.capacity(state, 1)?;
+            let permit = self.handle_budget.reserve(1)?;
             let observation = self.observation(state, &request.observation)?;
             let roi = request.roi.rect(&observation.frame)?;
             let operation = self.operation(wait_ms)?;
@@ -881,7 +974,7 @@ mod enabled {
                         .find_template(&find, &operation)
                         .map_err(|error| engine_error("template_recognition", error))?;
                     let Some(found) = outcome.result().matches().first() else {
-                        self.check()?;
+                        self.check_session(state)?;
                         return Ok(Value::Null);
                     };
                     let bounds = found.bounds();
@@ -919,7 +1012,7 @@ mod enabled {
                             .is_none_or(|text| region.text() == text)
                     });
                     let Some(found) = found else {
-                        self.check()?;
+                        self.check_session(state)?;
                         return Ok(Value::Null);
                     };
                     if found.text().len() > self.limits.log_bytes {
@@ -952,13 +1045,13 @@ mod enabled {
                 }
                 _ => return Err(argument("unknown recognition kind")),
             };
-            self.check()?;
+            self.check_session(state)?;
             if retained.stamp() != observation.frame.stamp() {
                 return Err(internal("recognition source correlation mismatch"));
             }
             let id = next_id(state, "result")?;
             compact["id"] = Value::String(id.clone());
-            state.results.insert(id, retained);
+            state.results.insert(id, Managed::new(retained, permit));
             Ok(compact)
         }
 
@@ -991,7 +1084,7 @@ mod enabled {
             state.active_queries += 1;
             let result = (|| {
                 loop {
-                    self.check()?;
+                    self.check_session(state)?;
                     let wait_ms = remaining_ms(deadline)?;
                     let value = self.recognize(state, &query.request, wait_ms)?;
                     if !value.is_null() {
@@ -1057,7 +1150,7 @@ mod enabled {
                     &operation,
                 ))
                 .map_err(|error| engine_error("postcondition_ocr", error))?;
-            self.check()?;
+            self.check_session(state)?;
             Ok(
                 json!({"satisfied":result.regions().iter().any(|region| region.text() == request.expected),
                 "frame":now.sequence().value(),"checkpoint":before.sequence().value(),"causation_claimed":false}),
@@ -1165,7 +1258,7 @@ mod enabled {
                 return Err(Fault::new("Timeout", "native input authority expired"));
             }
             let operation = self.operation(self.limits.wait_ms.min(remaining))?;
-            self.check()?;
+            self.check_session(state)?;
             if !self.control.admission.load(Ordering::Acquire) {
                 return Err(Fault::new(
                     "AdmissionClosed",
@@ -1592,6 +1685,37 @@ mod enabled {
         use super::*;
 
         #[test]
+        fn native_open_failure_never_infers_physical_cleanup_from_status_or_prose() {
+            for status in [
+                mp::Status::InvalidArgument,
+                mp::Status::Cancelled,
+                mp::Status::InputFailed,
+            ] {
+                let fault = session_open_error(true, mp::Error::new(status, "opaque failure"));
+                assert_eq!(fault.context["native_cleanup"], "unverified");
+                assert_eq!(fault.context["cause"]["status"], status.as_str());
+                assert_eq!(fault.context["cause"]["detail"], "opaque failure");
+                assert_eq!(fault.context["stage"], "session_open");
+                assert_eq!(fault.message, "opaque failure");
+            }
+        }
+
+        #[test]
+        fn validation_before_open_and_replay_failures_do_not_claim_native_ownership() {
+            let plan: Plan = serde_json::from_str(include_str!("../fixtures/controlled-plan.json"))
+                .expect("controlled plan");
+            let validation = validate_native(None, &plan).expect_err("missing authority");
+            assert_eq!(validation.category, "Blocked");
+            assert!(validation.context.get("native_cleanup").is_none());
+            let replay = session_open_error(
+                false,
+                mp::Error::new(mp::Status::Cancelled, "opaque failure"),
+            );
+            assert_eq!(replay.category, "Cancelled");
+            assert!(replay.context.get("native_cleanup").is_none());
+        }
+
+        #[test]
         fn native_sequences_reject_unowned_releases_duplicate_presses_and_held_keys() {
             let extent = Some(mp::PixelExtent::new(20, 10));
             let down = Action::KeyDown { key: "A".into() };
@@ -1744,6 +1868,17 @@ mod enabled {
         Fault::new(category, error.detail())
             .with_context(json!({"stage":stage,"engine_revision":REVISION,
             "cause":{"status":error.status().as_str(),"detail":error.detail()}}))
+    }
+    fn session_open_error(native: bool, error: mp::Error) -> Fault {
+        let mut fault = engine_error("session_open", error);
+        if native {
+            // The pinned facade can acquire capture/input before returning any
+            // error status. Rollback completion is only error prose, not a
+            // structured guarantee, so neither status nor cache release proves it.
+            // Validation failures before open_session never pass this boundary.
+            fault.context["native_cleanup"] = json!("unverified");
+        }
+        fault
     }
     fn prerequisite_error(stage: &str, error: mp::Error) -> Fault {
         let mut fault = engine_error(stage, error);

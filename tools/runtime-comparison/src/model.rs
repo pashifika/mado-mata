@@ -3,11 +3,50 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub const ENGINE_REVISION: &str = "85ccc580cd28ffb9b0b52271f6c87f1af0109a04";
 pub const MAX_TRANSPORT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
+
+/// Refuse excess bytes during serialization, rather than allocating an
+/// unbounded intermediate buffer before checking the transport limit.
+pub(crate) fn encode_bounded<T: Serialize>(value: &T, bound: usize) -> Result<Vec<u8>, Fault> {
+    struct Output {
+        bytes: Vec<u8>,
+        bound: usize,
+        exceeded: bool,
+    }
+    impl Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.bound.saturating_sub(self.bytes.len()) {
+                self.exceeded = true;
+                return Err(std::io::Error::other("JSON byte bound exceeded"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut output = Output {
+        bytes: Vec::new(),
+        bound,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut output, value) {
+        return Err(if output.exceeded {
+            Fault::new("LimitExceeded", "JSON exceeds its transport byte bound")
+        } else {
+            Fault::new("Encoding", error.to_string())
+        });
+    }
+    Ok(output.bytes)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +68,38 @@ impl Fault {
     pub fn with_context(mut self, context: Value) -> Self {
         self.context = context;
         self
+    }
+
+    /// Diagnostic detail cannot displace the primary category or the separate
+    /// native-cleanup obligation in the terminal protocol.
+    pub(crate) fn bound_diagnostics(&mut self) {
+        let original_bytes = self.message.len();
+        if original_bytes > MAX_DIAGNOSTIC_BYTES {
+            let mut end = MAX_DIAGNOSTIC_BYTES;
+            while !self.message.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.message.truncate(end);
+        }
+        let context_omitted = encode_bounded(&self.context, MAX_DIAGNOSTIC_BYTES).is_err();
+        if context_omitted {
+            let native_unverified = self.context["native_cleanup"] == "unverified";
+            self.context = serde_json::json!({});
+            if native_unverified {
+                self.context["native_cleanup"] = serde_json::json!("unverified");
+            }
+        }
+        let message_bytes_dropped = original_bytes - self.message.len();
+        if message_bytes_dropped != 0 || context_omitted {
+            if !self.context.is_object() {
+                self.context = serde_json::json!({"cause":self.context});
+            }
+            self.context["diagnostic_truncation"] = serde_json::json!({
+                "message_bytes_dropped":message_bytes_dropped,
+                "context_omitted":context_omitted,
+                "field_byte_limit":MAX_DIAGNOSTIC_BYTES
+            });
+        }
     }
 }
 
@@ -319,4 +390,42 @@ pub struct RuntimeMetrics {
 pub fn identity<T: Serialize>(value: &T) -> Result<String, Fault> {
     let bytes = serde_json::to_vec(value).map_err(|e| Fault::new("Encoding", e.to_string()))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn oversized_diagnostics_preserve_classification_and_native_cleanup_obligation() {
+        let message = "界".repeat(MAX_DIAGNOSTIC_BYTES);
+        let original_bytes = message.len();
+        let mut fault = Fault::new("Script", message).with_context(json!({
+            "stack":"x".repeat(MAX_DIAGNOSTIC_BYTES * 2),
+            "native_cleanup":"unverified"
+        }));
+        fault.bound_diagnostics();
+        assert_eq!(fault.category, "Script");
+        assert_eq!(fault.context["native_cleanup"], "unverified");
+        assert_eq!(
+            fault.context["diagnostic_truncation"]["context_omitted"],
+            true
+        );
+        assert_eq!(
+            fault.context["diagnostic_truncation"]["message_bytes_dropped"],
+            original_bytes - fault.message.len()
+        );
+        assert!(fault.message.len() <= MAX_DIAGNOSTIC_BYTES);
+        assert!(fault.message.chars().all(|character| character == '界'));
+        encode_bounded(&fault, MAX_TRANSPORT_BYTES - 1)
+            .expect("bounded fault remains transportable");
+    }
+
+    #[test]
+    fn bounded_encoding_counts_escaped_json_bytes() {
+        let error = encode_bounded(&"\0".repeat(100), 102).expect_err("escaping exceeds bound");
+        assert_eq!(error.category, "LimitExceeded");
+        assert_eq!(encode_bounded(&"abc", 5).expect("exact bound"), b"\"abc\"");
+    }
 }

@@ -302,10 +302,10 @@ its later revision emits the result explicitly and was sampled separately.
 ## Coverage, not just case count
 
 The catalog contains 112 requirement scenarios across four capabilities. The
-current local executable corpus passes 192 checks on each of macOS and Windows.
-Each OS has 78 passing JavaScript controlled requirement rows and 72 passing Lua
-rows, with no remaining applicable controlled row unexecuted. Language-specific
-inapplicability is separate; case counts are not requirement counts.
+pre-repair executable corpus passed 192 checks on each of macOS and Windows.
+That historical report had 78 passing JavaScript controlled requirement rows
+and 72 passing Lua rows per OS, with no applicable controlled row unexecuted.
+Language-specific inapplicability is separate; case counts are not requirement counts.
 
 Behavioral success does not waive prospective performance bounds. The combined
 report retains three macOS controlled cleanup-budget failures: 1,000,926,
@@ -333,6 +333,50 @@ native lifecycle matrix are unexecuted. The recorded-crop replay above is not
 representative end-to-end game performance. Required per-OS native budgets,
 tail samples, and some instrumentation remain unavailable. Raw execution
 records and machine-local paths remain private.
+
+## Review repair verification
+
+A subsequent local Apple Silicon macOS repair pass passes 199 controlled checks,
+35 default Rust unit regressions, and two real supervisor/child terminal
+regressions. The optional engine suite passes 42 unit regressions, including
+shared-handle-limit checks through the public in-memory replay facade. These
+engine regressions perform no native capture, OCR, or OS input. Manual Start
+completes successfully; immediate manual Stop retains `Cancelled` and clean
+cleanup without forced termination.
+
+The pass corrects six review findings:
+
+- A 9 MiB script exception after submitted controlled input now retains its
+  `Script` primary, explicit diagnostic truncation, submission receipt, and
+  verified controlled key release.
+- A held query with a 1 ms cleanup budget retains submitted-input and pre-cleanup
+  owner facts through watchdog exit 124, without claiming clean termination.
+- Literal JavaScript dynamic imports are inspected before readiness/input using
+  the trusted parser and immutable resolver. Missing, escaped, template,
+  parenthesized, and transitive literals are refused; computed imports retain
+  their runtime-only refusal contract.
+- Host input and engine observations/results/queries share one atomic managed
+  handle budget; queued, active, and retained receipt ownership remains charged.
+- Failed native session opening retains unverified rollback independently from
+  successful runner-cache release. This is conservative reporting, not a fresh
+  native rollback qualification.
+- Coverage is established inside compatible cohorts, including non-sensitive
+  hardware, the executed artifact, and observed compiler/parser identities.
+  Incompatible partial cohorts cannot manufacture passing requirements.
+
+The local 199-case cohort supplies 78 JavaScript and 72 Lua controlled passing
+requirement rows on macOS. Windows and native rows remain non-passing in this
+fresh evidence. The retained split-cohort reproduction, which formerly created
+three passing rows only when combined, now creates none. Legacy evidence without
+the new cohort identity remains readable but cannot be silently upgraded.
+
+One native finding remains unresolved: target loss during recognition can race
+with result publication because the pinned public facade exposes completed
+closure, not capture terminal state or an atomic publication guard. Known
+`TargetLost`/closed errors are latched and prior receipts survive, but this does
+not close that race. See the [native limitation](runtime-native.md).
+No Windows rerun, live native operation, permission request, game launch, input,
+focus change, or adoption decision was performed by this repair pass.
 
 ## Candidate and authoring observations
 

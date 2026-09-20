@@ -592,14 +592,7 @@ fn held_cases(rows: &mut Vec<Value>, inventory: &Inventory) -> Result<(), Fault>
             && snapshot["effects"] == json!([{"order":1,"kind":"key_down","key":"A"}])
             && cleanup["release_outcomes"]
                 == json!([{"key":"A","order":1,"released":true,"sink":"controlled-non-native"}])
-            && fault_is(
-                &late,
-                if cause == "stop" {
-                    "Cancelled"
-                } else {
-                    "AdmissionClosed"
-                },
-            )
+            && fault_is(&late, category)
             && forbidden_input.is_err();
         rows.push(json!({
             "id":format!("lifecycle-held-{cause}-release"),"candidate":"rust","lane":"controlled",

@@ -12,6 +12,14 @@ or mismatched provenance is refused. Native capture, OCR, and input receipts are
 real SDK operations, not the controlled sink. A submitted receipt still does not
 prove application effect. Both-OS workload and lifecycle evidence remain required.
 
+The current facade does not expose an atomic capture-terminal publication guard.
+Known native `TargetLost`/closed errors can close host admission, but target loss
+during an already-running recognition call can still race with successful result
+publication. That review finding remains unresolved pending a separately scoped
+upstream API repair and tested pin update. A new capture or input operation is
+not used as a status probe. Do not treat controlled regressions or earlier native
+smokes as qualification of this race.
+
 ## Install the engine prerequisites
 
 The default controlled build does not need these dependencies. For the optional

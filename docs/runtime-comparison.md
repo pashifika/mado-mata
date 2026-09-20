@@ -100,7 +100,10 @@ is used for compilation, preflight, module loading, and assets.
 The application approves `@mado/helper` 1.0.0 and its private transitive helper
 `@mado/order` 1.0.0. Packages request a catalog entry; they cannot approve code,
 versions, transitive permissions, compiler plugins, or install scripts. Static
-imports are checked before entry execution. Computed imports are checked when
+imports and statically visible literal `import()` dependencies are checked before
+entry execution through the same inventory resolver. JavaScript uses the pinned
+Node/TypeScript parser for this inspection only; it does not gain TypeScript type
+checking or ambient Node capabilities. Computed imports are checked when
 requested; a caught refusal still closes admission and remains the primary fault.
 JavaScript uses ES module live bindings and cycles. Lua rejects cycles with an
 import chain. Each attempt has new module instances and mutable `host.state`.
@@ -159,18 +162,24 @@ OS/kernel, and architecture. Keep materially different identities separate.
 Metrics distinguish startup, preflight, workflow, fixed host-operation timing,
 cleanup, process CPU, sampled supervisor/child RSS, VM allocation, and live owners.
 Here `preflight_us` covers common host preparation and TypeScript compilation;
-`workflow_us` covers the adapter invocation, including module/readiness overhead.
-It is not an isolated script-body benchmark.
+`workflow_us` covers the adapter invocation, including JavaScript dependency
+inspection and module/readiness overhead. It is not an isolated script-body
+benchmark.
 RSS is an observed periodic maximum, not an OS peak or proof of cleanup. VM
 allocation and live-owner values are explicitly endpoint measurements, not peaks.
 Missing values remain unavailable rather than becoming zero.
 CPU describes the runtime child, not a process-tree total; RSS is sampled
-separately for the supervisor and child. The separate TypeScript compiler's
-CPU/RSS are not included; its compilation time is included in preflight.
+separately for the supervisor and child. The separate trusted parser/compiler
+worker's CPU/RSS are not included. TypeScript compilation time is in preflight;
+JavaScript dependency-inspection time is in the adapter/workflow measurement.
 
 Entry settlement is recorded before cleanup can block. A retained `Returned`
 entry with forced/incomplete cleanup still has a failed overall outcome; missing
 settlement remains `Unobserved`, never an inferred successful return.
+`EntrySettled` also retains known receipts and an explicitly labeled pre-cleanup
+ownership snapshot. If the final record never arrives, those facts survive while
+cleanup remains incomplete. Diagnostic detail is byte-bounded with omission
+metadata; a transport failure must not bypass cleanup.
 Stop receipt and admission closure use supervisor-clock latency upper bounds,
 including pipe delivery and polling. Child-relative timestamps are separate.
 A normal return has no external Stop latency. For incomplete cleanup without
@@ -190,6 +199,25 @@ shared host or lifecycle obligations.
 The catalog retains requirements beyond the currently qualified lanes. A green
 CI job means its executed oracles passed, not that every native acceptance row
 passed.
+
+Requirement coverage is evaluated within a compatible qualification cohort:
+complete build/runtime/engine/environment identity plus
+`qualification: {version: 1, configuration_sha256, corpus_sha256}`. The two
+SHA-256 values bind the suite's complete configuration and corpus manifests,
+including its declared profile/scenario/package variations. Individual plan
+hashes may differ inside that suite; unrelated source builds or configurations
+cannot supply each other's missing checks.
+The build identity includes CPU brand/count, physical memory, and the executed
+binary's SHA-256 without publishing a hostname, serial number, or executable path.
+Suite identity also binds observed parser/compiler and emitted-inventory
+identities, not only declared version strings.
+
+`check` stamps its controlled suite identity automatically. Old or imported rows
+without sufficient identity remain readable but cannot create coverage `PASS`.
+The coverage matrix exposes per-cohort missing checks and `unqualified_evidence`;
+historical failures remain visible even when another cohort passes. Producer
+digests identify claimed content, not a signature or authentication of imported
+JSON. Do not invent missing qualification metadata for historical native results.
 
 Keep raw plans, model/runtime paths, screenshots, OCR text, loader diagnostics,
 and full execution records in private evidence storage. The `report` command

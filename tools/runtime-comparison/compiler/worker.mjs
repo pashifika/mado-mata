@@ -51,6 +51,30 @@ function origin(file, position) {
   return { module: file.fileName.replace(ROOT, ""), line: point.line + 1, column: point.character + 1 };
 }
 
+function literalImport(node) {
+  if (!ts.isCallExpression(node) || node.expression.kind !== ts.SyntaxKind.ImportKeyword) return;
+  let argument = node.arguments[0];
+  while (argument && ts.isParenthesizedExpression(argument)) argument = argument.expression;
+  return argument && ts.isStringLiteralLike(argument) ? argument : undefined;
+}
+
+function inspectJavaScript(request) {
+  const imports = [];
+  for (const [id, source] of Object.entries(request.sources)) {
+    if (typeof source !== "string" || (!id.endsWith(".js") && !id.endsWith(".d.ts"))) fail("CompilerPolicy", "Unsupported JavaScript source inventory member", { module: id });
+    // AST inspection only: QuickJS remains the syntax/execution authority. Do not
+    // apply TypeScript directives, configuration, type checking, or emit to JS.
+    const file = ts.createSourceFile(ROOT + id, source, ts.ScriptTarget.ESNext, false, ts.ScriptKind.JS);
+    const visit = node => {
+      const literal = literalImport(node);
+      if (literal) imports.push({ from: id, specifier: literal.text, kind: "dynamic", ...origin(file, literal.getStart(file)) });
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+  }
+  return { imports, identity: compilerIdentity };
+}
+
 function inspect(request) {
   // Package-controlled compiler configuration is never merged into application options.
   const forbidden = new Set(["plugins", "scripts", "install", "installers", "compilerOptions", "tsconfig", "typeAcquisition"]);
@@ -74,7 +98,8 @@ function inspect(request) {
       if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) add(node.moduleSpecifier.text, node.moduleSpecifier);
       if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteralLike(node.argument.literal)) add(node.argument.literal.text, node.argument.literal);
       if (ts.isImportEqualsDeclaration(node)) fail("CompilerPolicy", "Only ECMAScript imports are supported", origin(file, node.getStart(file)));
-      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments.length && ts.isStringLiteralLike(node.arguments[0])) add(node.arguments[0].text, node.arguments[0]);
+      const literal = literalImport(node);
+      if (literal) add(literal.text, literal);
       if (ts.isFunctionLike(node) && node.body) {
         const start = file.getLineAndCharacterOfPosition(node.getStart(file));
         const end = file.getLineAndCharacterOfPosition(node.end);
@@ -295,7 +320,10 @@ try {
     value = selfCheck();
   } else {
     const request = JSON.parse(workerData.input);
-    value = request.operation === "inspect" ? inspect(request) : request.operation === "compile" ? compile(request) : fail("CompilerPolicy", "Unknown compiler operation");
+    value = request.operation === "inspect" ? inspect(request)
+      : request.operation === "inspect-javascript" ? inspectJavaScript(request)
+      : request.operation === "compile" ? compile(request)
+      : fail("CompilerPolicy", "Unknown compiler operation");
   }
   const output = JSON.stringify(workerData.selfCheck ? value : { ok: true, value });
   if (Buffer.byteLength(output) + 1 > workerData.limit) fail("CompilerLimit", "Compiler output exceeds its bound");

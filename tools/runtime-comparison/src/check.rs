@@ -4,7 +4,7 @@ mod loading;
 use crate::host::{Host, resolve_options};
 use crate::inventory::Inventory;
 use crate::model::{Control, Fault, Limits, Plan};
-use crate::runner::{RunRecord, run_once};
+use crate::runner::{RunRecord, run_once, run_once_after_milestone};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -625,19 +625,31 @@ pub fn run() -> Result<Value, Fault> {
             let mut scenario = plan(candidate, "success", "template-first");
             scenario.limits.duration_ms = 2_000;
             scenario.limits.readiness_ms = 1_000;
-            let record = run_once(
-                &scenario,
-                &inventory,
-                if stop { Some(100) } else { None },
-                false,
-                None,
-            )?;
+            let record = if stop {
+                run_once_after_milestone(&scenario, &inventory, "VmHookReached", 100, false)?
+            } else {
+                run_once(&scenario, &inventory, None, false, None)?
+            };
             let interrupted = record
                 .primary
                 .as_ref()
-                .is_some_and(|f| ["Cancelled", "Timeout"].contains(&f.category.as_str()));
+                .is_some_and(|fault| fault.category == "Cancelled");
             let passed = if stop {
-                interrupted && !record.forced
+                interrupted
+                    && !record.forced
+                    && record
+                        .milestones
+                        .iter()
+                        .any(|milestone| milestone["event"] == "VmHookReached")
+                    && record.milestones.iter().any(|milestone| {
+                        milestone["event"] == "StopRequested" && milestone["reason"] == "Stop"
+                    })
+                    && record
+                        .milestones
+                        .iter()
+                        .any(|milestone| milestone["event"] == "AdmissionClosed")
+                    && record.metrics["stop_receipt_us"].as_u64().is_some()
+                    && record.metrics["admission_close_us"].as_u64().is_some()
             } else {
                 record.primary.is_some() && !record.forced
             } && record.cleanup["clean"] == true
@@ -866,11 +878,21 @@ pub fn run() -> Result<Value, Fault> {
         &held_plan,
         &inventories["rust"],
     )?);
+    let build = crate::report::build_identity();
+    let inventory_identities: BTreeMap<_, _> = inventories
+        .iter()
+        .map(|(candidate, inventory)| (*candidate, inventory.identity.as_str()))
+        .collect();
+    let qualification = crate::report::controlled_qualification(&rows, &inventory_identities)?;
     let evidence_nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| Fault::new("Clock", error.to_string()))?
         .as_nanos();
     for row in &mut rows {
+        if row.get("build").is_none() {
+            row["build"] = build.clone();
+        }
+        row["qualification"] = qualification.clone();
         if row.get("run").is_none() {
             row["run"] = json!(format!(
                 "check-{}-{evidence_nonce}-{}",

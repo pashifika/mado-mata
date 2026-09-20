@@ -182,6 +182,143 @@ fn ambient_imports(rows: &mut Vec<Value>) -> Result<(), Fault> {
     Ok(())
 }
 
+fn literal_imports(rows: &mut Vec<Value>, base: &Inventory) -> Result<(), Fault> {
+    for (name, request, helper, requester) in [
+        ("literal", "await import('./missing.js');", None, "main.js"),
+        (
+            "escaped-literal",
+            r#"await import('./mi\u0073sing.js');"#,
+            None,
+            "main.js",
+        ),
+        (
+            "template-literal",
+            "await import(`./missing.js`);",
+            None,
+            "main.js",
+        ),
+        (
+            "parenthesized-literal",
+            "await import((('./missing.js')));",
+            None,
+            "main.js",
+        ),
+        (
+            "transitive-literal",
+            "const dependency = await import('./decisions.js'); await dependency.load();",
+            Some("export function load() { return import('./missing.js'); }"),
+            "decisions.js",
+        ),
+        (
+            "declaration-suffix-literal",
+            "const dependency = await import('./runtime.d.ts'); await dependency.load();",
+            Some("export function load() { return import('./missing.js'); }"),
+            "runtime.d.ts",
+        ),
+    ] {
+        let source = format!(
+            "export function readiness(){{host.call('log',{{message:'readiness-entered'}});return 'Ready';}}\n\
+             export async function workflow(){{\n\
+             const observation=host.call('observe',{{}});\n\
+             const sequence=host.call('submit',{{observation,actions:[{{kind:'key_down',key:'A'}},{{kind:'key_up',key:'A'}}]}});\n\
+             host.call('settle',{{id:sequence.id}});\n\
+             {request}\n\
+             host.call('release',{{id:sequence.id}});host.call('release',{{id:observation.id}});\n\
+             }}"
+        );
+        let mut inventory = replace_entry(base, &source)?;
+        if let Some(helper) = helper {
+            inventory.sources.insert(requester.into(), helper.into());
+            inventory.refresh_identity()?;
+        }
+        let record = run_once(
+            &plan("javascript", "success", "template-first"),
+            &inventory,
+            None,
+            false,
+            None,
+        )?;
+        let passed = before_readiness(&record)
+            && record.primary.as_ref().is_some_and(|fault| {
+                fault.category == "ImportRefused"
+                    && fault.context["requester"] == requester
+                    && fault.context["module"] == requester
+                    && fault.context["specifier"] == "./missing.js"
+                    && fault.context["destination"] == "missing.js"
+                    && fault.context["stage"] == "loading"
+                    && fault.context["line"].as_u64().is_some_and(|line| line > 0)
+                    && fault.context["column"]
+                        .as_u64()
+                        .is_some_and(|column| column > 0)
+            })
+            && record.observations["failure"]["category"] == "ImportRefused";
+        case(
+            rows,
+            &format!("javascript-{name}-import-preflight"),
+            record,
+            passed,
+            "literal dynamic imports in every captured module resolve before readiness or a preceding balanced submit; refusal retains the requesting module and decoded specifier with no input",
+        );
+    }
+
+    let source = r#"// import('./comment-only.js')
+/// <reference types="ignored-javascript-comment" />
+const text = "import('./string-only.js')";
+const pattern = /import\('\.\/regexp-only\.js'\)/;
+export function readiness() { return 'Ready'; }
+export async function workflow() {
+    const first = await import('./decisions.js');
+    const second = await import(('./deci\u0073ions.js'));
+    const third = await import(`./decisions.js`);
+    const path = ['./', 'decisions', '.js'].join('');
+    const computed = await import(path);
+    const transitive = await first.load();
+    if (first !== second || first !== third || first !== computed
+        || first.value !== 7 || globalThis.loads !== 1
+        || typeof transitive.choose !== 'function') throw Error('import identity lost');
+    const observation = host.call('observe', {});
+    const sequence = host.call('submit', {
+        observation, actions: [{kind:'key_down',key:'A'}, {kind:'key_up',key:'A'}],
+    });
+    const receipt = host.call('settle', {id:sequence.id});
+    if (receipt.status !== 'Submitted') throw Error('input did not settle');
+    host.call('release', {id:sequence.id});
+    host.call('release', {id:observation.id});
+}"#;
+    let mut inventory = replace_entry(base, source)?;
+    inventory.sources.insert(
+        "decisions.js".into(),
+        "globalThis.loads=(globalThis.loads??0)+1;export const value=7;export function load(){return import('@mado/helper');}".into(),
+    );
+    inventory.refresh_identity()?;
+    let record = run_once(
+        &plan("javascript", "success", "template-first"),
+        &inventory,
+        None,
+        false,
+        None,
+    )?;
+    let passed = record.status == "PASS"
+        && record.entry_outcome == "Returned"
+        && !record.forced
+        && record.cleanup["clean"] == true
+        && record.observations["dispatches"] == 1
+        && record.observations["receipts"]
+            .as_array()
+            .is_some_and(|receipts| receipts.len() == 1 && receipts[0]["status"] == "Submitted")
+        && record.observations["effects"]
+            .as_array()
+            .is_some_and(|effects| effects.len() == 2);
+    case(
+        rows,
+        "javascript-valid-literal-and-computed-imports",
+        record,
+        passed,
+        "literal, escaped, template, parenthesized, computed and transitive approved imports share their normalized module instance and permit balanced input; comments, strings and regex text create no dependencies or TypeScript directive policy",
+    );
+    Ok(())
+}
+
 fn secondary_lua_loading(rows: &mut Vec<Value>) -> Result<(), Fault> {
     let tree = FixtureTree::new("lua")?;
     let scenario = plan("lua", "success", "template-first");
@@ -872,6 +1009,7 @@ pub(super) fn run(
 ) -> Result<(), Fault> {
     missing_entries(rows)?;
     ambient_imports(rows)?;
+    literal_imports(rows, &inventories["javascript"])?;
     secondary_lua_loading(rows)?;
     plugin_manifest_refusal(rows)?;
     generated_helper(rows, &inventories["typescript"])?;

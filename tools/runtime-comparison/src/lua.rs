@@ -488,9 +488,17 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
     let control = host.control();
     let interrupt_halted = halted.clone();
     let interrupt_deadline = deadline.clone();
+    let vm_hook = Arc::new(AtomicBool::new(false));
+    let interrupt_hook = vm_hook.clone();
+    let hook_host = host.clone();
     lua.set_global_hook(
         HookTriggers::new().every_nth_instruction(1000),
         move |_, debug| {
+            if interrupt_hook.load(Ordering::Acquire)
+                && interrupt_hook.swap(false, Ordering::AcqRel)
+            {
+                crate::runner::emit_vm_hook_reached(&hook_host);
+            }
             let fault = control.check().err().or_else(|| {
                 if control.elapsed_us() >= interrupt_deadline.load(Ordering::Acquire) {
                     Some(Fault::new("Timeout", "Runtime stage deadline expired"))
@@ -629,6 +637,8 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
                 })?;
             }
         }
+        // Literal decoding and syntax compilation do not prove package execution.
+        vm_hook.store(true, Ordering::Release);
         let mut entries = Vec::new();
         for entry in [&inventory.entries.readiness, &inventory.entries.workflow] {
             let value = modules

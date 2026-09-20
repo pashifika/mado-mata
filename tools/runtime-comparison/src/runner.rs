@@ -1,6 +1,8 @@
 use crate::host::{Host, resolve_options, run_rust};
 use crate::inventory::Inventory;
-use crate::model::{Control, Fault, MAX_TRANSPORT_BYTES, Plan, RuntimeMetrics, identity};
+use crate::model::{
+    Control, Fault, MAX_TRANSPORT_BYTES, Plan, RuntimeMetrics, encode_bounded, identity,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::fs::File;
@@ -8,13 +10,23 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+static VM_HOOK_EVIDENCE: OnceLock<mpsc::SyncSender<u64>> = OnceLock::new();
+
+/// Called once by an armed language instruction/interrupt hook. An in-process
+/// adapter has no child evidence channel; the hook never waits on stdout.
+pub(crate) fn emit_vm_hook_reached(host: &Host) {
+    if let Some(sender) = VM_HOOK_EVIDENCE.get() {
+        let _ = sender.try_send(host.control().elapsed_us());
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,19 +104,110 @@ fn frame(reader: &mut impl BufRead, bound: usize) -> Result<Option<Vec<u8>>, Fau
 }
 
 fn emit(value: &Value) -> Result<(), Fault> {
-    let bytes = serde_json::to_vec(value).map_err(|e| Fault::new("Encoding", e.to_string()))?;
-    if bytes.len() >= MAX_TRANSPORT_BYTES {
-        return Err(Fault::new(
-            "LimitExceeded",
-            "terminal record exceeds transport bound",
-        ));
-    }
+    let bytes = encode_bounded(value, MAX_TRANSPORT_BYTES - 1)?;
+    emit_bytes(&bytes)
+}
+
+fn emit_bytes(bytes: &[u8]) -> Result<(), Fault> {
     let mut stdout = std::io::stdout().lock();
     stdout
-        .write_all(&bytes)
+        .write_all(bytes)
         .and_then(|()| stdout.write_all(b"\n"))
         .and_then(|()| stdout.flush())
         .map_err(|e| Fault::new("Transport", e.to_string()))
+}
+
+// Diagnostic detail is expendable; accepted actions, receipts, release
+// obligations, postconditions and ownership facts are not.
+fn compact_observations(value: &mut Value) {
+    let Some(fields) = value.as_object_mut() else {
+        return;
+    };
+    fields.remove("logs");
+    fields.remove("failure");
+    if let Some(engine) = fields.get_mut("engine").and_then(Value::as_object_mut) {
+        engine.remove("configuration");
+    }
+    if let Some(receipts) = fields.get_mut("receipts").and_then(Value::as_array_mut) {
+        for receipt in receipts {
+            compact_receipt_diagnostics(receipt);
+        }
+    }
+    fields.insert("diagnostic_details_omitted".into(), json!(true));
+}
+
+fn compact_receipt_diagnostics(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            for (name, value) in fields {
+                if matches!(name.as_str(), "error" | "fault") && value.is_object() {
+                    value.as_object_mut().expect("object").retain(|key, _| {
+                        matches!(key.as_str(), "category" | "status" | "native_cleanup")
+                    });
+                    value["diagnostic_details_omitted"] = json!(true);
+                } else {
+                    compact_receipt_diagnostics(value);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                compact_receipt_diagnostics(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn settlement_bytes(mut value: Value) -> Result<Vec<u8>, Fault> {
+    let bytes = match encode_bounded(&value, MAX_TRANSPORT_BYTES - 1) {
+        Ok(bytes) => bytes,
+        Err(error) if error.category == "LimitExceeded" => {
+            compact_observations(&mut value["observations"]);
+            if let Some(runtime) = value["runtime"].as_object_mut() {
+                runtime.remove("source_diagnostic");
+            }
+            if let Some(cleanup) = value.get_mut("cleanup") {
+                compact_receipt_diagnostics(cleanup);
+            }
+            value["diagnostic_details_omitted"] = json!(true);
+            encode_bounded(&value, MAX_TRANSPORT_BYTES - 1)?
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(bytes)
+}
+
+fn emit_settlement(value: Value) -> Result<(), Fault> {
+    emit_bytes(&settlement_bytes(value)?)
+}
+
+fn preflight_cleanup(primary: &Fault, release: Result<(), Fault>) -> Value {
+    let native_unverified = primary.context["native_cleanup"] == "unverified";
+    let clean = !native_unverified && release.is_ok();
+    json!({
+        "clean":clean,
+        "status":if clean {"CleanupFinished"} else {"IncompleteCleanup"},
+        "stage":"preflight-no-host",
+        "native_cleanup":if native_unverified {Some("unverified")} else {None},
+        "runner_release":release.err()
+    })
+}
+
+fn complete_child(
+    clean: bool,
+    finished: &AtomicBool,
+    emission: Result<(), Fault>,
+) -> Result<bool, Fault> {
+    if !clean {
+        // Retained/quarantined work lives until independent containment. A
+        // broken evidence pipe must not imply that physical cleanup completed.
+        loop {
+            thread::park_timeout(Duration::from_millis(10));
+        }
+    }
+    finished.store(true, Ordering::Release);
+    emission.map(|()| true)
 }
 
 fn process_metrics() -> Value {
@@ -138,6 +241,18 @@ pub fn child() -> Result<bool, Fault> {
     emit(
         &json!({"event":"ChildStarted","run":run,"attempt":attempt,"pid":std::process::id(),"at_us":control.elapsed_us()}),
     )?;
+    if invocation.plan.candidate != "rust" {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let _ = VM_HOOK_EVIDENCE.set(sender);
+        let event_run = run.clone();
+        thread::spawn(move || {
+            if let Ok(at_us) = receiver.recv() {
+                let _ = emit(
+                    &json!({"event":"VmHookReached","run":event_run,"attempt":attempt,"at_us":at_us}),
+                );
+            }
+        });
+    }
 
     // These threads never acquire a VM, host, native-work, or ordinary-log lock.
     let watch_control = control.clone();
@@ -204,17 +319,23 @@ pub fn child() -> Result<bool, Fault> {
         });
     let host = match prepared {
         Ok(host) => host,
-        Err(error) => {
+        Err(mut error) => {
+            error.bound_diagnostics();
+            let entry_emission = emit_settlement(
+                json!({"event":"EntrySettled","run":invocation.run,"attempt":attempt,
+                "primary":error,"entry_outcome":"NotStarted","observations":{},
+                "preflight_us":preflight_start.elapsed().as_micros(),"at_us":control.elapsed_us()}),
+            )
+            .err();
             control.cancel();
-            let release = crate::engine::release_runner_resources();
-            emit(
-                &json!({"event":"Terminal","run":invocation.run,"attempt":attempt,"primary":error,"entry_outcome":"NotStarted",
-                "cleanup":{"clean":release.is_ok(),"stage":"preflight-no-host","runner_release":release.err()},"observations":{},
+            let cleanup = preflight_cleanup(&error, crate::engine::release_runner_resources());
+            let emission = emit_settlement(
+                json!({"event":"Terminal","run":invocation.run,"attempt":attempt,"primary":error,"entry_outcome":"NotStarted",
+                "cleanup":cleanup,"observations":{},"entry_emission_failure":entry_emission,
                 "runtime":null,"preflight_us":preflight_start.elapsed().as_micros(),"workflow_us":null,
                 "process":process_metrics()}),
-            )?;
-            finished.store(true, Ordering::Release);
-            return Ok(true);
+            );
+            return complete_child(cleanup["clean"] == true, &finished, emission);
         }
     };
     let mut inventory = invocation.inventory;
@@ -235,7 +356,7 @@ pub fn child() -> Result<bool, Fault> {
         _ => Err(Fault::new("InvalidPlan", "unknown candidate")),
     });
     let workflow_us = started.elapsed().as_micros();
-    let (metrics, primary) = match runtime {
+    let (metrics, mut primary) = match runtime {
         Ok(metrics) => (Some(metrics), host.failure()),
         Err(error) => {
             // Adapters retain the host-owned primary and enrich it at the live
@@ -248,21 +369,33 @@ pub fn child() -> Result<bool, Fault> {
             (None::<RuntimeMetrics>, Some(error))
         }
     };
-    control.cancel();
+    if let Some(primary) = primary.as_mut() {
+        primary.bound_diagnostics();
+    }
     let entry_outcome = if metrics.is_some() {
         "Returned"
     } else {
         "FailedOrNotStarted"
     };
-    // Retain the settled entry before cleanup can block or the watchdog can exit.
-    emit(
-        &json!({"event":"EntrySettled","run":invocation.run,"attempt":attempt,
-        "entry_outcome":entry_outcome,"primary":primary,"runtime":metrics,
+    // snapshot() takes only short-lived host bookkeeping locks; the engine
+    // snapshot reads immutable facts and atomics, never its native-work lock.
+    // Publish known facts before starting our local cleanup clock. External
+    // Stop/deadline cancellation remains independent throughout serialization.
+    let mut observations = host.snapshot();
+    observations["snapshot_stage"] = json!("pre_cleanup");
+    let entry_emission = emit_settlement(
+        json!({"event":"EntrySettled","run":invocation.run,"attempt":attempt,
+        "entry_outcome":entry_outcome,"primary":primary,"runtime":metrics,"observations":observations,
         "compiled_inventory_identity":inventory.identity,"preflight_us":preflight_us,
         "workflow_us":workflow_us,"at_us":control.elapsed_us()}),
-    )?;
+    )
+    .err();
+    control.cancel();
+    // An emission error is secondary evidence, never an early return before
+    // cleanup of accepted input, held keys, queued work, or native ownership.
     let mut cleanup = host.finish();
-    let observations = host.snapshot();
+    let mut observations = host.snapshot();
+    observations["snapshot_stage"] = json!("post_cleanup");
     drop(host);
     if cleanup["clean"] == true {
         if let Err(error) = crate::engine::release_runner_resources() {
@@ -270,21 +403,15 @@ pub fn child() -> Result<bool, Fault> {
             cleanup["runner_release_failure"] = json!(error);
         }
     }
-    emit(
-        &json!({"event":"Terminal","run":invocation.run,"attempt":attempt,
+    let emission = emit_settlement(
+        json!({"event":"Terminal","run":invocation.run,"attempt":attempt,
         "primary":primary,"entry_outcome":entry_outcome,"cleanup":cleanup,"observations":observations,"runtime":metrics,
+        "entry_emission_failure":entry_emission,
         "compiled_inventory_identity":inventory.identity,"preflight_us":preflight_us,"workflow_us":workflow_us,
         "stop_at_us":control.stop_us.load(Ordering::Acquire),
         "admission_closed_at_us":control.closed_us.load(Ordering::Acquire),"process":process_metrics()}),
-    )?;
-    if cleanup["clean"] != true {
-        // Keep retained work alive until the independent containment path exits.
-        loop {
-            thread::park_timeout(Duration::from_millis(10));
-        }
-    }
-    finished.store(true, Ordering::Release);
-    Ok(true)
+    );
+    complete_child(cleanup["clean"] == true, &finished, emission)
 }
 
 pub fn sample(plan: &Plan, inventory: &Inventory) -> Result<Vec<RunRecord>, Fault> {
@@ -310,7 +437,42 @@ pub fn run_once(
     inventory: &Inventory,
     stop_after_ms: Option<u64>,
     disconnect: bool,
+    operator_stop: Option<&mut dyn FnMut() -> bool>,
+) -> Result<RunRecord, Fault> {
+    supervise(
+        plan,
+        inventory,
+        stop_after_ms,
+        disconnect,
+        operator_stop,
+        None,
+    )
+}
+
+pub(crate) fn run_once_after_milestone(
+    plan: &Plan,
+    inventory: &Inventory,
+    event: &str,
+    delay_ms: u64,
+    disconnect: bool,
+) -> Result<RunRecord, Fault> {
+    supervise(
+        plan,
+        inventory,
+        None,
+        disconnect,
+        None,
+        Some((event, delay_ms)),
+    )
+}
+
+fn supervise(
+    plan: &Plan,
+    inventory: &Inventory,
+    stop_after_ms: Option<u64>,
+    disconnect: bool,
     mut operator_stop: Option<&mut dyn FnMut() -> bool>,
+    stop_milestone: Option<(&str, u64)>,
 ) -> Result<RunRecord, Fault> {
     plan.validate()?;
     inventory.validate()?;
@@ -421,6 +583,7 @@ pub fn run_once(
     let mut startup_us = None;
     let mut system = System::new();
     let child_pid = Pid::from_u32(child.0.id());
+    let mut milestone_received_at = None;
     let parent_pid = Pid::from_u32(std::process::id());
     let mut sampled_child_rss = 0u64;
     let mut sampled_parent_rss = 0u64;
@@ -436,6 +599,9 @@ pub fn run_once(
                             protocol_fault = Some(Fault::new("Transport", "duplicate terminal"));
                         }
                     } else {
+                        if stop_milestone.is_some_and(|(event, _)| value["event"] == event) {
+                            milestone_received_at.get_or_insert_with(Instant::now);
+                        }
                         if value["event"] == "ChildStarted" {
                             startup_us = Some(started.elapsed().as_micros());
                         }
@@ -462,10 +628,15 @@ pub fn run_once(
         let operator_requested =
             stop_sent_at.is_none() && operator_stop.as_mut().is_some_and(|poll| poll());
         let stop_at = stop_after_ms.unwrap_or(plan.limits.duration_ms);
+        let milestone_stop_due = stop_milestone.is_some_and(|(_, delay_ms)| {
+            milestone_received_at
+                .is_some_and(|at: Instant| at.elapsed() >= Duration::from_millis(delay_ms))
+        });
         if stop_sent_at.is_none()
             && (operator_requested
                 || elapsed >= Duration::from_millis(stop_at)
-                || protocol_fault.is_some())
+                || protocol_fault.is_some()
+                || milestone_stop_due)
         {
             stop_sent_at = Some(Instant::now());
             if disconnect {
@@ -530,19 +701,25 @@ pub fn run_once(
         }
     }
     let stderr = errors.join().unwrap_or_default();
-    let terminal = terminal.unwrap_or_else(|| {
-        milestones
-            .iter()
-            .find(|value| value["event"] == "EntrySettled")
-            .cloned()
-            .unwrap_or_else(|| json!({}))
-    });
-    let primary = protocol_fault.or_else(|| {
-        terminal
-            .get("primary")
-            .filter(|v| !v.is_null())
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
-    });
+    if stop_milestone
+        .is_some_and(|(event, _)| !milestones.iter().any(|value| value["event"] == event))
+    {
+        protocol_fault.get_or_insert_with(|| {
+            Fault::new("Fixture", "required execution milestone was not observed")
+        });
+    }
+    let terminal = settled_evidence(terminal, &milestones);
+    let primary = terminal
+        .get("primary")
+        .filter(|value| !value.is_null())
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| protocol_fault.clone())
+        .or_else(|| {
+            terminal
+                .get("entry_emission_failure")
+                .filter(|value| !value.is_null())
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+        });
     let clean = terminal["cleanup"]["clean"] == true && exit.success() && !forced;
     let status = if primary.as_ref().is_some_and(|e| e.category == "Blocked") {
         "BLOCKED"
@@ -554,7 +731,7 @@ pub fn run_once(
     let cleanup = if terminal.get("cleanup").is_some() {
         terminal["cleanup"].clone()
     } else {
-        json!({"clean":false,"outcome":"ForcedOrIncomplete","cleanup_finished_us":null,
+        json!({"clean":false,"status":"IncompleteCleanup","outcome":"ForcedOrIncomplete","cleanup_finished_us":null,
             "external_effects":"unknown; no automatic continuation"})
     };
     let reason = primary.as_ref().map_or_else(
@@ -622,16 +799,32 @@ pub fn run_once(
             "containment_metric_method":"supervisor-clock Stop-to-exit; absent external Stop, incomplete entry-settlement receipt-to-exit",
             "host_call_us":host_call_us,"cpu_percent":cpu_percent,"vm_bytes":terminal["runtime"]["vm_bytes"],
             "live_owners":terminal["observations"]["attempt_owners"],
-            "owner_method":"attempt owners after cleanup, not peak","budgets":plan.budgets,
+            "owner_method":if terminal["observations"]["snapshot_stage"] == "pre_cleanup" {
+                "attempt owners before cleanup; completion unverified, not peak"
+            } else {
+                "attempt owners after cleanup, not peak"
+            },"budgets":plan.budgets,
             "comparison_identity":identity(&(&plan.lane,&plan.scenario,&plan.profile,&plan.limits,&plan.budgets,
                 (plan.samples,plan.warmups,plan.repetitions),&inventory.metadata["runtime_scenario"],
                 &plan.native_config,&inventory.package_id,&inventory.schema,&inventory.profiles,&inventory.assets))?,
+            "protocol_fault":protocol_fault,"entry_emission_failure":terminal["entry_emission_failure"],
+            "diagnostic_details_omitted":terminal["diagnostic_details_omitted"],
             "stderr_bytes_retained":stderr.len(),"stderr":String::from_utf8_lossy(&stderr),
             "compiled_inventory_identity":terminal["compiled_inventory_identity"]}),
         milestones,
         exit_code: exit.code(),
         forced: forced || exit.code() == Some(124),
         build: crate::report::build_identity(),
+    })
+}
+
+fn settled_evidence(terminal: Option<Value>, milestones: &[Value]) -> Value {
+    terminal.unwrap_or_else(|| {
+        milestones
+            .iter()
+            .find(|value| value["event"] == "EntrySettled")
+            .cloned()
+            .unwrap_or_else(|| json!({}))
     })
 }
 
@@ -960,4 +1153,79 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         "parent_exit":status.code(),"parent_forced":forced,"target_survived":target_alive,
         "observed":response,"build":crate::report::build_identity()}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preflight_unverified_native_cleanup_is_independent_of_cache_release() {
+        let primary = Fault::new("NativeSession", "session opening failed")
+            .with_context(json!({"native_cleanup":"unverified"}));
+        let released = preflight_cleanup(&primary, Ok(()));
+        assert_eq!(released["clean"], false);
+        assert_eq!(released["status"], "IncompleteCleanup");
+        assert_eq!(released["native_cleanup"], "unverified");
+        let retained = preflight_cleanup(
+            &primary,
+            Err(Fault::new("RunnerResources", "retained owner")),
+        );
+        assert_eq!(retained["clean"], false);
+        assert_eq!(retained["runner_release"]["category"], "RunnerResources");
+        assert_eq!(retained["native_cleanup"], "unverified");
+    }
+
+    #[test]
+    fn preflight_cleanup_never_parses_human_diagnostics() {
+        let primary = Fault::new("Blocked", "native_cleanup unverified; rollback incomplete");
+        assert_eq!(preflight_cleanup(&primary, Ok(()))["clean"], true);
+        assert_eq!(
+            preflight_cleanup(
+                &primary,
+                Err(Fault::new("RunnerResources", "still retained"))
+            )["clean"],
+            false
+        );
+    }
+
+    #[test]
+    fn bounded_fallback_retains_receipts_and_owners_without_inventing_cleanup() {
+        let facts = json!({
+            "accepted":[{"id":"sequence-1","order":1,"actions":[{"kind":"key_down","key":"A"}]}],
+            "receipts":[{"id":"sequence-1","order":1,"status":"Submitted","submitted":1,
+                "total":1,"cleanup_required":["A"],"sink":"controlled-non-native"}],
+            "held_keys":["A"],"attempt_owners":2,"in_flight_native":1,
+            "postconditions":[{"satisfied":false}],
+            "snapshot_stage":"pre_cleanup"
+        });
+        let mut observations = facts.clone();
+        observations["logs"] = json!([{"message":"x".repeat(MAX_TRANSPORT_BYTES)}]);
+        let mut bytes = settlement_bytes(json!({
+            "event":"EntrySettled","run":"retained","attempt":1,
+            "primary":Fault::new("Script", "workflow failed"),
+            "entry_outcome":"FailedOrNotStarted","observations":observations
+        }))
+        .expect("diagnostic fallback fits");
+        bytes.push(b'\n');
+        let frame = frame(&mut bytes.as_slice(), MAX_TRANSPORT_BYTES)
+            .expect("bounded protocol frame")
+            .expect("entry frame");
+        let milestone = serde_json::from_slice(&frame).expect("settled evidence");
+        let retained = settled_evidence(None, &[milestone]);
+        assert_eq!(retained["primary"]["category"], "Script");
+        for field in [
+            "accepted",
+            "receipts",
+            "held_keys",
+            "attempt_owners",
+            "in_flight_native",
+            "postconditions",
+            "snapshot_stage",
+        ] {
+            assert_eq!(retained["observations"][field], facts[field], "{field}");
+        }
+        assert_eq!(retained["diagnostic_details_omitted"], true);
+        assert!(retained.get("cleanup").is_none());
+    }
 }

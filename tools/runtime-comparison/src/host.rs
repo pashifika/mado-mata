@@ -11,6 +11,87 @@ static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
 // A synthetic fixture identifier, never an OS-selected or operated-on process.
 const CONTROLLED_PROCESS_ID: u32 = 4242;
 
+/// One attempt-wide ceiling. Reservations never acquire host or native work locks.
+#[derive(Debug)]
+pub(crate) struct HandleBudget {
+    limit: usize,
+    live: AtomicUsize,
+}
+
+impl HandleBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            live: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn reserve(self: &Arc<Self>, count: usize) -> Result<HandlePermit, Fault> {
+        self.live
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+                live.checked_add(count).filter(|next| *next <= self.limit)
+            })
+            .map_err(|_| Fault::new("HandleLimit", "managed handle capacity exhausted"))?;
+        Ok(HandlePermit {
+            budget: Arc::clone(self),
+            count,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct HandlePermit {
+    budget: Arc<HandleBudget>,
+    count: usize,
+}
+
+impl HandlePermit {
+    #[cfg(feature = "engine")]
+    pub(crate) fn split_one(&mut self) -> Self {
+        assert!(self.count > 0, "a reservation must own the split handle");
+        self.count -= 1;
+        Self {
+            budget: Arc::clone(&self.budget),
+            count: 1,
+        }
+    }
+}
+
+impl Drop for HandlePermit {
+    fn drop(&mut self) {
+        self.budget.live.fetch_sub(self.count, Ordering::AcqRel);
+    }
+}
+
+/// The permit follows the logical owner, including moves into active work.
+pub(crate) struct Managed<T> {
+    pub(crate) owner: T,
+    _permit: HandlePermit,
+}
+
+impl<T> Managed<T> {
+    pub(crate) fn new(value: T, permit: HandlePermit) -> Self {
+        Self {
+            owner: value,
+            _permit: permit,
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Managed<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.owner
+    }
+}
+
+impl<T> std::ops::DerefMut for Managed<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.owner
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -485,12 +566,18 @@ impl Action {
     }
 }
 
-#[derive(Clone)]
+// The same permit moves from queued to active input, then to the retained receipt.
 struct Sequence {
     id: String,
     order: u64,
     observation: Value,
     actions: Vec<Action>,
+    permit: HandlePermit,
+}
+
+struct Receipt {
+    value: Value,
+    permit: Option<HandlePermit>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -525,11 +612,11 @@ struct State {
     focus: bool,
     route: bool,
     visible: String,
-    handles: BTreeMap<String, Handle>,
+    handles: BTreeMap<String, Managed<Handle>>,
     queue: VecDeque<Sequence>,
     active: Option<String>,
     accepted: Vec<Value>,
-    receipts: BTreeMap<String, Value>,
+    receipts: BTreeMap<String, Receipt>,
     released_receipts: BTreeSet<String>,
     effects: Vec<Value>,
     held_keys: BTreeMap<String, u64>,
@@ -596,6 +683,7 @@ struct Inner {
     dispatch: Mutex<()>,
     workers: Mutex<Vec<Worker>>,
     physical: Arc<AtomicUsize>,
+    handle_budget: Arc<HandleBudget>,
     held: AtomicBool,
     terminating: AtomicBool,
     metrics: [OperationMetrics; OPERATIONS.len()],
@@ -669,6 +757,7 @@ impl Host {
             .map_err(|_| Fault::new("Clock", "system clock precedes Unix epoch"))?
             .as_nanos();
         let lifetime = format!("controlled-{}-{nonce}-{attempt}", std::process::id());
+        let handle_budget = Arc::new(HandleBudget::new(plan.limits.handles));
         #[cfg(feature = "engine")]
         let engine = if plan.lane == "controlled" {
             None
@@ -679,6 +768,7 @@ impl Host {
                 Arc::clone(&control),
                 &lifetime,
                 attempt,
+                Arc::clone(&handle_budget),
             )?)
         };
         #[cfg(not(feature = "engine"))]
@@ -738,6 +828,7 @@ impl Host {
                 dispatch: Mutex::new(()),
                 workers: Mutex::new(Vec::new()),
                 physical: Arc::new(AtomicUsize::new(0)),
+                handle_budget,
                 held: AtomicBool::new(held),
                 terminating: AtomicBool::new(false),
                 metrics: std::array::from_fn(|_| OperationMetrics::default()),
@@ -765,7 +856,13 @@ impl Host {
             ));
         }
         self.inner.control.check()?;
-        if let Some(fault) = self.failure() {
+        // Target loss terminates the predecessor, not an explicitly scheduled
+        // controlled successor after verified cleanup. Preserve its first fault;
+        // Stop remains independently latched by the control check above.
+        if let Some(fault) = self
+            .failure()
+            .filter(|fault| fault.category != "TargetLost")
+        {
             return Err(fault);
         }
         let state = lock(&self.inner.state);
@@ -925,6 +1022,9 @@ impl Host {
             .unwrap_or(OPERATIONS.len() - 1);
         let started = Instant::now();
         let result = self.call_inner(method, args);
+        if let Err(error) = &result {
+            self.retain_terminal_fault(error);
+        }
         let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let metrics = &self.inner.metrics[index];
         metrics.count.fetch_add(1, Ordering::Relaxed);
@@ -934,6 +1034,12 @@ impl Host {
         metrics.total_us.fetch_add(elapsed, Ordering::Relaxed);
         metrics.max_us.fetch_max(elapsed, Ordering::Relaxed);
         result
+    }
+
+    fn retain_terminal_fault(&self, error: &Fault) {
+        if matches!(error.category.as_str(), "TargetLost" | "Closed") {
+            self.fail(error.clone());
+        }
     }
 
     fn call_inner(&self, method: &str, args: Value) -> Result<Value, Fault> {
@@ -972,7 +1078,8 @@ impl Host {
                     ));
                 }
                 let value = engine.call(method, args)?;
-                self.check()?; // Native late results cannot re-open the attempt.
+                // Checks the harness latch, not the SDK's unexposed capture terminal cause.
+                self.check()?;
                 let mut state = lock(&self.inner.state);
                 match method {
                     "observe" => state.observations += 1,
@@ -1034,40 +1141,6 @@ impl Host {
         id
     }
 
-    fn capacity(&self, state: &State) -> Result<(), Fault> {
-        self.capacity_for(state, 1)
-    }
-
-    fn capacity_for(&self, state: &State, additional: usize) -> Result<(), Fault> {
-        let receipts = state
-            .receipts
-            .len()
-            .saturating_sub(state.released_receipts.len());
-        let engine_handles = self.engine_handles();
-        if state.handles.len()
-            + state.queue.len()
-            + receipts
-            + usize::from(state.active.is_some())
-            + engine_handles
-            + additional
-            > self.inner.plan.limits.handles
-        {
-            return Err(Fault::new(
-                "HandleLimit",
-                "managed handle capacity exhausted",
-            ));
-        }
-        Ok(())
-    }
-
-    fn engine_handles(&self) -> usize {
-        #[cfg(feature = "engine")]
-        if let Some(engine) = &self.inner.engine {
-            return engine.snapshot()["script_handles"].as_u64().unwrap_or(0) as usize;
-        }
-        0
-    }
-
     fn frame(&self, state: &mut State) -> Arc<Frame> {
         state.frame += 1;
         state.observations += 1;
@@ -1086,12 +1159,12 @@ impl Host {
     fn observe(&self) -> Result<Value, Fault> {
         self.check()?;
         let mut state = lock(&self.inner.state);
-        self.capacity(&state)?;
+        let permit = self.inner.handle_budget.reserve(1)?;
         let frame = self.frame(&mut state);
         let value = frame.value.clone();
         state.handles.insert(
             value["id"].as_str().unwrap_or_default().into(),
-            Handle::Observation(frame),
+            Managed::new(Handle::Observation(frame), permit),
         );
         Ok(value)
     }
@@ -1123,7 +1196,7 @@ impl Host {
         let id = value["id"]
             .as_str()
             .ok_or_else(|| argument("observation.id must be a string"))?;
-        let frame = match state.handles.get(id) {
+        let frame = match state.handles.get(id).map(|handle| &handle.owner) {
             Some(Handle::Observation(frame)) => Some(Arc::clone(frame)),
             Some(Handle::Query(query)) if query.frame.value["id"] == id => {
                 Some(Arc::clone(&query.frame))
@@ -1228,7 +1301,7 @@ impl Host {
         self.check()?;
         let mut state = lock(&self.inner.state);
         let frame = self.observation(&state, &map["observation"])?;
-        self.capacity(&state)?;
+        let permit = self.inner.handle_budget.reserve(1)?;
         let id = self.next_id(&mut state, "query");
         state.recognitions += 1;
         let result = self.recognition_value(&frame, kind, &roi, &id)?;
@@ -1249,7 +1322,9 @@ impl Host {
             deadline: Instant::now() + Duration::from_millis(self.inner.plan.limits.wait_ms),
             terminal: (!waitable).then(|| result.clone()),
         };
-        state.handles.insert(id.clone(), Handle::Query(query));
+        state
+            .handles
+            .insert(id.clone(), Managed::new(Handle::Query(query), permit));
         if waitable {
             Ok(json!({"id":id}))
         } else {
@@ -1335,7 +1410,7 @@ impl Host {
                 return Err(error);
             }
             let mut state = lock(&self.inner.state);
-            let query = match state.handles.get(id) {
+            let query = match state.handles.get(id).map(|handle| &handle.owner) {
                 Some(Handle::Query(query)) => query.clone(),
                 _ => {
                     return Err(Fault::new(
@@ -1379,7 +1454,9 @@ impl Host {
                         .expected
                         .as_ref()
                         .is_none_or(|expected| result["text"].as_str() == Some(expected.as_str()));
-                if let Some(Handle::Query(stored)) = state.handles.get_mut(id) {
+                if let Some(Handle::Query(stored)) =
+                    state.handles.get_mut(id).map(|handle| &mut handle.owner)
+                {
                     stored.frame = frame;
                     if satisfied {
                         stored.terminal = Some(result.clone());
@@ -1481,7 +1558,7 @@ impl Host {
             state.queue_rejections += 1;
             return Err(Fault::new("QueueCapacity", "bounded input queue is full"));
         }
-        self.capacity(&state)?;
+        let permit = self.inner.handle_budget.reserve(1)?;
         let action_limit = self.inner.plan.limits.max_actions;
         #[cfg(feature = "engine")]
         let action_limit = self.inner.engine.as_ref().map_or(action_limit, |engine| {
@@ -1514,6 +1591,7 @@ impl Host {
             order,
             observation: map["observation"].clone(),
             actions,
+            permit,
         });
         state.queue_high_water = state.queue_high_water.max(state.queue.len());
         Ok(json!({"id":id,"order":order}))
@@ -1564,7 +1642,7 @@ impl Host {
                     return Err(Fault::new("InvalidHandle", "sequence handle was released"));
                 }
                 if let Some(receipt) = state.receipts.get(id) {
-                    return Ok(receipt.clone());
+                    return Ok(receipt.value.clone());
                 }
                 if !state.queue.iter().any(|sequence| sequence.id == id) {
                     return Err(Fault::new(
@@ -1580,22 +1658,33 @@ impl Host {
                 sequence
             };
             let receipt = match self.input_check(&sequence.observation) {
-                Err(error) => self.receipt(
-                    &sequence,
-                    if error.category == "Cancelled" {
-                        "Cancelled"
-                    } else {
-                        "Refused"
-                    },
-                    0,
-                    Some(&error.category),
-                    Vec::new(),
-                ),
+                Err(error) => {
+                    self.retain_terminal_fault(&error);
+                    let mut receipt = self.receipt(
+                        &sequence,
+                        if error.category == "Cancelled" {
+                            "Cancelled"
+                        } else {
+                            "Refused"
+                        },
+                        0,
+                        Some(&error.category),
+                        Vec::new(),
+                    );
+                    receipt["error"] = json!(error);
+                    receipt
+                }
                 Ok(()) => self.dispatch_sequence(&sequence),
             };
             let mut state = lock(&self.inner.state);
             state.active = None;
-            state.receipts.insert(sequence.id.clone(), receipt);
+            state.receipts.insert(
+                sequence.id,
+                Receipt {
+                    value: receipt,
+                    permit: Some(sequence.permit),
+                },
+            );
         }
     }
 
@@ -1623,8 +1712,17 @@ impl Host {
                         lock(&self.inner.state).dispatches += 1;
                     }
                     if receipt["status"] != "Submitted" {
+                        let category = match receipt["fault"]["status"].as_str() {
+                            Some(status) if status == mado_pilot::Status::TargetLost.as_str() => {
+                                "TargetLost"
+                            }
+                            Some(status) if status == mado_pilot::Status::Closed.as_str() => {
+                                "Closed"
+                            }
+                            _ => "NativeInput",
+                        };
                         self.fail(
-                            Fault::new("NativeInput", "native input did not complete")
+                            Fault::new(category, "native input did not complete")
                                 .with_context(json!({"receipt":receipt})),
                         );
                     }
@@ -1654,6 +1752,7 @@ impl Host {
                 match self.observation(&state, &sequence.observation) {
                     Ok(frame) => frame,
                     Err(error) => {
+                        self.retain_terminal_fault(&error);
                         return self.receipt(
                             sequence,
                             "Refused",
@@ -1673,6 +1772,7 @@ impl Host {
             let deadline = Instant::now() + Duration::from_millis(self.inner.plan.limits.wait_ms);
             while !work.completed.load(Ordering::Acquire) {
                 if let Err(error) = self.check() {
+                    self.retain_terminal_fault(&error);
                     return self.receipt(
                         sequence,
                         "Cancelled",
@@ -1692,6 +1792,7 @@ impl Host {
         let mut reason = None;
         for action in &sequence.actions {
             if let Err(error) = self.input_check(&sequence.observation) {
+                self.retain_terminal_fault(&error);
                 status = if submitted > 0 {
                     "Partial"
                 } else if error.category == "Cancelled" {
@@ -1706,6 +1807,7 @@ impl Host {
             // Fixture invalidation and effects linearize on the same short-held state lock.
             if self.inner.plan.lane == "controlled" {
                 if let Err(error) = self.observation(&state, &sequence.observation) {
+                    self.retain_terminal_fault(&error);
                     status = if submitted > 0 { "Partial" } else { "Refused" };
                     reason = Some(error.category);
                     break;
@@ -1801,6 +1903,9 @@ impl Host {
             return Ok(json!({"released":true}));
         }
         if state.receipts.contains_key(id) && state.released_receipts.insert(id.into()) {
+            if let Some(receipt) = state.receipts.get_mut(id) {
+                receipt.permit = None;
+            }
             return Ok(json!({"released":true}));
         }
         if let Some(index) = state.queue.iter().position(|sequence| sequence.id == id) {
@@ -1809,7 +1914,13 @@ impl Host {
                 .remove(index)
                 .ok_or_else(|| Fault::new("InvalidHandle", "sequence was already removed"))?;
             let receipt = self.receipt(&sequence, "Cancelled", 0, Some("Released"), Vec::new());
-            state.receipts.insert(id.into(), receipt);
+            state.receipts.insert(
+                id.into(),
+                Receipt {
+                    value: receipt,
+                    permit: None,
+                },
+            );
             state.released_receipts.insert(id.into());
             return Ok(json!({"released":true}));
         }
@@ -1888,15 +1999,13 @@ impl Host {
 
     pub fn snapshot(&self) -> Value {
         let state = lock(&self.inner.state);
-        let sequence_handles = state.queue.len()
-            + usize::from(state.active.is_some())
-            + state
-                .receipts
-                .len()
-                .saturating_sub(state.released_receipts.len());
-        let live = state.handles.len() + sequence_handles;
+        let live = self.inner.handle_budget.live.load(Ordering::Acquire);
         let physical = self.inner.physical.load(Ordering::Acquire);
-        let mut receipts: Vec<_> = state.receipts.values().collect();
+        let mut receipts: Vec<_> = state
+            .receipts
+            .values()
+            .map(|receipt| &receipt.value)
+            .collect();
         receipts.sort_unstable_by_key(|receipt| receipt["order"].as_u64());
         let mut value = json!({
             "lane":self.inner.plan.lane,"sink":self.input_sink(),"phase":state.phase.name(),
@@ -1940,8 +2049,6 @@ impl Host {
         #[cfg(feature = "engine")]
         if let Some(engine) = &self.inner.engine {
             let engine = engine.snapshot();
-            value["live_handles"] =
-                json!(live + engine["script_handles"].as_u64().unwrap_or(0) as usize);
             value["attempt_owners"] = json!(
                 value["attempt_owners"].as_u64().unwrap_or(0)
                     + engine["script_handles"].as_u64().unwrap_or(0)
@@ -1985,7 +2092,13 @@ impl Host {
                     Some("EntryTerminated"),
                     Vec::new(),
                 );
-                state.receipts.insert(sequence.id, receipt);
+                state.receipts.insert(
+                    sequence.id,
+                    Receipt {
+                        value: receipt,
+                        permit: Some(sequence.permit),
+                    },
+                );
             }
             state.handles.clear();
         }
@@ -2043,6 +2156,9 @@ impl Host {
             result
         };
         state.released_receipts = state.receipts.keys().cloned().collect();
+        for receipt in state.receipts.values_mut() {
+            receipt.permit = None;
+        }
         state.cleanup = Some(result.clone());
         result
     }
@@ -2126,6 +2242,303 @@ pub fn run_rust(host: &Host) -> Result<RuntimeMetrics, Fault> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ready_host_with_handle_limit(limit: usize) -> Host {
+        let mut host = make_host("success", "template-first");
+        let inner = Arc::get_mut(&mut host.inner).expect("unshared fixture");
+        inner.plan.limits.handles = limit;
+        inner.handle_budget = Arc::new(HandleBudget::new(limit));
+        host.begin_readiness().expect("readiness");
+        host.begin_workflow().expect("workflow");
+        host
+    }
+
+    #[cfg(feature = "engine")]
+    fn replay_host_with_handle_limit(limit: usize) -> Host {
+        let mut host = make_host("success", "template-first");
+        let inner = Arc::get_mut(&mut host.inner).expect("unshared fixture");
+        inner.plan.lane = "replay".into();
+        inner.plan.limits.handles = limit;
+        inner.handle_budget = Arc::new(HandleBudget::new(limit));
+        inner.engine = Some(crate::engine::Engine::replay_for_test(
+            &inner.plan,
+            Arc::clone(&inner.control),
+            &inner.lifetime,
+            inner.attempt,
+            Arc::clone(&inner.handle_budget),
+        ));
+        host.begin_readiness().expect("replay readiness");
+        host.begin_workflow().expect("replay workflow");
+        host
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn replay_engine_refuses_observation_while_host_owns_sequence_or_receipt() {
+        let host = replay_host_with_handle_limit(2);
+        let observation = observe(&host);
+        let sequence = submit(&host, &observation, "A").expect("aggregate two owners");
+        assert_eq!(
+            host.call("observe", json!({}))
+                .expect_err("queue consumes last slot")
+                .category,
+            "HandleLimit"
+        );
+        let recognition = json!({
+            "observation":observation,"kind":"ocr",
+            "roi":{"x":0,"y":0,"width":8,"height":8}
+        });
+        for method in ["recognize", "query"] {
+            assert_eq!(
+                host.call(method, recognition.clone())
+                    .expect_err("host owns remaining capacity")
+                    .category,
+                "HandleLimit"
+            );
+        }
+        let receipt = host
+            .call("settle", json!({"id":sequence["id"]}))
+            .expect("controlled sink");
+        assert_eq!(receipt["status"], "Submitted");
+        assert_eq!(
+            host.call("observe", json!({}))
+                .expect_err("receipt consumes last slot")
+                .category,
+            "HandleLimit"
+        );
+        assert_eq!(host.snapshot()["live_handles"], 2);
+        host.call("release", json!({"id":sequence["id"]}))
+            .expect("release receipt");
+        assert_eq!(
+            host.call("query", recognition)
+                .expect_err("query and its source require two slots")
+                .category,
+            "HandleLimit"
+        );
+        let newer = observe(&host);
+        assert_eq!(host.snapshot()["live_handles"], 2);
+        host.call("release", json!({"id":observation["id"]}))
+            .expect("release engine source");
+        host.call("release", json!({"id":newer["id"]}))
+            .expect("release newer engine source");
+        assert_eq!(host.finish()["clean"], true);
+        assert_eq!(host.snapshot()["live_handles"], 0);
+        assert_eq!(host.snapshot()["receipts"][0], receipt);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn replay_engine_owners_refuse_host_sequence_until_an_engine_release() {
+        let host = replay_host_with_handle_limit(2);
+        let first = observe(&host);
+        let second = observe(&host);
+        assert_eq!(
+            submit(&host, &first, "A")
+                .expect_err("engine consumes both slots")
+                .category,
+            "HandleLimit"
+        );
+        assert_eq!(host.snapshot()["accepted"], json!([]));
+        host.call("release", json!({"id":second["id"]}))
+            .expect("release engine slot");
+        let sequence = submit(&host, &first, "A").expect("host can reserve released slot");
+        host.call("release", json!({"id":sequence["id"]}))
+            .expect("cancel queued sequence");
+        assert_eq!(host.finish()["clean"], true);
+        assert_eq!(host.snapshot()["live_handles"], 0);
+        assert_eq!(host.snapshot()["receipts"][0]["status"], "Cancelled");
+    }
+
+    #[test]
+    fn shared_budget_keeps_queued_and_settled_input_charged_until_release() {
+        let host = ready_host_with_handle_limit(2);
+        let observation = observe(&host);
+        let sequence = submit(&host, &observation, "A").expect("two owners fit");
+        // Exercise the same atomic reservation used by engine observations and results.
+        assert_eq!(
+            host.inner
+                .handle_budget
+                .reserve(1)
+                .expect_err("queued input owns capacity")
+                .category,
+            "HandleLimit"
+        );
+        let receipt = host
+            .call("settle", json!({"id":sequence["id"]}))
+            .expect("settled");
+        assert_eq!(receipt["status"], "Submitted");
+        assert_eq!(
+            host.inner
+                .handle_budget
+                .reserve(1)
+                .expect_err("receipt still owns capacity")
+                .category,
+            "HandleLimit"
+        );
+        assert_eq!(host.snapshot()["live_handles"], 2);
+        host.call("release", json!({"id":sequence["id"]}))
+            .expect("release receipt");
+        let engine_owner = Managed::new(
+            (),
+            host.inner.handle_budget.reserve(1).expect("released slot"),
+        );
+        host.control().cancel();
+        host.call("release", json!({"id":observation["id"]}))
+            .expect("release after Stop");
+        assert_eq!(host.snapshot()["receipts"][0], receipt);
+        drop(engine_owner);
+        assert_eq!(host.finish()["clean"], true);
+        assert_eq!(host.snapshot()["live_handles"], 0);
+    }
+
+    #[test]
+    fn shared_budget_counts_engine_owners_before_host_admission() {
+        let host = ready_host_with_handle_limit(2);
+        let engine_owner = Managed::new(
+            (),
+            host.inner.handle_budget.reserve(1).expect("engine owner"),
+        );
+        let observation = observe(&host);
+        assert_eq!(
+            submit(&host, &observation, "A")
+                .expect_err("aggregate ceiling")
+                .category,
+            "HandleLimit"
+        );
+        assert_eq!(host.snapshot()["accepted"], json!([]));
+        drop(engine_owner);
+        let sequence = submit(&host, &observation, "A").expect("engine release returns capacity");
+        host.call("release", json!({"id":sequence["id"]}))
+            .expect("cancel queued sequence");
+        let replacement = host
+            .inner
+            .handle_budget
+            .reserve(1)
+            .expect("queue release returns capacity");
+        assert_eq!(host.snapshot()["receipts"][0]["status"], "Cancelled");
+        drop(replacement);
+        assert_eq!(host.finish()["clean"], true);
+        assert_eq!(host.snapshot()["live_handles"], 0);
+    }
+
+    #[test]
+    fn shared_budget_keeps_active_input_charged_while_dispatch_waits() {
+        let host = ready_host("held-work");
+        let observation = observe(&host);
+        let sequence = submit(&host, &observation, "A").expect("accepted");
+        let other_owners = host
+            .inner
+            .handle_budget
+            .reserve(30)
+            .expect("fill shared capacity");
+        let settling = host.clone();
+        let id = sequence["id"].clone();
+        let worker = thread::spawn(move || settling.call("settle", json!({"id":id})));
+        wait_until(|| host.snapshot()["in_flight_native"] == 1);
+        assert_eq!(host.snapshot()["queue_depth"], 0);
+        assert_eq!(host.snapshot()["active_sequence"], sequence["id"]);
+        assert_eq!(
+            host.inner
+                .handle_budget
+                .reserve(1)
+                .expect_err("active input still owns capacity")
+                .category,
+            "HandleLimit"
+        );
+        host.call("fixture", json!({"event":"release_hold"}))
+            .expect("release controlled worker");
+        let receipt = worker.join().expect("settler exits").expect("receipt");
+        assert_eq!(receipt["status"], "Submitted");
+        assert_eq!(host.snapshot()["live_handles"], 32);
+        drop(other_owners);
+        assert_eq!(host.finish()["clean"], true);
+        assert_eq!(host.snapshot()["live_handles"], 0);
+    }
+
+    #[test]
+    fn shared_budget_reserves_multi_owner_operations_atomically() {
+        let budget = Arc::new(HandleBudget::new(3));
+        let barrier = std::sync::Barrier::new(3);
+        let reservations = thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                barrier.wait();
+                budget.reserve(2)
+            });
+            let second = scope.spawn(|| {
+                barrier.wait();
+                budget.reserve(2)
+            });
+            barrier.wait();
+            [
+                first.join().expect("first allocator"),
+                second.join().expect("second allocator"),
+            ]
+        });
+        assert_eq!(
+            reservations.iter().filter(|result| result.is_ok()).count(),
+            1
+        );
+        assert_eq!(budget.live.load(Ordering::Acquire), 2);
+        assert_eq!(
+            budget
+                .reserve(2)
+                .expect_err("failed group reserves nothing")
+                .category,
+            "HandleLimit"
+        );
+        let final_slot = budget.reserve(1).expect("one slot remains");
+        assert_eq!(budget.live.load(Ordering::Acquire), 3);
+        drop(reservations);
+        drop(final_slot);
+        assert_eq!(budget.live.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn target_loss_is_latched_without_erasing_prior_receipts_or_release() {
+        let host = ready_host("success");
+        let observation = observe(&host);
+        let sequence = submit(&host, &observation, "A").expect("accepted");
+        let receipt = host
+            .call("settle", json!({"id":sequence["id"]}))
+            .expect("submitted");
+        host.call("fixture", json!({"event":"target_exit"}))
+            .expect("controlled target loss");
+        let fault = host.call("observe", json!({})).expect_err("target loss");
+        assert_eq!(fault.category, "TargetLost");
+        assert!(!host.control().admission.load(Ordering::Acquire));
+        host.fail(Fault::new("Closed", "later cleanup failure"));
+        assert_eq!(host.snapshot()["failure"], json!(fault));
+        assert_eq!(
+            host.call("postcondition", json!({}))
+                .expect_err("no actionable result")
+                .category,
+            "TargetLost"
+        );
+        host.call("release", json!({"id":observation["id"]}))
+            .expect("release remains usable");
+        host.call("release", json!({"id":sequence["id"]}))
+            .expect("receipt release remains usable");
+        assert_eq!(host.finish()["clean"], true);
+        assert_eq!(host.snapshot()["receipts"][0], receipt);
+    }
+
+    #[test]
+    fn target_loss_during_settlement_retains_fault_and_refused_receipt() {
+        let host = ready_host("success");
+        let observation = observe(&host);
+        let sequence = submit(&host, &observation, "A").expect("accepted");
+        host.call("fixture", json!({"event":"target_exit"}))
+            .expect("controlled target loss");
+        let receipt = host
+            .call("settle", json!({"id":sequence["id"]}))
+            .expect("receipt survives fault");
+        assert_eq!(receipt["status"], "Refused");
+        assert_eq!(receipt["error"]["category"], "TargetLost");
+        assert_eq!(host.snapshot()["failure"], receipt["error"]);
+        assert_eq!(host.snapshot()["effects"], json!([]));
+        assert_eq!(host.finish()["clean"], true);
+        assert_eq!(host.snapshot()["receipts"][0], receipt);
+    }
 
     fn schema() -> Value {
         serde_json::from_str(include_str!("../fixtures/common/schema.json"))
