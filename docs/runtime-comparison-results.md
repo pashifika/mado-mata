@@ -33,6 +33,26 @@ versions, platform, and build profile. Repeatable commands are in the
 [runtime guide](runtime-comparison.md); hosted outcomes belong to the PR checks.
 Do not compare timings across different build, plan, inventory, or host identities.
 
+## Independent Windows engine-build smoke
+
+At source `c420f1a1ac1b9293f07afb37562eee0af1e93564`, a Windows 11 build 26200
+AMD64 host built the locked `--features engine` executable and ran that exact
+binary with `--help` under the selected DLL environment. Both exited 0; startup
+returned the expected help text with empty stderr, without a timeout, output
+limit, or cleanup failure.
+
+The recorded environment used Rust/Cargo 1.97.1, MSVC 19.44.35228 x64,
+Windows SDK 10.0.26100.0, OpenCV 4.14.0, and libclang 22.1.8. The initial Cargo
+libgit2 fetch failed SSH authentication under the workstation's existing Git
+configuration. A retry with child-only `CARGO_NET_GIT_FETCH_WITH_CLI=true`
+succeeded without changing the pin or global configuration. The build retained
+two `unsafe_code` warnings in `inventory.rs`; they were not suppressed.
+
+The worker used its existing checkout, made no tracked changes, and returned
+full private build/startup records and selected DLL identities. This establishes
+Windows compilation and executable image startup, not ONNX initialization,
+model loading, real replay, native capture/input, or a performance budget pass.
+
 ## Coverage, not just case count
 
 The catalog contains 112 requirement scenarios across four capabilities. The
@@ -47,9 +67,11 @@ recovery transition racing with Stop. Those comparison interfaces do not exist;
 same harness PID or a hand-written conditional is not substitute evidence.
 Windows and native rows cannot inherit local macOS outcomes. The initial
 [hosted run](https://github.com/pashifika/mado-mata/actions/runs/35492214355)
-independently passed the original 111-case corpus on Linux, Apple Silicon macOS,
-and Windows, plus branch-flow validation and `CI Gate`. Hosted checks grant no
-authority to exercise an installed game or private OCR configuration.
+independently passed the original 111-case corpus. The expanded
+[163-case run](https://github.com/pashifika/mado-mata/actions/runs/35494185934)
+then passed on Linux, Apple Silicon macOS, and Windows, plus branch-flow
+validation and `CI Gate`. Hosted checks grant no authority to exercise an
+installed game or private OCR configuration.
 
 Native rows are blocked by the missing exact-target facade contract and absent
 operator-approved workload, paths, OCR/runtime/model identity, recorded corpus,
