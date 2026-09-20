@@ -7,6 +7,7 @@ import subprocess
 
 import yaml
 
+from check import NODE_VERSION, RUST_VERSION
 from gate import EXPECTED_JOBS, GATE_NAME_EXPRESSION, GATE_NAMES
 
 PRIVATE_ROOTS = {"rasen", ".rasen", "examples", "local_docs", ".cache", ".venv"}
@@ -19,9 +20,19 @@ REQUIRED_FILES = {
     "tools/ci/check.py", "tools/ci/branch_flow.py", "tools/ci/gate.py",
     "tools/ci/policy.py", "tools/ci/tooling.py", "tools/ci/install_tools.py",
     "tools/ci/test_ci.py", "tools/ci/requirements.txt",
+    "tools/runtime-comparison/Cargo.toml", "tools/runtime-comparison/Cargo.lock",
+    "tools/runtime-comparison/compiler/package.json", "tools/runtime-comparison/compiler/package-lock.json",
+    "tools/runtime-comparison/compiler/compile.mjs",
 }
 CONCURRENCY_GROUP = "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}"
 PR_TYPES = {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
+HOSTED_RUNNERS = {
+    "branch-flow": "ubuntu-24.04",
+    "repository": "ubuntu-24.04",
+    "runtime-macos": "macos-15",
+    "runtime-windows": "windows-2025",
+    "gate": "ubuntu-24.04",
+}
 
 
 def require(condition, message):
@@ -162,16 +173,18 @@ def check_workflow_hygiene(workflow, pins, label):
     require("secrets." not in json.dumps(workflow).lower(), f"{label}: CI must not consume secrets")
     jobs = workflow.get("jobs")
     require(isinstance(jobs, dict) and jobs, f"{label}: jobs must be a nonempty object")
+    require("defaults" not in workflow, f"{label}: workflow defaults must not redirect public commands")
     for name, job in jobs.items():
         where = f"{label}/{name}"
         require(isinstance(job, dict), f"{where}: job must be an object")
-        require(job.get("runs-on") == "ubuntu-24.04", f"{where}: use the declared hosted Ubuntu runner")
+        expected_runner = HOSTED_RUNNERS.get(name, "ubuntu-24.04") if label == "ci.yml" else "ubuntu-24.04"
+        require(job.get("runs-on") == expected_runner, f"{where}: use the declared hosted runner {expected_runner}")
         timeout = job.get("timeout-minutes")
         require(type(timeout) is int and 1 <= timeout <= 30, f"{where}: timeout must be 1-30 minutes")
         require(job.get("permissions", {"contents": "read"}) in ({}, {"contents": "read"}),
                 f"{where}: job permissions must not escalate authority")
-        require(not {"continue-on-error", "strategy", "container", "services"} & job.keys(),
-                f"{where}: no optional, matrix, or container jobs in this baseline")
+        require(not {"continue-on-error", "strategy", "container", "services", "defaults"} & job.keys(),
+                f"{where}: no optional, matrix, container jobs, or command overrides")
         steps = job.get("steps")
         require(isinstance(steps, list) and steps, f"{where}: steps must be a nonempty array")
         checkouts = 0
@@ -180,6 +193,7 @@ def check_workflow_hygiene(workflow, pins, label):
             require(("uses" in step) != ("run" in step), f"{where}: step must have exactly one of uses or run")
             require("continue-on-error" not in step and "if" not in step,
                     f"{where}: mandatory steps cannot be skipped or ignore failures")
+            require("working-directory" not in step, f"{where}: public commands must run from the checkout root")
             if "uses" in step:
                 uses = step["uses"]
                 require(isinstance(uses, str) and re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", uses),
@@ -227,18 +241,46 @@ def check_ci_workflow(workflow, pins):
     needs = gate.get("needs")
     require(isinstance(needs, list) and all(isinstance(name, str) for name in needs)
             and set(needs) == EXPECTED_JOBS and len(needs) == len(EXPECTED_JOBS),
-            "ci.yml: gate needs must be exactly branch-flow and repository")
+            "ci.yml: gate needs must match every mandatory job")
     commands = {
         "branch-flow": ["python3 tools/ci/branch_flow.py"],
         "repository": [
+            f"rustup toolchain install {RUST_VERSION} --profile minimal",
             "python3 -m pip install --require-hashes -r tools/ci/requirements.txt",
             "python3 tools/ci/install_tools.py", "python3 tools/ci/check.py",
         ],
         "gate": ["python3 tools/ci/gate.py"],
+        "runtime-macos": [
+            "python3 -c \"import platform; print(platform.platform(), platform.machine()); assert platform.machine() == 'arm64'\"",
+            f"rustup toolchain install {RUST_VERSION} --profile minimal",
+            "python3 -m pip install --require-hashes -r tools/ci/requirements.txt",
+            "python3 tools/ci/check.py --runtime-only",
+        ],
+        "runtime-windows": [
+            "git config --global core.symlinks true",
+            f"rustup toolchain install {RUST_VERSION} --profile minimal",
+            "python -m pip install --require-hashes -r tools/ci/requirements.txt",
+            "python tools/ci/check.py --runtime-only",
+        ],
     }
     for name, expected in commands.items():
         actual = [step["run"].strip() for step in jobs[name]["steps"] if "run" in step]
         require(actual == expected, f"ci.yml/{name}: required public commands must run without masking failures")
+    for name in ("repository", "runtime-macos", "runtime-windows"):
+        steps = jobs[name]["steps"]
+        for action, settings in (
+            ("actions/setup-python", {"python-version": "3.13"}),
+            ("actions/setup-node", {"node-version": NODE_VERSION, "package-manager-cache": False}),
+        ):
+            setup = [step for step in steps if step.get("uses", "").startswith(action + "@")]
+            require(len(setup) == 1 and setup[0].get("with") == settings,
+                    f"ci.yml/{name}: {action} must install the pinned tool without implicit caching")
+        check_index = next(index for index, step in enumerate(steps) if "tools/ci/check.py" in step.get("run", ""))
+        require(all(index < check_index for index, step in enumerate(steps) if "uses" in step),
+                f"ci.yml/{name}: checkout and tool setup must precede checks")
+    windows = jobs["runtime-windows"]["steps"]
+    require(windows[0].get("run") == "git config --global core.symlinks true",
+            "ci.yml/runtime-windows: preserve symlinks before checkout")
     gate_step = next(step for step in gate["steps"] if "run" in step)
     require(gate_step.get("env") == {"NEEDS_JSON": "${{ toJSON(needs) }}"},
             "ci.yml: gate must read the actual needs results through NEEDS_JSON")

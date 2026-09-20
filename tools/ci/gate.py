@@ -4,7 +4,7 @@ import json
 import os
 import sys
 
-EXPECTED_JOBS = frozenset({"branch-flow", "repository"})
+EXPECTED_JOBS = frozenset({"branch-flow", "repository", "runtime-macos", "runtime-windows"})
 GATE_NAMES = {
     "pull_request": "CI Gate",
     "push": "CI Gate (push)",
@@ -18,7 +18,7 @@ GATE_NAME_EXPRESSION = (
 
 def evaluate(needs):
     if not isinstance(needs, dict) or set(needs) != EXPECTED_JOBS:
-        raise ValueError("needs must contain exactly branch-flow and repository")
+        raise ValueError("needs must contain exactly: " + ", ".join(sorted(EXPECTED_JOBS)))
     failures = []
     for name in sorted(EXPECTED_JOBS):
         job = needs[name]
@@ -38,7 +38,7 @@ def main():
     except (ValueError, RecursionError) as error:
         print(f"CI gate failed: {error}", file=sys.stderr)
         return 1
-    print("CI gate passed: branch-flow and repository both succeeded.")
+    print("CI gate passed: all mandatory jobs succeeded.")
     return 0
 
 

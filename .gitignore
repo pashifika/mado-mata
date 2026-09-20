@@ -29,6 +29,8 @@ target
 /.venv/
 __pycache__/
 *.pyc
+/tools/runtime-comparison/compiler/node_modules/
+/tmp_pr_msg.md
 
 # The canonical public guide must survive personal agent-file ignores.
 !/AGENTS.md

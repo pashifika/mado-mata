@@ -38,8 +38,8 @@ def load_manifest():
             if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ValueError(f"invalid SHA256 for {name}/{host}")
     actions = data["actions"]
-    if not isinstance(actions, dict) or set(actions) != {"actions/checkout", "actions/setup-python"}:
-        raise ValueError("toolchain.json must pin checkout and setup-python")
+    if not isinstance(actions, dict) or set(actions) != {"actions/checkout", "actions/setup-python", "actions/setup-node"}:
+        raise ValueError("toolchain.json must pin checkout, setup-python, and setup-node")
     for name, pin in actions.items():
         if not isinstance(pin, dict) or not re.fullmatch(r"[0-9a-f]{40}", str(pin.get("sha", ""))):
             raise ValueError(f"invalid action commit pin for {name}")

@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "id": "controlled-comparison",
+  "candidate": "javascript",
+  "lane": "controlled",
+  "scenario": "success",
+  "profile": "template-first",
+  "limits": {
+    "duration_ms": 10000,
+    "readiness_ms": 2000,
+    "wait_ms": 1000,
+    "cleanup_ms": 1000,
+    "containment_ms": 2000,
+    "queue_capacity": 2,
+    "handles": 32,
+    "log_records": 8,
+    "log_bytes": 1024,
+    "vm_bytes": 16777216,
+    "max_actions": 64,
+    "snapshot_files": 128,
+    "snapshot_bytes": 1048576
+  },
+  "samples": 5,
+  "warmups": 1,
+  "repetitions": 1,
+  "budgets": {
+    "startup_us": 5000000,
+    "preflight_us": 8000000,
+    "host_call_us": 1000000,
+    "workflow_us": 8000000,
+    "stop_receipt_us": 500000,
+    "admission_close_us": 500000,
+    "cleanup_us": 1000000,
+    "containment_us": 2000000,
+    "cpu_percent": 400,
+    "supervisor_rss_bytes": 512000000,
+    "child_rss_bytes": 512000000,
+    "vm_bytes": 16777216,
+    "live_owners": 32
+  },
+  "native_config": null
+}

@@ -24,6 +24,7 @@ from tooling import load_manifest
 CI_DIR = Path(__file__).resolve().parent
 ROOT = CI_DIR.parents[1]
 REPO = "owner/project"
+GATE_JOBS = ("branch-flow", "repository", "runtime-macos", "runtime-windows")
 
 
 def pull_request(base="dev/runtime", head="change/capture", fork=False):
@@ -148,10 +149,10 @@ class BranchFlowTests(unittest.TestCase):
 
 class GateTests(unittest.TestCase):
     def test_only_all_success_passes(self):
-        for job in ("branch-flow", "repository"):
+        for job in GATE_JOBS:
             for status in ("success", "failure", "cancelled", "skipped", "", None, "neutral"):
                 with self.subTest(job=job, status=status):
-                    needs = {"branch-flow": {"result": "success"}, "repository": {"result": "success"}}
+                    needs = {name: {"result": "success"} for name in GATE_JOBS}
                     needs[job]["result"] = status
                     if status == "success":
                         evaluate(needs)
@@ -160,10 +161,15 @@ class GateTests(unittest.TestCase):
                             evaluate(needs)
 
     def test_missing_extra_and_malformed_dependencies_fail(self):
-        success = {"branch-flow": {"result": "success"}, "repository": {"result": "success"}}
-        for needs in (None, [], {}, {"branch-flow": {"result": "success"}},
-                      {**success, "unexpected": {"result": "success"}},
-                      {**success, "repository": {}}, {**success, "repository": "success"}):
+        success = {name: {"result": "success"} for name in GATE_JOBS}
+        cases = [None, [], {}, {**success, "unexpected": {"result": "success"}}]
+        for name in GATE_JOBS:
+            cases.extend([
+                {job: value for job, value in success.items() if job != name},
+                {**success, name: {}},
+                {**success, name: "success"},
+            ])
+        for needs in cases:
             with self.subTest(needs=needs), self.assertRaises(ValueError):
                 evaluate(needs)
 
@@ -174,7 +180,7 @@ class GateTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("CI gate failed:", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
-            result = cli("gate.py", {"NEEDS_JSON": json.dumps({name: {"result": "success"} for name in ("branch-flow", "repository")})}, directory)
+            result = cli("gate.py", {"NEEDS_JSON": json.dumps({name: {"result": "success"} for name in GATE_JOBS})}, directory)
             self.assertEqual(result.returncode, 0)
 
 
@@ -264,6 +270,47 @@ class RepositoryPolicyTests(unittest.TestCase):
         for workflow in cases:
             with self.subTest(workflow=workflow), self.assertRaises(ValueError):
                 check_ci_workflow(workflow, self.manifest["actions"])
+
+    def test_controlled_lanes_cannot_skip_execution_or_change_toolchains(self):
+        for name in ("repository", "runtime-macos", "runtime-windows"):
+            for mutation in ("skip job", "skip step", "mask failure", "policy only", "wrong runner",
+                             "floating rust", "floating node", "missing node", "implicit cache", "redirect command"):
+                with self.subTest(job=name, mutation=mutation):
+                    workflow = deepcopy(self.workflow)
+                    job = workflow["jobs"][name]
+                    steps = job["steps"]
+                    check = next(step for step in steps if "tools/ci/check.py" in step.get("run", ""))
+                    node = next(step for step in steps if step.get("uses", "").startswith("actions/setup-node@"))
+                    if mutation == "skip job":
+                        job["if"] = "false"
+                    elif mutation == "skip step":
+                        check["if"] = "false"
+                    elif mutation == "mask failure":
+                        check["continue-on-error"] = True
+                    elif mutation == "policy only":
+                        check["run"] = "python tools/ci/check.py --policy-only"
+                    elif mutation == "wrong runner":
+                        job["runs-on"] = "macos-15-intel"
+                    elif mutation == "floating rust":
+                        rust = next(step for step in steps if "rustup toolchain install" in step.get("run", ""))
+                        rust["run"] = "rustup toolchain install stable --profile minimal"
+                    elif mutation == "floating node":
+                        node["with"]["node-version"] = "24"
+                    elif mutation == "missing node":
+                        steps.remove(node)
+                    elif mutation == "implicit cache":
+                        node["with"]["package-manager-cache"] = True
+                    else:
+                        check["working-directory"] = "other-checkout"
+                    with self.assertRaises(ValueError):
+                        check_ci_workflow(workflow, self.manifest["actions"])
+
+    def test_windows_symlink_setup_must_precede_checkout(self):
+        workflow = deepcopy(self.workflow)
+        steps = workflow["jobs"]["runtime-windows"]["steps"]
+        steps[0], steps[1] = steps[1], steps[0]
+        with self.assertRaisesRegex(ValueError, "before checkout"):
+            check_ci_workflow(workflow, self.manifest["actions"])
 
     def test_tracked_private_paths_and_missing_public_guides_are_refused(self):
         check_paths(sorted(REQUIRED_FILES))

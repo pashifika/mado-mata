@@ -1,7 +1,8 @@
-"""Run tracked repository policy, behavior fixtures, and pinned offline checks."""
+"""Run tracked repository governance and the controlled runtime comparison."""
 
 import argparse
 import os
+import platform
 from pathlib import Path
 import shutil
 import subprocess
@@ -9,6 +10,10 @@ import sys
 import tempfile
 
 from tooling import ROOT, host_platform, installed_tool, load_manifest
+
+RUST_VERSION = "1.97.1"
+NODE_VERSION = "24.18.0"
+RUNTIME_ROOT = Path("tools/runtime-comparison")
 
 
 def copy_tracked(root, destination, paths):
@@ -39,9 +44,31 @@ def run(command, root):
     subprocess.run(command, cwd=root, check=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
 
 
+def check_runtime(root):
+    """Build and exercise the public, non-native executable and trusted compiler."""
+    print(f"Controlled runtime host: {platform.platform()} ({platform.machine()})", flush=True)
+    node = shutil.which("node")
+    npm = shutil.which("npm")
+    if node is None or npm is None:
+        raise ValueError(f"install Node.js {NODE_VERSION} with its bundled npm")
+    version = subprocess.run([node, "--version"], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+    if version != f"v{NODE_VERSION}":
+        raise ValueError(f"Node.js {NODE_VERSION} is required; found {version!r}")
+    compiler = root / RUNTIME_ROOT / "compiler"
+    run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], compiler)
+    run([node, "compile.mjs", "--self-check"], compiler)
+    cargo = ["cargo", f"+{RUST_VERSION}"]
+    manifest = ["--locked", "--manifest-path", RUNTIME_ROOT / "Cargo.toml"]
+    run([*cargo, "build", *manifest], root)
+    run([*cargo, "test", *manifest], root)
+    run([*cargo, "run", *manifest, "--", "check"], root)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--policy-only", action="store_true", help="run policy and behavior fixtures without native tools")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--policy-only", action="store_true", help="governance policy and its tests only; no runtime or external tools")
+    modes.add_argument("--runtime-only", action="store_true", help="policy, its tests, and controlled runtime; omit actionlint and lychee")
     args = parser.parse_args()
     if sys.version_info < (3, 11):
         print("Repository checks require Python 3.11 or newer.", file=sys.stderr)
@@ -64,7 +91,7 @@ def main():
             check_repository(snapshot, paths, manifest)
             print("Tracked repository policy passed.", flush=True)
             run([sys.executable, "-B", "-m", "unittest", "discover", "-s", "tools/ci", "-p", "test_*.py"], snapshot)
-            if not args.policy_only:
+            if not args.policy_only and not args.runtime_only:
                 host = host_platform()
                 tools = {name: installed_tool(name, pin, host) for name, pin in manifest["tools"].items()}
                 # Explicit empty configs and an isolated tracked-only tree prevent
@@ -78,11 +105,18 @@ def main():
                 run([tools["actionlint"], "-shellcheck=", "-pyflakes=", "-config-file", actionlint_config, *workflows], snapshot)
                 run([tools["lychee"], "--offline", "--include-fragments", "--no-progress", "--no-ignore", "--hidden",
                      "--config", lychee_config, "--root-dir", snapshot, "--", *markdown], snapshot)
-        print("Repository checks passed (policy only)." if args.policy_only else "Repository checks passed (policy, fixtures, actionlint, offline local links).")
+            if not args.policy_only:
+                check_runtime(snapshot)
+        if args.policy_only:
+            print("Repository checks passed (policy and governance tests only; runtime and external tools unexecuted).")
+        elif args.runtime_only:
+            print("Repository checks passed (policy, governance tests, controlled runtime; actionlint and lychee unexecuted).")
+        else:
+            print("Repository checks passed (policy, governance tests, actionlint, offline local links, controlled runtime).")
     except subprocess.CalledProcessError as error:
         print(f"Repository checks failed: command exited {error.returncode}", file=sys.stderr)
         if error.stderr:
-            print(error.stderr.decode("utf-8", errors="replace"), file=sys.stderr)
+            print(error.stderr if isinstance(error.stderr, str) else error.stderr.decode("utf-8", errors="replace"), file=sys.stderr)
         return 1
     except (OSError, ValueError, RecursionError) as error:
         print(f"Repository checks failed: {error}", file=sys.stderr)
