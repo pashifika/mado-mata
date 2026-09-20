@@ -96,12 +96,18 @@ Each recorded frame, PNG template, and MadoPilot package manifest must be a
   by that engine manifest. Neither map grants filesystem access.
 
 The ordinary workflow consumes one readiness frame, one decision frame, and one
-newer postcondition frame. Supply at least those three observations; extra query
-waits consume additional frames. Set the profile ROI to the recorded dimensions.
+newer postcondition frame. Supply at least those three observations; unmatched
+query waits can consume additional frames. Set the profile ROI to the recorded dimensions.
 Keep the complete package within `limits.snapshot_files` and
 `limits.snapshot_bytes`; three 320-by-160 RGBA frames occupy 614400 bytes before
-other package files. Use real observations appropriate to the declared oracle,
-not generated success pixels or pre-filled OCR results.
+other package files. For qualification, use real observations appropriate to the
+declared oracle, not generated success pixels or pre-filled OCR results.
+
+A separately labeled integration smoke may use an identified generated upstream
+fixture and its independent oracle. Such a static smoke does not qualify recorded
+gameplay, application transitions, postconditions, or performance. The
+[executed static-fixture smoke](runtime-comparison-results.md#real-engine-initialization-and-static-fixture-recognition)
+uses two observations and deliberately performs no input or postcondition.
 
 The following is the `native_config` shape for replay. Replace the illustrative
 paths, sizes, hashes, aliases, and frame declarations with the reviewed local
@@ -153,6 +159,10 @@ in `native_libraries`. These are reviewed file identities, not an automatic audi
 of the process loader's complete loaded-image list. Record the loader environment
 and actual selected libraries with the private invocation evidence. Canonical
 paths reject symlink aliases; hash the canonical target file.
+On Windows, preserve the exact result of Rust's `std::fs::canonicalize`, including
+its extended path prefix (`\\?\...`). Ordinary Python `Path.resolve()` output was
+refused by this strict equality check; do not strip or replace the Rust canonical
+form when projecting private configuration.
 
 Recorded timestamps must increase strictly. `placement: null` deliberately
 provides capture-pixel geometry only. If the recording has authoritative placement,

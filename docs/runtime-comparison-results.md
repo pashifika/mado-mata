@@ -69,11 +69,12 @@ assumed an obsolete `engine-` prefix. The host now resolves its own resources
 first and delegates remaining releases to the engine registry without relying
 on spelling or holding the host-state lock.
 
-With that correction, macOS JavaScript and Lua both passed real template matching,
-all six exact OCR text/geometry query oracles, blank-region absence, explicit
-query/result/observation release, and confirmed clean attempt teardown. Both
-outer invocations exited 0 with empty stderr and completed process cleanup.
-Windows verification of this correction is pending.
+With that correction, JavaScript and Lua passed on both macOS and Windows:
+real template matching, all six exact OCR text/geometry query oracles, blank-region
+absence, and clean attempt teardown. Each run completed 21 explicit managed
+releases without failure. All four outer invocations exited 0 with empty stderr,
+no timeout/output limit, and completed process cleanup. No input or postcondition
+was exercised.
 
 The selected CPU runtime/model identities are validated before execution.
 Prospective finite smoke bounds are not representative performance budgets;
@@ -107,11 +108,12 @@ then passed on Linux, Apple Silicon macOS, and Windows, plus branch-flow
 validation and `CI Gate`. Hosted checks grant no authority to exercise an
 installed game or private OCR configuration.
 
-Native rows are blocked by the missing exact-target facade contract and absent
-operator-approved workload, paths, OCR/runtime/model identity, recorded corpus,
-and prospective per-OS authority/budgets. Replay rows are blocked by missing real
-recorded frames and validated private recognition configuration. No screenshots,
-model paths, target names, or credentials were collected for this delivery.
+Live-native rows remain blocked by the missing exact-target facade contract and
+absent operator-approved target/workload, capture/input authority, and prospective
+per-OS qualification budgets. Representative replay still needs identified
+recorded frames beyond the generated static fixture. Validated model/runtime
+identities now support the limited smoke above; raw execution records and
+machine-local paths remain private.
 
 ## Candidate and authoring observations
 
