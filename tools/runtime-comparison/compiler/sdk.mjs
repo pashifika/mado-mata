@@ -49,12 +49,21 @@ interface MadoRecognition {
   readonly kind: "template" | "ocr"; readonly region: MadoRegion;
   readonly score: number; readonly text?: string;
 }
-interface MadoAction { readonly kind: "key_down" | "key_up"; readonly key: string }
+type MadoAction =
+  | { readonly kind: "key_down" | "key_up"; readonly key: string; readonly x?: never; readonly y?: never; readonly button?: never }
+  | { readonly kind: "click"; readonly x: number; readonly y: number; readonly button: "left" | "right" | "middle"; readonly key?: never };
 interface MadoReceipt {
   readonly id: string; readonly order: number;
   readonly status: "Submitted" | "Partial" | "Uncertain" | "Refused" | "Cancelled";
   readonly submitted: number; readonly total: number; readonly reason?: string;
   readonly cleanup_required: readonly string[]; readonly sink: "controlled-non-native" | "native";
+  readonly outcome?: string; readonly submitted_events?: number; readonly total_events?: number;
+  readonly last_submitted_event?: number | null;
+  readonly selected_route?: "system" | "window_message" | "process_directed" | null;
+  readonly address_scope?: string | null; readonly evidence?: string | null;
+  readonly used_fallback?: boolean; readonly partial_native_effect?: boolean; readonly possible_native_effect?: boolean;
+  readonly cleanup?: { readonly state: string; readonly released: number; readonly owed: number; readonly may_leave_state_held: boolean };
+  readonly application_effect_confirmed?: false;
 }
 interface MadoHostFault { readonly category: string; readonly message: string; readonly context: unknown }
 type MadoReady = "Ready";

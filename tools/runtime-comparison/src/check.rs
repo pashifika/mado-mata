@@ -872,8 +872,8 @@ pub fn run() -> Result<Value, Fault> {
     let matrix = crate::report::coverage(&rows)?;
     let check_passed = rows.iter().all(|row| row["status"] == "PASS");
     let mut output = json!({"version":1,"check_passed":check_passed,"rows":rows,
-        "coverage":matrix,"native_disposition":{"windows":"BLOCKED: no authorized workload/host; target identity facade prerequisite",
-            "macos":"BLOCKED: no authorized workload; target identity facade prerequisite"}});
+        "coverage":matrix,"native_disposition":{"windows":"BLOCKED: this controlled check grants no native target, workload, or capture/input authority",
+            "macos":"BLOCKED: this controlled check grants no native target, workload, or capture/input authority"}});
     output["summary"] = crate::report::summarize(&output)?;
     Ok(output)
 }

@@ -39,12 +39,14 @@ Keep ordinary hosted CI free of capture, input, permission prompts, native model
 paths, and private checkouts. Engine/OpenCV integration is an optional build;
 real replay and native evidence remain separate from controlled outcomes.
 
-Refuse native plans before engine construction, discovery, permission reads,
-capture, or input until the public facade can preserve the required target
-binding. Title-only/PID-only matching, private APIs, guessed handles, focus
-changes, fallback providers, or another input route are not acceptable shortcuts.
-This is an upstream integration prerequisite, not an observed engine runtime bug.
-No engine repair or native execution success is claimed.
+The initial pin refused native plans before engine construction because its public
+facade lacked the required provenance. The separately authorized additive update
+at `85ccc580cd28ffb9b0b52271f6c87f1af0109a04` supplies retained-process metadata
+without replacing native lifetime guards. Admit native execution only after an
+exact name/path/PID/lifetime match, and use actual SDK sessions and receipts.
+Title-only/PID-only matching, private APIs, guessed handles, automatic focus
+changes, fallback providers, or another input route remain unacceptable shortcuts.
+This resolves an integration prerequisite, not a previously proven native bug.
 
 Use independent cancellation/watchdog progress and owned-child termination for
 non-returning work. Keep logical completion, retained owners, cleanup records,
@@ -89,9 +91,12 @@ Stop/control loss, held-owner containment, and compiler strict-policy cases are
 exercised by the executable checks. The optional public-facade integration is
 compiled separately; model/corpus execution needs explicit private prerequisites.
 
-A future upstream pin must provide path/lifetime correlation through discovery,
-open, and dispatch, then pass consuming Windows and Apple Silicon macOS scenarios.
-Only that evidence and prospective numerical budgets can support an
-`Adopt(candidate)` decision. Until then the result is `Blocked(reason)` even when
-all available CI checks pass. See [usage and evidence boundaries](../runtime-comparison.md)
-and [native setup](../runtime-native.md).
+The new public pin and consumer connection remove the missing-provenance gate,
+not the application-effect or both-OS qualification gates. A macOS capture/OCR
+smoke can pass while a complete invocation-only click receipt has no observed
+game effect; retain both facts rather than declaring the workflow successful.
+Complete consuming Windows and Apple Silicon macOS scenarios and prospective
+numerical budgets before any `Adopt(candidate)` decision. Until then the result
+is `Blocked(reason)` even when all available CI checks pass. See
+[usage and evidence boundaries](../runtime-comparison.md) and
+[native setup](../runtime-native.md).

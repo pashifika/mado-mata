@@ -420,10 +420,67 @@ enum Handle {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Action {
-    kind: String,
-    key: String,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Action {
+    KeyDown {
+        key: String,
+    },
+    KeyUp {
+        key: String,
+    },
+    Click {
+        x: f64,
+        y: f64,
+        button: PointerButton,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PointerButton {
+    Left,
+    Right,
+    Middle,
+}
+
+impl Action {
+    pub(crate) fn event_count(&self) -> usize {
+        match self {
+            Self::Click { .. } => 3,
+            Self::KeyDown { .. } | Self::KeyUp { .. } => 1,
+        }
+    }
+
+    fn validate(&self, observation: &Value) -> Result<(), Fault> {
+        match self {
+            Self::KeyDown { key } | Self::KeyUp { key } => {
+                if key.is_empty()
+                    || key.len() > 32
+                    || !key
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                {
+                    return Err(argument("invalid portable key name"));
+                }
+            }
+            Self::Click { x, y, .. } => {
+                let width = observation["width"].as_u64().unwrap_or(0) as f64;
+                let height = observation["height"].as_u64().unwrap_or(0) as f64;
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || *x < 0.0
+                    || *y < 0.0
+                    || *x >= width
+                    || *y >= height
+                {
+                    return Err(argument(
+                        "click must lie within the retained capture-pixel extent",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -1290,19 +1347,23 @@ impl Host {
         }
         let actions: Vec<Action> = serde_json::from_value(map["actions"].clone())
             .map_err(|error| argument(error.to_string()))?;
+        let mut event_count = 0usize;
         for action in &actions {
-            if !["key_down", "key_up"].contains(&action.kind.as_str())
-                || action.key.is_empty()
-                || action.key.len() > 32
-                || !action
-                    .key
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-            {
-                return Err(argument("invalid action kind or portable key name"));
-            }
+            action.validate(&map["observation"])?;
+            event_count = event_count
+                .checked_add(action.event_count())
+                .ok_or_else(|| argument("expanded input event count overflow"))?;
         }
         self.input_check(&map["observation"])?;
+        #[cfg(feature = "engine")]
+        if self.inner.plan.lane == "native" {
+            let engine = self
+                .inner
+                .engine
+                .as_ref()
+                .ok_or_else(|| Fault::new("Blocked", "native engine is unavailable"))?;
+            engine.call("validate_input", args.clone())?;
+        }
         let mut state = lock(&self.inner.state);
         if self.inner.plan.lane == "controlled" {
             self.observation(&state, &map["observation"])?;
@@ -1321,7 +1382,12 @@ impl Host {
             return Err(Fault::new("QueueCapacity", "bounded input queue is full"));
         }
         self.capacity(&state)?;
-        if state.admitted_actions + actions.len() > self.inner.plan.limits.max_actions {
+        let action_limit = self.inner.plan.limits.max_actions;
+        #[cfg(feature = "engine")]
+        let action_limit = self.inner.engine.as_ref().map_or(action_limit, |engine| {
+            action_limit.min(engine.action_limit())
+        });
+        if event_count > action_limit.saturating_sub(state.admitted_actions) {
             return Err(Fault::new(
                 "ActionLimit",
                 "attempt action budget is exhausted",
@@ -1339,7 +1405,7 @@ impl Host {
         }
         let id = self.next_id(&mut state, "sequence");
         let order = state.accepted.len() as u64 + 1;
-        state.admitted_actions += actions.len();
+        state.admitted_actions += event_count;
         state
             .accepted
             .push(json!({"id":id,"order":order,"actions":actions}));
@@ -1362,11 +1428,19 @@ impl Host {
         cleanup: Vec<String>,
     ) -> Value {
         let mut receipt = json!({"id":sequence.id,"order":sequence.order,"status":status,"submitted":submitted,
-            "total":sequence.actions.len(),"cleanup_required":cleanup,"sink":"controlled-non-native"});
+            "total":sequence.actions.len(),"cleanup_required":cleanup,"sink":self.input_sink()});
         if let Some(reason) = reason {
             receipt["reason"] = json!(reason);
         }
         receipt
+    }
+
+    fn input_sink(&self) -> &'static str {
+        if self.inner.plan.lane == "native" {
+            "native"
+        } else {
+            "controlled-non-native"
+        }
     }
 
     fn settle(&self, args: &Value) -> Result<Value, Fault> {
@@ -1426,6 +1500,54 @@ impl Host {
     }
 
     fn dispatch_sequence(&self, sequence: &Sequence) -> Value {
+        #[cfg(feature = "engine")]
+        if self.inner.plan.lane == "native" {
+            let result = self
+                .inner
+                .engine
+                .as_ref()
+                .ok_or_else(|| Fault::new("Blocked", "native engine is unavailable"))
+                .and_then(|engine| {
+                    engine.call(
+                        "dispatch",
+                        json!({
+                            "observation":sequence.observation,"actions":sequence.actions
+                        }),
+                    )
+                });
+            return match result {
+                Ok(mut receipt) => {
+                    receipt["id"] = json!(sequence.id);
+                    receipt["order"] = json!(sequence.order);
+                    if receipt["possible_native_effect"] == true {
+                        lock(&self.inner.state).dispatches += 1;
+                    }
+                    if receipt["status"] != "Submitted" {
+                        self.fail(
+                            Fault::new("NativeInput", "native input did not complete")
+                                .with_context(json!({"receipt":receipt})),
+                        );
+                    }
+                    receipt
+                }
+                Err(error) => {
+                    let mut receipt = self.receipt(
+                        sequence,
+                        if error.category == "Cancelled" {
+                            "Cancelled"
+                        } else {
+                            "Refused"
+                        },
+                        0,
+                        Some(&error.category),
+                        Vec::new(),
+                    );
+                    receipt["error"] = json!(error);
+                    self.fail(error);
+                    receipt
+                }
+            };
+        }
         if self.inner.held.load(Ordering::Acquire) && self.inner.plan.lane == "controlled" {
             let frame = {
                 let state = lock(&self.inner.state);
@@ -1501,19 +1623,26 @@ impl Host {
             if submitted == 0 {
                 state.dispatches += 1;
             }
-            if action.kind == "key_down" {
-                state
-                    .held_keys
-                    .entry(action.key.clone())
-                    .or_insert(sequence.order);
-            } else if state.held_keys.remove(&action.key).is_some()
-                && self.inner.plan.scenario != "postcondition-absent"
-            {
-                state.visible = "DONE".into();
+            match action {
+                Action::KeyDown { key } => {
+                    state.held_keys.entry(key.clone()).or_insert(sequence.order);
+                }
+                Action::KeyUp { key } => {
+                    if state.held_keys.remove(key).is_some()
+                        && self.inner.plan.scenario != "postcondition-absent"
+                    {
+                        state.visible = "DONE".into();
+                    }
+                }
+                Action::Click { .. } => {
+                    if self.inner.plan.scenario != "postcondition-absent" {
+                        state.visible = "DONE".into();
+                    }
+                }
             }
-            state
-                .effects
-                .push(json!({"order":sequence.order,"kind":action.kind,"key":action.key}));
+            let mut effect = json!(action);
+            effect["order"] = json!(sequence.order);
+            state.effects.push(effect);
             submitted += 1;
             if self.inner.plan.scenario == "partial" {
                 status = "Partial";
@@ -1663,7 +1792,7 @@ impl Host {
         let mut receipts: Vec<_> = state.receipts.values().collect();
         receipts.sort_unstable_by_key(|receipt| receipt["order"].as_u64());
         let mut value = json!({
-            "lane":self.inner.plan.lane,"sink":"controlled-non-native","phase":state.phase.name(),
+            "lane":self.inner.plan.lane,"sink":self.input_sink(),"phase":state.phase.name(),
             "accepted":state.accepted,"receipts":receipts,
             "postconditions":state.postconditions,"observations":state.observations,"recognitions":state.recognitions,
             "dispatches":state.dispatches,"effects":state.effects,"queue_depth":state.queue.len(),
@@ -1717,6 +1846,13 @@ impl Host {
         self.inner.terminating.store(true, Ordering::Release);
         self.close_admission();
         let started = Instant::now();
+        let cleanup_ms = self.inner.plan.limits.cleanup_ms;
+        #[cfg(feature = "engine")]
+        let cleanup_ms = self
+            .inner
+            .engine
+            .as_ref()
+            .map_or(cleanup_ms, crate::engine::Engine::cleanup_limit_ms);
         {
             let mut state = lock(&self.inner.state);
             if let Some(cleanup) = &state.cleanup {
@@ -1737,7 +1873,13 @@ impl Host {
             }
             state.handles.clear();
         }
-        while started.elapsed() < Duration::from_millis(self.inner.plan.limits.cleanup_ms) {
+        #[cfg(feature = "engine")]
+        let engine_cleanup = self
+            .inner
+            .engine
+            .as_ref()
+            .map(crate::engine::Engine::finish);
+        while started.elapsed() < Duration::from_millis(cleanup_ms) {
             self.reap_workers();
             if self.inner.physical.load(Ordering::Acquire) == 0
                 && lock(&self.inner.workers).is_empty()
@@ -1748,12 +1890,6 @@ impl Host {
             thread::sleep(Duration::from_millis(1));
         }
         self.reap_workers();
-        #[cfg(feature = "engine")]
-        let engine_cleanup = self
-            .inner
-            .engine
-            .as_ref()
-            .map(crate::engine::Engine::finish);
         let mut state = lock(&self.inner.state);
         let active = state.active.is_some();
         if !active {
@@ -1950,6 +2086,104 @@ mod tests {
                 {"kind":"key_down","key":key},{"kind":"key_up","key":key}
             ]}),
         )
+    }
+
+    #[test]
+    fn clicks_use_capture_pixels_and_preserve_existing_key_wire_shape() {
+        let host = ready_host("success");
+        let observation = observe(&host);
+        let actions = json!([
+            {"kind":"key_down","key":"A"},
+            {"kind":"key_up","key":"A"},
+            {"kind":"click","x":12.5,"y":20.25,"button":"right"}
+        ]);
+        let sequence = host
+            .call(
+                "submit",
+                json!({"observation":observation,"actions":actions}),
+            )
+            .expect("bounded mixed input");
+        let receipt = host
+            .call("settle", json!({"id":sequence["id"]}))
+            .expect("settled");
+        assert_eq!(receipt["status"], "Submitted");
+        assert_eq!(receipt["submitted"], 3);
+        assert_eq!(host.snapshot()["accepted"][0]["actions"], actions);
+        assert_eq!(
+            host.snapshot()["effects"][2],
+            json!({
+                "order":1,"kind":"click","x":12.5,"y":20.25,"button":"right"
+            })
+        );
+        assert_eq!(host.finish()["clean"], true);
+    }
+
+    #[test]
+    fn invalid_click_coordinates_buttons_and_mixed_fields_never_enqueue() {
+        let host = ready_host("success");
+        let observation = observe(&host);
+        for action in [
+            json!({"kind":"click","x":640,"y":0,"button":"left"}),
+            json!({"kind":"click","x":0,"y":480,"button":"left"}),
+            json!({"kind":"click","x":-1,"y":0,"button":"left"}),
+            json!({"kind":"click","x":null,"y":0,"button":"left"}),
+            json!({"kind":"click","x":1,"y":1,"button":"unknown"}),
+            json!({"kind":"click","x":1,"y":1,"button":"middle","key":"A"}),
+            json!({"kind":"key_down","key":"A","x":1}),
+        ] {
+            assert_eq!(
+                host.call(
+                    "submit",
+                    json!({
+                        "observation":observation,"actions":[action]
+                    })
+                )
+                .expect_err("invalid input is refused")
+                .category,
+                "Argument"
+            );
+        }
+        assert_eq!(host.snapshot()["accepted"], json!([]));
+        assert_eq!(host.snapshot()["effects"], json!([]));
+        assert_eq!(host.finish()["clean"], true);
+    }
+
+    #[test]
+    fn click_expansion_consumes_the_attempt_event_budget_even_when_released() {
+        let host = ready_host("success");
+        let observation = observe(&host);
+        let clicks = vec![json!({"kind":"click","x":1,"y":1,"button":"left"}); 10];
+        let queued = host
+            .call(
+                "submit",
+                json!({"observation":observation,"actions":clicks}),
+            )
+            .expect("thirty expanded events fit");
+        host.call("release", json!({"id":queued["id"]}))
+            .expect("cancel queued input");
+        assert_eq!(
+            host.call(
+                "submit",
+                json!({
+                    "observation":observation,
+                    "actions":[{"kind":"click","x":1,"y":1,"button":"left"}]
+                })
+            )
+            .expect_err("three more events exceed the thirty-two event budget")
+            .category,
+            "ActionLimit"
+        );
+        let keys = submit(&host, &observation, "A").expect("two remaining events fit");
+        host.call("settle", json!({"id":keys["id"]}))
+            .expect("keys settle");
+        assert_eq!(host.snapshot()["receipts"][0]["status"], "Cancelled");
+        assert_eq!(
+            host.snapshot()["effects"],
+            json!([
+                {"order":2,"kind":"key_down","key":"A"},{"order":2,"kind":"key_up","key":"A"}
+            ])
+        );
+        assert_eq!(host.finish()["clean"], true);
     }
 
     fn query(host: &Host, observation: &Value) -> Result<Value, Fault> {

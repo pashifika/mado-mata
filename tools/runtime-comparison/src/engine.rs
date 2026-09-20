@@ -1,4 +1,4 @@
-//! Public-facade replay. Native admission stays closed without target provenance.
+//! Public-facade replay and strictly provenance-bound native capture, OCR, and input.
 
 use crate::model::Fault;
 #[cfg(feature = "engine")]
@@ -31,6 +31,7 @@ pub use enabled::{Engine, release_runner_resources};
 #[cfg(feature = "engine")]
 mod enabled {
     use super::*;
+    use crate::host::{Action, PointerButton};
     use crate::model::Limits;
     use mado_pilot as mp;
     use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -120,6 +121,37 @@ mod enabled {
         visible_postcondition: String,
         cleanup_ms: u64,
         containment_ms: u64,
+        #[serde(default)]
+        package_entries: BTreeMap<String, String>,
+        #[serde(default)]
+        templates: BTreeMap<String, String>,
+    }
+
+    impl NativeConfig {
+        fn route(&self) -> Result<mp::InputDelivery, Fault> {
+            match self.input.route.as_str() {
+                "system" => Ok(mp::InputDelivery::System),
+                "window_message" if cfg!(windows) => Ok(mp::InputDelivery::WindowMessage),
+                "process_directed" if cfg!(target_os = "macos") => {
+                    Ok(mp::InputDelivery::ProcessDirected)
+                }
+                _ => Err(blocked(
+                    "input_route_unsupported",
+                    "configured route is unavailable",
+                )),
+            }
+        }
+
+        fn focus(&self) -> Result<mp::FocusPolicy, Fault> {
+            match self.input.focus.as_str() {
+                "preserve" => Ok(mp::FocusPolicy::Preserve),
+                "require_focused" => Ok(mp::FocusPolicy::RequireFocused),
+                _ => Err(blocked(
+                    "input_route_unsupported",
+                    "focus changes are not authorized",
+                )),
+            }
+        }
     }
 
     #[derive(Deserialize, Serialize)]
@@ -140,7 +172,7 @@ mod enabled {
         max_actions: usize,
         route: String,
         focus: String,
-        representative_actions: Vec<Value>,
+        representative_actions: Vec<Action>,
     }
 
     struct Resources {
@@ -205,6 +237,11 @@ mod enabled {
         latest: Option<mp::FrameStamp>,
         serial: u64,
         cleanup: Option<Value>,
+        process_lifetime: String,
+        captured_frames: u64,
+        last_capture: Option<Instant>,
+        input_events: usize,
+        input_cleanup_incomplete: bool,
     }
 
     // Cancellation never acquires the VM, host-work, or engine-work mutex.
@@ -215,7 +252,7 @@ mod enabled {
     }
 
     impl CancellationBridge {
-        fn new(control: Arc<Control>) -> Result<Self, Fault> {
+        fn new(control: Arc<Control>, native_duration_ms: Option<u64>) -> Result<Self, Fault> {
             let token = mp::CancellationToken::new();
             let done = Arc::new(AtomicBool::new(false));
             let worker_token = token.clone();
@@ -224,7 +261,14 @@ mod enabled {
                 .name("engine-cancellation".into())
                 .spawn(move || {
                     while !worker_done.load(Ordering::Acquire) {
-                        if control.check().is_err() {
+                        if native_duration_ms
+                            .is_some_and(|bound| control.elapsed_us() / 1_000 >= bound)
+                        {
+                            control.cancel();
+                        }
+                        if control.check().is_err()
+                            || control.closed_us.load(Ordering::Acquire) != 0
+                        {
                             worker_token.cancel();
                             break;
                         }
@@ -269,6 +313,7 @@ mod enabled {
         closing: AtomicBool,
         in_flight: AtomicUsize,
         handles: AtomicUsize,
+        native: Option<NativeConfig>,
     }
 
     impl Engine {
@@ -282,7 +327,7 @@ mod enabled {
             let raw = plan.native_config.as_ref().ok_or_else(|| {
                 blocked(
                     "configuration_unset",
-                    "native_config must supply explicit replay and OCR configuration",
+                    "native_config must supply explicit engine and OCR configuration",
                 )
             })?;
             let config: Configuration = serde_json::from_value(raw.clone())
@@ -294,24 +339,31 @@ mod enabled {
                 ));
             }
             control.check()?;
-            if plan.lane == "native" {
-                validate_native(config.native.as_ref(), plan)?;
-                validate_ocr(&config, &control)?;
-                return Err(blocked(
-                    "target_identity_unavailable",
-                    "pinned public facade cannot correlate TargetId with executable/bundle path and process lifetime; native discovery, capture and input are refused",
-                ));
+            match plan.lane.as_str() {
+                "native" => {
+                    validate_native(config.native.as_ref(), plan)?;
+                    if config.replay.is_some() {
+                        return Err(blocked(
+                            "configuration_validation",
+                            "native forbids replay sources",
+                        ));
+                    }
+                }
+                "replay" if config.native.is_none() && config.replay.is_some() => {}
+                _ => {
+                    return Err(blocked(
+                        "configuration_validation",
+                        "select exactly one replay or native configuration",
+                    ));
+                }
             }
-            if plan.lane != "replay" || config.native.is_some() {
-                return Err(blocked(
-                    "configuration_validation",
-                    "replay requires lane replay and no native authority",
-                ));
-            }
-            let replay = config.replay.as_ref().ok_or_else(|| {
-                blocked("replay_unset", "replay corpus configuration is required")
-            })?;
-            let bridge = CancellationBridge::new(Arc::clone(&control))?;
+            let bridge = CancellationBridge::new(
+                Arc::clone(&control),
+                config
+                    .native
+                    .as_ref()
+                    .map(|native| native.capture.duration_ms),
+            )?;
             let operation = operation(&bridge.token, plan.limits.duration_ms)?;
             let model = validate_ocr(&config, &control)?;
             let mut digest = Sha256::new();
@@ -337,7 +389,11 @@ mod enabled {
                 }
                 Arc::clone(resources)
             } else {
-                let source = replay_source(replay, assets, &plan.limits)?;
+                let (entries, aliases) = match (&config.replay, &config.native) {
+                    (Some(replay), None) => (&replay.package_entries, &replay.templates),
+                    (None, Some(native)) => (&native.package_entries, &native.templates),
+                    _ => return Err(internal("validated engine configuration changed")),
+                };
                 let profile = match config.ocr.profile.as_str() {
                     mp::ACCEPTED_G004_PROFILE_ID => mp::OcrProviderProfile::NativeG004,
                     mp::ACCEPTED_BOUNDED_PROFILE_ID => mp::OcrProviderProfile::BoundedDetector,
@@ -349,12 +405,23 @@ mod enabled {
                     &config.ocr.model_root,
                     &config.ocr.runtime.path,
                 );
-                let engine = mp::replay_engine_with_ocr_provider(
-                    mp::ReplayEngineRequest::new(source),
-                    &ocr,
-                    &operation,
-                )
-                .map_err(|error| prerequisite_error("engine_initialization", error))?;
+                let engine = if let Some(replay) = &config.replay {
+                    mp::replay_engine_with_ocr_provider(
+                        mp::ReplayEngineRequest::new(replay_source(replay, assets, &plan.limits)?),
+                        &ocr,
+                        &operation,
+                    )
+                    .map_err(|error| prerequisite_error("engine_initialization", error))?
+                } else {
+                    native_engine(
+                        config
+                            .native
+                            .as_ref()
+                            .ok_or_else(|| internal("native authority missing"))?,
+                        &ocr,
+                        &operation,
+                    )?
+                };
                 // Recheck externally stored resources after initialization, before publication.
                 validate_ocr(&config, &control)?;
                 let provider = engine
@@ -368,36 +435,39 @@ mod enabled {
                         "configured CPU provider was not selected exactly",
                     ));
                 }
-                let mut package = mp::MemoryPackage::new();
-                for (entry, asset) in &replay.package_entries {
-                    let bytes = assets.get(asset).ok_or_else(|| {
-                        blocked(
-                            "template_asset_missing",
-                            "template package references an uncaptured asset",
-                        )
-                    })?;
-                    package = package.with_entry(entry, Arc::<[u8]>::from(bytes.as_slice()));
-                }
-                let package = engine.load_package(&mp::PackageSource::memory(package), &operation).map_err(|error| {
+                let mut templates = BTreeMap::new();
+                if !entries.is_empty() {
+                    let mut package = mp::MemoryPackage::new();
+                    for (entry, asset) in entries {
+                        let bytes = assets.get(asset).ok_or_else(|| {
+                            blocked(
+                                "template_asset_missing",
+                                "template package references an uncaptured asset",
+                            )
+                        })?;
+                        package = package.with_entry(entry, Arc::<[u8]>::from(bytes.as_slice()));
+                    }
+                    let package = engine.load_package(&mp::PackageSource::memory(package), &operation).map_err(|error| {
                     blocked("template_validation", "MadoPilot asset package validation failed").with_context(json!({
                         "stage":"template_validation", "engine_revision":REVISION,
                         "cause":{"status":error.status().as_str(),"kind":format!("{:?}",error.kind()),"stage":format!("{:?}",error.stage())}
                     }))
                 })?;
-                let mut templates = BTreeMap::new();
-                for (alias, template) in &replay.templates {
-                    let prepared = engine
-                        .prepare_from_package(&package, template, &operation)
-                        .map_err(|error| {
-                            prerequisite_error("template_initialization", error.into())
-                        })?;
-                    templates.insert(alias.clone(), prepared);
+                    for (alias, template) in aliases {
+                        let prepared = engine
+                            .prepare_from_package(&package, template, &operation)
+                            .map_err(|error| {
+                                prerequisite_error("template_initialization", error.into())
+                            })?;
+                        templates.insert(alias.clone(), prepared);
+                    }
                 }
                 let facts = json!({"engine_revision":REVISION,"configuration_identity":identity,
-                    "corpus_identity":replay.corpus_id,"backend":engine.backend().id(),
+                    "corpus_identity":config.replay.as_ref().map(|replay| &replay.corpus_id),"backend":engine.backend().id(),
                     "ocr_model":model.model().as_str(),"ocr_profile":model.profile().as_str(),
                     "ocr_provider":"cpu","ocr_runtime_profile":provider.runtime_profile().as_str(),
-                    "sink":"controlled-non-native","native_capture":false,"native_input":false});
+                    "sink":if config.native.is_some() {"native"} else {"controlled-non-native"},
+                    "native_capture":config.native.is_some(),"native_input":config.native.is_some()});
                 let resources = Arc::new(Resources {
                     identity,
                     engine,
@@ -409,20 +479,71 @@ mod enabled {
             };
             drop(cache);
             control.check()?;
+            let operation = if let Some(native) = &config.native {
+                let open_bound = native.capture.wait_ms.min(
+                    native
+                        .capture
+                        .duration_ms
+                        .saturating_sub(control.elapsed_us() / 1_000),
+                );
+                self::operation(&bridge.token, open_bound)?
+            } else {
+                operation
+            };
             let targets = resources
                 .engine
                 .discover(&operation)
-                .map_err(|error| engine_error("replay_discovery", error))?;
-            if targets.len() != 1 {
-                return Err(blocked(
-                    "replay_target",
-                    "replay configuration must contain exactly one target",
-                ));
-            }
+                .map_err(|error| engine_error("target_discovery", error))?;
+            let (target, request, process_lifetime) = if let Some(native) = &config.native {
+                let target = select_native_target(&targets, native)?;
+                let mut input =
+                    mp::InputOpenRequest::new().with_requirement(mp::InputRequirement::Required);
+                for action in &native.input.representative_actions {
+                    let kind = match action {
+                        Action::Click { .. } => mp::InputOperationKind::Pointer,
+                        Action::KeyDown { .. } | Action::KeyUp { .. } => {
+                            mp::InputOperationKind::Keyboard
+                        }
+                    };
+                    input = input.requiring(kind, native.route()?);
+                }
+                (
+                    target.id(),
+                    mp::SessionRequest::new()
+                        .capturing(
+                            mp::OpenRequest::new().with_capture_pacing(
+                                mp::CapturePacingRequest::required(Duration::from_millis(
+                                    native.capture.interval_ms,
+                                ))
+                                .map_err(|error| prerequisite_error("capture_pacing", error))?,
+                            ),
+                        )
+                        .requesting_input(input),
+                    format!(
+                        "{:016x}",
+                        target
+                            .process_identity()
+                            .ok_or_else(|| internal("selected target provenance missing"))?
+                            .lifetime()
+                    ),
+                )
+            } else {
+                if targets.len() != 1 {
+                    return Err(blocked(
+                        "replay_target",
+                        "replay configuration must contain exactly one target",
+                    ));
+                }
+                (
+                    targets[0].id(),
+                    mp::SessionRequest::new().capturing(mp::OpenRequest::new()),
+                    attempt_id.to_owned(),
+                )
+            };
             let session = resources
                 .engine
-                .open(targets[0].id(), &mp::OpenRequest::new(), &operation)
-                .map_err(|error| engine_error("replay_open", error))?;
+                .open_session(target, &request, &operation)
+                .map_err(|error| engine_error("session_open", error))?;
             Ok(Self {
                 resources,
                 state: Mutex::new(State {
@@ -435,6 +556,11 @@ mod enabled {
                     latest: None,
                     serial: 0,
                     cleanup: None,
+                    process_lifetime,
+                    captured_frames: 0,
+                    last_capture: None,
+                    input_events: 0,
+                    input_cleanup_incomplete: false,
                 }),
                 control,
                 limits: plan.limits.clone(),
@@ -444,6 +570,7 @@ mod enabled {
                 closing: AtomicBool::new(false),
                 in_flight: AtomicUsize::new(0),
                 handles: AtomicUsize::new(0),
+                native: config.native,
             })
         }
 
@@ -537,10 +664,12 @@ mod enabled {
                     }
                     Ok(json!({"released":true}))
                 }
-                "dispatch" => Err(blocked(
-                    "native_dispatch",
-                    "replay uses only the host controlled-non-native input sink",
-                )),
+                "validate_input" => {
+                    let request: DispatchRequest = decode(args)?;
+                    self.input_request(&state, &request)?;
+                    Ok(json!({"valid":true}))
+                }
+                "dispatch" => self.dispatch(&mut state, decode(args)?),
                 _ => Err(argument("unsupported engine operation")),
             };
             self.handles.store(owner_count(&state), Ordering::Release);
@@ -548,6 +677,11 @@ mod enabled {
         }
 
         fn check(&self) -> Result<(), Fault> {
+            if self.native.as_ref().is_some_and(|native| {
+                self.control.elapsed_us() / 1_000 >= native.capture.duration_ms
+            }) {
+                return Err(Fault::new("Timeout", "native capture authority expired"));
+            }
             self.control.check()?;
             if self.closing.load(Ordering::Acquire) {
                 return Err(Fault::new("Closed", "engine attempt is closing"));
@@ -564,7 +698,13 @@ mod enabled {
         fn operation(&self, bound: u64) -> Result<mp::OperationContext, Fault> {
             self.check()?;
             let elapsed = self.control.elapsed_us() / 1_000;
-            let remaining = self.limits.duration_ms.saturating_sub(elapsed);
+            let duration = self
+                .native
+                .as_ref()
+                .map_or(self.limits.duration_ms, |native| {
+                    native.capture.duration_ms.min(self.limits.duration_ms)
+                });
+            let remaining = duration.saturating_sub(elapsed);
             if remaining == 0 {
                 return Err(Fault::new("Timeout", "engine attempt deadline expired"));
             }
@@ -588,10 +728,37 @@ mod enabled {
 
         fn observe(&self, state: &mut State, wait_ms: u64) -> Result<Value, Fault> {
             self.capacity(state, 1)?;
+            let started = Instant::now();
+            let wait_ms = self
+                .native
+                .as_ref()
+                .map_or(wait_ms, |native| wait_ms.min(native.capture.wait_ms));
+            if let Some(native) = &self.native {
+                if state.captured_frames >= native.capture.max_frames {
+                    return Err(Fault::new(
+                        "CaptureLimit",
+                        "native frame authority is exhausted",
+                    ));
+                }
+                while state.last_capture.is_some_and(|last| {
+                    last.elapsed() < Duration::from_millis(native.capture.interval_ms)
+                }) {
+                    self.check()?;
+                    if started.elapsed() >= Duration::from_millis(wait_ms) {
+                        return Err(Fault::new(
+                            "Timeout",
+                            "capture pacing exhausted the bounded wait",
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
             let request = state
                 .latest
                 .map_or_else(mp::FrameRequest::latest, mp::FrameRequest::newer_than);
-            let operation = self.operation(wait_ms)?;
+            let operation = self.operation(remaining_ms_from(
+                Duration::from_millis(wait_ms).saturating_sub(started.elapsed()),
+            )?)?;
             let _active = self.active();
             let session = state
                 .session
@@ -599,7 +766,27 @@ mod enabled {
                 .ok_or_else(|| Fault::new("Closed", "session closed"))?;
             let frame = session
                 .acquire_frame(&request, &operation)
-                .map_err(|error| engine_error("replay_capture", error))?;
+                .map_err(|error| engine_error("capture", error))?;
+            state.captured_frames += 1;
+            state.last_capture = Some(Instant::now());
+            if let Some(native) = &self.native {
+                let actual = frame.transform().target().ok_or_else(|| {
+                    Fault::new(
+                        "StaleIdentity",
+                        "native frame has no authoritative placement",
+                    )
+                })?;
+                let expected = placement(&native.geometry)?;
+                if actual.desktop_origin() != expected.desktop_origin()
+                    || actual.logical_size() != expected.logical_size()
+                    || actual.scale() != expected.scale()
+                {
+                    return Err(Fault::new(
+                        "StaleIdentity",
+                        "native frame geometry differs from approved placement",
+                    ));
+                }
+            }
             self.check()?;
             state.latest = Some(frame.stamp());
             self.retain_observation(state, frame)
@@ -610,7 +797,7 @@ mod enabled {
             let id = next_id(state, "observation")?;
             let extent = frame.descriptor().extent();
             let value = json!({"id":id,"run":self.run,"attempt":self.attempt,
-                "process_lifetime":state.attempt_id,
+                "process_lifetime":state.process_lifetime,
                 "session":format!("{}", stamp.stream()),"geometry":stamp.geometry().value(),
                 "frame":stamp.sequence().value(),"epoch":stamp.epoch().value(),
                 "width":extent.width(),"height":extent.height(),"coordinate_space":"capture-pixels"});
@@ -678,7 +865,7 @@ mod enabled {
                         .as_ref()
                         .ok_or_else(|| argument("template asset is required"))?;
                     let template = self.resources.templates.get(alias).ok_or_else(|| {
-                        argument("template asset is not declared in replay configuration")
+                        argument("template asset is not declared in engine configuration")
                     })?;
                     let view = observation
                         .frame
@@ -843,7 +1030,7 @@ mod enabled {
             {
                 return Err(Fault::new(
                     "StaleIdentity",
-                    "postcondition requires a strictly newer compatible recorded frame",
+                    "postcondition requires a strictly newer compatible captured frame",
                 ));
             }
             if request.expected.is_empty() || request.expected.len() > self.limits.log_bytes {
@@ -877,6 +1064,128 @@ mod enabled {
             )
         }
 
+        pub fn action_limit(&self) -> usize {
+            self.native
+                .as_ref()
+                .map_or(self.limits.max_actions, |native| native.input.max_actions)
+        }
+
+        pub fn cleanup_limit_ms(&self) -> u64 {
+            self.native
+                .as_ref()
+                .map_or(self.limits.cleanup_ms, |native| native.cleanup_ms)
+        }
+
+        fn input_request(
+            &self,
+            state: &State,
+            request: &DispatchRequest,
+        ) -> Result<mp::InputRequest, Fault> {
+            let native = self.native.as_ref().ok_or_else(|| {
+                blocked(
+                    "native_dispatch",
+                    "replay uses only the host controlled-non-native input sink",
+                )
+            })?;
+            if !self.control.admission.load(Ordering::Acquire) {
+                return Err(Fault::new(
+                    "AdmissionClosed",
+                    "native input admission is closed",
+                ));
+            }
+            if state.input_cleanup_incomplete {
+                return Err(Fault::new(
+                    "IncompleteCleanup",
+                    "a prior input sequence may have left pressed state",
+                ));
+            }
+            if self.control.elapsed_us() / 1_000 >= native.input.duration_ms {
+                return Err(Fault::new("Timeout", "native input authority expired"));
+            }
+            let observation = self.observation(state, &request.observation)?;
+            let sequence = native_sequence(
+                &request.actions,
+                Some(observation.frame.descriptor().extent()),
+                native.input.max_actions,
+            )?;
+            if sequence.len() > native.input.max_actions.saturating_sub(state.input_events) {
+                return Err(Fault::new(
+                    "ActionLimit",
+                    "native expanded event authority is exhausted",
+                ));
+            }
+            for action in &request.actions {
+                let authorized = native.input.representative_actions.iter().any(|allowed| {
+                    matches!(
+                        (action, allowed),
+                        (Action::Click { .. }, Action::Click { .. })
+                            | (
+                                Action::KeyDown { .. } | Action::KeyUp { .. },
+                                Action::KeyDown { .. } | Action::KeyUp { .. }
+                            )
+                    )
+                });
+                if !authorized {
+                    return Err(Fault::new(
+                        "Authority",
+                        "input kind is absent from the approved representative actions",
+                    ));
+                }
+            }
+            let session = state
+                .session
+                .as_ref()
+                .ok_or_else(|| Fault::new("Closed", "session closed"))?;
+            Ok(mp::InputRequest::new(
+                session.target(),
+                sequence,
+                mp::DeliveryPlan::require(native.route()?),
+            )
+            .with_focus(native.focus()?)
+            .with_pointer_geometry(mp::PointerGeometry::require_unchanged_since(
+                observation.frame.stamp(),
+            ))
+            .with_cleanup_budget(mp::CleanupBudget::at_most(
+                mp::CleanupBudget::MAX_EVENTS,
+                Duration::from_millis(native.cleanup_ms),
+            )))
+        }
+
+        fn dispatch(&self, state: &mut State, request: DispatchRequest) -> Result<Value, Fault> {
+            let input = self.input_request(state, &request)?;
+            let native = self
+                .native
+                .as_ref()
+                .ok_or_else(|| internal("native authority missing"))?;
+            let remaining = native
+                .input
+                .duration_ms
+                .saturating_sub(self.control.elapsed_us() / 1_000);
+            if remaining == 0 {
+                return Err(Fault::new("Timeout", "native input authority expired"));
+            }
+            let operation = self.operation(self.limits.wait_ms.min(remaining))?;
+            self.check()?;
+            if !self.control.admission.load(Ordering::Acquire) {
+                return Err(Fault::new(
+                    "AdmissionClosed",
+                    "native input admission closed before dispatch",
+                ));
+            }
+            state.input_events += input.sequence().len();
+            let _active = self.active();
+            let session = state
+                .session
+                .as_ref()
+                .ok_or_else(|| Fault::new("Closed", "session closed"))?;
+            let receipt = session
+                .send_input(&input, &operation)
+                .map_err(|error| engine_error("native_input", error))?;
+            // A receipt survives cancellation: replacing it would erase possible native effect.
+            state.input_cleanup_incomplete |= receipt.cleanup().may_leave_state_held();
+            Ok(native_receipt(&receipt, &request.actions))
+        }
+
         pub fn snapshot(&self) -> Value {
             json!({"configuration":self.resources.facts,"script_handles":self.handles.load(Ordering::Acquire),
                 "in_flight":self.in_flight.load(Ordering::Acquire),"runner_engines":1,"runner_models":1,
@@ -887,7 +1196,7 @@ mod enabled {
             self.closing.store(true, Ordering::Release);
             self.bridge.token.cancel();
             let started = Instant::now();
-            let budget = Duration::from_millis(self.limits.cleanup_ms);
+            let budget = Duration::from_millis(self.cleanup_limit_ms());
             let mut state = loop {
                 match self.state.try_lock() {
                     Ok(state) => break state,
@@ -919,14 +1228,17 @@ mod enabled {
                     }
                     None => Ok(()),
                 });
-            let clean = close.is_ok() && state.session.as_ref().is_none_or(mp::Session::is_closed);
-            if clean {
+            let closed = close.is_ok() && state.session.as_ref().is_none_or(mp::Session::is_closed);
+            let clean = closed && !state.input_cleanup_incomplete;
+            if closed {
                 state.session = None;
             }
-            let result = json!({"clean":clean,"native_owners":usize::from(!clean),
+            let result = json!({"clean":clean,"native_owners":usize::from(!closed),
                 "in_flight":self.in_flight.load(Ordering::Acquire),"script_handles":0,
                 "runner_engines":1,"runner_models":1,"close_error":close.err(),
-                "physical_cleanup_confirmed":clean,"native_input_release":"not_applicable_replay"});
+                "session_closed":closed,"physical_cleanup_confirmed":clean,
+                "native_input_release":if self.native.is_none() {"not_applicable_replay"}
+                    else if state.input_cleanup_incomplete {"incomplete"} else {"no_outstanding_sequence_state"}});
             state.cleanup = Some(result.clone());
             result
         }
@@ -936,6 +1248,13 @@ mod enabled {
         fn drop(&mut self) {
             let _ = self.finish();
         }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DispatchRequest {
+        observation: Value,
+        actions: Vec<Action>,
     }
 
     #[derive(Deserialize)]
@@ -994,7 +1313,7 @@ mod enabled {
                     .is_none_or(|bottom| bottom > extent.height())
             {
                 return Err(argument(
-                    "ROI must be nonempty and inside the recorded capture extent",
+                    "ROI must be nonempty and inside the retained capture extent",
                 ));
             }
             mp::Rect::from_origin_size(
@@ -1063,6 +1382,358 @@ mod enabled {
             .with_cancellation(token.clone())
             .with_timeout(Duration::from_millis(timeout_ms))
             .map_err(|error| engine_error("operation_context", error))
+    }
+
+    fn native_engine(
+        native: &NativeConfig,
+        ocr: &mp::OcrProviderConfig,
+        operation: &mp::OperationContext,
+    ) -> Result<mp::Engine, Fault> {
+        let request = mp::NativeEngineRequest::new().with_capture_pacing(
+            mp::CapturePacingRequest::required(Duration::from_millis(native.capture.interval_ms))
+                .map_err(|error| prerequisite_error("capture_pacing", error))?,
+        );
+        #[cfg(target_os = "macos")]
+        let result = mp::macos_engine_with_ocr_provider(request, ocr, operation);
+        #[cfg(windows)]
+        let result = mp::windows_engine_with_ocr_provider(request, ocr, operation);
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            result.map_err(|error| prerequisite_error("engine_initialization", error))
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            let _ = (request, ocr, operation);
+            Err(blocked(
+                "native_platform_unsupported",
+                "native engine requires macOS or Windows",
+            ))
+        }
+    }
+
+    fn select_native_target<'a>(
+        targets: &'a [mp::TargetDescription],
+        config: &NativeConfig,
+    ) -> Result<&'a mp::TargetDescription, Fault> {
+        let lifetime = u64::from_str_radix(&config.process_lifetime, 16).map_err(|_| {
+            blocked(
+                "native_authority_validation",
+                "invalid opaque process lifetime",
+            )
+        })?;
+        let mut selected = None;
+        for target in targets.iter().filter(|target| {
+            target.capability().kind() == Some(mp::TargetKind::Window)
+                && target.name() == config.window_rule
+        }) {
+            let identity = target.process_identity().ok_or_else(|| {
+                blocked(
+                    "target_identity_unavailable",
+                    "an exact-name window lacks verified process provenance",
+                )
+            })?;
+            if identity.process_id().get() != config.process_id || identity.lifetime() != lifetime {
+                continue;
+            }
+            let path = if config.executable_or_bundle.is_dir() {
+                identity.application_bundle_path()
+            } else {
+                Some(identity.executable_path())
+            };
+            let Some(path) = path else {
+                return Err(blocked(
+                    "target_identity_unavailable",
+                    "selected process has no verified application-bundle path",
+                ));
+            };
+            let canonical = path.canonicalize().map_err(|_| {
+                blocked(
+                    "target_identity_unavailable",
+                    "selected process path cannot be resolved",
+                )
+            })?;
+            if canonical != config.executable_or_bundle {
+                continue;
+            }
+            if selected.replace(target).is_some() {
+                return Err(blocked(
+                    "target_identity_ambiguous",
+                    "multiple windows match the complete approved process identity",
+                ));
+            }
+        }
+        selected.ok_or_else(|| {
+            blocked(
+                "target_identity_mismatch",
+                "no window matches the exact name, canonical path, PID and lifetime",
+            )
+        })
+    }
+
+    fn native_key(value: &str) -> Result<mp::Key, Fault> {
+        let key = match value {
+            "Enter" => mp::Key::Enter,
+            "Tab" => mp::Key::Tab,
+            "Backspace" => mp::Key::Backspace,
+            "Delete" => mp::Key::Delete,
+            "Escape" => mp::Key::Escape,
+            "Space" => mp::Key::Space,
+            "ArrowUp" => mp::Key::ArrowUp,
+            "ArrowDown" => mp::Key::ArrowDown,
+            "ArrowLeft" => mp::Key::ArrowLeft,
+            "ArrowRight" => mp::Key::ArrowRight,
+            "Home" => mp::Key::Home,
+            "End" => mp::Key::End,
+            "PageUp" => mp::Key::PageUp,
+            "PageDown" => mp::Key::PageDown,
+            "Shift" => mp::Key::Modifier(mp::Modifier::Shift),
+            "Control" => mp::Key::Modifier(mp::Modifier::Control),
+            "Alt" => mp::Key::Modifier(mp::Modifier::Alt),
+            "Meta" => mp::Key::Modifier(mp::Modifier::Meta),
+            value if value.len() == 1 && value.as_bytes()[0].is_ascii_alphanumeric() => {
+                mp::Key::Character(char::from(value.as_bytes()[0]))
+            }
+            value if value.starts_with('F') => {
+                let number = value[1..]
+                    .parse::<u8>()
+                    .map_err(|_| argument("unsupported native key"))?;
+                if value != format!("F{number}") {
+                    return Err(argument("native function key must have its canonical name"));
+                }
+                mp::Key::Function(number)
+            }
+            _ => return Err(argument("unsupported native key")),
+        };
+        key.check()
+            .map_err(|fault| engine_error("input_key", fault.into()))?;
+        Ok(key)
+    }
+
+    fn native_sequence(
+        actions: &[Action],
+        extent: Option<mp::PixelExtent>,
+        maximum: usize,
+    ) -> Result<mp::InputSequence, Fault> {
+        let count = actions.iter().try_fold(0usize, |total, action| {
+            total
+                .checked_add(action.event_count())
+                .ok_or_else(|| argument("expanded input event count overflow"))
+        })?;
+        if count == 0 || count > maximum || count > mp::SequenceLimits::MAX_EVENTS {
+            return Err(Fault::new(
+                "ActionLimit",
+                "expanded native sequence exceeds its event authority",
+            ));
+        }
+        let mut events = Vec::with_capacity(count);
+        let mut held = Vec::new();
+        for action in actions {
+            match action {
+                Action::KeyDown { key } => {
+                    let key = native_key(key)?;
+                    if held.contains(&key) {
+                        return Err(argument(
+                            "a native sequence cannot press an already-held key",
+                        ));
+                    }
+                    held.push(key);
+                    events.push(mp::InputEvent::KeyPress(key));
+                }
+                Action::KeyUp { key } => {
+                    let key = native_key(key)?;
+                    let index =
+                        held.iter()
+                            .position(|pressed| *pressed == key)
+                            .ok_or_else(|| {
+                                argument("a native sequence cannot release a key it did not press")
+                            })?;
+                    held.remove(index);
+                    events.push(mp::InputEvent::KeyRelease(key));
+                }
+                Action::Click { x, y, button } => {
+                    if !x.is_finite()
+                        || !y.is_finite()
+                        || *x < 0.0
+                        || *y < 0.0
+                        || extent.is_some_and(|extent| {
+                            *x >= f64::from(extent.width()) || *y >= f64::from(extent.height())
+                        })
+                    {
+                        return Err(argument(
+                            "click must lie within the retained capture-pixel extent",
+                        ));
+                    }
+                    let point = mp::Point::new(mp::CoordinateSpace::CapturePixels, *x, *y)
+                        .map_err(|fault| engine_error("input_point", fault.into()))?;
+                    let button = match button {
+                        PointerButton::Left => mp::PointerButton::Primary,
+                        PointerButton::Right => mp::PointerButton::Secondary,
+                        PointerButton::Middle => mp::PointerButton::Middle,
+                    };
+                    events.extend([
+                        mp::InputEvent::PointerMove(point),
+                        mp::InputEvent::PointerPress(button),
+                        mp::InputEvent::PointerRelease(button),
+                    ]);
+                }
+            }
+        }
+        if !held.is_empty() {
+            return Err(argument(
+                "native key_down/key_up events must be balanced within one sequence",
+            ));
+        }
+        mp::InputSequence::within(events, mp::SequenceLimits::at_most(maximum))
+            .map_err(|fault| engine_error("input_sequence", fault.into()))
+    }
+
+    #[cfg(test)]
+    mod native_input_tests {
+        use super::*;
+
+        #[test]
+        fn native_sequences_reject_unowned_releases_duplicate_presses_and_held_keys() {
+            let extent = Some(mp::PixelExtent::new(20, 10));
+            let down = Action::KeyDown { key: "A".into() };
+            let up = Action::KeyUp { key: "A".into() };
+            for actions in [
+                vec![down.clone()],
+                vec![up.clone()],
+                vec![down.clone(), down.clone(), up.clone()],
+                vec![down.clone(), Action::KeyUp { key: "B".into() }],
+            ] {
+                assert_eq!(
+                    native_sequence(&actions, extent, 16)
+                        .expect_err("no sequence may leave or release foreign pressed state")
+                        .category,
+                    "Argument"
+                );
+            }
+            let balanced = native_sequence(&[down, up], extent, 2).expect("balanced sequence");
+            assert!(balanced.held_after(balanced.len()).is_empty());
+            assert_eq!(
+                balanced.possibly_held_after(1, false),
+                vec![mp::PressedState::Key(mp::Key::Character('A'))]
+            );
+        }
+
+        #[test]
+        fn native_clicks_are_bounded_balanced_three_event_sequences() {
+            let extent = Some(mp::PixelExtent::new(20, 10));
+            let click = Action::Click {
+                x: 19.5,
+                y: 9.5,
+                button: PointerButton::Middle,
+            };
+            assert_eq!(
+                native_sequence(std::slice::from_ref(&click), extent, 2)
+                    .expect_err("a click cannot fit in two native events")
+                    .category,
+                "ActionLimit"
+            );
+            let sequence = native_sequence(&[click], extent, 3).expect("three events fit");
+            assert_eq!(sequence.len(), 3);
+            assert_eq!(
+                sequence.held_after(2),
+                vec![mp::PressedState::Button(mp::PointerButton::Middle)]
+            );
+            assert!(sequence.held_after(3).is_empty());
+            for x in [20.0, -1.0, f64::NAN, f64::INFINITY] {
+                assert_eq!(
+                    native_sequence(
+                        &[Action::Click {
+                            x,
+                            y: 1.0,
+                            button: PointerButton::Left
+                        }],
+                        extent,
+                        3
+                    )
+                    .expect_err("non-finite or out-of-frame point refused")
+                    .category,
+                    "Argument"
+                );
+            }
+            let oversized = vec![
+                Action::Click {
+                    x: 1.0,
+                    y: 1.0,
+                    button: PointerButton::Left
+                };
+                86
+            ];
+            assert_eq!(
+                native_sequence(&oversized, extent, 4096)
+                    .expect_err("SDK event ceiling also applies")
+                    .category,
+                "ActionLimit"
+            );
+        }
+
+        #[test]
+        fn native_keys_never_guess_unsupported_or_aliased_names() {
+            assert_eq!(native_key("A").expect("character"), mp::Key::Character('A'));
+            assert_eq!(native_key("ArrowDown").expect("arrow"), mp::Key::ArrowDown);
+            assert_eq!(native_key("F24").expect("function"), mp::Key::Function(24));
+            for key in ["SomeKey", "F01", "F25", "F0", "RETURN"] {
+                assert_eq!(
+                    native_key(key).expect_err("unknown key refused").category,
+                    "Argument"
+                );
+            }
+        }
+    }
+
+    fn native_receipt(receipt: &mp::InputReceipt, actions: &[Action]) -> Value {
+        let mut end = 0usize;
+        let submitted = actions
+            .iter()
+            .take_while(|action| {
+                end += action.event_count();
+                end <= receipt.submitted()
+            })
+            .count();
+        let total_events: usize = actions.iter().map(Action::event_count).sum();
+        let status = match receipt.outcome() {
+            mp::SequenceOutcome::Complete => "Submitted",
+            mp::SequenceOutcome::Partial => "Partial",
+            mp::SequenceOutcome::Unexecuted => {
+                if receipt
+                    .fault()
+                    .is_some_and(|fault| fault.status() == mp::Status::Cancelled)
+                {
+                    "Cancelled"
+                } else {
+                    "Refused"
+                }
+            }
+            _ => "Uncertain",
+        };
+        let attempts: Vec<_> = receipt.attempts().iter().map(|attempt| json!({
+            "route":attempt.route().as_str(),"address_scope":attempt.address_scope().as_str(),
+            "outcome":attempt.outcome().as_str(),"submitted_events":attempt.submitted(),
+            "last_submitted_event":attempt.last_submitted(),
+            "evidence":attempt.evidence().map(|evidence| evidence.as_str()),
+            "partial_native_effect":attempt.partial_native_effect(),
+            "possible_native_effect":attempt.possible_native_effect(),
+            "fault":attempt.fault().map(|fault| json!({"kind":format!("{fault:?}"),"status":fault.status().as_str()}))
+        })).collect();
+        json!({
+            "status":status,"submitted":submitted,"total":actions.len(),"sink":"native",
+            "outcome":receipt.outcome().as_str(),"submitted_events":receipt.submitted(),"total_events":total_events,
+            "last_submitted_event":receipt.last_submitted(),
+            "selected_route":receipt.selected_route().map(|route| route.as_str()),
+            "address_scope":receipt.address_scope().map(|scope| scope.as_str()),
+            "evidence":receipt.evidence().map(|evidence| evidence.as_str()),
+            "used_fallback":receipt.used_fallback(),"attempts":attempts,
+            "partial_native_effect":receipt.partial_native_effect(),
+            "possible_native_effect":receipt.possible_native_effect(),
+            "fault":receipt.fault().map(|fault| json!({"kind":format!("{fault:?}"),"status":fault.status().as_str()})),
+            "cleanup":{"state":receipt.cleanup().as_str(),"released":receipt.cleanup_released(),
+                "owed":receipt.cleanup_owed(),"may_leave_state_held":receipt.cleanup().may_leave_state_held()},
+            "cleanup_required":if receipt.cleanup().may_leave_state_held() {vec!["native_input_release_unconfirmed"]} else {Vec::<&str>::new()},
+            "application_effect_confirmed":false
+        })
     }
     fn engine_error(stage: &str, error: mp::Error) -> Fault {
         let category = match error.status() {
@@ -1314,7 +1985,11 @@ mod enabled {
         if !config.executable_or_bundle.is_absolute()
             || !config.permission_executable.is_absolute()
             || config.process_id == 0
-            || config.process_lifetime.is_empty()
+            || config.process_lifetime.len() != 16
+            || !config
+                .process_lifetime
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             || config.window_rule.is_empty()
             || config.hardware.is_empty()
             || config.recognition_language.is_empty()
@@ -1331,6 +2006,52 @@ mod enabled {
             return Err(blocked(
                 "native_platform_unsupported",
                 "authority must identify this supported native OS",
+            ));
+        }
+        let target_is_bundle = config.executable_or_bundle.is_dir();
+        if target_is_bundle && config.operating_system != "macos" {
+            return Err(blocked(
+                "native_authority_validation",
+                "this platform requires an executable file",
+            ));
+        }
+        canonical(
+            &config.executable_or_bundle,
+            target_is_bundle,
+            "target_path",
+        )?;
+        canonical(
+            &config.permission_executable,
+            false,
+            "permission_executable",
+        )?;
+        let executable = std::env::current_exe()
+            .and_then(|path| path.canonicalize())
+            .map_err(|_| {
+                blocked(
+                    "permission_executable",
+                    "current executable identity is unavailable",
+                )
+            })?;
+        if executable != config.permission_executable {
+            return Err(blocked(
+                "permission_executable",
+                "authority does not name the current harness executable",
+            ));
+        }
+        if config.recognition_language != mp::ACCEPTED_G004_LANGUAGE_PROFILE_ID {
+            return Err(blocked(
+                "ocr_unsupported",
+                "native recognition language must match the selected OCR profile",
+            ));
+        }
+        if config.package_entries.is_empty() != config.templates.is_empty()
+            || config.package_entries.len() > plan.limits.snapshot_files
+            || config.templates.len() > plan.limits.handles
+        {
+            return Err(blocked(
+                "template_validation",
+                "native templates require bounded package entries and aliases together",
             ));
         }
         let capture = &config.capture;
@@ -1374,14 +2095,19 @@ mod enabled {
         if config.cleanup_ms == 0
             || config.cleanup_ms > plan.limits.cleanup_ms
             || config.containment_ms == 0
-            || config.containment_ms > plan.limits.containment_ms
+            || config.containment_ms != plan.limits.containment_ms
+            || config.cleanup_ms > config.containment_ms
         {
             return Err(blocked(
                 "cleanup_authority",
-                "finite cleanup and containment bounds must fit the plan",
+                "cleanup must fit the plan and containment must equal the supervisor's finite bound",
             ));
         }
         placement(&config.geometry)?;
+        native_sequence(&input.representative_actions, None, input.max_actions)
+            .map_err(|fault| blocked("input_authority", &fault.message))?;
+        config.route()?;
+        config.focus()?;
         Ok(())
     }
 

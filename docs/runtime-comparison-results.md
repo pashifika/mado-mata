@@ -2,13 +2,14 @@
 
 ## Decision
 
-`Blocked(exact-target integration prerequisite and incomplete both-OS qualification)`.
+`Blocked(incomplete native workflow and both-OS qualification)`.
 No runtime is selected for production. This delivery provides executable controlled
-comparison paths and explicitly scoped real-engine smoke evidence, not completion
-of every M0 acceptance scenario. Live capture/input, exact-target attachment, and
-representative recorded-gameplay qualification remain unexecuted.
+comparison paths, real recognition smoke evidence, and a strict native bridge.
+The first authorized macOS native workflow stopped at an unsatisfied visible
+postcondition despite complete input invocation receipts. Windows game execution
+and representative recorded-gameplay qualification remain unexecuted.
 
-## Verified local evidence
+## Initial local evidence
 
 The local host was Apple Silicon macOS, kernel 27.0.0, using Rust 1.97.1 and
 Node.js 24.18.0. The engine dependency was the public revision
@@ -88,6 +89,42 @@ needed Rust's exact extended canonical form. The package uses expected text only
 through the documented query API. None of these corrections changes fixture
 pixels, oracle text/geometry, the engine pin, or native authority.
 
+## Retained-provenance integration and macOS native probes
+
+A separately authorized source update pins the public engine revision
+`85ccc580cd28ffb9b0b52271f6c87f1af0109a04`. It adds optional retained-process
+path/lifetime provenance, preserves native open/dispatch guards, and connects the
+consumer to real native sessions. The earlier pin and smoke results above remain
+historical evidence; they are not silently relabeled with the new revision.
+
+The changed upstream capture package passed 103 tests on each of macOS and
+Windows. Two additional macOS provenance-boundary tests passed, as did the changed
+platform/capture lint checks and facade builds. These are source/build checks,
+not an upstream full-workspace or native-live qualification claim.
+
+The consumer passed 18 default and 21 engine-feature regressions and rebuilt the
+native executable. On Apple Silicon macOS 27, an authorized exact-target
+capture/OCR run passed without input. Its first setup attempt had exhausted the
+existing JavaScript promise allowance; that failed record was retained. A fresh
+plan raised only the enclosing VM allowance, leaving the native input event cap
+unchanged. This smoke does not qualify macOS 27 as a supported upstream release.
+
+Two separately authorized, bounded one-click probes then used `process_directed`:
+first preserving focus, then requiring focus after manual operator foregrounding.
+Each returned three submitted SDK events, `invocation_only` evidence, no fallback,
+and no held-state release obligation. In both cases, a strictly newer-frame OCR
+postcondition was false and a separate target-only image still showed no menu.
+Both attempts failed; neither completed even the first navigation step.
+Native close and outer process cleanup completed. No further click or alternate
+route was sent, and Windows game operations remained on hold.
+
+The private records bind the native executable to source SHA-256
+`e94ed07f89ace95f11416de08a35953cda86030c1cd6e6e3f693f4bc6a6c5aa7`
+and Cargo-lock SHA-256
+`cca5d4a0613412220c07adc4d7aea24033a60eb54be15728db2310c386fc05de`.
+The target, runtime paths, images, OCR content, plans, and raw logs remain private.
+Invocation without observed effect is not yet a diagnosed SDK or game defect.
+
 ## Coverage, not just case count
 
 The catalog contains 112 requirement scenarios across four capabilities. The
@@ -108,20 +145,21 @@ then passed on Linux, Apple Silicon macOS, and Windows, plus branch-flow
 validation and `CI Gate`. Hosted checks grant no authority to exercise an
 installed game or private OCR configuration.
 
-Live-native rows remain blocked by the missing exact-target facade contract and
-absent operator-approved target/workload, capture/input authority, and prospective
-per-OS qualification budgets. Representative replay still needs identified
-recorded frames beyond the generated static fixture. Validated model/runtime
-identities now support the limited smoke above; raw execution records and
-machine-local paths remain private.
+Live-native qualification remains incomplete despite the new exact-target
+contract and limited authorized macOS probes. The requested application
+transition failed, Windows game execution is still held, and representative
+per-OS budgets and sufficient comparable samples remain absent. Representative
+replay still needs identified recorded frames beyond the generated static
+fixture. Validated model/runtime identities support only the scoped evidence
+above; raw execution records and machine-local paths remain private.
 
 ## Candidate and authoring observations
 
 | Path | Verified characteristics | Unresolved comparison |
 | --- | --- | --- |
 | Direct Rust | Independent expected decisions and shared-host oracle | Real recognition/input costs and native ownership |
-| JavaScript | ES module caching/live cycles, bounded jobs, interruptible computation, frozen options | Native integration, full lifecycle corpus, representative performance |
-| Lua | Restricted secondary loading, coroutine interruption, cycle refusal, readonly values | Native integration, recovery/PID-reuse cases, representative performance |
+| JavaScript | ES module caching/live cycles, bounded jobs, interruptible computation, frozen options | Native application effect, full lifecycle corpus, representative performance |
+| Lua | Restricted secondary loading, coroutine interruption, cycle refusal, readonly values | Native workload coverage, recovery/PID-reuse cases, representative performance |
 | TypeScript to JavaScript | Inventory-bound compiler, strict SDK/schema types, actual completions, original helper source locations | Separate compiler CPU/RSS are not included in runtime-child measurements |
 
 The observations do not establish a winner. Timings are cold-child measurements;
@@ -138,14 +176,15 @@ Additional regressions exposed ordinary host work after entry return and the ris
 of losing settled entry results during forced cleanup. These corrections are in
 the [ADR](adr/0001-runtime-comparison-boundaries.md).
 
-No confirmed MadoPilot implementation defect was established: its current public
-facade lacks a contract required for safe exact-target admission. No sibling
-source was edited and no unverified engine repair was claimed. The
-[native guide](runtime-native.md) identifies the prerequisite without substituting
-a title/PID match or a private platform escape hatch.
+No confirmed MadoPilot runtime defect was established. With separate write and
+publication authority, an additive upstream provenance API and the consuming
+native adapter resolved the earlier integration prerequisite. The two input
+probes preserved actual invocation and failed-effect evidence rather than
+claiming an unverified repair. The [native guide](runtime-native.md) records the
+current strict admission and receipt contract.
 
-Complete the remaining controlled rows, supply authorized real replay/native
-inputs, resolve and requalify the exact-target dependency, and collect both-OS
+Complete the remaining controlled rows, resolve the observed native workflow
+failure, supply representative replay/native inputs, and collect both-OS
 evidence before choosing a runtime. Only then does a primary-OS M1–M4 development
 plan become the subsequent policy; retaining comparison adapters does not impose
 a multi-runtime desktop product.

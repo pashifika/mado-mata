@@ -1,16 +1,16 @@
 # Runtime comparison: replay and native prerequisites
 
 The optional `engine` feature consumes the public `mado-pilot` facade at
-`2c9d57a53e44ffc97315975c3ca46a766d6c8539`. It does not use a sibling path dependency,
+`85ccc580cd28ffb9b0b52271f6c87f1af0109a04`. It does not use a sibling path dependency,
 private platform APIs, a fake OCR backend, or a substitute input route.
 
-**Native execution is blocked at this pin.** The facade cannot bind its opaque
-`TargetId` to an executable/application-bundle path and exact process lifetime.
-The harness refuses native plans before engine construction, discovery,
-permission reads, capture, or input. Providing additional permission or a window
-title does not remove this blocker. Tasks requiring native attachment, receipts,
-permission/focus refusal, target loss, and both-OS qualification remain non-passing.
-Replay is a real recognition path, not native qualification.
+**Native integration is available; native qualification is not complete.** The
+facade now exposes optional retained-process provenance. The harness requires an
+exact window name, canonical executable/application-bundle path, process ID, and
+opaque process lifetime before opening the native session. Missing, ambiguous,
+or mismatched provenance is refused. Native capture, OCR, and input receipts are
+real SDK operations, not the controlled sink. A submitted receipt still does not
+prove application effect. Both-OS workload and lifecycle evidence remain required.
 
 ## Install the engine prerequisites
 
@@ -28,8 +28,8 @@ engine build, acquire the following separately; the harness downloads nothing:
   No `PATH` search, alternate runtime, accelerator preference, or fallback is used.
 - The accepted detector and recognizer below, under one canonical model root.
 
-Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/2c9d57a53e44ffc97315975c3ca46a766d6c8539/CONTRIBUTING.md#native-development-prerequisites)
-and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/2c9d57a53e44ffc97315975c3ca46a766d6c8539/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
+Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/85ccc580cd28ffb9b0b52271f6c87f1af0109a04/CONTRIBUTING.md#native-development-prerequisites)
+and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/85ccc580cd28ffb9b0b52271f6c87f1af0109a04/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
 Its `tools/setup-native.py` configures only the command it launches; it installs
 nothing. A separately obtained, revision-pinned public checkout can provide that
 setup tool without becoming the application's dependency source. From this
@@ -91,7 +91,7 @@ Each recorded frame, PNG template, and MadoPilot package manifest must be a
   Its `madopilot-package.json` entry must be a valid upstream asset manifest,
   including template content SHA-256, dimensions, license, and match defaults.
   The facade supports PNG templates, not raw template pixels. See the pinned
-  [manifest example](https://github.com/pashifika/mado-pilot/blob/2c9d57a53e44ffc97315975c3ca46a766d6c8539/fixtures/assets/phase1-slice/madopilot-package.json).
+  [manifest example](https://github.com/pashifika/mado-pilot/blob/85ccc580cd28ffb9b0b52271f6c87f1af0109a04/fixtures/assets/phase1-slice/madopilot-package.json).
 - `replay.templates` maps host recognition asset aliases to template IDs declared
   by that engine manifest. Neither map grants filesystem access.
 
@@ -208,54 +208,85 @@ never claims that a blocked backend has returned.
 
 `finish` cancels, releases retained results/observations, and closes the session
 with separate finite cleanup authority. Its facts distinguish remaining owners,
-in-flight work, close error, and confirmed replay cleanup. Compatible model/engine
-owners remain a separately counted runner baseline. At runner shutdown, after
+in-flight work, close error, and confirmed session cleanup. An incomplete native
+input-release receipt remains incomplete even if session close later succeeds.
+Compatible model/engine owners remain a separately counted runner baseline. At
+runner shutdown, after
 all hosts are dropped, `release_runner_resources` drops that baseline. The
 upstream ONNX Runtime API library itself remains process-global until process
 exit; dropping an engine is not a claim that the native library unloaded.
 Unreturned work requires the runner's containment result, not a clean outcome.
 
-## Native authority record and upstream prerequisite
+## Native target selection and finite authority
 
-A native plan must still carry the required prospective record. The declarative
-validator requires `native_config.native` with:
+Use `lane: "native"`, `native_config.replay: null`, and the required prospective
+`native_config.native` record:
 
-- `executable_or_bundle` and `permission_executable`: absolute paths; no game hash.
-- `process_id`, `process_lifetime`, `window_rule`, `operating_system` (`windows` or
-  `macos`, matching the host), and `hardware`.
+- `executable_or_bundle`: the exact canonical executable or application-bundle
+  path. `permission_executable`: the canonical running comparison executable.
+  Neither is a game-content hash.
+- `process_id`: the nonzero native PID. `process_lifetime`: exactly 16 lowercase
+  hexadecimal digits of the provider's opaque `TargetProcessIdentity::lifetime`.
+  This is not a portable timestamp or a value to compare across providers.
+- `window_rule`: the complete, exact window name, not a pattern.
+- `operating_system`: `windows` or `macos`, matching the host; `hardware` records
+  the operator's selected machine.
 - `capture`: `approved`, `duration_ms`, `max_frames`, `wait_ms`, `interval_ms`.
 - `input`: independent `approved`, `duration_ms`, `max_actions`, `route`, `focus`,
   and nonempty `representative_actions`.
 - `geometry`: the placement object above; `recognition_language`,
   `visible_postcondition`, `cleanup_ms`, and `containment_ms`.
+- Optional `package_entries` and `templates` use the same captured-asset mapping
+  as replay. Omit both for OCR-only execution.
 
 All authorities must be positive, finite, and within the plan's enclosing bounds.
+The native and enclosing `containment_ms` must be equal; the supervisor cannot
+silently apply a longer containment allowance. Native cleanup uses its own
+declared bound. Capture/input durations conservatively include attempt setup.
+Capture `max_frames` counts successful frame acquisitions, not every frame the
+SDK's continuous native producer generates. Required native pacing and bounded
+consumer acquisition intervals both apply. Geometry must match the actual frame's
+origin, logical extent, and scale; guessed placement is refused.
 Routes are explicitly `system`, Windows `window_message`, or macOS
 `process_directed`; focus is `preserve` or `require_focused`. These declarations
 are not grants from the OS, nor evidence that a route can act on the target.
 No launcher, elevation, focus change, process termination, restart allowance,
 route substitution, or automatic retry is supplied.
 
-The unresolved source-level prerequisite is precise:
+The Rust facade's
+[`TargetProcessIdentity`](https://github.com/pashifika/mado-pilot/blob/85ccc580cd28ffb9b0b52271f6c87f1af0109a04/crates/automation/capture/src/descriptor.rs)
+is optional discovery provenance, not continuing liveness or input authority.
+macOS publishes paths from its retained application and exact launch-value bits.
+Windows publishes the executable path and creation value from the same retained
+process handle used by its window authority. Native open and per-event dispatch
+retain their existing lifetime guards. No public C ABI change is required.
 
-- [`TargetDescription`](https://github.com/pashifika/mado-pilot/blob/2c9d57a53e44ffc97315975c3ca46a766d6c8539/crates/automation/capture/src/descriptor.rs#L252-L329)
-  exposes only ID, descriptive name, extent, format, coordinates, and capability.
-- [`TargetCapability`](https://github.com/pashifika/mado-pilot/blob/2c9d57a53e44ffc97315975c3ca46a766d6c8539/crates/automation/core/src/capability.rs#L472-L549)
-  exposes kind/capture/input capability, not process/path/lifetime provenance.
-- The public facade's engine discovery/open operations provide no path/lifetime
-  correlation operation. The upstream standalone
-  [example](https://github.com/pashifika/mado-pilot/blob/2c9d57a53e44ffc97315975c3ca46a766d6c8539/examples/rust-input-workflow/src/flow.rs#L75-L82)
-  selects an exact window title, which is insufficient for this application's
-  authorization contract.
+Prepare the private record from an authorized public-facade discovery and actual
+frame geometry. If an OS runs an installed bundle through another mounted path,
+establish that correspondence independently and pin the observed runtime path.
+A shared bundle identifier, title, or PID alone is not an identity repair.
 
-These findings were checked against direct source because graph coverage for the
-pin was stale and examples were excluded. They establish an integration
-prerequisite, not an observed native runtime defect. An upstream public API must
-bind the selected path and process/window lifetime to the returned target and
-preserve that binding through open and dispatch. Only a separately reviewed pin
-update plus actual Windows/macOS evidence may remove the blocker. Title-only
-matching, PID-only matching, native-handle guessing, and fixture/private APIs
-are not repairs.
+The action shapes are `{"kind":"key_down","key":"A"}`,
+`{"kind":"key_up","key":"A"}`, and
+`{"kind":"click","x":100,"y":200,"button":"left"}`. Click coordinates are finite
+capture pixels inside the retained observation; buttons are `left`, `right`, or
+`middle`. A native click expands into move/press/release, and all three SDK events
+consume the native attempt budget. Keys must be balanced inside one sequence;
+unowned releases, repeated presses, unsupported names, and held keys are refused.
+`representative_actions` declares approved operation kinds, not a title-based
+permission or an instruction to execute those example actions.
+
+`limits.max_actions` also bounds JavaScript promise creation and executed jobs.
+Keep adequate VM startup allowance there and use `native.input.max_actions` for
+a tighter physical-input event bound; a three-event input allowance does not
+require a three-promise VM allowance.
+
+`submit` admits bounded work; `settle` invokes the configured route using the
+retained frame stamp and unchanged-geometry policy. Native receipts retain SDK
+event counts, route/address scope, evidence strength, possible partial effects,
+and release obligations. No native receipt is generated from controlled effects.
+A refused/partial sequence closes admission and is never replayed automatically.
+Verify application effect independently on a strictly newer compatible frame.
 
 ## Failure stages and outer invocation evidence
 

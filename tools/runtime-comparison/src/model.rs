@@ -6,7 +6,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-pub const ENGINE_REVISION: &str = "2c9d57a53e44ffc97315975c3ca46a766d6c8539";
+pub const ENGINE_REVISION: &str = "85ccc580cd28ffb9b0b52271f6c87f1af0109a04";
 pub const MAX_TRANSPORT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

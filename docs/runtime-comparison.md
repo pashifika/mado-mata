@@ -6,10 +6,10 @@ application. Controlled checks exercise actual interpreters and owned processes;
 their input sink is **non-native**. They do not capture a screen, launch a game,
 change focus, request permissions, or send operating-system input.
 
-**Runtime adoption remains blocked.** The pinned engine cannot establish the
-required executable-path/process-lifetime binding for native targets. Both-OS
-native evidence, an authorized workload, and private OCR/replay prerequisites
-are still required. See [native prerequisites](runtime-native.md) and the
+**Runtime adoption remains blocked.** Exact-path/process-lifetime native binding
+and real SDK input are implemented, but complete both-OS workload, lifecycle, and
+performance evidence is still required. Invocation-only input receipts do not
+prove application effect. See [native prerequisites](runtime-native.md) and the
 [decision record](adr/0001-runtime-comparison-boundaries.md).
 
 ## Setup and commands
@@ -91,6 +91,12 @@ not native payloads. Operations include `asset`, `observe`, `recognize`, `query`
 No uncertain action is automatically replayed. Release remains available after
 admission closes. The controlled-only `fixture` operation injects declared state
 transitions; it is not native authority.
+
+Input actions retain the `key_down`/`key_up` forms and also accept a `click` with
+capture-pixel `x`, `y`, and `left`/`right`/`middle` button. Native sequences balance
+their keys, charge expanded events against finite authority, and preserve actual
+SDK receipt/cleanup outcomes. The TypeScript SDK describes these action variants
+and optional native receipt facts. See the [native contract](runtime-native.md#native-target-selection-and-finite-authority).
 
 ## Containment and measurements
 
