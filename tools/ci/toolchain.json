@@ -11,6 +11,10 @@
     "actions/setup-node": {
       "version": "v6.5.0",
       "sha": "249970729cb0ef3589644e2896645e5dc5ba9c38"
+    },
+    "actions/upload-artifact": {
+      "version": "v7.0.1",
+      "sha": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
     }
   },
   "tools": {

@@ -57,6 +57,7 @@ The version and integrity sources are:
 | Node.js | 24.18.0 | [check.py](../tools/ci/check.py) and [workflow](../.github/workflows/ci.yml) |
 | TypeScript | 5.9.3 | [Compiler manifest](../tools/runtime-comparison/compiler/package.json) and [lockfile](../tools/runtime-comparison/compiler/package-lock.json) |
 | GitHub Actions | Full commit SHAs | [Workflow](../.github/workflows/ci.yml) and [toolchain.json](../tools/ci/toolchain.json) |
+| actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
 CI uses Python 3.13, `ubuntu-24.04`, `macos-15`, and `windows-2025`. The macOS job
 prints and requires `arm64`; runtime checks also print their actual host identity.
@@ -119,6 +120,47 @@ Hosted Windows enables Git symlink checkout before fetching the repository.
 The two narrower modes are mutually exclusive. Missing tools, invalid input,
 or failing commands remain failures; neither mode substitutes for the full gate.
 These checks do not install remote rulesets or verify live GitHub enforcement.
+
+## Controlled results and concise logs
+
+Both the full check and `--runtime-only` capture the controlled `check` command's
+complete stdout and stderr in the original checkout, outside the disposable
+tracked-file snapshot:
+
+| File | Contents |
+| --- | --- |
+| `.cache/repository-ci/runtime-results/runtime-results.json` | Full controlled command stdout, normally JSON case results |
+| `.cache/repository-ci/runtime-results/runtime-stderr.log` | Full controlled command stderr |
+
+The console shows total, passed, and failed case counts and the evidence
+location instead of the raw JSON. Failure output includes bounded case IDs,
+reasons, and critical diagnostics; use the saved files for the complete output.
+Malformed or truncated JSON and nonzero command exits remain failures, with
+their raw output preserved. Missing results cannot pass. Each runtime invocation
+replaces earlier evidence so a failed attempt cannot reuse a previous result.
+`--policy-only` does not run the controlled command or produce fresh runtime
+evidence; any files from an earlier runtime invocation are not policy-only
+evidence.
+
+The Linux, macOS arm64, and Windows jobs each attempt an artifact upload after
+the controlled check with `always()`, including when an earlier step fails.
+Artifacts are named `controlled-runtime-${{ runner.os }}-${{ runner.arch }}` and
+retained for **7 days**. Downloads contain only `runtime-results.json` and
+`runtime-stderr.log`. Hidden-file inclusion is explicit because their source
+paths are under `.cache`; no directory, private planning files, or native
+evidence is uploaded.
+
+If an earlier prerequisite fails before evidence exists, the upload warns about
+missing files without replacing the original failure. It does not make the
+runtime job or mandatory gate pass. Other upload failures remain job failures.
+These artifacts contain controlled results, not native qualification evidence;
+artifact upload grants no native capture, OCR, game-launch, or input authority.
+
+Retrieve the short-lived GitHub artifacts only when an investigation needs them.
+Do not duplicate raw CI logs, JSON, or artifact ZIPs into private Rasen evidence,
+and do not commit raw output to either the product or planning repository.
+Record concise findings and the workflow run/artifact reference instead. This
+retention policy does not remove historical evidence.
 
 ## Direct controlled commands
 

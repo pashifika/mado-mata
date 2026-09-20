@@ -191,8 +191,20 @@ def check_workflow_hygiene(workflow, pins, label):
         for step in steps:
             require(isinstance(step, dict), f"{where}: each step must be an object")
             require(("uses" in step) != ("run" in step), f"{where}: step must have exactly one of uses or run")
-            require("continue-on-error" not in step and "if" not in step,
-                    f"{where}: mandatory steps cannot be skipped or ignore failures")
+            runtime_upload = (
+                label == "ci.yml" and name in {"repository", "runtime-macos", "runtime-windows"}
+                and isinstance(step.get("uses"), str)
+                and step["uses"].startswith("actions/upload-artifact@")
+            )
+            require("continue-on-error" not in step,
+                    f"{where}: mandatory steps cannot ignore failures")
+            if runtime_upload:
+                require(step.get("if") in ("${{ always() }}", "always()"),
+                        f"{where}: controlled evidence upload must run with always()")
+                require("actions/upload-artifact" in pins,
+                        f"{where}: controlled evidence upload must have a manifest pin")
+            else:
+                require("if" not in step, f"{where}: mandatory steps cannot be skipped")
             require("working-directory" not in step, f"{where}: public commands must run from the checkout root")
             if "uses" in step:
                 uses = step["uses"]
@@ -276,7 +288,21 @@ def check_ci_workflow(workflow, pins):
             require(len(setup) == 1 and setup[0].get("with") == settings,
                     f"ci.yml/{name}: {action} must install the pinned tool without implicit caching")
         check_index = next(index for index, step in enumerate(steps) if "tools/ci/check.py" in step.get("run", ""))
-        require(all(index < check_index for index, step in enumerate(steps) if "uses" in step),
+        uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
+        require(len(uploads) == 1 and steps[check_index + 1:] == uploads,
+                f"ci.yml/{name}: exactly one controlled evidence upload must immediately follow checks")
+        require(uploads[0].get("with") == {
+            "name": "controlled-runtime-${{ runner.os }}-${{ runner.arch }}",
+            "path": (
+                ".cache/repository-ci/runtime-results/runtime-results.json\n"
+                ".cache/repository-ci/runtime-results/runtime-stderr.log\n"
+            ),
+            "retention-days": 7,
+            "include-hidden-files": True,
+            "if-no-files-found": "warn",
+        }, f"ci.yml/{name}: upload only the two controlled evidence files with bounded retention")
+        require(all(index < check_index for index, step in enumerate(steps)
+                    if "uses" in step and step not in uploads),
                 f"ci.yml/{name}: checkout and tool setup must precede checks")
     windows = jobs["runtime-windows"]["steps"]
     require(windows[0].get("run") == "git config --global core.symlinks true",
