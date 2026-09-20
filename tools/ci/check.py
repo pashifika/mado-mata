@@ -1,7 +1,9 @@
-"""Run tracked repository policy, behavior fixtures, and pinned offline checks."""
+"""Run tracked repository governance and the controlled runtime comparison."""
 
 import argparse
+import json
 import os
+import platform
 from pathlib import Path
 import shutil
 import subprocess
@@ -9,6 +11,14 @@ import sys
 import tempfile
 
 from tooling import ROOT, host_platform, installed_tool, load_manifest
+
+RUST_VERSION = "1.97.1"
+NODE_VERSION = "24.18.0"
+RUNTIME_ROOT = Path("tools/runtime-comparison")
+RUNTIME_RESULTS = Path(".cache/repository-ci/runtime-results")
+FAILURE_ROW_LIMIT = 10
+FIELD_TEXT_LIMIT = 240
+DIAGNOSTIC_BYTES = 4096
 
 
 def copy_tracked(root, destination, paths):
@@ -39,14 +49,143 @@ def run(command, root):
     subprocess.run(command, cwd=root, check=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
 
 
+def bounded_text(value, limit=FIELD_TEXT_LIMIT, *, tail=False):
+    """Keep report text on one bounded console line, including control characters."""
+    if not isinstance(value, str):
+        return f"<{type(value).__name__}>"
+    fragment = value[-limit:] if tail else value[:limit]
+    escaped = json.dumps(fragment, ensure_ascii=True)[1:-1]
+    omitted = "..." if len(value) > limit or len(escaped) > limit else ""
+    return omitted + escaped[-limit:] if tail else escaped[:limit] + omitted
+
+
+def print_diagnostic_excerpt(path, label):
+    """Show both ends of a diagnostic stream without reading it all into memory."""
+    size = path.stat().st_size
+    if not size:
+        return
+    half = DIAGNOSTIC_BYTES // 2
+    with path.open("rb") as source:
+        print(f"{label}: {bounded_text(source.read(half).decode('utf-8', errors='replace'), half)}", file=sys.stderr)
+        if size > half:
+            if size > DIAGNOSTIC_BYTES:
+                print(f"{label}: ... {size - DIAGNOSTIC_BYTES} bytes omitted ...", file=sys.stderr)
+                source.seek(-half, os.SEEK_END)
+            print(f"{label}: {bounded_text(source.read(half).decode('utf-8', errors='replace'), half, tail=True)}", file=sys.stderr)
+
+
+def read_runtime_report(path):
+    from policy import unique_mapping
+
+    def reject_constant(value):
+        raise ValueError(f"invalid JSON number: {value}")
+
+    report = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_mapping, parse_constant=reject_constant)
+    if not isinstance(report, dict) or type(report.get("version")) is not int or report["version"] != 1:
+        raise ValueError("runtime report must be a version-1 object")
+    if type(report.get("check_passed")) is not bool:
+        raise ValueError("runtime report must contain boolean check_passed")
+    rows = report.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("runtime report must contain a nonempty rows array")
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            raise ValueError(f"runtime report row {index} must contain a nonempty string id")
+        if row.get("status") not in ("PASS", "FAIL", "BLOCKED", "UNEXECUTED", "NOT_APPLICABLE"):
+            raise ValueError(f"runtime report row {index} has an invalid status")
+    return report
+
+
+def run_runtime_check(command, root, results_directory):
+    """Retain byte-exact controlled evidence outside the disposable tracked tree."""
+    results_directory.mkdir(parents=True, exist_ok=True)
+    results_path = results_directory / "runtime-results.json"
+    stderr_path = results_directory / "runtime-stderr.log"
+    print("Running: " + " ".join(str(part) for part in command), flush=True)
+    print(f"Controlled runtime evidence: {results_path} ; {stderr_path}", flush=True)
+    # Open both streams before starting the command so a failed launch cannot
+    # reuse a previous invocation's report or diagnostics.
+    with results_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        result = subprocess.run(command, cwd=root, stdout=stdout, stderr=stderr, check=False,
+                                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    report = None
+    try:
+        report = read_runtime_report(results_path)
+    except (OSError, ValueError, RecursionError) as error:
+        print(f"Invalid controlled runtime report: {bounded_text(str(error))}", file=sys.stderr)
+        print_diagnostic_excerpt(results_path, "Runtime stdout")
+    failed = 0
+    if report is not None:
+        rows = report["rows"]
+        failed = sum(row["status"] != "PASS" for row in rows)
+        print(f"Controlled runtime: total={len(rows)} pass={len(rows) - failed} fail={failed} "
+              f"check_passed={str(report['check_passed']).lower()}", flush=True)
+        shown = 0
+        for row in rows:
+            if row["status"] == "PASS":
+                continue
+            fields = [f"id={bounded_text(row['id'])}", f"status={row['status']}"]
+            for name in ("reason", "oracle", "entry_outcome"):
+                if row.get(name) is not None:
+                    fields.append(f"{name}={bounded_text(row[name])}")
+            primary = row.get("primary")
+            if isinstance(primary, dict):
+                for name in ("category", "message"):
+                    if primary.get(name) is not None:
+                        fields.append(f"primary.{name}={bounded_text(primary[name])}")
+                context = primary.get("context")
+                if isinstance(context, dict) and context.get("stage") is not None:
+                    fields.append(f"stage={bounded_text(context['stage'])}")
+            print("Runtime failure: " + " ; ".join(fields), file=sys.stderr)
+            shown += 1
+            if shown == FAILURE_ROW_LIMIT:
+                break
+        if failed > shown:
+            print(f"Runtime failures: {failed - shown} additional rows retained in {results_path}", file=sys.stderr)
+    if result.returncode or report is None or not report["check_passed"] or failed:
+        print_diagnostic_excerpt(stderr_path, "Runtime stderr")
+        if result.returncode:
+            # Do not attach raw stderr: main's generic command handler prints it.
+            raise subprocess.CalledProcessError(result.returncode, command)
+        raise ValueError("controlled runtime check failed; see retained evidence")
+
+
+def check_runtime(root, results_directory):
+    """Build and exercise the public, non-native executable and trusted compiler."""
+    print(f"Controlled runtime host: {platform.platform()} ({platform.machine()})", flush=True)
+    node = shutil.which("node")
+    npm = shutil.which("npm")
+    if node is None or npm is None:
+        raise ValueError(f"install Node.js {NODE_VERSION} with its bundled npm")
+    version = subprocess.run([node, "--version"], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+    if version != f"v{NODE_VERSION}":
+        raise ValueError(f"Node.js {NODE_VERSION} is required; found {version!r}")
+    compiler = root / RUNTIME_ROOT / "compiler"
+    run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], compiler)
+    run([node, "compile.mjs", "--self-check"], compiler)
+    cargo = ["cargo", f"+{RUST_VERSION}"]
+    manifest = ["--locked", "--manifest-path", RUNTIME_ROOT / "Cargo.toml"]
+    run([*cargo, "build", *manifest], root)
+    run([*cargo, "test", *manifest], root)
+    run_runtime_check([*cargo, "run", *manifest, "--", "check"], root, results_directory)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--policy-only", action="store_true", help="run policy and behavior fixtures without native tools")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--policy-only", action="store_true", help="governance policy and its tests only; no runtime or external tools")
+    modes.add_argument("--runtime-only", action="store_true", help="policy, its tests, and controlled runtime; omit actionlint and lychee")
     args = parser.parse_args()
     if sys.version_info < (3, 11):
         print("Repository checks require Python 3.11 or newer.", file=sys.stderr)
         return 1
     try:
+        results_directory = ROOT / RUNTIME_RESULTS
+        if not args.policy_only:
+            # Clear old evidence even if policy, dependencies, or the build fail
+            # before the runtime command starts.
+            for name in ("runtime-results.json", "runtime-stderr.log"):
+                (results_directory / name).unlink(missing_ok=True)
         try:
             from policy import check_paths, check_repository, tracked_files
         except ModuleNotFoundError as error:
@@ -64,7 +203,7 @@ def main():
             check_repository(snapshot, paths, manifest)
             print("Tracked repository policy passed.", flush=True)
             run([sys.executable, "-B", "-m", "unittest", "discover", "-s", "tools/ci", "-p", "test_*.py"], snapshot)
-            if not args.policy_only:
+            if not args.policy_only and not args.runtime_only:
                 host = host_platform()
                 tools = {name: installed_tool(name, pin, host) for name, pin in manifest["tools"].items()}
                 # Explicit empty configs and an isolated tracked-only tree prevent
@@ -78,11 +217,18 @@ def main():
                 run([tools["actionlint"], "-shellcheck=", "-pyflakes=", "-config-file", actionlint_config, *workflows], snapshot)
                 run([tools["lychee"], "--offline", "--include-fragments", "--no-progress", "--no-ignore", "--hidden",
                      "--config", lychee_config, "--root-dir", snapshot, "--", *markdown], snapshot)
-        print("Repository checks passed (policy only)." if args.policy_only else "Repository checks passed (policy, fixtures, actionlint, offline local links).")
+            if not args.policy_only:
+                check_runtime(snapshot, results_directory)
+        if args.policy_only:
+            print("Repository checks passed (policy and governance tests only; runtime and external tools unexecuted).")
+        elif args.runtime_only:
+            print("Repository checks passed (policy, governance tests, controlled runtime; actionlint and lychee unexecuted).")
+        else:
+            print("Repository checks passed (policy, governance tests, actionlint, offline local links, controlled runtime).")
     except subprocess.CalledProcessError as error:
         print(f"Repository checks failed: command exited {error.returncode}", file=sys.stderr)
         if error.stderr:
-            print(error.stderr.decode("utf-8", errors="replace"), file=sys.stderr)
+            print(error.stderr if isinstance(error.stderr, str) else error.stderr.decode("utf-8", errors="replace"), file=sys.stderr)
         return 1
     except (OSError, ValueError, RecursionError) as error:
         print(f"Repository checks failed: {error}", file=sys.stderr)

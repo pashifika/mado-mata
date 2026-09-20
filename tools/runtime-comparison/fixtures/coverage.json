@@ -1,0 +1,2923 @@
+[
+  {
+    "id": "controlled-script-loading/authoring-files-change-after-the-snapshot",
+    "capability": "controlled-script-loading",
+    "requirement": "Immutable execution inventory",
+    "scenario": "Authoring files change after the snapshot",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the active run and its controlled fresh attempts SHALL continue using the captured content, while a later explicit run SHALL construct and validate its own inventory rather than silently change the active run",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-immutable-snapshot"
+      ],
+      "lua": [
+        "lua-immutable-snapshot"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/a-required-asset-is-unavailable",
+    "capability": "controlled-script-loading",
+    "requirement": "Immutable execution inventory",
+    "scenario": "A required asset is unavailable",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "preflight SHALL identify the asset and failure and SHALL NOT evaluate package code or open ordinary input admission",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "inventory-missing-asset"
+      ],
+      "lua": [
+        "inventory-missing-asset"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/a-destination-escapes-or-ambiguously-names-the-inventory",
+    "capability": "controlled-script-loading",
+    "requirement": "Portable normalized inventory names",
+    "scenario": "A destination escapes or ambiguously names the inventory",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "snapshot construction SHALL reject the conflicting or unsafe entries with their names and reason before package evaluation and input admission",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "inventory-case-collision",
+        "inventory-hardlink",
+        "inventory-symlink",
+        "inventory-manifest-traversal",
+        "resolver-refusal-0",
+        "resolver-refusal-1",
+        "resolver-refusal-2",
+        "resolver-refusal-3",
+        "resolver-refusal-4",
+        "resolver-refusal-5",
+        "resolver-refusal-6",
+        "resolver-refusal-7",
+        "resolver-refusal-8",
+        "resolver-refusal-9"
+      ],
+      "lua": [
+        "inventory-case-collision",
+        "inventory-hardlink",
+        "inventory-symlink",
+        "inventory-manifest-traversal",
+        "resolver-refusal-0",
+        "resolver-refusal-1",
+        "resolver-refusal-2",
+        "resolver-refusal-3",
+        "resolver-refusal-4",
+        "resolver-refusal-5",
+        "resolver-refusal-6",
+        "resolver-refusal-7",
+        "resolver-refusal-8",
+        "resolver-refusal-9"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/an-ambient-file-could-satisfy-a-missing-import",
+    "capability": "controlled-script-loading",
+    "requirement": "Portable normalized inventory names",
+    "scenario": "An ambient file could satisfy a missing import",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "resolution SHALL fail against the captured inventory and SHALL NOT load the ambient file",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-ambient-file-refusal",
+        "javascript-ambient-package-refusal"
+      ],
+      "lua": [
+        "lua-ambient-file-refusal"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/a-package-attempts-to-approve-its-own-helper",
+    "capability": "controlled-script-loading",
+    "requirement": "Application-approved dependency closure",
+    "scenario": "A package attempts to approve its own helper",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "preflight SHALL refuse the dependency regardless of package metadata or profile values, and SHALL NOT install or evaluate it",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "inventory-self-approval",
+        "inventory-helper-version"
+      ],
+      "lua": [
+        "inventory-self-approval",
+        "inventory-helper-version"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/an-approved-helper-s-dependency-is-unavailable",
+    "capability": "controlled-script-loading",
+    "requirement": "Application-approved dependency closure",
+    "scenario": "An approved helper's dependency is unavailable",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "preflight SHALL report the requesting helper, dependency, required identity, and refusal reason without selecting an ambient or differently versioned substitute",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "inventory-helper-version"
+      ],
+      "lua": [
+        "inventory-helper-version"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/a-computed-name-selects-an-approved-inventory-member",
+    "capability": "controlled-script-loading",
+    "requirement": "One resolver for every import route",
+    "scenario": "A computed name selects an approved inventory member",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the loader SHALL resolve the captured module under the same identity and policy used by static resolution, without consulting an external search path",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-module-cache"
+      ],
+      "lua": [
+        "lua-module-cache"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/a-transitive-static-import-violates-policy",
+    "capability": "controlled-script-loading",
+    "requirement": "One resolver for every import route",
+    "scenario": "A transitive static import violates policy",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "preflight SHALL reject the dependency chain before ordinary input admission and SHALL identify the requesting module, original specifier, normalized destination when available, and refusal reason",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-static-import-refusal"
+      ],
+      "lua": [
+        "lua-static-import-refusal"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/a-statically-discoverable-defect-blocks-execution",
+    "capability": "controlled-script-loading",
+    "requirement": "Mandatory preflight before ordinary input admission",
+    "scenario": "A statically discoverable defect blocks execution",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the host SHALL report the specific preflight stage and cause and SHALL NOT begin readiness, workflow, or ordinary input admission",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-syntax-error",
+        "javascript-static-import-refusal"
+      ],
+      "lua": [
+        "lua-syntax-error",
+        "lua-static-import-refusal"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/module-top-level-code-requests-input",
+    "capability": "controlled-script-loading",
+    "requirement": "Mandatory preflight before ordinary input admission",
+    "scenario": "Module top-level code requests input",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the guarded host SHALL refuse the action without dispatch, and module evaluation SHALL NOT bypass preflight or grant itself input authority",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-top-level-input"
+      ],
+      "lua": [
+        "lua-top-level-input"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/an-entry-declaration-is-missing",
+    "capability": "controlled-script-loading",
+    "requirement": "Declared entries are present and callable",
+    "scenario": "An entry declaration is missing",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "preflight SHALL report the affected entry and SHALL NOT invoke package readiness or workflow",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-missing-readiness-declaration",
+        "javascript-missing-workflow-declaration"
+      ],
+      "lua": [
+        "lua-missing-readiness-declaration",
+        "lua-missing-workflow-declaration"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/an-entry-resolves-to-a-non-callable-value",
+    "capability": "controlled-script-loading",
+    "requirement": "Declared entries are present and callable",
+    "scenario": "An entry resolves to a non-callable value",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the host SHALL report that entry's resolved module/function identity and actual value kind, SHALL NOT invoke readiness or workflow, and SHALL keep ordinary input admission closed",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-noncallable-entry"
+      ],
+      "lua": [
+        "lua-noncallable-entry"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/the-script-catches-a-computed-import-refusal",
+    "capability": "controlled-script-loading",
+    "requirement": "Runtime-only import refusal latches host failure",
+    "scenario": "The script catches a computed import refusal",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the requested module SHALL not have evaluated, the attempt SHALL retain the host-owned loading failure, and the later ordinary action SHALL be refused despite the caught language error",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-computed-refusal"
+      ],
+      "lua": [
+        "lua-computed-refusal"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/the-refusal-follows-an-accepted-action",
+    "capability": "controlled-script-loading",
+    "requirement": "Runtime-only import refusal latches host failure",
+    "scenario": "The refusal follows an accepted action",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the host SHALL close further ordinary admission while retaining the earlier sequence's receipt and cleanup obligations, and SHALL NOT claim that refusal undid the application's effects or automatically replay the sequence",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-computed-import-refusal"
+      ],
+      "lua": [
+        "lua-computed-import-refusal"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/repeated-imports-share-one-current-instance",
+    "capability": "controlled-script-loading",
+    "requirement": "Attempt-local module caches and documented cycles",
+    "scenario": "Repeated imports share one current instance",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the other helper SHALL observe the same module instance according to the selected language's documented semantics, without evaluating a second instance solely because of spelling",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-module-cache"
+      ],
+      "lua": [
+        "lua-module-cache"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/a-fresh-attempt-does-not-retain-evaluated-module-state",
+    "capability": "controlled-script-loading",
+    "requirement": "Attempt-local module caches and documented cycles",
+    "scenario": "A fresh attempt does not retain evaluated module state",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the new attempt SHALL observe freshly evaluated initial state from the unchanged run inventory rather than the previous module instance",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-module-cache",
+        "javascript-module-cache-rerun"
+      ],
+      "lua": [
+        "lua-module-cache",
+        "lua-module-cache-rerun"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/modules-form-an-import-cycle",
+    "capability": "controlled-script-loading",
+    "requirement": "Attempt-local module caches and documented cycles",
+    "scenario": "Modules form an import cycle",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "a supported cycle SHALL produce the declared language-semantic result, while an unsupported or invalid cycle SHALL fail within the loading bound with the import chain; neither outcome SHALL be replaced by an empty module or an unbounded wait",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-module-cycle"
+      ],
+      "lua": [
+        "lua-module-cycle"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/a-secondary-lua-loader-is-attempted",
+    "capability": "controlled-script-loading",
+    "requirement": "No unrestricted language loading or ambient capabilities",
+    "scenario": "A secondary Lua loader is attempted",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the route SHALL be unavailable or controlled so the forbidden code never evaluates and native loading never occurs; a runtime loader refusal SHALL latch the loading failure rather than allow a catch-and-continue input bypass",
+    "candidates": [
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "lua": [
+        "lua-secondary-loader-refusal"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/generated-javascript-requests-a-broader-import",
+    "capability": "controlled-script-loading",
+    "requirement": "No unrestricted language loading or ambient capabilities",
+    "scenario": "Generated JavaScript requests a broader import",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the same runtime refusal policy SHALL apply before the requested module evaluates, without granting ambient Node.js or filesystem authority to generated code",
+    "candidates": [
+      "javascript"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "typescript-generated-import-refusal"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/an-ambient-type-or-generated-helper-is-requested",
+    "capability": "controlled-script-loading",
+    "requirement": "Trusted and inventory-bound TypeScript compilation",
+    "scenario": "An ambient type or generated helper is requested",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the compiler SHALL report the unresolved or forbidden dependency before input admission and SHALL NOT load, install, or silently substitute the ambient content",
+    "candidates": [
+      "javascript"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "typescript-ambient-type-refusal",
+        "typescript-type-only-refusal",
+        "typescript-generated-helper-refusal"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/a-package-asks-the-compiler-to-execute-a-plugin",
+    "capability": "controlled-script-loading",
+    "requirement": "Trusted and inventory-bound TypeScript compilation",
+    "scenario": "A package asks the compiler to execute a plugin",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "preflight SHALL refuse the request with its configuration origin and SHALL NOT execute the requested code",
+    "candidates": [
+      "javascript"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "typescript-plugin-manifest-refusal"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/bundling-could-conceal-a-forbidden-dependency",
+    "capability": "controlled-script-loading",
+    "requirement": "Trusted and inventory-bound TypeScript compilation",
+    "scenario": "Bundling could conceal a forbidden dependency",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the controlled resolver SHALL reject it before inlining and input admission, retaining the requesting module and dependency chain in the diagnostic",
+    "candidates": [
+      "javascript"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "typescript-original-dependency-refusal"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/an-internal-or-approved-helper-raises-an-error",
+    "capability": "controlled-script-loading",
+    "requirement": "Original-source and native-cause diagnostics",
+    "scenario": "An internal or approved helper raises an error",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the diagnostic SHALL identify the originating helper and caller stack with original source locations, and SHALL include the approved version and content identity when that helper came from the application catalog",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-helper-error",
+        "javascript-approved-helper-diagnostic-clean",
+        "javascript-approved-helper-diagnostic-incomplete",
+        "typescript-approved-helper-diagnostic-clean",
+        "typescript-approved-helper-diagnostic-incomplete"
+      ],
+      "lua": [
+        "lua-helper-error",
+        "lua-approved-helper-diagnostic-clean",
+        "lua-approved-helper-diagnostic-incomplete"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/compiled-typescript-fails-inside-a-helper",
+    "capability": "controlled-script-loading",
+    "requirement": "Original-source and native-cause diagnostics",
+    "scenario": "Compiled TypeScript fails inside a helper",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "the diagnostic SHALL retain the generated location and identify the original TypeScript module, function, and line rather than point only to generated output",
+    "candidates": [
+      "javascript"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "typescript-helper-diagnostic",
+        "typescript-compiler-helper-diagnostic",
+        "typescript-source-mapping-captured-source",
+        "typescript-source-mapping-missing-map",
+        "typescript-source-mapping-changed-source",
+        "typescript-source-mapping-ambiguous-line",
+        "typescript-source-mapping-unmapped-span",
+        "typescript-source-mapping-backward-column",
+        "typescript-source-mapping-message-not-frame"
+      ]
+    }
+  },
+  {
+    "id": "controlled-script-loading/a-host-operation-returns-a-native-failure",
+    "capability": "controlled-script-loading",
+    "requirement": "Original-source and native-cause diagnostics",
+    "scenario": "A host operation returns a native failure",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the diagnostic SHALL retain the original script call site, typed host category, native cause, operation identity, and relevant target/observation identities rather than expose only a generic language exception or empty recognition result",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/comparable-builds-have-identifiable-dependencies",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Revision-pinned comparison environment",
+    "scenario": "Comparable builds have identifiable dependencies",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "its evidence SHALL identify the exact engine revision, runtime and compiler versions, features, build mode, and dependency inventory before samples are collected",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/engine-source-changes-during-comparison",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Revision-pinned comparison environment",
+    "scenario": "Engine source changes during comparison",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "it SHALL receive a distinct configuration identity, affected evidence SHALL be reverified, and results SHALL NOT be combined as if they came from the earlier build",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/authorized-target-receives-a-bounded-action",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Explicit finite native execution authority",
+    "scenario": "Authorized target receives a bounded action",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the harness SHALL bind that lifetime, execute only the approved route and bounded actions, and retain the authorization and effective configuration identity with the evidence",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/native-authority-or-target-is-unavailable",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Explicit finite native execution authority",
+    "scenario": "Native authority or target is unavailable",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the affected native case SHALL be `BLOCKED` with the missing prerequisite, and the harness SHALL NOT choose another process, infer permission, or substitute controlled evidence for a native pass",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/an-execution-limit-is-reached",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Explicit finite native execution authority",
+    "scenario": "An execution limit is reached",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the host SHALL refuse further ordinary activity, begin the applicable stop and cleanup path, and preserve the limit and cleanup outcomes without extending authority automatically",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/required-native-configuration-is-valid",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Explicit OCR and native dependency validation",
+    "scenario": "Required native configuration is valid",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "each candidate SHALL use that same effective configuration on the OS, record its identity, and reuse compatible initialized resources without per-call model initialization",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/ocr-prerequisites-fail-validation",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Explicit OCR and native dependency validation",
+    "scenario": "OCR prerequisites fail validation",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "preflight SHALL report the specific category before input starts, the unmet prerequisite SHALL remain visible in the evidence, and the host SHALL NOT silently use another model, provider, runtime, or ambient library path",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/stored-native-paths-change-content-within-a-run",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Explicit OCR and native dependency validation",
+    "scenario": "Stored native paths change content within a run",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the host SHALL preserve the originally validated resources where their lifetime remains valid or refuse incompatible reuse and require a new run, rather than treating the changed files as the original configuration",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/child-native-loading-fails-before-its-host-starts",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Explicit OCR and native dependency validation",
+    "scenario": "Child native loading fails before its host starts",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the supervisor SHALL record the child-startup stage, exit outcome, and available loader diagnostic, and dependent host/native scenarios SHALL remain `BLOCKED` rather than be reported as completed",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/the-shared-executable-cannot-start-its-supervisor",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Explicit OCR and native dependency validation",
+    "scenario": "The shared executable cannot start its supervisor",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the documented outer invocation procedure SHALL retain the observed exit and loader diagnostic, and the report SHALL mark dependent cases `BLOCKED` without requiring the unavailable application to self-report or claiming a completed scenario",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/required-native-permission-is-denied-or-revoked",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Platform permission and route refusals remain visible",
+    "scenario": "Required native permission is denied or revoked",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the harness SHALL expose the platform refusal, prevent disallowed ordinary input, retain any cleanup outcome, and identify the executable and permission involved",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/configured-route-cannot-act-on-the-target",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Platform permission and route refusals remain visible",
+    "scenario": "Configured route cannot act on the target",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the result SHALL preserve the typed refusal without trying a more intrusive route, elevating privileges, or treating an accepted script call as delivered native input",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/controlled-sink-records-ordered-effects",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Evidence lanes have distinct claims",
+    "scenario": "Controlled sink records ordered effects",
+    "lanes": [
+      "controlled"
+    ],
+    "oracle": "accepted order and controlled effects SHALL be attributable to the controlled lane only, with no native-input pass inferred from them",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-template-first",
+        "javascript-ocr-first",
+        "queue-overflow-and-order"
+      ],
+      "lua": [
+        "lua-template-first",
+        "lua-ocr-first",
+        "queue-overflow-and-order"
+      ]
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/replay-recognizes-a-recorded-observation",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Evidence lanes have distinct claims",
+    "scenario": "Replay recognizes a recorded observation",
+    "lanes": [
+      "replay"
+    ],
+    "oracle": "results SHALL identify the recorded frame and engine configuration, and the evidence SHALL state that replay does not establish native capture, real input delivery, focus behavior, or game response",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "replay_checks": {
+      "javascript": [
+        "javascript-recorded-real-replay",
+        "typescript-recorded-real-replay",
+        "rust-recorded-real-replay"
+      ],
+      "lua": [
+        "lua-recorded-real-replay",
+        "rust-recorded-real-replay"
+      ]
+    },
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/native-effect-is-observed",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Evidence lanes have distinct claims",
+    "scenario": "Native effect is observed",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "evidence SHALL retain the submission receipt separately from an accepted frame strictly newer than the pre-input checkpoint and the workload's postcondition result, without treating frame freshness alone as proof of causation",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/native-readiness-and-workflow-succeed",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Native host cases cover the selected integration",
+    "scenario": "Native readiness and workflow succeed",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the native workload SHALL exercise capture, recognition, ordered input, and the declared visible postcondition with attributable receipts, frame identities, and clean or explicitly incomplete resource outcomes",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/native-readiness-or-host-operation-fails",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Native host cases cover the selected integration",
+    "scenario": "Native readiness or host operation fails",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the result SHALL preserve the distinct typed outcome and cleanup facts, and a readiness failure SHALL prevent workflow entry rather than being converted into an empty success value",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/native-os-lifecycle-evidence-uses-controlled-transitions",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Native host cases cover the selected integration",
+    "scenario": "Native OS lifecycle evidence uses controlled transitions",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "it SHALL record admission, ownership, and terminal outcomes for the actual OS execution while distinguishing the controlled transition from production game launch, login, or recovery functionality",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/a-measured-comparison-is-attributable",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Comparable measurements use predeclared budgets",
+    "scenario": "A measured comparison is attributable",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "each result SHALL include startup, host-call and workflow latency, separate stop-receipt/admission/cleanup timings, CPU, peak and steady process RSS, VM memory, native and attempt-owned counts, and the fixed sampling metadata",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/memory-measurements-use-separate-ownership-domains",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Comparable measurements use predeclared budgets",
+    "scenario": "Memory measurements use separate ownership domains",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "it SHALL report supervisor and child process accounting with its aggregation method, distinguish VM accounting and allocator limitations from Rust/native allocations, and compare live-owner trends and RSS independently against their declared bounds",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/tail-samples-or-metrics-are-insufficient",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Comparable measurements use predeclared budgets",
+    "scenario": "Tail samples or metrics are insufficient",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the report SHALL withhold unsupported p50, p95, or p99 claims as applicable, state the sample or instrumentation limitation, and leave the affected budget result non-passing rather than deriving a pass from missing data",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/a-real-input-sample-has-an-uncertain-result",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Comparable measurements use predeclared budgets",
+    "scenario": "A real-input sample has an uncertain result",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the harness SHALL preserve that sample and SHALL NOT rerun its input automatically; any new sample SHALL require a verified usable starting state and fresh execution authority within the declared methodology",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/native-access-is-absent",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Exhaustive result rows preserve non-passing evidence",
+    "scenario": "Native access is absent",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the row SHALL be `BLOCKED` with the missing prerequisite; a case not yet attempted despite available prerequisites SHALL instead be `UNEXECUTED`, and neither status SHALL count as a pass",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/candidate-specific-scheduling-mechanism-is-absent",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Exhaustive result rows preserve non-passing evidence",
+    "scenario": "Candidate-specific scheduling mechanism is absent",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the feature-specific row SHALL explain `NOT_APPLICABLE`, while the candidate SHALL still supply required compute interruption, cancellation, detached-work ownership, and ordinary-admission evidence through the mechanisms it actually exposes",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/a-failed-candidate-is-rejected",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Exhaustive result rows preserve non-passing evidence",
+    "scenario": "A failed candidate is rejected",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the report SHALL retain that candidate's exercised failures and all remaining rows with honest statuses and reasons, rather than omitting the candidate or relabeling unexecuted requirements as nonfeatures",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/a-candidate-satisfies-the-adoption-gate",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Runtime recommendation is gated independently of artifact readiness",
+    "scenario": "A candidate satisfies the adoption gate",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the report SHALL propose `Adopt(candidate)` with traceable selection rationale and retain the other candidate's results and rejection or comparison rationale",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/native-evidence-is-blocked-on-one-os",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Runtime recommendation is gated independently of artifact readiness",
+    "scenario": "Native evidence is blocked on one OS",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the report SHALL state artifact readiness separately, return `Blocked(reason)`, and label any continued product prototyping provisional without promoting a winner or claiming completed native validation",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/m0-recommendation-precedes-product-implementation",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Runtime recommendation is gated independently of artifact readiness",
+    "scenario": "M0 recommendation precedes product implementation",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "it SHALL identify the recommendation as a future production-runtime choice, exclude claims that desktop packaging, full startup/login/recovery, or additional-OS application support are delivered, and allow losing adapters to remain only in the comparison tool rather than as a multi-runtime product requirement",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/a-reproducible-engine-defect-is-identified",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Engine defects use linked repair and reverification",
+    "scenario": "A reproducible engine defect is identified",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the evidence SHALL link the responsible engine Change and retain the failed row, rather than narrowing the requirement, changing the route, or treating the defect as a passing runtime limitation",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/an-engine-repair-is-verified",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Engine defects use linked repair and reverification",
+    "scenario": "An engine repair is verified",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the comparison SHALL record the verified source revision and fresh scenario evidence, retain the historical failure, and reevaluate affected budget and adoption results against that revision",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/a-repair-remains-unresolved",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Engine defects use linked repair and reverification",
+    "scenario": "A repair remains unresolved",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the linked Change and affected `FAIL` or `BLOCKED` evidence SHALL remain visible, and unaffected work SHALL NOT convert the unresolved contract into an adoption pass",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/native-evidence-contains-private-data",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Public evidence is sanitized without erasing failures",
+    "scenario": "Native evidence contains private data",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the committed report SHALL use sanitized labels and evidence references while retaining the private originals under the declared evidence policy, without publishing sensitive content",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "native-validation-and-runtime-decision/a-failing-attempt-exceeds-ordinary-log-capacity",
+    "capability": "native-validation-and-runtime-decision",
+    "requirement": "Public evidence is sanitized without erasing failures",
+    "scenario": "A failing attempt exceeds ordinary log capacity",
+    "lanes": [
+      "native"
+    ],
+    "oracle": "the retained record SHALL identify dropped detail and preserve the terminal outcome, configuration identity, failure reason, and available private evidence reference rather than omitting the attempt from the report",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [],
+      "lua": []
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/attempt-starts-with-interruption-installed",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Owned execution and independent control",
+    "scenario": "Attempt starts with interruption installed",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "Stop SHALL reach the installed interruption mechanism without waiting for module initialization to return, and ordinary host admission SHALL close within the predeclared bound",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-top-level-stop"
+      ],
+      "lua": [
+        "lua-top-level-stop"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/busy-worker-does-not-block-control",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Owned execution and independent control",
+    "scenario": "Busy worker does not block control",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the supervisor SHALL remain able to request Stop, observe admission closure, and enforce the cleanup or containment deadline without acquiring that lock",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "nonreturning-work-containment"
+      ],
+      "lua": [
+        "nonreturning-work-containment"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/accepted-sequence-order-matches-the-control",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Bounded ordered input admission",
+    "scenario": "Accepted sequence order matches the control",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "each execution SHALL expose the same accepted-command order and effects, including the boundary between conflicting sequences",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "queue-overflow-and-order"
+      ],
+      "lua": [
+        "queue-overflow-and-order"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/queue-capacity-is-exhausted",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Bounded ordered input admission",
+    "scenario": "Queue capacity is exhausted",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "excess submissions SHALL receive an explicit queue-capacity rejection, existing entries SHALL retain their acceptance order, and the recorded queue occupancy SHALL remain within the bound",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "queue-overflow-and-order"
+      ],
+      "lua": [
+        "queue-overflow-and-order"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/submission-is-partial-or-uncertain",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Bounded ordered input admission",
+    "scenario": "Submission is partial or uncertain",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "its receipt SHALL preserve the submitted portion and remaining cleanup obligations, the next conflicting dispatch SHALL wait for that outcome, and the host SHALL neither report the workflow postcondition as achieved nor automatically replay the uncertain input",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-partial",
+        "javascript-uncertain"
+      ],
+      "lua": [
+        "lua-partial",
+        "lua-uncertain"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/queued-input-becomes-stale",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Identity and authority checks at dispatch",
+    "scenario": "Queued input becomes stale",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the host SHALL reject that command as stale without delivering it to either the old or replacement target",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "queued-geometry",
+        "queued-session",
+        "queued-target_exit"
+      ],
+      "lua": [
+        "queued-geometry",
+        "queued-session",
+        "queued-target_exit"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/a-process-identifier-is-reused",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Identity and authority checks at dispatch",
+    "scenario": "A process identifier is reused",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "old commands and actionable recognition results SHALL remain invalid, and the host SHALL require a new authorized attempt and session before admitting input to the replacement",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "rust-lifecycle-controlled-pid-reuse"
+      ],
+      "lua": [
+        "rust-lifecycle-controlled-pid-reuse"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/route-permission-changes-after-acceptance",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Identity and authority checks at dispatch",
+    "scenario": "Route permission changes after acceptance",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "dispatch SHALL report the corresponding refusal without switching routes, escalating privileges, or bypassing the closed admission state",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "queued-route_revoked",
+        "queued-focus_lost"
+      ],
+      "lua": [
+        "queued-route_revoked",
+        "queued-focus_lost"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/a-tight-compute-loop-is-stopped",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Latched Stop across computation and scheduled work",
+    "scenario": "A tight compute loop is stopped",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "interruption SHALL terminate that execution under the configured bound, and the evidence SHALL measure the actual VM interruption rather than only a timeout around the evaluator",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-compute-stop"
+      ],
+      "lua": [
+        "lua-compute-stop"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/script-code-catches-interruption-or-host-refusal",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Latched Stop across computation and scheduled work",
+    "scenario": "Script code catches interruption or host refusal",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "no new ordinary host action SHALL be admitted, cancellation SHALL remain latched, and execution SHALL terminate or receive an explicit failed-interruption outcome followed by bounded containment",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-caught-error-stop",
+        "javascript-computed-import-refusal"
+      ],
+      "lua": [
+        "lua-caught-error-stop",
+        "lua-computed-import-refusal"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/detached-scheduling-survives-until-stop",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Latched Stop across computation and scheduled work",
+    "scenario": "Detached scheduling survives until Stop",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the host SHALL cancel or invalidate their pending work, prevent further ordinary host admission, and account for already-dispatched native work separately from canceled scheduling",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-lifecycle-stop-detached"
+      ],
+      "lua": [
+        "lua-lifecycle-stop-detached"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/stop-interrupts-a-delay-or-query-wait",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Finite cancellable waits",
+    "scenario": "Stop interrupts a delay or query wait",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the script-facing wait SHALL settle as canceled within its bound, no continuation SHALL admit ordinary work, and any native owner still running SHALL remain recorded",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-lifecycle-stop-delay",
+        "javascript-lifecycle-stop-query",
+        "lifecycle-held-stop-release"
+      ],
+      "lua": [
+        "lua-lifecycle-stop-delay",
+        "lua-lifecycle-stop-query",
+        "lifecycle-held-stop-release"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/a-condition-is-not-observed-before-its-deadline",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Finite cancellable waits",
+    "scenario": "A condition is not observed before its deadline",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the host SHALL return the typed timeout outcome, release the completed wait's managed ownership, and preserve any distinct in-flight native cleanup obligation",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "finite-query-timeout"
+      ],
+      "lua": [
+        "finite-query-timeout"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/target-loss-races-with-a-result",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Finite cancellable waits",
+    "scenario": "Target loss races with a result",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the host SHALL preserve the terminal cause, discard the result as actionable data, and prevent the late delivery from restarting the wait or advancing the workflow",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "lifecycle-held-target-loss-release"
+      ],
+      "lua": [
+        "lifecycle-held-target-loss-release"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/entry-returns-with-unawaited-work",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Entry return and failure terminate the attempt",
+    "scenario": "Entry returns with unawaited work",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "undispatched work SHALL be canceled, already-dispatched work SHALL remain owned until settled, and no detached continuation SHALL issue ordinary input after entry return",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-unawaited"
+      ],
+      "lua": [
+        "lua-unawaited"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/script-failure-occurs-after-dispatch",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Entry return and failure terminate the attempt",
+    "scenario": "Script failure occurs after dispatch",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the final record SHALL retain the attributable script failure and the sequence's submission and cleanup outcomes, and cleanup SHALL NOT overwrite the primary failure with a generic cancellation",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-computed-import-refusal"
+      ],
+      "lua": [
+        "lua-computed-import-refusal"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/successful-return-has-incomplete-cleanup",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Entry return and failure terminate the attempt",
+    "scenario": "Successful return has incomplete cleanup",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the terminal record SHALL preserve the successful entry result with incomplete or forced cleanup, and SHALL NOT label the attempt `Completed` or cleanly stopped",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-lifecycle-return-incomplete-cleanup",
+        "javascript-returned-entry-forced-cleanup"
+      ],
+      "lua": [
+        "lua-lifecycle-return-incomplete-cleanup",
+        "lua-returned-entry-forced-cleanup"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/observation-and-query-are-released",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Explicit native ownership and release",
+    "scenario": "Observation and query are released",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the host SHALL refuse reuse, remove its script-visible ownership, and retain any physical native owner only for its remaining operation lifetime",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "explicit-release-invalidates"
+      ],
+      "lua": [
+        "explicit-release-invalidates"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/logical-cancellation-precedes-physical-completion",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Explicit native ownership and release",
+    "scenario": "Logical cancellation precedes physical completion",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the query SHALL become unusable immediately, the native ownership count SHALL remain nonzero until that operation actually finishes, and cleanup SHALL remain incomplete until its owners settle",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "nonreturning-work-containment"
+      ],
+      "lua": [
+        "nonreturning-work-containment"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/script-omits-explicit-release",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Explicit native ownership and release",
+    "scenario": "Script omits explicit release",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "host cleanup SHALL release their attempt-owned resources safely, reject late access, and reach zero live attempt-owned and in-flight counts before reporting clean cleanup",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-lifecycle-omitted-release",
+        "javascript-lifecycle-explicit-release"
+      ],
+      "lua": [
+        "lua-lifecycle-omitted-release",
+        "lua-lifecycle-explicit-release"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/controlled-target-exit-precedes-a-fresh-attempt",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Fresh attempts reject previous generations",
+    "scenario": "Controlled target exit precedes a fresh attempt",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the new VM and attempt state SHALL be fresh, the run snapshot SHALL remain unchanged, and readiness SHALL reach explicit `Ready` before the new workflow begins",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-lifecycle-target-exit-fresh-vm"
+      ],
+      "lua": [
+        "lua-lifecycle-target-exit-fresh-vm"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/old-callback-arrives-during-the-new-attempt",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Fresh attempts reject previous generations",
+    "scenario": "Old callback arrives during the new attempt",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the host SHALL reject it by identity without issuing input, changing new attempt state, or completing a new attempt's operation",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "lifecycle-old-callback-identity"
+      ],
+      "lua": [
+        "lifecycle-old-callback-identity"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/stop-races-with-a-scheduled-fresh-attempt",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Fresh attempts reject previous generations",
+    "scenario": "Stop races with a scheduled fresh attempt",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "pending transition work SHALL be canceled, no new VM workflow SHALL start, and a later execution SHALL require a new explicit Start rather than clearing the old cancellation latch",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-lifecycle-stop-before-queue-fresh-attempt",
+        "javascript-lifecycle-stop-queued-fresh-attempt",
+        "javascript-lifecycle-stop-queued-predecessor-fresh-attempt",
+        "javascript-lifecycle-stop-admitted-fresh-attempt"
+      ],
+      "lua": [
+        "lua-lifecycle-stop-before-queue-fresh-attempt",
+        "lua-lifecycle-stop-queued-fresh-attempt",
+        "lua-lifecycle-stop-queued-predecessor-fresh-attempt",
+        "lua-lifecycle-stop-admitted-fresh-attempt"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/repeated-clean-attempts-return-to-the-ownership-baseline",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Repeated execution has bounded retention",
+    "scenario": "Repeated clean attempts return to the ownership baseline",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "each clean attempt SHALL return attempt-owned counts to zero and runner-owned counts to the declared baseline, with no accumulating input, jobs, sessions, or queries",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-template-first",
+        "javascript-ocr-first"
+      ],
+      "lua": [
+        "lua-template-first",
+        "lua-ocr-first"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/retention-exceeds-its-declared-bound",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Repeated execution has bounded retention",
+    "scenario": "Retention exceeds its declared bound",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the evidence SHALL retain the failing attempt and owner category, mark the affected requirement non-passing, and SHALL NOT erase the result by restarting the process or accepting stable RSS alone",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-lifecycle-retention-bound"
+      ],
+      "lua": [
+        "lua-lifecycle-retention-bound"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/held-native-work-exceeds-the-cleanup-deadline",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Bounded containment of non-returning native work",
+    "scenario": "Held native work exceeds the cleanup deadline",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the supervisor SHALL terminate and reap the child within the containment bound and record the unresolved operation and forced termination without claiming physical input cleanup",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "nonreturning-work-containment"
+      ],
+      "lua": [
+        "nonreturning-work-containment"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/controlled-hold-is-released-before-the-deadline",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Bounded containment of non-returning native work",
+    "scenario": "Controlled hold is released before the deadline",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "its result SHALL remain non-actionable, its native owners SHALL be released safely, and clean cleanup SHALL be reported only after all outstanding input releases and owners settle",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "lifecycle-held-stop-release"
+      ],
+      "lua": [
+        "lifecycle-held-stop-release"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/a-forced-child-exit-leaves-uncertain-external-effects",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Bounded containment of non-returning native work",
+    "scenario": "A forced child exit leaves uncertain external effects",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the terminal outcome SHALL retain that uncertainty, prohibit automatic continuation, and require explicit usable-state checks before a newly authorized run can act on the target",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "nonreturning-work-containment"
+      ],
+      "lua": [
+        "nonreturning-work-containment"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/control-channel-closes-while-computing",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Parent and control loss cancel without orphaned admission",
+    "scenario": "Control channel closes while computing",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the child SHALL latch cancellation, close ordinary admission, and complete cleanup or bounded containment without receiving another supervisor command",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-control-eof"
+      ],
+      "lua": [
+        "lua-control-eof"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/parent-dies-while-native-work-is-held",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Parent and control loss cancel without orphaned admission",
+    "scenario": "Parent dies while native work is held",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the independent parent-loss mechanism SHALL prevent new ordinary input and enforce a bounded child exit, and the surviving evidence observer SHALL record forced or incomplete cleanup without inventing a child cleanup acknowledgement",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "parent-death-held-work"
+      ],
+      "lua": [
+        "parent-death-held-work"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/intentional-supervisor-exit-completes-cleanly",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Parent and control loss cancel without orphaned admission",
+    "scenario": "Intentional supervisor exit completes cleanly",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "it SHALL request Stop, wait for the cleanup outcome within its deadline, reap its child, and leave the target process running",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-intentional-supervisor-exit"
+      ],
+      "lua": [
+        "lua-intentional-supervisor-exit"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/stop-acknowledgement-precedes-cleanup",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Terminal observability survives ordinary log pressure",
+    "scenario": "Stop acknowledgement precedes cleanup",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "request receipt and admission closure SHALL be observable separately from cleanup completion, and neither earlier event SHALL imply that physical native work or external input effects have ended",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "nonreturning-work-containment"
+      ],
+      "lua": [
+        "nonreturning-work-containment"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/ordinary-log-delivery-is-saturated",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Terminal observability survives ordinary log pressure",
+    "scenario": "Ordinary log delivery is saturated",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the host SHALL report dropped ordinary records, preserve bounded control responsiveness, and retain the terminal outcome independently of the saturated log stream",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "log-pressure-stop-release"
+      ],
+      "lua": [
+        "log-pressure-stop-release"
+      ]
+    }
+  },
+  {
+    "id": "runner-lifecycle-safety/child-exits-without-a-cleanup-record",
+    "capability": "runner-lifecycle-safety",
+    "requirement": "Terminal observability survives ordinary log pressure",
+    "scenario": "Child exits without a cleanup record",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the supervisor or surviving evidence observer SHALL record the observed exit and missing cleanup stage, preserve available primary and ownership facts, and SHALL NOT synthesize clean cleanup",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "nonreturning-work-containment"
+      ],
+      "lua": [
+        "nonreturning-work-containment"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/equivalent-decisions-and-input-order",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Equivalent runtime workload and direct-Rust control",
+    "scenario": "Equivalent decisions and input order",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "their decisions, accepted input-sequence order, submission classifications, and postcondition classifications SHALL match the declared expected behavior, excluding language-local syntax, generated identities, and measured timing from equality",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "rust-template-first",
+        "rust-ocr-first",
+        "javascript-template-first",
+        "javascript-ocr-first"
+      ],
+      "lua": [
+        "rust-template-first",
+        "rust-ocr-first",
+        "lua-template-first",
+        "lua-ocr-first"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/a-candidate-cannot-complete-a-required-case",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Equivalent runtime workload and direct-Rust control",
+    "scenario": "A candidate cannot complete a required case",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the comparison SHALL retain that candidate and case with its non-passing outcome and reason rather than omit the case, substitute another candidate's result, or treat a controlled or replay result as native success",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "report-preserves-required-failure"
+      ],
+      "lua": [
+        "report-preserves-required-failure"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/a-script-performs-recognition-without-owning-native-payloads",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Shared host operations and Rust-owned native values",
+    "scenario": "A script performs recognition without owning native payloads",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the workload SHALL receive the declared compact results and operation identities without acquiring raw frames, model objects, or native pointers, and released references SHALL cease to authorize subsequent host operations",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-template-first",
+        "javascript-ocr-first"
+      ],
+      "lua": [
+        "lua-template-first",
+        "lua-ocr-first"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/a-wait-has-no-finite-bound",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Shared host operations and Rust-owned native values",
+    "scenario": "A wait has no finite bound",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the host SHALL return a typed argument failure without creating an unbounded wait or treating the request as successful",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "lifecycle-finite-wait-arguments"
+      ],
+      "lua": [
+        "lifecycle-finite-wait-arguments"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/profiles-select-different-declared-actions",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Deterministic profile and default resolution",
+    "scenario": "Profiles select different declared actions",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "each implementation SHALL use that profile's resolved scalar values and list order to select the expected action, rather than retaining the other profile's values or sorting the list implicitly",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-template-first",
+        "javascript-ocr-first"
+      ],
+      "lua": [
+        "lua-template-first",
+        "lua-ocr-first"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/an-omitted-option-differs-from-a-partial-replacement-object",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Deterministic profile and default resolution",
+    "scenario": "An omitted option differs from a partial replacement object",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the first profile SHALL receive the whole default object and the second SHALL fail validation at the missing nested field rather than inherit that field from the default",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "lifecycle-profile-omission-versus-replacement"
+      ],
+      "lua": [
+        "lifecycle-profile-omission-versus-replacement"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/invalid-profile-data-cannot-reach-execution",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Deterministic profile and default resolution",
+    "scenario": "Invalid profile data cannot reach execution",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "preflight SHALL report the applicable identity or field error and SHALL NOT execute package code or admit ordinary input",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-lifecycle-invalid-profile-identity",
+        "javascript-lifecycle-invalid-profile-schema-version",
+        "javascript-lifecycle-invalid-profile-unknown-option",
+        "javascript-lifecycle-invalid-profile-coercion",
+        "javascript-lifecycle-invalid-profile-missing-field",
+        "javascript-lifecycle-invalid-profile-out-of-range"
+      ],
+      "lua": [
+        "lua-lifecycle-invalid-profile-identity",
+        "lua-lifecycle-invalid-profile-schema-version",
+        "lua-lifecycle-invalid-profile-unknown-option",
+        "lua-lifecycle-invalid-profile-coercion",
+        "lua-lifecycle-invalid-profile-missing-field",
+        "lua-lifecycle-invalid-profile-out-of-range"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/a-helper-attempts-nested-mutation",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Deeply immutable options and separate attempt state",
+    "scenario": "A helper attempts nested mutation",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the mutation SHALL be refused or leave the value unchanged, and subsequent option reads and action selection SHALL retain the original resolved values and order",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-readonly"
+      ],
+      "lua": [
+        "lua-readonly"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/mutable-workflow-state-does-not-become-configuration",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Deeply immutable options and separate attempt state",
+    "scenario": "Mutable workflow state does not become configuration",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the counter SHALL change only in attempt state, and the configured limit and selected profile values SHALL remain unchanged",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-readonly"
+      ],
+      "lua": [
+        "lua-readonly"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/readiness-permits-workflow-exactly-after-success",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Explicit readiness gates workflow entry",
+    "scenario": "Readiness permits workflow exactly after success",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the host SHALL invoke workflow only after that result, using the same attempt and resolved options, and SHALL NOT treat merely attaching to a process or finding a window as readiness success",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-template-first",
+        "javascript-malformed-readiness"
+      ],
+      "lua": [
+        "lua-template-first",
+        "lua-malformed-readiness"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/readiness-does-not-return-its-declared-success-outcome",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Explicit readiness gates workflow entry",
+    "scenario": "Readiness does not return its declared success outcome",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "workflow SHALL NOT begin, and the attempt SHALL retain the applicable readiness-contract, script, or typed host outcome rather than convert it to success or an undifferentiated no-match result",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-malformed-readiness"
+      ],
+      "lua": [
+        "lua-malformed-readiness"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/successful-recognition-finds-no-eligible-action",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Recognition preserves absence and typed outcomes",
+    "scenario": "Successful recognition finds no eligible action",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the workload SHALL follow its declared no-match branch without submitting a fabricated coordinate or reporting a backend failure",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-no-match"
+      ],
+      "lua": [
+        "lua-no-match"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/the-condition-remains-absent-until-the-query-deadline",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Recognition preserves absence and typed outcomes",
+    "scenario": "The condition remains absent until the query deadline",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the host SHALL report timeout, not successful recognition, target loss, or an indefinite wait",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "finite-query-timeout"
+      ],
+      "lua": [
+        "finite-query-timeout"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/recognition-fails-in-the-backend",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Recognition preserves absence and typed outcomes",
+    "scenario": "Recognition fails in the backend",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "that failure and its native cause SHALL remain observable at the script call site and in the attempt outcome, and the workload SHALL NOT handle it as an ordinary no-match action decision",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-backend-failure"
+      ],
+      "lua": [
+        "lua-backend-failure"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/submission-succeeds-but-the-application-condition-is-absent",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Actionable result identity and postcondition causality",
+    "scenario": "Submission succeeds but the application condition is absent",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the workload SHALL retain successful submission separately from the unsatisfied postcondition and SHALL NOT claim application success or automatically repeat the input",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-postcondition-absent"
+      ],
+      "lua": [
+        "lua-postcondition-absent"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/an-old-frame-is-presented-as-a-postcondition",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Actionable result identity and postcondition causality",
+    "scenario": "An old frame is presented as a postcondition",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "it SHALL refuse that frame as postcondition evidence and SHALL wait within its declared bound or report the resulting typed failure",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "postcondition-requires-new-frame"
+      ],
+      "lua": [
+        "postcondition-requires-new-frame"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/a-recognized-target-is-stale-at-submission",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Actionable result identity and postcondition causality",
+    "scenario": "A recognized target is stale at submission",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the host SHALL reject the stale result without dispatching input to the replacement target or transformed coordinates",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "queued-geometry",
+        "queued-session"
+      ],
+      "lua": [
+        "queued-geometry",
+        "queued-session"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/the-input-receipt-leaves-application-effects-uncertain",
+    "capability": "runtime-comparison-workload",
+    "requirement": "Actionable result identity and postcondition causality",
+    "scenario": "The input receipt leaves application effects uncertain",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the workload SHALL preserve that receipt and the observed postcondition separately, SHALL NOT replay the sequence automatically, and SHALL NOT report that later cleanup rolled back the application's state",
+    "candidates": [
+      "javascript",
+      "lua"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "javascript-partial",
+        "javascript-uncertain"
+      ],
+      "lua": [
+        "lua-partial",
+        "lua-uncertain"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/invalid-option-access-receives-source-diagnostics",
+    "capability": "runtime-comparison-workload",
+    "requirement": "TypeScript authoring uses the common contract",
+    "scenario": "Invalid option access receives source diagnostics",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the authoring check SHALL report the relevant original source location and type violation before input admission, using the generated schema-derived types rather than accepting a separate incompatible options definition",
+    "candidates": [
+      "javascript"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "typescript-option-diagnostic"
+      ]
+    }
+  },
+  {
+    "id": "runtime-comparison-workload/valid-typescript-retains-workload-behavior",
+    "capability": "runtime-comparison-workload",
+    "requirement": "TypeScript authoring uses the common contract",
+    "scenario": "Valid TypeScript retains workload behavior",
+    "lanes": [
+      "controlled",
+      "native"
+    ],
+    "oracle": "the resulting JavaScript SHALL execute on the same `rquickjs` host as the JavaScript candidate with equivalent resolved options, readiness, action order, and postcondition behavior",
+    "candidates": [
+      "javascript"
+    ],
+    "required_os": [
+      "windows",
+      "macos"
+    ],
+    "controlled_checks": {
+      "javascript": [
+        "typescript-template-first",
+        "typescript-ocr-first"
+      ]
+    }
+  }
+]

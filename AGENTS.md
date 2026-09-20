@@ -2,10 +2,12 @@
 
 ## Current scope
 
-MadoMata is pre-application: this checkout provides repository governance and
-its checks, not a runnable desktop application. Runtime selection and the M0
-comparison are not implemented. Do not invent Cargo, frontend, or game-launch
-commands, or add application scaffolding to make CI appear complete.
+MadoMata is pre-application: this checkout contains repository governance and the
+standalone M0 runtime comparison, not a desktop application. The controlled
+comparison is executable; native qualification and runtime adoption remain
+blocked on explicit prerequisites. Follow [the comparison guide](docs/runtime-comparison.md)
+for real Cargo commands. Do not invent frontend or game-launch commands, or add
+application scaffolding to make CI appear complete.
 
 ## Setup and verification
 

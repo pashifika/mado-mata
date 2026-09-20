@@ -1,0 +1,10 @@
+{
+  "package_id": "m0-workload",
+  "schema_version": 1,
+  "options": {
+    "recognition": {"threshold": 0.92, "roi": {"x": 0, "y": 0, "width": 640, "height": 480}},
+    "priorities": ["ocr", "template"],
+    "actions": {"template": "C", "ocr": "D"},
+    "postcondition": "DONE"
+  }
+}

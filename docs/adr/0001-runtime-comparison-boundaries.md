@@ -1,0 +1,135 @@
+# ADR 0001: bounded runtime comparison without native authority substitution
+
+- Status: accepted; QuickJS/TypeScript selected for macOS manual development; full native qualification incomplete
+- Date: 2026-09-20
+- Change: `m0-runtime-comparison`
+- Integration: `change/m0-runtime-comparison` → `dev/runtime-comparison`
+
+## Context
+
+M0 must compare actual JavaScript/Lua interpreters over a common host, with an
+independent Rust workload and TypeScript authoring. It must not confuse a compiled
+adapter, a controlled receipt, or logical cancellation with native qualification,
+application effect, or completed physical cleanup. A CI-first delivery is useful
+without inventing a desktop application or an authorized native target.
+
+Two original assumptions did not survive dependency inspection:
+
+1. `rquickjs`'s `rust-alloc` feature cannot be combined with its normal hard memory
+   limit. The [0.14.0 API documentation](https://docs.rs/rquickjs/0.14.0/rquickjs/struct.Runtime.html#method.set_memory_limit)
+   explicitly states that `set_memory_limit` has no effect with that allocator.
+2. Public MadoPilot revision `2c9d57a53e44ffc97315975c3ca46a766d6c8539` does not
+   correlate its opaque `TargetId` with a configured executable/application-bundle
+   path and exact process/window lifetime. Its
+   [target description](https://github.com/pashifika/mado-pilot/blob/2c9d57a53e44ffc97315975c3ca46a766d6c8539/crates/automation/capture/src/descriptor.rs#L252-L329)
+   and [capability description](https://github.com/pashifika/mado-pilot/blob/2c9d57a53e44ffc97315975c3ca46a766d6c8539/crates/automation/core/src/capability.rs#L472-L549)
+   lack that provenance. The public consumer example selects by window title,
+   which does not meet this application's target contract.
+
+## Decision
+
+Use the default QuickJS allocator with explicit finite memory limits, not
+`rust-alloc`. Pin `rquickjs` 0.14.0 (`std`, `loader`), `mlua` 0.12.1
+(`lua54`, `vendored`, `serde`), Lua 5.4.9, QuickJS-ng 0.16.2, TypeScript 5.9.3,
+Node.js 24.18.0, Rust 1.97.1, and the full public MadoPilot Git revision.
+
+Build actual standalone supervisor/child execution, immutable inventories,
+interpreters, strict authoring compilation, and controlled behavioral checks.
+Keep ordinary hosted CI free of capture, input, permission prompts, native model
+paths, and private checkouts. Engine/OpenCV integration is an optional build;
+real replay and native evidence remain separate from controlled outcomes.
+
+The initial pin refused native plans before engine construction because its public
+facade lacked the required provenance. The separately authorized additive update
+at `85ccc580cd28ffb9b0b52271f6c87f1af0109a04` supplies retained-process metadata
+without replacing native lifetime guards. Admit native execution only after an
+exact name/path/PID/lifetime match, and use actual SDK sessions and receipts.
+Title-only/PID-only matching, private APIs, guessed handles, automatic focus
+changes, fallback providers, or another input route remain unacceptable shortcuts.
+This resolves an integration prerequisite, not a previously proven native bug.
+
+Use independent cancellation/watchdog progress and owned-child termination for
+non-returning work. Keep logical completion, retained owners, cleanup records,
+and external exit observations separate. Never kill a Rust thread or an unrelated
+target to obtain a passing result. A compiler subprocess validates the owner PID
+supplied before launch and retains a framed control pipe until completion.
+Control EOF ends compilation even while the owner PID still exists; PID checks
+alone do not establish continuous ownership.
+
+Latch host failures before constructing script-visible error objects. Package
+code can mutate error prototypes, and error allocation itself can fail. Diagnostic
+work cannot decide whether an already-issued host refusal remains authoritative.
+Replay managed IDs include a fresh attempt identity, not just process-local
+engine/stream counters. Cached terminal queries require no new owner capacity.
+Unhandled Promise tracking retains exact bounded Promise identities until handled
+or disposed, rather than relying on potentially reusable pointer hashes.
+
+Retain `EntrySettled` before cleanup. Forced exit can preempt cleanup reporting,
+but must not erase a previously observed successful entry or primary fault.
+`Returned` with forced/incomplete cleanup is not successful attempt completion.
+Close all ordinary host work when workflow admission closes, not just input
+submission. Explicit release remains available. The actual JS/Lua return-boundary
+regressions failed before this correction and pass afterward.
+
+Real engine execution exposed a stale `engine-` prefix check in shared release
+routing after native IDs acquired fresh attempt identities. Windows JavaScript
+and Lua reached model initialization but failed the first readiness release.
+Resolve host-owned handles and receipts first, release the host-state lock, then
+delegate other IDs to the engine's ownership registry. Handle spelling is not an
+ownership contract. The follow-up macOS static-fixture smoke reaches actual OCR
+and confirms explicit query/result/observation release and clean attempt teardown.
+
+## Consequences and verification
+
+The controlled corpus can establish interpreter, loader, ordering, readonly,
+refusal, and process-containment behavior on hosted Windows/macOS/Linux builds.
+It cannot establish capture/OCR/input permission, real application effect, native
+cleanup, native warm-reuse performance, or the initial both-OS adoption gate.
+
+Actual VM memory exhaustion, prototype-error refusal, module identity/cycles,
+Stop/control loss, held-owner containment, and compiler strict-policy cases are
+exercised by the executable checks. The optional public-facade integration is
+compiled separately; model/corpus execution needs explicit private prerequisites.
+
+The new public pin and consumer connection remove the missing-provenance gate,
+not the application-effect or both-OS qualification gates. A macOS capture/OCR
+smoke can pass while a complete invocation-only click receipt has no observed
+game effect; retain both facts rather than declaring the workflow successful.
+Complete consuming Windows and Apple Silicon macOS scenarios and prospective
+numerical budgets before any `Adopt(candidate)` decision. Until then the result
+is `Blocked(reason)` even when all available CI checks pass. See
+[usage and evidence boundaries](../runtime-comparison.md) and
+[native setup](../runtime-native.md).
+
+## macOS-first development selection
+
+On 2026-09-20 the operator changed the delivery priority: finish a manually
+testable implementation instead of extending automated both-OS qualification.
+Select JavaScript on QuickJS through `rquickjs` for that development, with
+TypeScript as the preferred authoring language. This supersedes the requirement
+to complete the entire native comparison before choosing a development runtime.
+It does not turn unexecuted Windows/native cases into passing release evidence.
+
+The choice uses existing implementation evidence:
+
+- JavaScript completed the authorized six-step macOS game workflow, including
+  recognition postconditions and cleanup.
+- Both candidate VMs and the TypeScript authoring path pass controlled and real
+  recorded-frame workloads. TypeScript additionally provides verified schema/SDK
+  type checking, completion metadata, and original-source diagnostics.
+- Reusing one JavaScript VM and its TypeScript compiler avoids another product
+  SDK. Lua remains a comparison adapter, not a second product runtime.
+- The small replay sample does not establish a meaningful speed winner; neither
+  the choice nor the manual interface depends on such a claim.
+
+Keep the current pinned versions and shared Rust host. Add one manual invocation
+to the existing supervisor, with explicit Start, operator Stop, bounded cleanup,
+and a private result file. Do not build another runner or a desktop shell for
+this step. Native execution still requires a reviewed finite plan; no implicit
+game launch, focus change, elevation, fallback, or retry is introduced.
+
+The machine-readable comparison's `Blocked(reason)` continues to describe
+incomplete native qualification, not a prohibition on the selected macOS
+development path. Preserve historical failures and resume platform qualification
+when it serves the manually testable product. MadoPilot-side changes are retained
+in its private `local_docs/` for later separately scoped Change authoring.

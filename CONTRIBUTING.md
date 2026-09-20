@@ -2,18 +2,21 @@
 
 ## Public checkout and checks
 
-Public contributions need Git, the Python/tool setup in [docs/ci.md](docs/ci.md),
-and a GitHub account for PRs. They do not need Rasen, private design material,
-a sibling engine checkout, or an agent's personal configuration.
+Public contributions need Git, Python, and the pinned Rust/Node.js/tool setup in
+[docs/ci.md](docs/ci.md), plus a GitHub account for PRs. They do not need Rasen,
+private design material, a sibling engine checkout, or an agent's configuration.
 
 The checkout must preserve `CLAUDE.md -> AGENTS.md` as a relative symlink.
 See [Claude symlink setup](docs/development-guidance.md#claude-symlink) for Git
 and Windows link-creation prerequisites; a flattened text file is not equivalent.
 
 Run `python3 tools/ci/check.py` from the product root after the documented setup.
-It checks governance, workflows, and documentation; no application build or
-runtime command exists yet. Include actual commands, results, and unexecuted
-scope in the PR. Keep private paths, credentials, screenshots, and raw native
+It checks governance, workflows, documentation, and the controlled runtime
+comparison's Rust build, tests, CLI, and trusted TypeScript compiler. The narrower
+`--policy-only` mode does not exercise the executable; `--runtime-only` omits
+actionlint and local-link checks. Include actual commands, results, and unexecuted
+scope in the PR. Hosted controlled checks are not native qualification or runtime
+adoption evidence. Keep private paths, credentials, screenshots, and raw native
 execution evidence out of public descriptions.
 
 ## Select the route before implementation
@@ -38,9 +41,9 @@ whether an emergency is justified or the implementation is correct.
 A maintainer creates each new topic from a current, successfully checked `main`
 commit. Topic creation has a required-check exemption; subsequent updates need
 checked PRs. This is not server-side enforcement of the branch's starting
-ancestry. The intended next M0 route is `change/m0-runtime-comparison` into
-`dev/runtime-comparison`; naming it here does not authorize starting M0 before
-its governance prerequisite is verified.
+ancestry. The M0 route is `change/m0-runtime-comparison` into
+`dev/runtime-comparison`; its controlled executable does not authorize native
+capture, input, or game operations.
 
 ## Ordinary Change and promotion
 
