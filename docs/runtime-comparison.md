@@ -180,6 +180,14 @@ settlement remains `Unobserved`, never an inferred successful return.
 ownership snapshot. If the final record never arrives, those facts survive while
 cleanup remains incomplete. Diagnostic detail is byte-bounded with omission
 metadata; a transport failure must not bypass cleanup.
+
+A forced exit may truncate the final protocol frame after a successful
+`EntrySettled`. That incomplete-tail diagnostic remains in
+`metrics.protocol_fault`, but is not promoted into a new entry failure. The run
+still fails with forced/incomplete cleanup. Oversized frames, incomplete frames
+without a forced exit, and missing entry settlement are not exempted by this
+rule; an existing entry failure also retains precedence.
+
 Stop receipt and admission closure use supervisor-clock latency upper bounds,
 including pipe delivery and polling. Child-relative timestamps are separate.
 A normal return has no external Stop latency. For incomplete cleanup without

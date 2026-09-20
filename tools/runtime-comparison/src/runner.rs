@@ -105,11 +105,13 @@ fn frame(reader: &mut impl BufRead, bound: usize) -> Result<Option<Vec<u8>>, Fau
     if bytes.is_empty() {
         return Ok(None);
     }
-    if bytes.len() > bound || bytes.last() != Some(&b'\n') {
-        return Err(Fault::new(
-            "Transport",
-            "oversized or incomplete protocol frame",
-        ));
+    if bytes.len() > bound {
+        return Err(Fault::new("Transport", "oversized protocol frame")
+            .with_context(json!({"frame_error":"Oversized","bytes_received":bytes.len()})));
+    }
+    if bytes.last() != Some(&b'\n') {
+        return Err(Fault::new("Transport", "incomplete protocol frame")
+            .with_context(json!({"frame_error":"Incomplete","bytes_received":bytes.len()})));
     }
     Ok(Some(bytes))
 }
@@ -720,17 +722,11 @@ fn supervise(
         });
     }
     let terminal = settled_evidence(terminal, &milestones);
-    let primary = terminal
-        .get("primary")
-        .filter(|value| !value.is_null())
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .or_else(|| protocol_fault.clone())
-        .or_else(|| {
-            terminal
-                .get("entry_emission_failure")
-                .filter(|value| !value.is_null())
-                .and_then(|value| serde_json::from_value(value.clone()).ok())
-        });
+    let primary = terminal_primary(
+        &terminal,
+        protocol_fault.as_ref(),
+        forced || exit.code() == Some(124),
+    );
     let clean = terminal["cleanup"]["clean"] == true && exit.success() && !forced;
     let status = if primary.as_ref().is_some_and(|e| e.category == "Blocked") {
         "BLOCKED"
@@ -837,6 +833,36 @@ fn settled_evidence(terminal: Option<Value>, milestones: &[Value]) -> Value {
             .cloned()
             .unwrap_or_else(|| json!({}))
     })
+}
+
+fn terminal_primary(
+    terminal: &Value,
+    protocol_fault: Option<&Fault>,
+    forced: bool,
+) -> Option<Fault> {
+    terminal
+        .get("primary")
+        .filter(|value| !value.is_null())
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| {
+            protocol_fault
+                .filter(|error| {
+                    // Forced containment may cut the final write. Keep that
+                    // diagnostic in protocol_fault, not as a new entry failure;
+                    // the unverified cleanup and overall run still fail.
+                    !(forced
+                        && terminal["entry_outcome"] == "Returned"
+                        && error.category == "Transport"
+                        && error.context["frame_error"] == "Incomplete")
+                })
+                .cloned()
+        })
+        .or_else(|| {
+            terminal
+                .get("entry_emission_failure")
+                .filter(|value| !value.is_null())
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+        })
 }
 
 fn held_work(host: &Host, run: &str) -> Result<RuntimeMetrics, Fault> {
@@ -1169,6 +1195,44 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forced_eof_preserves_a_returned_entry_without_claiming_cleanup() {
+        let entry = json!({"event":"EntrySettled","entry_outcome":"Returned","primary":null});
+        let evidence = settled_evidence(None, &[entry]);
+        let error = frame(
+            &mut br#"{"event":"Terminal""#.as_slice(),
+            MAX_TRANSPORT_BYTES,
+        )
+        .expect_err("forced exit interrupted the terminal frame");
+        assert!(terminal_primary(&evidence, Some(&error), true).is_none());
+        assert_eq!(evidence["entry_outcome"], "Returned");
+        assert!(evidence.get("cleanup").is_none());
+    }
+
+    #[test]
+    fn forced_exit_does_not_excuse_other_protocol_failures() {
+        let entry = json!({"event":"EntrySettled","entry_outcome":"Returned","primary":null});
+        let partial = frame(&mut b"{".as_slice(), MAX_TRANSPORT_BYTES).unwrap_err();
+        let oversized = frame(&mut b"123456789\n".as_slice(), 8).unwrap_err();
+        for (scenario, evidence, error, forced) in [
+            ("unexpected EOF", &entry, &partial, false),
+            ("unobserved entry", &Value::Null, &partial, true),
+            ("oversized frame", &entry, &oversized, true),
+        ] {
+            let primary = terminal_primary(evidence, Some(error), forced)
+                .unwrap_or_else(|| panic!("{scenario} must remain a protocol failure"));
+            assert_eq!(primary.category, "Transport", "{scenario}");
+        }
+        let failed = json!({"event":"EntrySettled","entry_outcome":"FailedOrNotStarted",
+            "primary":Fault::new("Script", "entry failed")});
+        assert_eq!(
+            terminal_primary(&failed, Some(&partial), true)
+                .unwrap()
+                .category,
+            "Script"
+        );
+    }
 
     #[test]
     fn preflight_unverified_native_cleanup_is_independent_of_cache_release() {
