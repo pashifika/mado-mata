@@ -104,24 +104,32 @@ class BranchFlowTests(unittest.TestCase):
                 validate_event("pull_request", event, REPO)
 
     def test_non_pr_contexts_are_explicit_and_checked(self):
-        for name, ref, payload_ref, accepted in [
-            ("push", "refs/heads/main", "refs/heads/main", True),
-            ("push", "refs/heads/dev/runtime", "refs/heads/dev/runtime", True),
-            ("workflow_dispatch", "refs/heads/change/checks", "change/checks", True),
-            ("push", "refs/heads/main", "refs/heads/dev/runtime", False),
-            ("push", "refs/heads/change/checks", "refs/heads/change/checks", False),
-            ("workflow_dispatch", "refs/tags/v1", "v1", False),
-            ("workflow_dispatch", "refs/heads/main", "other", False),
-            ("schedule", "refs/heads/main", "main", False),
-            ("push", None, "refs/heads/main", False),
-        ]:
-            with self.subTest(name=name, ref=ref, payload_ref=payload_ref):
-                event = {"repository": {"full_name": REPO}, "ref": payload_ref}
-                if accepted:
-                    self.assertIn("PR routing is not applicable", validate_event(name, event, REPO, ref))
-                else:
-                    with self.assertRaises(ValueError):
-                        validate_event(name, event, REPO, ref)
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            for name, ref, payload_ref, accepted in [
+                ("push", "refs/heads/main", "refs/heads/main", True),
+                ("push", "refs/heads/dev/runtime", "refs/heads/dev/runtime", True),
+                ("workflow_dispatch", "refs/heads/fix/ci-manual-dispatch", "refs/heads/fix/ci-manual-dispatch", True),
+                ("push", "refs/heads/main", "refs/heads/dev/runtime", False),
+                ("push", "refs/heads/change/checks", "refs/heads/change/checks", False),
+                ("workflow_dispatch", "refs/tags/v1", "refs/tags/v1", False),
+                ("workflow_dispatch", "refs/heads/main", "main", False),
+                ("workflow_dispatch", "refs/heads/main", "refs/heads/other", False),
+                ("schedule", "refs/heads/main", "refs/heads/main", False),
+                ("push", None, "refs/heads/main", False),
+            ]:
+                with self.subTest(name=name, ref=ref, payload_ref=payload_ref):
+                    event_path.write_text(json.dumps({
+                        "repository": {"full_name": REPO}, "ref": payload_ref,
+                    }), encoding="utf-8")
+                    environment = {
+                        "GITHUB_EVENT_NAME": name, "GITHUB_EVENT_PATH": str(event_path),
+                        "GITHUB_REPOSITORY": REPO,
+                    }
+                    if ref is not None:
+                        environment["GITHUB_REF"] = ref
+                    result = cli("branch_flow.py", environment, directory)
+                    self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
 
     def test_cli_refuses_bad_json_and_treats_refs_as_data(self):
         with tempfile.TemporaryDirectory() as directory:

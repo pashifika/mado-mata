@@ -84,7 +84,7 @@ def validate_event(event_name, event, repository, ref=None):
             raise ValueError("push checks require main or a dev/<topic> branch")
         if event.get("ref") != ref:
             raise ValueError("push event ref does not match GITHUB_REF")
-    elif event.get("ref") != short_ref:
+    elif event.get("ref") != ref:
         raise ValueError(
             f"workflow_dispatch event ref {event.get('ref')!r} does not match GITHUB_REF {ref!r}"
         )
