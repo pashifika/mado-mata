@@ -104,11 +104,16 @@ and conversations are resolved. Repository settings allow merge and squash,
 not rebase; topic rules permit both and cannot select by head prefix, so the
 maintainer must choose the method in the route table.
 
-Automatic branch deletion is disabled. Retire a topic deliberately only after
-promotion, inspection of open child PRs and dependent work, and confirmation
-that its required history is reachable from `main`. Retire leaf and sync
-branches only when their PRs and dependent work are finished. Main deletion and
-protected-branch force pushes are prohibited; do not probe these destructively.
+Automatic deletion of merged PR head branches is enabled. Before merging,
+confirm that no unfinished work or dependent PR still needs the head branch.
+Promote a topic only when its scope is complete and its history will be
+preserved in `main`; do not use a merged topic as a long-lived work branch.
+For older or retained remote branches, verify the merged result and remaining
+dependencies before manual retirement. Squash-merged leaf commits need not be
+ancestors of the destination; confirm their changes are included rather than
+deleting every branch absent from `git branch --merged`. Keep active, unmerged
+topics and implementation branches. Main deletion and protected-branch force
+pushes remain prohibited.
 
 ## Maintainer planning and administration
 
