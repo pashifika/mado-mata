@@ -148,8 +148,8 @@ validate the intended single continuous capture session across a whole run.
 Repeated capture start/stop is a confounder for the input/OCR observations, not
 evidence that the SDK reopens capture on every frame. The consumer retains one
 session across `observe` calls inside an execution and closes it during `finish`.
-A continuous-session six-step trial remains unexecuted; native trials are held
-until that scenario and exact Windows target authority are established.
+Those segmented attempts did not establish continuous execution. A separate
+single-session follow-up is recorded below; Windows target authority remains open.
 
 One earlier child returned its script and reported clean native-session cleanup,
 then aborted during normal process exit. The crash stack placed the failing
@@ -167,6 +167,32 @@ did not repeat the shutdown abort; semantic OCR failures still exited as failure
 The runtime, model bytes, input route, and cleanup semantics were not replaced
 or weakened. The final native sessions and outer processes completed cleanup;
 macOS input stopped before the serial slot was handed to Windows preparation.
+
+### Single-session macOS workflow smoke
+
+A later, separately authorized trial executed one complete JavaScript workflow
+against the same retained macOS target. Preparation used authorized screenshots
+to establish OCR regions and control locations, then verified distinct switch
+templates on independent recorded captures. The native run used those prepared
+assets, not replay frames.
+
+The single invocation completed all six requested steps within its ten-click,
+30-event and 60-second bounds. It exercised the one-time menu-reveal path and
+character selection, verified the selected character with OCR, verified switch
+ON and OFF states with image templates, and verified the final menu with OCR.
+The script's session/lifetime continuity guards passed. No independent inspector
+capture, automatic input retry, route fallback, or programmatic focus change
+occurred during or after this trial. The child exited 0; session close and physical
+cleanup were confirmed with no remaining script handles or input sequences.
+Input receipts remain invocation-only; the separate recognition postconditions
+provide the observed application effects.
+The operator also confirmed visible workflow success.
+
+This is one real, bounded macOS workflow smoke, not representative performance,
+Windows qualification, runtime adoption, or proof of a future editor integration.
+The OS privacy-indicator animation was not independently recorded. Windows game
+execution remains unexecuted pending an explicitly approved executable path and
+its own target-specific preparation.
 
 ## Coverage, not just case count
 

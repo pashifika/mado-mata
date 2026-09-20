@@ -263,6 +263,11 @@ are not grants from the OS, nor evidence that a route can act on the target.
 No launcher, elevation, focus change, process termination, restart allowance,
 route substitution, or automatic retry is supplied.
 
+Prepare a complete workflow before its acceptance run: collect authorized
+reference frames, establish recognition regions and control locations, then author
+the script. Distinguish OCR postconditions from image-template postconditions.
+Offline replay supports preparation; it is not native game-effect acceptance.
+
 One native execution retains its capture session across observation, recognition,
 wait, and input operations; cleanup closes it on termination. To verify a
 Start-to-finish workflow, keep all its steps inside that one execution. Repeated
