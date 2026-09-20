@@ -335,6 +335,9 @@ pub fn run_once(
     let mut child = OwnedChild(
         Command::new(executable)
             .arg("child")
+            // The ORT API opt-out leaves the POSIX uploader alive. Suppress its
+            // initialization before any native library or child thread starts.
+            .env("ORT_DISABLE_TELEMETRY", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -676,6 +679,7 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     let mut child = OwnedChild(
         Command::new(std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?)
             .arg("child")
+            .env("ORT_DISABLE_TELEMETRY", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

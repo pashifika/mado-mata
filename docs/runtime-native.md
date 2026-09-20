@@ -50,6 +50,16 @@ OpenCV `core`, `imgproc`, `imgcodecs`, and their shared dependencies; on Windows
 it must expose the selected versioned `opencv_world` DLL and dependencies. A
 successful build is not evidence that replay, capture, OCR, or input executed.
 
+The supervisor sets `ORT_DISABLE_TELEMETRY=1` in every runtime-child command
+before process startup. In ONNX Runtime 1.29.0, the POSIX provider's API-level
+opt-out alone leaves its uploader alive and still emits `ProcessInfo`; the
+[process-wide opt-out](https://github.com/microsoft/onnxruntime/blob/v1.29.0/onnxruntime/core/platform/telemetry_environment.h)
+prevents uploader and device-ID initialization. The existing API-level opt-out
+remains in use, including Windows' separate ETW control model. No ambient process
+environment is mutated after threads start, and no exit exception is suppressed.
+Internal child invocations outside the supervisor must supply the same startup
+environment; they are not a supported shortcut around supervision.
+
 ### Accepted OCR content
 
 Both supported profiles use these exact Apache-2.0 model bytes. Obtain them
@@ -252,6 +262,12 @@ Routes are explicitly `system`, Windows `window_message`, or macOS
 are not grants from the OS, nor evidence that a route can act on the target.
 No launcher, elevation, focus change, process termination, restart allowance,
 route substitution, or automatic retry is supplied.
+
+One native execution retains its capture session across observation, recognition,
+wait, and input operations; cleanup closes it on termination. To verify a
+Start-to-finish workflow, keep all its steps inside that one execution. Repeated
+per-click `run` commands and independent screenshot inspectors open and close
+different sessions and must not be reported as a continuous-capture trial.
 
 The Rust facade's
 [`TargetProcessIdentity`](https://github.com/pashifika/mado-pilot/blob/85ccc580cd28ffb9b0b52271f6c87f1af0109a04/crates/automation/capture/src/descriptor.rs)

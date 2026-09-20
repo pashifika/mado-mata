@@ -2,12 +2,14 @@
 
 ## Decision
 
-`Blocked(incomplete native workflow and both-OS qualification)`.
+`Blocked(incomplete automated-native and both-OS qualification)`.
 No runtime is selected for production. This delivery provides executable controlled
 comparison paths, real recognition smoke evidence, and a strict native bridge.
-The first authorized macOS native workflow stopped at an unsatisfied visible
-postcondition despite complete input invocation receipts. Windows game execution
-and representative recorded-gameplay qualification remain unexecuted.
+The initial macOS process-directed probes failed. A separately authorized system
+route later completed the requested roundtrip with approved image verification;
+the OCR failures and a pre-correction native shutdown crash remain failed records.
+Windows game execution and representative recorded-gameplay qualification remain
+unexecuted.
 
 ## Initial local evidence
 
@@ -115,8 +117,8 @@ Each returned three submitted SDK events, `invocation_only` evidence, no fallbac
 and no held-state release obligation. In both cases, a strictly newer-frame OCR
 postcondition was false and a separate target-only image still showed no menu.
 Both attempts failed; neither completed even the first navigation step.
-Native close and outer process cleanup completed. No further click or alternate
-route was sent, and Windows game operations remained on hold.
+Native close and outer process cleanup completed. At that checkpoint, no further
+click or alternate route was sent and Windows game operations remained on hold.
 
 The private records bind the native executable to source SHA-256
 `e94ed07f89ace95f11416de08a35953cda86030c1cd6e6e3f693f4bc6a6c5aa7`
@@ -124,6 +126,47 @@ and Cargo-lock SHA-256
 `cca5d4a0613412220c07adc4d7aea24033a60eb54be15728db2310c386fc05de`.
 The target, runtime paths, images, OCR content, plans, and raw logs remain private.
 Invocation without observed effect is not yet a diagnosed SDK or game defect.
+
+### System-route continuation and shutdown correction
+
+The operator subsequently authorized at most 20 additional logical clicks using
+`system` with `require_focused`, without fallback or programmatic foregrounding.
+The continuation submitted 12 logical clicks / 36 SDK events against the retained
+target; 13 click reservations included one name-query failure that sent no input.
+It reached the requested character, activated the target switch, returned once,
+reopened the guide with that switch still active, deactivated it, and returned
+twice to the initial menu. The final returns used explicit 1500 ms waits and
+separate image checks. Name and title OCR checks failed in some attempts; the
+operator explicitly approved image-based verification rather than relabeling
+those failed checks as passes. This is an assisted, segmented UI result, not an
+unattended OCR success or representative performance qualification.
+
+Each action-stage invocation ended its child and capture session; separate
+read-only inspector sessions then captured the resulting screen. The operator
+observed the target's capture indicator appearing and disappearing. This does not
+validate the intended single continuous capture session across a whole run.
+Repeated capture start/stop is a confounder for the input/OCR observations, not
+evidence that the SDK reopens capture on every frame. The consumer retains one
+session across `observe` calls inside an execution and closes it during `finish`.
+A continuous-session six-step trial remains unexecuted; native trials are held
+until that scenario and exact Windows target authority are established.
+
+One earlier child returned its script and reported clean native-session cleanup,
+then aborted during normal process exit. The crash stack placed the failing
+`recursive_mutex::lock()` in ONNX Runtime 1.29.0's `Microsoft::Applications::Events`
+HTTP-response worker while the main thread ran `PosixTelemetry::Shutdown()`.
+The library's [POSIX implementation](https://github.com/microsoft/onnxruntime/blob/v1.29.0/onnxruntime/core/platform/posix/telemetry.cc)
+keeps its uploader and `ProcessInfo` active despite the existing API-level
+telemetry opt-out. The crash record does not establish upload success or payload.
+
+Both consumer child-launch sites now enforce `ORT_DISABLE_TELEMETRY=1` before
+initialization, preventing that uploader from being created. Two input-free
+static-fixture OCR executions, with the parent variable unset and set to `0`,
+both passed with child exit 0 and clean cleanup. Subsequent native executions
+did not repeat the shutdown abort; semantic OCR failures still exited as failures.
+The runtime, model bytes, input route, and cleanup semantics were not replaced
+or weakened. The final native sessions and outer processes completed cleanup;
+macOS input stopped before the serial slot was handed to Windows preparation.
 
 ## Coverage, not just case count
 
@@ -145,13 +188,14 @@ then passed on Linux, Apple Silicon macOS, and Windows, plus branch-flow
 validation and `CI Gate`. Hosted checks grant no authority to exercise an
 installed game or private OCR configuration.
 
-Live-native qualification remains incomplete despite the new exact-target
-contract and limited authorized macOS probes. The requested application
-transition failed, Windows game execution is still held, and representative
-per-OS budgets and sufficient comparable samples remain absent. Representative
-replay still needs identified recorded frames beyond the generated static
-fixture. Validated model/runtime identities support only the scoped evidence
-above; raw execution records and machine-local paths remain private.
+Live-native qualification remains incomplete despite the exact-target contract
+and assisted macOS roundtrip. The initial failed probes, later OCR failures, and
+native shutdown abort remain evidence, not discarded samples. Windows game
+execution awaits exact target authority, and representative per-OS budgets and
+sufficient comparable samples remain absent. Representative replay still needs
+identified recorded frames beyond the generated static fixture. Validated
+model/runtime identities support only the scoped evidence above; raw execution
+records and machine-local paths remain private.
 
 ## Candidate and authoring observations
 
@@ -176,15 +220,15 @@ Additional regressions exposed ordinary host work after entry return and the ris
 of losing settled entry results during forced cleanup. These corrections are in
 the [ADR](adr/0001-runtime-comparison-boundaries.md).
 
-No confirmed MadoPilot runtime defect was established. With separate write and
-publication authority, an additive upstream provenance API and the consuming
-native adapter resolved the earlier integration prerequisite. The two input
-probes preserved actual invocation and failed-effect evidence rather than
-claiming an unverified repair. The [native guide](runtime-native.md) records the
-current strict admission and receipt contract.
+The additive upstream provenance API and consuming native adapter resolved the
+earlier integration prerequisite. Input invocation failures, the later ONNX Runtime
+shutdown crash, and semantic OCR failures are separate findings. The startup
+telemetry correction addresses the diagnosed uploader lifecycle without claiming
+a general SDK, OCR, or game repair. The [native guide](runtime-native.md) records
+the current strict admission, startup environment, and receipt contracts.
 
-Complete the remaining controlled rows, resolve the observed native workflow
-failure, supply representative replay/native inputs, and collect both-OS
+Complete the remaining controlled rows, resolve unattended native OCR verification,
+supply representative replay/native inputs, and collect both-OS
 evidence before choosing a runtime. Only then does a primary-OS M1–M4 development
 plan become the subsequent policy; retaining comparison adapters does not impose
 a multi-runtime desktop product.
