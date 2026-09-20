@@ -1567,12 +1567,6 @@ impl Host {
     fn release(&self, args: &Value) -> Result<Value, Fault> {
         let map = object(args, &["id"], &["id"])?;
         let id = string(map, "id")?;
-        #[cfg(feature = "engine")]
-        if let Some(engine) = &self.inner.engine {
-            if id.starts_with("engine-") {
-                return engine.call("release", args.clone());
-            }
-        }
         let mut state = lock(&self.inner.state);
         if state.handles.remove(id).is_some() {
             return Ok(json!({"released":true}));
@@ -1589,6 +1583,12 @@ impl Host {
             state.receipts.insert(id.into(), receipt);
             state.released_receipts.insert(id.into());
             return Ok(json!({"released":true}));
+        }
+        drop(state);
+        // Native handle identities are opaque; route by ownership, not spelling.
+        #[cfg(feature = "engine")]
+        if let Some(engine) = &self.inner.engine {
+            return engine.call("release", args.clone());
         }
         Err(Fault::new(
             "InvalidHandle",

@@ -69,6 +69,14 @@ Close all ordinary host work when workflow admission closes, not just input
 submission. Explicit release remains available. The actual JS/Lua return-boundary
 regressions failed before this correction and pass afterward.
 
+Real engine execution exposed a stale `engine-` prefix check in shared release
+routing after native IDs acquired fresh attempt identities. Windows JavaScript
+and Lua reached model initialization but failed the first readiness release.
+Resolve host-owned handles and receipts first, release the host-state lock, then
+delegate other IDs to the engine's ownership registry. Handle spelling is not an
+ownership contract. The follow-up macOS static-fixture smoke reaches actual OCR
+and confirms explicit query/result/observation release and clean attempt teardown.
+
 ## Consequences and verification
 
 The controlled corpus can establish interpreter, loader, ordering, readonly,

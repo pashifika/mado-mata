@@ -4,8 +4,9 @@
 
 `Blocked(exact-target integration prerequisite and incomplete both-OS qualification)`.
 No runtime is selected for production. This delivery provides executable controlled
-comparison paths, not completion of every M0 acceptance scenario. Native capture,
-OCR, input, target attachment, and real replay were not exercised.
+comparison paths and explicitly scoped real-engine smoke evidence, not completion
+of every M0 acceptance scenario. Live capture/input, exact-target attachment, and
+representative recorded-gameplay qualification remain unexecuted.
 
 ## Verified local evidence
 
@@ -52,6 +53,39 @@ The worker used its existing checkout, made no tracked changes, and returned
 full private build/startup records and selected DLL identities. This establishes
 Windows compilation and executable image startup, not ONNX initialization,
 model loading, real replay, native capture/input, or a performance budget pass.
+
+## Real engine initialization and static-fixture recognition
+
+An explicitly authorized follow-up uses the pinned upstream Apache-2.0 G-004
+`status.png` and its independent text/geometry oracle. The generated static image
+is repeated for the host readiness observation and workflow observation under an
+artificial offline schedule. It is not a recorded gameplay sequence, application
+transition, or postcondition. No input is submitted.
+
+On Windows, both JavaScript and Lua initialized the actual CPU OCR model, then
+exposed a shared-host `InvalidHandle` failure on the first readiness release,
+before inference. Native IDs include attempt identity; release routing still
+assumed an obsolete `engine-` prefix. The host now resolves its own resources
+first and delegates remaining releases to the engine registry without relying
+on spelling or holding the host-state lock.
+
+With that correction, macOS JavaScript and Lua both passed real template matching,
+all six exact OCR text/geometry query oracles, blank-region absence, explicit
+query/result/observation release, and confirmed clean attempt teardown. Both
+outer invocations exited 0 with empty stderr and completed process cleanup.
+Windows verification of this correction is pending.
+
+The selected CPU runtime/model identities are validated before execution.
+Prospective finite smoke bounds are not representative performance budgets;
+one cold sample per candidate supports no distribution. Attempt cleanup reports
+zero native/script/in-flight owners separately from the retained runner
+engine/model baseline. Process exit is not a library-unload or warm-reuse claim.
+
+Setup refusals are preserved separately: the first smoke plan exceeded the
+existing snapshot ceiling and was reduced before execution; Windows local paths
+needed Rust's exact extended canonical form. The package uses expected text only
+through the documented query API. None of these corrections changes fixture
+pixels, oracle text/geometry, the engine pin, or native authority.
 
 ## Coverage, not just case count
 
