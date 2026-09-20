@@ -121,3 +121,5 @@ contribute without that access. Do not publish private planning links.
 Versioned rulesets do not install themselves. Administrative setup, migration,
 live readback, and recovery belong to
 [repository governance](docs/repository-governance.md), not contributor CI.
+
+[Temporary required-gate failure probe](missing-governance-verification-target.md)
