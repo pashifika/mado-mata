@@ -22,8 +22,10 @@ recursive catch-all `refs/heads/dev/**/*`. CI rejects nested topic names even
 though the catch-all protects them. No linear-history rule is used because
 promotion and reconciliation must preserve merge ancestry.
 
-Repository settings enable merge and squash, disable rebase merge, and disable
-automatic branch deletion. Topic rules cannot distinguish sync PRs from ordinary
+Repository settings enable merge, squash, and automatic deletion of merged PR
+head branches; rebase merge remains disabled. Check head-branch dependencies
+before merging, and inspect any branches GitHub retains before retiring them.
+Topic rules cannot distinguish sync PRs from ordinary
 leaf PRs; maintainers must select the correct method. The metadata check cannot
 prove urgency, content correctness, or branch ancestry and is not an immutable
 security boundary against an authorized maintainer changing the workflow.
@@ -123,7 +125,7 @@ separately:
 ```sh
 gh api --method PATCH "repos/$REPO" \
   -F allow_merge_commit=true -F allow_squash_merge=true \
-  -F allow_rebase_merge=false -F delete_branch_on_merge=false
+  -F allow_rebase_merge=false -F delete_branch_on_merge=true
 ```
 
 ## Read back and prove effective enforcement
