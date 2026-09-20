@@ -709,6 +709,12 @@ impl Host {
                 "authorized process lifetime ended",
             ));
         }
+        if state.phase == Phase::Workflow && !self.inner.control.admission.load(Ordering::Acquire) {
+            return Err(Fault::new(
+                "AdmissionClosed",
+                "ordinary work admission is closed",
+            ));
+        }
         if state.phase == Phase::Readiness
             && state.readiness_started.is_some_and(|started| {
                 started.elapsed() >= Duration::from_millis(self.inner.plan.limits.readiness_ms)

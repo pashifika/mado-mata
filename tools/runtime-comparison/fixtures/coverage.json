@@ -121,8 +121,13 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "javascript-ambient-file-refusal",
+        "javascript-ambient-package-refusal"
+      ],
+      "lua": [
+        "lua-ambient-file-refusal"
+      ]
     }
   },
   {
@@ -303,8 +308,14 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "javascript-missing-readiness-declaration",
+        "javascript-missing-workflow-declaration"
+      ],
+      "lua": [
+        "lua-missing-readiness-declaration",
+        "lua-missing-workflow-declaration"
+      ]
     }
   },
   {
@@ -482,7 +493,9 @@
       "macos"
     ],
     "controlled_checks": {
-      "lua": []
+      "lua": [
+        "lua-secondary-loader-refusal"
+      ]
     }
   },
   {
@@ -502,7 +515,9 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": []
+      "javascript": [
+        "typescript-generated-import-refusal"
+      ]
     }
   },
   {
@@ -524,7 +539,8 @@
     "controlled_checks": {
       "javascript": [
         "typescript-ambient-type-refusal",
-        "typescript-type-only-refusal"
+        "typescript-type-only-refusal",
+        "typescript-generated-helper-refusal"
       ]
     }
   },
@@ -545,7 +561,9 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": []
+      "javascript": [
+        "typescript-plugin-manifest-refusal"
+      ]
     }
   },
   {
@@ -565,7 +583,9 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": []
+      "javascript": [
+        "typescript-original-dependency-refusal"
+      ]
     }
   },
   {
@@ -1667,8 +1687,12 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "javascript-lifecycle-stop-detached"
+      ],
+      "lua": [
+        "lua-lifecycle-stop-detached"
+      ]
     }
   },
   {
@@ -1690,8 +1714,16 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "javascript-lifecycle-stop-delay",
+        "javascript-lifecycle-stop-query",
+        "lifecycle-held-stop-release"
+      ],
+      "lua": [
+        "lua-lifecycle-stop-delay",
+        "lua-lifecycle-stop-query",
+        "lifecycle-held-stop-release"
+      ]
     }
   },
   {
@@ -1740,8 +1772,12 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "lifecycle-held-target-loss-release"
+      ],
+      "lua": [
+        "lifecycle-held-target-loss-release"
+      ]
     }
   },
   {
@@ -1817,8 +1853,14 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "javascript-lifecycle-return-incomplete-cleanup",
+        "javascript-returned-entry-forced-cleanup"
+      ],
+      "lua": [
+        "lua-lifecycle-return-incomplete-cleanup",
+        "lua-returned-entry-forced-cleanup"
+      ]
     }
   },
   {
@@ -1894,8 +1936,14 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "javascript-lifecycle-omitted-release",
+        "javascript-lifecycle-explicit-release"
+      ],
+      "lua": [
+        "lua-lifecycle-omitted-release",
+        "lua-lifecycle-explicit-release"
+      ]
     }
   },
   {
@@ -1917,8 +1965,12 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "javascript-lifecycle-target-exit-fresh-vm"
+      ],
+      "lua": [
+        "lua-lifecycle-target-exit-fresh-vm"
+      ]
     }
   },
   {
@@ -1940,8 +1992,12 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "lifecycle-old-callback-identity"
+      ],
+      "lua": [
+        "lifecycle-old-callback-identity"
+      ]
     }
   },
   {
@@ -2015,8 +2071,12 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "javascript-lifecycle-retention-bound"
+      ],
+      "lua": [
+        "lua-lifecycle-retention-bound"
+      ]
     }
   },
   {
@@ -2065,8 +2125,12 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "lifecycle-held-stop-release"
+      ],
+      "lua": [
+        "lifecycle-held-stop-release"
+      ]
     }
   },
   {
@@ -2169,8 +2233,12 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "javascript-intentional-supervisor-exit"
+      ],
+      "lua": [
+        "lua-intentional-supervisor-exit"
+      ]
     }
   },
   {
@@ -2306,8 +2374,12 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "report-preserves-required-failure"
+      ],
+      "lua": [
+        "report-preserves-required-failure"
+      ]
     }
   },
   {
@@ -2358,8 +2430,12 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "lifecycle-finite-wait-arguments"
+      ],
+      "lua": [
+        "lifecycle-finite-wait-arguments"
+      ]
     }
   },
   {
@@ -2410,8 +2486,12 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "lifecycle-profile-omission-versus-replacement"
+      ],
+      "lua": [
+        "lifecycle-profile-omission-versus-replacement"
+      ]
     }
   },
   {
@@ -2433,8 +2513,22 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "javascript-lifecycle-invalid-profile-identity",
+        "javascript-lifecycle-invalid-profile-schema-version",
+        "javascript-lifecycle-invalid-profile-unknown-option",
+        "javascript-lifecycle-invalid-profile-coercion",
+        "javascript-lifecycle-invalid-profile-missing-field",
+        "javascript-lifecycle-invalid-profile-out-of-range"
+      ],
+      "lua": [
+        "lua-lifecycle-invalid-profile-identity",
+        "lua-lifecycle-invalid-profile-schema-version",
+        "lua-lifecycle-invalid-profile-unknown-option",
+        "lua-lifecycle-invalid-profile-coercion",
+        "lua-lifecycle-invalid-profile-missing-field",
+        "lua-lifecycle-invalid-profile-out-of-range"
+      ]
     }
   },
   {

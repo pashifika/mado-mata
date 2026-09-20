@@ -1,3 +1,6 @@
+mod lifecycle;
+mod loading;
+
 use crate::host::{Host, resolve_options};
 use crate::inventory::Inventory;
 use crate::model::{Control, Fault, Limits, Plan};
@@ -472,6 +475,58 @@ pub fn run() -> Result<Value, Fault> {
         inventories.insert(candidate, inventory);
     }
     shared_host_cases(&mut rows, &inventories["rust"])?;
+    loading::run(&mut rows, &inventories)?;
+    lifecycle::run(&mut rows, &inventories)?;
+    for candidate in ["javascript", "lua"] {
+        let loop_source = if candidate == "javascript" {
+            "export function readiness(){return 'Ready'} export function workflow(){while(true){}}"
+        } else {
+            "return {readiness=function() return 'Ready' end, workflow=function() while true do end end}"
+        };
+        let inventory = replace_entry(&inventories[candidate], loop_source)?;
+        rows.push(crate::runner::intentional_exit_evidence(
+            &plan(candidate, "success", "template-first"),
+            &inventory,
+        )?);
+        let held_source = if candidate == "javascript" {
+            "export function readiness(){return 'Ready'} export function workflow(){const o=host.call('observe',{});host.call('query',{observation:o,kind:'ocr',roi:{x:0,y:0,width:640,height:480},expected:'READY'});host.call('wait',{duration_ms:200});}"
+        } else {
+            "return {readiness=function() return 'Ready' end, workflow=function() local o=host.call('observe',{});host.call('query',{observation=o,kind='ocr',roi={x=0,y=0,width=640,height=480},expected='READY'});host.call('wait',{duration_ms=200});end}"
+        };
+        let inventory = replace_entry(&inventories[candidate], held_source)?;
+        let record = run_once(
+            &plan(candidate, "held-work", "template-first"),
+            &inventory,
+            None,
+            false,
+        )?;
+        let passed = record.entry_outcome == "Returned"
+            && record.primary.is_none()
+            && record.forced
+            && record.cleanup["clean"] != true
+            && record.status == "FAIL";
+        case(
+            &mut rows,
+            &format!("{candidate}-returned-entry-forced-cleanup"),
+            record,
+            passed,
+            "successful entry settlement survives forced containment without becoming clean completion",
+        );
+    }
+    let failed = run_once(
+        &plan("javascript", "success", "template-first"),
+        &replace_entry(
+            &inventories["javascript"],
+            "export function readiness(){return 'Ready'} export function workflow(){throw Error('required operation failed');}",
+        )?,
+        None,
+        false,
+    )?;
+    let report = crate::report::summarize(&json!({"version":1,"runs":[failed]}))?;
+    rows.push(json!({"id":"report-preserves-required-failure","candidate":"javascript","lane":"controlled",
+        "os":std::env::consts::OS,"status":if report["counts"]["FAIL"]==1 && report["decision"]["kind"]=="Blocked" {"PASS"}else{"FAIL"},
+        "oracle":"an actually failed required execution remains a failure in the report and cannot select a runtime",
+        "observed":report["counts"],"decision":report["decision"]}));
     for candidate in ["javascript", "lua"] {
         let base = &inventories[candidate];
         let cases: Vec<(&str, &str, bool)> = if candidate == "javascript" {

@@ -38,6 +38,7 @@ pub struct RunRecord {
     pub status: String,
     pub reason: String,
     pub primary: Option<Fault>,
+    pub entry_outcome: String,
     pub cleanup: Value,
     pub observations: Value,
     pub metrics: Value,
@@ -207,7 +208,7 @@ pub fn child() -> Result<bool, Fault> {
             control.cancel();
             let release = crate::engine::release_runner_resources();
             emit(
-                &json!({"event":"Terminal","run":invocation.run,"attempt":attempt,"primary":error,
+                &json!({"event":"Terminal","run":invocation.run,"attempt":attempt,"primary":error,"entry_outcome":"NotStarted",
                 "cleanup":{"clean":release.is_ok(),"stage":"preflight-no-host","runner_release":release.err()},"observations":{},
                 "runtime":null,"preflight_us":preflight_start.elapsed().as_micros(),"workflow_us":null,
                 "process":process_metrics()}),
@@ -247,6 +248,18 @@ pub fn child() -> Result<bool, Fault> {
         }
     };
     control.cancel();
+    let entry_outcome = if metrics.is_some() {
+        "Returned"
+    } else {
+        "FailedOrNotStarted"
+    };
+    // Retain the settled entry before cleanup can block or the watchdog can exit.
+    emit(
+        &json!({"event":"EntrySettled","run":invocation.run,"attempt":attempt,
+        "entry_outcome":entry_outcome,"primary":primary,"runtime":metrics,
+        "compiled_inventory_identity":inventory.identity,"preflight_us":preflight_us,
+        "workflow_us":workflow_us,"at_us":control.elapsed_us()}),
+    )?;
     let mut cleanup = host.finish();
     let observations = host.snapshot();
     drop(host);
@@ -258,7 +271,7 @@ pub fn child() -> Result<bool, Fault> {
     }
     emit(
         &json!({"event":"Terminal","run":invocation.run,"attempt":attempt,
-        "primary":primary,"cleanup":cleanup,"observations":observations,"runtime":metrics,
+        "primary":primary,"entry_outcome":entry_outcome,"cleanup":cleanup,"observations":observations,"runtime":metrics,
         "compiled_inventory_identity":inventory.identity,"preflight_us":preflight_us,"workflow_us":workflow_us,
         "stop_at_us":control.stop_us.load(Ordering::Acquire),
         "admission_closed_at_us":control.closed_us.load(Ordering::Acquire),"process":process_metrics()}),
@@ -504,7 +517,13 @@ pub fn run_once(
         }
     }
     let stderr = errors.join().unwrap_or_default();
-    let terminal = terminal.unwrap_or_else(|| json!({}));
+    let terminal = terminal.unwrap_or_else(|| {
+        milestones
+            .iter()
+            .find(|value| value["event"] == "EntrySettled")
+            .cloned()
+            .unwrap_or_else(|| json!({}))
+    });
     let primary = protocol_fault.or_else(|| {
         terminal
             .get("primary")
@@ -568,6 +587,10 @@ pub fn run_once(
         status: status.into(),
         reason,
         primary,
+        entry_outcome: terminal["entry_outcome"]
+            .as_str()
+            .unwrap_or("Unobserved")
+            .to_owned(),
         cleanup,
         observations: terminal["observations"].clone(),
         metrics: json!({"elapsed_us":started.elapsed().as_micros(),"startup_us":startup_us,
@@ -579,7 +602,11 @@ pub fn run_once(
             "stop_receipt_us":receipt_latency("StopRequested"),"admission_close_us":receipt_latency("AdmissionClosed"),
             "stop_metric_method":"supervisor-clock upper bound including pipe delivery and polling; null when no external Stop",
             "child_stop_at_us":terminal["stop_at_us"],"child_admission_closed_at_us":terminal["admission_closed_at_us"],
-            "cleanup_us":terminal["cleanup"]["elapsed_us"],"containment_us":stop_sent_us.map(|sent|exit_us.saturating_sub(sent)),
+            "cleanup_us":terminal["cleanup"]["elapsed_us"],"containment_us":stop_sent_us.or_else(|| {
+                (!clean).then(||milestones.iter().find(|value|value["event"]=="EntrySettled")
+                    .and_then(|value|value["supervisor_received_us"].as_u64())).flatten()
+            }).map(|sent|exit_us.saturating_sub(sent)),
+            "containment_metric_method":"supervisor-clock Stop-to-exit; absent external Stop, incomplete entry-settlement receipt-to-exit",
             "host_call_us":host_call_us,"cpu_percent":cpu_percent,"vm_bytes":terminal["runtime"]["vm_bytes"],
             "live_owners":terminal["observations"]["attempt_owners"],
             "owner_method":"attempt owners after cleanup, not peak","budgets":plan.budgets,
@@ -629,10 +656,23 @@ fn held_work(host: &Host, run: &str) -> Result<RuntimeMetrics, Fault> {
     ))
 }
 
-pub fn parent_probe() -> Result<bool, Fault> {
+pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     let mut input = BufReader::new(std::io::stdin());
     let bytes = frame(&mut input, MAX_TRANSPORT_BYTES)?
         .ok_or_else(|| Fault::new("Fixture", "missing probe invocation"))?;
+    if intentional {
+        let invocation: Invocation = serde_json::from_slice(&bytes)
+            .map_err(|error| Fault::new("Transport", error.to_string()))?;
+        let record = run_once(&invocation.plan, &invocation.inventory, Some(100), false)?;
+        let clean = record.cleanup["clean"] == true
+            && !record.forced
+            && record
+                .primary
+                .as_ref()
+                .is_some_and(|fault| fault.category == "Cancelled");
+        emit(&json!({"event":"SupervisorExit","record":record}))?;
+        return Ok(clean);
+    }
     let mut child = OwnedChild(
         Command::new(std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?)
             .arg("child")
@@ -782,5 +822,122 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
         "elapsed_us":started.elapsed().as_micros(),"cleanup":"ForcedOrIncomplete","cleanup_acknowledgement":null,
         "observation_method":"owned PID/start-time liveness; exited or zombie counts as stopped, not clean cleanup",
         "build":crate::report::build_identity()}),
+    )
+}
+
+/// Observe an owned supervisor completing Stop/cleanup/reaping before it exits.
+pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value, Fault> {
+    let executable =
+        std::env::current_exe().map_err(|error| Fault::new("Startup", error.to_string()))?;
+    let invocation = Invocation {
+        run: format!("intentional-exit-{}", std::process::id()),
+        attempt: 1,
+        plan: plan.clone(),
+        inventory: inventory.clone(),
+    };
+    let mut bytes = serde_json::to_vec(&invocation)
+        .map_err(|error| Fault::new("Encoding", error.to_string()))?;
+    bytes.push(b'\n');
+    if bytes.len() > MAX_TRANSPORT_BYTES {
+        return Err(Fault::new(
+            "LimitExceeded",
+            "probe invocation exceeds its bound",
+        ));
+    }
+    let mut target = OwnedChild(
+        Command::new(&executable)
+            .arg("target-probe")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| Fault::new("Startup", error.to_string()))?,
+    );
+    let mut parent = OwnedChild(
+        Command::new(&executable)
+            .arg("parent-stop-probe")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| Fault::new("Startup", error.to_string()))?,
+    );
+    let mut input = parent
+        .0
+        .stdin
+        .take()
+        .ok_or_else(|| Fault::new("Transport", "no probe input"))?;
+    let output = parent
+        .0
+        .stdout
+        .take()
+        .ok_or_else(|| Fault::new("Transport", "no probe output"))?;
+    let writer = thread::spawn(move || input.write_all(&bytes));
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        output
+            .take(MAX_TRANSPORT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let started = Instant::now();
+    let mut forced = false;
+    let status = loop {
+        if let Some(status) = parent
+            .0
+            .try_wait()
+            .map_err(|error| Fault::new("Containment", error.to_string()))?
+        {
+            break status;
+        }
+        if started.elapsed()
+            >= Duration::from_millis(plan.limits.duration_ms + plan.limits.containment_ms)
+        {
+            forced = true;
+            parent
+                .0
+                .kill()
+                .map_err(|error| Fault::new("Containment", error.to_string()))?;
+            break parent
+                .0
+                .wait()
+                .map_err(|error| Fault::new("Containment", error.to_string()))?;
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    let written = matches!(writer.join(), Ok(Ok(())));
+    let bytes = reader
+        .join()
+        .map_err(|_| Fault::new("Transport", "probe reader panicked"))?
+        .map_err(|error| Fault::new("Transport", error.to_string()))?;
+    let response: Value = if bytes.len() <= MAX_TRANSPORT_BYTES {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let record = &response["record"];
+    let target_alive = target
+        .0
+        .try_wait()
+        .map_err(|error| Fault::new("Containment", error.to_string()))?
+        .is_none();
+    let passed = written
+        && !forced
+        && status.success()
+        && target_alive
+        && response["event"] == "SupervisorExit"
+        && record["cleanup"]["clean"] == true
+        && record["forced"] == false
+        && record["exit_code"] == 0
+        && record["primary"]["category"] == "Cancelled"
+        && record["milestones"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["event"] == "StopRequested"));
+    Ok(
+        json!({"id":format!("{}-intentional-supervisor-exit",plan.candidate),"candidate":plan.candidate,
+        "lane":"controlled","os":std::env::consts::OS,"status":if passed{"PASS"}else{"FAIL"},
+        "oracle":"owned supervisor requests Stop, retains clean cleanup, reaps its child, exits successfully and leaves the inert target alive",
+        "parent_exit":status.code(),"parent_forced":forced,"target_survived":target_alive,
+        "observed":response,"build":crate::report::build_identity()}),
     )
 }

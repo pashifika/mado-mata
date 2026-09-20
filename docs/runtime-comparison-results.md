@@ -18,13 +18,14 @@ Node.js 24.18.0. The engine dependency was the public revision
 | Locked default Cargo build | Passed | Actual QuickJS and Lua interpreters; no native engine initialization |
 | Cargo behavioral regressions | 15 passed | Host validation, ordering, identities, cancellation, and ownership |
 | Trusted compiler self-check | 13 passed | Actual compilation, strict diagnostics, loader policy, and completions |
-| Executable `check` corpus | 111 passed | Includes expected refusals, forced incomplete cleanup, parent loss, and target survival |
+| Executable `check` corpus | 163 passed | Includes expected refusals, retained successful entry with forced cleanup, intentional exit, parent loss, and target survival |
 | Published `run` example | 6 successful runs | 1 warmup and 5 measured samples; controlled input only |
 | Published `report` example | Parsed successfully; decision blocked | p50 supported; p95 and p99 unavailable at this sample count |
 | Compiler control EOF during pending work | `CompilerContainment`, exit 1 | Owner remained alive; response arrived within 9 ms in this observation |
 | Missing budget, missing wait bound, unknown scenario, invalid report status | All refused | No permissive defaults or invented success |
-| Locked `--features engine` build | Passed | Compilation/linking against the real pinned public facade, not native/replay qualification |
-| Full tracked-repository check | Passed | 16 governance regressions, actionlint, offline links, compiler checks, Rust regressions, and the 111-case executable corpus |
+| Locked `--features engine` build and `--help` startup | Passed | Real facade compilation/linking and executable image load, not engine initialization or native/replay qualification |
+| Full tracked-repository check | Passed | 16 governance regressions, actionlint, offline links, compiler checks, Rust regressions, and the 163-case executable corpus |
+| Post-return ordinary host work | Reproduced, then corrected | Both JS/Lua regressions failed before the guard; observe/query/wait refuse after return while release remains available |
 
 The versioned raw results remain in private execution storage. Each executable
 result binds source and Cargo-lock hashes, plan and inventory identities, runtime
@@ -36,16 +37,19 @@ Do not compare timings across different build, plan, inventory, or host identiti
 
 The catalog contains 112 requirement scenarios across four capabilities. The
 local result expands them into candidate/lane/OS rows. Its Apple Silicon
-controlled coverage has 57 passing JavaScript rows and 53 passing Lua rows;
-21 JavaScript and 19 Lua controlled rows remain `UNEXECUTED`. Language-specific
+controlled coverage has 76 passing JavaScript rows and 70 passing Lua rows;
+two controlled rows per candidate remain `UNEXECUTED`. Language-specific
 inapplicability is separate. Several checks support more than one requirement;
-111 passing checks do not mean 112 requirements passed.
+163 passing checks do not mean 112 requirements passed.
 
-Remaining controlled qualification includes recovery/callback races, additional
-loading and scheduling boundaries, and certain ownership transitions. Windows
-and native rows cannot inherit local macOS outcomes. Hosted CI exercises the
-same non-native corpus on Linux, Apple Silicon macOS, and Windows, but does not
-provide authority to exercise an installed game or private OCR configuration.
+The remaining controlled rows require target-PID reuse injection and a scheduled
+recovery transition racing with Stop. Those comparison interfaces do not exist;
+same harness PID or a hand-written conditional is not substitute evidence.
+Windows and native rows cannot inherit local macOS outcomes. The initial
+[hosted run](https://github.com/pashifika/mado-mata/actions/runs/35492214355)
+independently passed the original 111-case corpus on Linux, Apple Silicon macOS,
+and Windows, plus branch-flow validation and `CI Gate`. Hosted checks grant no
+authority to exercise an installed game or private OCR configuration.
 
 Native rows are blocked by the missing exact-target facade contract and absent
 operator-approved workload, paths, OCR/runtime/model identity, recorded corpus,
@@ -59,7 +63,7 @@ model paths, target names, or credentials were collected for this delivery.
 | --- | --- | --- |
 | Direct Rust | Independent expected decisions and shared-host oracle | Real recognition/input costs and native ownership |
 | JavaScript | ES module caching/live cycles, bounded jobs, interruptible computation, frozen options | Native integration, full lifecycle corpus, representative performance |
-| Lua | Restricted libraries/loading, coroutine interruption, deterministic cycle refusal, readonly values | Additional loader/lifecycle boundaries and native integration |
+| Lua | Restricted secondary loading, coroutine interruption, cycle refusal, readonly values | Native integration, recovery/PID-reuse cases, representative performance |
 | TypeScript to JavaScript | Inventory-bound compiler, strict SDK/schema types, actual completions, original helper source locations | Separate compiler CPU/RSS are not included in runtime-child measurements |
 
 The observations do not establish a winner. Timings are cold-child measurements;
@@ -72,7 +76,9 @@ unavailable. Controlled plan ceilings are not retroactively chosen native budget
 Evidence corrected the QuickJS allocator choice, first-fault latching before
 script-observable error construction, exact retained Promise identities, trusted
 root alias handling, compiler control ownership, and fresh replay handle identity.
-These are recorded in the [ADR](adr/0001-runtime-comparison-boundaries.md).
+Additional regressions exposed ordinary host work after entry return and the risk
+of losing settled entry results during forced cleanup. These corrections are in
+the [ADR](adr/0001-runtime-comparison-boundaries.md).
 
 No confirmed MadoPilot implementation defect was established: its current public
 facade lacks a contract required for safe exact-target admission. No sibling

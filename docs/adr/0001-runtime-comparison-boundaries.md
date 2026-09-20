@@ -49,15 +49,25 @@ No engine repair or native execution success is claimed.
 Use independent cancellation/watchdog progress and owned-child termination for
 non-returning work. Keep logical completion, retained owners, cleanup records,
 and external exit observations separate. Never kill a Rust thread or an unrelated
-target to obtain a passing result. A compiler subprocess must validate the owner
-PID supplied before its launch; adopting an already-reparented PID is not proof
-of ownership.
+target to obtain a passing result. A compiler subprocess validates the owner PID
+supplied before launch and retains a framed control pipe until completion.
+Control EOF ends compilation even while the owner PID still exists; PID checks
+alone do not establish continuous ownership.
 
 Latch host failures before constructing script-visible error objects. Package
 code can mutate error prototypes, and error allocation itself can fail. Diagnostic
 work cannot decide whether an already-issued host refusal remains authoritative.
 Replay managed IDs include a fresh attempt identity, not just process-local
 engine/stream counters. Cached terminal queries require no new owner capacity.
+Unhandled Promise tracking retains exact bounded Promise identities until handled
+or disposed, rather than relying on potentially reusable pointer hashes.
+
+Retain `EntrySettled` before cleanup. Forced exit can preempt cleanup reporting,
+but must not erase a previously observed successful entry or primary fault.
+`Returned` with forced/incomplete cleanup is not successful attempt completion.
+Close all ordinary host work when workflow admission closes, not just input
+submission. Explicit release remains available. The actual JS/Lua return-boundary
+regressions failed before this correction and pass afterward.
 
 ## Consequences and verification
 

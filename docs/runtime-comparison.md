@@ -49,9 +49,9 @@ The example budgets are controlled-run ceilings, not native qualification budget
 Only the predeclared controlled scenarios are accepted; misspellings cannot
 silently become successful samples.
 
-`child`, `parent-probe`, and `target-probe` are harness-internal modes. The last is
-an inert owned process used to prove that containment does not terminate the
-separate target. It is not a game launcher.
+`child`, `parent-probe`, `parent-stop-probe`, and `target-probe` are harness-internal
+modes. The last is an inert owned process used to prove that containment and
+intentional supervisor exit do not terminate the separate target.
 
 ## Package and host contracts
 
@@ -118,17 +118,25 @@ Cargo lock hash, engine revision, compiler/interpreter versions, build profile,
 OS/kernel, and architecture. Keep materially different identities separate.
 Metrics distinguish startup, preflight, workflow, fixed host-operation timing,
 cleanup, process CPU, sampled supervisor/child RSS, VM allocation, and live owners.
+Here `preflight_us` covers common host preparation and TypeScript compilation;
+`workflow_us` covers the adapter invocation, including module/readiness overhead.
+It is not an isolated script-body benchmark.
 RSS is an observed periodic maximum, not an OS peak or proof of cleanup. VM
 allocation and live-owner values are explicitly endpoint measurements, not peaks.
 Missing values remain unavailable rather than becoming zero.
-CPU/RSS describe the Rust supervisor and runtime child, not a process-tree sum.
-The separate TypeScript compiler process is not included in those CPU/RSS values;
-its compilation time is included in preflight.
+CPU describes the runtime child, not a process-tree total; RSS is sampled
+separately for the supervisor and child. The separate TypeScript compiler's
+CPU/RSS are not included; its compilation time is included in preflight.
 
+Entry settlement is recorded before cleanup can block. A retained `Returned`
+entry with forced/incomplete cleanup still has a failed overall outcome; missing
+settlement remains `Unobserved`, never an inferred successful return.
 Stop receipt and admission closure use supervisor-clock latency upper bounds,
 including pipe delivery and polling. Child-relative timestamps are separate.
-A normal return has no external Stop latency. Cleanup completion and forced exit
-remain distinct. Nearest-rank p50 requires 2 samples, p95 requires 20, and p99
+A normal return has no external Stop latency. For incomplete cleanup without
+an external Stop, containment uses the supervisor's entry-settlement receipt
+through observed exit. Cleanup completion and forced exit remain distinct.
+Nearest-rank p50 requires 2 samples, p95 requires 20, and p99
 requires 100; insufficient samples produce `null`. Warmups are excluded.
 
 ## Evidence and handoff
