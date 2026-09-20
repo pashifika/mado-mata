@@ -265,11 +265,13 @@ pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Faul
             fault.context = json!({"cause": fault.context});
         }
         fault.context["inventory"] = json!(inventory.identity);
+        fault.context["catalog"] = inventory.metadata["catalog"].clone();
+        fault.context["stage"] = json!("compilation");
         fault
     };
     let inspection: Inspection =
         serde_json::from_value(transport(&request, limit, deadline).map_err(&attribute)?)
-            .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
+            .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     let mut resolutions: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for import in inspection.imports {
         let destination =
@@ -281,7 +283,7 @@ pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Faul
                         "line": import.line, "column": import.column, "specifier": import.specifier,
                         "kind": import.kind, "cause": fault.context,
                     });
-                    fault
+                    attribute(fault)
                 })?;
         resolutions
             .entry(import.from)
@@ -290,16 +292,16 @@ pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Faul
     }
     request["operation"] = json!("compile");
     request["resolutions"] = serde_json::to_value(resolutions)
-        .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
+        .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     request["compiler_identity"] = inspection.identity;
     let compilation: Compilation =
         serde_json::from_value(transport(&request, limit, deadline).map_err(&attribute)?)
-            .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
+            .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     let mut compiled = inventory.clone();
     compiled.metadata["original_sources"] = serde_json::to_value(&inventory.sources)
-        .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
+        .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     compiled.metadata["original_source_maps"] = serde_json::to_value(&inventory.source_maps)
-        .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
+        .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     compiled.metadata["original_inventory"] = json!(inventory.identity);
     compiled.metadata["runtime"] = json!("javascript");
     compiled.metadata["compiler"] = compilation.compiler;
@@ -394,12 +396,19 @@ fn original_location(
                 return None;
             }
             generated_column = generated_column.checked_add(fields[0])?;
+            if fields[0] < 0 {
+                return None;
+            }
             if fields.len() >= 4 {
                 source = source.checked_add(fields[1])?;
                 source_line = source_line.checked_add(fields[2])?;
                 source_column = source_column.checked_add(fields[3])?;
             }
             if generated_line as u64 == target_line {
+                if column.is_none() && fields.len() == 1 {
+                    // The reported line may point into an unmapped span.
+                    return None;
+                }
                 if let Some(column) = column {
                     if generated_column > i64::try_from(column.checked_sub(1)?).ok()? {
                         break;
@@ -471,6 +480,11 @@ fn mapped_frame(inventory: &Inventory, module: &str, line: u64, column: Option<u
 
 /// Enrich attribution without changing the typed primary fault or its native cause.
 pub fn map_fault(inventory: &Inventory, mut fault: Fault) -> Fault {
+    // Compiler/preflight diagnostics already name original inputs. There is no
+    // generated inventory to map if compilation never completed.
+    if inventory.metadata["original_inventory"].as_str().is_none() {
+        return fault;
+    }
     let mut frames = Vec::new();
     if let (Some(module), Some(line)) = (
         fault.context["module"].as_str(),
@@ -485,25 +499,13 @@ pub fn map_fault(inventory: &Inventory, mut fault: Fault) -> Fault {
     }
     if let Some(stack) = fault.context["stack"].as_str() {
         for row in stack.lines().take(128) {
-            // Match captured IDs only. No guessed filename or original coordinate.
-            for module in inventory.source_maps.keys() {
-                let marker = format!("{module}:");
-                let Some(offset) = row.find(&marker) else {
-                    continue;
-                };
-                if row[..offset].chars().next_back().is_some_and(|character| {
-                    character.is_ascii_alphanumeric() || "/._-@".contains(character)
-                }) {
-                    continue;
-                }
-                let location = &row[offset + marker.len()..];
-                let mut parts = location.split(|character: char| !character.is_ascii_digit());
-                let Some(line) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
-                    continue;
-                };
-                let column = parts.next().and_then(|value| value.parse::<u64>().ok());
-                frames.push(mapped_frame(inventory, module, line, column));
-                break;
+            if let Some(frame) = crate::javascript::source_frame(inventory, row) {
+                frames.push(mapped_frame(
+                    inventory,
+                    frame["module"].as_str().expect("parsed module"),
+                    frame["line"].as_u64().expect("parsed line"),
+                    frame["column"].as_u64(),
+                ));
             }
         }
     }

@@ -157,13 +157,24 @@ function virtualHost(request, libraries, declarations, emitted) {
   return { host, files };
 }
 
-function diagnostics(program) {
-  return ts.getPreEmitDiagnostics(program).map(diagnostic => ({
+function diagnosticRecord(diagnostic, functions) {
+  const location = diagnostic.file && diagnostic.start !== undefined ? origin(diagnostic.file, diagnostic.start) : {};
+  const enclosing = functions[location.module]?.findLast(fn =>
+    location.line >= fn.start_line && location.line <= fn.end_line
+    && (location.line !== fn.start_line || location.column >= fn.start_column)
+    && (location.line !== fn.end_line || location.column <= fn.end_column));
+  return {
     code: diagnostic.code,
     category: ts.DiagnosticCategory[diagnostic.category],
     message: ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
-    ...(diagnostic.file && diagnostic.start !== undefined ? origin(diagnostic.file, diagnostic.start) : {}),
-  }));
+    ...location,
+    function: enclosing?.name ?? null,
+    ...(diagnostic.relatedInformation ? { related: diagnostic.relatedInformation.map(item => diagnosticRecord(item, functions)) } : {}),
+  };
+}
+
+function diagnostics(program, functions = {}) {
+  return ts.getPreEmitDiagnostics(program).map(diagnostic => diagnosticRecord(diagnostic, functions));
 }
 
 function compile(request) {
@@ -181,10 +192,13 @@ function compile(request) {
   const { host, files } = virtualHost(request, libraries, declarations, emitted);
   const roots = Object.keys(request.sources).map(id => ROOT + id).concat(SDK);
   const program = ts.createProgram(roots, options, host);
-  const errors = diagnostics(program);
+  const errors = diagnostics(program, inspected.functions);
   if (errors.length) fail("TypeScript", "TypeScript compilation failed", { diagnostics: errors, compiler: compilerIdentity });
   const result = program.emit();
-  if (result.emitSkipped || result.diagnostics.length) fail("TypeScript", "TypeScript emit failed", { compiler: compilerIdentity });
+  if (result.emitSkipped || result.diagnostics.length) fail("TypeScript", "TypeScript emit failed", {
+    diagnostics: result.diagnostics.map(diagnostic => diagnosticRecord(diagnostic, inspected.functions)),
+    compiler: compilerIdentity,
+  });
   const sources = Object.create(null);
   const source_maps = Object.create(null);
   for (const [id, content] of Object.entries(emitted)) {
@@ -287,7 +301,14 @@ try {
   if (Buffer.byteLength(output) + 1 > workerData.limit) fail("CompilerLimit", "Compiler output exceeds its bound");
   parentPort.postMessage({ output, ok: true });
 } catch (error) {
-  const fault = { category: error.category ?? "Compiler", message: error.message, context: error.context ?? {} };
+  const context = error.context == null ? {} : typeof error.context === "object" && !Array.isArray(error.context) ? { ...error.context } : { cause: error.context };
+  context.compiler ??= compilerIdentity;
+  context.stack ??= error.stack ?? null;
+  if (error.code !== undefined) context.code ??= error.code;
+  if (error.cause !== undefined) context.cause ??= error.cause instanceof Error
+    ? { name: error.cause.name, message: error.cause.message, stack: error.cause.stack, code: error.cause.code }
+    : error.cause;
+  const fault = { category: error.category ?? "Compiler", message: error.message, context };
   let output = JSON.stringify({ ok: false, fault });
   if (Buffer.byteLength(output) + 1 > workerData.limit) output = JSON.stringify({ ok: false, fault: { category: "CompilerLimit", message: "Compiler diagnostics exceed the output bound", context: {} } });
   parentPort.postMessage({ output, ok: false });

@@ -607,10 +607,16 @@
     ],
     "controlled_checks": {
       "javascript": [
-        "javascript-helper-error"
+        "javascript-helper-error",
+        "javascript-approved-helper-diagnostic-clean",
+        "javascript-approved-helper-diagnostic-incomplete",
+        "typescript-approved-helper-diagnostic-clean",
+        "typescript-approved-helper-diagnostic-incomplete"
       ],
       "lua": [
-        "lua-helper-error"
+        "lua-helper-error",
+        "lua-approved-helper-diagnostic-clean",
+        "lua-approved-helper-diagnostic-incomplete"
       ]
     }
   },
@@ -632,7 +638,15 @@
     ],
     "controlled_checks": {
       "javascript": [
-        "typescript-helper-diagnostic"
+        "typescript-helper-diagnostic",
+        "typescript-compiler-helper-diagnostic",
+        "typescript-source-mapping-captured-source",
+        "typescript-source-mapping-missing-map",
+        "typescript-source-mapping-changed-source",
+        "typescript-source-mapping-ambiguous-line",
+        "typescript-source-mapping-unmapped-span",
+        "typescript-source-mapping-backward-column",
+        "typescript-source-mapping-message-not-frame"
       ]
     }
   },
@@ -969,6 +983,17 @@
       "windows",
       "macos"
     ],
+    "replay_checks": {
+      "javascript": [
+        "javascript-recorded-real-replay",
+        "typescript-recorded-real-replay",
+        "rust-recorded-real-replay"
+      ],
+      "lua": [
+        "lua-recorded-real-replay",
+        "rust-recorded-real-replay"
+      ]
+    },
     "controlled_checks": {
       "javascript": [],
       "lua": []
@@ -1579,8 +1604,12 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "rust-lifecycle-controlled-pid-reuse"
+      ],
+      "lua": [
+        "rust-lifecycle-controlled-pid-reuse"
+      ]
     }
   },
   {
@@ -2019,8 +2048,18 @@
       "macos"
     ],
     "controlled_checks": {
-      "javascript": [],
-      "lua": []
+      "javascript": [
+        "javascript-lifecycle-stop-before-queue-fresh-attempt",
+        "javascript-lifecycle-stop-queued-fresh-attempt",
+        "javascript-lifecycle-stop-queued-predecessor-fresh-attempt",
+        "javascript-lifecycle-stop-admitted-fresh-attempt"
+      ],
+      "lua": [
+        "lua-lifecycle-stop-before-queue-fresh-attempt",
+        "lua-lifecycle-stop-queued-fresh-attempt",
+        "lua-lifecycle-stop-queued-predecessor-fresh-attempt",
+        "lua-lifecycle-stop-admitted-fresh-attempt"
+      ]
     }
   },
   {

@@ -90,7 +90,13 @@ try {
     process.exitCode = response.ok ? 0 : 1;
   }
 } catch (error) {
-  abort(error.code === "COMPILER_OWNER_LOST" ? "CompilerContainment" : error.code === "ERR_WORKER_OUT_OF_MEMORY" ? "CompilerLimit" : "Compiler", error.message);
+  abort(error.code === "COMPILER_OWNER_LOST" ? "CompilerContainment" : error.code === "ERR_WORKER_OUT_OF_MEMORY" ? "CompilerLimit" : "Compiler", error.message, {
+    stack: error.stack ?? null,
+    code: error.code,
+    cause: error.cause instanceof Error
+      ? { name: error.cause.name, message: error.cause.message, stack: error.cause.stack, code: error.cause.code }
+      : error.cause,
+  });
 } finally {
   clearTimeout(deadlineTimer);
   clearInterval(parentTimer);

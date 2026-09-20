@@ -8,6 +8,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
+// A synthetic fixture identifier, never an OS-selected or operated-on process.
+const CONTROLLED_PROCESS_ID: u32 = 4242;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -517,6 +519,8 @@ struct State {
     session: u64,
     geometry: u64,
     frame: u64,
+    retained_process_lifetime: String,
+    current_process_lifetime: String,
     alive: bool,
     focus: bool,
     route: bool,
@@ -604,6 +608,50 @@ pub struct Host {
     inner: Arc<Inner>,
 }
 
+/// One explicitly queued controlled successor. Its control exists before its VM,
+/// so Stop can cancel queued work without reopening the predecessor's latch.
+pub(crate) struct ScheduledAttempt {
+    predecessor: Host,
+    control: Arc<Control>,
+}
+
+impl ScheduledAttempt {
+    pub(crate) fn control(&self) -> Arc<Control> {
+        Arc::clone(&self.control)
+    }
+
+    pub(crate) fn admit(self) -> Result<Host, Fault> {
+        self.control.check()?;
+        self.predecessor.fresh_predecessor()?;
+        self.predecessor.inner.control.admit_transition()?;
+        self.control.check()?;
+        let old = &self.predecessor.inner;
+        let fresh = Host::new(
+            old.plan.clone(),
+            old.options.clone(),
+            old.assets.clone(),
+            Arc::clone(&self.control),
+        )?;
+        {
+            let previous = lock(&old.state);
+            let mut state = lock(&fresh.inner.state);
+            state.session = previous.session.checked_add(1).ok_or_else(|| {
+                Fault::new("TransitionRefused", "target session generation exhausted")
+            })?;
+            if previous.current_process_lifetime != previous.retained_process_lifetime {
+                // Only the explicit new attempt binds the injected replacement.
+                state.retained_process_lifetime = previous.current_process_lifetime.clone();
+                state.current_process_lifetime = previous.current_process_lifetime.clone();
+            }
+        }
+        if let Err(error) = self.control.check() {
+            fresh.finish();
+            return Err(error);
+        }
+        Ok(fresh)
+    }
+}
+
 impl Host {
     pub fn new(
         plan: Plan,
@@ -651,7 +699,7 @@ impl Host {
                 assets,
                 control,
                 attempt,
-                lifetime,
+                lifetime: lifetime.clone(),
                 state: Mutex::new(State {
                     phase: Phase::Instantiating,
                     readiness_started: None,
@@ -659,6 +707,8 @@ impl Host {
                     session: 1,
                     geometry: 1,
                     frame: 0,
+                    retained_process_lifetime: lifetime.clone(),
+                    current_process_lifetime: lifetime,
                     alive: true,
                     focus: true,
                     route: true,
@@ -705,6 +755,54 @@ impl Host {
     }
     pub fn limits(&self) -> Limits {
         self.inner.plan.limits.clone()
+    }
+
+    fn fresh_predecessor(&self) -> Result<(), Fault> {
+        if self.inner.plan.lane != "controlled" {
+            return Err(Fault::new(
+                "Authority",
+                "fresh-attempt scheduling is restricted to the controlled harness",
+            ));
+        }
+        self.inner.control.check()?;
+        if let Some(fault) = self.failure() {
+            return Err(fault);
+        }
+        let state = lock(&self.inner.state);
+        if state.phase != Phase::Finished {
+            return Err(Fault::new(
+                "TransitionRefused",
+                "predecessor has not terminated",
+            ));
+        }
+        if state
+            .cleanup
+            .as_ref()
+            .is_none_or(|cleanup| cleanup["clean"] != true)
+            || !state.handles.is_empty()
+            || !state.queue.is_empty()
+            || state.active.is_some()
+            || !state.held_keys.is_empty()
+            || state.receipts.len() != state.released_receipts.len()
+            || self.inner.physical.load(Ordering::Acquire) != 0
+            || !lock(&self.inner.workers).is_empty()
+        {
+            return Err(Fault::new(
+                "IncompleteCleanup",
+                "fresh attempt requires a settled predecessor ownership baseline",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn schedule_fresh(&self) -> Result<ScheduledAttempt, Fault> {
+        self.fresh_predecessor()?;
+        self.inner.control.queue_transition()?;
+        let control = Arc::new(Control::new(&self.inner.plan.limits));
+        Ok(ScheduledAttempt {
+            predecessor: self.clone(),
+            control,
+        })
     }
 
     fn close_admission(&self) {
@@ -760,7 +858,7 @@ impl Host {
         if state.phase == Phase::Finished {
             return Err(Fault::new("AdmissionClosed", "attempt has finished"));
         }
-        if !state.alive {
+        if !state.alive || state.current_process_lifetime != state.retained_process_lifetime {
             return Err(Fault::new(
                 "TargetLost",
                 "authorized process lifetime ended",
@@ -976,7 +1074,8 @@ impl Host {
         let id = self.next_id(state, "observation");
         Arc::new(Frame {
             value: json!({
-                "id":id,"run":self.inner.plan.id,"attempt":self.inner.attempt,"process_lifetime":self.inner.lifetime,
+                "id":id,"run":self.inner.plan.id,"attempt":self.inner.attempt,
+                "process_id":CONTROLLED_PROCESS_ID,"process_lifetime":state.retained_process_lifetime,
                 "session":state.session,"geometry":state.geometry,"frame":state.frame,
                 "width":640,"height":480,"coordinate_space":"capture-pixels"
             }),
@@ -1000,7 +1099,8 @@ impl Host {
     fn validate_identity(&self, state: &State, value: &Value) -> Result<(), Fault> {
         if value["run"].as_str() != Some(self.inner.plan.id.as_str())
             || value["attempt"].as_u64() != Some(self.inner.attempt)
-            || value["process_lifetime"].as_str() != Some(self.inner.lifetime.as_str())
+            || value["process_id"].as_u64() != Some(u64::from(CONTROLLED_PROCESS_ID))
+            || value["process_lifetime"].as_str() != Some(state.retained_process_lifetime.as_str())
             || value["session"].as_u64() != Some(state.session)
             || value["geometry"].as_u64() != Some(state.geometry)
         {
@@ -1009,7 +1109,7 @@ impl Host {
                 "observation belongs to a different run, process lifetime, session, or geometry",
             ));
         }
-        if !state.alive {
+        if !state.alive || state.current_process_lifetime != state.retained_process_lifetime {
             return Err(Fault::new(
                 "TargetLost",
                 "authorized process lifetime ended",
@@ -1771,6 +1871,13 @@ impl Host {
                 state.alive = false;
                 self.close_admission();
             }
+            "pid_reuse" => {
+                // Keep PID, attempt, session, and geometry unchanged: only the
+                // observed lifetime changes, while the authorized one is retained.
+                state.current_process_lifetime =
+                    format!("controlled-pid-reuse-{}", self.inner.lifetime);
+                self.close_admission();
+            }
             "focus_lost" => state.focus = false,
             "route_revoked" => state.route = false,
             "hold" => self.inner.held.store(true, Ordering::Release),
@@ -1802,6 +1909,15 @@ impl Host {
             "held_keys":state.held_keys.keys().collect::<Vec<_>>(),"logs":state.logs,"dropped_logs":state.dropped_logs,
             "release_outcomes":state.release_outcomes
         });
+        if self.inner.plan.lane == "controlled" {
+            value["target_identity"] = json!({
+                "scope":"controlled PID-reuse injection; not OS PID recycling",
+                "process_id":CONTROLLED_PROCESS_ID,"attempt":self.inner.attempt,
+                "session":state.session,"geometry":state.geometry,"alive":state.alive,
+                "retained_process_lifetime":state.retained_process_lifetime,
+                "current_process_lifetime":state.current_process_lifetime
+            });
+        }
         drop(state);
         value["failure"] = json!(self.failure());
         value["operation_metrics"] = Value::Object(

@@ -6,6 +6,8 @@ use crate::runner::run_once;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub(super) fn run(
@@ -15,6 +17,7 @@ pub(super) fn run(
     profile_cases(rows, &inventories["rust"])?;
     finite_wait_cases(rows, &inventories["rust"])?;
     identity_cases(rows, &inventories["rust"])?;
+    pid_reuse_case(rows, &inventories["rust"])?;
     held_cases(rows, &inventories["rust"])?;
     for candidate in ["javascript", "lua"] {
         let inventory = &inventories[candidate];
@@ -23,6 +26,7 @@ pub(super) fn run(
         normal_return_case(rows, candidate, inventory)?;
         retention_case(rows, candidate, inventory)?;
         fresh_vm_case(rows, candidate, inventory)?;
+        fresh_stop_cases(rows, candidate, inventory)?;
         incomplete_return_case(rows, candidate, inventory)?;
         stop_cases(rows, candidate, inventory)?;
     }
@@ -161,6 +165,7 @@ fn invalid_profile_cases(
             &invalid,
             None,
             false,
+            None,
         );
         let passed = result.as_ref().is_err_and(|fault| {
             fault.category == category && field.is_none_or(|field| fault.message.contains(field))
@@ -336,6 +341,179 @@ fn identity_cases(rows: &mut Vec<Value>, inventory: &Inventory) -> Result<(), Fa
         "stale_observation":stale_observation,"stale_recognition":stale_recognition,
         "stale_query":stale_query,"stale_sequence":stale_sequence,"current_result":current_result
     });
+    Ok(())
+}
+
+fn pid_reuse_case(rows: &mut Vec<Value>, inventory: &Inventory) -> Result<(), Fault> {
+    let candidate = "rust";
+    let old = new_host(inventory, plan(candidate, "success", "template-first"))?;
+    let old_entry = old.begin_readiness().and_then(|()| old.begin_workflow());
+    let observation = old.call("observe", json!({}))?;
+    let recognition = old.call(
+        "recognize",
+        json!({"observation":observation,"kind":"ocr",
+            "roi":{"x":0,"y":0,"width":640,"height":480}}),
+    )?;
+    let query = old.call(
+        "query",
+        json!({"observation":observation,"kind":"ocr","expected":"DONE",
+            "roi":{"x":0,"y":0,"width":640,"height":480}}),
+    )?;
+    let actions = json!([{"kind":"key_down","key":"B"},{"kind":"key_up","key":"B"}]);
+    let prior = old.call(
+        "submit",
+        json!({"observation":observation,"actions":actions}),
+    )?;
+    let prior_receipt = old.call("settle", json!({"id":prior["id"]}))?;
+    let queued = old.call(
+        "submit",
+        json!({"observation":recognition["observation"],"actions":actions}),
+    )?;
+    let before_injection = old.snapshot();
+    let injection = old.call("fixture", json!({"event":"pid_reuse"}))?;
+    let after_injection = old.snapshot();
+    let old_observation = old.call("observe", json!({}));
+    let old_action = old.call(
+        "submit",
+        json!({"observation":observation,"actions":actions}),
+    );
+    let old_recognition = old.call(
+        "submit",
+        json!({"observation":recognition["observation"],"actions":actions}),
+    );
+    let old_query = old.call("query_wait", json!({"id":query["id"],"timeout_ms":100}));
+    let refused_receipt = old.call("settle", json!({"id":queued["id"]}));
+    let repeated_receipt = old.call("settle", json!({"id":queued["id"]}));
+    let retained_receipt = old.call("settle", json!({"id":prior["id"]}));
+    let after_old_callbacks = old.snapshot();
+    let old_cleanup = old.finish();
+    let old_snapshot = old.snapshot();
+
+    let scheduled = old.schedule_fresh()?;
+    let fresh = scheduled.admit()?;
+    let fresh_entry = fresh
+        .begin_readiness()
+        .and_then(|()| fresh.begin_workflow());
+    let current_observation = fresh.call("observe", json!({}))?;
+    let current_query = fresh.call(
+        "query",
+        json!({"observation":current_observation,"kind":"ocr","expected":"READY",
+            "roi":{"x":0,"y":0,"width":640,"height":480}}),
+    )?;
+    let before_late_callbacks = fresh.snapshot();
+    // The old cancellation context is not the scheduled successor's context.
+    old.control().cancel();
+    let late_observation = fresh.call(
+        "submit",
+        json!({"observation":observation,"actions":actions}),
+    );
+    let late_recognition = fresh.call(
+        "submit",
+        json!({"observation":recognition["observation"],"actions":actions}),
+    );
+    let late_query = fresh.call("query_wait", json!({"id":query["id"],"timeout_ms":100}));
+    let late_queued = fresh.call("settle", json!({"id":queued["id"]}));
+    let late_receipt = fresh.call("settle", json!({"id":prior["id"]}));
+    let after_late_callbacks = fresh.snapshot();
+    let current_result = fresh.call(
+        "query_wait",
+        json!({"id":current_query["id"],"timeout_ms":100}),
+    );
+    let fresh_control = fresh.control().check();
+    let fresh_cleanup = fresh.finish();
+    let fresh_snapshot = fresh.snapshot();
+    let retained = &before_injection["target_identity"];
+    let replacement = &after_injection["target_identity"];
+    let passed = old_entry.is_ok()
+        && fresh_entry.is_ok()
+        && injection["applied"] == true
+        && retained["process_id"] == replacement["process_id"]
+        && retained["attempt"] == replacement["attempt"]
+        && retained["session"] == replacement["session"]
+        && retained["geometry"] == replacement["geometry"]
+        && retained["alive"] == true
+        && replacement["alive"] == true
+        && retained["retained_process_lifetime"] == replacement["retained_process_lifetime"]
+        && retained["current_process_lifetime"] != replacement["current_process_lifetime"]
+        && fault_is(&old_observation, "TargetLost")
+        && fault_is(&old_action, "TargetLost")
+        && fault_is(&old_recognition, "TargetLost")
+        && fault_is(&old_query, "TargetLost")
+        && prior_receipt["status"] == "Submitted"
+        && prior_receipt["submitted"] == 2
+        && retained_receipt
+            .as_ref()
+            .is_ok_and(|receipt| *receipt == prior_receipt)
+        && refused_receipt.as_ref().is_ok_and(|receipt| {
+            receipt["status"] == "Refused"
+                && receipt["reason"] == "TargetLost"
+                && receipt["submitted"] == 0
+                && repeated_receipt
+                    .as_ref()
+                    .is_ok_and(|again| again == receipt)
+        })
+        && before_injection["dispatches"] == after_old_callbacks["dispatches"]
+        && before_injection["effects"] == after_old_callbacks["effects"]
+        && before_injection["accepted"] == after_old_callbacks["accepted"]
+        && after_old_callbacks["queue_depth"] == 0
+        && old_cleanup["clean"] == true
+        && no_owners(&old_snapshot)
+        && current_observation["process_id"] == observation["process_id"]
+        && current_observation["process_lifetime"] == replacement["current_process_lifetime"]
+        && current_observation["attempt"] != observation["attempt"]
+        && current_observation["session"] != observation["session"]
+        && fault_is(&late_observation, "StaleIdentity")
+        && fault_is(&late_recognition, "StaleIdentity")
+        && fault_is(&late_query, "InvalidHandle")
+        && fault_is(&late_queued, "InvalidHandle")
+        && fault_is(&late_receipt, "InvalidHandle")
+        && [
+            "accepted",
+            "receipts",
+            "effects",
+            "live_handles",
+            "attempt_owners",
+            "observations",
+            "recognitions",
+            "queue_depth",
+            "active_sequence",
+        ]
+        .iter()
+        .all(|key| before_late_callbacks[*key] == after_late_callbacks[*key])
+        && current_result.as_ref().is_ok_and(|result| {
+            result["id"] == current_query["id"]
+                && result["text"] == "READY"
+                && result["observation"]["process_lifetime"]
+                    == replacement["current_process_lifetime"]
+        })
+        && fresh_control.is_ok()
+        && fault_is(&old.control().check(), "Cancelled")
+        && fresh_cleanup["clean"] == true
+        && no_owners(&fresh_snapshot);
+    let old_evidence = json!({
+        "entry_result":old_entry,"observation":observation,"recognition":recognition,"query":query,
+        "prior_sequence":prior,"prior_receipt":prior_receipt,"queued_sequence":queued,
+        "before_injection":before_injection,"injection":injection,"after_injection":after_injection,
+        "old_observation":old_observation,"old_action":old_action,"old_recognition":old_recognition,
+        "old_query":old_query,"refused_receipt":refused_receipt,"repeated_receipt":repeated_receipt,
+        "retained_receipt":retained_receipt,"after_old_callbacks":after_old_callbacks,
+        "cleanup":old_cleanup,"observations":old_snapshot
+    });
+    let fresh_evidence = json!({
+        "entry_result":fresh_entry,"observation":current_observation,
+        "before_late_callbacks":before_late_callbacks,"after_late_callbacks":after_late_callbacks,
+        "late_observation":late_observation,"late_recognition":late_recognition,"late_query":late_query,
+        "late_queued_sequence":late_queued,"late_receipt":late_receipt,
+        "current_result":current_result,"control":fresh_control
+    });
+    rows.push(json!({
+        "id":format!("{candidate}-lifecycle-controlled-pid-reuse"),"candidate":candidate,
+        "lane":"controlled","os":std::env::consts::OS,"status":if passed {"PASS"} else {"FAIL"},
+        "oracle":"controlled shared-host PID-reuse injection changes only the observed lifetime, not PID or attempt/session/geometry; old observations, recognition, queued input, and receipts cannot target the replacement; only an explicitly scheduled clean successor binds the replacement, and late old handles/control cannot mutate it",
+        "identity_scope":"synthetic controlled PID-reuse injection, not actual OS PID recycling",
+        "inventory_identity":inventory.identity,"old":old_evidence,"fresh":fresh_evidence,
+        "cleanup":fresh_cleanup,"observations":fresh_snapshot,"build":crate::report::build_identity()
+    }));
     Ok(())
 }
 
@@ -610,7 +788,9 @@ return {
     let old_late = old.call("observe", json!({}));
     let old_cleanup = old.finish();
     let old_snapshot = old.snapshot();
-    let fresh = new_host(&inventory, plan(candidate, "success", "template-first"))?;
+    let scheduled = old.schedule_fresh()?;
+    let duplicate = old.schedule_fresh().map(|_| ());
+    let fresh = scheduled.admit()?;
     let fresh_entry = run_vm(candidate, &inventory, &fresh);
     let fresh_cleanup = fresh.finish();
     let fresh_snapshot = fresh.snapshot();
@@ -625,6 +805,10 @@ return {
         && fresh_snapshot["operation_metrics"]["fixture"]["count"] == 1
         && fresh_snapshot["operation_metrics"]["fixture"]["failures"] == 0
         && (fault_is(&old_late, "TargetLost") || fault_is(&old_late, "AdmissionClosed"))
+        && fault_is(&duplicate, "TransitionRefused")
+        && old_snapshot["target_identity"]["session"]
+            != fresh_snapshot["target_identity"]["session"]
+        && !Arc::ptr_eq(&old.control(), &fresh.control())
         && identity_changed
         && old_snapshot["logs"] == logs
         && fresh_snapshot["logs"] == logs
@@ -640,13 +824,183 @@ return {
     rows.push(json!({
         "id":format!("{candidate}-lifecycle-target-exit-fresh-vm"),"candidate":candidate,
         "lane":"controlled","os":std::env::consts::OS,"status":if passed {"PASS"} else {"FAIL"},
-        "oracle":"after controlled target exit, an explicitly constructed new VM uses the same immutable inventory, fresh module/host state, and literal Ready before its workflow; this is not an automatic recovery scheduler",
+        "oracle":"after controlled target exit and clean predecessor release, the one-shot bounded scheduled transition constructs a fresh Host/VM from unchanged inventory; fresh module/host state and literal Ready precede workflow, and duplicate successor scheduling is refused; no application launch or automatic recovery is performed",
         "inventory_identity":identity,"old_entry_result":old_entry,
+        "duplicate_schedule":duplicate,
         "old_late_access":old_late,"old_cleanup":old_cleanup,
         "old_observations":old_snapshot,"fresh_entry_result":fresh_entry,
         "cleanup":fresh_cleanup,"observations":fresh_snapshot,
         "build":crate::report::build_identity()
     }));
+    Ok(())
+}
+
+fn fresh_stop_cases(
+    rows: &mut Vec<Value>,
+    candidate: &str,
+    inventory: &Inventory,
+) -> Result<(), Fault> {
+    for boundary in ["before-queue", "queued", "queued-predecessor", "admitted"] {
+        let old = new_host(inventory, plan(candidate, "success", "template-first"))?;
+        let old_entry = run_vm(candidate, inventory, &old);
+        let premature = old.schedule_fresh().map(|_| ());
+        let old_cleanup = old.finish();
+        let old_snapshot = old.snapshot();
+        let (control, transition, boundary_proof, refused_again) = if boundary == "before-queue" {
+            let control = old.control();
+            control.cancel();
+            let refused = old.schedule_fresh().map(|_| ());
+            let repeated = old.schedule_fresh().map(|_| ());
+            (
+                control,
+                json!({"admitted":false,"fault":refused.err()}),
+                json!({"stage":"before-queue","predecessor":old_snapshot}),
+                repeated,
+            )
+        } else {
+            let scheduled = old.schedule_fresh()?;
+            let control = if boundary == "queued-predecessor" {
+                old.control()
+            } else {
+                scheduled.control()
+            };
+            let duration = Duration::from_millis(old.limits().wait_ms);
+            // Capacity-one rendezvous channels have finite waits. These runs
+            // force both linearized orderings and both pending Stop addresses.
+            let (arrived_tx, arrived_rx) = mpsc::sync_channel(1);
+            let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+            let worker_candidate = candidate.to_owned();
+            let worker_inventory = inventory.clone();
+            let admission_first = boundary == "admitted";
+            let worker = std::thread::Builder::new()
+                .name("m0-fresh-transition".into())
+                .spawn(move || -> Result<Value, Fault> {
+                    let rendezvous = |proof: Value| -> Result<(), Fault> {
+                        arrived_tx
+                            .send(proof)
+                            .map_err(|error| Fault::new("Fixture", error.to_string()))?;
+                        resume_rx
+                            .recv_timeout(duration)
+                            .map_err(|error| Fault::new("Fixture", error.to_string()))
+                    };
+                    if !admission_first {
+                        rendezvous(json!({"stage":"queued"}))?;
+                    }
+                    match scheduled.admit() {
+                        Err(fault) => {
+                            if admission_first {
+                                rendezvous(json!({"stage":"admission-failed","fault":fault}))?;
+                            }
+                            Ok(json!({"admitted":false,"fault":fault}))
+                        }
+                        Ok(fresh) => {
+                            let released = if admission_first {
+                                rendezvous(
+                                    json!({"stage":"admitted","before_stop":fresh.snapshot()}),
+                                )
+                            } else {
+                                Ok(())
+                            };
+                            let entry = released.and_then(|()| {
+                                run_vm(&worker_candidate, &worker_inventory, &fresh)
+                            });
+                            let cleanup = fresh.finish();
+                            Ok(json!({
+                                "admitted":true,"entry_result":entry,
+                                "cleanup":cleanup,"observations":fresh.snapshot()
+                            }))
+                        }
+                    }
+                })
+                .map_err(|error| Fault::new("Fixture", error.to_string()))?;
+            let arrival = arrived_rx
+                .recv_timeout(duration)
+                .map_err(|error| Fault::new("Fixture", error.to_string()));
+            control.cancel();
+            let resumed = resume_tx
+                .send(())
+                .map_err(|error| Fault::new("Fixture", error.to_string()));
+            let result = worker
+                .join()
+                .map_err(|_| Fault::new("Fixture", "fresh-transition worker panicked"))?;
+            let proof = json!({"arrival":arrival,"resume":resumed});
+            let result = result?;
+            let repeated = old.schedule_fresh().map(|_| ());
+            (control, result, proof, repeated)
+        };
+        let first_stop = control.stop_us.load(Ordering::Acquire);
+        let first_close = control.closed_us.load(Ordering::Acquire);
+        control.cancel();
+        let latched = control.check();
+        let no_requeue = control.queue_transition();
+        let no_readmission = control.admit_transition();
+        // A genuinely new explicit Start gets another control/Host/VM; it does
+        // not clear the stopped pending/old attempt's cancellation context.
+        let explicit = new_host(inventory, plan(candidate, "success", "template-first"))?;
+        let explicit_entry = run_vm(candidate, inventory, &explicit);
+        let explicit_cleanup = explicit.finish();
+        let explicit_snapshot = explicit.snapshot();
+        let stopped = if boundary == "admitted" {
+            boundary_proof["arrival"]["Ok"]["stage"] == "admitted"
+                && boundary_proof["arrival"]["Ok"]["before_stop"]["phase"] == "Instantiating"
+                && boundary_proof["arrival"]["Ok"]["before_stop"]["observations"] == 0
+                && boundary_proof["resume"].get("Ok").is_some()
+                && transition["admitted"] == true
+                && transition["entry_result"]["Err"]["category"] == "Cancelled"
+                && transition["observations"]["observations"] == 0
+                && transition["observations"]["logs"] == json!([])
+                && transition["observations"]["accepted"] == json!([])
+                && transition["observations"]["effects"] == json!([])
+                && transition["cleanup"]["clean"] == true
+                && no_owners(&transition["observations"])
+        } else {
+            transition["admitted"] == false
+                && transition["fault"]["category"] == "Cancelled"
+                && (boundary == "before-queue"
+                    || (boundary_proof["arrival"]["Ok"]["stage"] == "queued"
+                        && boundary_proof["resume"].get("Ok").is_some()))
+        };
+        let passed = old_entry.is_ok()
+            && fault_is(&premature, "TransitionRefused")
+            && old_cleanup["clean"] == true
+            && no_owners(&old_snapshot)
+            && stopped
+            && fault_is(
+                &refused_again,
+                if matches!(boundary, "before-queue" | "queued-predecessor") {
+                    "Cancelled"
+                } else {
+                    "TransitionRefused"
+                },
+            )
+            && fault_is(&latched, "Cancelled")
+            && fault_is(&no_requeue, "Cancelled")
+            && fault_is(&no_readmission, "Cancelled")
+            && first_stop > 0
+            && first_close > 0
+            && first_stop == control.stop_us.load(Ordering::Acquire)
+            && first_close == control.closed_us.load(Ordering::Acquire)
+            && !control.admission.load(Ordering::Acquire)
+            && !Arc::ptr_eq(&control, &explicit.control())
+            && explicit_entry.is_ok()
+            && explicit_cleanup["clean"] == true
+            && explicit_snapshot["receipts"][0]["status"] == "Submitted"
+            && no_owners(&explicit_snapshot)
+            && fault_is(&control.check(), "Cancelled");
+        rows.push(json!({
+            "id":format!("{candidate}-lifecycle-stop-{boundary}-fresh-attempt"),
+            "candidate":candidate,"lane":"controlled","os":std::env::consts::OS,
+            "status":if passed {"PASS"} else {"FAIL"},
+            "oracle":"a bounded controlled successor cannot bypass an unfinished predecessor or latched Stop; deterministic rendezvous covers Stop before queueing, before admission, and after admission before VM entry; no post-Stop workflow/input occurs, duplicate scheduling is refused, and only a separate explicit Start uses fresh cancellation state",
+            "inventory_identity":inventory.identity,"old_entry_result":old_entry,
+            "premature_schedule":premature,"old_cleanup":old_cleanup,"old_observations":old_snapshot,
+            "boundary":boundary_proof,"transition":transition,"repeated_schedule":refused_again,
+            "latched_control":latched,"requeue":no_requeue,"readmission":no_readmission,
+            "stop_us":first_stop,"closed_us":first_close,
+            "explicit_start_entry":explicit_entry,"explicit_start_cleanup":explicit_cleanup,
+            "explicit_start_observations":explicit_snapshot,"build":crate::report::build_identity()
+        }));
+    }
     Ok(())
 }
 
@@ -671,6 +1025,7 @@ fn incomplete_return_case(
     let incomplete = host.finish();
     let retained = host.snapshot();
     let late = host.call("observe", json!({}));
+    let refused_transition = host.schedule_fresh().map(|_| ());
     let released = host.call("fixture", json!({"event":"release_hold"}));
     let harness_cleanup = host.finish();
     let after = host.snapshot();
@@ -683,6 +1038,7 @@ fn incomplete_return_case(
         && incomplete["remaining"]["in_flight_native"] == 1
         && retained["in_flight_native"] == 1
         && retained["live_handles"] == 0
+        && fault_is(&refused_transition, "IncompleteCleanup")
         && fault_is(&late, "AdmissionClosed")
         && released.is_ok()
         && harness_cleanup["clean"] == true
@@ -691,8 +1047,9 @@ fn incomplete_return_case(
         "id":format!("{candidate}-lifecycle-return-incomplete-cleanup"),"candidate":candidate,
         "lane":"controlled","os":std::env::consts::OS,"status":if passed {"PASS"} else {"FAIL"},
         "execution_status":if entry.is_ok() && incomplete["clean"] == true {"PASS"} else {"FAIL"},
-        "oracle":"successful actual VM entry return is retained separately from IncompleteCleanup with a live physical owner; later fixture teardown does not rewrite the original terminal cleanup outcome",
+        "oracle":"successful actual VM entry return is retained separately from IncompleteCleanup with a live physical owner; fresh-attempt scheduling is refused while ownership remains, and later fixture teardown does not rewrite the original terminal cleanup outcome",
         "entry_result":entry,"before_cleanup":before,"cleanup":incomplete,"observations":retained,
+        "refused_fresh_transition":refused_transition,
         "late_access":late,"fixture_hold_release":released,"fixture_cleanup":harness_cleanup,
         "after_fixture_cleanup":after,"inventory_identity":inventory.identity,
         "build":crate::report::build_identity()
@@ -799,7 +1156,7 @@ end}
             },
             "template-first",
         );
-        let record = run_once(&scenario, &inventory, Some(250), false)?;
+        let record = run_once(&scenario, &inventory, Some(250), false, None)?;
         let operation = if kind == "query" {
             "query_wait"
         } else {

@@ -238,7 +238,8 @@ pub fn child() -> Result<bool, Fault> {
     let (metrics, primary) = match runtime {
         Ok(metrics) => (Some(metrics), host.failure()),
         Err(error) => {
-            let error = host.failure().unwrap_or(error);
+            // Adapters retain the host-owned primary and enrich it at the live
+            // language boundary. Replacing it with the latch loses attribution.
             let error = if invocation.plan.candidate == "typescript" {
                 crate::typescript::map_fault(&inventory, error)
             } else {
@@ -290,7 +291,7 @@ pub fn sample(plan: &Plan, inventory: &Inventory) -> Result<Vec<RunRecord>, Faul
     plan.validate()?;
     let mut records = Vec::new();
     for i in 0..plan.warmups + plan.samples * plan.repetitions {
-        let mut record = run_once(plan, inventory, None, false)?;
+        let mut record = run_once(plan, inventory, None, false, None)?;
         record.metrics["warmup"] = Value::Bool(i < plan.warmups);
         record.metrics["sample_index"] = json!(i);
         let failed = record.status != "PASS";
@@ -302,11 +303,14 @@ pub fn sample(plan: &Plan, inventory: &Inventory) -> Result<Vec<RunRecord>, Faul
     Ok(records)
 }
 
+/// The optional operator callback must be a nonblocking poll. A true result
+/// requests the same bounded Stop/cleanup path as the existing timed control.
 pub fn run_once(
     plan: &Plan,
     inventory: &Inventory,
     stop_after_ms: Option<u64>,
     disconnect: bool,
+    mut operator_stop: Option<&mut dyn FnMut() -> bool>,
 ) -> Result<RunRecord, Fault> {
     plan.validate()?;
     inventory.validate()?;
@@ -453,9 +457,15 @@ pub fn run_once(
             break;
         }
         let elapsed = started.elapsed();
+        // The optional operator poll is nonblocking and runs in the supervisor,
+        // independently of compilation, VM execution, and native-work locks.
+        let operator_requested =
+            stop_sent_at.is_none() && operator_stop.as_mut().is_some_and(|poll| poll());
         let stop_at = stop_after_ms.unwrap_or(plan.limits.duration_ms);
         if stop_sent_at.is_none()
-            && (elapsed >= Duration::from_millis(stop_at) || protocol_fault.is_some())
+            && (operator_requested
+                || elapsed >= Duration::from_millis(stop_at)
+                || protocol_fault.is_some())
         {
             stop_sent_at = Some(Instant::now());
             if disconnect {
@@ -666,7 +676,13 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     if intentional {
         let invocation: Invocation = serde_json::from_slice(&bytes)
             .map_err(|error| Fault::new("Transport", error.to_string()))?;
-        let record = run_once(&invocation.plan, &invocation.inventory, Some(100), false)?;
+        let record = run_once(
+            &invocation.plan,
+            &invocation.inventory,
+            Some(100),
+            false,
+            None,
+        )?;
         let clean = record.cleanup["clean"] == true
             && !record.forced
             && record

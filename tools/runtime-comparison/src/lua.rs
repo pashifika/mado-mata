@@ -91,13 +91,55 @@ fn annotate(
         fault.context = json!({"cause":fault.context});
     }
     fault.context["inventory"] = json!(inventory.identity);
-    if fault.context.get("module").is_none() {
-        fault.context["module"] = json!(module);
-    }
-    fault.context["stage"] = json!(stage);
     if let Some(stack) = stack {
-        fault.context["stack"] = json!(stack);
+        if fault.context.get("stack").is_none() {
+            fault.context["stack"] = json!(stack);
+        }
     }
+    let origin = fault.context["stack"].as_str().and_then(|stack| {
+        stack.lines().take(128).find_map(|row| {
+            let (source, rest) = row.trim().split_once(':')?;
+            if !inventory.sources.contains_key(source) {
+                return None;
+            }
+            let (line, description) = rest.split_once(':')?;
+            let line = line.parse::<u64>().ok().filter(|line| *line > 0)?;
+            let function = ["function", "field", "local", "upvalue", "method"]
+                .iter()
+                .find_map(|kind| {
+                    description
+                        .trim()
+                        .strip_prefix("in ")?
+                        .strip_prefix(*kind)?
+                        .strip_prefix(" '")?
+                        .split_once('\'')
+                        .map(|(name, _)| name)
+                });
+            Some(json!({"module":source,"line":line,"function":function}))
+        })
+    });
+    if fault.context.get("module").is_none()
+        || fault.context["module"]
+            .as_str()
+            .is_some_and(|module| module.starts_with('<'))
+    {
+        fault.context["module"] = origin
+            .as_ref()
+            .map_or_else(|| json!(module), |frame| frame["module"].clone());
+    }
+    if let Some(origin) = origin {
+        if fault.context["module"] == origin["module"] {
+            for key in ["line", "function"] {
+                if fault.context.get(key).is_none() {
+                    fault.context[key] = origin[key].clone();
+                }
+            }
+        }
+    }
+    if fault.context.get("stage").is_none() {
+        fault.context["stage"] = json!(stage);
+    }
+    fault.context["source_mapping"] = json!("unavailable; stable Lua chunk locations retained");
     fault.context["catalog"] = inventory.metadata["catalog"].clone();
     fault
 }
@@ -109,13 +151,13 @@ fn script_fault(error: mlua::Error, inventory: &Inventory, module: &str, stage: 
         _ => "Script",
     };
     let text = error.to_string();
-    annotate(
-        Fault::new(category, text.clone()),
-        inventory,
-        module,
-        stage,
-        Some(text),
-    )
+    // mlua nests external faults under callback/context errors. Their typed
+    // primary and native context must survive rather than becoming Script.
+    let fault = error
+        .downcast_ref::<Fault>()
+        .cloned()
+        .unwrap_or_else(|| Fault::new(category, text.clone()));
+    annotate(fault, inventory, module, stage, Some(text))
 }
 
 struct Modules {
@@ -181,15 +223,23 @@ impl Modules {
     fn environment(self: &Rc<Self>, lua: &Lua, id: &str) -> mlua::Result<Table> {
         let weak = Rc::downgrade(self);
         let requester = id.to_owned();
-        let require = lua.create_function(move |_, specifier: String| {
+        let require = lua.create_function(move |lua, specifier: String| {
             let modules = weak
                 .upgrade()
                 .ok_or_else(|| mlua::Error::runtime("Attempt loader is closed"))?;
-            let id = modules
+            let result = modules
                 .inventory
                 .resolve(&requester, &specifier)
-                .map_err(|fault| modules.refuse(fault))?;
-            modules.load(&id)
+                .map_err(|fault| modules.refuse(fault))
+                .and_then(|id| modules.load(&id));
+            if result.is_err() {
+                modules.host.set_failure_stack(
+                    lua.traceback(None, 1)
+                        .ok()
+                        .map(|stack| stack.to_string_lossy()),
+                );
+            }
+            result
         })?;
         let globals = lua.globals();
         let env = lua.create_table()?;
@@ -493,14 +543,29 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
             .create_function(move |lua, (method, args): (String, Value)| {
                 let args: Json = lua.from_value(args)?;
                 match bridge_host.call(&method, args) {
-                    Ok(Json::Null) => Ok(Value::Nil),
-                    Ok(value) => lua.to_value(&value),
+                    Ok(value) => {
+                        if bridge_host.failure().is_some() {
+                            bridge_halted.store(true, Ordering::Release);
+                            bridge_host.set_failure_stack(
+                                lua.traceback(None, 1)
+                                    .ok()
+                                    .map(|stack| stack.to_string_lossy()),
+                            );
+                        }
+                        if value.is_null() {
+                            Ok(Value::Nil)
+                        } else {
+                            lua.to_value(&value)
+                        }
+                    }
                     Err(fault) => {
                         let stack = lua.traceback(None, 1).ok().map(|s| s.to_string_lossy());
                         let fault =
                             annotate(fault, &bridge_inventory, "<host-call>", &method, stack);
                         bridge_halted.store(true, Ordering::Release);
                         bridge_host.fail(fault.clone());
+                        bridge_host
+                            .set_failure_stack(fault.context["stack"].as_str().map(str::to_owned));
                         Err(mlua::Error::external(fault))
                     }
                 }
@@ -558,6 +623,7 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
                     .eval()
                     .map_err(|error| script_fault(error, &inventory, id, "static-import"))?;
                 inventory.resolve(id, &specifier).map_err(|fault| {
+                    let fault = annotate(fault, &inventory, id, "static-import", None);
                     host.fail(fault.clone());
                     fault
                 })?;
@@ -654,7 +720,7 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
         },
     };
     if let Some(fault) = host.failure() {
-        return Err(fault);
+        return Err(annotate(fault, &inventory, "<runtime>", "execution", None));
     }
     result?;
     host.control().check()?;

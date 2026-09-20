@@ -86,6 +86,33 @@ impl Loader for Modules {
     }
 }
 
+/// Parse only QuickJS frames naming an exact captured module, never message text.
+pub(crate) fn source_frame(inventory: &Inventory, row: &str) -> Option<Json> {
+    let row = row.trim().strip_prefix("at ")?;
+    let (function, location) = match row.rsplit_once(" (") {
+        Some((function, location)) => (Some(function), location.strip_suffix(')')?),
+        None => (None, row),
+    };
+    let (module, coordinates) = location.split_once(':')?;
+    if !inventory.sources.contains_key(module) {
+        return None;
+    }
+    let mut coordinates = coordinates.split(':');
+    let line = coordinates
+        .next()?
+        .parse::<u64>()
+        .ok()
+        .filter(|line| *line > 0)?;
+    let column = match coordinates.next() {
+        Some(column) => Some(column.parse::<u64>().ok().filter(|column| *column > 0)?),
+        None => None,
+    };
+    if coordinates.next().is_some() {
+        return None;
+    }
+    Some(json!({"module":module,"line":line,"column":column,"function":function}))
+}
+
 fn annotate(
     mut fault: Fault,
     inventory: &Inventory,
@@ -97,12 +124,37 @@ fn annotate(
         fault.context = json!({"cause":fault.context});
     }
     fault.context["inventory"] = json!(inventory.identity);
-    if fault.context.get("module").is_none() {
-        fault.context["module"] = json!(module);
-    }
-    fault.context["stage"] = json!(stage);
     if let Some(stack) = stack {
-        fault.context["stack"] = json!(stack);
+        if fault.context.get("stack").is_none() {
+            fault.context["stack"] = json!(stack);
+        }
+    }
+    let origin = fault.context["stack"].as_str().and_then(|stack| {
+        stack
+            .lines()
+            .take(128)
+            .find_map(|row| source_frame(inventory, row))
+    });
+    if fault.context.get("module").is_none()
+        || fault.context["module"]
+            .as_str()
+            .is_some_and(|module| module.starts_with('<'))
+    {
+        fault.context["module"] = origin
+            .as_ref()
+            .map_or_else(|| json!(module), |frame| frame["module"].clone());
+    }
+    if let Some(origin) = origin {
+        if fault.context["module"] == origin["module"] {
+            for key in ["line", "column", "function"] {
+                if fault.context.get(key).is_none() {
+                    fault.context[key] = origin[key].clone();
+                }
+            }
+        }
+    }
+    if fault.context.get("stage").is_none() {
+        fault.context["stage"] = json!(stage);
     }
     fault.context["source_mapping"] = json!("unavailable; generated locations retained");
     fault.context["catalog"] = inventory.metadata["catalog"].clone();
@@ -250,13 +302,27 @@ fn host_call<'js>(
             let args: Json = serde_json::from_str(&args)
                 .map_err(|error| Exception::throw_type(&ctx, &error.to_string()))?;
             match host.call(&method, args) {
-                Ok(value) => ctx.json_parse(value.to_string()),
+                Ok(value) => {
+                    // A partial native receipt can latch failure while remaining a
+                    // successful return value. Capture its still-live script caller.
+                    if let Some(fault) = host.failure() {
+                        halted.store(true, Ordering::Release);
+                        host.set_failure_stack(
+                            Exception::from_message(ctx.clone(), &fault.message)
+                                .ok()
+                                .and_then(|exception| exception.stack()),
+                        );
+                    }
+                    ctx.json_parse(value.to_string())
+                }
                 Err(fault) => {
                     let fault = annotate(fault, &inventory, "<host-call>", &method, None);
                     halted.store(true, Ordering::Release);
                     host.fail(fault.clone());
                     let exception = Exception::from_message(ctx.clone(), &fault.message)?;
-                    host.set_failure_stack(exception.stack());
+                    let stack = exception.stack();
+                    host.set_failure_stack(stack.clone());
+                    let fault = annotate(fault, &inventory, "<host-call>", &method, stack);
                     exception
                         .as_object()
                         .set("category", fault.category.as_str())?;
@@ -437,7 +503,7 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
     rejections.borrow_mut().clear();
     host.control().admission.store(false, Ordering::Release);
     if let Some(fault) = host.failure() {
-        return Err(fault);
+        return Err(annotate(fault, &inventory, "<runtime>", "execution", None));
     }
     host.control().check()?;
     if host.control().elapsed_us() >= deadline.load(Ordering::Acquire) {

@@ -70,27 +70,36 @@ pub fn coverage(rows: &[Value]) -> Result<Vec<Value>, Fault> {
                     if lane != "controlled" && !["windows", "macos"].contains(system) {
                         continue;
                     }
-                    let checks = requirement["controlled_checks"][candidate].as_array();
+                    let checks_key = match lane.as_str() {
+                        Some("controlled") => "controlled_checks",
+                        Some("replay") => "replay_checks",
+                        Some("native") => "native_checks",
+                        _ => return Err(Fault::new("Report", "unknown catalog evidence lane")),
+                    };
+                    let checks = requirement[checks_key][candidate].as_array();
                     let mut evidence = Vec::new();
                     let mut complete = checks.is_some_and(|checks| !checks.is_empty());
                     let mut failed = false;
-                    if lane == "controlled" {
-                        for check in checks.into_iter().flatten() {
-                            let matches: Vec<_> = rows
-                                .iter()
-                                .filter(|row| {
-                                    row["id"] == *check
-                                        && os(row) == *system
-                                        && row["lane"] == "controlled"
-                                })
-                                .collect();
-                            if matches.is_empty() {
-                                complete = false;
+                    let mut blocked = false;
+                    let mut unexecuted = false;
+                    for check in checks.into_iter().flatten() {
+                        let matches: Vec<_> = rows
+                            .iter()
+                            .filter(|row| {
+                                row["id"] == *check && os(row) == *system && row["lane"] == *lane
+                            })
+                            .collect();
+                        if matches.is_empty() {
+                            complete = false;
+                        }
+                        for row in matches {
+                            match row["status"].as_str() {
+                                Some("PASS") => {}
+                                Some("FAIL") => failed = true,
+                                Some("BLOCKED") => blocked = true,
+                                _ => unexecuted = true,
                             }
-                            for row in matches {
-                                failed |= row["status"] != "PASS";
-                                evidence.push(reference(row).clone());
-                            }
+                            evidence.push(reference(row).clone());
                         }
                     }
                     let (status, reason) = if !applicable {
@@ -98,22 +107,32 @@ pub fn coverage(rows: &[Value]) -> Result<Vec<Value>, Fault> {
                             "NOT_APPLICABLE",
                             "language-specific mechanism only; shared host and lifecycle requirements remain applicable",
                         )
+                    } else if failed {
+                        ("FAIL", "at least one required behavioral oracle failed")
+                    } else if blocked {
+                        (
+                            "BLOCKED",
+                            "at least one required oracle has an unmet prerequisite",
+                        )
+                    } else if unexecuted {
+                        (
+                            "UNEXECUTED",
+                            "at least one required oracle has not executed",
+                        )
+                    } else if complete {
+                        (
+                            "PASS",
+                            "all named same-OS, same-lane oracles passed; shared checks retain their actual implementation identity",
+                        )
                     } else if lane == "native" {
                         (
                             "BLOCKED",
-                            "public facade lacks exact path/process-lifetime target binding; no explicit per-OS target, capture/input authority or qualified numerical plan",
+                            "this catalog/result set does not establish complete per-scenario native qualification with explicit per-OS authority",
                         )
                     } else if lane == "replay" {
                         (
                             "BLOCKED",
-                            "no explicitly configured accepted OCR model/runtime and identified authorized recorded corpus",
-                        )
-                    } else if failed {
-                        ("FAIL", "at least one required behavioral oracle failed")
-                    } else if complete {
-                        (
-                            "PASS",
-                            "all named controlled oracles passed; shared checks retain their actual implementation identity",
+                            "this result set lacks the named real recorded-replay oracles on this OS",
                         )
                     } else {
                         (
@@ -273,12 +292,12 @@ pub fn summarize(data: &Value) -> Result<Value, Fault> {
                 && row["lane"]=="native" && row["metric"]==*metric && row["status"]=="PASS")).count();
         json!({"candidate":candidate,"unmet_required_rows":unmet,"unmet_budget_rows":unmet_budgets})
     }).collect();
-    // This engine pin cannot produce authorized native evidence. Do not accept a
-    // caller-supplied coverage/budget PASS in place of executable capability.
+    // Summary rows do not authorize native operations or constitute a reviewed
+    // runtime-adoption decision.
     Ok(
         json!({"version":1,"counts":counts,"timings":timings,"direct_rust_deltas":deltas,
         "coverage_counts":coverage_counts,"budgets":budgets,
-        "decision":{"kind":"Blocked","reason":"exact-target public-facade prerequisite and both-OS native qualification remain unmet","coverage":missing},
+        "decision":{"kind":"Blocked","reason":"both-OS native qualification and an explicit runtime decision remain outstanding","coverage":missing},
         "claims":{"controlled":"non-native sink only","replay":"recognition only; no native input",
             "native":"no native execution authority inferred","artifact_completion_is_adoption":false}}),
     )

@@ -223,6 +223,8 @@ pub struct Control {
     pub stop_us: AtomicU64,
     pub closed_us: AtomicU64,
     cause: AtomicU8,
+    // One outgoing successor: unscheduled, queued, admitted, or closed.
+    transition: AtomicU8,
     started: Instant,
     deadline: Instant,
 }
@@ -236,6 +238,7 @@ impl Control {
             stop_us: AtomicU64::new(0),
             closed_us: AtomicU64::new(0),
             cause: AtomicU8::new(0),
+            transition: AtomicU8::new(0),
             started,
             deadline: started + Duration::from_millis(limits.duration_ms),
         }
@@ -249,6 +252,7 @@ impl Control {
         let _ = self
             .cause
             .compare_exchange(0, cause, Ordering::AcqRel, Ordering::Acquire);
+        self.transition.store(3, Ordering::Release);
         let now = self.elapsed_us().max(1);
         let _ = self
             .stop_us
@@ -272,6 +276,32 @@ impl Control {
             1 => Err(Fault::new("Cancelled", "attempt cancellation is latched")),
             _ => Ok(()),
         }
+    }
+
+    // Each predecessor permits one successor. Stop and transition admission
+    // linearize on one atomic, without acquiring a VM/native/dispatch lock.
+    pub(crate) fn queue_transition(&self) -> Result<(), Fault> {
+        self.check()?;
+        self.transition
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                self.check().err().unwrap_or_else(|| {
+                    Fault::new("TransitionRefused", "fresh attempt is already scheduled")
+                })
+            })?;
+        self.check()
+    }
+
+    pub(crate) fn admit_transition(&self) -> Result<(), Fault> {
+        self.check()?;
+        self.transition
+            .compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                self.check().err().unwrap_or_else(|| {
+                    Fault::new("TransitionRefused", "fresh attempt is not pending")
+                })
+            })?;
+        self.check()
     }
 
     pub fn elapsed_us(&self) -> u64 {

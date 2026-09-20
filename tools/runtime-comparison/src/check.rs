@@ -389,7 +389,7 @@ fn inventory_cases(rows: &mut Vec<Value>) -> Result<(), Fault> {
             },
         )
         .map_err(|e| Fault::new("Fixture", e.to_string()))?;
-        let record = run_once(&scenario, &inventory, None, false)?;
+        let record = run_once(&scenario, &inventory, None, false, None)?;
         let passed = record.status == "PASS" && record.observations["effects"][0]["key"] == "A";
         case(
             rows,
@@ -417,6 +417,7 @@ pub fn run() -> Result<Value, Fault> {
                 &inventory,
                 None,
                 false,
+                None,
             )?;
             let effects = record.observations["effects"].as_array();
             let passed = record.status == "PASS"
@@ -443,6 +444,7 @@ pub fn run() -> Result<Value, Fault> {
                 &inventory,
                 None,
                 false,
+                None,
             )?;
             let receipts = &record.observations["receipts"];
             let passed = match scenario {
@@ -499,6 +501,7 @@ pub fn run() -> Result<Value, Fault> {
             &inventory,
             None,
             false,
+            None,
         )?;
         let passed = record.entry_outcome == "Returned"
             && record.primary.is_none()
@@ -521,6 +524,7 @@ pub fn run() -> Result<Value, Fault> {
         )?,
         None,
         false,
+        None,
     )?;
     let report = crate::report::summarize(&json!({"version":1,"runs":[failed]}))?;
     rows.push(json!({"id":"report-preserves-required-failure","candidate":"javascript","lane":"controlled",
@@ -626,6 +630,7 @@ pub fn run() -> Result<Value, Fault> {
                 &inventory,
                 if stop { Some(100) } else { None },
                 false,
+                None,
             )?;
             let interrupted = record
                 .primary
@@ -662,6 +667,7 @@ pub fn run() -> Result<Value, Fault> {
             &inventory,
             Some(100),
             true,
+            None,
         )?;
         let passed = record
             .primary
@@ -698,6 +704,7 @@ pub fn run() -> Result<Value, Fault> {
                 &inventory,
                 None,
                 false,
+                None,
             )?;
             let passed = match name {
                 "readonly" | "module-cache" => record.status == "PASS",
@@ -738,6 +745,7 @@ pub fn run() -> Result<Value, Fault> {
                     &inventory,
                     None,
                     false,
+                    None,
                 )?;
                 let passed = record.status == "PASS";
                 case(
@@ -778,6 +786,7 @@ pub fn run() -> Result<Value, Fault> {
             &inventory,
             None,
             false,
+            None,
         )?;
         let mut passed = record
             .primary
@@ -822,6 +831,7 @@ pub fn run() -> Result<Value, Fault> {
             &inventory,
             None,
             false,
+            None,
         )?;
         let passed = record
             .primary
@@ -841,7 +851,7 @@ pub fn run() -> Result<Value, Fault> {
         );
     }
     let held_plan = plan("rust", "held-work", "template-first");
-    let held = run_once(&held_plan, &inventories["rust"], Some(100), false)?;
+    let held = run_once(&held_plan, &inventories["rust"], Some(100), false, None)?;
     let held_passed = held.forced
         && held.cleanup["clean"] != true
         && held.milestones.iter().any(|row| row["event"] == "WorkHeld");
