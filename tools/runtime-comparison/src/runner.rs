@@ -18,13 +18,24 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
-static VM_HOOK_EVIDENCE: OnceLock<mpsc::SyncSender<u64>> = OnceLock::new();
+static EXECUTION_EVIDENCE: OnceLock<mpsc::SyncSender<(&'static str, u64)>> = OnceLock::new();
+static HOST_WAIT_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// Called once by an armed language instruction/interrupt hook. An in-process
 /// adapter has no child evidence channel; the hook never waits on stdout.
 pub(crate) fn emit_vm_hook_reached(host: &Host) {
-    if let Some(sender) = VM_HOOK_EVIDENCE.get() {
-        let _ = sender.try_send(host.control().elapsed_us());
+    if let Some(sender) = EXECUTION_EVIDENCE.get() {
+        let _ = sender.try_send(("VmHookReached", host.control().elapsed_us()));
+    }
+}
+
+/// The first host wait is a separate boundary from parser startup or VM entry.
+/// Notify through the bounded channel, never block host work on the output pipe.
+pub(crate) fn emit_host_wait_entered(host: &Host) {
+    if let Some(sender) = EXECUTION_EVIDENCE.get()
+        && !HOST_WAIT_REPORTED.swap(true, Ordering::Relaxed)
+    {
+        let _ = sender.try_send(("HostWaitEntered", host.control().elapsed_us()));
     }
 }
 
@@ -242,14 +253,14 @@ pub fn child() -> Result<bool, Fault> {
         &json!({"event":"ChildStarted","run":run,"attempt":attempt,"pid":std::process::id(),"at_us":control.elapsed_us()}),
     )?;
     if invocation.plan.candidate != "rust" {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let _ = VM_HOOK_EVIDENCE.set(sender);
+        // One instruction-hook notification and one host-wait notification.
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let _ = EXECUTION_EVIDENCE.set(sender);
         let event_run = run.clone();
         thread::spawn(move || {
-            if let Ok(at_us) = receiver.recv() {
-                let _ = emit(
-                    &json!({"event":"VmHookReached","run":event_run,"attempt":attempt,"at_us":at_us}),
-                );
+            for (event, at_us) in receiver.iter().take(2) {
+                let _ =
+                    emit(&json!({"event":event,"run":event_run,"attempt":attempt,"at_us":at_us}));
             }
         });
     }

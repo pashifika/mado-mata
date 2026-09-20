@@ -185,6 +185,13 @@ including pipe delivery and polling. Child-relative timestamps are separate.
 A normal return has no external Stop latency. For incomplete cleanup without
 an external Stop, containment uses the supervisor's entry-settlement receipt
 through observed exit. Cleanup completion and forced exit remain distinct.
+
+Controlled Stop checks start their delay only after reaching the operation under
+test: `VmHookReached` for CPU-only VM work, or `HostWaitEntered` for the first
+host delay/query wait. Parser startup time is not evidence that either operation
+has started. These bounded notifications do not block the VM or host on stdout;
+the checks still require cancellation, rejected continuation input, and cleanup.
+
 Nearest-rank p50 requires 2 samples, p95 requires 20, and p99
 requires 100; insufficient samples produce `null`. Warmups are excluded.
 

@@ -2,7 +2,7 @@ use super::{case, host_case, host_for, plan, replace_entry};
 use crate::host::{Host, resolve_options};
 use crate::inventory::Inventory;
 use crate::model::{Control, Fault, Plan, RuntimeMetrics};
-use crate::runner::run_once;
+use crate::runner::{run_once, run_once_after_milestone};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1149,13 +1149,24 @@ end}
             },
             "template-first",
         );
-        let record = run_once(&scenario, &inventory, Some(250), false, None)?;
+        let record =
+            run_once_after_milestone(&scenario, &inventory, "HostWaitEntered", 100, false)?;
         let operation = if kind == "query" {
             "query_wait"
         } else {
             "wait"
         };
         let observations = &record.observations;
+        let wait_entered = record
+            .milestones
+            .iter()
+            .find(|event| event["event"] == "HostWaitEntered")
+            .and_then(|event| event["at_us"].as_u64());
+        let stop_received = record
+            .milestones
+            .iter()
+            .find(|event| event["event"] == "StopRequested" && event["reason"] == "Stop")
+            .and_then(|event| event["at_us"].as_u64());
         let mut passed = record.status == "FAIL"
             && record
                 .primary
@@ -1165,6 +1176,9 @@ end}
             && !record.forced
             && record.cleanup["clean"] == true
             && no_owners(observations)
+            && wait_entered
+                .zip(stop_received)
+                .is_some_and(|(entered, stopped)| entered < stopped)
             && observations["operation_metrics"][operation]["count"] == 1
             && observations["operation_metrics"][operation]["failures"] == 1
             && observations["operation_metrics"][operation]["total_us"]
@@ -1202,7 +1216,7 @@ end}
             &format!("{candidate}-lifecycle-stop-{kind}"),
             record,
             passed,
-            "actual VM delay/query or scheduled callback is interrupted by external Stop; no continuation input is admitted, dispatched work remains distinct, and bounded clean cleanup reaps the child",
+            "external Stop is sent only after the actual host wait is entered, independent of parser/startup latency; the VM delay/query or scheduled callback is interrupted, no continuation input is admitted, and bounded clean cleanup reaps the child",
         );
     }
     Ok(())

@@ -1116,6 +1116,7 @@ impl Host {
                 let map = object(&args, &["duration_ms"], &["duration_ms"])?;
                 let duration = positive(map, "duration_ms", self.inner.plan.limits.wait_ms)?;
                 let started = Instant::now();
+                crate::runner::emit_host_wait_entered(self);
                 while started.elapsed() < Duration::from_millis(duration) {
                     self.check()?;
                     thread::sleep(
@@ -1404,6 +1405,7 @@ impl Host {
         let id = string(map, "id")?;
         let timeout = positive(map, "timeout_ms", self.inner.plan.limits.wait_ms)?;
         let deadline = Instant::now() + Duration::from_millis(timeout);
+        crate::runner::emit_host_wait_entered(self);
         loop {
             if let Err(error) = self.check() {
                 lock(&self.inner.state).handles.remove(id);
