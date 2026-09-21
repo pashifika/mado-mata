@@ -208,9 +208,12 @@ an external Stop, containment uses the supervisor's entry-settlement receipt
 through observed exit. Cleanup completion and forced exit remain distinct.
 
 Controlled Stop checks start their delay only after reaching the operation under
-test: `VmHookReached` for CPU-only VM work, `HostWaitEntered` for the first host
-delay/query wait, or `WorkHeld` for retained work ownership. Parser startup
-and build-identity collection are not evidence that the operation has started.
+test: `VmHookReached` for CPU-only VM work, control EOF, and intentional supervisor
+exit; `HostWaitEntered` for the first host delay/query wait; or `WorkHeld` for
+retained work ownership. Parser startup and build-identity collection are not
+evidence that the operation has started. The EOF and intentional-exit checks
+require VM-hook evidence before the cancellation receipt, along with a clean
+child exit; they do not extend the cleanup or containment deadlines.
 These bounded notifications do not block the VM or host on stdout;
 the checks still require cancellation, rejected continuation input, and cleanup.
 

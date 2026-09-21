@@ -1112,12 +1112,12 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     if intentional {
         let invocation: Invocation = serde_json::from_slice(&bytes)
             .map_err(|error| Fault::new("Transport", error.to_string()))?;
-        let record = run_once(
+        let record = run_once_after_milestone(
             &invocation.plan,
             &invocation.inventory,
-            Some(100),
+            "VmHookReached",
+            100,
             false,
-            None,
         )?;
         let clean = record.cleanup["clean"] == true
             && !record.forced
@@ -1388,9 +1388,13 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         && record["forced"] == false
         && record["exit_code"] == 0
         && record["primary"]["category"] == "Cancelled"
-        && record["milestones"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().any(|row| row["event"] == "StopRequested"));
+        && record["milestones"].as_array().is_some_and(|rows| {
+            let vm_hook = rows.iter().position(|row| row["event"] == "VmHookReached");
+            let stop_requested = rows
+                .iter()
+                .position(|row| row["event"] == "StopRequested" && row["reason"] == "Stop");
+            matches!((vm_hook, stop_requested), (Some(hook), Some(stop)) if hook < stop)
+        });
     Ok(
         json!({"id":format!("{}-intentional-supervisor-exit",plan.candidate),"candidate":plan.candidate,
         "lane":"controlled","os":std::env::consts::OS,"status":if passed{"PASS"}else{"FAIL"},
