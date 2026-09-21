@@ -51,7 +51,7 @@ jobs:
         run: python3 tools/ci/branch_flow.py
 
   repository:
-    name: Repository and controlled runtime (Linux)${{ github.event_name == 'push' && ' (push)' || '' }}
+    name: Repository, runtime, and desktop core (Linux)${{ github.event_name == 'push' && ' (push)' || '' }}
     needs: dev-push-policy
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
     runs-on: ubuntu-24.04
@@ -73,7 +73,7 @@ jobs:
         run: python3 -m pip install --require-hashes -r tools/ci/requirements.txt
       - name: Install checksum-verified native tools
         run: python3 tools/ci/install_tools.py
-      - name: Check tracked repository files
+      - name: Check tracked repository, runtime, and desktop core
         run: python3 tools/ci/check.py
       - name: Upload controlled runtime evidence
         if: ${{ always() }}
@@ -88,7 +88,7 @@ jobs:
           if-no-files-found: warn
 
   runtime-macos:
-    name: Controlled runtime (macOS arm64)${{ github.event_name == 'push' && ' (push)' || '' }}
+    name: Controlled runtime and desktop (macOS arm64)${{ github.event_name == 'push' && ' (push)' || '' }}
     needs: dev-push-policy
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
     runs-on: macos-15
@@ -110,7 +110,7 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal
       - name: Install pinned Python dependency
         run: python3 -m pip install --require-hashes -r tools/ci/requirements.txt
-      - name: Check tracked controlled runtime
+      - name: Check tracked runtime, desktop core, and macOS shell
         run: python3 tools/ci/check.py --runtime-only
       - name: Upload controlled runtime evidence
         if: ${{ always() }}
@@ -125,7 +125,7 @@ jobs:
           if-no-files-found: warn
 
   runtime-windows:
-    name: Controlled runtime (Windows)${{ github.event_name == 'push' && ' (push)' || '' }}
+    name: Controlled runtime and desktop core (Windows)${{ github.event_name == 'push' && ' (push)' || '' }}
     needs: dev-push-policy
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
     runs-on: windows-2025
@@ -147,7 +147,7 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal
       - name: Install pinned Python dependency
         run: python -m pip install --require-hashes -r tools/ci/requirements.txt
-      - name: Check tracked controlled runtime
+      - name: Check tracked runtime and desktop core
         run: python tools/ci/check.py --runtime-only
       - name: Upload controlled runtime evidence
         if: ${{ always() }}

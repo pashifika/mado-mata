@@ -1968,6 +1968,7 @@ impl Host {
         }
         state.log_bytes += message.len();
         state.logs.push(message.into());
+        crate::runner::emit_script_log(self.control().elapsed_us(), message);
         Ok(json!({"recorded":true}))
     }
 

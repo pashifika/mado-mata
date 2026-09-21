@@ -10,8 +10,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    Arc, OnceLock,
-    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
 use std::thread;
@@ -20,6 +20,77 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 static EXECUTION_EVIDENCE: OnceLock<mpsc::SyncSender<(&'static str, u64)>> = OnceLock::new();
 static HOST_WAIT_REPORTED: AtomicBool = AtomicBool::new(false);
+static SCRIPT_LOGS: OnceLock<ScriptStream> = OnceLock::new();
+
+struct ScriptStream {
+    sender: mpsc::SyncSender<Value>,
+    retained: Mutex<ScriptBuffer>,
+    record_limit: usize,
+    byte_limit: usize,
+    run: String,
+    attempt: u64,
+}
+
+#[derive(Default)]
+struct ScriptBuffer {
+    records: Vec<Value>,
+    bytes: usize,
+    dropped: u64,
+}
+
+/// Separate finite queues keep ordinary log pressure off lifecycle evidence.
+#[derive(Clone)]
+pub struct Observer {
+    pub progress: mpsc::SyncSender<Value>,
+    pub logs: mpsc::SyncSender<Value>,
+    pub dropped_logs: Arc<AtomicU64>,
+}
+
+impl Observer {
+    fn progress(&self, value: &Value) {
+        let mut progress = serde_json::Map::new();
+        for key in ["event", "run", "attempt", "at_us", "reason", "supervisor_received_us"] {
+            if let Some(field) = value.get(key) {
+                progress.insert(key.into(), field.clone());
+            }
+        }
+        let _ = self.progress.try_send(Value::Object(progress));
+    }
+
+    fn log(&self, value: Value) {
+        if self.logs.try_send(value).is_err() {
+            self.dropped_logs.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+pub(crate) fn emit_script_log(at_us: u64, message: &str) {
+    if let Some(stream) = SCRIPT_LOGS.get() {
+        let mut retained = stream.retained.lock().unwrap_or_else(|error| error.into_inner());
+        if retained.records.len() >= stream.record_limit
+            || message.len() > stream.byte_limit.saturating_sub(retained.bytes)
+        {
+            retained.dropped = retained.dropped.saturating_add(1);
+            return;
+        }
+        let value = json!({
+            "event":"ScriptLog", "source":"Script", "severity":"info",
+            "run":stream.run, "attempt":stream.attempt,
+            "sequence":retained.records.len() + 1, "at_us":at_us, "message":message
+        });
+        retained.bytes += message.len();
+        retained.records.push(value.clone());
+        let _ = stream.sender.try_send(value);
+    }
+}
+
+fn retain_script_logs(observations: &mut Value) {
+    if let Some(stream) = SCRIPT_LOGS.get() {
+        let retained = stream.retained.lock().unwrap_or_else(|error| error.into_inner());
+        observations["script_logs"] = json!(retained.records);
+        observations["script_logs_dropped"] = json!(retained.dropped);
+    }
+}
 
 /// Called once by an armed language instruction/interrupt hook. An in-process
 /// adapter has no child evidence channel; the hook never waits on stdout.
@@ -46,6 +117,8 @@ struct Invocation {
     attempt: u64,
     plan: Plan,
     inventory: Inventory,
+    #[serde(default)]
+    observe_logs: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -137,6 +210,7 @@ fn compact_observations(value: &mut Value) {
         return;
     };
     fields.remove("logs");
+    fields.remove("script_logs");
     fields.remove("failure");
     if let Some(engine) = fields.get_mut("engine").and_then(Value::as_object_mut) {
         engine.remove("configuration");
@@ -254,6 +328,22 @@ pub fn child() -> Result<bool, Fault> {
     emit(
         &json!({"event":"ChildStarted","run":run,"attempt":attempt,"pid":std::process::id(),"at_us":control.elapsed_us()}),
     )?;
+    if invocation.observe_logs {
+        let (sender, receiver) = mpsc::sync_channel::<Value>(invocation.plan.limits.log_records);
+        let _ = SCRIPT_LOGS.set(ScriptStream {
+            sender,
+            retained: Mutex::new(ScriptBuffer::default()),
+            record_limit: invocation.plan.limits.log_records,
+            byte_limit: invocation.plan.limits.log_bytes,
+            run: run.clone(),
+            attempt,
+        });
+        thread::spawn(move || {
+            for value in receiver {
+                let _ = emit(&value);
+            }
+        });
+    }
     if invocation.plan.candidate != "rust" {
         // One instruction-hook notification and one host-wait notification.
         let (sender, receiver) = mpsc::sync_channel(2);
@@ -396,6 +486,7 @@ pub fn child() -> Result<bool, Fault> {
     // Stop/deadline cancellation remains independent throughout serialization.
     let mut observations = host.snapshot();
     observations["snapshot_stage"] = json!("pre_cleanup");
+    retain_script_logs(&mut observations);
     let entry_emission = emit_settlement(
         json!({"event":"EntrySettled","run":invocation.run,"attempt":attempt,
         "entry_outcome":entry_outcome,"primary":primary,"runtime":metrics,"observations":observations,
@@ -409,6 +500,7 @@ pub fn child() -> Result<bool, Fault> {
     let mut cleanup = host.finish();
     let mut observations = host.snapshot();
     observations["snapshot_stage"] = json!("post_cleanup");
+    retain_script_logs(&mut observations);
     drop(host);
     if cleanup["clean"] == true {
         if let Err(error) = crate::engine::release_runner_resources() {
@@ -452,6 +544,7 @@ pub fn run_once(
     disconnect: bool,
     operator_stop: Option<&mut dyn FnMut() -> bool>,
 ) -> Result<RunRecord, Fault> {
+    let executable = std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?;
     supervise(
         plan,
         inventory,
@@ -459,6 +552,21 @@ pub fn run_once(
         disconnect,
         operator_stop,
         None,
+        &executable,
+        None,
+    )
+}
+
+/// The application chooses the executable; observer queues never block supervision.
+pub fn run_once_with_executable(
+    executable: &Path,
+    plan: &Plan,
+    inventory: &Inventory,
+    operator_stop: &mut dyn FnMut() -> bool,
+    observer: &Observer,
+) -> Result<RunRecord, Fault> {
+    supervise(
+        plan, inventory, None, false, Some(operator_stop), None, executable, Some(observer),
     )
 }
 
@@ -469,6 +577,7 @@ pub(crate) fn run_once_after_milestone(
     delay_ms: u64,
     disconnect: bool,
 ) -> Result<RunRecord, Fault> {
+    let executable = std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?;
     supervise(
         plan,
         inventory,
@@ -476,6 +585,8 @@ pub(crate) fn run_once_after_milestone(
         disconnect,
         None,
         Some((event, delay_ms)),
+        &executable,
+        None,
     )
 }
 
@@ -486,6 +597,8 @@ fn supervise(
     disconnect: bool,
     mut operator_stop: Option<&mut dyn FnMut() -> bool>,
     stop_milestone: Option<(&str, u64)>,
+    executable: &Path,
+    observer: Option<&Observer>,
 ) -> Result<RunRecord, Fault> {
     plan.validate()?;
     inventory.validate()?;
@@ -499,18 +612,14 @@ fn supervise(
         attempt: 1,
         plan: plan.clone(),
         inventory: inventory.clone(),
+        observe_logs: observer.is_some(),
     };
-    let mut bytes =
-        serde_json::to_vec(&invocation).map_err(|e| Fault::new("Encoding", e.to_string()))?;
-    if bytes.len() >= MAX_TRANSPORT_BYTES {
-        return Err(Fault::new(
-            "LimitExceeded",
-            "child invocation exceeds byte bound",
-        ));
-    }
+    let mut bytes = encode_bounded(&invocation, MAX_TRANSPORT_BYTES - 1)?;
     bytes.push(b'\n');
+    if observer.is_some() && operator_stop.as_mut().is_some_and(|poll| poll()) {
+        return Err(Fault::new("Cancelled", "Stop requested before child startup"));
+    }
     let started = Instant::now();
-    let executable = std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?;
     let mut child = OwnedChild(
         Command::new(executable)
             .arg("child")
@@ -550,27 +659,48 @@ fn supervise(
         .stderr
         .take()
         .ok_or_else(|| Fault::new("Transport", "child stderr unavailable"))?;
-    // At most sixteen records plus one bound-error; joining never needs a drain.
+    // Logs bypass the independent sixteen-record lifecycle allowance.
     let (sender, receiver) = mpsc::sync_channel(17);
+    let log_observer = observer.cloned();
+    let event_run = run.clone();
+    let log_limit = if observer.is_some() { plan.limits.log_records } else { 0 };
     let reader = thread::spawn(move || {
         let mut input = BufReader::new(stdout);
-        for _ in 0..16 {
+        let mut control_records = 0;
+        let mut log_records = 0;
+        for _ in 0..16 + log_limit {
             match frame(&mut input, MAX_TRANSPORT_BYTES) {
                 Ok(Some(bytes)) => {
                     let result = serde_json::from_slice::<Value>(&bytes)
                         .map_err(|e| Fault::new("Transport", e.to_string()));
-                    if sender.send(result).is_err() {
+                    if let Ok(value) = &result
+                        && value["event"] == "ScriptLog"
+                        && value["run"] == event_run
+                        && value["attempt"] == 1
+                        && log_records < log_limit
+                    {
+                        log_records += 1;
+                        if let Some(observer) = &log_observer {
+                            observer.log(value.clone());
+                        }
+                        continue;
+                    }
+                    control_records += 1;
+                    if control_records > 16 {
+                        break;
+                    }
+                    if sender.try_send(result).is_err() {
                         return;
                     }
                 }
                 Ok(None) => return,
                 Err(error) => {
-                    let _ = sender.send(Err(error));
+                    let _ = sender.try_send(Err(error));
                     return;
                 }
             }
         }
-        let _ = sender.send(Err(Fault::new(
+        let _ = sender.try_send(Err(Fault::new(
             "Transport",
             "child exceeded protocol record bound",
         )));
@@ -607,6 +737,9 @@ fn supervise(
             match message {
                 Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
                     value["supervisor_received_us"] = json!(started.elapsed().as_micros());
+                    if let Some(observer) = observer {
+                        observer.progress(&value);
+                    }
                     if value["event"] == "Terminal" {
                         if terminal.replace(value).is_some() {
                             protocol_fault = Some(Fault::new("Transport", "duplicate terminal"));
@@ -698,6 +831,9 @@ fn supervise(
         match message {
             Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
                 value["supervisor_received_us"] = json!(started.elapsed().as_micros());
+                if let Some(observer) = observer {
+                    observer.progress(&value);
+                }
                 if value["event"] == "ChildStarted" {
                     startup_us = Some(started.elapsed().as_micros());
                 }
@@ -967,6 +1103,7 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
         attempt: 1,
         plan: plan.clone(),
         inventory: inventory.clone(),
+        observe_logs: false,
     };
     let executable = std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?;
     let mut target = OwnedChild(
@@ -1084,6 +1221,7 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         attempt: 1,
         plan: plan.clone(),
         inventory: inventory.clone(),
+        observe_logs: false,
     };
     let mut bytes = serde_json::to_vec(&invocation)
         .map_err(|error| Fault::new("Encoding", error.to_string()))?;
@@ -1195,6 +1333,19 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saturated_observer_logs_do_not_consume_terminal_delivery() {
+        let (progress, events) = mpsc::sync_channel(1);
+        let (logs, messages) = mpsc::sync_channel(1);
+        let observer = Observer { progress, logs, dropped_logs: Arc::new(AtomicU64::new(0)) };
+        observer.log(json!({"message":"retained"}));
+        observer.log(json!({"message":"overflow"}));
+        observer.progress(&json!({"event":"Terminal","run":"owned","attempt":1}));
+        assert_eq!(events.try_recv().unwrap()["event"], "Terminal");
+        assert_eq!(messages.try_recv().unwrap()["message"], "retained");
+        assert_eq!(observer.dropped_logs.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn forced_eof_preserves_a_returned_entry_without_claiming_cleanup() {

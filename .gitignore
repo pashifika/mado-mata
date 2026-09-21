@@ -31,6 +31,9 @@ __pycache__/
 *.pyc
 /tools/runtime-comparison/compiler/node_modules/
 /tmp_pr_msg.md
+/apps/desktop/node_modules/
+/apps/desktop/dist/
+/apps/desktop/src-tauri/gen/
 
 # The canonical public guide must survive personal agent-file ignores.
 !/AGENTS.md

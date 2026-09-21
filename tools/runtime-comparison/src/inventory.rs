@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 const HELPER: &str = "@mado/helper";
@@ -85,17 +86,26 @@ struct Stamp {
     identity: (u64, u64, u64, u64),
 }
 
-struct Capture {
+struct Capture<'a> {
     files: BTreeMap<String, Vec<u8>>,
     stamps: BTreeMap<String, Stamp>,
     bytes: usize,
     file_limit: usize,
     byte_limit: usize,
     deadline: Instant,
+    stop: Option<&'a AtomicBool>,
 }
 
 impl Inventory {
     pub fn capture(root: &Path, limits: &Limits) -> Result<Self, Fault> {
+        Self::capture_with_stop(root, limits, None)
+    }
+
+    pub(crate) fn capture_with_stop(
+        root: &Path,
+        limits: &Limits,
+        stop: Option<&AtomicBool>,
+    ) -> Result<Self, Fault> {
         if limits.snapshot_files == 0
             || limits.snapshot_files > MAX_FILES
             || limits.snapshot_bytes == 0
@@ -117,6 +127,7 @@ impl Inventory {
             file_limit: limits.snapshot_files,
             byte_limit: limits.snapshot_bytes,
             deadline,
+            stop,
         };
         capture.collect(&root, "", 0)?;
         // A second bounded pass compares file identities, contents and directory membership.
@@ -582,8 +593,11 @@ impl Write for BoundedWriter {
     }
 }
 
-impl Capture {
+impl Capture<'_> {
     fn check(&self) -> Result<(), Fault> {
+        if self.stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+            return Err(Fault::new("Cancelled", "Stop requested during inventory capture"));
+        }
         if Instant::now() >= self.deadline {
             return Err(Fault::new("Timeout", "inventory capture deadline exceeded"));
         }

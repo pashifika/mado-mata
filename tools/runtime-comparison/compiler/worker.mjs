@@ -66,6 +66,10 @@ function inspectJavaScript(request) {
     // apply TypeScript directives, configuration, type checking, or emit to JS.
     const file = ts.createSourceFile(ROOT + id, source, ts.ScriptTarget.ESNext, false, ts.ScriptKind.JS);
     const visit = node => {
+      if (id.endsWith(".js") && (ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
+        && node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) {
+        imports.push({ from: id, specifier: node.moduleSpecifier.text, kind: "module", ...origin(file, node.moduleSpecifier.getStart(file)) });
+      }
       const literal = literalImport(node);
       if (literal) imports.push({ from: id, specifier: literal.text, kind: "dynamic", ...origin(file, literal.getStart(file)) });
       ts.forEachChild(node, visit);

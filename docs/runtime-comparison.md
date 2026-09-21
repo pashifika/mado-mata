@@ -1,10 +1,12 @@
 # M0 runtime comparison
 
 This standalone executable compares JavaScript, Lua, TypeScript authoring into the
-JavaScript VM, and an independent direct-Rust workload. It is not the desktop
-application. Controlled checks exercise actual interpreters and owned processes;
-their input sink is **non-native**. They do not capture a screen, launch a game,
-change focus, request permissions, or send operating-system input.
+JavaScript VM, and an independent direct-Rust workload. The separate
+[controlled macOS desktop application](desktop.md) reuses its supervised runner;
+the comparison CLI remains independently usable. Controlled checks exercise
+actual interpreters and owned processes; their input sink is **non-native**.
+They do not capture a screen, launch a game, change focus, request permissions,
+or send operating-system input.
 
 **macOS development uses JavaScript on QuickJS with TypeScript authoring.**
 The [selection decision](adr/0001-runtime-comparison-boundaries.md#macos-first-development-selection)
@@ -32,6 +34,9 @@ forced/incomplete cleanup. A passing controlled check is not runtime adoption.
 Compiler checks include actual strict diagnostics and LanguageService completion
 results, not source-text assertions. [Repository CI](ci.md) invokes these checks
 from a tracked-only snapshot on Linux, Apple Silicon macOS, and Windows x64.
+The same full/runtime-only entrypoints also check desktop frontend state/build
+and the Rust application core on all three hosts, then compile the shell on
+macOS only. Those checks do not launch the GUI or qualify another desktop OS.
 
 A bounded, non-native example plan is provided:
 
@@ -86,6 +91,12 @@ Confirming Start for a native plan authorizes only that plan's exact target,
 route, and finite operation limits, not automatic focus, elevation, or fallback.
 Scripts must evaluate their postconditions explicitly; `Submitted` alone is not
 application success. Raw result files can contain private execution details.
+For the package/profile GUI, use the [desktop build and run guide](desktop.md).
+It retains app-local named profiles separately from package source and captures
+one immutable run at Start. Draft edits and later profile saves affect only a
+subsequent run. Package/schema mismatches are refused without migrating stored
+data, and Stop/cleanup remain independent of the bounded GUI and file logs.
+The shell uses fixed checkout-owned runner/compiler paths, not a release bundle.
 
 ## Package and host contracts
 
