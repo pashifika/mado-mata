@@ -333,6 +333,10 @@ and cleanup separate; do not retry or substitute System to convert a
 refused/no-effect result into a background pass. Controlled M1 work is not blocked
 by remaining native qualification.
 
+The operator has cancelled further UIKit fixture work as unnecessary; it is not
+a remaining prerequisite for this investigation. That cancellation does not
+claim successful UIKit execution.
+
 A diagnostic UIKit fixture needs separate evidence for signing/provisioning,
 ordinary installation, startup, event receipt, and real control action. A signed
 flat iPhoneOS build or an exported IPA alone does not prove it is runnable on the

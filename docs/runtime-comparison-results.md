@@ -384,8 +384,10 @@ running receiver, or bundle at either checked Applications destination was
 observed. No retry, hand-built wrapper, private installer-service invocation,
 trust change, or permission change was used. No successful Xcode development
 installation was established; this source-specific refusal does not establish
-that paid membership is required. At the operator's request, fixture installation
-is suspended in favor of alternative input-path research for the existing game.
+that paid membership is required. The operator first suspended fixture
+installation, then cancelled that branch as unnecessary after the integrated
+background workflow succeeded. UIKit/iPhoneOS receiver execution is no longer a
+remaining qualification prerequisite; it is cancelled, not passed.
 Signing and export success do not establish UIKit event receipt, touch delivery,
 or a real control action. This fixture-installation work sent no game input.
 
@@ -472,9 +474,12 @@ allocated source's identity.
 This establishes the exact full workflow once, not general application support,
 macOS 27 release qualification, repeated-run reliability, or concurrent-input
 preservation. The descriptor remains `Unknown` and receipts remain invocation
-evidence. Windows was not rerun, UIKit installation remains suspended, and no
-new authority follows from the result. Private images, paths, raw OCR output,
-plans, and execution evidence remain outside public commits.
+evidence. Windows was not rerun. The operator cancelled further UIKit fixture
+work as unnecessary; repeated-run and concurrent-typing qualification remain
+open. No new authority follows from the result. Minimal diagnostic source and
+conclusions are retained privately while generated experiment artifacts are
+removed. Private images, paths, raw OCR output, plans, and execution evidence
+remain outside public commits.
 
 ## Recorded replay and ownership qualification
 
