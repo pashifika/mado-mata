@@ -8,7 +8,7 @@ import subprocess
 import yaml
 
 from check import NODE_VERSION, RUST_VERSION
-from gate import EXPECTED_JOBS, GATE_NAME_EXPRESSION, GATE_NAMES
+from gate import CHECKS_IF, EXPECTED_JOBS, GATE_IF, GATE_NAME_EXPRESSION, GATE_NAMES, SELECTOR_JOB
 
 PRIVATE_ROOTS = {"rasen", ".rasen", "examples", "local_docs", ".cache", ".venv"}
 SHARED_RULE = ".omp/rules/mado-mata-execution.md"
@@ -17,7 +17,7 @@ REQUIRED_FILES = {
     "docs/ci.md", "docs/repository-governance.md", "docs/development-guidance.md",
     ".github/workflows/ci.yml", ".github/rulesets/main.json",
     ".github/rulesets/topic-development.json", "tools/ci/toolchain.json",
-    "tools/ci/check.py", "tools/ci/branch_flow.py", "tools/ci/gate.py",
+    "tools/ci/check.py", "tools/ci/branch_flow.py", "tools/ci/gate.py", "tools/ci/select_checks.py",
     "tools/ci/policy.py", "tools/ci/tooling.py", "tools/ci/install_tools.py",
     "tools/ci/test_ci.py", "tools/ci/requirements.txt",
     "tools/runtime-comparison/Cargo.toml", "tools/runtime-comparison/Cargo.lock",
@@ -26,7 +26,9 @@ REQUIRED_FILES = {
 }
 CONCURRENCY_GROUP = "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}"
 PR_TYPES = {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
+PUSH_NAME_SUFFIX = "${{ github.event_name == 'push' && ' (push)' || '' }}"
 HOSTED_RUNNERS = {
+    SELECTOR_JOB: "ubuntu-24.04",
     "branch-flow": "ubuntu-24.04",
     "repository": "ubuntu-24.04",
     "runtime-macos": "macos-15",
@@ -181,8 +183,12 @@ def check_workflow_hygiene(workflow, pins, label):
         require(job.get("runs-on") == expected_runner, f"{where}: use the declared hosted runner {expected_runner}")
         timeout = job.get("timeout-minutes")
         require(type(timeout) is int and 1 <= timeout <= 30, f"{where}: timeout must be 1-30 minutes")
-        require(job.get("permissions", {"contents": "read"}) in ({}, {"contents": "read"}),
-                f"{where}: job permissions must not escalate authority")
+        if label == "ci.yml" and name == SELECTOR_JOB:
+            require(job.get("permissions") == {"contents": "read", "pull-requests": "read"},
+                    f"{where}: only the selector may read promotion PR metadata")
+        else:
+            require(job.get("permissions", {"contents": "read"}) in ({}, {"contents": "read"}),
+                    f"{where}: job permissions must not escalate authority")
         require(not {"continue-on-error", "strategy", "container", "services", "defaults"} & job.keys(),
                 f"{where}: no optional, matrix, container jobs, or command overrides")
         steps = job.get("steps")
@@ -242,19 +248,49 @@ def check_ci_workflow(workflow, pins):
     require(workflow.get("concurrency") == {"group": CONCURRENCY_GROUP, "cancel-in-progress": True},
             "ci.yml: concurrency must isolate events/PRs/refs and cancel superseded runs")
     jobs = workflow["jobs"]
-    require(set(jobs) == EXPECTED_JOBS | {"gate"}, "ci.yml: job set disagrees with mandatory gate dependencies")
+    require(set(jobs) == EXPECTED_JOBS | {SELECTOR_JOB, "gate"},
+            "ci.yml: job set disagrees with selector and mandatory gate dependencies")
+    selector = jobs[SELECTOR_JOB]
+    require(selector.get("if") == "${{ github.event_name == 'push' }}" and "needs" not in selector,
+            "ci.yml: the promotion PR selector must run independently on pushes only")
+    require(selector.get("timeout-minutes") == 2, "ci.yml: the selector must finish within two minutes")
+    require(set(selector) <= {"name", "if", "runs-on", "timeout-minutes", "permissions", "outputs", "steps"},
+            "ci.yml: the selector must not override execution context")
+    require(selector.get("name", SELECTOR_JOB) not in GATE_NAMES.values(),
+            "ci.yml: gate contexts are reserved for the aggregate job")
+    require(selector.get("outputs") == {"skip-checks": "${{ steps.promotion-pr.outputs.skip-checks }}"},
+            "ci.yml: selector output must come from the promotion PR lookup")
+    selector_steps = selector["steps"]
+    require(len(selector_steps) == 2
+            and selector_steps[0].get("uses", "").startswith("actions/checkout@")
+            and selector_steps[0].get("with") == {"persist-credentials": False}
+            and set(selector_steps[0]) <= {"name", "uses", "with"},
+            "ci.yml: selector must use only the pinned event checkout followed by the lookup")
+    lookup = selector_steps[1]
+    require(lookup.get("id") == "promotion-pr"
+            and lookup.get("env") == {"GH_TOKEN": "${{ github.token }}"}
+            and set(lookup) <= {"name", "id", "run", "env"},
+            "ci.yml: selector must expose the lookup output and use only the read-only workflow token")
     for name in EXPECTED_JOBS:
-        require("if" not in jobs[name] and "needs" not in jobs[name], f"{name}: mandatory jobs must run independently")
-        require(jobs[name].get("name", name) not in GATE_NAMES.values(),
-                f"{name}: gate contexts are reserved for the aggregate job")
+        require(jobs[name].get("if") == CHECKS_IF
+                and jobs[name].get("needs") in (SELECTOR_JOB, [SELECTOR_JOB]),
+                f"{name}: mandatory checks may skip only a push covered by its promotion PR")
+        display_name = jobs[name].get("name")
+        require(isinstance(display_name, str) and display_name.endswith(PUSH_NAME_SUFFIX)
+                and bool(display_name.removesuffix(PUSH_NAME_SUFFIX).strip())
+                and "${{" not in display_name.removesuffix(PUSH_NAME_SUFFIX)
+                and display_name.removesuffix(PUSH_NAME_SUFFIX).strip() not in GATE_NAMES.values(),
+                f"{name}: mandatory job names must distinguish push checks without claiming gate contexts")
     gate = jobs["gate"]
     require(gate.get("name") == GATE_NAME_EXPRESSION, "ci.yml: gate names must distinguish PR, push, and manual events")
-    require(gate.get("if") in ("${{ always() }}", "always()"), "ci.yml: gate must run with always()")
+    require(gate.get("if") == GATE_IF, "ci.yml: gate must always evaluate unless a push is covered by its promotion PR")
     needs = gate.get("needs")
+    dependencies = EXPECTED_JOBS | {SELECTOR_JOB}
     require(isinstance(needs, list) and all(isinstance(name, str) for name in needs)
-            and set(needs) == EXPECTED_JOBS and len(needs) == len(EXPECTED_JOBS),
-            "ci.yml: gate needs must match every mandatory job")
+            and set(needs) == dependencies and len(needs) == len(dependencies),
+            "ci.yml: gate needs must match the selector and every mandatory job")
     commands = {
+        SELECTOR_JOB: ["python3 tools/ci/select_checks.py"],
         "branch-flow": ["python3 tools/ci/branch_flow.py"],
         "repository": [
             f"rustup toolchain install {RUST_VERSION} --profile minimal",
