@@ -68,7 +68,7 @@ jobs:
           node-version: '24.18.0'
           package-manager-cache: false
       - name: Install pinned Rust
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install 1.98.1 --profile minimal
       - name: Install pinned Python dependency
         run: python3 -m pip install --require-hashes -r tools/ci/requirements.txt
       - name: Install checksum-verified native tools
@@ -107,7 +107,7 @@ jobs:
       - name: Require Apple Silicon runner
         run: python3 -c "import platform; print(platform.platform(), platform.machine()); assert platform.machine() == 'arm64'"
       - name: Install pinned Rust
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install 1.98.1 --profile minimal
       - name: Install pinned Python dependency
         run: python3 -m pip install --require-hashes -r tools/ci/requirements.txt
       - name: Check tracked controlled runtime
@@ -144,7 +144,7 @@ jobs:
           node-version: '24.18.0'
           package-manager-cache: false
       - name: Install pinned Rust
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install 1.98.1 --profile minimal
       - name: Install pinned Python dependency
         run: python -m pip install --require-hashes -r tools/ci/requirements.txt
       - name: Check tracked controlled runtime

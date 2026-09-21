@@ -25,7 +25,7 @@ smokes as qualification of this race.
 The default controlled build does not need these dependencies. For the optional
 engine build, acquire the following separately; the harness downloads nothing:
 
-- Rust 1.97.1, the application's locked Git dependency, and a native C++ toolchain.
+- Rust 1.98.1, the application's locked Git dependency, and a native C++ toolchain.
 - Apple Silicon macOS: Xcode Command Line Tools, OpenCV 4 development files, and
   libclang. The pinned engine qualifies macOS 26 with deployment minimum 26.5.2;
   it does not qualify macOS 27 automatically.
@@ -44,13 +44,13 @@ setup tool without becoming the application's dependency source. From this
 repository root, with that tool's absolute path:
 
 ```sh
-MACOSX_DEPLOYMENT_TARGET=26.5.2 python3 /absolute/pinned-mado-pilot/tools/setup-native.py -- cargo +1.97.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml --features engine
+MACOSX_DEPLOYMENT_TARGET=26.5.2 python3 /absolute/pinned-mado-pilot/tools/setup-native.py -- cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml --features engine
 ```
 
 Windows, from the x64 MSVC developer shell:
 
 ```bat
-python C:\pinned-mado-pilot\tools\setup-native.py --opencv-root C:\native\opencv --libclang-path "C:\Program Files\LLVM\bin" -- cargo +1.97.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml --features engine
+python C:\pinned-mado-pilot\tools\setup-native.py --opencv-root C:\native\opencv --libclang-path "C:\Program Files\LLVM\bin" -- cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml --features engine
 ```
 
 Keep the same selected loader environment for execution. On macOS it must expose
@@ -194,7 +194,7 @@ invalidate prior actionable stream generations.
 Run with the same native setup environment:
 
 ```sh
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml --features engine -- run /private/replay-plan.json /private/replay-package
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml --features engine -- run /private/replay-plan.json /private/replay-package
 ```
 
 The input queue remains the host's **controlled-non-native** sink. Recognition uses
@@ -273,6 +273,26 @@ Routes are explicitly `system`, Windows `window_message`, or macOS
 are not grants from the OS, nor evidence that a route can act on the target.
 No launcher, elevation, focus change, process termination, restart allowance,
 route substitution, or automatic retry is supplied.
+
+### Background-input qualification
+
+`preserve` prohibits a focus change; it does not prove the target was in the
+background. Qualification needs attributable non-foreground observations at
+admission/dispatch and effect-observation boundaries, plus the predeclared effect
+on a strictly newer compatible frame of the retained target. Process-directed
+delivery addresses the owning process, not an exact responder or guaranteed
+window. Ordinary Windows targets cannot inherit a private fixture's protocol
+acknowledgement.
+
+At the current pin, macOS `process_directed` and ordinary Windows
+`window_message` advertise unknown target compatibility. The
+[compatibility disposition](runtime-comparison-results.md#background-input-compatibility-disposition)
+records a background macOS invocation with no observed menu effect and retained
+Windows refusals. Neither route is qualified for the selected game. Keep
+submission, possible effect, observed application effect, and cleanup separate;
+do not retry or substitute System to convert a refused/no-effect result into a
+background pass. Controlled M1 work is not blocked by this unresolved native
+question.
 
 Prepare a complete workflow before its acceptance run: collect authorized
 reference frames, establish recognition regions and control locations, then author

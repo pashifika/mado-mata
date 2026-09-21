@@ -227,6 +227,68 @@ No retry, focus change, elevation, or route fallback occurred. An earlier
 the exact rejecting policy check or measured token levels; static analysis is
 not a runtime root-cause determination. Both native execution slots are closed.
 
+## Background-input compatibility disposition
+
+The 2026-09-21 investigation retained MadoPilot
+`85ccc580cd28ffb9b0b52271f6c87f1af0109a04` and the MadoMata input implementation
+from `3acde7f72c0a67189fc4cd529174197b52ef04a1`. Rust was upgraded separately to
+**1.98.1**; historical results above retain their original toolchain identities.
+The routes already exist and are wired into the consumer. Available transport
+does not establish target acceptance.
+
+| OS / operation | Route / address scope | Advertised support / receipt ceiling | Observed effect and disposition |
+| --- | --- | --- | --- |
+| macOS 27.0 (`26A428`), arm64; one idle-screen dismissal click | `process_directed` / owning process | `Unknown` / `invocation_only` | Three SDK events submitted while the application was observed in the background; expected menu absent. **Unqualified**, consumption unresolved. |
+| Retained macOS focused workflow | `system` / focused system | `Supported` / `invocation_only` | Separately observed workflow effects. Focused baseline only, not background support. |
+| Retained Windows ordinary-window attempt | `window_message` / exact window | `Unknown` / target queue admission | Refused; no background success. Exact rejecting check remains unknown. |
+| Retained Windows focused workflow attempt | `system` / focused system | `Supported` / system input admission | `PolicyRefused`, `Unexecuted`, zero submitted events. No new Windows run. |
+
+The new macOS diagnostic used the pinned public Rust facade directly, not a new
+interpreter workflow. It retained the exact process lifetime and window, used
+capture-pixel move/press/release with unchanged source geometry, selected only
+`process_directed` with `preserve`, and performed no activation or fallback.
+Application-level `NSWorkspace` observations at admission, immediately before
+submission, and at effect observation all reported inactive/non-frontmost.
+These are boundary samples, not an atomic per-event foreground guarantee.
+
+The expected result was the initial menu becoming visible. Two target-only
+frames came from one capture session: sequence 1 before input and sequence 145
+after a 1500 ms observation wait, with the same epoch and geometry. Visual
+inspection still showed the idle screen. The receipt reported three submitted
+events, possible native effect, no partial effect, no held state, and no cleanup
+owed. Session close succeeded; the outer process exited 0 without containment
+after approximately 16 seconds. That exit confirms diagnostic completion,
+**not** the failed application postcondition.
+
+An earlier preparation found no approved menu control and sent no input.
+A subsequent source-image review timed out before dispatch, also with zero
+input and confirmed session close. Both remain separate failed/unexecuted
+preparations. No input was replayed after the completed no-effect attempt.
+The finite diagnostic slots are closed; the historical M0 slots remain closed.
+Images, target identities, local configuration, and raw results remain private.
+
+Non-native verification on Rust 1.98.1 passed the full repository check
+(36 governance tests, 38 Rust unit tests, two terminal tests, 199 controlled
+cases, compiler self-checks, actionlint, and offline links), five engine-feature
+consumer input tests, and 84 pinned macOS SDK input/geometry unit tests.
+The latter use scripted drivers and geometry sources: they do not prove native
+event consumption. Windows SDK unit tests were inspected but not executed here.
+
+No consumer or SDK contract violation was reproduced, so there is no input
+implementation repair, speculative upstream Change, or SDK pin update.
+Remaining questions are target consumption of the process-addressed event
+representation and the exact historical Windows policy-refusal site/conditions.
+Neither no-effect nor zero submission alone proves an SDK defect; Windows
+integrity levels were not measured by this investigation.
+
+Controlled M1 package/profile work may proceed. M1 must not advertise background
+support or derive application success from a receipt. M2/native work inherits
+explicit route selection, independent newer-frame effect checks, no automatic
+fallback or activation, and these unresolved compatibility questions.
+Full both-OS native qualification and the independent capture-terminal/publication
+guard prerequisite remain unchanged. macOS 27 results do not extend the SDK's
+qualified OS range.
+
 ## Recorded replay and ownership qualification
 
 The current pinned facade recognizes two authorized recorded frame crops under

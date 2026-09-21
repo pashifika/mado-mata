@@ -14,16 +14,16 @@ See [native prerequisites](runtime-native.md) before any real capture or input.
 
 ## Setup and commands
 
-Run from the repository root with Rust **1.97.1** and Node.js **24.18.0**. The
+Run from the repository root with Rust **1.98.1** and Node.js **24.18.0**. The
 controlled build needs a C toolchain for the vendored interpreters, but no OpenCV,
 ONNX models, sibling checkout, private planning repository, or game installation.
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund --prefix tools/runtime-comparison/compiler
 node tools/runtime-comparison/compiler/compile.mjs --self-check
-cargo +1.97.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml
-cargo +1.97.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- check
+cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml
+cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- check
 ```
 
 `check` executes the built-in behavioral corpus and prints versioned JSON. Its
@@ -37,8 +37,8 @@ A bounded, non-native example plan is provided:
 
 ```sh
 mkdir -p .cache/runtime-comparison
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- run tools/runtime-comparison/fixtures/controlled-plan.json tools/runtime-comparison/fixtures/javascript > .cache/runtime-comparison/sample.json
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- report .cache/runtime-comparison/sample.json
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- run tools/runtime-comparison/fixtures/controlled-plan.json tools/runtime-comparison/fixtures/javascript > .cache/runtime-comparison/sample.json
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- report .cache/runtime-comparison/sample.json
 ```
 
 Use a private copy of the plan to select `rust`, `javascript`, `lua`, or
@@ -59,7 +59,7 @@ After the setup above, start one controlled TypeScript invocation:
 
 ```sh
 mkdir -p .cache/runtime-comparison
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- manual tools/runtime-comparison/fixtures/manual-plan.json tools/runtime-comparison/fixtures/typescript .cache/runtime-comparison/manual-result.json
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- manual tools/runtime-comparison/fixtures/manual-plan.json tools/runtime-comparison/fixtures/typescript .cache/runtime-comparison/manual-result.json
 ```
 
 Review the candidate, lane, and limits, then enter `start`. While it runs, enter
