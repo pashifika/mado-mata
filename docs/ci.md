@@ -198,6 +198,20 @@ The [workflow](../.github/workflows/ci.yml) runs on PRs targeting `main` and
 change is rechecked. There are no workflow path filters. Manual dispatch becomes
 available when the workflow is on the default branch.
 
+The lightweight `dev-push-policy` job runs only on pushes. It suppresses duplicate
+`dev/<topic>` push checks only when an open promotion PR to `main` has both its
+head and base in this repository, with the exact pushed branch and commit SHA.
+The [selector](../tools/ci/select_checks.py) uses paginated GitHub CLI lookup with
+a 30-second timeout; invalid metadata, malformed responses, lookup failures, and
+an unconfirmed match keep all checks enabled. Main pushes, PRs (including forks),
+and manual dispatch never suppress checks or perform this lookup.
+
+Only this selector job receives `pull-requests: read` alongside `contents: read`,
+using the read-only `github.token` as `GH_TOKEN`. API responses and credentials
+are not logged. Failure to write the required `GITHUB_OUTPUT` is a selector
+failure, not a successful selection. A failed selector still allows the four
+checks to attempt work, but cannot produce a passing gate.
+
 The stable result is intentionally event-specific:
 
 | Event | Gate check name | Required by branch rulesets |
@@ -206,7 +220,8 @@ The stable result is intentionally event-specific:
 | Push | `CI Gate (push)` | No |
 | Manual dispatch | `CI Gate (manual)` | No |
 
-The `gate` job runs with `always()` and requires all four explicit jobs:
+Unless an exact-head promotion PR suppresses the duplicate push run, the `gate`
+job runs with `always()` and needs the selector plus all four mandatory jobs:
 
 | Job | Coverage |
 | --- | --- |
@@ -215,11 +230,18 @@ The `gate` job runs with `always()` and requires all four explicit jobs:
 | `runtime-macos` | Policy, governance tests, and controlled runtime on Apple Silicon macOS |
 | `runtime-windows` | Policy, governance tests, and controlled runtime on Windows |
 
-Only success from every expected job passes. Failure, cancellation, missing
-results, unexpected dependencies, and skipped work cannot produce a successful
-gate. There are no optional lanes. A successful push/manual result on the same
-SHA cannot replace the PR-required result. The aggregate reads `NEEDS_JSON` as
-data; keep its expected job set synchronized with the workflow when adding a lane.
+Only success from every mandatory job passes. Failure, cancellation, missing
+results, unexpected dependencies, and skipped mandatory work cannot produce a
+successful gate. The selector must succeed or be skipped (as on PR/manual
+events); its output does not excuse skipped mandatory results. There are no
+optional lanes. On a confirmed duplicate push, the four jobs and push gate are
+skipped, not reported as successful validation.
+
+All four check names gain ` (push)` only on push events so their skipped statuses
+cannot satisfy PR checks. A push/manual gate result on the same SHA cannot
+replace the PR-required `CI Gate`. The aggregate reads `NEEDS_JSON` as data and
+requires exactly the selector plus the four mandatory job IDs; keep that set
+synchronized with the workflow when adding a lane.
 
 Branch flow reads `GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`, and
 `GITHUB_REPOSITORY`; non-PR contexts also use `GITHUB_REF`. PR metadata is JSON

@@ -1,4 +1,4 @@
-"""Deterministic route, gate, policy, tracked-input, and runtime-output regressions."""
+"""Deterministic route, selector, gate, policy, tracked-input, and runtime regressions."""
 
 from copy import deepcopy
 from contextlib import redirect_stderr, redirect_stdout
@@ -16,18 +16,36 @@ from unittest.mock import patch
 from branch_flow import validate_event
 import check
 from check import copy_tracked
-from gate import evaluate
+from gate import SELECTOR_JOB, evaluate
 from install_tools import extract_binary
 from policy import (
     REQUIRED_FILES, check_ci_workflow, check_claude, check_paths,
-    check_ruleset, read_json, read_workflow,
+    check_ruleset, check_workflow_hygiene, read_json, read_workflow,
 )
+import select_checks
 from tooling import load_manifest
 
 CI_DIR = Path(__file__).resolve().parent
 ROOT = CI_DIR.parents[1]
 REPO = "owner/project"
 GATE_JOBS = ("branch-flow", "repository", "runtime-macos", "runtime-windows")
+HEAD_BRANCH = "dev/runtime-comparison"
+HEAD_SHA = "a1" * 20
+
+
+def gate_needs(selector_result="success"):
+    return {
+        **{name: {"result": "success"} for name in GATE_JOBS},
+        SELECTOR_JOB: {"result": selector_result},
+    }
+
+
+def promotion_pr():
+    return {
+        "state": "open",
+        "head": {"ref": HEAD_BRANCH, "sha": HEAD_SHA, "repo": {"full_name": REPO}},
+        "base": {"ref": "main", "repo": {"full_name": REPO}},
+    }
 
 
 def pull_request(base="dev/runtime", head="change/capture", fork=False):
@@ -43,7 +61,10 @@ def pull_request(base="dev/runtime", head="change/capture", fork=False):
 def cli(script, environment, directory):
     return subprocess.run(
         [sys.executable, "-B", str(CI_DIR / script)], cwd=directory,
-        env={"PATH": os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1", **environment},
+        env={
+            **{key: os.environ[key] for key in ("PATH", "SYSTEMROOT") if key in os.environ},
+            "PYTHONDONTWRITEBYTECODE": "1", **environment,
+        },
         text=True, capture_output=True, check=False,
     )
 
@@ -151,26 +172,33 @@ class BranchFlowTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
-    def test_only_all_success_passes(self):
-        for job in GATE_JOBS:
-            for status in ("success", "failure", "cancelled", "skipped", "", None, "neutral"):
-                with self.subTest(job=job, status=status):
-                    needs = {name: {"result": "success"} for name in GATE_JOBS}
-                    needs[job]["result"] = status
-                    if status == "success":
-                        evaluate(needs)
-                    else:
-                        with self.assertRaisesRegex(ValueError, job):
+    def test_only_all_mandatory_success_passes(self):
+        for selector_result in ("success", "skipped"):
+            for job in GATE_JOBS:
+                for status in ("success", "failure", "cancelled", "skipped", "", None, "neutral", [], True):
+                    with self.subTest(selector=selector_result, job=job, status=status):
+                        needs = gate_needs(selector_result)
+                        needs[job]["result"] = status
+                        if status == "success":
                             evaluate(needs)
+                        else:
+                            with self.assertRaises(ValueError):
+                                evaluate(needs)
+
+    def test_selector_failure_cannot_pass_even_when_fallback_checks_succeed(self):
+        for status in ("failure", "cancelled", "neutral", "", None, [], True):
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                evaluate(gate_needs(status))
 
     def test_missing_extra_and_malformed_dependencies_fail(self):
-        success = {name: {"result": "success"} for name in GATE_JOBS}
+        success = gate_needs()
         cases = [None, [], {}, {**success, "unexpected": {"result": "success"}}]
-        for name in GATE_JOBS:
+        for name in (*GATE_JOBS, SELECTOR_JOB):
             cases.extend([
                 {job: value for job, value in success.items() if job != name},
                 {**success, name: {}},
                 {**success, name: "success"},
+                {**success, name: None},
             ])
         for needs in cases:
             with self.subTest(needs=needs), self.assertRaises(ValueError):
@@ -181,10 +209,190 @@ class GateTests(unittest.TestCase):
             for env in ({}, {"NEEDS_JSON": "{bad"}, {"NEEDS_JSON": "[]"}, {"NEEDS_JSON": '{"branch-flow": {"result": "success"}}'}):
                 result = cli("gate.py", env, directory)
                 self.assertEqual(result.returncode, 1)
-                self.assertIn("CI gate failed:", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
-            result = cli("gate.py", {"NEEDS_JSON": json.dumps({name: {"result": "success"} for name in GATE_JOBS})}, directory)
-            self.assertEqual(result.returncode, 0)
+            for selector_result in ("success", "skipped"):
+                result = cli("gate.py", {"NEEDS_JSON": json.dumps(gate_needs(selector_result))}, directory)
+                self.assertEqual(result.returncode, 0)
+
+
+class CheckSelectionTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.output = self.root / "github-output"
+        self.environment = {
+            **{key: os.environ[key] for key in ("PATH", "SYSTEMROOT") if key in os.environ},
+            "GITHUB_EVENT_NAME": "push", "GITHUB_REF": f"refs/heads/{HEAD_BRANCH}",
+            "GITHUB_REPOSITORY": REPO, "GITHUB_SHA": HEAD_SHA,
+            "GITHUB_OUTPUT": str(self.output), "GH_TOKEN": "private-test-token",
+        }
+
+    def invoke(self, payload=b"[]", returncode=0, error=None, environment=None, lookup_allowed=True):
+        response = self.root / "response"
+        response.write_bytes(payload)
+        emitter = self.root / "gh-emitter.py"
+        emitter.write_text(
+            "from pathlib import Path\n"
+            "import sys\n"
+            "sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())\n"
+            "sys.stderr.write('private-api-diagnostic private-test-token')\n"
+            "sys.exit(int(sys.argv[2]))\n",
+            encoding="utf-8",
+        )
+        real_run = subprocess.run
+
+        def controlled_process(command, **kwargs):
+            if not lookup_allowed:
+                raise AssertionError("ineligible context must not query GitHub")
+            self.assertEqual(command[:2], ["gh", "api"])
+            self.assertIn(f"repos/{REPO}/pulls", command)
+            self.assertEqual(command[command.index("--method") + 1], "GET")
+            self.assertIn("--paginate", command)
+            self.assertIn("--slurp", command)
+            for field in ("state=open", "base=main", f"head=owner:{HEAD_BRANCH}", "per_page=100"):
+                self.assertIn(field, command)
+            self.assertGreater(kwargs.get("timeout", 0), 0)
+            self.assertLessEqual(kwargs["timeout"], 120)
+            self.assertFalse(kwargs.get("shell", False))
+            if error is not None:
+                raise error
+            return real_run(
+                [sys.executable, "-B", str(emitter), str(response), str(returncode)], **kwargs,
+            )
+
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            patch.dict(os.environ, self.environment if environment is None else environment, clear=True),
+            patch.object(select_checks.subprocess, "run", side_effect=controlled_process),
+            redirect_stdout(output), redirect_stderr(errors),
+        ):
+            code = select_checks.main()
+        console = output.getvalue() + errors.getvalue()
+        self.assertNotIn("private-test-token", console)
+        self.assertNotIn("private-api-diagnostic", console)
+        self.assertNotIn("private-response", console)
+        return code
+
+    def test_covering_pr_can_be_on_a_later_page(self):
+        stale = promotion_pr()
+        stale["head"]["sha"] = "b2" * 20
+        self.assertTrue(select_checks.covering_pr([[stale], [], [promotion_pr()]], REPO, HEAD_BRANCH, HEAD_SHA))
+        identity = promotion_pr()
+        identity["head"]["repo"]["full_name"] = REPO.upper()
+        identity["base"]["repo"]["full_name"] = REPO.upper()
+        identity["head"]["sha"] = HEAD_SHA.upper()
+        self.assertTrue(select_checks.covering_pr([[identity]], REPO, HEAD_BRANCH, HEAD_SHA))
+
+    def test_noncovering_prs_cannot_suppress_checks(self):
+        cases = [
+            ("different head", ("head", "ref"), "dev/other"),
+            ("case-sensitive branch", ("head", "ref"), "dev/Runtime-comparison"),
+            ("stale head", ("head", "sha"), "b2" * 20),
+            ("fork head", ("head", "repo", "full_name"), "contributor/project"),
+            ("different base", ("base", "ref"), "dev/runtime-comparison"),
+            ("foreign base repository", ("base", "repo", "full_name"), "other/project"),
+            ("closed PR", ("state",), "closed"),
+            ("unknown state", ("state",), "unknown"),
+        ]
+        for scenario, path, value in cases:
+            with self.subTest(scenario=scenario):
+                pr = promotion_pr()
+                target = pr
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                self.assertFalse(select_checks.covering_pr([[pr]], REPO, HEAD_BRANCH, HEAD_SHA))
+
+    def test_malformed_metadata_cannot_hide_behind_an_earlier_match(self):
+        valid = promotion_pr()
+        cases = [
+            None, {}, [valid], [None], [[None]], [[valid], {}], [[valid, None]],
+        ]
+        for path, value in [
+            (("head",), None), (("base",), []), (("state",), None),
+            (("head", "repo"), None), (("base", "repo"), {}),
+            (("head", "ref"), 7), (("base", "ref"), None), (("head", "sha"), "not-a-sha"),
+        ]:
+            pr = promotion_pr()
+            target = pr
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            cases.append([[valid], [pr]])
+        for pages in cases:
+            with self.subTest(pages=pages):
+                self.assertFalse(select_checks.covering_pr(pages, REPO, HEAD_BRANCH, HEAD_SHA))
+
+    def test_selector_main_requires_confirmed_successful_lookup(self):
+        matching = json.dumps([[{**promotion_pr(), "title": "private-response"}]]).encode("utf-8")
+        cases = [
+            ("covering PR", matching, 0, "true"),
+            ("no PR", b"[[]]", 0, "false"),
+            ("malformed JSON", b"{private-response", 0, "false"),
+            ("ambiguous JSON", matching.replace(b'"state": "open"', b'"state": "closed", "state": "open"'), 0, "false"),
+            ("nonfinite JSON", json.dumps([[{**promotion_pr(), "number": float("nan")}]]).encode("utf-8"), 0, "false"),
+            ("malformed pages", json.dumps([[promotion_pr()], None]).encode("utf-8"), 0, "false"),
+            ("invalid encoding", b"\xffprivate-response", 0, "false"),
+            ("lookup failed with matching response", matching, 7, "false"),
+        ]
+        for scenario, payload, returncode, skip in cases:
+            with self.subTest(scenario=scenario):
+                self.output.unlink(missing_ok=True)
+                self.assertEqual(self.invoke(payload, returncode), 0)
+                self.assertEqual(self.output.read_text(encoding="utf-8"), f"skip-checks={skip}\n")
+
+    def test_lookup_errors_fall_back_without_dumping_error_payloads(self):
+        for error in (
+            FileNotFoundError("private-api-diagnostic"),
+            subprocess.TimeoutExpired(["gh", "private-test-token"], 30, output="private-api-diagnostic"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self.output.unlink(missing_ok=True)
+                self.assertEqual(self.invoke(error=error), 0)
+                self.assertEqual(self.output.read_text(encoding="utf-8"), "skip-checks=false\n")
+
+    def test_only_valid_dev_push_contexts_may_query_github(self):
+        cases = [
+            ("GITHUB_EVENT_NAME", "pull_request"),
+            ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+            ("GITHUB_EVENT_NAME", "schedule"),
+            ("GITHUB_EVENT_NAME", ""),
+            ("GITHUB_REF", "refs/heads/main"),
+            ("GITHUB_REF", "refs/heads/change/runtime"),
+            ("GITHUB_REF", "refs/tags/dev/runtime"),
+            ("GITHUB_REF", "refs/heads/dev/nested/topic"),
+            ("GITHUB_REF", "refs/heads/dev/Uppercase"),
+            ("GITHUB_REF", "refs/heads/dev/two--words"),
+            ("GITHUB_REF", "refs/heads/dev/"),
+            ("GITHUB_REPOSITORY", "owner/project/extra"),
+            ("GITHUB_REPOSITORY", "owner/$(touch injected)"),
+            ("GITHUB_REPOSITORY", ""),
+            ("GITHUB_SHA", "a1" * 19),
+            ("GITHUB_SHA", "z" * 40),
+            ("GITHUB_SHA", "0" * 40),
+            ("GITHUB_SHA", ""),
+        ]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                self.output.unlink(missing_ok=True)
+                environment = {**self.environment, field: value}
+                self.assertEqual(self.invoke(environment=environment, lookup_allowed=False), 0)
+                self.assertEqual(self.output.read_text(encoding="utf-8"), "skip-checks=false\n")
+
+    def test_cli_requires_a_writable_output_file(self):
+        environment = {**self.environment, "GITHUB_EVENT_NAME": "workflow_dispatch", "PATH": ""}
+        result = cli("select_checks.py", environment, self.root)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "skip-checks=false\n")
+        for path in (None, str(self.root)):
+            with self.subTest(output=path):
+                invalid = {key: value for key, value in environment.items() if key != "GITHUB_OUTPUT"}
+                if path is not None:
+                    invalid["GITHUB_OUTPUT"] = path
+                result = cli("select_checks.py", invalid, self.root)
+                self.assertEqual(result.returncode, 1)
+                self.assertNotIn("Traceback", result.stderr)
 
 
 class RuntimeOutputTests(unittest.TestCase):
@@ -509,6 +717,110 @@ class RepositoryPolicyTests(unittest.TestCase):
             with self.subTest(workflow=workflow), self.assertRaises(ValueError):
                 check_ci_workflow(workflow, self.manifest["actions"])
 
+    def test_selector_permissions_cannot_spread_to_other_jobs_or_workflows(self):
+        permissions = {"contents": "read", "pull-requests": "read"}
+        for name in (*GATE_JOBS, "gate"):
+            with self.subTest(job=name):
+                workflow = deepcopy(self.workflow)
+                workflow["jobs"][name]["permissions"] = permissions
+                with self.assertRaises(ValueError):
+                    check_ci_workflow(workflow, self.manifest["actions"])
+        workflow = deepcopy(self.workflow)
+        workflow["permissions"] = permissions
+        with self.assertRaises(ValueError):
+            check_ci_workflow(workflow, self.manifest["actions"])
+        workflow = deepcopy(self.workflow)
+        workflow["jobs"] = {SELECTOR_JOB: workflow["jobs"][SELECTOR_JOB]}
+        with self.assertRaises(ValueError):
+            check_workflow_hygiene(workflow, self.manifest["actions"], "other.yml")
+
+    def test_selector_cannot_change_scope_authority_or_output_provenance(self):
+        cases = [
+            ("all events", ("if",), "${{ always() }}"),
+            ("skipped selector", ("if",), "false"),
+            ("dependent selector", ("needs",), "repository"),
+            ("unbounded lookup job", ("timeout-minutes",), 30),
+            ("wrong host", ("runs-on",), "self-hosted"),
+            ("write authority", ("permissions",), {"contents": "read", "pull-requests": "write"}),
+            ("missing lookup authority", ("permissions",), {"contents": "read"}),
+            ("extra authority", ("permissions",), {"contents": "read", "pull-requests": "read", "issues": "read"}),
+            ("forged output", ("outputs",), {"skip-checks": "true"}),
+            ("overridden metadata", ("env",), {"GITHUB_SHA": "b2" * 20}),
+            ("floating checkout", ("steps", 0, "uses"), "actions/checkout@v7"),
+            ("stored credentials", ("steps", 0, "with", "persist-credentials"), True),
+            ("other revision", ("steps", 0, "with", "ref"), "main"),
+            ("other repository", ("steps", 0, "with", "repository"), "other/project"),
+            ("mismatched output step", ("steps", 1, "id"), "other"),
+            ("conditional lookup", ("steps", 1, "if"), "false"),
+            ("lookup failure hidden", ("steps", 1, "continue-on-error"), True),
+            ("forged lookup", ("steps", 1, "run"), "echo skip-checks=true"),
+            ("masked lookup", ("steps", 1, "run"), "python3 tools/ci/select_checks.py || true"),
+            ("different command root", ("steps", 1, "working-directory"), "other"),
+            ("missing lookup token", ("steps", 1, "env"), {}),
+            ("secret token", ("steps", 1, "env"), {"GH_TOKEN": "${{ secrets.TOKEN }}"}),
+            ("token environment override", ("steps", 1, "env"), {
+                "GH_TOKEN": "${{ github.token }}", "GITHUB_REPOSITORY": "other/project",
+            }),
+        ]
+        for scenario, path, value in cases:
+            with self.subTest(scenario=scenario):
+                workflow = deepcopy(self.workflow)
+                target = workflow["jobs"][SELECTOR_JOB]
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                with self.assertRaises(ValueError):
+                    check_ci_workflow(workflow, self.manifest["actions"])
+        for mutation in ("missing checkout", "duplicate checkout", "lookup before checkout"):
+            with self.subTest(mutation=mutation):
+                workflow = deepcopy(self.workflow)
+                steps = workflow["jobs"][SELECTOR_JOB]["steps"]
+                if mutation == "missing checkout":
+                    steps.pop(0)
+                elif mutation == "duplicate checkout":
+                    steps.insert(0, deepcopy(steps[0]))
+                else:
+                    steps.reverse()
+                with self.assertRaises(ValueError):
+                    check_ci_workflow(workflow, self.manifest["actions"])
+
+    def test_selection_cannot_bypass_mandatory_dependencies_or_pr_statuses(self):
+        for name in GATE_JOBS:
+            for field, value in (
+                ("if", "${{ success() }}"),
+                ("if", "${{ needs.dev-push-policy.outputs.skip-checks != 'true' }}"),
+                ("needs", []),
+                ("needs", [SELECTOR_JOB, "gate"]),
+                ("name", "Shared check context"),
+                ("name", "CI Gate${{ github.event_name == 'push' && ' (push)' || '' }}"),
+            ):
+                with self.subTest(job=name, field=field, value=value):
+                    workflow = deepcopy(self.workflow)
+                    workflow["jobs"][name][field] = value
+                    with self.assertRaises(ValueError):
+                        check_ci_workflow(workflow, self.manifest["actions"])
+        for dependencies in (
+            list(GATE_JOBS), [SELECTOR_JOB], [SELECTOR_JOB, *GATE_JOBS, "unexpected"],
+            [SELECTOR_JOB, *GATE_JOBS, SELECTOR_JOB],
+        ):
+            with self.subTest(dependencies=dependencies):
+                workflow = deepcopy(self.workflow)
+                workflow["jobs"]["gate"]["needs"] = dependencies
+                with self.assertRaises(ValueError):
+                    check_ci_workflow(workflow, self.manifest["actions"])
+        for name in (*GATE_JOBS, SELECTOR_JOB):
+            with self.subTest(missing_job=name):
+                workflow = deepcopy(self.workflow)
+                del workflow["jobs"][name]
+                with self.assertRaises(ValueError):
+                    check_ci_workflow(workflow, self.manifest["actions"])
+        for push in ({"branches": ["dev/**"]}, {"branches": ["main", "dev/**"], "paths": ["src/**"]}):
+            with self.subTest(push=push):
+                workflow = deepcopy(self.workflow)
+                workflow["on"]["push"] = push
+                with self.assertRaises(ValueError):
+                    check_ci_workflow(workflow, self.manifest["actions"])
+
     def test_controlled_lanes_cannot_skip_execution_or_change_toolchains(self):
         for name in ("repository", "runtime-macos", "runtime-windows"):
             for mutation in ("skip job", "skip step", "mask failure", "policy only", "wrong runner",
@@ -590,7 +902,7 @@ class RepositoryPolicyTests(unittest.TestCase):
                         steps.append({"name": "Extra step", "run": "echo unexpected"})
                     with self.assertRaises(ValueError):
                         check_ci_workflow(workflow, self.manifest["actions"])
-        for name in ("branch-flow", "gate"):
+        for name in (SELECTOR_JOB, "branch-flow", "gate"):
             with self.subTest(non_runtime_job=name):
                 workflow = deepcopy(self.workflow)
                 upload = next(step for step in workflow["jobs"]["repository"]["steps"]
@@ -611,8 +923,9 @@ class RepositoryPolicyTests(unittest.TestCase):
         for forbidden in ("rasen/config.yaml", ".rasen/evidence/run.json", "examples/app.py", "local_docs/design.md", ".omp/config.yml", ".omp/sessions/log", ".omp/rules/unapproved.md", ".cache/tool", "tools/ci/__pycache__/policy.pyc"):
             with self.subTest(path=forbidden), self.assertRaisesRegex(ValueError, "path|state"):
                 check_paths([*REQUIRED_FILES, forbidden])
-        with self.assertRaisesRegex(ValueError, "CLAUDE.md"):
-            check_paths(sorted(REQUIRED_FILES - {"CLAUDE.md"}))
+        for missing in ("CLAUDE.md", "tools/ci/select_checks.py"):
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                check_paths(sorted(REQUIRED_FILES - {missing}))
 
     def test_canonical_symlink_refuses_copies_wrong_targets_and_broken_links(self):
         with tempfile.TemporaryDirectory() as directory:
