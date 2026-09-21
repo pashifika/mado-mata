@@ -240,7 +240,7 @@ does not establish target acceptance.
 | --- | --- | --- | --- |
 | macOS 27.0 (`26A428`), arm64; one idle-screen dismissal click | `process_directed` / owning process | `Unknown` / `invocation_only` | Three SDK events submitted while the application was observed in the background; expected menu absent. **Unqualified**, consumption unresolved. |
 | Same macOS host; isolated `NSEvent` + Command recipe | `process_directed` / owning process | Production support unchanged / `invocation_only` | Initial menu visibly appeared in one bounded trial; see [NSEvent-based game trial](#nsevent-based-game-trial). Repeatability and concurrent typing remain **unqualified**. |
-| Same macOS host; SDK `AppKitBackground` at `acc5d98` | `process_directed` / owning process | `Unknown` / `invocation_only` | One unchanged full character-guide workflow passed: ten clicks, independently verified on/off transitions and return navigation. See [integrated workflow](#sdk-integrated-full-background-workflow); no route-wide or repeated-run qualification. |
+| Same macOS host; SDK `AppKitBackground` at `acc5d98` | `process_directed` / owning process | `Unknown` / `invocation_only` | Two recorded full character-guide workflows and one operator-confirmed repetition succeeded. One ordinary-typing case had no operator-reported interference, but incomplete supplementary cursor/focus coverage. See [bounded repetition](#bounded-repetition-with-ordinary-terminal-typing); no route-wide or statistical reliability qualification. |
 | Retained macOS focused workflow | `system` / focused system | `Supported` / `invocation_only` | Separately observed workflow effects. Focused baseline only, not background support. |
 | Retained Windows ordinary-window attempt | `window_message` / exact window | `Unknown` / target queue admission | Refused; no background success. Exact rejecting check remains unknown. |
 | Retained Windows focused workflow attempt | `system` / focused system | `Supported` / system input admission | `PolicyRefused`, `Unexecuted`, zero submitted events. No new Windows run. |
@@ -475,11 +475,43 @@ This establishes the exact full workflow once, not general application support,
 macOS 27 release qualification, repeated-run reliability, or concurrent-input
 preservation. The descriptor remains `Unknown` and receipts remain invocation
 evidence. Windows was not rerun. The operator cancelled further UIKit fixture
-work as unnecessary; repeated-run and concurrent-typing qualification remain
-open. No new authority follows from the result. Minimal diagnostic source and
+work as unnecessary. The later [bounded typing repetition](#bounded-repetition-with-ordinary-terminal-typing)
+records additional evidence separately. No new authority follows from either result. Minimal diagnostic source and
 conclusions are retained privately while generated experiment artifacts are
 removed. Private images, paths, raw OCR output, plans, and execution evidence
 remain outside public commits.
+
+### Bounded repetition with ordinary terminal typing
+
+On 2026-09-21, fresh finite authority covered one repetition of the same
+single-game workflow while the operator typed in a foreground terminal. The
+script, profiles, assets, SDK pin, route, focus policy, and 50 ms hold were
+unchanged. An input-free one-frame preflight refreshed exact target identity and
+geometry; that session closed before the workflow's retained session opened.
+There were no warmups, automatic retries, fallback, or additional input runs.
+
+The invocation passed in **33.286 seconds**, including cleanup: **ten logical
+clicks, forty SDK events, and twenty-three capture acquisitions**. OCR/template
+checks again verified the selected character, switch on, switch off after
+reopening, and final menu. SDK cleanup reported no outstanding input state,
+no live handles, and a closed session; the outer process exited 0 without
+timeout or output truncation.
+
+The operator reported **terminal typing unaffected**. No typed content was
+collected; continuous typing duration was not independently measured. The
+supplementary observer expired at its 90-second preparation/preflight bound
+before the input-action interval. Its samples are not evidence of cursor/focus
+preservation during this workflow, and the earlier run's 2,498 samples are not
+reused for that claim.
+
+Together with the original recorded run and a later operator-confirmed,
+log-disabled repetition, this gives three successful workflow observations.
+It completes this bounded repetition/ordinary-typing case, not a statistical
+reliability rate, continuous cursor/focus guarantee, generic application
+support, macOS release qualification, or full both-OS native adoption.
+Descriptor compatibility remains `Unknown`, and submission receipts remain
+invocation-only. Windows and the cancelled UIKit diagnostic were not rerun.
+This authority is consumed and closed; raw evidence remains private.
 
 ## Recorded replay and ownership qualification
 

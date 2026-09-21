@@ -324,10 +324,14 @@ At the current pin, macOS `process_directed` and ordinary Windows
 keeps historical no-effect invocations, isolated construction trials, and
 Windows refusals separate from the
 [SDK-integrated full background workflow](runtime-comparison-results.md#sdk-integrated-full-background-workflow).
-The latter passed once at the current pin with `appkit_background` and a 50 ms
-hold, using independent OCR/template postconditions. It does not qualify
-repeatability, simultaneous ordinary typing, arbitrary games, or either
-production route generally. An AppKit fixture action is not an iOS-on-Mac game
+The original recorded run passed at the current pin with `appkit_background`
+and a 50 ms hold, using independent OCR/template postconditions. A subsequent
+[bounded typing repetition](runtime-comparison-results.md#bounded-repetition-with-ordinary-terminal-typing)
+also passed; the operator reported terminal typing unaffected. Its supplementary
+observer did not cover the input-action interval, so it does not establish
+concurrent whole-run cursor/focus preservation. These cases do not qualify
+statistical reliability, arbitrary games, or either production route generally.
+An AppKit fixture action is not an iOS-on-Mac game
 acceptance result. Keep submission, possible effect, observed application effect,
 and cleanup separate; do not retry or substitute System to convert a
 refused/no-effect result into a background pass. Controlled M1 work is not blocked
