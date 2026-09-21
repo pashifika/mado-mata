@@ -148,6 +148,8 @@ cancellation can finish while that owner remains live. Missing physical cleanup
 requires finite child containment and an incomplete outcome, never a fabricated
 clean acknowledgement. A separate observer checks child exit after parent death
 and verifies the inert target survives. Only owned harness processes are killed.
+A controlled `release_hold` also reaches a worker registering concurrently;
+registration cannot lose a release that arrived before the worker was listed.
 
 Each sample starts a fresh child. The tool reports cold process behavior; it does
 not claim that these samples measure warm engine reuse. The optional engine cache

@@ -1378,7 +1378,12 @@ impl Host {
                 return Err(Fault::new("Backend", error.to_string()));
             }
         };
-        lock(&self.inner.workers).push(Worker {
+        let mut workers = lock(&self.inner.workers);
+        // A release before registration must also reach this newly created worker.
+        if !self.inner.held.load(Ordering::Acquire) {
+            work.released.store(true, Ordering::Release);
+        }
+        workers.push(Worker {
             work: Arc::clone(&work),
             thread,
         });
@@ -3131,6 +3136,34 @@ mod tests {
             "Cancelled"
         );
         assert_eq!(host.snapshot()["effects"], json!([]));
+    }
+
+    #[test]
+    fn held_worker_registration_cannot_miss_a_prior_release() {
+        let host = ready_host("held-work");
+        let observation = observe(&host);
+        let frame = host
+            .observation(&lock(&host.inner.state), &observation)
+            .expect("retained observation");
+        // Dispatch can observe the hold before release, then register its worker afterward.
+        host.call("fixture", json!({"event":"release_hold"}))
+            .expect("release before worker registration");
+        let work = host.start_held_work(frame).expect("physical worker");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !work.completed.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let completed_without_second_release = work.completed.load(Ordering::Acquire);
+        // Reap the worker even when the regression fails.
+        host.call("fixture", json!({"event":"release_hold"}))
+            .expect("release for test cleanup");
+        wait_until(|| host.snapshot()["in_flight_native"] == 0);
+        drop(work);
+        assert_eq!(host.finish()["clean"], true);
+        assert!(
+            completed_without_second_release,
+            "a release before registration must not leave physical work held"
+        );
     }
 
     #[test]
