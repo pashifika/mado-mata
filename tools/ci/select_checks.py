@@ -93,10 +93,11 @@ def main() -> int:
                     "-f", f"head={owner}:{branch}", "-f", "per_page=100",
                 ],
                 check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, encoding="utf-8", timeout=30,
+                timeout=30,
             )
+            # Decode here so encoding errors reach the fallback on every platform.
             pages = json.loads(
-                response.stdout, object_pairs_hook=unique_object,
+                response.stdout.decode("utf-8"), object_pairs_hook=unique_object,
                 parse_constant=reject_constant,
             )
             skip_checks = covering_pr(pages, repository, branch, sha)
