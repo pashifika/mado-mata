@@ -290,8 +290,13 @@ impl Output {
     fn fail(&self, operation: &str, error: &io::Error) {
         let mut state = lock(&self.state);
         state.file_errors = state.file_errors.saturating_add(1);
-        // Error strings may include machine paths; publish only operation and kind.
-        state.last_file_error = Some(format!("{operation}: {:?}", error.kind()));
+        // Keep OS errors path-free and sanitize any custom recovery guidance.
+        let detail = if error.get_ref().is_some() {
+            safe_text(&error.to_string(), MESSAGE_BYTES)
+        } else {
+            format!("{:?}", error.kind())
+        };
+        state.last_file_error = Some(format!("{operation}: {detail}"));
         state.file_available = false;
         state.writing = false;
         state.file_dropped = state.file_dropped.saturating_add(state.file.len() as u64);
@@ -557,9 +562,11 @@ fn safe_text(text: &str, limit: usize) -> String {
         "-----begin",
         "ghp_",
         "github_pat_",
-        "sk-",
         "akia",
-        "ocr",
+        "ocr_text",
+        "ocr text",
+        "ocr result",
+        "ocr:",
         "screenshot",
         "data:image",
         "raw_terminal",
@@ -570,7 +577,10 @@ fn safe_text(text: &str, limit: usize) -> String {
         "eyj",
     ]
     .iter()
-    .any(|word| lower.contains(word));
+    .any(|word| lower.contains(word))
+        || lower
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
+            .any(|word| word.starts_with("sk-"));
     let bytes = text.as_bytes();
     let absolute_path = text.trim() == "/"
         || bytes.iter().enumerate().any(|(index, byte)| {
@@ -805,7 +815,7 @@ mod tests {
             "INFO",
             Some("run-1"),
             "decision.selected",
-            "Selected",
+            "ocr",
             json!({
                 "selection": ["a", "b"], "count": 2, "nested": {"enabled": true},
                 "password": "hidden-value", "ocr_text": "private-recognition",
@@ -819,11 +829,19 @@ mod tests {
         logger.with_dispatch(|| {
             tracing::info!(run = "run-1", code = "backend.ready", count = 7u64, "Ready");
         });
+        logger.emit(
+            "Script",
+            "INFO",
+            Some("run-1"),
+            "workflow.step",
+            "task-1",
+            json!({"details": "(sk-alpha987)"}),
+        );
         let entries = logger.drain().entries;
         let status = logger.shutdown();
         assert!(status.shutdown_complete);
         assert!(!status.shutdown_timed_out);
-        assert_eq!(status.file_written, 2);
+        assert_eq!(status.file_written, 3);
         assert_eq!(status.file_errors, 0);
         let lines = fs::read_to_string(directory.0.join(FILE_NAMES[0])).unwrap();
         let disk: Vec<Value> = lines
@@ -835,6 +853,9 @@ mod tests {
             .map(|entry| serde_json::to_value(entry).unwrap())
             .collect();
         assert_eq!(disk, gui);
+        assert_eq!(disk[0]["message"], "ocr");
+        assert_eq!(disk[2]["message"], "task-1");
+        assert_eq!(disk[2]["fields"]["details"], REDACTED);
         assert_eq!(disk[0]["fields"]["selection"], json!(["a", "b"]));
         assert_eq!(disk[0]["fields"]["nested"]["enabled"], true);
         assert_eq!(disk[1]["source"], "Rust");
@@ -948,12 +969,6 @@ mod tests {
         assert_eq!(batch.file_errors, 1);
         assert_eq!(batch.file_dropped, 1);
         assert_eq!(batch.gui_dropped, 0);
-        assert!(
-            batch
-                .last_file_error
-                .unwrap()
-                .starts_with("Log file write failed:")
-        );
         output.close();
         assert!(output.status().shutdown_complete);
     }

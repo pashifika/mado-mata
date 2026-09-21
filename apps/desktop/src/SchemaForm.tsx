@@ -18,35 +18,6 @@ function emptyValue(schema: Schema): Json {
   return '';
 }
 
-// Numeric editor text is preserved until the command boundary, never coerced to null or zero.
-export function readDraft(schema: Schema, draft: Record<string, Json>) {
-  const errors: Record<string, string> = {};
-  function convert(node: Schema, value: Json, path: string): Json {
-    if ((node.type === 'number' || node.type === 'integer') && typeof value === 'string') {
-      const text = value.trim();
-      const number = Number(text);
-      if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(text) || !Number.isFinite(number)) {
-        errors[path] = 'Enter a finite number; an empty field is not zero.';
-        return value;
-      }
-      if (node.type === 'integer' && !Number.isSafeInteger(number)) {
-        errors[path] = 'Enter an integer within the JavaScript safe integer range.';
-        return value;
-      }
-      return number;
-    }
-    if (node.type === 'object' && object(value)) {
-      return Object.fromEntries(Object.entries(value).map(([key, child]) => [key,
-        node.properties?.[key] ? convert(node.properties[key], child, `${path}.${key}`) : child]));
-    }
-    if (node.type === 'array' && Array.isArray(value) && node.items) {
-      return value.map((child, index) => convert(node.items!, child, `${path}[${index}]`));
-    }
-    return value;
-  }
-  return {values: convert(schema, draft, '$') as Record<string, Json>, errors};
-}
-
 interface FieldProps {
   schema: Schema;
   value: Json;

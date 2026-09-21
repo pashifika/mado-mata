@@ -2,7 +2,7 @@
 
 use crate::host::resolve_options;
 use crate::inventory::Inventory;
-use crate::model::{Control, Fault, Plan, encode_bounded, identity};
+use crate::model::{Control, Fault, Limits, Plan, encode_bounded, identity};
 use crate::runner::{Observer, run_once_with_executable};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -209,7 +209,7 @@ impl DesktopController {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 
-    /// Capture and parse/type-check only; no package module is evaluated.
+    /// Capture and statically validate only; no package module is evaluated.
     pub fn inspect(&self, package: &Path) -> Result<PackageInfo, Fault> {
         if self.state().closed {
             return Err(Fault::new(
@@ -220,19 +220,14 @@ impl DesktopController {
         let limits = manual_plan()?.limits;
         let inventory = Inventory::capture(package, &limits)?;
         let runtime = runtime(&inventory)?;
-        match runtime.as_str() {
+        let inventory = match runtime.as_str() {
             "typescript" => {
                 crate::typescript::compile(&inventory, &limits)?;
+                inventory
             }
-            "javascript" => {
-                crate::typescript::validate_javascript_imports(
-                    &inventory,
-                    &limits,
-                    &Control::new(&limits),
-                )?;
-            }
+            "javascript" => inspect_javascript(inventory, &limits)?,
             _ => unreachable!("runtime() admits only QuickJS languages"),
-        }
+        };
         let defaults = profile(&inventory.package_id, &inventory.schema, json!({}));
         let effective_defaults =
             resolve_options(&inventory.schema, &defaults, &inventory.package_id).ok();
@@ -437,6 +432,14 @@ fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
     Ok(plan)
 }
 
+fn inspect_javascript(inventory: Inventory, limits: &Limits) -> Result<Inventory, Fault> {
+    let inventory = Arc::new(inventory);
+    let control = Arc::new(Control::new(limits));
+    crate::typescript::validate_javascript_modules(&inventory, limits, &control)?;
+    Arc::try_unwrap(inventory)
+        .map_err(|_| Fault::new("Runtime", "inspection retained the captured inventory"))
+}
+
 fn runtime(inventory: &Inventory) -> Result<String, Fault> {
     match inventory.metadata["runtime"].as_str() {
         Some(value @ ("javascript" | "typescript")) => Ok(value.into()),
@@ -563,21 +566,137 @@ mod tests {
             .get_mut("main.js")
             .unwrap()
             .push_str("\nthrow new Error('must not evaluate during inspect');\n");
-        crate::typescript::validate_javascript_imports(&inventory, &limits, &Control::new(&limits))
-            .unwrap();
+        let mut inventory = inspect_javascript(inventory, &limits).unwrap();
         inventory
             .sources
             .get_mut("main.js")
             .unwrap()
             .push_str("\nexport { missing } from './missing.js';\n");
-        let fault = crate::typescript::validate_javascript_imports(
-            &inventory,
-            &limits,
-            &Control::new(&limits),
-        )
-        .unwrap_err();
+        let fault = inspect_javascript(inventory, &limits).unwrap_err();
         assert_eq!(fault.category, "ImportRefused");
         assert_eq!(fault.context["specifier"], "./missing.js");
+    }
+
+    #[test]
+    fn javascript_preflight_links_present_modules_without_evaluation() {
+        let limits = manual_plan().unwrap().limits;
+        let mut inventory = Inventory::capture(
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/javascript")),
+            &limits,
+        )
+        .unwrap();
+        inventory.sources.get_mut("main.js").unwrap().push_str(
+            "\nexport { decide as chooseDecision } from './decisions.js';\n\
+             export * from './decisions.js';\n\
+             throw new Error('entry must not evaluate during inspect');\n",
+        );
+        inventory.sources.get_mut("decisions.js").unwrap().push_str(
+            "\nimport { readiness } from './main.js';\n\
+             export { readiness };\n\
+             throw new Error('dependency must not evaluate during inspect');\n",
+        );
+        let inventory = inspect_javascript(inventory, &limits).unwrap();
+        for invalid_binding in [
+            "import { notExported as unavailable } from './decisions.js';",
+            "export { notExported } from './decisions.js';",
+        ] {
+            let mut invalid = inventory.clone();
+            invalid
+                .sources
+                .get_mut("main.js")
+                .unwrap()
+                .push_str(invalid_binding);
+            let fault = inspect_javascript(invalid, &limits).unwrap_err();
+            assert_eq!(
+                fault.category, "ImportRefused",
+                "{invalid_binding}: {fault:?}"
+            );
+            assert!(fault.message.contains("notExported"), "{fault:?}");
+        }
+    }
+
+    #[test]
+    fn javascript_preflight_follows_requested_declaration_modules_only() {
+        let limits = manual_plan().unwrap().limits;
+        let mut inventory = Inventory::capture(
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/javascript")),
+            &limits,
+        )
+        .unwrap();
+        inventory.sources.insert(
+            "runtime.d.ts".into(),
+            "export { decide } from './bridge.d.ts';\n\
+             import { readiness } from './main.js';\n\
+             export { readiness };\n\
+             throw new Error('runtime declaration must not evaluate during inspect');\n"
+                .into(),
+        );
+        inventory.sources.insert(
+            "bridge.d.ts".into(),
+            "import { decide } from './decisions.js';\n\
+             export { decide };\n\
+             throw new Error('transitive declaration must not evaluate during inspect');\n"
+                .into(),
+        );
+        inventory.sources.insert(
+            "unused.d.ts".into(),
+            "export { Unused } from './missing-types.d.ts';\n\
+             export declare const unused: import('./missing-query.d.ts').Unused;\n"
+                .into(),
+        );
+        for request in [
+            "import { decide } from './runtime.d.ts';",
+            "export function load() { return import('./runtime.d.ts'); }",
+        ] {
+            let mut selected = inventory.clone();
+            selected.sources.insert(
+                "main.js".into(),
+                format!(
+                    "{request}\n\
+                     export function readiness() {{ return 'Ready'; }}\n\
+                     export function workflow() {{}}\n\
+                     throw new Error('entry must not evaluate during inspect');\n"
+                ),
+            );
+            let selected = inspect_javascript(selected, &limits).unwrap();
+
+            let mut missing_export = selected.clone();
+            missing_export.sources.insert(
+                "bridge.d.ts".into(),
+                "export { notExported as decide } from './decisions.js';".into(),
+            );
+            let fault = inspect_javascript(missing_export, &limits).unwrap_err();
+            assert_eq!(fault.category, "ImportRefused", "{request}: {fault:?}");
+            assert!(fault.message.contains("notExported"), "{fault:?}");
+
+            let mut invalid_syntax = selected;
+            invalid_syntax.sources.insert(
+                "bridge.d.ts".into(),
+                "export function decide() {\n  const value = ;\n}\n".into(),
+            );
+            let fault = inspect_javascript(invalid_syntax, &limits).unwrap_err();
+            assert_eq!(fault.category, "Syntax", "{request}: {fault:?}");
+            assert_eq!(fault.context["module"], "bridge.d.ts");
+            assert_eq!(fault.context["line"], 2);
+        }
+    }
+
+    #[test]
+    fn javascript_preflight_preserves_target_engine_syntax_location() {
+        let limits = manual_plan().unwrap().limits;
+        let mut inventory = Inventory::capture(
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/javascript")),
+            &limits,
+        )
+        .unwrap();
+        inventory.sources.insert(
+            "decisions.js".into(),
+            "export function decide() {\n  const value = ;\n}\n".into(),
+        );
+        let fault = inspect_javascript(inventory, &limits).unwrap_err();
+        assert_eq!(fault.category, "Syntax");
+        assert_eq!(fault.context["module"], "decisions.js");
+        assert_eq!(fault.context["line"], 2);
     }
 
     #[test]

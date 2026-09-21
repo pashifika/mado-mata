@@ -72,7 +72,7 @@ try {
     workerData: { input, limit, selfCheck },
     resourceLimits: { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 16, stackSizeMb: 4 },
     env: {},
-    execArgv: [],
+    execArgv: ["--experimental-vm-modules"],
   });
   const response = await new Promise((resolve, reject) => {
     worker.once("message", resolve);

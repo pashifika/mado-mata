@@ -1,8 +1,8 @@
 import {useEffect, useMemo, useRef, useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {getCurrentWindow} from '@tauri-apps/api/window';
-import SchemaForm, {readDraft} from './SchemaForm.tsx';
-import {acceptController, defaultDraft, retainLogs} from './state.ts';
+import SchemaForm from './SchemaForm.tsx';
+import {acceptController, defaultDraft, readDraft, retainLogs, verifiedCleanup} from './state.ts';
 import type {LogStore} from './state.ts';
 import type {ControllerView, Fault, Json, LogBatch, PackageInfo, Poll, Profile, Selection, Settings} from './types.ts';
 
@@ -35,9 +35,9 @@ function ResultPanel({view}: {view: ControllerView}) {
   const cleanup = record(result?.cleanup);
   return <>
     <div className="result-facts">
-      <div><span>Result status</span><strong>{String(result?.status ?? 'Not settled')}</strong></div>
+      <div><span>Result status</span><strong>{String(result?.status ?? (view.state === 'terminal' && view.error ? view.error.category === 'Cancelled' ? 'Cancelled' : 'Refused' : 'Not settled'))}</strong></div>
       <div><span>Entry outcome</span><strong>{String(result?.entry_outcome ?? 'Unobserved')}</strong></div>
-      <div><span>Cleanup</span><strong>{cleanup.clean === true ? 'Clean' : cleanup.clean === false ? 'Incomplete / not clean' : 'Unverified'}</strong></div>
+      <div><span>Cleanup</span><strong>{verifiedCleanup(result) ? 'Clean' : cleanup.clean === false || result?.forced === true || (typeof result?.exit_code === 'number' && result.exit_code !== 0) ? 'Incomplete / not clean' : 'Unverified'}</strong></div>
       <div><span>Forced containment</span><strong>{result?.forced === true ? 'Yes' : result?.forced === false ? 'No' : 'Unobserved'}</strong></div>
     </div>
     {result && <div className="outcome-details">

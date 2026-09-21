@@ -13,6 +13,7 @@ use tauri::Manager;
 struct Backend {
     application: Arc<Application>,
     closing: AtomicBool,
+    exiting: AtomicBool,
 }
 
 async fn background<T: Send + 'static>(
@@ -114,7 +115,19 @@ fn close(app: &tauri::AppHandle) {
         if let Err(error) = &outcome {
             eprintln!("Shutdown: {}", error.category);
         }
-        app.exit(i32::from(outcome.is_err()));
+        // Serialize the exit request with native termination on the event thread.
+        // A late worker must not call app.exit() after native Quit destroyed it.
+        let exit_app = app.clone();
+        if app
+            .run_on_main_thread(move || {
+                if !exit_app.state::<Backend>().exiting.load(Ordering::SeqCst) {
+                    exit_app.exit(i32::from(outcome.is_err()));
+                }
+            })
+            .is_err()
+        {
+            eprintln!("Shutdown: event loop is no longer accepting exit requests");
+        }
     });
 }
 
@@ -139,6 +152,7 @@ fn main() {
             app.manage(Backend {
                 application: Application::new(root, executable.clone())?,
                 closing: AtomicBool::new(false),
+                exiting: AtomicBool::new(false),
             });
             Ok(())
         })
@@ -167,11 +181,24 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("desktop initialization")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if !app.state::<Backend>().closing.load(Ordering::SeqCst) {
-                    api.prevent_exit();
-                    close(app);
+            match event {
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    if !app.state::<Backend>().closing.load(Ordering::SeqCst) {
+                        api.prevent_exit();
+                        close(app);
+                    }
                 }
+                tauri::RunEvent::Exit => {
+                    let backend = app.state::<Backend>();
+                    backend.exiting.store(true, Ordering::SeqCst);
+                    backend.closing.store(true, Ordering::SeqCst);
+                    // macOS terminate: skips ExitRequested. This last callback must
+                    // wait for bounded containment/flush, including an in-flight close.
+                    if let Err(error) = backend.application.shutdown() {
+                        eprintln!("Shutdown: {}", error.category);
+                    }
+                }
+                _ => {}
             }
         });
 }

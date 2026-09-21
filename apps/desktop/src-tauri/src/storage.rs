@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
 const VERSION: u32 = 1;
 const MAX_PROFILES: usize = 64;
@@ -111,7 +111,7 @@ impl Store {
                     })?;
                 let (old, _) = profiles.swap_remove(index);
                 check_binding(&old, &inventory.package_id, &schema_identity)?;
-                validate_values(inventory, old.values)?;
+                validate_values(inventory, old.values).map_err(|fault| profile_fault(fault, id))?;
                 id.to_owned()
             }
             None => {
@@ -197,17 +197,21 @@ impl Store {
     }
 
     fn read_profile(&self, id: &str) -> Result<(Profile, usize), Fault> {
-        check_directory(&self.root)?;
-        check_directory(&self.root.join("profiles"))?;
-        let (profile, size): (Profile, _) = read_json(&self.profile_path(id), MAX_PROFILE_BYTES)?;
-        validate_profile(&profile)?;
-        if profile.id != id {
-            return Err(Fault::new(
-                "ProfileIdentity",
-                "profile ID does not match its filename",
-            ));
-        }
-        Ok((profile, size))
+        let result = (|| {
+            check_directory(&self.root)?;
+            check_directory(&self.root.join("profiles"))?;
+            let (profile, size): (Profile, _) =
+                read_json(&self.profile_path(id), MAX_PROFILE_BYTES)?;
+            validate_profile(&profile)?;
+            if profile.id != id {
+                return Err(Fault::new(
+                    "ProfileIdentity",
+                    "profile ID does not match its filename",
+                ));
+            }
+            Ok((profile, size))
+        })();
+        result.map_err(|fault| profile_fault(fault, id))
     }
 
     fn profiles(&self) -> Result<Vec<(Profile, usize)>, Fault> {
@@ -224,19 +228,32 @@ impl Store {
                 ));
             }
             let entry = entry.map_err(|error| storage("read profile entry", error))?;
-            let name = entry.file_name();
-            let name = name.to_str().ok_or_else(|| {
-                Fault::new("Storage", "profile directory contains a non-UTF-8 filename")
-            })?;
-            if let Some(id) = name.strip_suffix(".pending") {
-                validate_id(id)?;
-                checked_file(&entry.path(), MAX_PROFILE_BYTES)?;
+            let filename = entry.file_name();
+            let name_bytes = filename.as_encoded_bytes();
+            // Other entries are not stored profiles, but still consume directory capacity.
+            if !name_bytes.ends_with(b".json") && !name_bytes.ends_with(b".pending") {
                 continue;
             }
-            let id = name.strip_suffix(".json").ok_or_else(|| {
-                Fault::new("Storage", "profile directory contains an unexpected file")
+            let with_filename = |mut fault: Fault| {
+                // Escape only the basename; never expose the private storage path.
+                fault.context["file"] = json!(name_bytes.escape_ascii().to_string());
+                fault
+            };
+            let name = filename.to_str().ok_or_else(|| {
+                with_filename(Fault::new(
+                    "Storage",
+                    "profile directory contains a non-UTF-8 filename",
+                ))
             })?;
-            validate_id(id)?;
+            if let Some(id) = name.strip_suffix(".pending") {
+                validate_id(id).map_err(with_filename)?;
+                checked_file(&entry.path(), MAX_PROFILE_BYTES).map_err(with_filename)?;
+                continue;
+            }
+            let Some(id) = name.strip_suffix(".json") else {
+                continue;
+            };
+            validate_id(id).map_err(with_filename)?;
             if result.len() >= MAX_PROFILES {
                 return Err(limit("profile count exceeds 64"));
             }
@@ -249,6 +266,11 @@ impl Store {
         }
         Ok(result)
     }
+}
+
+fn profile_fault(mut fault: Fault, id: &str) -> Fault {
+    fault.context["profile_id"] = json!(id);
+    fault
 }
 
 fn new_id() -> Result<String, Fault> {
@@ -557,9 +579,6 @@ fn private_directory(path: &Path) -> Result<(), Fault> {
         }
         Err(error) => return Err(storage("inspect storage directory", error)),
     }
-    #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|error| storage("make storage directory private", error))?;
     check_directory(path)
 }
 
@@ -730,6 +749,8 @@ mod tests {
     use super::*;
     use mado_runtime_comparison::inventory::{Entries, Entry};
     use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     struct Directory(PathBuf);
 
@@ -820,6 +841,154 @@ mod tests {
                 .id,
             second.id
         );
+    }
+
+    #[test]
+    fn foreign_entries_do_not_block_profile_operations() {
+        let directory = Directory::new();
+        let store = directory.store();
+        let inventory = inventory();
+        let profiles = directory.0.join("profiles");
+        fs::write(profiles.join(".DS_Store"), b"Finder metadata").unwrap();
+        fs::write(profiles.join("notes.txt"), b"Operator notes").unwrap();
+        fs::create_dir(profiles.join("archive")).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            fs::write(
+                profiles.join(std::ffi::OsStr::from_bytes(b"\xff-metadata")),
+                b"Foreign metadata",
+            )
+            .unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("missing-target", profiles.join("foreign-link")).unwrap();
+        let saved = store.save(&inventory, None, "Original", options()).unwrap();
+        let renamed = store.rename(&inventory, &saved.id, "Renamed").unwrap();
+        assert_eq!(renamed.id, saved.id);
+        let listed = store
+            .list(&inventory.package_id, &saved.schema_identity)
+            .unwrap();
+        assert_eq!(listed.profiles.len(), 1);
+        assert_eq!(listed.profiles[0].id, saved.id);
+        assert_eq!(listed.profiles[0].name, "Renamed");
+        assert_eq!(listed.profiles[0].values, options());
+        store.delete(&saved.id).unwrap();
+        assert!(
+            store
+                .list(&inventory.package_id, &saved.schema_identity)
+                .unwrap()
+                .profiles
+                .is_empty()
+        );
+        assert_eq!(
+            fs::read(profiles.join(".DS_Store")).unwrap(),
+            b"Finder metadata"
+        );
+        assert_eq!(
+            fs::read(profiles.join("notes.txt")).unwrap(),
+            b"Operator notes"
+        );
+    }
+
+    #[test]
+    fn foreign_entries_still_consume_directory_capacity() {
+        let directory = Directory::new();
+        let store = directory.store();
+        let inventory = inventory();
+        let profiles = directory.0.join("profiles");
+        for index in 0..MAX_DIRECTORY_ENTRIES - 2 {
+            fs::write(profiles.join(format!("note-{index}.txt")), b"").unwrap();
+        }
+        let saved = store
+            .save(&inventory, None, "Last slot", options())
+            .unwrap();
+        store.rename(&inventory, &saved.id, "At capacity").unwrap();
+        let path = store.profile_path(&saved.id);
+        let before = fs::read(&path).unwrap();
+        fs::write(profiles.join("one-too-many.txt"), b"").unwrap();
+        assert_eq!(
+            store
+                .list(&inventory.package_id, &saved.schema_identity)
+                .unwrap_err()
+                .category,
+            "StorageLimit"
+        );
+        assert_eq!(
+            store
+                .save(&inventory, None, "Overflow", options())
+                .unwrap_err()
+                .category,
+            "StorageLimit"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn owned_entry_names_and_pending_files_remain_checked() {
+        let directory = Directory::new();
+        let store = directory.store();
+        let inventory = inventory();
+        let schema_identity = identity(&inventory.schema).unwrap();
+        let profiles = directory.0.join("profiles");
+        fs::write(profiles.join(".DS_Store"), b"Finder metadata").unwrap();
+        for name in [".json", ".pending"] {
+            let path = profiles.join(name);
+            fs::write(&path, b"Evidence").unwrap();
+            let fault = store
+                .list(&inventory.package_id, &schema_identity)
+                .unwrap_err();
+            assert_eq!(fault.category, "ProfileIdentity");
+            assert_eq!(fault.context["file"], name);
+            assert_eq!(fs::read(&path).unwrap(), b"Evidence");
+            fs::remove_file(path).unwrap();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let path = profiles.join(std::ffi::OsStr::from_bytes(b"\xff.json"));
+            fs::write(&path, b"Evidence").unwrap();
+            let fault = store
+                .list(&inventory.package_id, &schema_identity)
+                .unwrap_err();
+            assert_eq!(fault.category, "Storage");
+            assert_eq!(fault.context["file"], r"\xff.json");
+            assert_eq!(fs::read(&path).unwrap(), b"Evidence");
+            fs::remove_file(path).unwrap();
+        }
+        let pending_name = format!("{}.pending", new_id().unwrap());
+        let pending = profiles.join(&pending_name);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        options
+            .open(&pending)
+            .unwrap()
+            .set_len(MAX_PROFILE_BYTES as u64 + 1)
+            .unwrap();
+        let fault = store
+            .list(&inventory.package_id, &schema_identity)
+            .unwrap_err();
+        assert_eq!(fault.category, "StorageLimit");
+        assert_eq!(fault.context["file"], pending_name);
+        assert_eq!(
+            fs::metadata(pending).unwrap().len(),
+            MAX_PROFILE_BYTES as u64 + 1
+        );
+    }
+
+    #[test]
+    fn profile_read_failure_preserves_io_context_and_safe_identity() {
+        let directory = Directory::new();
+        let store = directory.store();
+        let id = new_id().unwrap();
+        let fault = store.delete(&id).unwrap_err();
+        assert_eq!(fault.category, "Storage");
+        assert_eq!(fault.context["profile_id"], id);
+        assert_eq!(fault.context["operation"], "inspect stored file");
+        assert_eq!(fault.context["kind"], "NotFound");
+        assert!(fault.context.get("os_code").is_some());
     }
 
     #[test]
@@ -998,24 +1167,60 @@ mod tests {
         let inventory = inventory();
         let profile = store.save(&inventory, None, "Original", options()).unwrap();
         let path = store.profile_path(&profile.id);
-        let mut malformed = serde_json::to_value(&profile).unwrap();
-        malformed["version"] = json!(2);
-        fs::write(&path, serde_json::to_vec(&malformed).unwrap()).unwrap();
-        let bytes = fs::read(&path).unwrap();
-        assert_eq!(
-            store
+        let profiles = directory.0.join("profiles");
+        fs::write(profiles.join(".DS_Store"), b"Finder metadata").unwrap();
+        fs::write(profiles.join("notes.txt"), b"Operator notes").unwrap();
+        let mut incompatible = serde_json::to_value(&profile).unwrap();
+        incompatible["version"] = json!(2);
+        let mut mismatched = serde_json::to_value(&profile).unwrap();
+        mismatched["id"] = json!(new_id().unwrap());
+        let mut authority = serde_json::to_value(&profile).unwrap();
+        authority["values"] = json!({"nested": {"api_key": "credential"}});
+        for (bytes, category, field) in [
+            (b"not JSON".to_vec(), "StorageFormat", None),
+            (
+                serde_json::to_vec(&incompatible).unwrap(),
+                "ProfileVersion",
+                None,
+            ),
+            (
+                serde_json::to_vec(&mismatched).unwrap(),
+                "ProfileIdentity",
+                None,
+            ),
+            (
+                serde_json::to_vec(&authority).unwrap(),
+                "ProfileAuthority",
+                Some("$.nested.api_key"),
+            ),
+        ] {
+            fs::write(&path, &bytes).unwrap();
+            let fault = store
                 .list(&inventory.package_id, &profile.schema_identity)
-                .unwrap_err()
-                .category,
-            "ProfileVersion"
-        );
-        assert!(
-            store
-                .save(&inventory, Some(&profile.id), "Replacement", options())
-                .is_err()
-        );
+                .unwrap_err();
+            assert_eq!(fault.category, category);
+            assert_eq!(fault.context["profile_id"], profile.id);
+            if let Some(field) = field {
+                assert_eq!(fault.context["field"], field);
+            }
+            for id in [None, Some(profile.id.as_str())] {
+                let fault = store
+                    .save(&inventory, id, "Replacement", options())
+                    .unwrap_err();
+                assert_eq!(fault.category, category);
+                assert_eq!(fault.context["profile_id"], profile.id);
+            }
+            let fault = store
+                .rename(&inventory, &profile.id, "Renamed")
+                .unwrap_err();
+            assert_eq!(fault.category, category);
+            assert_eq!(fault.context["profile_id"], profile.id);
+            let fault = store.delete(&profile.id).unwrap_err();
+            assert_eq!(fault.category, category);
+            assert_eq!(fault.context["profile_id"], profile.id);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
         assert!(store.delete("../settings").is_err());
-        assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 
     #[test]
@@ -1063,6 +1268,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn existing_insecure_directories_are_refused_without_chmod() {
+        for relative in ["", "profiles"] {
+            let directory = Directory::new();
+            let path = directory.0.join(relative);
+            if !relative.is_empty() {
+                fs::create_dir(&path).unwrap();
+            }
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            let fault = Store::new(directory.0.clone())
+                .err()
+                .expect("existing shared storage must be refused");
+            assert_eq!(fault.category, "Storage");
+            assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o755);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn private_storage_refuses_symlink_profile_authority() {
         let directory = Directory::new();
         let store = directory.store();
@@ -1070,6 +1293,10 @@ mod tests {
         let profile = store.save(&inventory, None, "Original", options()).unwrap();
         let path = store.profile_path(&profile.id);
         assert_eq!(fs::metadata(&directory.0).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::metadata(directory.0.join("profiles")).unwrap().mode() & 0o777,
+            0o700
+        );
         assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
         let outside = directory.0.join("original.json");
         fs::rename(&path, &outside).unwrap();

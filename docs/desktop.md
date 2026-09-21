@@ -79,14 +79,23 @@ input route. Keep it outside package source and public tracked files. Reuse the
 same root when checking restart persistence; use a different private root to
 isolate another session without deleting existing data.
 
+New data directories use private Unix permissions. An existing data root or
+profile directory with group/other access is refused without changing its mode;
+choose or prepare a private application directory deliberately.
+The current Tauri setup path reports this refusal on stderr and aborts startup;
+it does not open a recovery UI. The existing directory and its files are unchanged.
+
 ## Inspect, edit, and save profiles
 
 1. Enter the selected package directory and choose **Inspect**. For the shipped
    controlled example, use the absolute path to
    `tools/runtime-comparison/fixtures/typescript` in this checkout. Inspection
    validates inventory, schema, assets, and static dependencies without executing
-   package automation. A remembered package path is only a location hint and is
-   revalidated, not an authority grant.
+   package automation. JavaScript syntax and module bindings are checked without
+   evaluating module bodies, including requested executable `.d.ts` dependencies.
+   A remembered package path is only a revalidated location hint, not an authority
+   grant. Failure to save that hint produces a warning but does not invalidate a
+   successfully inspected package; existing settings and pending files survive.
 2. Select a package preset or a saved profile. Presets such as `template-first`
    and `ocr-first` become editable drafts; they are not automatically persisted
    application profiles. The form covers supported scalar, enum, nested-object,
@@ -101,14 +110,24 @@ isolate another session without deleting existing data.
    stable ID; **Delete profile** removes only that selected app-local profile.
    **New draft** does not overwrite a saved profile.
 
+The integer editor is limited to JavaScript's safe integer range. For `number`
+fields, plain integer text must survive conversion exactly; decimal/exponent
+input retains finite floating-point semantics. Source JSON integers outside the
+safe integer range and signed zero (`-0.0`) are explicitly refused with field
+attribution before they can be silently changed. Unsupported stored values remain
+on disk and cannot be updated or renamed through this application.
+Number-schema values received from the WebView are restored as floating-point
+values before validation, saving, and saved-profile comparison, including values
+such as `1.0`, `1e18`, and `1e100` whose JSON spelling may change in transit.
+
 Saved profiles are versioned and bind a stable ID/name, package ID, schema
 identity, and values. They are separate files under `profiles/`, not edits to the
 package's declared preset files. A relocated compatible package can reuse its
 profiles after validation. Incompatible schemas are reported separately from
 compatible profiles, and their files remain untouched. Malformed data or
-unsupported storage versions are refused without silent reset or migration.
-Create a new compatible profile deliberately; do not rewrite stored identity
-fields merely to bypass refusal.
+unsupported storage versions refuse profile operations without silent reset,
+quarantine, or migration. Diagnostics identify the affected profile/file. Preserve
+it before deliberate recovery; do not rewrite identity fields to bypass refusal.
 
 Writes validate first and use a same-directory temporary file plus atomic
 replacement. A failed save preserves the previous valid file. Storage is bounded
@@ -116,6 +135,10 @@ to **64 profiles**, **64 KiB per encoded profile**, and **1 MiB total profile
 bytes**. Settings are separately stored in `settings.json`. Portable profile
 values exclude executable/model paths, credentials, permission grants, and input
 authority; remembered local package paths belong only in application settings.
+
+Only `.json` and `.pending` entries belong to the profile store. Other entries,
+such as filesystem metadata, are ignored without being opened, but still count
+toward the directory-entry bound. An invalid owned file is not ignored.
 
 An interrupted save may leave a `.pending` file. The application preserves it
 instead of silently discarding evidence or overwriting it. Close the app and move
@@ -125,10 +148,11 @@ valid `.json` file intact.
 ## Start, Stop, and results
 
 **Start** submits the current explicit draft. Unmodified saved values retain the
-saved profile ID; edited values run as a draft until saved. Rust revalidates the
-package/profile and captures an immutable run, including dependency content and
-finite execution limits. A stale inspection is not a permission to execute changed
-source. Only one preparing/running/stopping reservation is admitted.
+saved profile ID; edited values run as a draft until saved. Rust checks that a
+submitted saved ID still names the stored values before admitting a run, then
+revalidates the package/profile and captures immutable inputs, including dependency
+content and finite execution limits. A stale inspection is not permission to
+execute changed source. Only one preparing/running/stopping reservation is admitted.
 
 Edits to a draft, a later profile save, or changes to package source after capture
 affect only the next run. **Stop** addresses the active run independently of
@@ -137,16 +161,27 @@ starting again. A late record from an earlier run must not replace a newer run's
 state.
 
 The UI keeps entry outcome, receipts, cancellation progress, and cleanup outcome
-separate. A Stop request is not proof of physical cleanup; a returned entry with
-forced/incomplete cleanup is not success. TypeScript failures retain original
-source attribution and host causes rather than becoming generic UI errors.
+separate. A Stop request is not proof of physical cleanup. Clean cleanup requires
+a child cleanup acknowledgement, a zero exit code, and no forced containment;
+script failure can still have clean cleanup. Missing evidence stays unverified,
+and a terminal preparation refusal is not displayed as still unsettled. TypeScript
+failures retain original source attribution and host causes.
+
+Run build metadata comes from the actual owned runtime child, not the desktop
+executable. If startup identity is unavailable, it remains unknown (`null`) rather
+than being substituted with supervisor metadata.
 
 The controlled plan bounds an invocation to **10 s**, cleanup to **1 s**, and
 containment to **2 s**. Controller shutdown waits at most **14 s** for its owned
-worker. Closing the window requests shutdown off the UI thread; unexpected app
-loss uses the runner's existing parent-loss contract. An expired deadline remains
-an unverified/incomplete-cleanup outcome, not a clean acknowledgement. File-log
-shutdown has its own bound below and never determines the run result.
+worker. Ordinary window closure requests shutdown off the UI thread. Native macOS
+Quit can bypass that request callback, so the final exit callback waits for the
+same bounded shutdown, without starting a second sequence. This fallback is
+source-verified against the pinned dependencies; the native Quit gesture has not
+been exercised. Unexpected app loss retains the runner's parent-loss contract.
+An expired deadline remains unverified/incomplete, not a clean acknowledgement.
+The log bridge polls every **50 ms** and is joined during shutdown; that interval
+is not a join timeout. File-log shutdown follows below and never determines the
+run result.
 
 ## Logs and retention
 
@@ -171,7 +206,9 @@ other, and neither is the authoritative result channel.
   An existing active file with an incomplete final JSONL line is also refused;
   preserve or move that file before retrying rather than appending to a damaged
   record.
-- **Shutdown:** the retained writer guard waits at most **500 ms**. Expired flush
+- **Shutdown:** the retained writer guard waits at most **500 ms**. Pending,
+  failed, or incomplete file delivery is also reported through an independent,
+  sanitized stderr diagnostic with its own **50 ms** wait bound. Expired flush
   and abrupt exit do not guarantee persistence.
 
 Keep app data, execution diagnostics, and any private fixture copies out of

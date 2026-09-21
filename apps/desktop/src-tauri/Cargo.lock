@@ -1973,7 +1973,6 @@ dependencies = [
  "mado-runtime-comparison",
  "serde",
  "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-wdio-webdriver",

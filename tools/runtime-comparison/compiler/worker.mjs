@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { parentPort, workerData } from "node:worker_threads";
+import { createContext, SourceTextModule } from "node:vm";
 import ts from "./node_modules/typescript/lib/typescript.js";
 import { definitions, methods } from "./sdk.mjs";
 
@@ -66,7 +67,7 @@ function inspectJavaScript(request) {
     // apply TypeScript directives, configuration, type checking, or emit to JS.
     const file = ts.createSourceFile(ROOT + id, source, ts.ScriptTarget.ESNext, false, ts.ScriptKind.JS);
     const visit = node => {
-      if (id.endsWith(".js") && (ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
+      if ((id.endsWith(".js") || request.include_declaration_modules) && (ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
         && node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) {
         imports.push({ from: id, specifier: node.moduleSpecifier.text, kind: "module", ...origin(file, node.moduleSpecifier.getStart(file)) });
       }
@@ -77,6 +78,62 @@ function inspectJavaScript(request) {
     visit(file);
   }
   return { imports, identity: compilerIdentity };
+}
+
+function checkCompilerIdentity(request) {
+  if (!request.compiler_identity || Object.keys(request.compiler_identity).length !== Object.keys(compilerIdentity).length
+      || Object.entries(compilerIdentity).some(([key, value]) => request.compiler_identity[key] !== value)) {
+    fail("CompilerIdentity", "Compiler changed between inspection and compilation");
+  }
+}
+
+async function linkJavaScript(request) {
+  checkCompilerIdentity(request);
+  // QuickJS COMPILE_ONLY resolves paths but its public API cannot link without
+  // evaluation. Use the engine's ECMAScript linker, not a second binding parser.
+  // No evaluate(), namespace access, dynamic-import hook, or ambient loader.
+  const context = createContext(Object.create(null));
+  const modules = new Map();
+  const declare = id => {
+    if (modules.has(id)) return modules.get(id);
+    if (!Object.hasOwn(request.sources, id)) fail("ImportRefused", "Module is absent from captured sources", { module: id });
+    try {
+      const module = new SourceTextModule(request.sources[id], { identifier: id, context });
+      modules.set(id, module);
+      return module;
+    } catch (error) {
+      error.category = "Syntax";
+      error.context = { module: id, stage: "syntax" };
+      throw error;
+    }
+  };
+  // The inventory resolver supplies only executable roots and their reachable
+  // dependencies, including literal import() targets. Unused declarations stay inert.
+  for (const id of Object.keys(request.resolutions)) declare(id);
+  const linker = (specifier, referring, { attributes }) => {
+    const module = referring.identifier;
+    if (Object.keys(attributes).length) fail("ImportRefused", "Import attributes are not supported", { module, specifier });
+    const destination = request.resolutions?.[module]?.[specifier];
+    if (typeof destination !== "string" || !Object.hasOwn(request.sources, destination)) {
+      fail("ImportRefused", "Source dependency is absent from the authorized resolution table", { module, specifier });
+    }
+    return declare(destination);
+  };
+  for (const [id, module] of modules) {
+    if (module.status !== "unlinked") continue;
+    try {
+      // link() checks bindings (including re-exports and cycles) but never runs
+      // package code. The independent worker watchdog still bounds this phase.
+      await module.link(linker);
+    } catch (error) {
+      error.category ??= "ImportRefused";
+      // Node may provide no import-site coordinates for a link failure. Retain
+      // its message/stack and label the graph root, not an invented fault origin.
+      error.context = { root_module: id, stage: "linking", ...error.context };
+      throw error;
+    }
+  }
+  return { identity: compilerIdentity };
 }
 
 function inspect(request) {
@@ -208,10 +265,7 @@ function diagnostics(program, functions = {}) {
 
 function compile(request) {
   const inspected = inspect(request);
-  if (!request.compiler_identity || Object.keys(request.compiler_identity).length !== Object.keys(compilerIdentity).length
-      || Object.entries(compilerIdentity).some(([key, value]) => request.compiler_identity[key] !== value)) {
-    fail("CompilerIdentity", "Compiler changed between inspection and compilation");
-  }
+  checkCompilerIdentity(request);
   for (const imported of inspected.imports) {
     if (!request.resolutions?.[imported.from]?.[imported.specifier]) fail("ImportRefused", "Source dependency is absent from the authorized resolution table", imported);
   }
@@ -326,6 +380,7 @@ try {
     const request = JSON.parse(workerData.input);
     value = request.operation === "inspect" ? inspect(request)
       : request.operation === "inspect-javascript" ? inspectJavaScript(request)
+      : request.operation === "link-javascript" ? await linkJavaScript(request)
       : request.operation === "compile" ? compile(request)
       : fail("CompilerPolicy", "Unknown compiler operation");
   }

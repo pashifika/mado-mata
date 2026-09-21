@@ -49,7 +49,14 @@ pub struct Observer {
 impl Observer {
     fn progress(&self, value: &Value) {
         let mut progress = serde_json::Map::new();
-        for key in ["event", "run", "attempt", "at_us", "reason", "supervisor_received_us"] {
+        for key in [
+            "event",
+            "run",
+            "attempt",
+            "at_us",
+            "reason",
+            "supervisor_received_us",
+        ] {
             if let Some(field) = value.get(key) {
                 progress.insert(key.into(), field.clone());
             }
@@ -66,7 +73,10 @@ impl Observer {
 
 pub(crate) fn emit_script_log(at_us: u64, message: &str) {
     if let Some(stream) = SCRIPT_LOGS.get() {
-        let mut retained = stream.retained.lock().unwrap_or_else(|error| error.into_inner());
+        let mut retained = stream
+            .retained
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if retained.records.len() >= stream.record_limit
             || message.len() > stream.byte_limit.saturating_sub(retained.bytes)
         {
@@ -86,7 +96,10 @@ pub(crate) fn emit_script_log(at_us: u64, message: &str) {
 
 fn retain_script_logs(observations: &mut Value) {
     if let Some(stream) = SCRIPT_LOGS.get() {
-        let retained = stream.retained.lock().unwrap_or_else(|error| error.into_inner());
+        let retained = stream
+            .retained
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         observations["script_logs"] = json!(retained.records);
         observations["script_logs_dropped"] = json!(retained.dropped);
     }
@@ -141,6 +154,7 @@ pub struct RunRecord {
     pub milestones: Vec<Value>,
     pub exit_code: Option<i32>,
     pub forced: bool,
+    /// The owned child's build identity, or null when startup evidence is unavailable.
     pub build: Value,
 }
 
@@ -325,8 +339,55 @@ pub fn child() -> Result<bool, Fault> {
     let finished = Arc::new(AtomicBool::new(false));
     let run = invocation.run.clone();
     let attempt = invocation.attempt;
+
+    // These threads never acquire a VM, host, native-work, or ordinary-log lock.
+    // Start control before identity collection: hashing or hardware discovery
+    // must not delay Stop admission closure or the cleanup watchdog.
+    let watch_control = control.clone();
+    let watch_finished = finished.clone();
+    let cleanup_ms = invocation.plan.limits.cleanup_ms;
+    thread::spawn(move || {
+        loop {
+            if watch_finished.load(Ordering::Acquire) {
+                return;
+            }
+            let _ = watch_control.check();
+            let stop = watch_control.stop_us.load(Ordering::Acquire);
+            if stop != 0 && watch_control.elapsed_us().saturating_sub(stop) > cleanup_ms * 1000 {
+                // The observer records the exit; this is never a clean acknowledgement.
+                std::process::exit(124);
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    });
+    let input_run = run.clone();
+    let input_control = control.clone();
+    thread::spawn(move || {
+        let reason = match frame(&mut input, 1024) {
+            Ok(Some(bytes)) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(value)
+                    if value == json!({"command":"Stop","run":input_run,"attempt":attempt}) =>
+                {
+                    "Stop"
+                }
+                _ => "InvalidControl",
+            },
+            Ok(None) => "ControlLost",
+            Err(_) => "InvalidControl",
+        };
+        input_control.cancel();
+        let _ = emit(
+            &json!({"event":"StopRequested","run":input_run,"attempt":attempt,"reason":reason,
+            "at_us":input_control.stop_us.load(Ordering::Acquire)}),
+        );
+        let _ = emit(
+            &json!({"event":"AdmissionClosed","run":input_run,"attempt":attempt,
+            "at_us":input_control.closed_us.load(Ordering::Acquire)}),
+        );
+    });
     emit(
-        &json!({"event":"ChildStarted","run":run,"attempt":attempt,"pid":std::process::id(),"at_us":control.elapsed_us()}),
+        &json!({"event":"ChildStarted","run":run,"attempt":attempt,"pid":std::process::id(),
+            "build":crate::report::build_identity(),"at_us":control.elapsed_us()}),
     )?;
     if invocation.observe_logs {
         let (sender, receiver) = mpsc::sync_channel::<Value>(invocation.plan.limits.log_records);
@@ -356,47 +417,6 @@ pub fn child() -> Result<bool, Fault> {
             }
         });
     }
-
-    // These threads never acquire a VM, host, native-work, or ordinary-log lock.
-    let watch_control = control.clone();
-    let watch_finished = finished.clone();
-    let cleanup_ms = invocation.plan.limits.cleanup_ms;
-    thread::spawn(move || {
-        loop {
-            if watch_finished.load(Ordering::Acquire) {
-                return;
-            }
-            let _ = watch_control.check();
-            let stop = watch_control.stop_us.load(Ordering::Acquire);
-            if stop != 0 && watch_control.elapsed_us().saturating_sub(stop) > cleanup_ms * 1000 {
-                // The observer records the exit; this is never a clean acknowledgement.
-                std::process::exit(124);
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
-    });
-    let input_control = control.clone();
-    thread::spawn(move || {
-        let reason = match frame(&mut input, 1024) {
-            Ok(Some(bytes)) => match serde_json::from_slice::<Value>(&bytes) {
-                Ok(value) if value == json!({"command":"Stop","run":run,"attempt":attempt}) => {
-                    "Stop"
-                }
-                _ => "InvalidControl",
-            },
-            Ok(None) => "ControlLost",
-            Err(_) => "InvalidControl",
-        };
-        input_control.cancel();
-        let _ = emit(
-            &json!({"event":"StopRequested","run":run,"attempt":attempt,"reason":reason,
-            "at_us":input_control.stop_us.load(Ordering::Acquire)}),
-        );
-        let _ = emit(
-            &json!({"event":"AdmissionClosed","run":run,"attempt":attempt,
-            "at_us":input_control.closed_us.load(Ordering::Acquire)}),
-        );
-    });
 
     let preflight_start = Instant::now();
     let selected = invocation
@@ -566,7 +586,14 @@ pub fn run_once_with_executable(
     observer: &Observer,
 ) -> Result<RunRecord, Fault> {
     supervise(
-        plan, inventory, None, false, Some(operator_stop), None, executable, Some(observer),
+        plan,
+        inventory,
+        None,
+        false,
+        Some(operator_stop),
+        None,
+        executable,
+        Some(observer),
     )
 }
 
@@ -617,7 +644,10 @@ fn supervise(
     let mut bytes = encode_bounded(&invocation, MAX_TRANSPORT_BYTES - 1)?;
     bytes.push(b'\n');
     if observer.is_some() && operator_stop.as_mut().is_some_and(|poll| poll()) {
-        return Err(Fault::new("Cancelled", "Stop requested before child startup"));
+        return Err(Fault::new(
+            "Cancelled",
+            "Stop requested before child startup",
+        ));
     }
     let started = Instant::now();
     let mut child = OwnedChild(
@@ -663,7 +693,11 @@ fn supervise(
     let (sender, receiver) = mpsc::sync_channel(17);
     let log_observer = observer.cloned();
     let event_run = run.clone();
-    let log_limit = if observer.is_some() { plan.limits.log_records } else { 0 };
+    let log_limit = if observer.is_some() {
+        plan.limits.log_records
+    } else {
+        0
+    };
     let reader = thread::spawn(move || {
         let mut input = BufReader::new(stdout);
         let mut control_records = 0;
@@ -724,6 +758,7 @@ fn supervise(
     let mut forced = false;
     let mut stop_sent_at = None;
     let mut startup_us = None;
+    let mut child_build = None;
     let mut system = System::new();
     let child_pid = Pid::from_u32(child.0.id());
     let mut milestone_received_at = None;
@@ -736,6 +771,15 @@ fn supervise(
         while let Ok(message) = receiver.try_recv() {
             match message {
                 Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
+                    if value["event"] == "ChildStarted" {
+                        if let Err(error) =
+                            retain_child_build(&value, child.0.id(), &mut child_build)
+                        {
+                            protocol_fault = Some(error);
+                            continue;
+                        }
+                        startup_us = Some(started.elapsed().as_micros());
+                    }
                     value["supervisor_received_us"] = json!(started.elapsed().as_micros());
                     if let Some(observer) = observer {
                         observer.progress(&value);
@@ -747,9 +791,6 @@ fn supervise(
                     } else {
                         if stop_milestone.is_some_and(|(event, _)| value["event"] == event) {
                             milestone_received_at.get_or_insert_with(Instant::now);
-                        }
-                        if value["event"] == "ChildStarted" {
-                            startup_us = Some(started.elapsed().as_micros());
                         }
                         milestones.push(value);
                     }
@@ -830,12 +871,16 @@ fn supervise(
     while let Ok(message) = receiver.try_recv() {
         match message {
             Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
+                if value["event"] == "ChildStarted" {
+                    if let Err(error) = retain_child_build(&value, child.0.id(), &mut child_build) {
+                        protocol_fault = Some(error);
+                        continue;
+                    }
+                    startup_us = Some(started.elapsed().as_micros());
+                }
                 value["supervisor_received_us"] = json!(started.elapsed().as_micros());
                 if let Some(observer) = observer {
                     observer.progress(&value);
-                }
-                if value["event"] == "ChildStarted" {
-                    startup_us = Some(started.elapsed().as_micros());
                 }
                 if value["event"] == "Terminal" {
                     if terminal.replace(value).is_some() {
@@ -855,6 +900,11 @@ fn supervise(
     {
         protocol_fault.get_or_insert_with(|| {
             Fault::new("Fixture", "required execution milestone was not observed")
+        });
+    }
+    if child_build.is_none() && terminal.is_some() {
+        protocol_fault.get_or_insert_with(|| {
+            Fault::new("Transport", "terminal evidence lacks child build identity")
         });
     }
     let terminal = settled_evidence(terminal, &milestones);
@@ -957,8 +1007,28 @@ fn supervise(
         milestones,
         exit_code: exit.code(),
         forced: forced || exit.code() == Some(124),
-        build: crate::report::build_identity(),
+        build: child_build.unwrap_or(Value::Null),
     })
+}
+
+// Call only after run/attempt correlation. Metadata is evidence, never a source
+// of executable paths or authority; the PID comes from the supervisor's child.
+fn retain_child_build(started: &Value, pid: u32, build: &mut Option<Value>) -> Result<(), Fault> {
+    if build.is_some() {
+        return Err(Fault::new("Transport", "duplicate child startup identity"));
+    }
+    if started["pid"].as_u64() != Some(u64::from(pid)) {
+        return Err(Fault::new(
+            "StaleIdentity",
+            "foreign child startup identity",
+        ));
+    }
+    let identity = started
+        .get("build")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| Fault::new("Transport", "missing child build identity"))?;
+    *build = Some(identity.clone());
+    Ok(())
 }
 
 fn settled_evidence(terminal: Option<Value>, milestones: &[Value]) -> Value {
@@ -1338,7 +1408,11 @@ mod tests {
     fn saturated_observer_logs_do_not_consume_terminal_delivery() {
         let (progress, events) = mpsc::sync_channel(1);
         let (logs, messages) = mpsc::sync_channel(1);
-        let observer = Observer { progress, logs, dropped_logs: Arc::new(AtomicU64::new(0)) };
+        let observer = Observer {
+            progress,
+            logs,
+            dropped_logs: Arc::new(AtomicU64::new(0)),
+        };
         observer.log(json!({"message":"retained"}));
         observer.log(json!({"message":"overflow"}));
         observer.progress(&json!({"event":"Terminal","run":"owned","attempt":1}));

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -257,9 +257,27 @@ fn transport(
 /// Inspect JavaScript with the pinned parser without type checking or emitting.
 /// The worker shares the attempt's remaining deadline and cancellation latch.
 pub(crate) fn validate_javascript_imports(
-    inventory: &Inventory,
+    inventory: &Arc<Inventory>,
     limits: &Limits,
-    control: &Control,
+    control: &Arc<Control>,
+) -> Result<Value, Fault> {
+    inspect_javascript(inventory, limits, control, false)
+}
+
+/// Check target syntax and link the requested executable graph without evaluation.
+pub(crate) fn validate_javascript_modules(
+    inventory: &Arc<Inventory>,
+    limits: &Limits,
+    control: &Arc<Control>,
+) -> Result<Value, Fault> {
+    inspect_javascript(inventory, limits, control, true)
+}
+
+fn inspect_javascript(
+    inventory: &Arc<Inventory>,
+    limits: &Limits,
+    control: &Arc<Control>,
+    link: bool,
 ) -> Result<Value, Fault> {
     control.check()?;
     let remaining_us = limits
@@ -272,14 +290,17 @@ pub(crate) fn validate_javascript_imports(
         .saturating_mul(8)
         .saturating_add(1024 * 1024)
         .min(MAX_COMPILER_BYTES);
-    // Declaration-suffixed sources can also be requested by the runtime loader;
-    // inspect them without treating their type-only syntax as executable imports.
-    let request = json!({"operation": "inspect-javascript", "sources": inventory.sources});
+    // Capture candidate declaration edges only for desktop linking. The runtime
+    // import-path preflight retains its existing handling of declaration sources.
+    let mut request = json!({
+        "operation": "inspect-javascript", "sources": inventory.sources,
+        "include_declaration_modules": link,
+    });
     let inspection: Inspection =
         serde_json::from_value(transport(&request, limit, deadline, Some(control))?)
             .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
     control.check()?;
-    for import in inspection.imports {
+    let resolve = |import: &Import| {
         control.check()?;
         inventory
             .resolve(&import.from, &import.specifier)
@@ -290,7 +311,59 @@ pub(crate) fn validate_javascript_imports(
                 fault.context["kind"] = json!(import.kind);
                 fault.context["parser"] = inspection.identity.clone();
                 fault
-            })?;
+            })
+    };
+    if link {
+        let mut imports: BTreeMap<&str, Vec<&Import>> = BTreeMap::new();
+        for import in &inspection.imports {
+            imports.entry(&import.from).or_default().push(import);
+        }
+        let mut pending: Vec<String> = inventory
+            .sources
+            .keys()
+            .filter(|id| id.ends_with(".js"))
+            .cloned()
+            .collect();
+        let mut resolutions: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        while let Some(module) = pending.pop() {
+            control.check()?;
+            if resolutions.contains_key(&module) {
+                continue;
+            }
+            let mut edges = BTreeMap::new();
+            if let Some(imports) = imports.get(module.as_str()) {
+                for import in imports {
+                    let destination = resolve(import)?;
+                    pending.push(destination.clone());
+                    edges.insert(import.specifier.clone(), destination);
+                }
+            }
+            // Empty rows also mark visited leaves. Each captured module is
+            // expanded once, so re-exports and cycles cannot grow the traversal.
+            resolutions.insert(module, edges);
+        }
+        // QuickJS remains the syntax authority, including declaration-suffixed
+        // modules requested through literal import(). Neither engine evaluates.
+        crate::javascript::validate_syntax(
+            inventory.clone(),
+            limits,
+            control.clone(),
+            resolutions.keys().map(String::as_str),
+        )?;
+        request["operation"] = json!("link-javascript");
+        request["resolutions"] = serde_json::to_value(resolutions)
+            .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
+        request["compiler_identity"] = inspection.identity.clone();
+        transport(&request, limit, deadline, Some(control)).map_err(|mut fault| {
+            fault.context["inventory"] = json!(inventory.identity);
+            fault.context["catalog"] = inventory.metadata["catalog"].clone();
+            fault
+        })?;
+        control.check()?;
+    } else {
+        for import in &inspection.imports {
+            resolve(import)?;
+        }
     }
     Ok(json!({
         "identity": inspection.identity,

@@ -596,7 +596,10 @@ impl Write for BoundedWriter {
 impl Capture<'_> {
     fn check(&self) -> Result<(), Fault> {
         if self.stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
-            return Err(Fault::new("Cancelled", "Stop requested during inventory capture"));
+            return Err(Fault::new(
+                "Cancelled",
+                "Stop requested during inventory capture",
+            ));
         }
         if Instant::now() >= self.deadline {
             return Err(Fault::new("Timeout", "inventory capture deadline exceeded"));

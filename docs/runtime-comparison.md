@@ -208,9 +208,10 @@ an external Stop, containment uses the supervisor's entry-settlement receipt
 through observed exit. Cleanup completion and forced exit remain distinct.
 
 Controlled Stop checks start their delay only after reaching the operation under
-test: `VmHookReached` for CPU-only VM work, or `HostWaitEntered` for the first
-host delay/query wait. Parser startup time is not evidence that either operation
-has started. These bounded notifications do not block the VM or host on stdout;
+test: `VmHookReached` for CPU-only VM work, `HostWaitEntered` for the first host
+delay/query wait, or `WorkHeld` for retained work ownership. Parser startup
+and build-identity collection are not evidence that the operation has started.
+These bounded notifications do not block the VM or host on stdout;
 the checks still require cancellation, rejected continuation input, and cleanup.
 
 Nearest-rank p50 requires 2 samples, p95 requires 20, and p99
@@ -235,8 +236,11 @@ SHA-256 values bind the suite's complete configuration and corpus manifests,
 including its declared profile/scenario/package variations. Individual plan
 hashes may differ inside that suite; unrelated source builds or configurations
 cannot supply each other's missing checks.
-The build identity includes CPU brand/count, physical memory, and the executed
-binary's SHA-256 without publishing a hostname, serial number, or executable path.
+The actual runtime child's startup record supplies its complete build identity,
+including CPU brand/count, physical memory, and executed binary SHA-256, without
+publishing a hostname, serial number, or executable path. The supervisor checks
+the owned PID and run correlation. Missing child identity stays `null`, not the
+supervisor's identity; it cannot establish qualified coverage.
 Suite identity also binds observed parser/compiler and emitted-inventory
 identities, not only declared version strings.
 

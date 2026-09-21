@@ -863,7 +863,7 @@ pub fn run() -> Result<Value, Fault> {
         );
     }
     let held_plan = plan("rust", "held-work", "template-first");
-    let held = run_once(&held_plan, &inventories["rust"], Some(100), false, None)?;
+    let held = run_once_after_milestone(&held_plan, &inventories["rust"], "WorkHeld", 100, false)?;
     let held_passed = held.forced
         && held.cleanup["clean"] != true
         && held.milestones.iter().any(|row| row["event"] == "WorkHeld");
