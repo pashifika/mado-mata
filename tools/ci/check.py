@@ -12,7 +12,7 @@ import tempfile
 
 from tooling import ROOT, host_platform, installed_tool, load_manifest
 
-RUST_VERSION = "1.97.1"
+RUST_VERSION = "1.98.1"
 NODE_VERSION = "24.18.0"
 RUNTIME_ROOT = Path("tools/runtime-comparison")
 RUNTIME_RESULTS = Path(".cache/repository-ci/runtime-results")

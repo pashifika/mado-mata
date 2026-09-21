@@ -5,7 +5,7 @@
 Use Git, Python 3.11 or newer, Rustup, Node.js **24.18.0** with its bundled npm,
 and a native C/C++ build toolchain. Install Node from its
 [official release](https://nodejs.org/dist/v24.18.0/) and verify the release's
-signed checksums. Rustup installs Rust **1.97.1** with the command below.
+signed checksums. Rustup installs Rust **1.98.1** with the command below.
 Linux needs a C compiler and linker; macOS needs Xcode Command Line Tools;
 Windows needs the Visual Studio C++ build tools and Windows SDK for Rust's
 MSVC target. The controlled build vendors Lua and does not require OCR models,
@@ -28,7 +28,7 @@ python3 -m venv .cache/repository-ci/venv
 . .cache/repository-ci/venv/bin/activate
 python3 -m pip install --require-hashes -r tools/ci/requirements.txt
 python3 tools/ci/install_tools.py
-rustup toolchain install 1.97.1 --profile minimal
+rustup toolchain install 1.98.1 --profile minimal
 python3 tools/ci/check.py
 ```
 
@@ -53,7 +53,7 @@ The version and integrity sources are:
 | actionlint | 1.7.12 | [toolchain.json](../tools/ci/toolchain.json), including host assets and SHA-256 values |
 | lychee | 0.24.2 | [toolchain.json](../tools/ci/toolchain.json), including host assets and SHA-256 values |
 | PyYAML | 6.0.3 | [requirements.txt](../tools/ci/requirements.txt), hash-pinned Python distributions |
-| Rust | 1.97.1 | [check.py](../tools/ci/check.py), explicit `cargo +1.97.1` |
+| Rust | 1.98.1 | [check.py](../tools/ci/check.py), explicit `cargo +1.98.1` |
 | Node.js | 24.18.0 | [check.py](../tools/ci/check.py) and [workflow](../.github/workflows/ci.yml) |
 | TypeScript | 5.9.3 | [Compiler manifest](../tools/runtime-comparison/compiler/package.json) and [lockfile](../tools/runtime-comparison/compiler/package-lock.json) |
 | GitHub Actions | Full commit SHAs | [Workflow](../.github/workflows/ci.yml) and [toolchain.json](../tools/ci/toolchain.json) |
@@ -170,9 +170,9 @@ the same commands the local check uses:
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund --prefix tools/runtime-comparison/compiler
 node tools/runtime-comparison/compiler/compile.mjs --self-check
-cargo +1.97.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml
-cargo +1.97.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- check
+cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml
+cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- check
 ```
 
 `check` emits JSON evidence for the exercised controlled cases. The explicit
@@ -180,8 +180,8 @@ toolchain selector avoids dependence on the user's Rust default. To execute a
 specific plan or summarize saved results, the CLI also accepts:
 
 ```sh
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- run <plan.json> <package-root>
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- report <results.json>
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- run <plan.json> <package-root>
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- report <results.json>
 ```
 
 Replace the angle-bracket arguments with actual paths; they are not shell
