@@ -21,6 +21,8 @@ const METRICS: [&str; 13] = [
     "live_owners",
 ];
 
+/// Identity of this process, not of an executable it may supervise. Supervised
+/// runs retain this value from the child's run-correlated startup record.
 pub fn build_identity() -> Value {
     static IDENTITY: LazyLock<Value> = LazyLock::new(|| {
         // Enumerate non-sensitive hardware once, without process lists,
@@ -503,7 +505,7 @@ pub fn summarize(data: &Value) -> Result<Value, Fault> {
                 "qualification.version = 1","qualification.configuration_sha256","qualification.corpus_sha256"],
             "identity":"exact build and immutable suite configuration/corpus digests; profile/scenario plans may differ within that suite",
             "hardware":"CPU brands, logical CPU count and total physical memory; no hostnames, serial numbers or private paths",
-            "artifact":"SHA-256 of the actual executable; cached bounded streaming read, unavailable on read/hash failure",
+            "artifact":"SHA-256 of the executing process; child-reported for supervised runs, unavailable without startup identity or on read/hash failure",
             "configuration":"SHA-256 of the complete check-to-configuration manifest, including prospective limits/budgets and applicable native engine/target configuration",
             "corpus":"SHA-256 of the complete immutable corpus manifest, including package variants/assets, observed effective compiler/parser and emitted-inventory identities, and applicable recorded frames/models",
             "trust":"producer-attested content identities, not authentication of imported evidence; absent/unknown metadata cannot contribute to PASS"},

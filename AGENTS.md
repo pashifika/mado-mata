@@ -2,17 +2,19 @@
 
 ## Current scope
 
-MadoMata is pre-application: this checkout contains repository governance and the
-standalone M0 runtime comparison, not a desktop application. The controlled
-comparison is executable; native qualification and runtime adoption remain
-blocked on explicit prerequisites. Follow [the comparison guide](docs/runtime-comparison.md)
-for real Cargo commands. Do not invent frontend or game-launch commands, or add
-application scaffolding to make CI appear complete.
+MadoMata contains a controlled macOS desktop application and the standalone M0
+runtime comparison. The desktop uses the existing supervised QuickJS/TypeScript
+runner with a non-native input sink. Follow [the desktop guide](docs/desktop.md)
+for real checkout build/run commands and [the comparison guide](docs/runtime-comparison.md)
+for the independent CLI. Native qualification, R6, runtime adoption, release
+packaging, and additional-OS desktop support remain unresolved. Do not invent
+game-launch commands or treat controlled results as native acceptance.
 
 ## Setup and verification
 
 Run commands from the product repository root. Follow the pinned installation
-procedure in [docs/ci.md](docs/ci.md) before running the full check:
+procedure in [docs/ci.md](docs/ci.md) before running the full check, which includes
+the desktop frontend/core and the macOS shell build on macOS:
 
 ```sh
 python3 tools/ci/check.py
@@ -28,6 +30,9 @@ The policy-only result is not a substitute for the full check. Public checks
 must work without private planning, sibling checkouts, or personal skill paths.
 Report the command, outcome, and unexecuted scope; never convert a missing
 prerequisite or skipped native scenario into a pass.
+Actual GUI acceptance is a separate local macOS procedure in the desktop guide;
+hosted builds do not verify WebView interaction or satisfy missing native/replay
+prerequisites.
 
 ## Change discipline
 
@@ -67,6 +72,7 @@ prerequisite or skipped native scenario into a pass.
 
 - [Contributor workflow](CONTRIBUTING.md): branches, PRs, verification, retirement.
 - [CI](docs/ci.md): installation, check scope, stable gate, native limitations.
+- [Desktop](docs/desktop.md): pinned checkout build/run, profiles, logs, local GUI acceptance.
 - [Repository governance](docs/repository-governance.md): intended settings,
   explicit administrative installation, readback, and recovery.
 - [Development guidance](docs/development-guidance.md): instruction ownership,

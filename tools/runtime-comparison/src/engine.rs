@@ -173,6 +173,42 @@ mod enabled {
         route: String,
         focus: String,
         representative_actions: Vec<Action>,
+        #[serde(default)]
+        macos_process_pointer_mode: MacosProcessPointerMode,
+        #[serde(default)]
+        click_hold_ms: u64,
+    }
+
+    #[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    enum MacosProcessPointerMode {
+        #[default]
+        CoreGraphics,
+        #[serde(rename = "appkit_background")]
+        AppKitBackground,
+    }
+
+    impl InputAuthority {
+        fn validate_pointer_options(&self, operating_system: &str) -> Result<(), Fault> {
+            if self.click_hold_ms > 1_000 {
+                return Err(blocked(
+                    "input_authority",
+                    "click_hold_ms must be between 0 and 1000",
+                ));
+            }
+            if self.macos_process_pointer_mode == MacosProcessPointerMode::AppKitBackground
+                && (!cfg!(target_os = "macos")
+                    || operating_system != "macos"
+                    || self.route != "process_directed"
+                    || self.focus != "preserve")
+            {
+                return Err(blocked(
+                    "input_route_unsupported",
+                    "appkit_background requires macOS process_directed input with preserve focus",
+                ));
+            }
+            Ok(())
+        }
     }
 
     struct Resources {
@@ -1163,6 +1199,15 @@ mod enabled {
                 .map_or(self.limits.max_actions, |native| native.input.max_actions)
         }
 
+        pub(crate) fn action_event_count(&self, action: &Action) -> usize {
+            native_action_event_count(
+                action,
+                self.native
+                    .as_ref()
+                    .map_or(0, |native| native.input.click_hold_ms),
+            )
+        }
+
         pub fn cleanup_limit_ms(&self) -> u64 {
             self.native
                 .as_ref()
@@ -1200,6 +1245,7 @@ mod enabled {
                 &request.actions,
                 Some(observation.frame.descriptor().extent()),
                 native.input.max_actions,
+                native.input.click_hold_ms,
             )?;
             if sequence.len() > native.input.max_actions.saturating_sub(state.input_events) {
                 return Err(Fault::new(
@@ -1276,7 +1322,11 @@ mod enabled {
                 .map_err(|error| engine_error("native_input", error))?;
             // A receipt survives cancellation: replacing it would erase possible native effect.
             state.input_cleanup_incomplete |= receipt.cleanup().may_leave_state_held();
-            Ok(native_receipt(&receipt, &request.actions))
+            Ok(native_receipt(
+                &receipt,
+                &request.actions,
+                native.input.click_hold_ms,
+            ))
         }
 
         pub fn snapshot(&self) -> Value {
@@ -1487,6 +1537,15 @@ mod enabled {
                 .map_err(|error| prerequisite_error("capture_pacing", error))?,
         );
         #[cfg(target_os = "macos")]
+        let request = request.with_macos_config(mp::MacosConfig::new().with_process_pointer_mode(
+            match native.input.macos_process_pointer_mode {
+                MacosProcessPointerMode::CoreGraphics => mp::MacosProcessPointerMode::CoreGraphics,
+                MacosProcessPointerMode::AppKitBackground => {
+                    mp::MacosProcessPointerMode::AppKitBackground
+                }
+            },
+        ));
+        #[cfg(target_os = "macos")]
         let result = mp::macos_engine_with_ocr_provider(request, ocr, operation);
         #[cfg(windows)]
         let result = mp::windows_engine_with_ocr_provider(request, ocr, operation);
@@ -1602,14 +1661,20 @@ mod enabled {
         Ok(key)
     }
 
+    fn native_action_event_count(action: &Action, click_hold_ms: u64) -> usize {
+        action.event_count()
+            + usize::from(click_hold_ms != 0 && matches!(action, Action::Click { .. }))
+    }
+
     fn native_sequence(
         actions: &[Action],
         extent: Option<mp::PixelExtent>,
         maximum: usize,
+        click_hold_ms: u64,
     ) -> Result<mp::InputSequence, Fault> {
         let count = actions.iter().try_fold(0usize, |total, action| {
             total
-                .checked_add(action.event_count())
+                .checked_add(native_action_event_count(action, click_hold_ms))
                 .ok_or_else(|| argument("expanded input event count overflow"))
         })?;
         if count == 0 || count > maximum || count > mp::SequenceLimits::MAX_EVENTS {
@@ -1666,8 +1731,11 @@ mod enabled {
                     events.extend([
                         mp::InputEvent::PointerMove(point),
                         mp::InputEvent::PointerPress(button),
-                        mp::InputEvent::PointerRelease(button),
                     ]);
+                    if click_hold_ms != 0 {
+                        events.push(mp::InputEvent::Delay(Duration::from_millis(click_hold_ms)));
+                    }
+                    events.push(mp::InputEvent::PointerRelease(button));
                 }
             }
         }
@@ -1727,13 +1795,13 @@ mod enabled {
                 vec![down.clone(), Action::KeyUp { key: "B".into() }],
             ] {
                 assert_eq!(
-                    native_sequence(&actions, extent, 16)
+                    native_sequence(&actions, extent, 16, 0)
                         .expect_err("no sequence may leave or release foreign pressed state")
                         .category,
                     "Argument"
                 );
             }
-            let balanced = native_sequence(&[down, up], extent, 2).expect("balanced sequence");
+            let balanced = native_sequence(&[down, up], extent, 2, 0).expect("balanced sequence");
             assert!(balanced.held_after(balanced.len()).is_empty());
             assert_eq!(
                 balanced.possibly_held_after(1, false),
@@ -1750,12 +1818,12 @@ mod enabled {
                 button: PointerButton::Middle,
             };
             assert_eq!(
-                native_sequence(std::slice::from_ref(&click), extent, 2)
+                native_sequence(std::slice::from_ref(&click), extent, 2, 0)
                     .expect_err("a click cannot fit in two native events")
                     .category,
                 "ActionLimit"
             );
-            let sequence = native_sequence(&[click], extent, 3).expect("three events fit");
+            let sequence = native_sequence(&[click], extent, 3, 0).expect("three events fit");
             assert_eq!(sequence.len(), 3);
             assert_eq!(
                 sequence.held_after(2),
@@ -1771,7 +1839,8 @@ mod enabled {
                             button: PointerButton::Left
                         }],
                         extent,
-                        3
+                        3,
+                        0
                     )
                     .expect_err("non-finite or out-of-frame point refused")
                     .category,
@@ -1787,11 +1856,215 @@ mod enabled {
                 86
             ];
             assert_eq!(
-                native_sequence(&oversized, extent, 4096)
+                native_sequence(&oversized, extent, 4096, 0)
                     .expect_err("SDK event ceiling also applies")
                     .category,
                 "ActionLimit"
             );
+        }
+
+        #[test]
+        fn held_clicks_count_the_delay_and_keep_release_after_it() {
+            let click = Action::Click {
+                x: 1.0,
+                y: 2.0,
+                button: PointerButton::Left,
+            };
+            let extent = Some(mp::PixelExtent::new(20, 10));
+            assert_eq!(
+                native_sequence(std::slice::from_ref(&click), extent, 3, 50)
+                    .expect_err("a held click requires four events")
+                    .category,
+                "ActionLimit"
+            );
+            let sequence = native_sequence(std::slice::from_ref(&click), extent, 4, 50)
+                .expect("four-event authority");
+            assert_eq!(
+                sequence.events(),
+                &[
+                    mp::InputEvent::PointerMove(
+                        mp::Point::new(mp::CoordinateSpace::CapturePixels, 1.0, 2.0)
+                            .expect("point"),
+                    ),
+                    mp::InputEvent::PointerPress(mp::PointerButton::Primary),
+                    mp::InputEvent::Delay(Duration::from_millis(50)),
+                    mp::InputEvent::PointerRelease(mp::PointerButton::Primary),
+                ]
+            );
+            assert_eq!(
+                sequence.held_after(3),
+                vec![mp::PressedState::Button(mp::PointerButton::Primary)]
+            );
+            assert!(sequence.held_after(4).is_empty());
+            let full = vec![click.clone(); mp::SequenceLimits::MAX_EVENTS / 4];
+            assert_eq!(
+                native_sequence(&full, extent, 4096, 50)
+                    .expect("SDK ceiling")
+                    .len(),
+                mp::SequenceLimits::MAX_EVENTS
+            );
+            let oversized = vec![click; mp::SequenceLimits::MAX_EVENTS / 4 + 1];
+            assert_eq!(
+                native_sequence(&oversized, extent, 4096, 50)
+                    .expect_err("held clicks also obey the SDK ceiling")
+                    .category,
+                "ActionLimit"
+            );
+        }
+
+        fn input_authority_json() -> Value {
+            json!({
+                "approved":true, "duration_ms":1000, "max_actions":16,
+                "route":"system", "focus":"preserve",
+                "representative_actions":[{"kind":"click","x":1.0,"y":2.0,"button":"left"}]
+            })
+        }
+
+        #[test]
+        fn native_pointer_options_reject_unknown_modes_and_unbounded_holds() {
+            for (field, value) in [
+                ("macos_process_pointer_mode", json!("unknown")),
+                ("macos_process_pointer_mode", json!("app_kit_background")),
+                ("click_hold_ms", json!(-1)),
+                ("click_hold_ms", json!(0.5)),
+                ("click_hold_ms", Value::Null),
+            ] {
+                let mut raw = input_authority_json();
+                raw[field] = value;
+                assert!(serde_json::from_value::<InputAuthority>(raw).is_err());
+            }
+            for (hold, expected_delay) in [(None, None), (Some(1_000), Some(1_000))] {
+                let mut raw = input_authority_json();
+                if let Some(hold) = hold {
+                    raw["click_hold_ms"] = json!(hold);
+                }
+                let input: InputAuthority = serde_json::from_value(raw).expect("bounded authority");
+                input
+                    .validate_pointer_options("windows")
+                    .expect("default pointer mode");
+                let sequence = native_sequence(
+                    &input.representative_actions,
+                    None,
+                    input.max_actions,
+                    input.click_hold_ms,
+                )
+                .expect("bounded sequence");
+                let delay = sequence.events().iter().find_map(|event| match event {
+                    mp::InputEvent::Delay(duration) => Some(duration.as_millis()),
+                    _ => None,
+                });
+                assert_eq!(delay, expected_delay);
+                assert_eq!(sequence.len(), if expected_delay.is_some() { 4 } else { 3 });
+            }
+            let mut raw = input_authority_json();
+            raw["click_hold_ms"] = json!(1_001);
+            let input: InputAuthority = serde_json::from_value(raw).expect("typed milliseconds");
+            assert_eq!(
+                input
+                    .validate_pointer_options("macos")
+                    .expect_err("overlong hold is refused")
+                    .context["stage"],
+                "input_authority"
+            );
+        }
+
+        #[test]
+        fn appkit_pointer_mode_requires_macos_process_directed_preserve() {
+            for (operating_system, route, focus) in [
+                ("windows", "process_directed", "preserve"),
+                ("macos", "system", "preserve"),
+                ("macos", "process_directed", "require_focused"),
+                ("macos", "process_directed", "preserve"),
+            ] {
+                let mut raw = input_authority_json();
+                raw["macos_process_pointer_mode"] = json!("appkit_background");
+                raw["route"] = json!(route);
+                raw["focus"] = json!(focus);
+                let input: InputAuthority = serde_json::from_value(raw).expect("known mode");
+                let result = input.validate_pointer_options(operating_system);
+                if cfg!(target_os = "macos")
+                    && operating_system == "macos"
+                    && route == "process_directed"
+                    && focus == "preserve"
+                {
+                    result.expect("explicit background pointer authority");
+                } else {
+                    assert_eq!(
+                        result.expect_err("incompatible pointer mode").context["stage"],
+                        "input_route_unsupported"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn held_click_receipts_require_complete_release_not_delay_or_partial_effect() {
+            let descriptor =
+                mp::FrameDescriptor::packed(mp::PixelExtent::new(1, 1), mp::PixelFormat::Rgba8)
+                    .expect("replay descriptor");
+            let frame = mp::replay::ReplayFrame::new(
+                descriptor,
+                mp::MonotonicInstant::from_origin(Duration::ZERO),
+                mp::Continuity::Continuous,
+                None,
+                vec![0; descriptor.byte_len()].into_boxed_slice(),
+            )
+            .expect("replay frame");
+            let source = mp::replay::ReplaySource::from_targets(vec![
+                mp::replay::ReplayTarget::new("receipt-projection", vec![frame])
+                    .expect("replay target"),
+            ])
+            .expect("replay source");
+            let engine = mp::replay_engine(source).expect("replay engine");
+            let target = engine
+                .discover(&mp::OperationContext::new())
+                .expect("replay discovery")[0]
+                .id();
+            let click = Action::Click {
+                x: 1.0,
+                y: 2.0,
+                button: PointerButton::Left,
+            };
+            let actions = [
+                Action::KeyDown { key: "A".into() },
+                click.clone(),
+                Action::KeyUp { key: "A".into() },
+                click,
+            ];
+            for (submitted_events, partial_native_effect, submitted_actions) in [
+                (3, false, 1),
+                (4, false, 1),
+                (4, true, 1),
+                (5, false, 2),
+                (6, false, 3),
+                (9, true, 3),
+            ] {
+                let receipt = mp::InputReceipt::partial(
+                    target,
+                    mp::InputDelivery::System,
+                    mp::SubmissionEvidence::SystemInputAdmission,
+                    submitted_events,
+                    partial_native_effect,
+                    mp::InputFault::SubmissionFailed,
+                )
+                .with_cleanup(0, 1);
+                let projected = native_receipt(&receipt, &actions, 50);
+                assert_eq!(projected["status"], "Partial");
+                assert_eq!(projected["submitted"], submitted_actions);
+                assert_eq!(projected["total_events"], 10);
+                assert_eq!(projected["cleanup"]["may_leave_state_held"], true);
+                assert_eq!(projected["application_effect_confirmed"], false);
+            }
+            let receipt = mp::InputReceipt::complete(
+                target,
+                mp::InputDelivery::System,
+                mp::SubmissionEvidence::SystemInputAdmission,
+                10,
+            );
+            let projected = native_receipt(&receipt, &actions, 50);
+            assert_eq!(projected["status"], "Submitted");
+            assert_eq!(projected["submitted"], 4);
+            assert_eq!(projected["application_effect_confirmed"], false);
         }
 
         #[test]
@@ -1808,16 +2081,19 @@ mod enabled {
         }
     }
 
-    fn native_receipt(receipt: &mp::InputReceipt, actions: &[Action]) -> Value {
+    fn native_receipt(receipt: &mp::InputReceipt, actions: &[Action], click_hold_ms: u64) -> Value {
         let mut end = 0usize;
         let submitted = actions
             .iter()
             .take_while(|action| {
-                end += action.event_count();
+                end += native_action_event_count(action, click_hold_ms);
                 end <= receipt.submitted()
             })
             .count();
-        let total_events: usize = actions.iter().map(Action::event_count).sum();
+        let total_events: usize = actions
+            .iter()
+            .map(|action| native_action_event_count(action, click_hold_ms))
+            .sum();
         let status = match receipt.outcome() {
             mp::SequenceOutcome::Complete => "Submitted",
             mp::SequenceOutcome::Partial => "Partial",
@@ -2117,6 +2393,9 @@ mod enabled {
 
     fn validate_native(config: Option<&NativeConfig>, plan: &Plan) -> Result<(), Fault> {
         let config = config.ok_or_else(|| blocked("native_authority_unset", "native requires an operator-approved target and separate finite capture/input authority"))?;
+        config
+            .input
+            .validate_pointer_options(&config.operating_system)?;
         if !config.executable_or_bundle.is_absolute()
             || !config.permission_executable.is_absolute()
             || config.process_id == 0
@@ -2239,8 +2518,13 @@ mod enabled {
             ));
         }
         placement(&config.geometry)?;
-        native_sequence(&input.representative_actions, None, input.max_actions)
-            .map_err(|fault| blocked("input_authority", &fault.message))?;
+        native_sequence(
+            &input.representative_actions,
+            None,
+            input.max_actions,
+            input.click_hold_ms,
+        )
+        .map_err(|fault| blocked("input_authority", &fault.message))?;
         config.route()?;
         config.focus()?;
         Ok(())

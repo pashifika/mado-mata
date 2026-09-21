@@ -1534,8 +1534,15 @@ impl Host {
         let mut event_count = 0usize;
         for action in &actions {
             action.validate(&map["observation"])?;
+            #[cfg(not(feature = "engine"))]
+            let expanded = action.event_count();
+            #[cfg(feature = "engine")]
+            let expanded = self.inner.engine.as_ref().map_or_else(
+                || action.event_count(),
+                |engine| engine.action_event_count(action),
+            );
             event_count = event_count
-                .checked_add(action.event_count())
+                .checked_add(expanded)
                 .ok_or_else(|| argument("expanded input event count overflow"))?;
         }
         self.input_check(&map["observation"])?;
@@ -1961,6 +1968,7 @@ impl Host {
         }
         state.log_bytes += message.len();
         state.logs.push(message.into());
+        crate::runner::emit_script_log(self.control().elapsed_us(), message);
         Ok(json!({"recorded":true}))
     }
 

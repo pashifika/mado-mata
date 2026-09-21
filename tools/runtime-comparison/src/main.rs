@@ -1,14 +1,4 @@
-mod check;
-mod engine;
-mod host;
-mod inventory;
-mod javascript;
-mod lua;
-mod model;
-mod report;
-mod runner;
-mod scenarios;
-mod typescript;
+use mado_runtime_comparison::{check, inventory, model, report, runner};
 
 use model::{Fault, Plan};
 use std::fs::{File, OpenOptions};

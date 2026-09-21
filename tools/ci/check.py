@@ -1,4 +1,4 @@
-"""Run tracked repository governance and the controlled runtime comparison."""
+"""Run tracked governance, controlled runtime, and desktop application checks."""
 
 import argparse
 import json
@@ -12,9 +12,10 @@ import tempfile
 
 from tooling import ROOT, host_platform, installed_tool, load_manifest
 
-RUST_VERSION = "1.97.1"
+RUST_VERSION = "1.98.1"
 NODE_VERSION = "24.18.0"
 RUNTIME_ROOT = Path("tools/runtime-comparison")
+DESKTOP_ROOT = Path("apps/desktop")
 RUNTIME_RESULTS = Path(".cache/repository-ci/runtime-results")
 FAILURE_ROW_LIMIT = 10
 FIELD_TEXT_LIMIT = 240
@@ -151,7 +152,7 @@ def run_runtime_check(command, root, results_directory):
 
 
 def check_runtime(root, results_directory):
-    """Build and exercise the public, non-native executable and trusted compiler."""
+    """Exercise the controlled runtime and desktop without native authority."""
     print(f"Controlled runtime host: {platform.platform()} ({platform.machine()})", flush=True)
     node = shutil.which("node")
     npm = shutil.which("npm")
@@ -168,13 +169,22 @@ def check_runtime(root, results_directory):
     run([*cargo, "build", *manifest], root)
     run([*cargo, "test", *manifest], root)
     run_runtime_check([*cargo, "run", *manifest, "--", "check"], root, results_directory)
+    run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix", DESKTOP_ROOT], root)
+    run([npm, "test", "--prefix", DESKTOP_ROOT], root)
+    run([npm, "run", "build", "--prefix", DESKTOP_ROOT], root)
+    desktop_manifest = ["--locked", "--manifest-path", DESKTOP_ROOT / "src-tauri/Cargo.toml"]
+    run([*cargo, "test", *desktop_manifest, "--no-default-features", "--lib"], root)
+    if platform.system() == "Darwin":
+        run([*cargo, "build", *desktop_manifest, "--features", "custom-protocol"], root)
+    else:
+        print("Desktop shell build unexecuted: supported only on macOS; frontend and core checked.", flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--policy-only", action="store_true", help="governance policy and its tests only; no runtime or external tools")
-    modes.add_argument("--runtime-only", action="store_true", help="policy, its tests, and controlled runtime; omit actionlint and lychee")
+    modes.add_argument("--policy-only", action="store_true", help="governance policy and its tests only; no runtime, desktop, or external tools")
+    modes.add_argument("--runtime-only", action="store_true", help="policy, its tests, controlled runtime, and desktop; omit actionlint and lychee")
     args = parser.parse_args()
     if sys.version_info < (3, 11):
         print("Repository checks require Python 3.11 or newer.", file=sys.stderr)
@@ -220,11 +230,11 @@ def main():
             if not args.policy_only:
                 check_runtime(snapshot, results_directory)
         if args.policy_only:
-            print("Repository checks passed (policy and governance tests only; runtime and external tools unexecuted).")
+            print("Repository checks passed (policy and governance tests only; runtime, desktop, and external tools unexecuted).")
         elif args.runtime_only:
-            print("Repository checks passed (policy, governance tests, controlled runtime; actionlint and lychee unexecuted).")
+            print("Repository checks passed (policy, governance tests, controlled runtime, desktop checks; actionlint and lychee unexecuted).")
         else:
-            print("Repository checks passed (policy, governance tests, actionlint, offline local links, controlled runtime).")
+            print("Repository checks passed (policy, governance tests, actionlint, offline local links, controlled runtime, desktop checks).")
     except subprocess.CalledProcessError as error:
         print(f"Repository checks failed: command exited {error.returncode}", file=sys.stderr)
         if error.stderr:

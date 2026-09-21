@@ -1,10 +1,12 @@
 # M0 runtime comparison
 
 This standalone executable compares JavaScript, Lua, TypeScript authoring into the
-JavaScript VM, and an independent direct-Rust workload. It is not the desktop
-application. Controlled checks exercise actual interpreters and owned processes;
-their input sink is **non-native**. They do not capture a screen, launch a game,
-change focus, request permissions, or send operating-system input.
+JavaScript VM, and an independent direct-Rust workload. The separate
+[controlled macOS desktop application](desktop.md) reuses its supervised runner;
+the comparison CLI remains independently usable. Controlled checks exercise
+actual interpreters and owned processes; their input sink is **non-native**.
+They do not capture a screen, launch a game, change focus, request permissions,
+or send operating-system input.
 
 **macOS development uses JavaScript on QuickJS with TypeScript authoring.**
 The [selection decision](adr/0001-runtime-comparison-boundaries.md#macos-first-development-selection)
@@ -14,16 +16,16 @@ See [native prerequisites](runtime-native.md) before any real capture or input.
 
 ## Setup and commands
 
-Run from the repository root with Rust **1.97.1** and Node.js **24.18.0**. The
+Run from the repository root with Rust **1.98.1** and Node.js **24.18.0**. The
 controlled build needs a C toolchain for the vendored interpreters, but no OpenCV,
 ONNX models, sibling checkout, private planning repository, or game installation.
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund --prefix tools/runtime-comparison/compiler
 node tools/runtime-comparison/compiler/compile.mjs --self-check
-cargo +1.97.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml
-cargo +1.97.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- check
+cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml
+cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- check
 ```
 
 `check` executes the built-in behavioral corpus and prints versioned JSON. Its
@@ -32,13 +34,16 @@ forced/incomplete cleanup. A passing controlled check is not runtime adoption.
 Compiler checks include actual strict diagnostics and LanguageService completion
 results, not source-text assertions. [Repository CI](ci.md) invokes these checks
 from a tracked-only snapshot on Linux, Apple Silicon macOS, and Windows x64.
+The same full/runtime-only entrypoints also check desktop frontend state/build
+and the Rust application core on all three hosts, then compile the shell on
+macOS only. Those checks do not launch the GUI or qualify another desktop OS.
 
 A bounded, non-native example plan is provided:
 
 ```sh
 mkdir -p .cache/runtime-comparison
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- run tools/runtime-comparison/fixtures/controlled-plan.json tools/runtime-comparison/fixtures/javascript > .cache/runtime-comparison/sample.json
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- report .cache/runtime-comparison/sample.json
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- run tools/runtime-comparison/fixtures/controlled-plan.json tools/runtime-comparison/fixtures/javascript > .cache/runtime-comparison/sample.json
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- report .cache/runtime-comparison/sample.json
 ```
 
 Use a private copy of the plan to select `rust`, `javascript`, `lua`, or
@@ -59,7 +64,7 @@ After the setup above, start one controlled TypeScript invocation:
 
 ```sh
 mkdir -p .cache/runtime-comparison
-cargo +1.97.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- manual tools/runtime-comparison/fixtures/manual-plan.json tools/runtime-comparison/fixtures/typescript .cache/runtime-comparison/manual-result.json
+cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- manual tools/runtime-comparison/fixtures/manual-plan.json tools/runtime-comparison/fixtures/typescript .cache/runtime-comparison/manual-result.json
 ```
 
 Review the candidate, lane, and limits, then enter `start`. While it runs, enter
@@ -86,6 +91,12 @@ Confirming Start for a native plan authorizes only that plan's exact target,
 route, and finite operation limits, not automatic focus, elevation, or fallback.
 Scripts must evaluate their postconditions explicitly; `Submitted` alone is not
 application success. Raw result files can contain private execution details.
+For the package/profile GUI, use the [desktop build and run guide](desktop.md).
+It retains app-local named profiles separately from package source and captures
+one immutable run at Start. Draft edits and later profile saves affect only a
+subsequent run. Package/schema mismatches are refused without migrating stored
+data, and Stop/cleanup remain independent of the bounded GUI and file logs.
+The shell uses fixed checkout-owned runner/compiler paths, not a release bundle.
 
 ## Package and host contracts
 
@@ -197,9 +208,13 @@ an external Stop, containment uses the supervisor's entry-settlement receipt
 through observed exit. Cleanup completion and forced exit remain distinct.
 
 Controlled Stop checks start their delay only after reaching the operation under
-test: `VmHookReached` for CPU-only VM work, or `HostWaitEntered` for the first
-host delay/query wait. Parser startup time is not evidence that either operation
-has started. These bounded notifications do not block the VM or host on stdout;
+test: `VmHookReached` for CPU-only VM work, control EOF, and intentional supervisor
+exit; `HostWaitEntered` for the first host delay/query wait; or `WorkHeld` for
+retained work ownership. Parser startup and build-identity collection are not
+evidence that the operation has started. The EOF and intentional-exit checks
+require VM-hook evidence before the cancellation receipt, along with a clean
+child exit; they do not extend the cleanup or containment deadlines.
+These bounded notifications do not block the VM or host on stdout;
 the checks still require cancellation, rejected continuation input, and cleanup.
 
 Nearest-rank p50 requires 2 samples, p95 requires 20, and p99
@@ -224,8 +239,11 @@ SHA-256 values bind the suite's complete configuration and corpus manifests,
 including its declared profile/scenario/package variations. Individual plan
 hashes may differ inside that suite; unrelated source builds or configurations
 cannot supply each other's missing checks.
-The build identity includes CPU brand/count, physical memory, and the executed
-binary's SHA-256 without publishing a hostname, serial number, or executable path.
+The actual runtime child's startup record supplies its complete build identity,
+including CPU brand/count, physical memory, and executed binary SHA-256, without
+publishing a hostname, serial number, or executable path. The supervisor checks
+the owned PID and run correlation. Missing child identity stays `null`, not the
+supervisor's identity; it cannot establish qualified coverage.
 Suite identity also binds observed parser/compiler and emitted-inventory
 identities, not only declared version strings.
 

@@ -227,6 +227,292 @@ No retry, focus change, elevation, or route fallback occurred. An earlier
 the exact rejecting policy check or measured token levels; static analysis is
 not a runtime root-cause determination. Both native execution slots are closed.
 
+## Background-input compatibility disposition
+
+The 2026-09-21 investigation retained MadoPilot
+`85ccc580cd28ffb9b0b52271f6c87f1af0109a04` and the MadoMata input implementation
+from `3acde7f72c0a67189fc4cd529174197b52ef04a1`. Rust was upgraded separately to
+**1.98.1**; historical results above retain their original toolchain identities.
+The routes already exist and are wired into the consumer. Available transport
+does not establish target acceptance.
+
+| OS / operation | Route / address scope | Advertised support / receipt ceiling | Observed effect and disposition |
+| --- | --- | --- | --- |
+| macOS 27.0 (`26A428`), arm64; one idle-screen dismissal click | `process_directed` / owning process | `Unknown` / `invocation_only` | Three SDK events submitted while the application was observed in the background; expected menu absent. **Unqualified**, consumption unresolved. |
+| Same macOS host; isolated `NSEvent` + Command recipe | `process_directed` / owning process | Production support unchanged / `invocation_only` | Initial menu visibly appeared in one bounded trial; see [NSEvent-based game trial](#nsevent-based-game-trial). Repeatability and concurrent typing remain **unqualified**. |
+| Same macOS host; SDK `AppKitBackground` at `acc5d98` | `process_directed` / owning process | `Unknown` / `invocation_only` | Two recorded full character-guide workflows and one operator-confirmed repetition succeeded. One ordinary-typing case had no operator-reported interference, but incomplete supplementary cursor/focus coverage. See [bounded repetition](#bounded-repetition-with-ordinary-terminal-typing); no route-wide or statistical reliability qualification. |
+| Retained macOS focused workflow | `system` / focused system | `Supported` / `invocation_only` | Separately observed workflow effects. Focused baseline only, not background support. |
+| Retained Windows ordinary-window attempt | `window_message` / exact window | `Unknown` / target queue admission | Refused; no background success. Exact rejecting check remains unknown. |
+| Retained Windows focused workflow attempt | `system` / focused system | `Supported` / system input admission | `PolicyRefused`, `Unexecuted`, zero submitted events. No new Windows run. |
+
+The new macOS diagnostic used the pinned public Rust facade directly, not a new
+interpreter workflow. It retained the exact process lifetime and window, used
+capture-pixel move/press/release with unchanged source geometry, selected only
+`process_directed` with `preserve`, and performed no activation or fallback.
+Application-level `NSWorkspace` observations at admission, immediately before
+submission, and at effect observation all reported inactive/non-frontmost.
+These are boundary samples, not an atomic per-event foreground guarantee.
+
+The expected result was the initial menu becoming visible. Two target-only
+frames came from one capture session: sequence 1 before input and sequence 145
+after a 1500 ms observation wait, with the same epoch and geometry. Visual
+inspection still showed the idle screen. The receipt reported three submitted
+events, possible native effect, no partial effect, no held state, and no cleanup
+owed. Session close succeeded; the outer process exited 0 without containment
+after approximately 16 seconds. That exit confirms diagnostic completion,
+**not** the failed application postcondition.
+
+An earlier preparation found no approved menu control and sent no input.
+A subsequent source-image review timed out before dispatch, also with zero
+input and confirmed session close. Both remain separate failed/unexecuted
+preparations. No input was replayed after the completed no-effect attempt.
+The finite diagnostic slots are closed; the historical M0 slots remain closed.
+Images, target identities, local configuration, and raw results remain private.
+
+Non-native verification on Rust 1.98.1 passed the full repository check
+(36 governance tests, 38 Rust unit tests, two terminal tests, 199 controlled
+cases, compiler self-checks, actionlint, and offline links), five engine-feature
+consumer input tests, and 84 pinned macOS SDK input/geometry unit tests.
+The latter use scripted drivers and geometry sources: they do not prove native
+event consumption. Windows SDK unit tests were inspected but not executed here.
+
+No consumer or SDK contract violation was reproduced, so there is no input
+implementation repair, speculative upstream Change, or SDK pin update.
+Remaining questions are target consumption of the process-addressed event
+representation and the exact historical Windows policy-refusal site/conditions.
+Neither no-effect nor zero submission alone proves an SDK defect; Windows
+integrity levels were not measured by this investigation.
+
+Controlled M1 package/profile work may proceed. M1 must not advertise background
+support or derive application success from a receipt. M2/native work inherits
+explicit route selection, independent newer-frame effect checks, no automatic
+fallback or activation, and these unresolved compatibility questions.
+Full both-OS native qualification and the independent capture-terminal/publication
+guard prerequisite remain unchanged. macOS 27 results do not extend the SDK's
+qualified OS range.
+
+### iOS-on-Mac event-representation experiments
+
+A separately authorized follow-up kept the same SDK pin and used an isolated,
+fingerprinted copy of its native shim, not a production adapter change. Bundle
+metadata identified the selected App Store game as an iPhoneOS build, version
+`1.0.461`, running on the same arm64 macOS 27.0 (`26A428`) host. Each input trial
+used one move/down/up sequence, `process_directed`, `preserve`, the retained
+process lifetime, and unchanged captured geometry. No activation, cursor warp,
+permission prompt, System fallback, extra primer click, or Windows input ran.
+
+The independent game trials produced these outcomes:
+
+| Event source | Additional event metadata | Expected menu effect |
+| --- | --- | --- |
+| `NULL` | None | Submitted without observed effect |
+| `NULL` | Public window fields 91 and 92 | Submitted without observed effect |
+| Private, sequence-owned | Private field 51 and window-local point | Submitted without observed effect |
+| `NULL` | Private field 51 and window-local point | Submitted without observed effect |
+| `NULL` | Fields 51, 91, 92 and window-local point | Submitted without observed effect |
+| Private, sequence-owned | Fields 51, 91, 92 and window-local point | Submitted without observed effect |
+
+All six trials reported three submitted events, no owned releases owed, and
+successful session close. Each retained nine compatible post-send frames from
+approximately 0.5 to 4.5 seconds after send completion within a five-second
+observation interval. All 54 reviewed frames remained in the animated idle
+scene; none displayed the menu. Capture timestamps used the SDK's monotonic
+domain and a 250 ms freshness margin. That margin is heuristic: the midpoint
+calibration's uncertainty is not exposed, so it is not a proven error bound.
+The requested two-second owned-release budget was clamped by the pinned SDK to
+250 ms; these completed clicks did not exercise an outstanding-release path.
+
+A dedicated AppKit receiver separated process event observation from a real
+`NSButton` action. The button explicitly accepted first mouse while inactive.
+Its diagnostic monitor never changed the visible counter:
+
+| Recipe | Receiver observation | Real control action |
+| --- | --- | --- |
+| `NULL`, no window metadata | Down/up observed with window number zero | None |
+| Add private field 51 only | Down/up associated with the receiver window | None |
+| Add window-local point | Location matched the button; receiver remained inactive | Counter `0 -> 1`, visibly confirmed |
+| Same metadata, original private source | Location matched the button; receiver remained inactive | Counter `1 -> 2`, visibly confirmed |
+
+This establishes an AppKit event-representation difference, not game
+compatibility. The window-local point was derived from the captured geometry;
+the event's global position was retained. Window hints did not replace the
+SDK's authority checks or upgrade owning-process scope and `invocation_only`.
+
+A non-posting native inspection found that `CGEventPostToPid` and
+`SLEventPostToPid` resolve to the same function address on this OS build.
+Disassembly confirmed the two-argument posting ABI. Merely swapping their
+names would not isolate a different transport here, so no redundant private
+posting trial or dual posting was performed. The separate window-local setter's
+ABI was inspected before its isolated use. These findings are build-specific,
+not a promise about other macOS releases.
+
+Available foreground/target activity and cursor samples remained unchanged
+across all ten input trials; no activation or Space-change notifications were
+recorded. One observer sample was unavailable in the NULL combined-metadata
+game trial. Sampling cannot exclude every transient disturbance, and ordinary
+typing delivery was not measured. Game repeatability and user-input
+preservation acceptance therefore remain unqualified. The successful AppKit
+recipe is not sufficient justification for a production option or SDK pin
+update. Private source, process-scoped receipts, and the no-fallback contract
+remain unchanged in the production SDK.
+
+An instrumented UIKit receiver compiled as an arm64 iPhoneOS binary (`IOS`,
+minimum 15.0, SDK 27.0), not Catalyst or Simulator. Its initial ad-hoc-signed
+bundle had no embedded provisioning profile and received `rejected` from
+`spctl --assess --type execute`. That initial assessment stopped before launch.
+
+With separate operator authorization, Xcode's standard Personal Team workflow
+then produced an Apple Development-signed build. Strict code-signature
+verification passed, and its embedded development profile included the
+authorized Mac. The signed build still received `rejected` from `spctl`; that
+assessment was kept separate from actual launch evidence. One ordinary
+nonactivating LaunchServices attempt exited with
+`The application cannot be opened because it has an incorrect executable format.`
+No receiver PID or readiness record was observed, and no UIKit input was sent.
+
+Archiving the same iPhoneOS target and exporting it with Xcode's `debugging`
+method subsequently succeeded, producing a development IPA whose embedded
+profile also included the Mac. Apple's
+[registered-device distribution guidance](https://developer.apple.com/documentation/xcode/distributing-your-app-to-registered-devices)
+distinguishes this archive/export stage from installation. With separate
+foreground-setup authorization, one ordinary Apple iOS App Installer attempt
+failed with `MIInstallerErrorDomain Code=111` (`ApplicationVerificationFailed`):
+the free provisioning profile was not permitted for that installation source.
+The installer displayed a failure even though the waiting `open` command exited
+0; that exit is not installation success. Afterward, no registered receiver,
+running receiver, or bundle at either checked Applications destination was
+observed. No retry, hand-built wrapper, private installer-service invocation,
+trust change, or permission change was used. No successful Xcode development
+installation was established; this source-specific refusal does not establish
+that paid membership is required. The operator first suspended fixture
+installation, then cancelled that branch as unnecessary after the integrated
+background workflow succeeded. UIKit/iPhoneOS receiver execution is no longer a
+remaining qualification prerequisite; it is cancelled, not passed.
+Signing and export success do not establish UIKit event receipt, touch delivery,
+or a real control action. This fixture-installation work sent no game input.
+
+### NSEvent-based game trial
+
+The operator next authorized the `NSEvent` recipe first. The experiment ported
+event construction from axcli revision
+[`ce6ef8e65d210fbcf4f8d3d8d8d4bbeda5d2fde6`](https://github.com/andelf/axcli/blob/ce6ef8e65d210fbcf4f8d3d8d8d4bbeda5d2fde6/src/input.rs)
+into the isolated shim, retaining the pinned SDK's target/lifetime, geometry,
+foreground, deadline, and cleanup checks. It did not install axcli, modify the
+game, resume IPA installation, or change the production SDK or its pin.
+
+Events came from `NSEvent`'s mouse factory and carried the Command modifier,
+subtype 3, primary button, public window fields 91/92, and derived window-local
+coordinates. Each event used the existing `CGEventPostToPid` transport once.
+Unlike axcli's two-event click, the SDK probe retained a process-directed move
+to establish capture-relative coordinates, then down, a 50 ms delay, and up:
+three native pointer events and four SDK sequence events including the delay.
+No activation, cursor warp, global input, retry, or fallback was performed.
+
+**The idle-screen dismissal postcondition was observed once.** The immediate
+pre-input frame had no menu; all nine retained, strictly newer compatible
+post-input frames displayed the initial menu, including the combatant entry.
+Their timestamps were approximately 0.49–4.49 seconds after send completion.
+The same five-second observation window and heuristic 250 ms freshness margin
+used above apply. This does not establish operation of the combatant entry,
+training-guide controls, or the full game workflow.
+
+The receipt was complete with no fault, zero releases owed, and successful
+session close. Across 621 available observer samples, the target remained
+inactive, foreground identity and cursor position were unchanged, and no
+activation or Space-change notification was recorded. Sampling does not prove
+continuous noninterference; simultaneous ordinary typing was not exercised.
+
+Non-posting construction checks preserved event type, position, click count,
+Command flag, and the supplied window number. On this host, field 51 retained
+that window number while field 55 followed event type, contrary to the upstream
+comment. No field-55 write was added. The successful compound recipe does not
+isolate which construction field, modifier, or timing difference mattered.
+Repeatability, user-input preservation, broader game controls, and cross-OS
+qualification remain open. The finite trial is closed; no production adoption
+or additional native authority follows from this result.
+
+### SDK-integrated full background workflow
+
+Under fresh finite authority, the unchanged private character-guide workload
+passed once on macOS 27.0 arm64 with the published MadoPilot revision
+`acc5d98ae8cfc4958970be826a28011bc12185c9`, Rust **1.98.1**, and the JavaScript
+runtime's OCR-first profile. The consumer used the Git-pinned SDK, not a sibling
+path dependency or compiler shim. `appkit_background`, `process_directed`,
+`preserve`, and a 50 ms hold were explicitly selected; CoreGraphics remains the
+default.
+
+The run retained one capture session, process lifetime, and geometry throughout
+all steps. OCR independently verified menu navigation and the selected character;
+image templates verified the switch turning on and then off after reopening the
+guide. A strictly newer final OCR observation verified return to the initial menu.
+The script source, recognition thresholds, profiles, and assets were unchanged.
+An earlier CLI startup refused Finder metadata during package inventory, before
+native execution. Only manifest-declared files were then materialized byte-for-byte
+into the execution package; inventory policy was not weakened.
+
+The full invocation completed in **30.867 seconds**, including cleanup, with
+**ten logical clicks, forty SDK events, and twenty-three capture acquisitions**.
+Each click was move/press/delay/release; thirty pointer events were posted.
+Receipts remained `invocation_only`, with no fallback or partial native effect.
+Cleanup reported no outstanding sequence state, no remaining handles or queued
+work, and a closed capture session.
+
+All **2,498 available passive samples** observed the target in the background,
+one unchanged foreground identity, and one unchanged cursor position. No
+activation or Space-change notification was recorded. This is sampled evidence,
+not an atomic continuous noninterference guarantee; ordinary concurrent typing
+was not exercised. A later, separate capture-only inspection showed the idle
+scene with its menu hidden, not a substitute for the run-bound final OCR result.
+No additional input was sent.
+
+Non-posting verification passed 298 macOS adapter/linkage tests, four facade
+configuration tests, and 51 consumer engine/terminal tests. SDK Clippy passed
+with warnings denied. A private-source construction regression compares against
+the actual allocated source ID: `-1` requests a private source but is not the
+allocated source's identity.
+
+This establishes the exact full workflow once, not general application support,
+macOS 27 release qualification, repeated-run reliability, or concurrent-input
+preservation. The descriptor remains `Unknown` and receipts remain invocation
+evidence. Windows was not rerun. The operator cancelled further UIKit fixture
+work as unnecessary. The later [bounded typing repetition](#bounded-repetition-with-ordinary-terminal-typing)
+records additional evidence separately. No new authority follows from either result. Minimal diagnostic source and
+conclusions are retained privately while generated experiment artifacts are
+removed. Private images, paths, raw OCR output, plans, and execution evidence
+remain outside public commits.
+
+### Bounded repetition with ordinary terminal typing
+
+On 2026-09-21, fresh finite authority covered one repetition of the same
+single-game workflow while the operator typed in a foreground terminal. The
+script, profiles, assets, SDK pin, route, focus policy, and 50 ms hold were
+unchanged. An input-free one-frame preflight refreshed exact target identity and
+geometry; that session closed before the workflow's retained session opened.
+There were no warmups, automatic retries, fallback, or additional input runs.
+
+The invocation passed in **33.286 seconds**, including cleanup: **ten logical
+clicks, forty SDK events, and twenty-three capture acquisitions**. OCR/template
+checks again verified the selected character, switch on, switch off after
+reopening, and final menu. SDK cleanup reported no outstanding input state,
+no live handles, and a closed session; the outer process exited 0 without
+timeout or output truncation.
+
+The operator reported **terminal typing unaffected**. No typed content was
+collected; continuous typing duration was not independently measured. The
+supplementary observer expired at its 90-second preparation/preflight bound
+before the input-action interval. Its samples are not evidence of cursor/focus
+preservation during this workflow, and the earlier run's 2,498 samples are not
+reused for that claim.
+
+Together with the original recorded run and a later operator-confirmed,
+log-disabled repetition, this gives three successful workflow observations.
+It completes this bounded repetition/ordinary-typing case, not a statistical
+reliability rate, continuous cursor/focus guarantee, generic application
+support, macOS release qualification, or full both-OS native adoption.
+Descriptor compatibility remains `Unknown`, and submission receipts remain
+invocation-only. Windows and the cancelled UIKit diagnostic were not rerun.
+This authority is consumed and closed; raw evidence remains private.
+
 ## Recorded replay and ownership qualification
 
 The current pinned facade recognizes two authorized recorded frame crops under

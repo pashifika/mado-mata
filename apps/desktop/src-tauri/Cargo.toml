@@ -1,0 +1,36 @@
+[package]
+name = "mado-mata-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+publish = false
+
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-build"]
+custom-protocol = ["desktop", "tauri/custom-protocol"]
+webdriver = ["desktop", "dep:tauri-plugin-wdio-webdriver"]
+
+[[bin]]
+name = "mado-mata-desktop"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[dependencies]
+mado-runtime-comparison = { path = "../../../tools/runtime-comparison" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.145", features = ["float_roundtrip"] }
+tauri = { version = "=2.11.6", optional = true }
+tauri-plugin-wdio-webdriver = { version = "=1.4.0", optional = true }
+
+tracing = "=0.1.41"
+tracing-subscriber = { version = "=0.3.20", default-features = false, features = ["registry", "std"] }
+[build-dependencies]
+tauri-build = { version = "=2.6.3", optional = true }
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

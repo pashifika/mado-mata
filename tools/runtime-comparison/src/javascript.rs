@@ -17,12 +17,18 @@ use serde_json::{Value as Json, json};
 
 use crate::host::Host;
 use crate::inventory::{Entry, Inventory};
-use crate::model::{Fault, RuntimeMetrics};
+use crate::model::{Control, Fault, Limits, RuntimeMetrics};
+
+#[derive(Clone)]
+enum ModuleFaults {
+    Execution(Host),
+    Inspection(Rc<RefCell<Option<Fault>>>),
+}
 
 #[derive(Clone)]
 struct Modules {
     inventory: Arc<Inventory>,
-    host: Host,
+    faults: ModuleFaults,
     halted: Arc<AtomicBool>,
     compiled: Rc<RefCell<BTreeSet<String>>>,
 }
@@ -35,10 +41,29 @@ impl Modules {
             .unwrap_or("<loader>")
             .to_owned();
         let fault = annotate(fault, &self.inventory, &module, "loading", None);
-        self.host.fail(fault.clone());
+        match &self.faults {
+            ModuleFaults::Execution(host) => host.fail(fault.clone()),
+            ModuleFaults::Inspection(failure) => {
+                failure.borrow_mut().get_or_insert_with(|| fault.clone());
+            }
+        }
         match Exception::from_message(ctx.clone(), &fault.message) {
             Ok(exception) => {
-                self.host.set_failure_stack(exception.stack());
+                match &self.faults {
+                    ModuleFaults::Execution(host) => host.set_failure_stack(exception.stack()),
+                    ModuleFaults::Inspection(failure) => {
+                        let mut failure = failure.borrow_mut();
+                        if let Some(fault) = failure.take() {
+                            *failure = Some(annotate(
+                                fault,
+                                &self.inventory,
+                                &module,
+                                "loading",
+                                exception.stack(),
+                            ));
+                        }
+                    }
+                }
                 exception.throw()
             }
             Err(error) => error,
@@ -84,6 +109,48 @@ impl Loader for Modules {
         self.compiled.borrow_mut().insert(name.to_owned());
         Module::declare(ctx.clone(), name, source)
     }
+}
+
+/// Check the target engine's syntax without evaluating modules or installing a host.
+/// COMPILE_ONLY resolves module paths, but does not validate imported bindings.
+pub(crate) fn validate_syntax<'a>(
+    inventory: Arc<Inventory>,
+    limits: &Limits,
+    control: Arc<Control>,
+    requested: impl IntoIterator<Item = &'a str>,
+) -> Result<(), Fault> {
+    control.check()?;
+    let runtime = Runtime::new().map_err(|error| Fault::new("Runtime", error.to_string()))?;
+    runtime.set_memory_limit(limits.vm_bytes);
+    runtime.set_max_stack_size(256 * 1024);
+    let interrupt_control = control.clone();
+    runtime.set_interrupt_handler(Some(Box::new(move || interrupt_control.check().is_err())));
+    let failure = Rc::new(RefCell::new(None));
+    let mut modules = Modules {
+        inventory: inventory.clone(),
+        faults: ModuleFaults::Inspection(failure.clone()),
+        halted: Arc::new(AtomicBool::new(false)),
+        compiled: Rc::new(RefCell::new(BTreeSet::new())),
+    };
+    runtime.set_loader(modules.clone(), modules.clone());
+    let context =
+        Context::full(&runtime).map_err(|error| Fault::new("Runtime", error.to_string()))?;
+    let result = context.with(|ctx| {
+        for name in requested {
+            control.check()?;
+            if !modules.compiled.borrow().contains(name) {
+                modules
+                    .load(&ctx, name, None)
+                    .map_err(|error| exception_fault(&ctx, error, &inventory, name, "syntax"))?;
+            }
+        }
+        Ok(())
+    });
+    control.check()?;
+    if let Some(fault) = failure.borrow_mut().take() {
+        return Err(fault);
+    }
+    result
 }
 
 /// Parse only QuickJS frames naming an exact captured module, never message text.
@@ -377,7 +444,7 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
     })));
     let mut modules = Modules {
         inventory: inventory.clone(),
-        host: host.clone(),
+        faults: ModuleFaults::Execution(host.clone()),
         halted: halted.clone(),
         compiled: Rc::new(RefCell::new(BTreeSet::new())),
     };
