@@ -7,6 +7,14 @@
     "actions/setup-python": {
       "version": "v7.0.0",
       "sha": "5fda3b95a4ea91299a34e894583c3862153e4b97"
+    },
+    "actions/setup-node": {
+      "version": "v6.5.0",
+      "sha": "249970729cb0ef3589644e2896645e5dc5ba9c38"
+    },
+    "actions/upload-artifact": {
+      "version": "v7.0.1",
+      "sha": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
     }
   },
   "tools": {

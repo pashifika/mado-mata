@@ -4,7 +4,16 @@ import json
 import os
 import sys
 
-EXPECTED_JOBS = frozenset({"branch-flow", "repository"})
+EXPECTED_JOBS = frozenset({"branch-flow", "repository", "runtime-macos", "runtime-windows"})
+SELECTOR_JOB = "dev-push-policy"
+CHECKS_IF = (
+    "${{ !cancelled() && (github.event_name != 'push' || "
+    "needs.dev-push-policy.outputs.skip-checks != 'true') }}"
+)
+GATE_IF = (
+    "${{ always() && (github.event_name != 'push' || "
+    "needs.dev-push-policy.outputs.skip-checks != 'true') }}"
+)
 GATE_NAMES = {
     "pull_request": "CI Gate",
     "push": "CI Gate (push)",
@@ -17,16 +26,19 @@ GATE_NAME_EXPRESSION = (
 
 
 def evaluate(needs):
-    if not isinstance(needs, dict) or set(needs) != EXPECTED_JOBS:
-        raise ValueError("needs must contain exactly branch-flow and repository")
-    failures = []
+    expected = EXPECTED_JOBS | {SELECTOR_JOB}
+    if not isinstance(needs, dict) or set(needs) != expected:
+        raise ValueError("needs must contain exactly: " + ", ".join(sorted(expected)))
+    selector = needs[SELECTOR_JOB]
+    result = selector.get("result") if isinstance(selector, dict) else None
+    failures = [] if result in ("success", "skipped") else [f"{SELECTOR_JOB}={result!r}"]
     for name in sorted(EXPECTED_JOBS):
         job = needs[name]
         result = job.get("result") if isinstance(job, dict) else None
         if result != "success":
             failures.append(f"{name}={result!r}")
     if failures:
-        raise ValueError("mandatory jobs did not succeed: " + ", ".join(failures))
+        raise ValueError("CI dependencies did not succeed: " + ", ".join(failures))
 
 
 def main():
@@ -38,7 +50,7 @@ def main():
     except (ValueError, RecursionError) as error:
         print(f"CI gate failed: {error}", file=sys.stderr)
         return 1
-    print("CI gate passed: branch-flow and repository both succeeded.")
+    print("CI gate passed: all mandatory jobs succeeded.")
     return 0
 
 

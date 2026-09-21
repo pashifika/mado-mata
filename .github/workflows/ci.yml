@@ -16,8 +16,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dev-push-policy:
+    name: Select dev push checks
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      skip-checks: ${{ steps.promotion-pr.outputs.skip-checks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check for a covering promotion PR
+        id: promotion-pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/ci/select_checks.py
+
+  # Push statuses must not satisfy PR validation when duplicate work is skipped.
   branch-flow:
-    name: Branch flow
+    name: Branch flow${{ github.event_name == 'push' && ' (push)' || '' }}
+    needs: dev-push-policy
+    if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -28,9 +51,11 @@ jobs:
         run: python3 tools/ci/branch_flow.py
 
   repository:
-    name: Repository checks
+    name: Repository and controlled runtime (Linux)${{ github.event_name == 'push' && ' (push)' || '' }}
+    needs: dev-push-policy
+    if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,17 +63,108 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24.18.0'
+          package-manager-cache: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.97.1 --profile minimal
       - name: Install pinned Python dependency
         run: python3 -m pip install --require-hashes -r tools/ci/requirements.txt
       - name: Install checksum-verified native tools
         run: python3 tools/ci/install_tools.py
       - name: Check tracked repository files
         run: python3 tools/ci/check.py
+      - name: Upload controlled runtime evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: controlled-runtime-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            .cache/repository-ci/runtime-results/runtime-results.json
+            .cache/repository-ci/runtime-results/runtime-stderr.log
+          retention-days: 7
+          include-hidden-files: true
+          if-no-files-found: warn
+
+  runtime-macos:
+    name: Controlled runtime (macOS arm64)${{ github.event_name == 'push' && ' (push)' || '' }}
+    needs: dev-push-policy
+    if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24.18.0'
+          package-manager-cache: false
+      - name: Require Apple Silicon runner
+        run: python3 -c "import platform; print(platform.platform(), platform.machine()); assert platform.machine() == 'arm64'"
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Install pinned Python dependency
+        run: python3 -m pip install --require-hashes -r tools/ci/requirements.txt
+      - name: Check tracked controlled runtime
+        run: python3 tools/ci/check.py --runtime-only
+      - name: Upload controlled runtime evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: controlled-runtime-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            .cache/repository-ci/runtime-results/runtime-results.json
+            .cache/repository-ci/runtime-results/runtime-stderr.log
+          retention-days: 7
+          include-hidden-files: true
+          if-no-files-found: warn
+
+  runtime-windows:
+    name: Controlled runtime (Windows)${{ github.event_name == 'push' && ' (push)' || '' }}
+    needs: dev-push-policy
+    if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Preserve tracked symlinks
+        run: git config --global core.symlinks true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24.18.0'
+          package-manager-cache: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Install pinned Python dependency
+        run: python -m pip install --require-hashes -r tools/ci/requirements.txt
+      - name: Check tracked controlled runtime
+        run: python tools/ci/check.py --runtime-only
+      - name: Upload controlled runtime evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: controlled-runtime-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            .cache/repository-ci/runtime-results/runtime-results.json
+            .cache/repository-ci/runtime-results/runtime-stderr.log
+          retention-days: 7
+          include-hidden-files: true
+          if-no-files-found: warn
 
   gate:
     name: ${{ github.event_name == 'pull_request' && 'CI Gate' || github.event_name == 'push' && 'CI Gate (push)' || 'CI Gate (manual)' }}
-    if: ${{ always() }}
-    needs: [branch-flow, repository]
+    if: ${{ always() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
+    needs: [dev-push-policy, branch-flow, repository, runtime-macos, runtime-windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

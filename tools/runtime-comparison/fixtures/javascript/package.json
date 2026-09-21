@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "package_id": "m0-workload",
+  "runtime": "javascript",
+  "sdk": "mado-host-v1",
+  "entry_contract": "ready-string-v1",
+  "entries": {
+    "readiness": {
+      "module": "main.js",
+      "function": "readiness"
+    },
+    "workflow": {
+      "module": "main.js",
+      "function": "workflow"
+    }
+  },
+  "sources": [
+    "main.js",
+    "decisions.js"
+  ],
+  "schema": "schema.json",
+  "profiles": {
+    "template-first": "profiles/template-first.json",
+    "ocr-first": "profiles/ocr-first.json"
+  },
+  "assets": {
+    "marker": {
+      "path": "assets/marker.rgba",
+      "format": "raw-rgba8",
+      "width": 2,
+      "height": 2
+    }
+  },
+  "source_maps": {},
+  "dependencies": {
+    "@mado/helper": "1.0.0"
+  }
+}
