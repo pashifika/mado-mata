@@ -7,7 +7,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-pub const ENGINE_REVISION: &str = "85ccc580cd28ffb9b0b52271f6c87f1af0109a04";
+pub const ENGINE_REVISION: &str = "acc5d98ae8cfc4958970be826a28011bc12185c9";
 pub const MAX_TRANSPORT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 

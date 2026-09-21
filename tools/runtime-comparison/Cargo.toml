@@ -16,7 +16,7 @@ sha2 = "=0.10.9"
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "loader"] }
 mlua = { version = "=0.12.1", default-features = false, features = ["lua54", "vendored", "serde"] }
-mado-pilot = { git = "https://github.com/pashifika/mado-pilot", rev = "85ccc580cd28ffb9b0b52271f6c87f1af0109a04", optional = true }
+mado-pilot = { git = "https://github.com/pashifika/mado-pilot", rev = "acc5d98ae8cfc4958970be826a28011bc12185c9", optional = true }
 
 [build-dependencies]
 sha2 = "=0.10.9"

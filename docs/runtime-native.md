@@ -1,8 +1,8 @@
 # Runtime comparison: replay and native prerequisites
 
 The optional `engine` feature consumes the public `mado-pilot` facade at
-`85ccc580cd28ffb9b0b52271f6c87f1af0109a04`. It does not use a sibling path dependency,
-private platform APIs, a fake OCR backend, or a substitute input route.
+`acc5d98ae8cfc4958970be826a28011bc12185c9`. The harness uses no sibling path
+dependency, direct platform calls, fake OCR backend, or substitute input route.
 
 **Native integration is available; native qualification is not complete.** The
 facade now exposes optional retained-process provenance. The harness requires an
@@ -36,8 +36,8 @@ engine build, acquire the following separately; the harness downloads nothing:
   No `PATH` search, alternate runtime, accelerator preference, or fallback is used.
 - The accepted detector and recognizer below, under one canonical model root.
 
-Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/85ccc580cd28ffb9b0b52271f6c87f1af0109a04/CONTRIBUTING.md#native-development-prerequisites)
-and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/85ccc580cd28ffb9b0b52271f6c87f1af0109a04/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
+Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/acc5d98ae8cfc4958970be826a28011bc12185c9/CONTRIBUTING.md#native-development-prerequisites)
+and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/acc5d98ae8cfc4958970be826a28011bc12185c9/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
 Its `tools/setup-native.py` configures only the command it launches; it installs
 nothing. A separately obtained, revision-pinned public checkout can provide that
 setup tool without becoming the application's dependency source. From this
@@ -109,7 +109,7 @@ Each recorded frame, PNG template, and MadoPilot package manifest must be a
   Its `madopilot-package.json` entry must be a valid upstream asset manifest,
   including template content SHA-256, dimensions, license, and match defaults.
   The facade supports PNG templates, not raw template pixels. See the pinned
-  [manifest example](https://github.com/pashifika/mado-pilot/blob/85ccc580cd28ffb9b0b52271f6c87f1af0109a04/fixtures/assets/phase1-slice/madopilot-package.json).
+  [manifest example](https://github.com/pashifika/mado-pilot/blob/acc5d98ae8cfc4958970be826a28011bc12185c9/fixtures/assets/phase1-slice/madopilot-package.json).
 - `replay.templates` maps host recognition asset aliases to template IDs declared
   by that engine manifest. Neither map grants filesystem access.
 
@@ -255,6 +255,7 @@ Use `lane: "native"`, `native_config.replay: null`, and the required prospective
 - `capture`: `approved`, `duration_ms`, `max_frames`, `wait_ms`, `interval_ms`.
 - `input`: independent `approved`, `duration_ms`, `max_actions`, `route`, `focus`,
   and nonempty `representative_actions`.
+  Optional `macos_process_pointer_mode` and `click_hold_ms` are described below.
 - `geometry`: the placement object above; `recognition_language`,
   `visible_postcondition`, `cleanup_ms`, and `containment_ms`.
 - Optional `package_entries` and `templates` use the same captured-asset mapping
@@ -274,6 +275,39 @@ are not grants from the OS, nor evidence that a route can act on the target.
 No launcher, elevation, focus change, process termination, restart allowance,
 route substitution, or automatic retry is supplied.
 
+The optional `native.input` pointer settings are explicit authority, not an
+automatic compatibility fallback:
+
+- `macos_process_pointer_mode`: `core_graphics` (default) or
+  `appkit_background`. Unknown values are refused. `appkit_background` requires
+  a macOS host and declared `operating_system: "macos"`, `route:
+  "process_directed"`, and `focus: "preserve"`; incompatible selections fail
+  before engine initialization, discovery, or permission work. It selects the
+  SDK's AppKit background pointer construction, not a System route, focus change,
+  Command key press, or application control action. Ordinary pointer submission
+  requires a background target and available capability; bounded release cleanup
+  remains available for sequence-owned state after a focus change. Keyboard
+  events and other routes retain their existing behavior.
+  The SDK adds an event-local Command modifier, which can change application
+  click semantics, and dynamically resolves the private
+  `CGEventSetWindowLocation` function. Missing capability is a refusal, not a
+  fallback. This option does not establish general game or OS-version support.
+- `click_hold_ms`: an integer from `0` through `1000`, default `0`, applied to
+  each native click. Zero retains Move/Press/Release (three SDK events). A positive
+  value inserts an SDK `Delay` between Press and Release (four SDK events);
+  `click_hold_ms: 50` requests a 50 ms hold. This is part of the cancellable,
+  deadline-bound `InputSequence`, not an uninterruptible native sleep, additional
+  operation authority, or retry. The operation/input duration and independent
+  cleanup bounds still apply.
+
+`max_actions` counts expanded SDK events, including each hold delay, both during
+prospective admission and cumulatively across the attempt. Representative actions
+must fit the same expansion; key-down and key-up each remain one event. A held
+click therefore needs four events of authority even though it is one logical host
+action. Receipts count that logical action as submitted only after its Release
+event is completely submitted, never after Delay alone or a partial Release.
+Neither a complete submission receipt nor cleanup proves application effect.
+
 ### Background-input qualification
 
 `preserve` prohibits a focus change; it does not prove the target was in the
@@ -287,12 +321,24 @@ acknowledgement.
 At the current pin, macOS `process_directed` and ordinary Windows
 `window_message` advertise unknown target compatibility. The
 [compatibility disposition](runtime-comparison-results.md#background-input-compatibility-disposition)
-records a background macOS invocation with no observed menu effect and retained
-Windows refusals. Neither route is qualified for the selected game. Keep
-submission, possible effect, observed application effect, and cleanup separate;
-do not retry or substitute System to convert a refused/no-effect result into a
-background pass. Controlled M1 work is not blocked by this unresolved native
-question.
+keeps historical no-effect invocations, isolated construction trials, and
+Windows refusals separate from the
+[SDK-integrated full background workflow](runtime-comparison-results.md#sdk-integrated-full-background-workflow).
+The latter passed once at the current pin with `appkit_background` and a 50 ms
+hold, using independent OCR/template postconditions. It does not qualify
+repeatability, simultaneous ordinary typing, arbitrary games, or either
+production route generally. An AppKit fixture action is not an iOS-on-Mac game
+acceptance result. Keep submission, possible effect, observed application effect,
+and cleanup separate; do not retry or substitute System to convert a
+refused/no-effect result into a background pass. Controlled M1 work is not blocked
+by remaining native qualification.
+
+A diagnostic UIKit fixture needs separate evidence for signing/provisioning,
+ordinary installation, startup, event receipt, and real control action. A signed
+flat iPhoneOS build or an exported IPA alone does not prove it is runnable on the
+Mac. Do not fabricate an installed wrapper or bypass trust settings. Any required
+foreground setup needs separate authority and must not be counted as a
+background-input trial.
 
 Prepare a complete workflow before its acceptance run: collect authorized
 reference frames, establish recognition regions and control locations, then author
@@ -306,7 +352,7 @@ per-click `run` commands and independent screenshot inspectors open and close
 different sessions and must not be reported as a continuous-capture trial.
 
 The Rust facade's
-[`TargetProcessIdentity`](https://github.com/pashifika/mado-pilot/blob/85ccc580cd28ffb9b0b52271f6c87f1af0109a04/crates/automation/capture/src/descriptor.rs)
+[`TargetProcessIdentity`](https://github.com/pashifika/mado-pilot/blob/acc5d98ae8cfc4958970be826a28011bc12185c9/crates/automation/capture/src/descriptor.rs)
 is optional discovery provenance, not continuing liveness or input authority.
 macOS publishes paths from its retained application and exact launch-value bits.
 Windows publishes the executable path and creation value from the same retained
@@ -322,9 +368,10 @@ The action shapes are `{"kind":"key_down","key":"A"}`,
 `{"kind":"key_up","key":"A"}`, and
 `{"kind":"click","x":100,"y":200,"button":"left"}`. Click coordinates are finite
 capture pixels inside the retained observation; buttons are `left`, `right`, or
-`middle`. A native click expands into move/press/release, and all three SDK events
-consume the native attempt budget. Keys must be balanced inside one sequence;
-unowned releases, repeated presses, unsupported names, and held keys are refused.
+`middle`. By default, a native click expands into move/press/release, consuming
+three SDK events. A positive `click_hold_ms` inserts a delay and consumes four.
+Keys must be balanced inside one sequence; unowned releases, repeated presses,
+unsupported names, and held keys are refused.
 `representative_actions` declares approved operation kinds, not a title-based
 permission or an instruction to execute those example actions.
 
