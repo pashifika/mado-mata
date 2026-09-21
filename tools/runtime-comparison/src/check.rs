@@ -674,29 +674,34 @@ pub fn run() -> Result<Value, Fault> {
             "return {readiness=function() return 'Ready' end,workflow=function() while true do end end}"
         };
         let inventory = replace_entry(base, loop_source)?;
-        let record = run_once(
+        let record = run_once_after_milestone(
             &plan(candidate, "success", "template-first"),
             &inventory,
-            Some(100),
+            "VmHookReached",
+            100,
             true,
-            None,
         )?;
+        let vm_hook = record
+            .milestones
+            .iter()
+            .position(|event| event["event"] == "VmHookReached");
+        let control_lost = record.milestones.iter().position(|event| {
+            event["event"] == "StopRequested" && event["reason"] == "ControlLost"
+        });
         let passed = record
             .primary
             .as_ref()
             .is_some_and(|e| e.category == "Cancelled")
             && !record.forced
             && record.cleanup["clean"] == true
-            && record
-                .milestones
-                .iter()
-                .any(|m| m["reason"] == "ControlLost");
+            && record.exit_code == Some(0)
+            && matches!((vm_hook, control_lost), (Some(hook), Some(stop)) if hook < stop);
         case(
             &mut rows,
             &format!("{candidate}-control-eof"),
             record,
             passed,
-            "child-side cancellation progresses on control EOF without another command",
+            "control EOF after observed VM entry cancels without another command and completes clean cleanup",
         );
         for name in [
             "readonly",
@@ -863,7 +868,7 @@ pub fn run() -> Result<Value, Fault> {
         );
     }
     let held_plan = plan("rust", "held-work", "template-first");
-    let held = run_once(&held_plan, &inventories["rust"], Some(100), false, None)?;
+    let held = run_once_after_milestone(&held_plan, &inventories["rust"], "WorkHeld", 100, false)?;
     let held_passed = held.forced
         && held.cleanup["clean"] != true
         && held.milestones.iter().any(|row| row["event"] == "WorkHeld");

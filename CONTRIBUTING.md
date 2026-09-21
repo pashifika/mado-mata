@@ -11,12 +11,15 @@ See [Claude symlink setup](docs/development-guidance.md#claude-symlink) for Git
 and Windows link-creation prerequisites; a flattened text file is not equivalent.
 
 Run `python3 tools/ci/check.py` from the product root after the documented setup.
-It checks governance, workflows, documentation, and the controlled runtime
-comparison's Rust build, tests, CLI, and trusted TypeScript compiler. The narrower
-`--policy-only` mode does not exercise the executable; `--runtime-only` omits
-actionlint and local-link checks. Include actual commands, results, and unexecuted
-scope in the PR. Hosted controlled checks are not native qualification or runtime
-adoption evidence. Keep private paths, credentials, screenshots, and raw native
+It checks governance, workflows, documentation, the controlled runtime's Rust
+build/tests/CLI/compiler, and the desktop frontend and shell-independent Rust
+core. On macOS it also compiles the desktop shell. The narrower `--policy-only`
+mode does not exercise either executable; `--runtime-only` includes runtime and
+desktop checks but omits actionlint and local-link checks. Use the
+[desktop guide](docs/desktop.md) for checkout build/run and separate local macOS
+GUI acceptance. Include actual commands, results, and unexecuted scope in the PR.
+Hosted builds do not verify GUI interaction, native qualification, or runtime
+adoption. Keep private paths, credentials, screenshots, and raw native
 execution evidence out of public descriptions.
 
 ## Select the route before implementation
