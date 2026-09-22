@@ -312,13 +312,27 @@ impl Application {
     pub fn check_environment(
         &self,
         replay_descriptor_path: Option<String>,
+        package_inventory_identity: Option<String>,
     ) -> Result<String, Fault> {
         if self.closing.load(Ordering::Acquire) {
             return Err(Fault::new("Closing", "Application is closing"));
         }
-        let package = lock(&self.selected)
-            .as_ref()
-            .map(|selected| (selected.path.clone(), selected.inventory.identity.clone()));
+        let package = match package_inventory_identity {
+            Some(identity) => {
+                let selected = lock(&self.selected);
+                let selected = selected
+                    .as_ref()
+                    .filter(|selected| selected.inventory.identity == identity)
+                    .ok_or_else(|| {
+                        Fault::new(
+                            "StaleIdentity",
+                            "Selected package changed; inspect it again",
+                        )
+                    })?;
+                Some((selected.path.clone(), identity))
+            }
+            None => None,
+        };
         let store = self.store.clone();
         let (acquired, ready) = mpsc::sync_channel(1);
         let run = self.runner.check_environment_with_preparation(
@@ -648,6 +662,52 @@ mod tests {
     }
 
     #[test]
+    fn environment_check_refuses_missing_or_stale_package_selection() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let path = package_path();
+        let identity = application.runner.inspect(&path).unwrap().inventory_identity;
+        let error = application
+            .check_environment(None, Some(identity.clone()))
+            .unwrap_err();
+        assert_eq!(error.category, "StaleIdentity");
+        assert!(application.runner.poll().run.is_none());
+
+        application.select(&path).unwrap();
+        let replacement = application.select(&fixture.numeric_package()).unwrap();
+        assert_ne!(replacement.package.inventory_identity, identity);
+        let error = application
+            .check_environment(None, Some(identity))
+            .unwrap_err();
+        assert_eq!(error.category, "StaleIdentity");
+        assert!(application.runner.poll().run.is_none());
+    }
+
+    #[test]
+    fn environment_check_without_package_does_not_inherit_cached_selection() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let selection = application.select(&package_path()).unwrap();
+        let run = application.check_environment(None, None).unwrap();
+        let terminal = settled(application);
+        assert_eq!(terminal.run.as_deref(), Some(run.as_str()));
+        let fault = terminal.error.unwrap();
+        assert_eq!(fault.category, "EnvironmentUnset");
+        assert!(fault.context["package_inventory_identity"].is_null());
+
+        // Omitting the package must not discard the cached inspection either.
+        let identity = selection.package.inventory_identity;
+        let run = application
+            .check_environment(None, Some(identity.clone()))
+            .unwrap();
+        let terminal = settled(application);
+        assert_eq!(terminal.run.as_deref(), Some(run.as_str()));
+        let fault = terminal.error.unwrap();
+        assert_eq!(fault.category, "EnvironmentUnset");
+        assert_eq!(fault.context["package_inventory_identity"], identity);
+    }
+
+    #[test]
     fn stale_saved_values_are_refused_before_runner_startup() {
         let fixture = Fixture::new();
         let application = &fixture.application;
@@ -744,7 +804,7 @@ mod tests {
         let (checked, check) = mpsc::sync_channel(1);
         let checking = application.clone();
         let competitor = std::thread::spawn(move || {
-            let _ = checked.send(checking.check_environment(None));
+            let _ = checked.send(checking.check_environment(None, None));
         });
         let refusal = check.recv_timeout(Duration::from_secs(2));
         let premature = admission.recv_timeout(Duration::from_millis(100));

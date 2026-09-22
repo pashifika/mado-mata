@@ -96,10 +96,14 @@ async fn start(request: StartRequest, state: tauri::State<'_, Backend>) -> Resul
 #[tauri::command]
 async fn check_environment(
     replay_descriptor_path: Option<String>,
+    package_inventory_identity: Option<String>,
     state: tauri::State<'_, Backend>,
 ) -> Result<String, Fault> {
     let application = state.application.clone();
-    background(move || application.check_environment(replay_descriptor_path)).await
+    background(move || {
+        application.check_environment(replay_descriptor_path, package_inventory_identity)
+    })
+    .await
 }
 
 #[tauri::command]

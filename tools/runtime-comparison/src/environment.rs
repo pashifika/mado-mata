@@ -234,6 +234,7 @@ pub fn capture_replay(
         control.check()?;
         let asset = &declarations[&frame.asset];
         if asset["format"] != "raw-rgba8"
+            || frame.pixel_format != "rgba8"
             || asset["width"].as_u64() != Some(u64::from(frame.width))
             || asset["height"].as_u64() != Some(u64::from(frame.height))
         {
@@ -819,6 +820,7 @@ mod tests {
                     "asset":"marker","width":1,"height":4,"pixel_format":"rgba8","captured_ns":0,"discontinuous":false,"placement":null,
                 }),
             ),
+            ("pixel format mismatch", "/frames/0/pixel_format", json!("bgra8")),
             ("nonincreasing timestamp", "/frames/1/captured_ns", json!(0)),
             (
                 "uncaptured frame",

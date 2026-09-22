@@ -77,6 +77,44 @@ fn run_separately(
 }
 
 #[test]
+fn pre_spawn_stop_retains_known_no_child_cleanup() {
+    let plan: Plan =
+        serde_json::from_str(include_str!("../fixtures/controlled-plan.json")).unwrap();
+    let inventory = Inventory::capture(
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/javascript")),
+        &plan.limits,
+    )
+    .unwrap();
+    let (progress, _events) = mpsc::sync_channel(16);
+    let (logs, _messages) = mpsc::sync_channel(1);
+    let observer = runner::Observer {
+        progress,
+        logs,
+        dropped_logs: Arc::new(AtomicU64::new(0)),
+    };
+    // Both public supervisor paths must distinguish no child from unknown cleanup.
+    let faults = [
+        runner::run_once(&plan, &inventory, None, false, Some(&mut || true)).unwrap_err(),
+        runner::run_once_with_executable(
+            Path::new(env!("CARGO_BIN_EXE_mado-runtime-comparison")),
+            &plan,
+            &inventory,
+            &mut || true,
+            &observer,
+        )
+        .unwrap_err(),
+    ];
+    for fault in faults {
+        assert_eq!(fault.category, "Cancelled");
+        assert_eq!(fault.context["stage"], "child_startup");
+        assert_eq!(fault.context["boundary"], "before_spawn");
+        assert_eq!(fault.context["child_started"], false);
+        assert_eq!(fault.context["cleanup"]["clean"], true);
+        assert_eq!(fault.context["cleanup"]["child_started"], false);
+    }
+}
+
+#[test]
 fn separate_supervisor_records_runtime_identity_through_cleanup() {
     let executable = Path::new(env!("CARGO_BIN_EXE_mado-runtime-comparison"));
     let runtime_sha256 = executable_sha256(executable);

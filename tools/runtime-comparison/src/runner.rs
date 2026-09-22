@@ -934,7 +934,11 @@ fn supervise(
         return Err(Fault::new(
             "Cancelled",
             "Stop requested before child startup",
-        ));
+        )
+        .with_context(json!({
+            "stage":"child_startup","boundary":"before_spawn","child_started":false,
+            "cleanup":{"clean":true,"child_started":false}
+        })));
     }
     let started = Instant::now();
     let mut command = Command::new(executable);
@@ -953,7 +957,11 @@ fn supervise(
         return Err(Fault::new(
             "Cancelled",
             "Stop requested before child startup",
-        ));
+        )
+        .with_context(json!({
+            "stage":"child_startup","boundary":"before_spawn","child_started":false,
+            "cleanup":{"clean":true,"child_started":false}
+        })));
     }
     let mut child = OwnedChild(command.spawn().map_err(|error| {
         Fault::new("ChildStartup", error.to_string()).with_context(json!({

@@ -50,7 +50,7 @@ function ResultPanel({view, disclosed, onDisclose}: {view: ControllerView; discl
   const completed = Array.isArray(source.completed_stages) ? source.completed_stages.map(String) : [];
   return <>
     <div className="result-facts">
-      <div><span>Result status</span><strong>{String(result?.status ?? (view.state === 'terminal' && view.error ? view.error.category === 'Cancelled' ? 'Cancelled' : 'Refused' : 'Not settled'))}</strong></div>
+      <div><span>Result status</span><strong>{String(result?.status ?? (view.state === 'terminal' && view.error ? view.error.category : 'Not settled'))}</strong></div>
       <div><span>Entry outcome</span><strong>{String(result?.entry_outcome ?? 'Unobserved')}</strong></div>
       <div><span>Cleanup</span><strong>{cleanupLabel(result, source)}</strong></div>
       <div><span>Forced containment</span><strong>{result?.forced === true ? 'Yes' : result?.forced === false ? 'No' : 'Unobserved'}</strong></div>
@@ -356,7 +356,7 @@ export default function App() {
       if (!current?.ocr_environment || !sameEnvironment(current.ocr_environment, envParsed.environment)) {
         throw {category: 'Draft', message: 'Saved settings no longer match this environment. Save the environment, then Check again.', context: null};
       }
-      const operation = await invoke<string>('check_environment', {replayDescriptorPath: selectedDescriptor});
+      const operation = await invoke<string>('check_environment', {replayDescriptorPath: selectedDescriptor, packageInventoryIdentity: selection?.inventory_identity ?? null});
       expectedRun.current = operation;
       const association: CheckAssociation = {
         operation, environment: current.ocr_environment, descriptorPath: selectedDescriptor, packageInventoryIdentity: selection?.inventory_identity ?? null,

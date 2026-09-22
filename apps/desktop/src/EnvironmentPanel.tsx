@@ -27,7 +27,7 @@ function CheckCard({check, stale}: {check: LastCheck; stale: string[]}) {
       <span className={`tag ${stale.length ? 'stale' : 'current'}`}>{stale.length ? 'Stale association' : 'Current association'}</span></div>
     <dl className="run-identity">
       <dt>Operation</dt><dd><code>{association.operation}</code></dd>
-      <dt>Outcome</dt><dd id="check-outcome">{result ? String(result.status ?? 'Settled') : view.error ? 'Refused' : 'Unsettled'}{hasFailure && <> · {faultSummary(failure, true)}</>}</dd>
+      <dt>Outcome</dt><dd id="check-outcome">{result ? String(result.status ?? 'Settled') : view.error ? faultSummary(view.error, true) : 'Unsettled'}{result && hasFailure && <> · {faultSummary(failure, true)}</>}</dd>
       <dt>Stage</dt><dd>{text(source.stage) ?? 'Unobserved'}</dd>
       <dt>Completed</dt><dd>{completed.length ? completed.join(' → ') : 'None recorded'}</dd>
       <dt>Initialization</dt><dd>{initializationLabel(view.progress)}</dd>
@@ -54,7 +54,7 @@ export default function EnvironmentPanel(props: Props) {
   const fixedMismatch = saved !== null && (saved.language !== ENVIRONMENT_LANGUAGE || saved.provider !== ENVIRONMENT_PROVIDER || saved.runtime_profile !== ENVIRONMENT_RUNTIME_PROFILE || saved.model !== savedModel);
   const checkBlock = !loaded ? 'Settings are not loaded.' : !saved ? 'Save an OCR environment to enable Check.'
     : dirty ? 'Check reads saved settings only. Save the environment first.' : active ? 'Another operation owns the runner until its terminal outcome is recorded.' : null;
-  const blank = !draft.profile && !draft.model_root && !draft.runtime_path && !draft.library_paths;
+  const blank = !draft.profile && !draft.model_root.trim() && !draft.runtime_path.trim() && !draft.library_paths.trim();
   function field(key: keyof EnvironmentDraft, value: string) {
     onDraft({...draft, [key]: value});
   }
@@ -87,9 +87,10 @@ export default function EnvironmentPanel(props: Props) {
           placeholder="Absolute path to the pinned ONNX runtime library" onChange={event => field('runtime_path', event.target.value)}/>
         {errors.runtime_path && <p className="field-error">{errors.runtime_path}</p>}
         <label htmlFor="library-paths">Reviewed native library paths · one per line</label>
-        <textarea id="library-paths" className="library-paths" value={draft.library_paths} disabled={locked} spellCheck={false} rows={3}
+        <textarea id="library-paths" className="library-paths" value={draft.library_paths} disabled={locked} spellCheck={false} rows={3} aria-invalid={Boolean(errors.library_paths)}
           placeholder="Explicit non-system libraries the engine child may load" onChange={event => field('library_paths', event.target.value)}/>
-        <p className="muted">Enter absolute paths; Rust canonicalizes them and derives file and SDK identities during Check and again on every Start. Listing a path is not an audit of every loaded image.</p>
+        {errors.library_paths && <p className="field-error">{errors.library_paths}</p>}
+        <p className="muted">Enter 1–64 absolute paths; blank lines are ignored. Rust canonicalizes them and derives file and SDK identities during Check and again on every Start. Listing a path is not an audit of every loaded image.</p>
         <div className="button-row">
           <button id="save-environment" className="primary" disabled={locked || !loaded || !dirty || Object.keys(errors).length > 0} onClick={onSave}>{blank ? 'Save as unconfigured' : 'Save environment'}</button>
           <button id="clear-environment" disabled={locked || blank} onClick={() => onDraft({profile: '', model_root: '', runtime_path: '', library_paths: ''})}>Clear draft</button>

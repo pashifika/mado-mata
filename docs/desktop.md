@@ -172,7 +172,8 @@ valid `.json` file intact.
 
 1. In **OCR environment**, choose an offered supported profile and enter the
    absolute model root, pinned ONNX Runtime library, and reviewed non-system
-   library locations, one library per line. Use the pinned
+   library locations, **1–64 libraries**, one per line. Blank lines are ignored
+   and surrounding whitespace is trimmed. Use the pinned
    [engine prerequisites](runtime-native.md#install-the-engine-prerequisites).
    Model bytes must match the selected profile; a filename alone is insufficient.
    Rust resolves selected aliases to canonical paths and derives byte lengths,
@@ -188,9 +189,13 @@ valid `.json` file intact.
    inspected package inventory. No arbitrary asset paths, executable override,
    native authority, or unknown fields are accepted.
 4. Choose **Check saved environment**. Unsaved environment edits must be saved
-   first. Check reserves the same operation slot as Start before settings or
-   resource I/O; it is cancellable through **Stop**. Without a corpus it reports
-   file-validation progress and the missing prerequisite, never readiness.
+   first. Check uses the currently inspected package identity, never a forgotten
+   selection retained by the backend. With no inspected package, it can still
+   validate environment files but cannot initialize a corpus. A mismatched
+   package identity is refused before an operation starts. Check reserves the
+   same operation slot as Start before settings or resource I/O; it is cancellable
+   through **Stop**. Without a corpus it reports file-validation progress and the
+   missing prerequisite, never readiness.
 5. With a valid corpus, Check starts the real owned engine child and initializes
    the replay backend. It does not resolve a workload profile, compile or
    evaluate package modules, or call readiness/workflow. `NotExecuted`, absent
@@ -230,7 +235,9 @@ fail in-flight or subsequent validation; it never updates captured identities.
 terminal outcome and owned-child cleanup before starting again. A late record
 cannot replace a successor's state. No automatic retry replaces an unsettled run.
 
-The UI keeps entry outcome, receipts, cancellation, and cleanup separate. A Stop
+The UI displays the recorded result status, or the typed error category when no
+result record exists; a timeout or cancellation is not relabeled as a refusal.
+It keeps entry outcome, receipts, cancellation, and cleanup separate. A Stop
 request is not proof of physical cleanup. For a started child, clean cleanup
 requires acknowledgement, zero exit, and no forced containment; script failure
 can still have clean cleanup. A known pre-child refusal is labeled separately.

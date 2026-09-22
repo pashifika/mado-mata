@@ -128,6 +128,7 @@ export function readEnvironment(draft:EnvironmentDraft):{environment:OcrEnvironm
   if (!supported) errors.profile = draft.profile ? 'This saved profile is not supported by this desktop build.' : 'Choose a supported OCR profile.';
   if (!modelRoot) errors.model_root = 'Enter the model root directory.';
   if (!runtimePath) errors.runtime_path = 'Enter the OCR runtime library path.';
+  if (libraries.length < 1 || libraries.length > 64) errors.library_paths = 'Enter 1–64 reviewed native library paths, one per line.';
   if (Object.keys(errors).length > 0 || !supported) return {environment:null, errors};
   return {environment:{
     model:supported.model, profile:supported.profile, language:ENVIRONMENT_LANGUAGE, provider:ENVIRONMENT_PROVIDER,
