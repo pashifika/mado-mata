@@ -2,14 +2,18 @@ import {useEffect, useMemo, useRef, useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {getCurrentWindow} from '@tauri-apps/api/window';
 import SchemaForm from './SchemaForm.tsx';
-import {acceptController, defaultDraft, readDraft, retainLogs, verifiedCleanup} from './state.ts';
-import type {LogStore} from './state.ts';
+import EnvironmentPanel from './EnvironmentPanel.tsx';
+import type {LastCheck} from './EnvironmentPanel.tsx';
+import {DISCLOSURE_LIMIT, acceptController, boundedText, cleanupLabel, defaultDraft, environmentDraft, faultSummary, initializationLabel, readDraft, readEnvironment, record, retainLogs, sameEnvironment, staleReasons, text} from './state.ts';
+import type {CheckAssociation, EnvironmentDraft, LogStore} from './state.ts';
 import type {ControllerView, Fault, Json, LogBatch, PackageInfo, Poll, Profile, Selection, Settings} from './types.ts';
 
-const idle: ControllerView = {run: null, state: 'idle', result: null, error: null, progress: [], dropped_logs: 0};
+const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0};
 const busyPhases = new Set(['preparing', 'running', 'stopping']);
 type Losses = Omit<LogBatch, 'entries'>;
-type RunSnapshot = {run: string; packageId: string; profileName: string; profileId: string; scenario: string; values: Record<string, Json>};
+type RunSnapshot =
+  | {kind: 'run'; run: string; lane: string; packageId: string; profileName: string; profileId: string; scenario: string; descriptorPath: string | null; values: Record<string, Json>}
+  | {kind: 'check'; run: string; association: CheckAssociation};
 
 function fault(error: unknown): Fault {
   if (error !== null && typeof error === 'object' && 'message' in error) {
@@ -19,41 +23,71 @@ function fault(error: unknown): Fault {
   return {category: 'Application', message: String(error), context: null};
 }
 
-function record(value: Json | undefined): Record<string, Json> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {};
-}
-
 function FaultMessage({value, title}: {value: Fault; title: string}) {
   return <section className="fault" role="alert"><strong>{title} · {value.category}</strong><p>{value.message}</p>
     {value.context !== null && <pre className="diagnostic">{JSON.stringify(value.context, null, 2)}</pre>}
   </section>;
 }
 
-function ResultPanel({view}: {view: ControllerView}) {
+function BoundedRecord({value}: {value: Json}) {
+  const bounded = boundedText(JSON.stringify(value, null, 2), DISCLOSURE_LIMIT);
+  return <>
+    <pre>{bounded.text}</pre>
+    {bounded.truncated > 0 && <p className="inline-warning">Display truncated: {bounded.truncated} more characters are retained by the backend record but not rendered.</p>}
+  </>;
+}
+
+function ResultPanel({view, disclosed, onDisclose}: {view: ControllerView; disclosed: boolean; onDisclose: (next: boolean) => void}) {
   const result = view.result;
+  // Preparation faults carry the same operation facts in their context as a settled result.
+  const source = result ?? record(view.error?.context);
   const observations = record(result?.observations);
-  const cleanup = record(result?.cleanup);
+  const build = record(result?.build);
+  const check = view.operation === 'environment_check';
+  const lane = text(result?.lane) ?? text(source.lane);
+  // Replay observations and script decisions can carry recognized text: private until disclosed.
+  const privateDetail = !check && lane !== null && lane !== 'controlled';
+  const completed = Array.isArray(source.completed_stages) ? source.completed_stages.map(String) : [];
   return <>
     <div className="result-facts">
-      <div><span>Result status</span><strong>{String(result?.status ?? (view.state === 'terminal' && view.error ? view.error.category === 'Cancelled' ? 'Cancelled' : 'Refused' : 'Not settled'))}</strong></div>
+      <div><span>Result status</span><strong>{String(result?.status ?? (view.state === 'terminal' && view.error ? view.error.category : 'Not settled'))}</strong></div>
       <div><span>Entry outcome</span><strong>{String(result?.entry_outcome ?? 'Unobserved')}</strong></div>
-      <div><span>Cleanup</span><strong>{verifiedCleanup(result) ? 'Clean' : cleanup.clean === false || result?.forced === true || (typeof result?.exit_code === 'number' && result.exit_code !== 0) ? 'Incomplete / not clean' : 'Unverified'}</strong></div>
+      <div><span>Cleanup</span><strong>{cleanupLabel(result, source)}</strong></div>
       <div><span>Forced containment</span><strong>{result?.forced === true ? 'Yes' : result?.forced === false ? 'No' : 'Unobserved'}</strong></div>
     </div>
-    {result && <div className="outcome-details">
-      <h3>Script decisions</h3>
-      {Array.isArray(observations.logs) && observations.logs.length > 0
-        ? <ul className="decision-list">{observations.logs.map((item, index) => <li key={index}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>)}</ul>
-        : <p className="muted">No decision was recorded.</p>}
-      <div className="evidence-grid">{['dispatches', 'receipts', 'accepted', 'effects', 'postconditions', 'sink'].map(key => <details key={key}>
-        <summary>{key}{Array.isArray(observations[key]) ? ` · ${observations[key].length}` : ''}</summary>
-        <pre>{JSON.stringify(observations[key] ?? null, null, 2)}</pre>
-      </details>)}</div>
+    <dl className="run-identity identity-facts" id="identity-facts">
+      <dt>Stage</dt><dd>{text(source.stage) ?? (view.state === 'idle' ? 'No operation yet' : 'Unobserved')}</dd>
+      <dt>Completed</dt><dd>{completed.length ? completed.join(' → ') : 'None recorded'}</dd>
+      <dt>Environment</dt><dd><code>{text(source.environment_identity) ?? 'Not derived'}</code></dd>
+      <dt>Corpus</dt><dd><code>{text(source.corpus_identity) ?? 'Not derived'}</code></dd>
+      {check && <><dt>Selection</dt><dd><code>{text(source.selection_identity) ?? 'Unobserved'}</code></dd><dt>Initialization</dt><dd id="initialization">{initializationLabel(view.progress)}</dd></>}
+      <dt>Child build</dt><dd>{build.engine_enabled === undefined ? 'No startup identity observed' : <>engine {build.engine_enabled === true ? 'enabled' : 'absent'} · <code>{text(build.executable_sha256) ?? 'unhashed'}</code></>}</dd>
+    </dl>
+    {result && check && <div className="outcome-details">
+      <p className="muted">No package module, readiness, or workflow code was evaluated. Engine facts are the child's own report.</p>
+      <details><summary>Engine facts</summary><BoundedRecord value={observations.engine ?? null}/></details>
       <details><summary>Cleanup evidence</summary><pre>{JSON.stringify(result.cleanup ?? null, null, 2)}</pre></details>
     </div>}
-    <details id="result"><summary>Full result record · build metadata and diagnostics</summary>
-      <pre>{JSON.stringify(result, null, 2)}</pre>
-    </details>
+    {result && !check && <div className="outcome-details">
+      {privateDetail && !disclosed
+        ? <p className="muted">Script decisions and observation records stay hidden until disclosed below. Full records are not automatically copied to ordinary logs; scripts can explicitly emit bounded messages.</p>
+        : <>
+          <h3>Script decisions</h3>
+          {Array.isArray(observations.logs) && observations.logs.length > 0
+            ? <ul className="decision-list">{observations.logs.map((item, index) => <li key={index}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>)}</ul>
+            : <p className="muted">No decision was recorded.</p>}
+          <div className="evidence-grid">{['dispatches', 'receipts', 'accepted', 'effects', 'postconditions', 'sink', ...(privateDetail ? ['engine'] : [])].map(key => <details key={key}>
+            <summary>{key}{Array.isArray(observations[key]) ? ` · ${observations[key].length}` : ''}</summary>
+            <BoundedRecord value={observations[key] ?? null}/>
+          </details>)}</div>
+        </>}
+      <details><summary>Cleanup evidence</summary><pre>{JSON.stringify(result.cleanup ?? null, null, 2)}</pre></details>
+    </div>}
+    <div id="result" className="private-disclosure">
+      <button id="disclose-result" disabled={!result && !view.error} onClick={() => onDisclose(!disclosed)}>{disclosed ? 'Hide full record' : 'Disclose full record · private'}</button>
+      <span className="muted">Build metadata, diagnostics{privateDetail ? ', and recognition detail' : ''}. Rendered here only, bounded to {DISCLOSURE_LIMIT / 1024} KiB.</span>
+      {disclosed && <BoundedRecord value={result ?? (view.error ? {category: view.error.category, message: view.error.message, context: view.error.context} : null)}/>}
+    </div>
   </>;
 }
 
@@ -68,6 +102,11 @@ export default function App() {
   const [draft, setDraft] = useState<Record<string, Json>>({});
   const [validation, setValidation] = useState<Record<string, Json> | null>(null);
   const [scenario, setScenario] = useState('workflow');
+  const [lane, setLane] = useState('controlled');
+  const [descriptorPath, setDescriptorPath] = useState('');
+  const [envDraft, setEnvDraft] = useState<EnvironmentDraft>(environmentDraft(null));
+  const [lastCheck, setLastCheck] = useState<LastCheck | null>(null);
+  const [disclosed, setDisclosed] = useState(false);
   const [view, setView] = useState<ControllerView>(idle);
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null);
   const [starting, setStarting] = useState(false);
@@ -87,6 +126,7 @@ export default function App() {
   const commandInFlight = useRef(true);
   const revision = useRef(0);
   const retention = useRef(1000);
+  const envRevision = useRef(0);
   const selectedProfile = profiles.find(profile => profile.id === selectedId);
   const parsed = useMemo(() => selection ? readDraft(selection.schema, draft) : {values: draft, errors: {}}, [selection, draft]);
   const numericErrors = Object.keys(parsed.errors).length > 0;
@@ -94,8 +134,33 @@ export default function App() {
   const dirty = valuesDirty || name !== selectedProfile?.name;
   const bound = !selectedProfile || (selectedProfile.package_id === selection?.package_id && selectedProfile.schema_identity === selection?.schema_identity);
   const active = starting || busyPhases.has(view.state);
-  const locked = Boolean(operation) || closing;
+  const locked = Boolean(operation) || starting || closing;
   const primary = view.error ?? (view.result?.primary ? fault(view.result.primary) : null);
+  const privatePrimary = view.operation !== 'environment_check' &&
+    (snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane)) !== 'controlled';
+  const envParsed = useMemo(() => readEnvironment(envDraft), [envDraft]);
+  const envErrors = Object.keys(envParsed.errors).length > 0;
+  const savedEnvironment = settings?.ocr_environment ?? null;
+  const envDirty = envErrors || !sameEnvironment(envParsed.environment, savedEnvironment);
+  const selectedDescriptor = descriptorPath.trim() || null;
+  const checkStale = lastCheck ? staleReasons(lastCheck.association, {
+    saved: savedEnvironment, draftDirty: envDirty, descriptorPath: selectedDescriptor, packageInventoryIdentity: selection?.inventory_identity ?? null,
+  }) : [];
+  const startBlock = lane === 'replay' && !selectedDescriptor ? 'Replay needs a recorded corpus descriptor path.'
+    : lane === 'replay' && !savedEnvironment ? 'Replay needs a saved OCR environment.' : null;
+
+  // A terminal check is retained independently of later runs, keyed to what it observed.
+  useEffect(() => {
+    if (snapshot?.kind === 'check' && view.run === snapshot.run && view.state === 'terminal') {
+      setLastCheck({association: snapshot.association, view});
+    }
+  }, [view, snapshot]);
+
+  function editEnvironment(next: EnvironmentDraft) {
+    envRevision.current += 1;
+    setEnvDraft(next);
+    setNotice('');
+  }
 
   function editDraft(next: Record<string, Json>) {
     revision.current += 1;
@@ -177,6 +242,7 @@ export default function App() {
         const saved = await invoke<Settings>('settings');
         if (!alive) return;
         setSettings(saved);
+        setEnvDraft(environmentDraft(saved.ocr_environment));
         setLogLimit(String(saved.gui_log_limit));
         retention.current = saved.gui_log_limit;
         setLogs(old => retainLogs(old, [], saved.gui_log_limit));
@@ -242,16 +308,18 @@ export default function App() {
   }
 
   async function startRun() {
-    if (startInFlight.current || active || commandInFlight.current || closing) return;
+    if (startInFlight.current || active || commandInFlight.current || closing || startBlock) return;
     let values: Record<string, Json>;
     try {values = valuesForCommand();} catch (cause) {setError(fault(cause)); return;}
     if (!selection) return;
     const profileId = selectedProfile && !valuesDirty ? selectedProfile.id : 'draft';
+    const replay = lane === 'replay';
     const request = {
       package_path: packagePath, inventory_identity: selection.inventory_identity,
       package_id: selectedProfile?.package_id ?? selection.package_id,
       schema_identity: selectedProfile?.schema_identity ?? selection.schema_identity,
-      profile_id: profileId, values, lane: 'controlled', scenario,
+      profile_id: profileId, values, lane, scenario: replay ? 'workflow' : scenario,
+      replay_descriptor_path: replay ? selectedDescriptor : null,
     };
     const profileName = selectedProfile && !valuesDirty ? selectedProfile.name : name || 'Untitled draft';
     startInFlight.current = true;
@@ -259,11 +327,42 @@ export default function App() {
     setStarting(true);
     setError(null);
     setNotice('');
+    setDisclosed(false);
     try {
       const run = await invoke<string>('start', {request});
       expectedRun.current = run;
-      setSnapshot({run, packageId: request.package_id, profileName, profileId, scenario, values});
+      setSnapshot({kind: 'run', run, lane, packageId: request.package_id, profileName, profileId, scenario: request.scenario, descriptorPath: request.replay_descriptor_path, values});
       setView({...idle, run, state: 'preparing'});
+    } catch (cause) {
+      setError(fault(cause));
+    } finally {
+      epoch.current += 1;
+      startInFlight.current = false;
+      setStarting(false);
+    }
+  }
+
+  // Check reads saved settings only; the association records exactly what the backend will read.
+  async function checkEnvironment() {
+    if (startInFlight.current || active || commandInFlight.current || closing || envDirty) return;
+    startInFlight.current = true;
+    epoch.current += 1;
+    setStarting(true);
+    setError(null);
+    setNotice('');
+    setDisclosed(false);
+    try {
+      const current = settings;
+      if (!current?.ocr_environment || !sameEnvironment(current.ocr_environment, envParsed.environment)) {
+        throw {category: 'Draft', message: 'Saved settings no longer match this environment. Save the environment, then Check again.', context: null};
+      }
+      const operation = await invoke<string>('check_environment', {replayDescriptorPath: selectedDescriptor, packageInventoryIdentity: selection?.inventory_identity ?? null});
+      expectedRun.current = operation;
+      const association: CheckAssociation = {
+        operation, environment: current.ocr_environment, descriptorPath: selectedDescriptor, packageInventoryIdentity: selection?.inventory_identity ?? null,
+      };
+      setSnapshot({kind: 'check', run: operation, association});
+      setView({...idle, run: operation, state: 'preparing', operation: 'environment_check'});
     } catch (cause) {
       setError(fault(cause));
     } finally {
@@ -300,9 +399,22 @@ export default function App() {
     setNotice(`Saved GUI log limit: ${saved.gui_log_limit}. Run results and file logs are unchanged.`);
   }
 
+  async function saveEnvironment() {
+    if (envErrors) throw {category: 'Draft', message: 'Correct the environment fields before saving. The saved environment is unchanged.', context: envParsed.errors};
+    const savedRevision = envRevision.current;
+    const environment = envParsed.environment;
+    const previous = await invoke<Settings>('settings');
+    const saved = await invoke<Settings>('save_settings', {settings: {...previous, ocr_environment: environment}});
+    setSettings(saved);
+    if (savedRevision === envRevision.current) setEnvDraft(environmentDraft(saved.ocr_environment));
+    setNotice(saved.ocr_environment
+      ? `Saved OCR environment · ${saved.ocr_environment.profile}. Nothing was initialized; run Check. Active operations keep their captured environment.`
+      : 'Saved settings with no OCR environment. Controlled runs are unaffected; replay and Check need a saved environment.');
+  }
+
   return <div className="app-shell">
     <header className="app-header"><div><span className="eyebrow">CONTROLLED DESKTOP RUNNER</span><h1>MadoMata</h1></div>
-      <div className="header-actions"><span className="lane-badge">QuickJS · no native authority</span>
+      <div className="header-actions"><span className="lane-badge">QuickJS · recorded replay only · no live authority</span>
         <button id="close" disabled={closing} onClick={async () => {
           setClosing(true);
           try {await getCurrentWindow().close();} catch (cause) {setError(fault(cause)); setClosing(false);}
@@ -357,8 +469,13 @@ export default function App() {
         </section>
       </aside>
       <main className="main-content">
-        <div className="operation-status" role="status">{operation || notice || 'Edits affect the next run, never the active snapshot.'}</div>
-        <div id="error">{error && <FaultMessage title="Action failed" value={error}/>} {primary && <FaultMessage title="Primary run error" value={primary}/>}</div>
+        <div className="operation-status" role="status">{operation || notice || 'Edits affect the next operation, never the active snapshot.'}</div>
+        <div id="error">{error && <FaultMessage title="Action failed" value={error}/>}
+          {primary && (privatePrimary || view.operation === 'environment_check'
+            ? <section className="fault" role="alert"><strong>{view.operation === 'environment_check' ? 'Primary check error' : 'Primary run error'} · {faultSummary(primary, !privatePrimary)}</strong>
+                <p>Full diagnostics are available through explicit private disclosure below.</p></section>
+            : <FaultMessage title="Primary run error" value={primary}/>)}
+        </div>
         {pollError && <FaultMessage title="Controller connection failed · last known state retained" value={pollError}/>}
         <div className="editor-run-grid">
           <section className="panel editor-panel" aria-labelledby="draft-heading">
@@ -375,24 +492,38 @@ export default function App() {
             {validation && <details className="validated"><summary>Valid · effective values</summary><pre>{JSON.stringify(validation, null, 2)}</pre></details>}
           </section>
           <section className="panel run-panel" aria-labelledby="run-heading">
-            <div className="panel-heading"><div><span className="eyebrow">IMMUTABLE RUN</span><h2 id="run-heading">Execution</h2></div>
+            <div className="panel-heading"><div><span className="eyebrow">IMMUTABLE OPERATION</span><h2 id="run-heading">{view.operation === 'environment_check' ? 'Environment check' : 'Execution'}</h2></div>
               <span id="state" className={`phase phase-${starting ? 'preparing' : view.state}`}>{starting ? 'preparing' : view.state}</span></div>
-            <label htmlFor="scenario">Controlled scenario</label><select id="scenario" value={scenario} onChange={event => setScenario(event.target.value)}>
+            <label htmlFor="lane">Execution lane</label><select id="lane" value={lane} onChange={event => {setLane(event.target.value); setNotice('');}}>
+              <option value="controlled">Controlled · fixture observations, no recognition</option>
+              <option value="replay">Replay · recorded corpus, real recognition, controlled sink</option>
+              <option value="native" disabled>Native · refused, no live capture or input</option>
+            </select>
+            <label htmlFor="scenario">Controlled scenario</label><select id="scenario" value={lane === 'replay' ? 'workflow' : scenario} disabled={lane === 'replay'} onChange={event => setScenario(event.target.value)}>
               <option value="workflow">Workflow</option><option value="held-work">Held work · exercise Stop</option><option value="no-match">No match</option>
-            </select><p className="muted">Start uses {selectedProfile && !valuesDirty ? `saved profile “${selectedProfile.name}”` : 'the explicit draft shown here'}.</p>
-            <div className="run-buttons"><button id="start" className="primary" disabled={!selection || active || locked || numericErrors || !bound} onClick={() => void startRun()}>Start</button>
+            </select><p className="muted">Start uses {selectedProfile && !valuesDirty ? `saved profile “${selectedProfile.name}”` : 'the explicit draft shown here'}{lane === 'replay' ? `, the saved OCR environment, and descriptor ${selectedDescriptor ?? '(none)'}` : ''}. Every Start revalidates files; no check or inspection is reused.</p>
+            <div className="run-buttons"><button id="start" className="primary" disabled={!selection || active || locked || numericErrors || !bound || startBlock !== null} onClick={() => void startRun()}>Start</button>
               <button id="stop" className="stop-button" disabled={!view.run || !busyPhases.has(view.state) || view.state === 'stopping' || stopping || starting || closing} onClick={() => void stopRun()}>{stopping ? 'Requesting Stop…' : 'Stop'}</button></div>
-            <p className="authority-note">Submitted does not prove effect; Stop does not prove cleanup.</p>
-            <dl className="run-identity"><dt>Run ID</dt><dd id="run-id">{view.run ?? 'No run yet'}</dd>
-              {snapshot && <><dt>Captured profile</dt><dd>{snapshot.profileName} · {snapshot.profileId}</dd><dt>Package / scenario</dt><dd>{snapshot.packageId} / {snapshot.scenario}</dd></>}
+            {startBlock && <p className="muted" id="start-block">{startBlock}</p>}
+            <p className="authority-note">Submitted does not prove effect; Stop does not prove cleanup. Stop covers checks and runs alike.</p>
+            <dl className="run-identity"><dt>Operation ID</dt><dd id="run-id">{view.run ?? 'No operation yet'}</dd>
+              <dt>Kind</dt><dd id="operation-kind">{view.run ? view.operation === 'environment_check' ? 'Environment check · no package code' : `Run · ${snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane) ?? 'unknown'} lane` : 'Idle'}</dd>
+              {snapshot?.kind === 'run' && <><dt>Captured profile</dt><dd>{snapshot.profileName} · {snapshot.profileId}</dd><dt>Package / scenario</dt><dd>{snapshot.packageId} / {snapshot.scenario}</dd>
+                {snapshot.lane === 'replay' && <><dt>Descriptor</dt><dd>{snapshot.descriptorPath}</dd></>}</>}
+              {snapshot?.kind === 'check' && <><dt>Checked profile</dt><dd>{snapshot.association.environment?.profile ?? 'unconfigured'}</dd>
+                <dt>Descriptor</dt><dd>{snapshot.association.descriptorPath ?? 'none · initialization not attempted'}</dd></>}
             </dl>
-            {snapshot && <details><summary>Captured options · unchanged by draft edits</summary><pre>{JSON.stringify(snapshot.values, null, 2)}</pre></details>}
+            {snapshot?.kind === 'run' && <details><summary>Captured options · unchanged by draft edits</summary><pre>{JSON.stringify(snapshot.values, null, 2)}</pre></details>}
+            {snapshot?.kind === 'check' && <details><summary>Captured saved environment · unchanged by later edits</summary><pre>{JSON.stringify(snapshot.association.environment, null, 2)}</pre></details>}
             <h3>Progress milestones</h3><ol className="progress-list">{view.progress.map((event, index) => <li key={`${view.run}-${index}`}>
-              <details><summary>{String(event.event ?? 'Milestone')}{typeof event.at_us === 'number' ? ` · ${(event.at_us / 1000).toFixed(1)} ms` : ''}</summary><pre>{JSON.stringify(event, null, 2)}</pre></details>
+              <details><summary>{String(event.event ?? 'Milestone')}{text(event.stage) ? ` · ${event.stage}` : ''}{typeof event.at_us === 'number' ? ` · ${(event.at_us / 1000).toFixed(1)} ms` : ''}</summary><pre>{JSON.stringify(event, null, 2)}</pre></details>
             </li>)}</ol>{view.progress.length === 0 && <p className="muted">No milestones recorded.</p>}
-            <ResultPanel view={view}/>
+            <ResultPanel view={view} disclosed={disclosed} onDisclose={setDisclosed}/>
           </section>
         </div>
+        <EnvironmentPanel draft={envDraft} errors={envParsed.errors} onDraft={editEnvironment} saved={savedEnvironment} loaded={settings !== null}
+          dirty={envDirty} locked={locked} active={active} descriptorPath={descriptorPath} onDescriptorPath={path => {setDescriptorPath(path); setNotice('');}}
+          onSave={() => void command('Saving environment', saveEnvironment)} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale}/>
         <section className="panel logs-panel" aria-labelledby="logs-heading">
           <div className="panel-heading"><div><span className="eyebrow">STRUCTURED EVENT STREAM</span><h2 id="logs-heading">Logs</h2></div><span className="tag">{logs.items.length} / {settings?.gui_log_limit ?? 1000} retained</span></div>
           <dl className="loss-counters"><div><dt>Display evicted</dt><dd>{logs.evicted}</dd></div><div><dt>Source / controller dropped · current run</dt><dd>{view.dropped_logs}</dd></div>

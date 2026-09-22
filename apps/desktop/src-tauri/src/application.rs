@@ -36,7 +36,7 @@ struct Selected {
 
 pub struct Application {
     runner: DesktopController,
-    store: Mutex<Store>,
+    store: Arc<Mutex<Store>>,
     selected: Mutex<Option<Selected>>,
     logger: Logger,
     view: Mutex<Value>,
@@ -52,13 +52,13 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Application {
-    pub fn new(root: PathBuf, runner: PathBuf) -> Result<Arc<Self>, Fault> {
+    pub fn new(root: PathBuf, controlled: PathBuf, engine: PathBuf) -> Result<Arc<Self>, Fault> {
         let application = Arc::new(Self {
-            runner: DesktopController::new(runner),
-            store: Mutex::new(Store::new(root.clone())?),
+            runner: DesktopController::new(controlled, engine),
+            store: Arc::new(Mutex::new(Store::new(root.clone())?)),
             selected: Mutex::new(None),
             logger: Logger::new(root.join("logs"))?,
-            view: Mutex::new(json!({"state":"idle","run":null})),
+            view: Mutex::new(json!({"state":"idle","run":null,"operation":"run"})),
             closing: AtomicBool::new(false),
             bridge: Mutex::new(None),
             shutdown_outcome: OnceLock::new(),
@@ -272,22 +272,81 @@ impl Application {
             normalize_editor_numbers(&selected.inventory.schema, &mut request.values);
             desktop_options(&selected.inventory, request.values.clone())?;
         }
-        if request.profile_id != "draft" {
-            let profile = checked_profile(
-                &lock(&self.store),
-                &request.package_id,
-                &request.schema_identity,
-                &request.profile_id,
-            )?;
-            if !same_json_values(&profile.values, &request.values) {
-                return Err(Fault::new(
-                    "ProfileIdentity",
-                    "Saved profile values changed; select it again",
-                )
-                .with_context(json!({"profile_id":profile.id})));
-            }
+        let store = self.store.clone();
+        let (acquired, ready) = mpsc::sync_channel(1);
+        let run = self
+            .runner
+            .start_with_preparation(request, move |request, control| {
+                let store = lock(&store);
+                let _ = acquired.send(());
+                control.check()?;
+                let environment = if request.lane == "replay" {
+                    store.settings()?.ocr_environment
+                } else {
+                    None
+                };
+                if request.profile_id != "draft" {
+                    let profile = checked_profile(
+                        &store,
+                        &request.package_id,
+                        &request.schema_identity,
+                        &request.profile_id,
+                    )?;
+                    if !same_json_values(&profile.values, &request.values) {
+                        return Err(Fault::new(
+                            "ProfileIdentity",
+                            "Saved profile values changed; select it again",
+                        )
+                        .with_context(json!({"profile_id":profile.id})));
+                    }
+                }
+                control.check()?;
+                Ok(environment)
+            })?;
+        // The worker owns the store lock before admission returns. Later saves
+        // cannot overtake its immutable input capture, and all I/O stays reserved.
+        let _ = ready.recv();
+        Ok(run)
+    }
+
+    pub fn check_environment(
+        &self,
+        replay_descriptor_path: Option<String>,
+        package_inventory_identity: Option<String>,
+    ) -> Result<String, Fault> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(Fault::new("Closing", "Application is closing"));
         }
-        self.runner.start(request)
+        let package = match package_inventory_identity {
+            Some(identity) => {
+                let selected = lock(&self.selected);
+                let selected = selected
+                    .as_ref()
+                    .filter(|selected| selected.inventory.identity == identity)
+                    .ok_or_else(|| {
+                        Fault::new(
+                            "StaleIdentity",
+                            "Selected package changed; inspect it again",
+                        )
+                    })?;
+                Some((selected.path.clone(), identity))
+            }
+            None => None,
+        };
+        let store = self.store.clone();
+        let (acquired, ready) = mpsc::sync_channel(1);
+        let run = self.runner.check_environment_with_preparation(
+            package,
+            replay_descriptor_path,
+            move |control| {
+                let store = lock(&store);
+                let _ = acquired.send(());
+                control.check()?;
+                Ok(store.settings()?.ocr_environment)
+            },
+        )?;
+        let _ = ready.recv();
+        Ok(run)
     }
 
     pub fn stop(&self, run: &str) -> Result<(), Fault> {
@@ -539,8 +598,12 @@ mod tests {
                 std::process::id(),
                 NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed),
             ));
-            let application =
-                Application::new(root.clone(), root.join("runner-must-not-be-launched")).unwrap();
+            let application = Application::new(
+                root.clone(),
+                root.join("runner-must-not-be-launched"),
+                root.join("engine-must-not-be-launched"),
+            )
+            .unwrap();
             Self { root, application }
         }
 
@@ -583,8 +646,69 @@ mod tests {
             .unwrap()
     }
 
+    fn settled(application: &Application) -> mado_runtime_comparison::desktop::ControllerView {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let view = application.runner.poll();
+            if view.state == "terminal" {
+                return view;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "operation did not settle"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     #[test]
-    fn stale_saved_values_are_refused_before_run_admission() {
+    fn environment_check_refuses_missing_or_stale_package_selection() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let path = package_path();
+        let identity = application.runner.inspect(&path).unwrap().inventory_identity;
+        let error = application
+            .check_environment(None, Some(identity.clone()))
+            .unwrap_err();
+        assert_eq!(error.category, "StaleIdentity");
+        assert!(application.runner.poll().run.is_none());
+
+        application.select(&path).unwrap();
+        let replacement = application.select(&fixture.numeric_package()).unwrap();
+        assert_ne!(replacement.package.inventory_identity, identity);
+        let error = application
+            .check_environment(None, Some(identity))
+            .unwrap_err();
+        assert_eq!(error.category, "StaleIdentity");
+        assert!(application.runner.poll().run.is_none());
+    }
+
+    #[test]
+    fn environment_check_without_package_does_not_inherit_cached_selection() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let selection = application.select(&package_path()).unwrap();
+        let run = application.check_environment(None, None).unwrap();
+        let terminal = settled(application);
+        assert_eq!(terminal.run.as_deref(), Some(run.as_str()));
+        let fault = terminal.error.unwrap();
+        assert_eq!(fault.category, "EnvironmentUnset");
+        assert!(fault.context["package_inventory_identity"].is_null());
+
+        // Omitting the package must not discard the cached inspection either.
+        let identity = selection.package.inventory_identity;
+        let run = application
+            .check_environment(None, Some(identity.clone()))
+            .unwrap();
+        let terminal = settled(application);
+        assert_eq!(terminal.run.as_deref(), Some(run.as_str()));
+        let fault = terminal.error.unwrap();
+        assert_eq!(fault.category, "EnvironmentUnset");
+        assert_eq!(fault.context["package_inventory_identity"], identity);
+    }
+
+    #[test]
+    fn stale_saved_values_are_refused_before_runner_startup() {
         let fixture = Fixture::new();
         let application = &fixture.application;
         let path = package_path();
@@ -613,7 +737,7 @@ mod tests {
             .join("profiles")
             .join(format!("{}.json", saved.id));
         let before = fs::read(&stored_path).unwrap();
-        let fault = application
+        let run = application
             .start(StartRequest {
                 package_path: path.to_string_lossy().into_owned(),
                 inventory_identity: inventory.identity,
@@ -623,18 +747,88 @@ mod tests {
                 values,
                 lane: "controlled".into(),
                 scenario: "workflow".into(),
+                replay_descriptor_path: None,
             })
-            .unwrap_err();
+            .unwrap();
+        let controller = settled(application);
+        let fault = controller.error.unwrap();
         assert_eq!(fault.category, "ProfileIdentity");
         assert_eq!(fault.context["profile_id"], saved.id);
-        let controller = application.runner.poll();
-        assert_eq!(controller.state, "idle");
-        assert!(controller.run.is_none());
+        assert_eq!(controller.run.as_deref(), Some(run.as_str()));
+        assert_eq!(
+            fault.context["cleanup"],
+            json!({"clean":true,"child_started":false})
+        );
         assert_eq!(fs::read(&stored_path).unwrap(), before);
         let profiles = lock(&application.store)
             .list(&saved.package_id, &saved.schema_identity)
             .unwrap();
         assert_eq!(profiles.profiles[0].values, replacement);
+    }
+
+    #[test]
+    fn admission_reserves_before_store_io_and_owns_the_profile_snapshot() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let path = package_path();
+        let selection = application.select(&path).unwrap();
+        let values = selection.package.profiles["template-first"]["options"].clone();
+        let saved = application
+            .save_profile(None, "Before", values.clone())
+            .unwrap();
+        let request = StartRequest {
+            package_path: path.to_string_lossy().into_owned(),
+            inventory_identity: selection.package.inventory_identity,
+            package_id: saved.package_id.clone(),
+            schema_identity: saved.schema_identity.clone(),
+            profile_id: saved.id.clone(),
+            values: values.clone(),
+            lane: "controlled".into(),
+            scenario: "workflow".into(),
+            replay_descriptor_path: None,
+        };
+        let store = lock(&application.store);
+        let (admitted, admission) = mpsc::sync_channel(1);
+        let starting = application.clone();
+        let starter = std::thread::spawn(move || {
+            let _ = admitted.send(starting.start(request));
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while application.runner.poll().state != "preparing" {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Start did not reserve"
+            );
+            std::thread::yield_now();
+        }
+        let (checked, check) = mpsc::sync_channel(1);
+        let checking = application.clone();
+        let competitor = std::thread::spawn(move || {
+            let _ = checked.send(checking.check_environment(None, None));
+        });
+        let refusal = check.recv_timeout(Duration::from_secs(2));
+        let premature = admission.recv_timeout(Duration::from_millis(100));
+        drop(store);
+        competitor.join().unwrap();
+        starter.join().unwrap();
+        assert_eq!(refusal.unwrap().unwrap_err().category, "RunActive");
+        assert!(
+            matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)),
+            "Start must acquire snapshot ownership before returning admission"
+        );
+        let run = admission
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        let mut next_values = values;
+        next_values["priorities"] = json!(["ocr", "template"]);
+        application
+            .save_profile(Some(&saved.id), "After", next_values)
+            .unwrap();
+        let terminal = settled(application);
+        assert_eq!(terminal.run.as_deref(), Some(run.as_str()));
+        // The absent fixture executable is the expected boundary, not a changed-profile refusal.
+        assert_eq!(terminal.error.unwrap().category, "ChildStartup");
     }
 
     #[test]
@@ -773,7 +967,7 @@ mod tests {
                 .category,
             "ProfileRejected"
         );
-        let error = application
+        application
             .start(StartRequest {
                 package_path: path.to_string_lossy().into_owned(),
                 inventory_identity: inventory.identity,
@@ -783,10 +977,11 @@ mod tests {
                 values: json!({"amount":9_007_199_254_740_992_u64}),
                 lane: "controlled".into(),
                 scenario: "workflow".into(),
+                replay_descriptor_path: None,
             })
-            .unwrap_err();
-        assert_eq!(error.category, "ProfileRejected");
-        assert_eq!(application.runner.poll().state, "idle");
+            .unwrap();
+        let controller = settled(application);
+        assert_eq!(controller.error.unwrap().category, "ProfileRejected");
         assert_eq!(fs::read(stored_path).unwrap(), before);
     }
 
@@ -888,9 +1083,16 @@ mod tests {
                 values: submitted,
                 lane: "controlled".into(),
                 scenario: "workflow".into(),
+                replay_descriptor_path: None,
             })
             .unwrap();
         assert_eq!(application.runner.poll().run.as_deref(), Some(run.as_str()));
+        let terminal = settled(application);
+        assert_eq!(terminal.error.as_ref().unwrap().category, "ChildStartup");
+        assert_eq!(
+            terminal.error.unwrap().context["operation_stage"],
+            "execution"
+        );
         assert_eq!(
             fs::read(
                 fixture
@@ -901,6 +1103,37 @@ mod tests {
             .unwrap(),
             before,
         );
+    }
+
+    #[test]
+    fn controlled_start_ignores_unavailable_environment_settings() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let path = package_path();
+        let selection = application.select(&path).unwrap();
+        let settings_path = fixture.root.join("settings.json");
+        let preserved = b"unreadable OCR settings must not disable controlled runs";
+        fs::write(&settings_path, preserved).unwrap();
+        let package = selection.package;
+        application
+            .start(StartRequest {
+                package_path: path.to_string_lossy().into_owned(),
+                inventory_identity: package.inventory_identity,
+                package_id: package.package_id,
+                schema_identity: package.schema_identity,
+                profile_id: "draft".into(),
+                values: package.profiles["template-first"]["options"].clone(),
+                lane: "controlled".into(),
+                scenario: "workflow".into(),
+                replay_descriptor_path: None,
+            })
+            .unwrap();
+        let terminal = settled(application);
+        let fault = terminal.error.unwrap();
+        assert_eq!(fault.category, "ChildStartup");
+        assert_eq!(fault.context["operation_stage"], "execution");
+        assert!(fault.context["environment_identity"].is_null());
+        assert_eq!(fs::read(settings_path).unwrap(), preserved);
     }
 
     #[test]

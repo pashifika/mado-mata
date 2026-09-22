@@ -20,6 +20,11 @@ upstream API repair and tested pin update. A new capture or input operation is
 not used as a status probe. Do not treat controlled regressions or earlier native
 smokes as qualification of this race.
 
+The optional macOS [desktop replay lane](desktop.md#save-and-check-an-ocr-environment)
+uses the same engine and replay object, with a separate fixed engine artifact.
+Its App settings hold local locations and Rust derives identities; portable
+profiles contain no model/runtime paths. It never projects live native authority.
+
 ## Install the engine prerequisites
 
 The default controlled build does not need these dependencies. For the optional
@@ -57,6 +62,13 @@ Keep the same selected loader environment for execution. On macOS it must expose
 OpenCV `core`, `imgproc`, `imgcodecs`, and their shared dependencies; on Windows
 it must expose the selected versioned `opencv_world` DLL and dependencies. A
 successful build is not evidence that replay, capture, OCR, or input executed.
+
+For desktop consumption, use the dedicated target directory from the
+[desktop build guide](desktop.md#build-and-run-from-the-checkout); the CLI command
+above must not overwrite the desktop's controlled runner artifact. The desktop
+supervisor configures engine-child loader directories from the selected runtime
+and library locations, without changing the GUI's environment. Windows keeps an
+absolute compiler executable selected before narrowing DLL search paths.
 
 The supervisor sets `ORT_DISABLE_TELEMETRY=1` in every runtime-child command
 before process startup. In ONNX Runtime 1.29.0, the POSIX provider's API-level
@@ -184,6 +196,9 @@ On Windows, preserve the exact result of Rust's `std::fs::canonicalize`, includi
 its extended path prefix (`\\?\...`). Ordinary Python `Path.resolve()` output was
 refused by this strict equality check; do not strip or replace the Rust canonical
 form when projecting private configuration.
+These strict canonical-field rules apply to CLI `native_config`. The desktop
+accepts explicit absolute location hints and resolves them in Rust before
+constructing the same configuration; it exposes no hash or Plan override.
 
 Recorded timestamps must increase strictly. `placement: null` deliberately
 provides capture-pixel geometry only. If the recording has authoritative placement,

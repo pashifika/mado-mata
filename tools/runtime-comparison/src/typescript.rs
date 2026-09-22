@@ -86,7 +86,14 @@ fn transport(
             json!({"requires": "npm ci --ignore-scripts in tools/runtime-comparison/compiler"}),
         ));
     }
-    let mut command = Command::new("node");
+    #[cfg(windows)]
+    let node = std::env::var_os("MADO_COMPILER_NODE")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| "node".into());
+    #[cfg(not(windows))]
+    let node = "node";
+    let mut command = Command::new(node);
     command.env_clear();
     // Resolve the trusted compiler installation without inheriting Node hooks.
     if let Some(path) = std::env::var_os("PATH") {

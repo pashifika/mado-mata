@@ -195,7 +195,9 @@ fn manual(plan_path: &Path, package: &Path, output_path: &Path) -> Result<bool, 
             .primary
             .as_ref()
             .map_or("none", |fault| fault.category.as_str()),
-        if record.cleanup["clean"] == true && !record.forced && record.exit_code == Some(0) {
+        if record.cleanup["clean"] == true && record.cleanup["child_started"] == false {
+            "clean-no-child-started"
+        } else if record.cleanup["clean"] == true && !record.forced && record.exit_code == Some(0) {
             "settled"
         } else {
             "incomplete-or-unverified"

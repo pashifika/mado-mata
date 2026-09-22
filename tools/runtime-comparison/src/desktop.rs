@@ -1,14 +1,15 @@
-//! One application-owned controlled run, with independent lifecycle and log queues.
+//! One application-owned operation, with independent lifecycle and log queues.
 
+use crate::environment::{OcrEnvironment, capture_environment, capture_replay};
 use crate::host::resolve_options;
 use crate::inventory::Inventory;
 use crate::model::{Control, Fault, Limits, Plan, encode_bounded, identity};
-use crate::runner::{Observer, run_once_with_executable};
+use crate::runner::{Observer, run_environment_check_with_executable, run_once_with_executable};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,6 +18,8 @@ const LOG_CAPACITY: usize = 64;
 const PROGRESS_CAPACITY: usize = 32;
 const REQUEST_BYTES: usize = 65_536;
 const SHUTDOWN_MS: u64 = 14_000;
+const REPLAY_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
+const REPLAY_DURATION_MS: u64 = 30_000;
 static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,6 +35,8 @@ pub struct StartRequest {
     pub lane: String,
     #[serde(default = "workflow")]
     pub scenario: String,
+    #[serde(default)]
+    pub replay_descriptor_path: Option<String>,
 }
 
 fn workflow() -> String {
@@ -52,6 +57,7 @@ pub struct PackageInfo {
 #[derive(Debug, Serialize)]
 pub struct ControllerView {
     pub run: Option<String>,
+    pub operation: String,
     pub state: String,
     pub result: Option<Value>,
     pub error: Option<Fault>,
@@ -61,7 +67,7 @@ pub struct ControllerView {
 }
 
 struct Active {
-    stop: Arc<AtomicBool>,
+    control: Arc<Control>,
     worker: JoinHandle<Result<Value, Fault>>,
     progress: mpsc::Receiver<Value>,
     logs: mpsc::Receiver<Value>,
@@ -71,6 +77,7 @@ struct Active {
 struct State {
     closed: bool,
     run: Option<String>,
+    operation: &'static str,
     phase: &'static str,
     active: Option<Active>,
     result: Option<Value>,
@@ -86,6 +93,7 @@ impl State {
         Self {
             closed: false,
             run: None,
+            operation: "run",
             phase: "idle",
             active: None,
             result: None,
@@ -101,6 +109,7 @@ impl State {
         let Some(run) = &self.run else { return };
         value["child_run"] = value["run"].clone();
         value["run"] = json!(run);
+        value["operation"] = json!(self.operation);
         if value["event"] == "ChildStarted" && self.phase == "preparing" {
             self.phase = "running";
         }
@@ -146,8 +155,13 @@ impl State {
         let result = active.worker.join().unwrap_or_else(|_| {
             Err(Fault::new(
                 "Controller",
-                "run worker panicked; inspect containment evidence",
-            ))
+                "operation worker panicked; inspect containment evidence",
+            )
+            .with_context(json!({
+                "operation":self.operation,"app_run":self.run,"stage":"worker",
+                "environment_identity":null,"corpus_identity":null,
+                "cleanup":{"clean":false,"child_started":null}
+            })))
         });
         // A final event may have arrived between the first drain and is_finished().
         for value in active.progress.try_iter() {
@@ -179,8 +193,8 @@ impl State {
                 }
                 self.result = Some(value);
             }
-            Err(mut error) => {
-                error.bound_diagnostics();
+            Err(error) => {
+                // Workers bound diagnostics before adding bounded operation correlation.
                 self.error = Some(error);
             }
         }
@@ -193,14 +207,16 @@ impl State {
 }
 
 pub struct DesktopController {
-    runner_path: PathBuf,
+    controlled_path: PathBuf,
+    engine_path: PathBuf,
     state: Mutex<State>,
 }
 
 impl DesktopController {
-    pub fn new(runner_path: PathBuf) -> Self {
+    pub fn new(controlled_path: PathBuf, engine_path: PathBuf) -> Self {
         Self {
-            runner_path,
+            controlled_path,
+            engine_path,
             state: Mutex::new(State::new()),
         }
     }
@@ -245,7 +261,125 @@ impl DesktopController {
     }
 
     /// Reserve synchronously; package capture and execution never run on the UI thread.
-    pub fn start(&self, request: StartRequest) -> Result<String, Fault> {
+    pub fn start(
+        &self,
+        request: StartRequest,
+        environment: Option<OcrEnvironment>,
+    ) -> Result<String, Fault> {
+        self.start_with_preparation(request, move |_, _| Ok(environment))
+    }
+
+    /// Application-owned profile checks share the reservation with resource capture.
+    pub fn start_with_preparation(
+        &self,
+        mut request: StartRequest,
+        prepare: impl FnOnce(&mut StartRequest, &Control) -> Result<Option<OcrEnvironment>, Fault>
+        + Send
+        + 'static,
+    ) -> Result<String, Fault> {
+        self.reserve(
+            "run",
+            request.lane == "replay",
+            move |app_run, control, observer, controlled, engine| {
+                let mut evidence = Evidence::new(
+                    "run",
+                    app_run,
+                    None,
+                    request.replay_descriptor_path.as_deref(),
+                )?;
+                evidence.stage("request_validation", observer);
+                let prepared = (|| {
+                    control.check()?;
+                    encode_bounded(&request, REQUEST_BYTES)?;
+                    evidence.fields["package_inventory_identity"] =
+                        json!(request.inventory_identity);
+                    evidence.fields["schema_identity"] = json!(request.schema_identity);
+                    evidence.fields["profile_id"] = json!(request.profile_id);
+                    let plan = requested_plan(&request)?;
+                    evidence.complete();
+                    evidence.stage("input_capture", observer);
+                    let environment = prepare(&mut request, control)?;
+                    evidence.fields["selection_identity"] =
+                        json!(environment.as_ref().map(identity).transpose()?);
+                    control.check()?;
+                    Ok((plan, environment))
+                })();
+                let (plan, environment) = prepared.map_err(|error| evidence.fault(error, true))?;
+                evidence.complete();
+                let executable = if request.lane == "replay" {
+                    engine
+                } else {
+                    controlled
+                };
+                execute(
+                    executable,
+                    &request,
+                    environment.as_ref(),
+                    plan,
+                    control,
+                    observer,
+                    evidence,
+                )
+            },
+        )
+    }
+
+    pub fn check_environment(
+        &self,
+        environment: Option<OcrEnvironment>,
+        package: Option<(PathBuf, String)>,
+        replay_descriptor_path: Option<String>,
+    ) -> Result<String, Fault> {
+        self.check_environment_with_preparation(package, replay_descriptor_path, move |_| {
+            Ok(environment)
+        })
+    }
+
+    pub fn check_environment_with_preparation(
+        &self,
+        package: Option<(PathBuf, String)>,
+        replay_descriptor_path: Option<String>,
+        prepare: impl FnOnce(&Control) -> Result<Option<OcrEnvironment>, Fault> + Send + 'static,
+    ) -> Result<String, Fault> {
+        self.reserve(
+            "environment_check",
+            true,
+            move |app_run, control, observer, _, engine| {
+                let mut evidence = Evidence::new(
+                    "environment_check",
+                    app_run,
+                    None,
+                    replay_descriptor_path.as_deref(),
+                )?;
+                evidence.stage("input_capture", observer);
+                let environment = control
+                    .check()
+                    .and_then(|()| prepare(control))
+                    .map_err(|error| evidence.fault(error, true))?;
+                evidence.fields["selection_identity"] =
+                    json!(environment.as_ref().map(identity).transpose()?);
+                evidence.complete();
+                execute_check(
+                    engine,
+                    environment.as_ref(),
+                    package.as_ref(),
+                    replay_descriptor_path.as_deref(),
+                    evidence,
+                    control,
+                    observer,
+                )
+            },
+        )
+    }
+
+    fn reserve(
+        &self,
+        operation: &'static str,
+        replay: bool,
+        work: impl FnOnce(&str, &Control, &Observer, &Path, &Path) -> Result<Value, Fault>
+        + Send
+        + 'static,
+    ) -> Result<String, Fault> {
         let mut state = self.state();
         state.refresh();
         if state.closed {
@@ -255,13 +389,12 @@ impl DesktopController {
             ));
         }
         if state.active.is_some() {
-            return Err(
-                Fault::new("RunActive", "previous run has not settled and been reaped")
-                    .with_context(json!({"run":state.run})),
-            );
+            return Err(Fault::new(
+                "RunActive",
+                "previous operation has not settled and been reaped",
+            )
+            .with_context(json!({"run":state.run,"operation":state.operation})));
         }
-        encode_bounded(&request, REQUEST_BYTES)?;
-        let plan = requested_plan(&request)?;
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| Fault::new("Clock", error.to_string()))?
@@ -271,7 +404,11 @@ impl DesktopController {
             std::process::id(),
             NEXT_RUN.fetch_add(1, Ordering::Relaxed)
         );
-        let stop = Arc::new(AtomicBool::new(false));
+        let mut limits = manual_plan()?.limits;
+        if replay {
+            limits.duration_ms = REPLAY_DURATION_MS;
+        }
+        let control = Arc::new(Control::new(&limits));
         let (progress_send, progress) = mpsc::sync_channel(PROGRESS_CAPACITY);
         let (log_send, logs) = mpsc::sync_channel(LOG_CAPACITY);
         let dropped_logs = Arc::new(AtomicU64::new(0));
@@ -280,32 +417,25 @@ impl DesktopController {
             logs: log_send,
             dropped_logs: dropped_logs.clone(),
         };
-        let worker_stop = stop.clone();
-        let executable = self.runner_path.clone();
+        let worker_control = control.clone();
+        let controlled = self.controlled_path.clone();
+        let engine = self.engine_path.clone();
         let app_run = run.clone();
         let worker = thread::Builder::new()
             .name("desktop-runner".into())
-            .spawn(move || {
-                execute(
-                    &executable,
-                    &request,
-                    plan,
-                    &app_run,
-                    &worker_stop,
-                    &observer,
-                )
-            })
+            .spawn(move || work(&app_run, &worker_control, &observer, &controlled, &engine))
             .map_err(|error| Fault::new("Startup", error.to_string()))?;
         state.run = Some(run.clone());
+        state.operation = operation;
         state.phase = "preparing";
         state.result = None;
         state.error = None;
-        state.progress = vec![json!({"event":"Preparing","run":run})];
+        state.progress = vec![json!({"event":"Preparing","run":run,"operation":operation})];
         state.logs.clear();
         state.seen_logs.clear();
         state.dropped_logs = 0;
         state.active = Some(Active {
-            stop,
+            control,
             worker,
             progress,
             logs,
@@ -323,7 +453,7 @@ impl DesktopController {
             ));
         }
         if let Some(active) = &state.active {
-            active.stop.store(true, Ordering::Release);
+            active.control.cancel();
             if state.phase != "stopping" {
                 state.phase = "stopping";
                 if state.progress.len() < PROGRESS_CAPACITY {
@@ -342,6 +472,7 @@ impl DesktopController {
         state.refresh();
         ControllerView {
             run: state.run.clone(),
+            operation: state.operation.into(),
             state: state.phase.into(),
             result: state.result.clone(),
             error: state.error.clone(),
@@ -357,7 +488,7 @@ impl DesktopController {
             let mut state = self.state();
             state.closed = true;
             if let Some(active) = &state.active {
-                active.stop.store(true, Ordering::Release);
+                active.control.cancel();
                 state.phase = "stopping";
             }
         }
@@ -394,20 +525,20 @@ fn manual_plan() -> Result<Plan, Fault> {
 
 fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
     match request.lane.as_str() {
-        "controlled" => {}
-        "replay" => {
-            return Err(Fault::new(
-                "Blocked",
-                "desktop replay requires an explicitly configured engine/model and saved-frame identity",
-            ));
-        }
+        "controlled" | "replay" => {}
         "native" => {
             return Err(Fault::new(
                 "NativeRefused",
-                "desktop M1 grants no native capture, OCR, target, or input authority",
+                "desktop grants no live capture, target, or input authority",
             ));
         }
         _ => return Err(Fault::new("InvalidPlan", "unknown desktop execution lane")),
+    }
+    if request.lane == "replay" && request.scenario != "workflow" {
+        return Err(Fault::new(
+            "InvalidPlan",
+            "recorded replay accepts only the package workflow, not controlled fixture scenarios",
+        ));
     }
     if request.package_path.is_empty() || request.package_path.len() > 4096 {
         return Err(Fault::new(
@@ -417,7 +548,11 @@ fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
     }
     let mut plan = manual_plan()?;
     plan.id = "desktop".into();
-    plan.lane = "controlled".into();
+    plan.lane = request.lane.clone();
+    if plan.lane == "replay" {
+        plan.limits.snapshot_bytes = REPLAY_SNAPSHOT_BYTES;
+        plan.limits.duration_ms = REPLAY_DURATION_MS;
+    }
     plan.native_config = None;
     plan.samples = 1;
     plan.warmups = 0;
@@ -491,40 +626,275 @@ fn select_profile(inventory: &mut Inventory, request: &StartRequest) -> Result<(
     inventory.refresh_identity()
 }
 
-fn cancelled(stop: &AtomicBool) -> Result<(), Fault> {
-    if stop.load(Ordering::Acquire) {
-        Err(Fault::new(
-            "Cancelled",
-            "Stop requested during preparation; no child started",
-        ))
-    } else {
-        Ok(())
+struct Evidence {
+    fields: Value,
+    stage: &'static str,
+    completed: Vec<&'static str>,
+}
+
+impl Evidence {
+    fn new(
+        operation: &'static str,
+        app_run: &str,
+        environment: Option<&OcrEnvironment>,
+        descriptor: Option<&str>,
+    ) -> Result<Self, Fault> {
+        Ok(Self {
+            fields: json!({
+                "operation":operation,"app_run":app_run,
+                "selection_identity":environment.map(identity).transpose()?,
+                "replay_descriptor_path":descriptor.filter(|path| path.len() <= 4096),
+                "environment_identity":null,"corpus_identity":null
+            }),
+            stage: "request_validation",
+            completed: Vec::new(),
+        })
+    }
+
+    fn stage(&mut self, stage: &'static str, observer: &Observer) {
+        self.stage = stage;
+        let _ = observer.progress.try_send(json!({
+            "event":"PreparationStage","stage":stage
+        }));
+    }
+
+    fn complete(&mut self) {
+        self.completed.push(self.stage);
+    }
+
+    fn attach(&self, value: &mut Value) {
+        for (key, field) in self.fields.as_object().expect("evidence object") {
+            value[key] = field.clone();
+        }
+        value["stage"] = json!(self.stage);
+        value["completed_stages"] = json!(self.completed);
+    }
+
+    fn fault(&self, mut fault: Fault, before_child: bool) -> Fault {
+        fault.bound_diagnostics();
+        if !fault.context.is_object() {
+            fault.context = json!({"cause":fault.context});
+        }
+        let source_stage = fault.context.get("stage").cloned();
+        self.attach(&mut fault.context);
+        if let Some(stage) = source_stage {
+            fault.context["operation_stage"] = json!(self.stage);
+            fault.context["stage"] = stage;
+        }
+        // Only the returning preparation worker can attest no child was started.
+        if before_child {
+            fault.context["cleanup"] = json!({"clean":true,"child_started":false});
+        }
+        fault
+    }
+}
+
+fn replay_configuration(
+    environment: Option<&OcrEnvironment>,
+    control: &Control,
+    observer: &Observer,
+    evidence: &mut Evidence,
+) -> Result<Value, Fault> {
+    evidence.stage("environment_validation", observer);
+    control.check()?;
+    let environment = environment.ok_or_else(|| {
+        Fault::new(
+            "EnvironmentUnset",
+            "Save an OCR environment before checking or replaying",
+        )
+    })?;
+    let snapshot = capture_environment(environment, control)?;
+    evidence.fields["environment_identity"] = json!(snapshot.identity);
+    evidence.complete();
+    Ok(snapshot.configuration)
+}
+
+fn project_replay(
+    plan: &mut Plan,
+    mut configuration: Value,
+    descriptor: Option<&str>,
+    inventory: &Inventory,
+    control: &Control,
+    observer: &Observer,
+    evidence: &mut Evidence,
+) -> Result<(), Fault> {
+    evidence.stage("corpus_validation", observer);
+    control.check()?;
+    let descriptor = descriptor
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            Fault::new(
+                "ReplayPrerequisite",
+                "Select a recorded corpus before backend initialization",
+            )
+        })?;
+    if descriptor.len() > 4096 || descriptor.chars().any(char::is_control) {
+        return Err(Fault::new(
+            "ReplayPrerequisite",
+            "Corpus descriptor path exceeds accepted bounds",
+        ));
+    }
+    let replay = capture_replay(Path::new(descriptor), inventory, &plan.limits, control)?;
+    evidence.fields["corpus_identity"] = json!(replay.identity);
+    evidence.fields["corpus_id"] = json!(replay.corpus_id);
+    configuration["replay"] = replay.configuration;
+    configuration["native"] = Value::Null;
+    plan.native_config = Some(configuration);
+    plan.validate()?;
+    evidence.complete();
+    Ok(())
+}
+
+fn engine_available(executable: &Path) -> Result<(), Fault> {
+    match std::fs::metadata(executable) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        _ => Err(Fault::new(
+            "EngineUnavailable",
+            "The fixed engine runner artifact is unavailable; build it in the documented checkout location",
+        )),
     }
 }
 
 fn execute(
     executable: &Path,
     request: &StartRequest,
+    environment: Option<&OcrEnvironment>,
     mut plan: Plan,
-    app_run: &str,
-    stop: &AtomicBool,
+    control: &Control,
+    observer: &Observer,
+    mut evidence: Evidence,
+) -> Result<Value, Fault> {
+    let prepared = (|| {
+        evidence.stage("package_validation", observer);
+        control.check()?;
+        let mut inventory = Inventory::capture_with_stop(
+            Path::new(&request.package_path),
+            &manual_plan()?.limits,
+            Some(&control.cancelled),
+        )?;
+        control.check()?;
+        plan.candidate = runtime(&inventory)?;
+        evidence.complete();
+        if plan.lane == "replay" {
+            let configuration =
+                replay_configuration(environment, control, observer, &mut evidence)?;
+            project_replay(
+                &mut plan,
+                configuration,
+                request.replay_descriptor_path.as_deref(),
+                &inventory,
+                control,
+                observer,
+                &mut evidence,
+            )?;
+            evidence.stage("engine_availability", observer);
+            engine_available(executable)?;
+            evidence.complete();
+        }
+        evidence.stage("profile_validation", observer);
+        select_profile(&mut inventory, request)?;
+        evidence.complete();
+        control.check()?;
+        Ok(inventory)
+    })();
+    let inventory = prepared.map_err(|error| evidence.fault(error, true))?;
+    evidence.stage("execution", observer);
+    let mut poll_stop = || control.check().is_err();
+    let record = run_once_with_executable(executable, &plan, &inventory, &mut poll_stop, observer)
+        .map_err(|error| evidence.fault(error, false))?;
+    let mut result = serde_json::to_value(record)
+        .map_err(|error| evidence.fault(Fault::new("Encoding", error.to_string()), false))?;
+    evidence.attach(&mut result);
+    Ok(result)
+}
+
+fn execute_check(
+    executable: &Path,
+    environment: Option<&OcrEnvironment>,
+    package: Option<&(PathBuf, String)>,
+    descriptor: Option<&str>,
+    mut evidence: Evidence,
+    control: &Control,
     observer: &Observer,
 ) -> Result<Value, Fault> {
-    cancelled(stop)?;
-    let mut inventory =
-        Inventory::capture_with_stop(Path::new(&request.package_path), &plan.limits, Some(stop))?;
-    cancelled(stop)?;
-    plan.candidate = runtime(&inventory)?;
-    select_profile(&mut inventory, request)?;
-    cancelled(stop)?;
-    let mut poll_stop = || stop.load(Ordering::Acquire);
-    let record = run_once_with_executable(executable, &plan, &inventory, &mut poll_stop, observer)?;
-    let mut result =
-        serde_json::to_value(record).map_err(|error| Fault::new("Encoding", error.to_string()))?;
-    result["app_run"] = json!(app_run);
-    result["package_inventory_identity"] = json!(request.inventory_identity);
-    result["schema_identity"] = json!(request.schema_identity);
-    result["profile_id"] = json!(request.profile_id);
+    evidence.fields["package_inventory_identity"] = json!(package.map(|(_, identity)| identity));
+    let prepared = (|| {
+        let mut plan = manual_plan()?;
+        plan.id = "desktop-environment-check".into();
+        plan.lane = "replay".into();
+        plan.limits.snapshot_bytes = REPLAY_SNAPSHOT_BYTES;
+        plan.limits.duration_ms = REPLAY_DURATION_MS;
+        plan.samples = 1;
+        plan.warmups = 0;
+        plan.repetitions = 1;
+        let configuration = replay_configuration(environment, control, observer, &mut evidence)?;
+        evidence.stage("corpus_validation", observer);
+        let (path, expected) = package.ok_or_else(|| {
+            Fault::new(
+                "ReplayPrerequisite",
+                "Select a package and recorded corpus before backend initialization",
+            )
+        })?;
+        if descriptor.is_none_or(|path| path.trim().is_empty()) {
+            return Err(Fault::new(
+                "ReplayPrerequisite",
+                "Select a recorded corpus before backend initialization",
+            ));
+        }
+        control.check()?;
+        // Package capture remains lane-independent; replay's larger bound covers expanded frames.
+        let inventory =
+            Inventory::capture_with_stop(path, &manual_plan()?.limits, Some(&control.cancelled))?;
+        control.check()?;
+        if inventory.identity != *expected {
+            return Err(Fault::new(
+                "StaleIdentity",
+                "Package changed; inspect it again before checking",
+            ));
+        }
+        plan.candidate = runtime(&inventory)?;
+        project_replay(
+            &mut plan,
+            configuration,
+            descriptor,
+            &inventory,
+            control,
+            observer,
+            &mut evidence,
+        )?;
+        evidence.stage("engine_availability", observer);
+        engine_available(executable)?;
+        evidence.complete();
+        control.check()?;
+        Ok((plan, inventory))
+    })();
+    let (plan, inventory) = prepared.map_err(|error| evidence.fault(error, true))?;
+    evidence.stage("child_startup", observer);
+    let mut poll_stop = || control.check().is_err();
+    let record = run_environment_check_with_executable(
+        executable,
+        &plan,
+        &inventory,
+        &mut poll_stop,
+        observer,
+    )
+    .map_err(|error| evidence.fault(error, false))?;
+    let observed_stage = record
+        .primary
+        .as_ref()
+        .and_then(|fault| fault.context.get("stage"))
+        .or_else(|| record.observations.get("stage"))
+        .filter(|stage| stage.is_string())
+        .cloned();
+    if record.observations["stage"] == "initialized" {
+        evidence.completed.push("backend_initialization");
+    }
+    let mut result = serde_json::to_value(record)
+        .map_err(|error| evidence.fault(Fault::new("Encoding", error.to_string()), false))?;
+    evidence.attach(&mut result);
+    if let Some(stage) = observed_stage {
+        result["stage"] = stage;
+    }
     Ok(result)
 }
 
@@ -550,6 +920,7 @@ mod tests {
             values: inventory.profiles["ocr-first"]["options"].clone(),
             lane: "controlled".into(),
             scenario: workflow(),
+            replay_descriptor_path: None,
         }
     }
 
@@ -736,8 +1107,11 @@ mod tests {
 
     #[test]
     fn pending_worker_reserves_run_and_stale_stop_cannot_cancel_successor() {
-        let controller = DesktopController::new(PathBuf::from("unused-runner"));
-        let stop = Arc::new(AtomicBool::new(false));
+        let controller = DesktopController::new(
+            PathBuf::from("unused-runner"),
+            PathBuf::from("unused-engine"),
+        );
+        let control = Arc::new(Control::new(&manual_plan().unwrap().limits));
         let (release, wait) = mpsc::sync_channel(1);
         let worker = thread::spawn(move || {
             wait.recv().unwrap();
@@ -750,7 +1124,7 @@ mod tests {
             state.run = Some("successor".into());
             state.phase = "preparing";
             state.active = Some(Active {
-                stop: stop.clone(),
+                control: control.clone(),
                 worker,
                 progress,
                 logs,
@@ -758,17 +1132,27 @@ mod tests {
             });
         }
         assert_eq!(
-            controller.start(request(&fixture())).unwrap_err().category,
+            controller
+                .start(request(&fixture()), None)
+                .unwrap_err()
+                .category,
+            "RunActive"
+        );
+        assert_eq!(
+            controller
+                .check_environment(None, None, None)
+                .unwrap_err()
+                .category,
             "RunActive"
         );
         assert_eq!(
             controller.stop("predecessor").unwrap_err().category,
             "StaleIdentity"
         );
-        assert!(!stop.load(Ordering::Acquire));
+        assert!(!control.cancelled.load(Ordering::Acquire));
         controller.stop("successor").unwrap();
         assert_eq!(controller.poll().state, "stopping");
-        assert!(stop.load(Ordering::Acquire));
+        assert!(control.cancelled.load(Ordering::Acquire));
         release.send(()).unwrap();
         controller.shutdown().unwrap();
         let terminal = controller.poll();
@@ -780,7 +1164,8 @@ mod tests {
     #[test]
     fn preparation_stop_never_attempts_to_launch_the_runner() {
         let request = request(&fixture());
-        let stop = AtomicBool::new(true);
+        let control = Control::new(&manual_plan().unwrap().limits);
+        control.cancel();
         let (progress, _) = mpsc::sync_channel(PROGRESS_CAPACITY);
         let (logs, _) = mpsc::sync_channel(LOG_CAPACITY);
         let observer = Observer {
@@ -791,21 +1176,136 @@ mod tests {
         let result = execute(
             Path::new("runner-must-not-be-launched"),
             &request,
+            None,
             requested_plan(&request).unwrap(),
-            "cancelled-before-capture",
-            &stop,
+            &control,
             &observer,
+            Evidence::new("run", "cancelled-before-capture", None, None).unwrap(),
         );
-        assert_eq!(result.unwrap_err().category, "Cancelled");
+        let error = result.unwrap_err();
+        assert_eq!(error.category, "Cancelled");
+        assert_eq!(
+            error.context["cleanup"],
+            json!({"clean":true,"child_started":false})
+        );
         assert_eq!(
             Inventory::capture_with_stop(
                 Path::new(&request.package_path),
                 &manual_plan().unwrap().limits,
-                Some(&stop),
+                Some(&control.cancelled),
             )
             .unwrap_err()
             .category,
             "Cancelled"
         );
+    }
+
+    fn settled(controller: &DesktopController) -> ControllerView {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let view = controller.poll();
+            if view.state == "terminal" {
+                return view;
+            }
+            assert!(Instant::now() < deadline, "operation did not settle");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn reserved_preparation_excludes_check_and_stop_prevents_launch() {
+        let controller =
+            DesktopController::new("missing-controlled".into(), "missing-engine".into());
+        let (entered, started) = mpsc::sync_channel(1);
+        let (release, wait) = mpsc::sync_channel(1);
+        let run = controller
+            .start_with_preparation(request(&fixture()), move |_, _| {
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+                Ok(None)
+            })
+            .unwrap();
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let refusal = controller.check_environment(None, None, None).unwrap_err();
+        assert_eq!(refusal.category, "RunActive");
+        assert_eq!(refusal.context["run"], run);
+        controller.stop(&run).unwrap();
+        release.send(()).unwrap();
+        let terminal = settled(&controller);
+        let fault = terminal.error.unwrap();
+        assert_eq!(terminal.run.as_deref(), Some(run.as_str()));
+        assert_eq!(fault.category, "Cancelled");
+        assert_eq!(
+            fault.context["cleanup"],
+            json!({"clean":true,"child_started":false})
+        );
+        assert!(
+            !terminal
+                .progress
+                .iter()
+                .any(|event| event["event"] == "ChildStarted")
+        );
+        let next = controller.check_environment(None, None, None).unwrap();
+        assert_eq!(controller.stop(&run).unwrap_err().category, "StaleIdentity");
+        let terminal = settled(&controller);
+        assert_eq!(terminal.run.as_deref(), Some(next.as_str()));
+        assert_eq!(terminal.operation, "environment_check");
+        assert_eq!(terminal.error.unwrap().category, "EnvironmentUnset");
+    }
+
+    #[test]
+    fn replay_without_environment_never_falls_back_to_controlled() {
+        let controller =
+            DesktopController::new("missing-controlled".into(), "missing-engine".into());
+        let mut request = request(&fixture());
+        request.lane = "replay".into();
+        request.replay_descriptor_path = Some("not-read-without-environment.json".into());
+        controller.start(request, None).unwrap();
+        let terminal = settled(&controller);
+        let fault = terminal.error.unwrap();
+        assert_eq!(fault.category, "EnvironmentUnset");
+        assert_eq!(fault.context["stage"], "environment_validation");
+        assert_eq!(
+            fault.context["cleanup"],
+            json!({"clean":true,"child_started":false})
+        );
+        assert!(
+            !terminal
+                .progress
+                .iter()
+                .any(|event| event["event"] == "ChildStarted")
+        );
+    }
+
+    #[test]
+    fn ipc_cannot_select_native_authority_or_runner_artifacts() {
+        let request = request(&fixture());
+        for field in ["native_config", "environment", "executable", "limits"] {
+            let mut value = serde_json::to_value(&request).unwrap();
+            value[field] = json!({});
+            assert!(
+                serde_json::from_value::<StartRequest>(value).is_err(),
+                "{field}"
+            );
+        }
+        let controller =
+            DesktopController::new("missing-controlled".into(), "missing-engine".into());
+        let mut native = request.clone();
+        native.lane = "native".into();
+        controller.start(native, None).unwrap();
+        let terminal = settled(&controller);
+        let fault = terminal.error.unwrap();
+        assert_eq!(fault.category, "NativeRefused");
+        assert_eq!(
+            fault.context["cleanup"],
+            json!({"clean":true,"child_started":false})
+        );
+        let mut replay = request;
+        replay.lane = "replay".into();
+        replay.scenario = "partial".into();
+        controller.start(replay, None).unwrap();
+        let fault = settled(&controller).error.unwrap();
+        assert_eq!(fault.category, "InvalidPlan");
+        assert_eq!(fault.context["cleanup"]["child_started"], false);
     }
 }
