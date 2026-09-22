@@ -31,77 +31,17 @@ pub use enabled::{Engine, release_runner_resources};
 #[cfg(feature = "engine")]
 mod enabled {
     use super::*;
+    use crate::environment::{Configuration, Placement, ReplayConfig, canonical, validate_replay};
     use crate::host::{Action, HandleBudget, HandlePermit, Managed, PointerButton};
     use crate::model::Limits;
     use mado_pilot as mp;
     use serde::{Deserialize, Serialize, de::DeserializeOwned};
     use sha2::{Digest, Sha256};
-    use std::fs::File;
-    use std::io::Read;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Mutex, MutexGuard, TryLockError};
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
-
-    #[derive(Deserialize, Serialize)]
-    #[serde(deny_unknown_fields)]
-    struct Configuration {
-        version: u32,
-        ocr: OcrConfig,
-        native_libraries: Vec<Library>,
-        replay: Option<ReplayConfig>,
-        native: Option<NativeConfig>,
-    }
-
-    #[derive(Deserialize, Serialize)]
-    #[serde(deny_unknown_fields)]
-    struct Library {
-        path: PathBuf,
-        sha256: String,
-        bytes: u64,
-    }
-
-    #[derive(Deserialize, Serialize)]
-    #[serde(deny_unknown_fields)]
-    struct OcrConfig {
-        model: String,
-        profile: String,
-        language: String,
-        provider: String,
-        runtime_profile: String,
-        model_root: PathBuf,
-        runtime: Library,
-    }
-
-    #[derive(Deserialize, Serialize)]
-    #[serde(deny_unknown_fields)]
-    struct ReplayConfig {
-        corpus_id: String,
-        frames: Vec<RecordedFrame>,
-        package_entries: BTreeMap<String, String>,
-        templates: BTreeMap<String, String>,
-    }
-
-    #[derive(Deserialize, Serialize)]
-    #[serde(deny_unknown_fields)]
-    struct RecordedFrame {
-        asset: String,
-        width: u32,
-        height: u32,
-        pixel_format: String,
-        captured_ns: u64,
-        discontinuous: bool,
-        placement: Option<Placement>,
-    }
-
-    #[derive(Deserialize, Serialize)]
-    #[serde(deny_unknown_fields)]
-    struct Placement {
-        desktop_origin: [f64; 2],
-        logical_size: [f64; 2],
-        scale: [f64; 2],
-    }
 
     // Declarative policy is checked without discovering windows or probing permissions.
     #[derive(Deserialize, Serialize)]
@@ -368,7 +308,7 @@ mod enabled {
                     "native_config must supply explicit engine and OCR configuration",
                 )
             })?;
-            let config: Configuration = serde_json::from_value(raw.clone())
+            let config: Configuration<NativeConfig> = serde_json::from_value(raw.clone())
                 .map_err(|error| blocked("configuration_validation", &error.to_string()))?;
             if config.version != 1 {
                 return Err(blocked(
@@ -444,12 +384,16 @@ mod enabled {
                     &config.ocr.runtime.path,
                 );
                 let engine = if let Some(replay) = &config.replay {
-                    mp::replay_engine_with_ocr_provider(
-                        mp::ReplayEngineRequest::new(replay_source(replay, assets, &plan.limits)?),
-                        &ocr,
-                        &operation,
-                    )
-                    .map_err(|error| prerequisite_error("engine_initialization", error))?
+                    let request = mp::ReplayEngineRequest::new(replay_source(
+                        replay,
+                        assets,
+                        &plan.limits,
+                        &control,
+                    )?);
+                    control.check()?;
+                    crate::runner::emit_backend_initialization_started(&control);
+                    mp::replay_engine_with_ocr_provider(request, &ocr, &operation)
+                        .map_err(|error| prerequisite_error("backend_initialization", error))?
                 } else {
                     native_engine(
                         config
@@ -2165,162 +2109,29 @@ mod enabled {
     }
 
     fn validate_ocr(
-        config: &Configuration,
+        config: &Configuration<NativeConfig>,
         control: &Control,
     ) -> Result<mp::OcrModelIdentity, Fault> {
-        let ocr = &config.ocr;
-        let model = match ocr.profile.as_str() {
-            mp::ACCEPTED_G004_PROFILE_ID => mp::OcrModelIdentity::accepted_g004(),
-            mp::ACCEPTED_BOUNDED_PROFILE_ID => mp::OcrModelIdentity::accepted_bounded_detector(),
-            _ => return Err(blocked("ocr_unsupported", "unsupported OCR profile")),
-        };
-        if ocr.model != model.model().as_str()
-            || ocr.language != mp::ACCEPTED_G004_LANGUAGE_PROFILE_ID
-            || ocr.provider != "cpu"
-            || ocr.runtime_profile != mp::DEFAULT_OCR_RUNTIME_PROFILE_ID
-        {
-            return Err(blocked(
-                "ocr_unsupported",
-                "model/profile/language/runtime/provider combination is unsupported; no provider fallback is permitted",
-            ));
+        crate::environment::validate_ocr(config, control)?;
+        match config.ocr.profile.as_str() {
+            mp::ACCEPTED_G004_PROFILE_ID => Ok(mp::OcrModelIdentity::accepted_g004()),
+            mp::ACCEPTED_BOUNDED_PROFILE_ID => {
+                Ok(mp::OcrModelIdentity::accepted_bounded_detector())
+            }
+            _ => Err(blocked("ocr_unsupported", "unsupported OCR profile")),
         }
-        canonical(&ocr.model_root, true, "model_root")?;
-        for (relative, identity) in [
-            (
-                "rapidocr-v3.9.2/ch_PP-OCRv4_det_mobile.onnx",
-                model.detector(),
-            ),
-            (
-                "rapidocr-v3.9.2/PP-OCRv6_rec_small.onnx",
-                model.recognizer(),
-            ),
-        ] {
-            let path = ocr.model_root.join(relative);
-            verify_file(
-                &Library {
-                    path,
-                    sha256: hex(&identity.sha256()),
-                    bytes: identity.byte_len(),
-                },
-                control,
-                "model_validation",
-            )?;
-        }
-        verify_file(&ocr.runtime, control, "runtime_validation")?;
-        if config.native_libraries.is_empty() {
-            return Err(blocked(
-                "native_libraries_unset",
-                "identify the linked OpenCV and other non-system native library files",
-            ));
-        }
-        for library in &config.native_libraries {
-            verify_file(library, control, "native_library_validation")?;
-        }
-        Ok(model)
-    }
-
-    fn canonical(path: &Path, directory: bool, stage: &str) -> Result<(), Fault> {
-        if !path.is_absolute() {
-            return Err(blocked(
-                stage,
-                "configured path must be absolute and canonical",
-            ));
-        }
-        let resolved = path.canonicalize().map_err(|error| blocked("configuration_missing_file", "configured prerequisite is missing or unreadable")
-            .with_context(json!({"stage":stage,"io_kind":format!("{:?}",error.kind()),"engine_revision":REVISION})))?;
-        if resolved != path {
-            return Err(blocked(
-                stage,
-                "configured path must be canonical; symlink aliases are not accepted",
-            ));
-        }
-        let metadata = resolved
-            .metadata()
-            .map_err(|_| blocked(stage, "configured prerequisite metadata is unreadable"))?;
-        if (directory && !metadata.is_dir()) || (!directory && !metadata.is_file()) {
-            return Err(blocked(
-                stage,
-                "configured prerequisite has the wrong file type",
-            ));
-        }
-        Ok(())
-    }
-
-    fn verify_file(library: &Library, control: &Control, stage: &str) -> Result<(), Fault> {
-        if library.bytes == 0
-            || library.bytes > 1_073_741_824
-            || library.sha256.len() != 64
-            || !library
-                .sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(blocked(
-                "configuration_validation",
-                "each resource requires a finite size (at most 1 GiB) and lowercase SHA-256",
-            ));
-        }
-        canonical(&library.path, false, stage)?;
-        let mut file = File::open(&library.path)
-            .map_err(|_| blocked(stage, "configured resource cannot be opened"))?;
-        let before = file
-            .metadata()
-            .map_err(|_| blocked(stage, "resource metadata unavailable"))?;
-        if before.len() != library.bytes {
-            return Err(blocked(
-                "configuration_changed",
-                "configured resource byte length changed",
-            ));
-        }
-        let mut hash = Sha256::new();
-        let mut buffer = [0u8; 65_536];
-        let mut remaining = library.bytes;
-        while remaining > 0 {
-            control.check()?;
-            let length = usize::try_from(remaining.min(buffer.len() as u64))
-                .map_err(|_| internal("resource length overflow"))?;
-            file.read_exact(&mut buffer[..length]).map_err(|_| {
-                blocked(stage, "resource changed or became unreadable while hashing")
-            })?;
-            hash.update(&buffer[..length]);
-            remaining -= length as u64;
-        }
-        let mut trailing = [0u8; 1];
-        if file
-            .read(&mut trailing)
-            .map_err(|_| blocked(stage, "resource read failed"))?
-            != 0
-            || format!("{:x}", hash.finalize()) != library.sha256
-        {
-            return Err(blocked(
-                "configuration_changed",
-                "configured resource content does not match its immutable identity",
-            ));
-        }
-        Ok(())
     }
 
     fn replay_source(
         config: &ReplayConfig,
         assets: &BTreeMap<String, Vec<u8>>,
         limits: &Limits,
+        control: &Control,
     ) -> Result<mp::replay::ReplaySource, Fault> {
-        if config.corpus_id.is_empty()
-            || config.frames.is_empty()
-            || config.frames.len() > limits.snapshot_files
-            || config.package_entries.is_empty()
-            || config.templates.is_empty()
-            || config.templates.len() > limits.handles
-        {
-            return Err(blocked(
-                "replay_validation",
-                "recorded corpus, bounded frames, template package entries and template aliases are required",
-            ));
-        }
+        validate_replay(config, assets, limits, control)?;
         let mut frames = Vec::with_capacity(config.frames.len());
-        let mut bytes = 0usize;
-        let mut timestamp = None;
         for record in &config.frames {
+            control.check()?;
             let format = match record.pixel_format.as_str() {
                 "rgba8" => mp::PixelFormat::Rgba8,
                 "bgra8" => mp::PixelFormat::Bgra8,
@@ -2331,28 +2142,12 @@ mod enabled {
                     ));
                 }
             };
-            if timestamp.is_some_and(|previous| previous >= record.captured_ns) {
-                return Err(blocked(
-                    "replay_validation",
-                    "recorded timestamps must be strictly increasing",
-                ));
-            }
-            timestamp = Some(record.captured_ns);
             let pixels = assets.get(&record.asset).ok_or_else(|| {
                 blocked(
                     "replay_asset_missing",
                     "recorded frame asset is not in the captured inventory",
                 )
             })?;
-            bytes = bytes
-                .checked_add(pixels.len())
-                .ok_or_else(|| argument("replay byte count overflow"))?;
-            if bytes > limits.snapshot_bytes {
-                return Err(blocked(
-                    "replay_limit",
-                    "replay corpus exceeds snapshot_bytes",
-                ));
-            }
             let descriptor = mp::FrameDescriptor::packed(
                 mp::PixelExtent::new(record.width, record.height),
                 format,
@@ -2528,9 +2323,5 @@ mod enabled {
         config.route()?;
         config.focus()?;
         Ok(())
-    }
-
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }

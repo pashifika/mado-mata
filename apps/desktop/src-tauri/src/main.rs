@@ -94,6 +94,15 @@ async fn start(request: StartRequest, state: tauri::State<'_, Backend>) -> Resul
 }
 
 #[tauri::command]
+async fn check_environment(
+    replay_descriptor_path: Option<String>,
+    state: tauri::State<'_, Backend>,
+) -> Result<String, Fault> {
+    let application = state.application.clone();
+    background(move || application.check_environment(replay_descriptor_path)).await
+}
+
+#[tauri::command]
 fn stop(run: String, state: tauri::State<'_, Backend>) -> Result<(), Fault> {
     state.application.stop(&run)
 }
@@ -143,6 +152,9 @@ fn main() {
     };
     let executable = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../tools/runtime-comparison/target/debug/mado-runtime-comparison");
+    let engine_executable = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../../../tools/runtime-comparison/target/desktop-engine/debug/mado-runtime-comparison",
+    );
     let builder = tauri::Builder::default()
         .setup(move |app| {
             let root = match &data_root {
@@ -150,7 +162,7 @@ fn main() {
                 None => app.path().app_data_dir()?,
             };
             app.manage(Backend {
-                application: Application::new(root, executable.clone())?,
+                application: Application::new(root, executable.clone(), engine_executable.clone())?,
                 closing: AtomicBool::new(false),
                 exiting: AtomicBool::new(false),
             });
@@ -166,6 +178,7 @@ fn main() {
             rename_profile,
             delete_profile,
             start,
+            check_environment,
             stop,
             poll
         ])

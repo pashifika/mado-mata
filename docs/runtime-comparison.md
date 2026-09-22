@@ -2,8 +2,9 @@
 
 This standalone executable compares JavaScript, Lua, TypeScript authoring into the
 JavaScript VM, and an independent direct-Rust workload. The separate
-[controlled macOS desktop application](desktop.md) reuses its supervised runner;
-the comparison CLI remains independently usable. Controlled checks exercise
+[macOS desktop application](desktop.md) reuses its supervised runner with
+controlled and optional recorded-replay lanes; the CLI remains independently
+usable. Controlled checks exercise
 actual interpreters and owned processes; their input sink is **non-native**.
 They do not capture a screen, launch a game, change focus, request permissions,
 or send operating-system input.

@@ -20,6 +20,7 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 static EXECUTION_EVIDENCE: OnceLock<mpsc::SyncSender<(&'static str, u64)>> = OnceLock::new();
 static HOST_WAIT_REPORTED: AtomicBool = AtomicBool::new(false);
+static BACKEND_INITIALIZATION_STARTED: AtomicBool = AtomicBool::new(false);
 static SCRIPT_LOGS: OnceLock<ScriptStream> = OnceLock::new();
 
 struct ScriptStream {
@@ -56,6 +57,8 @@ impl Observer {
             "at_us",
             "reason",
             "supervisor_received_us",
+            "operation",
+            "stage",
         ] {
             if let Some(field) = value.get(key) {
                 progress.insert(key.into(), field.clone());
@@ -123,11 +126,62 @@ pub(crate) fn emit_host_wait_entered(host: &Host) {
     }
 }
 
+#[cfg(feature = "engine")]
+pub(crate) fn emit_backend_initialization_started(control: &Control) {
+    BACKEND_INITIALIZATION_STARTED.store(true, Ordering::Release);
+    if let Some(sender) = EXECUTION_EVIDENCE.get() {
+        let _ = sender.try_send(("BackendInitializationStarted", control.elapsed_us()));
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Operation {
+    Run,
+    EnvironmentCheck,
+}
+
+impl Operation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::EnvironmentCheck => "environment_check",
+        }
+    }
+
+    fn validate(self, plan: &Plan) -> Result<(), Fault> {
+        if self == Self::EnvironmentCheck {
+            let configuration = plan.native_config.as_ref().ok_or_else(|| {
+                crate::environment::blocked(
+                    "configuration_unset",
+                    "environment check requires a replay configuration",
+                )
+            })?;
+            let configuration: crate::environment::Configuration<Value> =
+                serde_json::from_value(configuration.clone()).map_err(|error| {
+                    crate::environment::blocked("configuration_validation", &error.to_string())
+                })?;
+            if plan.lane != "replay"
+                || configuration.version != 1
+                || configuration.native.is_some()
+                || configuration.replay.is_none()
+            {
+                return Err(crate::environment::blocked(
+                    "configuration_validation",
+                    "environment check accepts only non-native replay initialization",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Invocation {
     run: String,
     attempt: u64,
+    operation: Operation,
     plan: Plan,
     inventory: Inventory,
     #[serde(default)]
@@ -335,6 +389,7 @@ pub fn child() -> Result<bool, Fault> {
         serde_json::from_slice(&bytes).map_err(|e| Fault::new("Transport", e.to_string()))?;
     invocation.plan.validate()?;
     invocation.inventory.validate()?;
+    invocation.operation.validate(&invocation.plan)?;
     let control = Arc::new(Control::new(&invocation.plan.limits));
     let finished = Arc::new(AtomicBool::new(false));
     let run = invocation.run.clone();
@@ -387,9 +442,9 @@ pub fn child() -> Result<bool, Fault> {
     });
     emit(
         &json!({"event":"ChildStarted","run":run,"attempt":attempt,"pid":std::process::id(),
-            "build":crate::report::build_identity(),"at_us":control.elapsed_us()}),
+            "build":crate::report::build_identity(),"operation":invocation.operation.name(),"at_us":control.elapsed_us()}),
     )?;
-    if invocation.observe_logs {
+    if invocation.observe_logs && invocation.operation == Operation::Run {
         let (sender, receiver) = mpsc::sync_channel::<Value>(invocation.plan.limits.log_records);
         let _ = SCRIPT_LOGS.set(ScriptStream {
             sender,
@@ -405,62 +460,99 @@ pub fn child() -> Result<bool, Fault> {
             }
         });
     }
-    if invocation.plan.candidate != "rust" {
-        // One instruction-hook notification and one host-wait notification.
-        let (sender, receiver) = mpsc::sync_channel(2);
+    {
+        // SDK initialization, instruction hook, and host wait have independent
+        // bounded notifications; Check never emits either VM/workflow event.
+        let (sender, receiver) = mpsc::sync_channel(3);
         let _ = EXECUTION_EVIDENCE.set(sender);
         let event_run = run.clone();
+        let operation = invocation.operation;
         thread::spawn(move || {
-            for (event, at_us) in receiver.iter().take(2) {
-                let _ =
-                    emit(&json!({"event":event,"run":event_run,"attempt":attempt,"at_us":at_us}));
+            for (event, at_us) in receiver.iter().take(3) {
+                let stage =
+                    (event == "BackendInitializationStarted").then_some("backend_initialization");
+                let _ = emit(&json!({"event":event,"run":event_run,"attempt":attempt,
+                    "operation":operation.name(),"stage":stage,"at_us":at_us}));
             }
         });
     }
 
     let preflight_start = Instant::now();
-    let selected = invocation
-        .inventory
-        .profiles
-        .get(&invocation.plan.profile)
-        .ok_or_else(|| Fault::new("Profile", "selected profile is not in the inventory"));
-    let prepared = selected
-        .and_then(|profile| {
-            resolve_options(
-                &invocation.inventory.schema,
-                profile,
-                &invocation.inventory.package_id,
-            )
-        })
-        .and_then(|options| {
-            Host::new(
-                invocation.plan.clone(),
-                options,
-                invocation.inventory.assets.clone(),
-                control.clone(),
-            )
-        });
+    let checking = invocation.operation == Operation::EnvironmentCheck;
+    if checking {
+        emit(
+            &json!({"event":"EnginePreparationStarted","run":run,"attempt":attempt,
+            "operation":"environment_check","stage":"engine_preparation","at_us":control.elapsed_us()}),
+        )?;
+    }
+    let options = if checking {
+        // No profile readiness, package evaluation, compiler, or VM is entered.
+        Ok(json!({}))
+    } else {
+        invocation
+            .inventory
+            .profiles
+            .get(&invocation.plan.profile)
+            .ok_or_else(|| Fault::new("Profile", "selected profile is not in the inventory"))
+            .and_then(|profile| {
+                resolve_options(
+                    &invocation.inventory.schema,
+                    profile,
+                    &invocation.inventory.package_id,
+                )
+            })
+    };
+    let prepared = options.and_then(|options| {
+        Host::new(
+            invocation.plan.clone(),
+            options,
+            invocation.inventory.assets.clone(),
+            control.clone(),
+        )
+    });
     let host = match prepared {
         Ok(host) => host,
         Err(mut error) => {
+            if checking && error.context.get("stage").is_none() {
+                if !error.context.is_object() {
+                    error.context = json!({});
+                }
+                error.context["stage"] = json!(if !cfg!(feature = "engine") {
+                    "engine_unavailable"
+                } else if BACKEND_INITIALIZATION_STARTED.load(Ordering::Acquire) {
+                    "backend_initialization"
+                } else {
+                    "engine_preparation"
+                });
+            }
+            let observations = json!({"operation":invocation.operation.name(),
+                "stage":error.context["stage"],"initialized":false});
+            let entry_outcome = if checking {
+                "NotExecuted"
+            } else {
+                "NotStarted"
+            };
             error.bound_diagnostics();
             let entry_emission = emit_settlement(
                 json!({"event":"EntrySettled","run":invocation.run,"attempt":attempt,
-                "primary":error,"entry_outcome":"NotStarted","observations":{},
+                "primary":error,"entry_outcome":entry_outcome,"observations":observations,
                 "preflight_us":preflight_start.elapsed().as_micros(),"at_us":control.elapsed_us()}),
             )
             .err();
             control.cancel();
             let cleanup = preflight_cleanup(&error, crate::engine::release_runner_resources());
             let emission = emit_settlement(
-                json!({"event":"Terminal","run":invocation.run,"attempt":attempt,"primary":error,"entry_outcome":"NotStarted",
-                "cleanup":cleanup,"observations":{},"entry_emission_failure":entry_emission,
+                json!({"event":"Terminal","run":invocation.run,"attempt":attempt,"primary":error,"entry_outcome":entry_outcome,
+                "cleanup":cleanup,"observations":observations,"entry_emission_failure":entry_emission,
                 "runtime":null,"preflight_us":preflight_start.elapsed().as_micros(),"workflow_us":null,
                 "process":process_metrics()}),
             );
             return complete_child(cleanup["clean"] == true, &finished, emission);
         }
     };
+    if checking {
+        return finish_environment_check(host, &invocation, &control, &finished, preflight_start);
+    }
     let mut inventory = invocation.inventory;
     let compilation = if invocation.plan.candidate == "typescript" {
         crate::typescript::compile(&inventory, &invocation.plan.limits)
@@ -539,6 +631,54 @@ pub fn child() -> Result<bool, Fault> {
     complete_child(cleanup["clean"] == true, &finished, emission)
 }
 
+fn finish_environment_check(
+    host: Host,
+    invocation: &Invocation,
+    control: &Control,
+    finished: &AtomicBool,
+    started: Instant,
+) -> Result<bool, Fault> {
+    let primary = control.check().err();
+    let initialization_us = started.elapsed().as_micros();
+    let mut observations = host.snapshot();
+    observations["operation"] = json!("environment_check");
+    observations["stage"] = json!("initialized");
+    observations["initialized"] = json!(true);
+    observations["snapshot_stage"] = json!("pre_cleanup");
+    // Publication errors must not bypass the owned session's cleanup path.
+    let milestone_emission = emit(&json!({"event":"BackendInitialized","run":invocation.run,
+        "attempt":invocation.attempt,"operation":"environment_check","stage":"initialized",
+        "at_us":control.elapsed_us()}))
+    .err();
+    let entry_emission = emit_settlement(json!({"event":"EntrySettled","run":invocation.run,
+        "attempt":invocation.attempt,"primary":primary,"entry_outcome":"NotExecuted",
+        "observations":observations,"runtime":null,"preflight_us":initialization_us,
+        "workflow_us":null,"at_us":control.elapsed_us()}))
+    .err()
+    .or(milestone_emission);
+    control.cancel();
+    let mut cleanup = host.finish();
+    observations = host.snapshot();
+    observations["operation"] = json!("environment_check");
+    observations["stage"] = json!("initialized");
+    observations["initialized"] = json!(true);
+    observations["snapshot_stage"] = json!("post_cleanup");
+    drop(host);
+    if cleanup["clean"] == true {
+        if let Err(error) = crate::engine::release_runner_resources() {
+            cleanup["clean"] = json!(false);
+            cleanup["runner_release_failure"] = json!(error);
+        }
+    }
+    let emission = emit_settlement(json!({"event":"Terminal","run":invocation.run,
+        "attempt":invocation.attempt,"primary":primary,"entry_outcome":"NotExecuted",
+        "cleanup":cleanup,"observations":observations,"runtime":null,
+        "entry_emission_failure":entry_emission,"preflight_us":initialization_us,"workflow_us":null,
+        "stop_at_us":control.stop_us.load(Ordering::Acquire),
+        "admission_closed_at_us":control.closed_us.load(Ordering::Acquire),"process":process_metrics()}));
+    complete_child(cleanup["clean"] == true, finished, emission)
+}
+
 pub fn sample(plan: &Plan, inventory: &Inventory) -> Result<Vec<RunRecord>, Fault> {
     plan.validate()?;
     let mut records = Vec::new();
@@ -574,6 +714,7 @@ pub fn run_once(
         None,
         &executable,
         None,
+        Operation::Run,
     )
 }
 
@@ -594,6 +735,28 @@ pub fn run_once_with_executable(
         None,
         executable,
         Some(observer),
+        Operation::Run,
+    )
+}
+
+/// Initializes the selected real replay backend without executing package code.
+pub fn run_environment_check_with_executable(
+    executable: &Path,
+    plan: &Plan,
+    inventory: &Inventory,
+    operator_stop: &mut dyn FnMut() -> bool,
+    observer: &Observer,
+) -> Result<RunRecord, Fault> {
+    supervise(
+        plan,
+        inventory,
+        None,
+        false,
+        Some(operator_stop),
+        None,
+        executable,
+        Some(observer),
+        Operation::EnvironmentCheck,
     )
 }
 
@@ -614,7 +777,128 @@ pub(crate) fn run_once_after_milestone(
         Some((event, delay_ms)),
         &executable,
         None,
+        Operation::Run,
     )
+}
+
+fn child_loader_environment(command: &mut Command, plan: &Plan) -> Result<Value, Fault> {
+    // The ORT API opt-out leaves the POSIX uploader alive. Suppress its
+    // initialization before any native library or child thread starts.
+    command.env("ORT_DISABLE_TELEMETRY", "1");
+    #[cfg(windows)]
+    {
+        command.env_remove("MADO_COMPILER_NODE");
+        // Resolve Node before restricting the engine's DLL search path.
+        if let Some(path) = std::env::var_os("PATH") {
+            for directory in std::env::split_paths(&path) {
+                let node = directory.join("node.exe");
+                if node.is_file()
+                    && let Ok(node) = node.canonicalize()
+                {
+                    command.env("MADO_COMPILER_NODE", node);
+                    break;
+                }
+            }
+        }
+    }
+    if plan.lane == "controlled" {
+        return Ok(json!({"ORT_DISABLE_TELEMETRY":"1"}));
+    }
+    let raw = plan.native_config.as_ref().ok_or_else(|| {
+        crate::environment::blocked(
+            "configuration_unset",
+            "engine configuration is required before child startup",
+        )
+    })?;
+    let configuration: crate::environment::Configuration<Value> =
+        serde_json::from_value(raw.clone()).map_err(|error| {
+            crate::environment::blocked("configuration_validation", &error.to_string())
+        })?;
+    let mut directories = Vec::new();
+    for library in
+        std::iter::once(&configuration.ocr.runtime).chain(&configuration.native_libraries)
+    {
+        if !library.path.is_absolute() {
+            return Err(crate::environment::blocked(
+                "child_loader_configuration",
+                "selected library paths must be absolute",
+            ));
+        }
+        let directory = library.path.parent().ok_or_else(|| {
+            crate::environment::blocked(
+                "child_loader_configuration",
+                "selected library has no parent directory",
+            )
+        })?;
+        if !directories.contains(&directory) {
+            directories.push(directory);
+        }
+    }
+    let paths = std::env::join_paths(&directories).map_err(|error| {
+        crate::environment::blocked("child_loader_configuration", &error.to_string())
+    })?;
+    let variable = if cfg!(target_os = "macos") {
+        "DYLD_LIBRARY_PATH"
+    } else if cfg!(windows) {
+        "PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    };
+    // Do not inherit arbitrary search directories or mutate the GUI process.
+    command.env(variable, &paths);
+    Ok(json!({"ORT_DISABLE_TELEMETRY":"1","search_variable":variable,"directories":directories}))
+}
+
+fn loader_prerequisite_record(
+    run: String,
+    plan: &Plan,
+    inventory: &Inventory,
+    operation: Operation,
+    primary: Fault,
+    started: Instant,
+) -> Result<RunRecord, Fault> {
+    Ok(RunRecord {
+        version: 1,
+        run,
+        candidate: plan.candidate.clone(),
+        lane: plan.lane.clone(),
+        scenario: plan.scenario.clone(),
+        profile: plan.profile.clone(),
+        plan_identity: identity(plan)?,
+        inventory_identity: inventory.identity.clone(),
+        status: "BLOCKED".into(),
+        reason: primary.message.clone(),
+        entry_outcome: "NotExecuted".into(),
+        cleanup: json!({"clean":true,"child_started":false}),
+        observations: json!({"operation":operation.name(),"stage":primary.context["stage"],
+            "child_started":false}),
+        primary: Some(primary),
+        metrics: json!({"elapsed_us":started.elapsed().as_micros(),"runtime":null,
+            "workflow_us":null,"vm_bytes":null,"child_process":null}),
+        milestones: Vec::new(),
+        exit_code: None,
+        forced: false,
+        build: Value::Null,
+    })
+}
+
+fn child_startup_fault(
+    exit_code: Option<i32>,
+    forced: bool,
+    stop_requested: bool,
+    stderr: &[u8],
+) -> Fault {
+    let retained = &stderr[..stderr.len().min(4096)];
+    Fault::new(
+        "ChildStartup",
+        "child exited before an authenticated startup record was observed",
+    )
+    .with_context(json!({
+        "stage":"child_startup","boundary":"before_child_started","child_started":true,
+        "rust_startup_observed":false,"exit_code":exit_code,"forced":forced,
+        "stop_requested":stop_requested,"stderr":String::from_utf8_lossy(retained),
+        "stderr_bytes_retained":retained.len(),"stderr_truncated":stderr.len() > retained.len()
+    }))
 }
 
 fn supervise(
@@ -626,9 +910,11 @@ fn supervise(
     stop_milestone: Option<(&str, u64)>,
     executable: &Path,
     observer: Option<&Observer>,
+    operation: Operation,
 ) -> Result<RunRecord, Fault> {
     plan.validate()?;
     inventory.validate()?;
+    operation.validate(plan)?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| Fault::new("Clock", e.to_string()))?
@@ -637,6 +923,7 @@ fn supervise(
     let invocation = Invocation {
         run: run.clone(),
         attempt: 1,
+        operation,
         plan: plan.clone(),
         inventory: inventory.clone(),
         observe_logs: observer.is_some(),
@@ -650,18 +937,30 @@ fn supervise(
         ));
     }
     let started = Instant::now();
-    let mut child = OwnedChild(
-        Command::new(executable)
-            .arg("child")
-            // The ORT API opt-out leaves the POSIX uploader alive. Suppress its
-            // initialization before any native library or child thread starts.
-            .env("ORT_DISABLE_TELEMETRY", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| Fault::new("Startup", e.to_string()))?,
-    );
+    let mut command = Command::new(executable);
+    command
+        .arg("child")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let loader_environment = match child_loader_environment(&mut command, plan) {
+        Ok(environment) => environment,
+        Err(error) => {
+            return loader_prerequisite_record(run, plan, inventory, operation, error, started);
+        }
+    };
+    if operator_stop.as_mut().is_some_and(|poll| poll()) {
+        return Err(Fault::new(
+            "Cancelled",
+            "Stop requested before child startup",
+        ));
+    }
+    let mut child = OwnedChild(command.spawn().map_err(|error| {
+        Fault::new("ChildStartup", error.to_string()).with_context(json!({
+            "stage":"child_startup","boundary":"spawn","io_kind":format!("{:?}",error.kind()),
+            "child_started":false,"cleanup":{"clean":true,"child_started":false}
+        }))
+    })?);
     let mut input = child
         .0
         .stdin
@@ -908,12 +1207,22 @@ fn supervise(
         });
     }
     let terminal = settled_evidence(terminal, &milestones);
-    let primary = terminal_primary(
-        &terminal,
-        protocol_fault.as_ref(),
-        forced || exit.code() == Some(124),
-    );
-    let clean = terminal["cleanup"]["clean"] == true && exit.success() && !forced;
+    let primary = if child_build.is_none() {
+        Some(child_startup_fault(
+            exit.code(),
+            forced || exit.code() == Some(124),
+            stop_sent_at.is_some(),
+            &stderr,
+        ))
+    } else {
+        terminal_primary(
+            &terminal,
+            protocol_fault.as_ref(),
+            forced || exit.code() == Some(124),
+        )
+    };
+    let clean =
+        child_build.is_some() && terminal["cleanup"]["clean"] == true && exit.success() && !forced;
     let status = if primary.as_ref().is_some_and(|e| e.category == "Blocked") {
         "BLOCKED"
     } else if clean && primary.is_none() {
@@ -921,7 +1230,7 @@ fn supervise(
     } else {
         "FAIL"
     };
-    let cleanup = if terminal.get("cleanup").is_some() {
+    let cleanup = if child_build.is_some() && terminal.get("cleanup").is_some() {
         terminal["cleanup"].clone()
     } else {
         json!({"clean":false,"status":"IncompleteCleanup","outcome":"ForcedOrIncomplete","cleanup_finished_us":null,
@@ -930,7 +1239,11 @@ fn supervise(
     let reason = primary.as_ref().map_or_else(
         || {
             if clean {
-                "entry returned and cleanup settled".into()
+                if operation == Operation::EnvironmentCheck {
+                    "backend initialized and cleanup settled without executing package code".into()
+                } else {
+                    "entry returned and cleanup settled".into()
+                }
             } else {
                 "child exited without verified clean cleanup".into()
             }
@@ -958,6 +1271,26 @@ fn supervise(
     let cpu_percent = terminal["process"]["cpu_ms"]
         .as_f64()
         .map(|cpu| cpu * 100_000.0 / exit_us.max(1) as f64);
+    let mut observations = terminal["observations"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    observations.insert("operation".into(), json!(operation.name()));
+    if operation == Operation::EnvironmentCheck && !observations.contains_key("stage") {
+        observations.insert(
+            "stage".into(),
+            json!(if child_build.is_none() {
+                "child_startup"
+            } else if milestones
+                .iter()
+                .any(|value| value["event"] == "BackendInitializationStarted")
+            {
+                "backend_initialization"
+            } else {
+                "engine_preparation"
+            }),
+        );
+    }
     Ok(RunRecord {
         version: 1,
         run,
@@ -970,12 +1303,16 @@ fn supervise(
         status: status.into(),
         reason,
         primary,
-        entry_outcome: terminal["entry_outcome"]
-            .as_str()
-            .unwrap_or("Unobserved")
-            .to_owned(),
+        entry_outcome: if operation == Operation::EnvironmentCheck {
+            "NotExecuted".into()
+        } else {
+            terminal["entry_outcome"]
+                .as_str()
+                .unwrap_or("Unobserved")
+                .to_owned()
+        },
         cleanup,
-        observations: terminal["observations"].clone(),
+        observations: Value::Object(observations),
         metrics: json!({"elapsed_us":started.elapsed().as_micros(),"startup_us":startup_us,
             "preflight_us":terminal["preflight_us"],"workflow_us":terminal["workflow_us"],
             "runtime":terminal["runtime"],"child_process":terminal["process"],
@@ -1003,6 +1340,7 @@ fn supervise(
             "protocol_fault":protocol_fault,"entry_emission_failure":terminal["entry_emission_failure"],
             "diagnostic_details_omitted":terminal["diagnostic_details_omitted"],
             "stderr_bytes_retained":stderr.len(),"stderr":String::from_utf8_lossy(&stderr),
+            "loader_environment":loader_environment,
             "compiled_inventory_identity":terminal["compiled_inventory_identity"]}),
         milestones,
         exit_code: exit.code(),
@@ -1109,9 +1447,9 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     let mut input = BufReader::new(std::io::stdin());
     let bytes = frame(&mut input, MAX_TRANSPORT_BYTES)?
         .ok_or_else(|| Fault::new("Fixture", "missing probe invocation"))?;
+    let invocation: Invocation = serde_json::from_slice(&bytes)
+        .map_err(|error| Fault::new("Transport", error.to_string()))?;
     if intentional {
-        let invocation: Invocation = serde_json::from_slice(&bytes)
-            .map_err(|error| Fault::new("Transport", error.to_string()))?;
         let record = run_once_after_milestone(
             &invocation.plan,
             &invocation.inventory,
@@ -1128,13 +1466,16 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
         emit(&json!({"event":"SupervisorExit","record":record}))?;
         return Ok(clean);
     }
+    let mut command =
+        Command::new(std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?);
+    command
+        .arg("child")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    child_loader_environment(&mut command, &invocation.plan)?;
     let mut child = OwnedChild(
-        Command::new(std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?)
-            .arg("child")
-            .env("ORT_DISABLE_TELEMETRY", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+        command
             .spawn()
             .map_err(|e| Fault::new("Startup", e.to_string()))?,
     );
@@ -1171,6 +1512,7 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
     let invocation = Invocation {
         run: run.clone(),
         attempt: 1,
+        operation: Operation::Run,
         plan: plan.clone(),
         inventory: inventory.clone(),
         observe_logs: false,
@@ -1289,6 +1631,7 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
     let invocation = Invocation {
         run: format!("intentional-exit-{}", std::process::id()),
         attempt: 1,
+        operation: Operation::Run,
         plan: plan.clone(),
         inventory: inventory.clone(),
         observe_logs: false,

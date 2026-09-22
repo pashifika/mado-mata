@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup} from './state.ts';
+import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,SUPPORTED_PROFILES} from './state.ts';
 
 test('late predecessor result cannot replace the successor or its preparing state',()=>{
   const current={run:'next',state:'preparing',result:null};
@@ -78,4 +78,73 @@ test('verified cleanup requires independent successful exit without forced conta
   assert.equal(verifiedCleanup({...result,exit_code:1}),false);
   assert.equal(verifiedCleanup({...result,exit_code:null}),false);
   assert.equal(verifiedCleanup({...result,cleanup:{clean:false}}),false);
+});
+
+test('a preparation fault is clean only when the backend settled before any child',()=>{
+  assert.equal(cleanupLabel(null,{cleanup:{clean:true,child_started:false}}),'Clean · no child started');
+  assert.equal(cleanupLabel(null,{cleanup:{clean:true}}),'Unverified');
+  assert.equal(cleanupLabel(null,{cleanup:{clean:false,child_started:true}}),'Incomplete / not clean');
+  assert.equal(cleanupLabel({status:'FAIL',cleanup:{clean:true},forced:true,exit_code:0},{}),'Incomplete / not clean');
+});
+
+test('a blank environment draft means unconfigured, not a partially filled tuple',()=>{
+  assert.deepEqual(readEnvironment(environmentDraft(null)),{environment:null,errors:{}});
+  const partial=readEnvironment({profile:SUPPORTED_PROFILES[0].profile,model_root:'  ',runtime_path:'',library_paths:''});
+  assert.equal(partial.environment,null);
+  assert.deepEqual(Object.keys(partial.errors).sort(),['model_root','runtime_path']);
+});
+
+test('a saved profile outside the supported set cannot be re-saved unchanged',()=>{
+  const saved={model:'other',profile:'other-profile',language:'x',provider:'cuda',runtime_profile:'y',model_root:'/models',runtime_path:'/rt.dylib',native_library_paths:[]};
+  const parsed=readEnvironment(environmentDraft(saved));
+  assert.equal(parsed.environment,null);
+  assert.ok(parsed.errors.profile);
+});
+
+test('environment draft round-trips through the fixed supported tuple with trimmed library lines',()=>{
+  const draft={profile:SUPPORTED_PROFILES[1].profile,model_root:' /models ',runtime_path:'/rt/libonnxruntime.dylib',library_paths:'\n /lib/a.dylib \n\n/lib/b.dylib\r\n'};
+  const {environment,errors}=readEnvironment(draft);
+  assert.deepEqual(errors,{});
+  assert.deepEqual(environment,{
+    model:SUPPORTED_PROFILES[1].model,profile:SUPPORTED_PROFILES[1].profile,
+    language:'horizontal-ja-basic-latin-ascii-digits-ui-symbols-v1',provider:'cpu',runtime_profile:'onnxruntime-1.29.0-api17-cpu',
+    model_root:'/models',runtime_path:'/rt/libonnxruntime.dylib',native_library_paths:['/lib/a.dylib','/lib/b.dylib'],
+  });
+  assert.equal(sameEnvironment(readEnvironment(environmentDraft(environment)).environment,environment),true);
+  assert.equal(sameEnvironment(environment,{...environment,native_library_paths:['/lib/b.dylib','/lib/a.dylib']}),false);
+});
+
+const checkedEnvironment=readEnvironment({profile:SUPPORTED_PROFILES[0].profile,model_root:'/models',runtime_path:'/rt.dylib',library_paths:''}).environment;
+const association={operation:'desktop-1',environment:checkedEnvironment,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
+const unchanged={saved:checkedEnvironment,draftDirty:false,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
+for (const {scenario,current,reasons} of [
+  {scenario:'nothing changed since the check',current:unchanged,reasons:0},
+  {scenario:'the environment was saved again with another path',current:{...unchanged,saved:{...checkedEnvironment,model_root:'/models-2'}},reasons:1},
+  {scenario:'the draft has unsaved edits even though saved settings match',current:{...unchanged,draftDirty:true},reasons:1},
+  {scenario:'another descriptor is selected',current:{...unchanged,descriptorPath:null},reasons:1},
+  {scenario:'another package is inspected',current:{...unchanged,packageInventoryIdentity:'inv-2'},reasons:1},
+  {scenario:'the environment was cleared after the check',current:{...unchanged,saved:null,draftDirty:true},reasons:2},
+]) {
+  test(`check association: ${scenario}`,()=>{
+    assert.equal(staleReasons(association,current).length,reasons);
+  });
+}
+
+
+test('private disclosure is bounded and reports what was cut',()=>{
+  assert.deepEqual(boundedText('abcdef',4),{text:'abcd',truncated:2});
+  assert.deepEqual(boundedText('abc',3),{text:'abc',truncated:0});
+  assert.throws(()=>boundedText('abc',0));
+});
+
+test('ordinary replay fault summaries do not disclose recognized text or diagnostic context',()=>{
+  const privateText='private recorded recognition';
+  const summary=faultSummary({
+    category:'JavaScript',message:privateText,
+    context:{stage:'workflow',recognized_text:privateText,source:{private_detail:privateText}},
+  });
+  assert.ok(summary.includes('JavaScript'));
+  assert.ok(summary.includes('workflow'));
+  assert.ok(!summary.includes(privateText));
+  assert.ok(!summary.includes('private_detail'));
 });

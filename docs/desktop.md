@@ -1,17 +1,18 @@
-# Controlled macOS desktop
+# macOS desktop: controlled runs and recorded replay
 
-MadoMata's development application uses a trusted Tauri/React WebView for package
-inspection, profile editing, run control, and structured logs. Package code runs
-in the existing supervised QuickJS runner, never in the WebView. JavaScript and
-TypeScript packages use the **controlled, non-native input sink**: no screen
-capture, OCR installation, game launch, focus changes, permission prompts, or OS
-input are required or authorized.
+MadoMata's trusted Tauri/React WebView provides package inspection, profile
+editing, run control, App-local OCR configuration, and structured logs. Package
+code runs in the supervised QuickJS runner, never in the WebView. Controlled
+runs need no OCR installation. Optional recorded replay uses real engine
+OCR/template recognition over explicitly selected, previously authorized frames.
+Both desktop lanes retain the **controlled, non-native input sink**. Neither
+grants live capture, game launch, focus changes, permission prompts, or OS input.
 
-Only macOS desktop development is supported in this Change. Linux and Windows
-CI check the frontend and shell-independent Rust core, not additional desktop
-platform support. Native adoption, R6, per-game background compatibility, replay
-prerequisites, and release distribution remain separate unresolved work. See the
-[native prerequisites](runtime-native.md) before any native operation.
+Only macOS desktop development is supported. Linux and Windows CI check the
+frontend and shell-independent Rust core, not additional desktop platforms.
+Live native qualification, R6, per-game background compatibility, and release
+distribution remain separate work. See the [engine prerequisites](runtime-native.md)
+and [replay boundary decision](adr/0003-desktop-recorded-replay.md).
 
 ## Build and run from the checkout
 
@@ -45,7 +46,7 @@ scripts.
 rustup toolchain install 1.98.1 --profile minimal
 npm ci --ignore-scripts --no-audit --no-fund --prefix tools/runtime-comparison/compiler
 npm ci --ignore-scripts --no-audit --no-fund --prefix apps/desktop
-cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml
+cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml --target-dir tools/runtime-comparison/target
 npm run build --prefix apps/desktop
 cargo +1.98.1 build --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --features custom-protocol
 apps/desktop/src-tauri/target/debug/mado-mata-desktop
@@ -54,18 +55,39 @@ apps/desktop/src-tauri/target/debug/mado-mata-desktop
 `custom-protocol` serves the built application assets; no Vite server is needed.
 These commands do not enable the test-only `webdriver` feature. Normal builds
 have no automation listener, and release builds do not register that listener.
-The [shell decision](adr/0002-desktop-runner-boundary.md) records the limited
-WKWebView/real-child/Stop/window-close evidence, not completed workflow acceptance.
+The [shell decision](adr/0002-desktop-runner-boundary.md) describes the real
+WKWebView boundary; the [replay decision](adr/0003-desktop-recorded-replay.md)
+records its separate engine child and bounded consuming evidence.
 
 This is a checkout build, **not a relocatable app bundle or release installer**.
-The application owns a fixed runner path at
-`tools/runtime-comparison/target/debug/mado-runtime-comparison` and uses the
-trusted compiler installed under `tools/runtime-comparison/compiler`. Build both
-in this checkout before launching; rebuilding only the app is insufficient after
-runtime changes. Do not redirect the runtime build with `CARGO_TARGET_DIR` or a
-cross-compilation target when following these run instructions. CI may use other
-build directories for compilation checks, but a real app run still needs its
-fixed runner/compiler paths. Moving a binary alone does not supply them.
+The application owns these fixed paths; package data and IPC cannot select them:
+
+| Artifact | Checkout path |
+| --- | --- |
+| Controlled runner | `tools/runtime-comparison/target/debug/mado-runtime-comparison` |
+| Optional engine runner | `tools/runtime-comparison/target/desktop-engine/debug/mado-runtime-comparison` |
+| Trusted compiler | `tools/runtime-comparison/compiler` |
+
+The GUI and controlled runner are built without `engine`. Never replace the
+controlled artifact with an engine-enabled build. After installing the pinned
+[native prerequisites](runtime-native.md#install-the-engine-prerequisites), use
+the absolute location of that revision's public setup tool:
+
+```sh
+MACOSX_DEPLOYMENT_TARGET=26.5.2 python3 /absolute/pinned-mado-pilot/tools/setup-native.py -- cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml --features engine --target-dir tools/runtime-comparison/target/desktop-engine
+```
+
+For engine-enabled regression checks, replace `build` with `test` in that command.
+The setup tool configures only its child command and installs nothing. It is not
+a product path dependency. Building the engine does not supply models, runtime
+libraries, or a corpus, and does not authorize native operations.
+
+Rebuild both relevant runner artifacts after runtime changes. Rebuilding only
+the GUI is insufficient. Follow these explicit target directories; do not use a
+cross-compilation target for a local app run. CI may use other directories for
+compilation checks. Moving a binary alone does not supply the fixed paths.
+An absent engine artifact or failure before Rust startup remains a typed
+diagnostic in the non-native GUI; controlled execution remains independent.
 
 By default, profiles, settings, and logs live in Tauri's application-local data
 directory. For isolated acceptance work, use a dedicated private directory:
@@ -134,7 +156,8 @@ replacement. A failed save preserves the previous valid file. Storage is bounded
 to **64 profiles**, **64 KiB per encoded profile**, and **1 MiB total profile
 bytes**. Settings are separately stored in `settings.json`. Portable profile
 values exclude executable/model paths, credentials, permission grants, and input
-authority; remembered local package paths belong only in application settings.
+authority. Package location hints and the optional OCR environment belong only
+in application settings; neither is execution authority.
 
 Only `.json` and `.pending` entries belong to the profile store. Other entries,
 such as filesystem metadata, are ignored without being opened, but still count
@@ -145,34 +168,87 @@ instead of silently discarding evidence or overwriting it. Close the app and mov
 that file outside the data root before explicitly retrying; keep the prior
 valid `.json` file intact.
 
+## Save and check an OCR environment
+
+1. In **OCR environment**, choose an offered supported profile and enter the
+   absolute model root, pinned ONNX Runtime library, and reviewed non-system
+   library locations, one library per line. Use the pinned
+   [engine prerequisites](runtime-native.md#install-the-engine-prerequisites).
+   Model bytes must match the selected profile; a filename alone is insufficient.
+   Rust resolves selected aliases to canonical paths and derives byte lengths,
+   hashes, and SDK identity; operators do not edit identity fields.
+2. **Save environment** validates structure and atomically saves settings. It
+   does not load libraries, models, or a backend. **Clear draft** followed by
+   **Save as unconfigured** removes the optional environment. Existing M1
+   settings with no environment remain unconfigured without a read-time rewrite.
+   Failed saves and incompatible stored data preserve the previous bytes.
+3. Inspect the recorded package and enter a **Recorded corpus descriptor**.
+   The descriptor is the `replay` object from the [existing replay format](runtime-native.md#prepare-a-private-replay-package-and-plan),
+   not a Plan or complete `native_config`. Its assets must already belong to the
+   inspected package inventory. No arbitrary asset paths, executable override,
+   native authority, or unknown fields are accepted.
+4. Choose **Check saved environment**. Unsaved environment edits must be saved
+   first. Check reserves the same operation slot as Start before settings or
+   resource I/O; it is cancellable through **Stop**. Without a corpus it reports
+   file-validation progress and the missing prerequisite, never readiness.
+5. With a valid corpus, Check starts the real owned engine child and initializes
+   the replay backend. It does not resolve a workload profile, compile or
+   evaluate package modules, or call readiness/workflow. `NotExecuted`, absent
+   VM/workflow metrics, initialization milestones, and independent cleanup are
+   intentional. A prerequisite refusal, loader failure, and interrupted
+   initialization are different outcomes.
+
+The descriptor is a session location hint, not persisted native authority.
+It is bounded to **256 KiB**. Package capture remains **1 MiB** across inspection,
+Check, and both Start lanes; expanded replay frames are bounded separately to
+**2 MiB**. Geometry, strictly increasing timestamps, package declarations,
+template maps, and relative paths are validated before replay admission.
+
+**Last check** retains its operation, stages, identities, failure summary, and
+cleanup. Draft/settings/package/descriptor changes detach that association.
+Nothing watches paths or grants permission from an earlier successful check:
+every Start recaptures and revalidates, including same-path replacements.
+Detailed check diagnostics require explicit private disclosure.
+
 ## Start, Stop, and results
 
-**Start** submits the current explicit draft. Unmodified saved values retain the
-saved profile ID; edited values run as a draft until saved. Rust checks that a
-submitted saved ID still names the stored values before admitting a run, then
-revalidates the package/profile and captures immutable inputs, including dependency
-content and finite execution limits. A stale inspection is not permission to
-execute changed source. Only one preparing/running/stopping reservation is admitted.
+**Start** submits the current explicit draft. Choose **Controlled** for the
+shipped fixtures, or **Recorded replay** with a saved environment and selected
+descriptor. Replay accepts only the package workflow, never controlled fault
+injection scenarios. The native lane remains refused.
 
-Edits to a draft, a later profile save, or changes to package source after capture
-affect only the next run. **Stop** addresses the active run independently of
-ordinary logs. Wait for its terminal outcome and owned-child cleanup before
-starting again. A late record from an earlier run must not replace a newer run's
-state.
+Unmodified saved values retain the saved profile ID; edits run as a draft until
+saved. The worker reserves the single preparing/running/stopping slot before
+input I/O and owns the settings/profile store lock before Start returns its
+operation ID. Later saves cannot overtake this capture. It then revalidates the
+package, external resources, and corpus and constructs one immutable input set
+with fixed backend limits. A stale inspection or check is not execution authority.
 
-The UI keeps entry outcome, receipts, cancellation progress, and cleanup outcome
-separate. A Stop request is not proof of physical cleanup. Clean cleanup requires
-a child cleanup acknowledgement, a zero exit code, and no forced containment;
-script failure can still have clean cleanup. Missing evidence stays unverified,
-and a terminal preparation refusal is not displayed as still unsettled. TypeScript
-failures retain original source attribution and host causes.
+Draft edits and later saves never mutate the active values. Replacing a file can
+fail in-flight or subsequent validation; it never updates captured identities.
+**Stop** addresses the active operation independently of logs. Wait for its
+terminal outcome and owned-child cleanup before starting again. A late record
+cannot replace a successor's state. No automatic retry replaces an unsettled run.
+
+The UI keeps entry outcome, receipts, cancellation, and cleanup separate. A Stop
+request is not proof of physical cleanup. For a started child, clean cleanup
+requires acknowledgement, zero exit, and no forced containment; script failure
+can still have clean cleanup. A known pre-child refusal is labeled separately.
+Missing evidence remains unverified. Replay failures retain original-source
+attribution, successful empty recognition remains distinct from corpus
+exhaustion, and recognition-bearing diagnostics require explicit private
+disclosure. Full records are rendered only on request, bounded to **512 KiB**;
+they are not automatically copied into ordinary logs. Scripts can explicitly
+emit bounded messages, so operators must still avoid logging private content.
 
 Run build metadata comes from the actual owned runtime child, not the desktop
 executable. If startup identity is unavailable, it remains unknown (`null`) rather
 than being substituted with supervisor metadata.
 
-The controlled plan bounds an invocation to **10 s**, cleanup to **1 s**, and
-containment to **2 s**. Controller shutdown waits at most **14 s** for its owned
+Controlled execution has a **10 s** operation deadline; replay and Check use
+**30 s**, including input capture. Repeated parent/child resource verification
+is not skipped to fit the controlled-only deadline. Cleanup remains **1 s** and
+containment **2 s**. Controller shutdown waits at most **14 s** for its owned
 worker. Ordinary window closure requests shutdown off the UI thread. Native macOS
 Quit can bypass that request callback, so the final exit callback waits for the
 same bounded shutdown, without starting a second sequence. This fallback is
@@ -255,7 +331,31 @@ scope separately from [hosted build/core checks](ci.md#local-check-scope).
    only in the disposable data root; confirm loss/failure counters do not erase
    results or disable Stop.
 
-Saved-frame replay needs explicitly configured engine/model prerequisites; this
-controlled application does not synthesize replay or OCR success when they are
-missing. Full native Windows/macOS qualification, R6, background compatibility,
-and release packaging are not covered by this procedure or a green hosted build.
+### Recorded-replay acceptance
+
+Use explicitly authorized saved frames and separately installed accepted models,
+runtime, and libraries. Declare independent recognition/decision expectations
+and the finite bounds before measurement. Keep raw paths, images, text, and
+records private; do not create new game captures to satisfy this procedure.
+
+1. Save the environment, Close/reopen, and Check with and without a corpus.
+   Confirm file validation is not labeled initialization. Use a private package
+   that would throw during module evaluation to confirm Check never evaluates it.
+2. Run saved template-first and OCR-first profiles through the real WebView.
+   Verify their distinct declared decisions, real newer-frame postconditions,
+   correlated child/environment/corpus identities, and independent cleanup.
+   Repeat only after settlement; no command mocks or generated recognition answers.
+3. Replace an owned resource at the same path, then Check/Start again. Confirm
+   revalidation, truthful failure stages, and preserved settings/profile bytes.
+   Edit saved settings/profile values during work and verify current-run isolation.
+   Test missing engine prerequisites without disrupting controlled execution.
+4. Stop during actual SDK initialization, recognition, and query work. Close
+   during an active operation, observe settlement/reaping, then reopen. Exercise
+   file-output failure or log pressure without losing Stop or terminal evidence.
+   Record forced/incomplete outcomes honestly; do not retry them into a pass.
+5. Trigger an original-source exception carrying real recognition detail.
+   Confirm the ordinary result shows only safe classification, with full bounded
+   diagnostics available only through explicit private disclosure.
+
+Hosted CI does not execute these steps. Live Windows/macOS native qualification,
+R6, background compatibility, and release packaging remain separate obligations.

@@ -1,4 +1,9 @@
-use mado_runtime_comparison::{inventory::Inventory, model::Plan, runner};
+use mado_runtime_comparison::{
+    desktop::{DesktopController, StartRequest},
+    inventory::Inventory,
+    model::Plan,
+    runner,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -6,7 +11,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, atomic::AtomicU64, mpsc};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 struct PlanFile(PathBuf);
 
@@ -126,4 +131,128 @@ fn separate_supervisor_records_runtime_identity_through_cleanup() {
         Some("Cancelled")
     );
     assert_eq!(stopped.build, record.build);
+}
+
+#[cfg(unix)]
+#[test]
+fn child_exit_before_rust_startup_is_not_a_successful_check() {
+    let mut plan: Plan =
+        serde_json::from_str(include_str!("../fixtures/controlled-plan.json")).unwrap();
+    plan.lane = "replay".into();
+    // Only loader locations are consumed before this process exits. No SDK or
+    // recognition result is substituted for the absent Rust startup protocol.
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    plan.native_config = Some(serde_json::json!({
+        "version":1,
+        "ocr":{
+            "model":"phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2",
+            "profile":"phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2",
+            "language":"horizontal-ja-basic-latin-ascii-digits-ui-symbols-v1",
+            "provider":"cpu","runtime_profile":"onnxruntime-1.29.0-api17-cpu",
+            "model_root":executable.parent().unwrap(),
+            "runtime":{"path":executable,"sha256":"0".repeat(64),"bytes":1},
+        },
+        "native_libraries":[],
+        "native":null,
+        "replay":{"corpus_id":"startup-boundary","frames":[],"package_entries":{},"templates":{}},
+    }));
+    let inventory = Inventory::capture(
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/javascript")),
+        &plan.limits,
+    )
+    .unwrap();
+    let (progress, _events) = mpsc::sync_channel(16);
+    let (logs, _messages) = mpsc::sync_channel(1);
+    let observer = runner::Observer {
+        progress,
+        logs,
+        dropped_logs: Arc::new(AtomicU64::new(0)),
+    };
+    let record = runner::run_environment_check_with_executable(
+        Path::new("/usr/bin/true"),
+        &plan,
+        &inventory,
+        &mut || false,
+        &observer,
+    )
+    .unwrap();
+    assert_eq!(record.exit_code, Some(0));
+    assert_eq!(record.status, "FAIL");
+    let primary = record.primary.unwrap();
+    assert_eq!(primary.category, "ChildStartup");
+    assert_eq!(primary.context["boundary"], "before_child_started");
+    assert_eq!(record.entry_outcome, "NotExecuted");
+    assert_eq!(record.observations["operation"], "environment_check");
+    assert_eq!(record.cleanup["clean"], false);
+    assert!(record.metrics["runtime"].is_null());
+    assert!(record.metrics["vm_bytes"].is_null());
+}
+
+#[test]
+fn inspected_package_starts_controlled_without_requiring_an_engine() {
+    let controller = DesktopController::new(
+        PathBuf::from(env!("CARGO_BIN_EXE_mado-runtime-comparison")),
+        PathBuf::from("engine-not-used-for-controlled"),
+    );
+    let package = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/typescript"));
+    let inspected = controller.inspect(package).unwrap();
+    let run = controller
+        .start(
+            StartRequest {
+                package_path: package.to_str().unwrap().into(),
+                inventory_identity: inspected.inventory_identity,
+                package_id: inspected.package_id,
+                schema_identity: inspected.schema_identity,
+                profile_id: "draft".into(),
+                values: inspected.profiles["template-first"]["options"].clone(),
+                lane: "controlled".into(),
+                scenario: "workflow".into(),
+                replay_descriptor_path: None,
+            },
+            None,
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(14);
+    loop {
+        let view = controller.poll();
+        assert_eq!(view.run.as_deref(), Some(run.as_str()));
+        if view.state == "terminal" {
+            assert!(view.error.is_none(), "{:?}", view.error);
+            let result = view.result.expect("terminal execution result");
+            assert_eq!(result["status"], "PASS", "{result}");
+            assert_eq!(result["cleanup"]["clean"], true);
+            break;
+        }
+        assert!(Instant::now() < deadline, "controller did not settle");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn missing_replay_environment_retains_a_blocked_cli_record_without_a_child() {
+    let mut plan: Plan =
+        serde_json::from_str(include_str!("../fixtures/controlled-plan.json")).unwrap();
+    plan.lane = "replay".into();
+    plan.samples = 1;
+    plan.warmups = 0;
+    plan.native_config = None;
+    let plan_file = PlanFile::new(&plan);
+    let output = Command::new(env!("CARGO_BIN_EXE_mado-runtime-comparison"))
+        .arg("run")
+        .arg(&plan_file.0)
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/javascript"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let output: Value =
+        serde_json::from_slice(&output.stdout).expect("structured prerequisite result");
+    let record = &output["runs"][0];
+    assert_eq!(record["status"], "BLOCKED");
+    assert_eq!(record["primary"]["category"], "Blocked");
+    assert_eq!(record["entry_outcome"], "NotExecuted");
+    assert_eq!(record["cleanup"]["child_started"], false);
+    assert_eq!(record["cleanup"]["clean"], true);
+    assert!(record["build"].is_null());
+    assert!(record["metrics"]["runtime"].is_null());
+    assert!(record["metrics"]["workflow_us"].is_null());
 }
