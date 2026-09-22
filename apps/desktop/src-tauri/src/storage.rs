@@ -1,3 +1,4 @@
+use mado_runtime_comparison::environment::OcrEnvironment;
 use mado_runtime_comparison::host::resolve_options;
 use mado_runtime_comparison::inventory::Inventory;
 use mado_runtime_comparison::model::{Fault, identity};
@@ -41,6 +42,8 @@ pub struct Settings {
     pub version: u32,
     pub gui_log_limit: usize,
     pub package_path: Option<String>,
+    #[serde(default)]
+    pub ocr_environment: Option<OcrEnvironment>,
 }
 
 impl Default for Settings {
@@ -49,6 +52,7 @@ impl Default for Settings {
             version: VERSION,
             gui_log_limit: 1000,
             package_path: None,
+            ocr_environment: None,
         }
     }
 }
@@ -554,6 +558,9 @@ fn validate_settings(settings: &Settings) -> Result<(), Fault> {
             "Settings",
             "remembered package path must be nonempty text of at most 4096 bytes",
         ));
+    }
+    if let Some(environment) = &settings.ocr_environment {
+        environment.validate()?;
     }
     // This is a location hint, not a captured inventory or permission grant.
     Ok(())
@@ -1116,6 +1123,74 @@ mod tests {
             assert!(store.settings().is_err());
             assert!(store.save_settings(Settings::default()).is_err());
             assert_eq!(fs::read(&path).unwrap(), malformed);
+        }
+    }
+
+    #[test]
+    fn environment_settings_are_structural_and_preserve_existing_data() {
+        use mado_runtime_comparison::environment::{
+            G004_PROFILE, LANGUAGE, PROVIDER, RUNTIME_PROFILE,
+        };
+
+        let directory = Directory::new();
+        let store = directory.store();
+        store.save_settings(Settings::default()).unwrap();
+        let profile = store
+            .save(&inventory(), None, "Portable", options())
+            .unwrap();
+        let profile_path = store.profile_path(&profile.id);
+        let profile_before = fs::read(&profile_path).unwrap();
+        let path = directory.0.join("settings.json");
+        let original =
+            br#"{ "version":1, "gui_log_limit":12, "package_path":"remembered-package" }"#;
+        fs::write(&path, original).unwrap();
+        let mut settings = store.settings().unwrap();
+        assert!(settings.ocr_environment.is_none());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let environment = OcrEnvironment {
+            model: G004_PROFILE.into(),
+            profile: G004_PROFILE.into(),
+            language: LANGUAGE.into(),
+            provider: PROVIDER.into(),
+            runtime_profile: RUNTIME_PROFILE.into(),
+            model_root: directory
+                .0
+                .join("missing-models")
+                .to_string_lossy()
+                .into_owned(),
+            runtime_path: directory
+                .0
+                .join("missing-runtime")
+                .to_string_lossy()
+                .into_owned(),
+            native_library_paths: vec![
+                directory
+                    .0
+                    .join("missing-library")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+        };
+        settings.ocr_environment = Some(environment.clone());
+        store.save_settings(settings).unwrap();
+        let reopened = directory.store().settings().unwrap();
+        assert_eq!(reopened.ocr_environment, Some(environment));
+        assert_eq!(reopened.gui_log_limit, 12);
+        assert_eq!(reopened.package_path.as_deref(), Some("remembered-package"));
+        assert_eq!(fs::read(profile_path).unwrap(), profile_before);
+        let saved = fs::read(&path).unwrap();
+        let mut invalid = reopened.clone();
+        invalid.ocr_environment.as_mut().unwrap().provider = "cuda".into();
+        assert!(store.save_settings(invalid).is_err());
+        assert_eq!(fs::read(&path).unwrap(), saved);
+        for field in ["provider", "target"] {
+            let mut corrupted = serde_json::to_value(&reopened).unwrap();
+            corrupted["ocr_environment"][field] = json!("unauthorized");
+            let bytes = serde_json::to_vec(&corrupted).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            assert!(store.settings().is_err());
+            assert!(store.save_settings(reopened.clone()).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
         }
     }
 

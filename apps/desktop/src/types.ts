@@ -12,10 +12,15 @@ export interface PackageInfo {
   effective_defaults:Record<string,Json>|null;
 }
 export interface Profile {version:number; id:string; name:string; package_id:string; schema_identity:string; values:Record<string,Json>}
-export interface Settings {version:number; gui_log_limit:number; package_path:string|null}
+// Machine-local OCR environment; absent means unconfigured. Field order matches the backend struct.
+export interface OcrEnvironment {
+  model:string; profile:string; language:string; provider:string; runtime_profile:string;
+  model_root:string; runtime_path:string; native_library_paths:string[];
+}
+export interface Settings {version:number; gui_log_limit:number; package_path:string|null; ocr_environment:OcrEnvironment|null}
 export interface Selection {package:PackageInfo; profiles:Profile[]; profiles_error:Fault|null}
 export interface ControllerView {
-  run:string|null; state:string; result:Record<string,Json>|null; error:Fault|null;
+  run:string|null; state:string; operation:string; result:Record<string,Json>|null; error:Fault|null;
   progress:Record<string,Json>[]; dropped_logs:number;
 }
 export interface LogEntry {

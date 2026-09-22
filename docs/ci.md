@@ -110,6 +110,11 @@ The full check has these responsibilities:
   are checked without loading a desktop shell or obtaining native authority.
 - On macOS, build the real Tauri shell with `--features custom-protocol` after
   building frontend assets. The test-only `webdriver` feature is not enabled.
+  Optional OCR settings, bounded replay projection, admission races, and
+  pre-startup failures are checked without loading a real OCR backend. The
+  separate engine artifact and actual [recorded-replay WebView acceptance](desktop.md#recorded-replay-acceptance)
+  remain explicit local checks; no private corpus, model, or native permission
+  is added to default CI.
   Linux and Windows explicitly report the shell build as unexecuted.
 
 For governance policy and its behavioral tests only, after Python dependency

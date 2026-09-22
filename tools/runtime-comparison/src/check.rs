@@ -622,9 +622,8 @@ pub fn run() -> Result<Value, Fault> {
         };
         for (name, source, stop) in cases {
             let inventory = replace_entry(base, source)?;
-            let mut scenario = plan(candidate, "success", "template-first");
-            scenario.limits.duration_ms = 2_000;
-            scenario.limits.readiness_ms = 1_000;
+            // Startup and import validation precede the VM hook; keep the common bound.
+            let scenario = plan(candidate, "success", "template-first");
             let record = if stop {
                 run_once_after_milestone(&scenario, &inventory, "VmHookReached", 100, false)?
             } else {

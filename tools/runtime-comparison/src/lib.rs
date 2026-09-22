@@ -3,6 +3,7 @@
 pub mod check;
 pub mod desktop;
 pub mod engine;
+pub mod environment;
 pub mod host;
 pub mod inventory;
 pub mod javascript;
