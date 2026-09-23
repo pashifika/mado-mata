@@ -1,5 +1,6 @@
 import {useState} from 'react';
 import SchemaForm from './SchemaForm.tsx';
+import Select from './Select';
 import ResultPanel, {FaultMessage, fault} from './ResultPanel.tsx';
 import {faultSummary, text} from './state.ts';
 import type {CheckAssociation} from './state.ts';
@@ -95,15 +96,14 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           {workspace.profilesError && <><FaultMessage title="Some saved profiles could not be loaded" value={workspace.profilesError}/><p className="muted">Compatible profiles and new drafts remain available. Stored files were not modified. Restore compatible data, then reinspect.</p></>}
           <div className="two-col">
             <div className="field"><label htmlFor="profile-select">Saved profile</label>
-              <select id="profile-select" value={workspace.selectedId ?? ''} disabled={locked} onChange={event => handlers.selectProfile(event.target.value)}>
-                <option value="">Unsaved draft</option>{workspace.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
-              </select>
+              <Select id="profile-select" value={workspace.selectedId ?? ''} disabled={locked} onChange={handlers.selectProfile}
+                options={[{value: '', label: 'Unsaved draft'}, ...workspace.profiles.map(profile => ({value: profile.id, label: profile.name}))]}/>
               {selectedProfile && <p className="identity-text">{selectedProfile.id}</p>}
               {!bound && <p className="inline-warning">Stale schema identity. This profile cannot be rebound or run.</p>}</div>
             <div className="field"><label htmlFor="preset-select">Package preset</label>
-              <select id="preset-select" value={workspace.preset} disabled={locked} onChange={event => handlers.newDraft(event.target.value)}>
-                <option value="">Top-level defaults</option>{Object.keys(workspace.package.profiles).map(key => <option key={key} value={key}>{key}</option>)}
-              </select><p className="field-help">Choosing a preset creates a new draft. Save it with a name to keep it.</p></div>
+              <Select id="preset-select" value={workspace.preset} disabled={locked} onChange={handlers.newDraft}
+                options={[{value: '', label: 'Top-level defaults'}, ...Object.keys(workspace.package.profiles).map(key => ({value: key, label: key}))]}/>
+              <p className="field-help">Choosing a preset creates a new draft. Save it with a name to keep it.</p></div>
           </div>
           <div className="field"><label htmlFor="profile-name">Profile name</label>
             <input id="profile-name" value={workspace.name} disabled={locked} onChange={event => handlers.change(item => ({...item, name: event.target.value, notice: '', touched: true}))}/></div>
@@ -120,15 +120,14 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           <h3>Execution route</h3>
           <div className="two-col">
             <div className="field"><label htmlFor="lane">Execution lane</label>
-              <select id="lane" value={workspace.lane} disabled={locked} onChange={event => handlers.change(item => ({...item, lane: event.target.value, notice: ''}))}>
-                <option value="controlled">Controlled · fixture observations, no recognition</option>
-                <option value="replay">Replay · recorded corpus, real recognition, controlled sink</option>
-                <option value="native" disabled>Native · refused, no live capture or input</option>
-              </select></div>
+              <Select id="lane" value={workspace.lane} disabled={locked} onChange={lane => handlers.change(item => ({...item, lane, notice: ''}))}
+                options={[{value: 'controlled', label: 'Controlled · fixture observations, no recognition'},
+                  {value: 'replay', label: 'Replay · recorded corpus, real recognition, controlled sink'},
+                  {value: 'native', label: 'Native · refused, no live capture or input', disabled: true}]}/></div>
             <div className="field"><label htmlFor="scenario">Controlled scenario</label>
-              <select id="scenario" value={workspace.lane === 'replay' ? 'workflow' : workspace.scenario} disabled={locked || workspace.lane === 'replay'} onChange={event => handlers.change(item => ({...item, scenario: event.target.value}))}>
-                <option value="workflow">Workflow</option><option value="held-work">Held work · exercise Stop</option><option value="no-match">No match</option>
-              </select></div>
+              <Select id="scenario" value={workspace.lane === 'replay' ? 'workflow' : workspace.scenario} disabled={locked || workspace.lane === 'replay'}
+                onChange={scenario => handlers.change(item => ({...item, scenario}))}
+                options={[{value: 'workflow', label: 'Workflow'}, {value: 'held-work', label: 'Held work · exercise Stop'}, {value: 'no-match', label: 'No match'}]}/></div>
           </div>
           <div className="field"><label htmlFor="descriptor-path">Recorded corpus descriptor</label>
             <input id="descriptor-path" type="text" value={workspace.descriptorPath} disabled={locked} spellCheck={false} aria-invalid={descriptorError !== null}

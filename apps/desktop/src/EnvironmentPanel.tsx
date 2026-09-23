@@ -1,4 +1,5 @@
 import {useState} from 'react';
+import Select from './Select';
 import {DISCLOSURE_LIMIT, ENVIRONMENT_LANGUAGE, ENVIRONMENT_PROVIDER, ENVIRONMENT_RUNTIME_PROFILE, SUPPORTED_PROFILES, boundedText, cleanupLabel, faultSummary, initializationLabel, record, text} from './state.ts';
 import type {CheckAssociation, EnvironmentDraft} from './state.ts';
 import type {ControllerView, OcrEnvironment, WorkspaceRef} from './types.ts';
@@ -67,11 +68,10 @@ export default function EnvironmentPanel(props: Props) {
       <p className="muted">Machine-local, saved in App settings, never in portable profiles. Save validates structure only; Check initializes the engine.</p></div>
       <span className={`tag ${dirty ? 'unsaved' : ''}`}>{!loaded ? 'Settings not loaded' : dirty ? 'Unsaved changes' : saved ? 'Saved' : 'Unconfigured'}</span></div>
     <div className="field"><label htmlFor="ocr-profile">Supported OCR profile</label>
-      <select id="ocr-profile" value={draft.profile} disabled={locked} aria-invalid={Boolean(errors.profile)} onChange={event => field('profile', event.target.value)}>
-        <option value="">Not configured</option>
-        {SUPPORTED_PROFILES.map(item => <option key={item.profile} value={item.profile}>{item.label}</option>)}
-        {draft.profile && !supported && <option value={draft.profile} disabled>Unsupported · {draft.profile}</option>}
-      </select>
+      <Select id="ocr-profile" value={draft.profile} disabled={locked} aria-invalid={Boolean(errors.profile)} onChange={value => field('profile', value)}
+        options={[{value: '', label: 'Not configured'},
+          ...SUPPORTED_PROFILES.map(item => ({value: item.profile, label: item.label})),
+          ...(draft.profile && !supported ? [{value: draft.profile, label: `Unsupported · ${draft.profile}`, disabled: true}] : [])]}/>
       {errors.profile && <p className="field-error">{errors.profile}</p>}</div>
     <dl className="fixed-facts">
       <dt>Model</dt><dd>{supported?.model ?? '—'}</dd>

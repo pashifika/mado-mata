@@ -3,6 +3,7 @@ import type {ReactNode} from 'react';
 import EnvironmentPanel from './EnvironmentPanel.tsx';
 import type {CheckTarget, LastCheck} from './EnvironmentPanel.tsx';
 import {FaultMessage} from './ResultPanel.tsx';
+import Select from './Select';
 import {TIMEOUT_SECONDS, VISIBLE_COUNTS} from './state.ts';
 import type {EnvironmentDraft, SettingsDraft} from './state.ts';
 import type {EditableSettings, Fault, Settings} from './types.ts';
@@ -57,17 +58,15 @@ export default function SettingsDialog(props: Props) {
             <h3 id="notifications-heading">Quiet, but not invisible.</h3>
             <p className="muted">Short-lived cards at the bottom right. Blocking failures and cleanup outcomes remain on the Run page regardless of cards.</p>
             <div className="field"><label htmlFor="visible-count">Visible notifications</label>
-              <select id="visible-count" value={draft.notifications.visible_count} aria-invalid={Boolean(errors.visibleCount)}
-                onChange={event => onDraft({...draft, notifications: {...draft.notifications, visible_count: Number(event.target.value)}})}>
-                {VISIBLE_COUNTS.map(count => <option key={count} value={count}>{count} {count === 1 ? 'card' : 'cards'}</option>)}
-              </select>
+              <Select id="visible-count" value={String(draft.notifications.visible_count)} aria-invalid={Boolean(errors.visibleCount)}
+                onChange={value => onDraft({...draft, notifications: {...draft.notifications, visible_count: Number(value)}})}
+                options={VISIBLE_COUNTS.map(count => ({value: String(count), label: `${count} ${count === 1 ? 'card' : 'cards'}`}))}/>
               {errors.visibleCount && <p className="field-error">{errors.visibleCount}</p>}
               <p className="field-help">Older cards leave the stack immediately; every event stays in the relevant log.</p></div>
             <div className="field"><label htmlFor="timeout-seconds">Auto-dismiss after</label>
-              <select id="timeout-seconds" value={draft.notifications.timeout_seconds} aria-invalid={Boolean(errors.timeoutSeconds)}
-                onChange={event => onDraft({...draft, notifications: {...draft.notifications, timeout_seconds: Number(event.target.value)}})}>
-                {TIMEOUT_SECONDS.map(seconds => <option key={seconds} value={seconds}>{seconds} seconds</option>)}
-              </select>
+              <Select id="timeout-seconds" value={String(draft.notifications.timeout_seconds)} aria-invalid={Boolean(errors.timeoutSeconds)}
+                onChange={value => onDraft({...draft, notifications: {...draft.notifications, timeout_seconds: Number(value)}})}
+                options={TIMEOUT_SECONDS.map(seconds => ({value: String(seconds), label: `${seconds} seconds`}))}/>
               {errors.timeoutSeconds && <p className="field-error">{errors.timeoutSeconds}</p>}
               <p className="field-help">The timer pauses while you hover or focus a card. Cards already shown keep the duration they were created with.</p></div>
             <div className="switch-row"><label htmlFor="show-success">Show success notifications</label>

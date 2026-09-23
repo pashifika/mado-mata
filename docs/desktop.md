@@ -129,6 +129,18 @@ switching workspaces. Enter/Space selects; Escape cancels and returns focus to t
 trigger. Tab reaches the enabled close action in the popup footer; Shift+Tab
 returns from that action to the selected option. Leaving the popup dismisses it.
 
+Profile, preset, execution, schema-enum, App settings, and log-filter controls use
+the same styled single-select as workspace navigation. Arrow keys, Home/End, and
+type-ahead move the active option; Enter/Space commits and Escape cancels. Form
+selectors also commit on Tab. Workspace Tab never switches workspaces by itself.
+Keyboard focus stays on the trigger while the active option is indicated in the
+popup; disabled options cannot be selected. Empty and invalid current values are
+not silently replaced.
+
+Popups scroll within the viewport and open above the trigger when needed. Inside
+App settings they remain within the native modal, outside its content scroller.
+Escape dismisses an open selector without cancelling the settings draft.
+
 **Run control** and **Logs** beside the dropdown belong to the selected workspace.
 Switching workspaces does not transfer an operation. There is **one application-wide
 operation slot** for Start and OCR Check; the owner and Stop remain available
@@ -413,9 +425,15 @@ scope separately from [hosted build/core checks](ci.md#local-check-scope).
    after workspace switches, closure, and log eviction.
 8. Verify Run, Logs, the Application menu, and App settings at 1440, 1024, and
    900 CSS-pixel widths, including keyboard navigation and modal Stop.
-   Verify the compact aggregate counters, conditional Errors count, styled
-   dropdown selection/dismissal, and the shared level/text log-search field. Check
-   structured Rust/Script attribution and independent file output. Exercise
+   Verify the compact aggregate counters, conditional Errors count, shared
+   selectors, and combined level/text log-search field. Check disabled Native
+   selection, Replay's scenario lock, preset/profile round trips, empty enum
+   values, long-list keyboard navigation, and popup placement near viewport edges.
+   Leave a selector open across operation completion and verify it stays anchored
+   when the operation strip disappears.
+   In App settings, verify selector Escape preserves the dialog and Save retains
+   numeric notification values after restart.
+   Check structured Rust/Script attribution and independent file output. Exercise
    queue pressure/file failure only in the disposable data root; loss/failure
    counters must not erase results or disable Stop.
 

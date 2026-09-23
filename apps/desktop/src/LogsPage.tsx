@@ -1,4 +1,5 @@
 import {useEffect, useMemo} from 'react';
+import Select from './Select';
 import {LOG_LEVELS, viewLogs} from './workspace.ts';
 import type {LogFilter, LogScope} from './workspace.ts';
 import type {LogBatch, LogEntry} from './types.ts';
@@ -34,10 +35,9 @@ export default function LogsPage(props: Props) {
   const lossVisible = losses.gui_dropped > 0 || losses.file_dropped > 0 || losses.file_errors > 0 || evicted > 0 || (sourceDropped ?? 0) > 0;
   return <>
     <div className="page-heading"><div><span className="eyebrow">{eyebrow}</span><h1 id="logs-page-heading" tabIndex={-1}>{heading}</h1><p>{description}</p></div>
-      <div className="actions">{onScope && <label className="inline-label" htmlFor="log-scope">Scope
-        <select id="log-scope" value={scope.kind} onChange={event => onScope(event.target.value === 'all' ? {kind: 'all'} : {kind: 'application'})}>
-          <option value="application">Application events only</option><option value="all">All retained events</option>
-        </select></label>}</div>
+      <div className="actions">{onScope && <div className="inline-label"><label htmlFor="log-scope">Scope</label>
+        <Select id="log-scope" value={scope.kind} onChange={value => onScope(value === 'all' ? {kind: 'all'} : {kind: 'application'})}
+          options={[{value: 'application', label: 'Application events only'}, {value: 'all', label: 'All retained events'}]}/></div>}</div>
     </div>
     {reveal !== null && !revealed && <section className="fault" role="alert"><strong>Event #{reveal} is no longer retained</strong>
       <p>It was evicted from the bounded display buffer or never delivered to the GUI queue. Retained operation outcomes stay on the Run page; file logs are unaffected.</p></section>}
@@ -46,9 +46,8 @@ export default function LogsPage(props: Props) {
       <div className="log-toolbar">
         <div className="log-search-field" role="group" aria-label="Log filters">
           <label htmlFor="log-level" className="visually-hidden">Log level</label>
-          <select id="log-level" value={filter.level} onChange={event => onFilter({...filter, level: event.target.value})}>
-            <option value="">All levels</option>{LOG_LEVELS.map(level => <option key={level} value={level}>{level.toUpperCase()}</option>)}
-          </select>
+          <Select id="log-level" value={filter.level} onChange={level => onFilter({...filter, level})}
+            options={[{value: '', label: 'All levels'}, ...LOG_LEVELS.map(level => ({value: level, label: level.toUpperCase()}))]}/>
           <label htmlFor="log-search" className="visually-hidden">Search code, message, source, or run</label>
           <input id="log-search" type="search" value={filter.text} placeholder="Search code, message, source, or run ID" spellCheck={false}
             onChange={event => onFilter({...filter, text: event.target.value})}/>
