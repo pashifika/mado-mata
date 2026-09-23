@@ -1,3 +1,5 @@
+import {messages} from './i18n.ts';
+import type {Locale, Message} from './i18n.ts';
 import {defaultDraft} from './state.ts';
 import type {ControllerView, Fault, Json, LogEntry, PackageInfo, Profile, Selection, WorkspaceRef} from './types.ts';
 
@@ -23,12 +25,12 @@ export interface Workspace {
   // Local edit counter: a validation or save that raced a later edit must not overwrite it.
   draftRevision:number; validation:Record<string,Json>|null;
   lane:string; scenario:string; descriptorPath:string; page:Page;
-  error:Fault|null; notice:string; disclosedRun:string|null;
+  error:Fault|null; notice:Message|null; disclosedRun:string|null;
   logFilter:LogFilter;
   // True once the operator changed profile/draft state; a pristine default draft closes without confirmation.
   touched:boolean;
   // Label of the in-flight state-changing command owned by this workspace, if any.
-  busy:string|null;
+  busy:Message|null;
 }
 
 // Retained after close so diagnostics stay attributable without reopening the package.
@@ -50,7 +52,7 @@ export function freshWorkspace(selection:Selection, previous?:Workspace):Workspa
     selectedId: null, name: '', preset: '', draft: defaultDraft(selection.package.schema),
     draftRevision: (previous?.draftRevision ?? 0) + 1, validation: null,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
-    page: previous?.page ?? 'run', error: null, notice: '', disclosedRun: null, logFilter: previous?.logFilter ?? {text: '', level: ''}, touched: false, busy: null,
+    page: previous?.page ?? 'run', error: null, notice: null, disclosedRun: null, logFilter: previous?.logFilter ?? {text: '', level: ''}, touched: false, busy: null,
   };
 }
 
@@ -62,10 +64,10 @@ export function openWorkspace(list:Workspace[], selection:Selection):Workspace[]
   const existing = index < 0 ? undefined : list[index];
   let opened:Workspace;
   if (existing && existing.revision === selection.revision) {
-    const reopened = {...existing, profilesError: selection.profiles_error, notice: 'This package root is already open; its draft is unchanged.'};
+    const reopened:Workspace = {...existing, profilesError: selection.profiles_error, notice: {key:'alreadyOpen'}};
     opened = catalogKnown(selection.profiles_error) ? reconcileProfiles(reopened, selection.profiles) : reopened;
   } else {
-    opened = {...freshWorkspace(selection, existing), notice: 'Package inspected. Start will revalidate its identity and capture current values.'};
+    opened = {...freshWorkspace(selection, existing), notice: {key:'inspected'}};
   }
   const next = [...list];
   if (existing) next[index] = opened; else next.push(opened);
@@ -91,7 +93,7 @@ function reconcileProfiles(workspace:Workspace, profiles:Profile[]):Workspace {
   const current = profiles.find(item => item.id === previous.id);
   if (!current) {
     return {...workspace, profiles, selectedId: null, touched: true,
-      notice: `Saved profile “${previous.name}” was deleted outside this workspace. Its values remain in this unsaved draft.`};
+      notice: {key:'deletedElsewhere', args:[previous.name]}};
   }
   const renamed = previous.name !== current.name;
   const changed = JSON.stringify(previous.values) !== JSON.stringify(current.values);
@@ -99,8 +101,8 @@ function reconcileProfiles(workspace:Workspace, profiles:Profile[]):Workspace {
   return {
     ...workspace, profiles, name: renamed && workspace.name === previous.name ? current.name : workspace.name,
     notice: changed
-      ? `Saved profile “${current.name}” was updated outside this workspace. This draft keeps its own values: Update profile overwrites the saved ones; to load them instead, pick “Unsaved draft” and then the profile.`
-      : `Saved profile was renamed to “${current.name}” outside this workspace. Draft values are unchanged.`,
+      ? {key:'updatedElsewhere', args:[current.name]}
+      : {key:'renamedElsewhere', args:[current.name]},
   };
 }
 
@@ -158,7 +160,7 @@ export function updateWorkspace(list:Workspace[], id:string, update:(workspace:W
 }
 
 export function editDraft(workspace:Workspace, draft:Record<string,Json>):Workspace {
-  return {...workspace, draft, draftRevision: workspace.draftRevision + 1, validation: null, notice: '', touched: true};
+  return {...workspace, draft, draftRevision: workspace.draftRevision + 1, validation: null, notice: null, touched: true};
 }
 
 export function newDraft(workspace:Workspace, presetName = ''):Workspace {
@@ -189,13 +191,14 @@ export function workspaceLabel(workspace:Pick<Workspace,'id'|'packagePath'|'pack
 export type OriginLabel = {kind:'open'; label:string} | {kind:'closed'; label:string} | {kind:'unknown'; label:string} | {kind:'application'; label:string};
 
 // Attribution is honest about closed and unknown origins; it never assigns an event to a newer tab.
-export function originLabel(workspaceId:string|null, open:Workspace[], closed:ClosedWorkspace[]):OriginLabel {
-  if (workspaceId === null) return {kind: 'application', label: 'Application'};
+export function originLabel(workspaceId:string|null, open:Workspace[], closed:ClosedWorkspace[], locale:Locale = 'en'):OriginLabel {
+  const t = messages[locale].app;
+  if (workspaceId === null) return {kind: 'application', label: t.application};
   const current = open.find(item => item.id === workspaceId);
   if (current) return {kind: 'open', label: workspaceLabel(current, open)};
   const retained = closed.find(item => item.id === workspaceId);
-  if (retained) return {kind: 'closed', label: `${retained.label} · closed`};
-  return {kind: 'unknown', label: `${workspaceId} · closed, no retained detail`};
+  if (retained) return {kind: 'closed', label: t.closedLabel(retained.label)};
+  return {kind: 'unknown', label: t.unknownOrigin(workspaceId)};
 }
 
 export type LogScope = {kind:'workspace'; id:string} | {kind:'application'} | {kind:'all'};

@@ -117,6 +117,8 @@ TSX files under `apps/desktop/src/` are grouped by responsibility:
 | `components/` | Shared selection, schema forms, results, notifications, and workspace navigation |
 | `pages/` | Run and Logs page views |
 | `settings/` | App settings dialog and OCR environment view |
+| `locales/` | Bundled English/Japanese JSON text resources |
+| `i18n.ts`, `ui-messages.ts`, `locale.tsx` | Typed formatting and saved-locale presentation |
 
 Imports point directly to the owning file. Non-visual TypeScript modules and
 their tests remain at the source root; the Rust layout under `src-tauri/` is
@@ -175,7 +177,7 @@ controls and workspace command buttons are disabled. Schema options remain edita
 Stop and navigation stay available. The reason is shown in the issuing workspace, in
 the workspace dropdown, and in the **+** form.
 
-Use **Application → App settings** for Notifications, OCR environment, and Logs.
+Use **Application → App settings** for Display, Notifications, OCR environment, and Logs.
 Categories share one draft and one **Save changes** action. **Cancel**, the
 dialog close button, or **Escape** discards unsaved edits; merely opening the
 dialog initializes no recognition backend. A category whose fields are invalid
@@ -187,6 +189,34 @@ beside its button, the footer names it once the draft has changes, and
 preserving the latest package-location hint. Active operations keep the settings
 they already captured. **Application → Application logs** opens application-wide
 diagnostics; **Close window** follows the bounded shutdown path.
+
+### Display language
+
+Choose **Display → Language → English / 日本語**, then **Save changes**.
+The saved language applies immediately without restarting workspaces or runs.
+Cancel, Escape, and failed Save keep the previous language; edits made during a
+pending Save remain unsaved. Language does not change OCR recognition settings,
+profile values, or input authority.
+
+New installations and older settings without `locale` use English without a
+read-time rewrite. Package-location hint updates do not add a missing locale.
+An invalid present locale is refused without replacing the settings file.
+If the initial settings read fails, App settings stays unavailable: a failed read
+is not a new installation, and the UI cannot Save a replacement default draft.
+Resolve the reported read error and restart the application to load the existing
+settings before editing them.
+After explicit Save, older strict binaries may reject the new field: preserve
+the file before rollback and deliberately restore a compatible backup or remove
+only `locale`. Do not reset profiles or other settings.
+
+UI labels, help, accessible names, and frontend validation are localized.
+All log bodies, log-derived notification bodies, backend/SDK errors, and raw
+diagnostics stay original after existing privacy and size limits. Package text,
+names, IDs, paths, and values are not translated.
+
+Translations live in JSON; formatting and typed parameters stay in TypeScript.
+The existing `npm test --prefix apps/desktop` checks cross-language keys and
+placeholders. See [ADR 0004](adr/0004-desktop-localization-resources.md).
 
 ## Inspect, edit, and save profiles
 
@@ -479,6 +509,15 @@ scope separately from [hosted build/core checks](ci.md#local-check-scope).
    Check structured Rust/Script attribution and independent file output. Exercise
    queue pressure/file failure only in the disposable data root; loss/failure
    counters must not erase results or disable Stop.
+9. Repeat the UI checks in English and Japanese. Save and restart; cancel an
+   uncommitted language edit; provoke a Save failure only in the disposable
+   store and verify unchanged saved bytes and effective language. Check document
+   language, validation, and retained notices after switching, including an
+   asynchronous completion and edits made during Save.
+   Switch language during a controlled run, then Stop the same operation.
+   Verify independent drafts, card pause/duration, log filters and original
+   diagnostic bodies. A synthetic fault checks payload preservation, not actual
+   SDK execution. Leave unavailable provider-specific evidence explicitly open.
 
 ### Recorded-replay acceptance
 

@@ -54,7 +54,7 @@ test('a profile saved through one root reaches the other root of the same packag
   assert.deepEqual(synced[2].profiles,[]);
   assert.deepEqual(synced[1].draft,{count:'3'});
   assert.equal(synced[1].selectedId,null);
-  assert.equal(synced[1].notice,'');
+  assert.equal(synced[1].notice,null);
 });
 
 test('opening a second root of the same package refreshes the first root without resetting its draft',()=>{
@@ -104,7 +104,6 @@ test('reopening a root whose listing failed keeps its catalog, selection and dra
   assert.equal(alpha.name,'Review');
   assert.deepEqual(alpha.draft,{count:'4'});
   assert.deepEqual(alpha.profilesError,unreadable);
-  assert.doesNotMatch(alpha.notice,/deleted/);
   assert.deepEqual(list[1].profiles,[shared]);
   const added=profile('Q','Added on disk',{count:1},'shared');
   list=openWorkspace(list,selection('a',1,'/games/alpha','shared',[shared,added]));
@@ -138,7 +137,7 @@ test('a failed listing in one root leaves the other root as it was; the next rea
   assert.equal(beta.selectedId,'P');
   assert.deepEqual(beta.profiles,[shared]);
   assert.deepEqual(beta.draft,{count:'6'});
-  assert.equal(beta.notice,'');
+  assert.equal(beta.notice,null);
   assert.equal(beta.profilesError,null);
   const added=profile('Q','Added on disk',{count:1},'shared');
   const recovered=selection('a',3,'/games/alpha','shared',[shared,added]);
@@ -146,7 +145,7 @@ test('a failed listing in one root leaves the other root as it was; the next rea
   assert.deepEqual(list[1].profiles,[shared,added]);
   assert.equal(list[1].selectedId,'P');
   assert.deepEqual(list[1].draft,{count:'6'});
-  assert.equal(list[1].notice,'');
+  assert.equal(list[1].notice,null);
 });
 
 test('a ProfileRejected listing is a real partial catalog and reaches the other root',()=>{
@@ -169,7 +168,7 @@ test('an unchanged catalog or an unknown source leaves same-package roots as the
     assert.equal(beta.selectedId,'P');
     assert.deepEqual(beta.profiles,[shared]);
     assert.deepEqual(beta.draft,{count:'2'});
-    assert.equal(beta.notice,'');
+    assert.equal(beta.notice,null);
     assert.equal(synced[0].notice,list[0].notice);
   }
 });

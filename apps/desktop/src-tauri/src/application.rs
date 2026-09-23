@@ -144,6 +144,8 @@ pub struct Application {
     runner: DesktopController,
     store: Arc<Mutex<Store>>,
     commands: Mutex<()>,
+    #[cfg(test)]
+    command_admitted: AtomicBool,
     // Admission/collection share this lock; workers never acquire it.
     workspaces: Mutex<Workspaces>,
     logger: Logger,
@@ -164,6 +166,8 @@ impl Application {
             runner: DesktopController::new(controlled, engine),
             store: Arc::new(Mutex::new(Store::new(root.clone())?)),
             commands: Mutex::new(()),
+            #[cfg(test)]
+            command_admitted: AtomicBool::new(false),
             workspaces: Mutex::new(Workspaces {
                 open: Vec::new(),
                 next_id: 1,
@@ -230,6 +234,8 @@ impl Application {
                 ));
             }
         };
+        #[cfg(test)]
+        self.command_admitted.store(true, Ordering::Release);
         Ok((command, lock(&self.workspaces)))
     }
 
@@ -2039,6 +2045,7 @@ mod tests {
         let settings = application.settings().unwrap();
         application
             .save_settings(EditableSettings {
+                locale: settings.locale,
                 gui_log_limit: settings.gui_log_limit,
                 ocr_environment: Some(environment.clone()),
                 notifications: settings.notifications,
@@ -2064,6 +2071,7 @@ mod tests {
         let settings = application.settings().unwrap();
         application
             .save_settings(EditableSettings {
+                locale: settings.locale,
                 gui_log_limit: settings.gui_log_limit,
                 ocr_environment: None,
                 notifications: settings.notifications,
@@ -2153,13 +2161,15 @@ mod tests {
         let workspace = workspace_ref(&selection);
         let values = selection.package.profiles["template-first"]["options"].clone();
         let store = lock(&application.store);
+        // Observing admission must not contend for the nonblocking command mutex.
+        application.command_admitted.store(false, Ordering::Release);
         let saving = application.clone();
         let save_workspace = workspace.clone();
         let saver = std::thread::spawn(move || {
             saving.save_profile(&save_workspace, None, "Keep on close", values)
         });
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while application.commands.try_lock().is_ok() {
+        while !application.command_admitted.load(Ordering::Acquire) {
             assert!(std::time::Instant::now() < deadline);
             std::thread::yield_now();
         }

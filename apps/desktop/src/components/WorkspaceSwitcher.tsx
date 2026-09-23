@@ -1,4 +1,6 @@
 import Select from './Select.tsx';
+import {messages} from '../i18n.ts';
+import {useLocale} from '../locale.tsx';
 
 export interface WorkspaceOption {
   id: string;
@@ -18,6 +20,8 @@ interface Props {
 }
 
 export default function WorkspaceSwitcher({items, selectedId, onSelect, onClose, closeReason}: Props) {
+  const locale = useLocale();
+  const t = messages[locale].ui;
   const selected = items.find(item => item.id === selectedId);
   let running = 0;
   let errors = 0;
@@ -27,18 +31,18 @@ export default function WorkspaceSwitcher({items, selectedId, onSelect, onClose,
   }
 
   return <>
-    <div className="workspace-summary" role="group" aria-label="All workspace status">
+    <div className="workspace-summary" role="group" aria-label={t.workspaces.status}>
       <span id="workspace-running-count" className={running ? 'running-count active' : 'running-count'}>
-        {running > 0 && <span className="workspace-status status-busy" aria-hidden="true"/>}Running <strong>{running}/{items.length}</strong>
+        {running > 0 && <span className="workspace-status status-busy" aria-hidden="true"/>}{t.workspaces.running} <strong>{running}/{items.length}</strong>
       </span>
-      {errors > 0 && <span id="workspace-error-count" className="workspace-error-count" title={`${errors} workspace${errors === 1 ? '' : 's'} need attention`}>Errors <strong>{errors}</strong></span>}
+      {errors > 0 && <span id="workspace-error-count" className="workspace-error-count" title={t.workspaces.attention(errors)}>{t.workspaces.errors} <strong>{errors}</strong></span>}
     </div>
     <Select id="workspace-select" className="workspace-picker" value={selectedId ?? ''}
       disabled={items.length === 0} onChange={onSelect} commitOnTab={false}
-      placeholder={items.length ? 'Choose workspace' : 'No open workspaces'}
-      aria-describedby="workspace-summary" aria-label={`Workspace: ${selected?.label ?? 'Choose workspace'}`}
-      title={selected?.path} listLabel="Workspaces"
-      heading={<><span>Workspaces</span><span>{items.length} open</span></>}
+      placeholder={items.length ? t.workspaces.choose : t.workspaces.empty}
+      aria-describedby="workspace-summary" aria-label={t.workspaces.label(selected?.label ?? t.workspaces.choose)}
+      title={selected?.path} listLabel={t.workspaces.heading}
+      heading={<><span>{t.workspaces.heading}</span><span>{t.workspaces.open(items.length)}</span></>}
       options={items.map(item => ({
         value: item.id, label: item.label, title: item.path,
         description: <span className={`workspace-option-status status-${item.status.kind}`}>
@@ -48,9 +52,9 @@ export default function WorkspaceSwitcher({items, selectedId, onSelect, onClose,
       }))}
       action={selected && onClose ? {
         id: 'close-workspace',
-        label: <><span className="workspace-close-symbol" aria-hidden="true">×</span>Close selected workspace</>,
-        ariaLabel: `Close selected workspace: ${selected.label}`,
-        title: closeReason ?? `Close ${selected.label}`,
+        label: <><span className="workspace-close-symbol" aria-hidden="true">×</span>{t.workspaces.close}</>,
+        ariaLabel: t.workspaces.closeLabel(selected.label),
+        title: closeReason ?? t.workspaces.closeTitle(selected.label),
         disabled: closeReason !== null,
         onClick: onClose,
       } : undefined}/>

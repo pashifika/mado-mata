@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,retainedCheck,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
+import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
+import {messages} from './i18n.ts';
 
 test('late predecessor result cannot replace the successor or its preparing state',()=>{
   const current={run:'next',state:'preparing',result:null};
@@ -80,12 +81,15 @@ test('verified cleanup requires independent successful exit without forced conta
   assert.equal(verifiedCleanup({...result,cleanup:{clean:false}}),false);
 });
 
-test('a preparation fault is clean only when the backend settled before any child',()=>{
-  assert.equal(cleanupLabel(null,{cleanup:{clean:true,child_started:false}}),'Clean · no child started');
-  assert.equal(cleanupLabel(null,{cleanup:{clean:true}}),'Unverified');
-  assert.equal(cleanupLabel(null,{cleanup:{clean:false,child_started:true}}),'Incomplete / not clean');
-  assert.equal(cleanupLabel({status:'FAIL',cleanup:{clean:true},forced:true,exit_code:0},{}),'Incomplete / not clean');
-});
+for (const locale of ['en','ja']) {
+  test(`preparation cleanup remains distinct from unverified or forced cleanup in ${locale}`,()=>{
+    const labels=messages[locale].validation;
+    assert.equal(cleanupLabel(null,{cleanup:{clean:true,child_started:false}},locale),labels.cleanNoChild);
+    assert.equal(cleanupLabel(null,{cleanup:{clean:true}},locale),labels.unverified);
+    assert.equal(cleanupLabel(null,{cleanup:{clean:false,child_started:true}},locale),labels.incomplete);
+    assert.equal(cleanupLabel({status:'FAIL',cleanup:{clean:true},forced:true,exit_code:0},{},locale),labels.incomplete);
+  });
+}
 
 for (const {scenario,draft} of [
   {scenario:'an empty environment draft is unconfigured',draft:environmentDraft(null)},
@@ -168,19 +172,23 @@ for (const {scenario,current,reasons} of [
   });
 }
 
-test('a host-retained check maps to the association exactly as the host read it',()=>{
-  const controller={run:'desktop-7',state:'terminal',operation:'environment_check',result:null,error:{category:'Environment',message:'missing',context:null},progress:[],dropped_logs:0,workspace_id:'ws-1',workspace_revision:1};
-  const retained=retainedCheck({workspace,environment:checkedEnvironment,descriptor_path:null,package_inventory_identity:'inv-1',controller});
-  assert.deepEqual(retained.association,{operation:'desktop-7',workspace,environment:checkedEnvironment,descriptorPath:null,packageInventoryIdentity:'inv-1'});
-  assert.equal(retained.view,controller);
-  assert.equal(staleReasons(retained.association,{...unchanged,descriptorPath:null}).length,0);
+test('a completed settings Save preserves later locale and invalid input edits',()=>{
+  const submitted={...settingsDraftFrom(null),locale:'ja'};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  const current={...submitted,locale:'en',logLimit:'not a number'};
+  const settled=settingsDraftAfterSave(current,submitted,saved);
+  assert.equal(settled.locale,'en');
+  assert.equal(settled.logLimit,'not a number');
+  const parsed=readSettingsDraft(settled);
+  assert.equal(parsed.settings,null);
+  assert.ok(parsed.errors.logLimit);
 });
 
-const validSettingsDraft={logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(checkedEnvironment)};
+const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(checkedEnvironment)};
 test('a complete settings draft becomes one editable settings object without version or package hint',()=>{
   const parsed=readSettingsDraft(validSettingsDraft);
   assert.deepEqual(parsed.errors,{});
-  assert.deepEqual(parsed.settings,{gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true}});
+  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true}});
   assert.equal(readSettingsDraft({...validSettingsDraft,environment:environmentDraft(null)}).settings.ocr_environment,null);
 });
 
@@ -191,6 +199,8 @@ for (const {scenario,draft,field} of [
   {scenario:'three visible cards',draft:{...validSettingsDraft,notifications:{...DEFAULT_NOTIFICATIONS,visible_count:3}},field:'visibleCount'},
   {scenario:'a ten second timeout',draft:{...validSettingsDraft,notifications:{...DEFAULT_NOTIFICATIONS,timeout_seconds:10}},field:'timeoutSeconds'},
   {scenario:'a partial environment',draft:{...validSettingsDraft,environment:{...environmentDraft(checkedEnvironment),model_root:''}},field:'model_root'},
+  {scenario:'an unsupported language',draft:{...validSettingsDraft,locale:'fr'},field:'locale'},
+  {scenario:'a null language',draft:{...validSettingsDraft,locale:null},field:'locale'},
 ]) {
   test(`settings draft refuses ${scenario} without producing a save payload`,()=>{
     const parsed=readSettingsDraft(draft);
