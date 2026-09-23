@@ -387,7 +387,9 @@
   },
   "entryOutcome": {
     "Returned": "Returned",
-    "Interrupted": "Interrupted",
-    "NotExecuted": "Not executed"
+    "NotStarted": "Not started",
+    "FailedOrNotStarted": "Failed or not started",
+    "NotExecuted": "Not executed",
+    "Unobserved": "Unobserved"
   }
 }

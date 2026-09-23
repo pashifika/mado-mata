@@ -23,6 +23,74 @@ for (const namespace of ['app','ui']) {
   });
 }
 
+const adapterArguments = {
+  'app.openHelp': [[4]], 'app.workspaceLimit': [[4]], 'app.closeConfirm': [['profile-A']],
+  'app.workspaceAria': [['profile-A']], 'app.activity': [['profile-A']], 'app.closedLabel': [['profile-A']],
+  'app.unknownOrigin': [['workspace-A']], 'app.retainedOutcome': [[2]], 'app.attention': [['reason-A']],
+  'app.ready': [['profile-A']], 'app.descriptorLimit': [[4096]], 'app.profileSaved': [['profile-A','P']],
+  'app.profileRenamed': [['profile-A']], 'app.deletedElsewhere': [['profile-A']],
+  'app.updatedElsewhere': [['profile-A']], 'app.renamedElsewhere': [['profile-A']],
+  'app.stopFailed': [['diagnostic-A']], 'app.settingsSaved': [['profile-A']],
+  'app.waitForCommand': [['savingSettings']],
+  'ui.phase': [['idle']], 'ui.operation': [['run']], 'ui.lane': [['controlled']],
+  'ui.severity': [['ERROR']], 'ui.entryOutcome': [['Returned']],
+  'ui.common.revision': [['package-A',2]],
+  'ui.settings.invalid': [[1,''],[2,''],[1,'Logs'],[2,'Logs']],
+  'ui.settings.invalidCount': [[2]], 'ui.settings.wait': [['reason-A']],
+  'ui.settings.cards': [[1],[2]], 'ui.settings.seconds': [[1],[2]],
+  'ui.settings.logLimitHelp': [[null],[1000]],
+  'ui.environment.truncated': [[1],[2]], 'ui.environment.staleHelp': [[['reason-A','reason-B']]],
+  'ui.environment.wait': [['reason-A']], 'ui.environment.unsupported': [['profile-A']],
+  'ui.environment.profileLabel': [['unknown','fallback-A']],
+  'ui.environment.mismatch': [['model-A','language-A','provider-A','runtime-A']],
+  'ui.run.heading': [['profile-A']], 'ui.run.owned': [[null],['run-A']],
+  'ui.run.settled': [[null],['run-A']], 'ui.run.inspected': [[2]],
+  'ui.run.descriptorHelp': [[4096]],
+  'ui.run.startUses': [[null,false,null,null],['profile-A',false,null,null],[null,true,null,null],['profile-A',true,'environment-A','corpus-A']],
+  'ui.run.olderRevision': [[1,2]], 'ui.run.stopTarget': [[null],['run-A']],
+  'ui.run.runKind': [['controlled']],
+  'ui.result.truncated': [[1],[2]], 'ui.result.disclosureHelp': [[false,512],[true,512]],
+  'ui.schema.fieldAction': [[false,'$.field'],[true,'$.field']],
+  'ui.schema.omittedDefault': [['default-A']], 'ui.schema.unknown': [['$.field','value-A']],
+  'ui.schema.ordered': [1,2].flatMap(count=>[[count,undefined,undefined],[count,0,undefined],[count,undefined,4],[count,0,4]]),
+  'ui.schema.moveUp': [['$.field']], 'ui.schema.moveDown': [['$.field']],
+  'ui.schema.removeItem': [['$.field']], 'ui.schema.invalid': [['value-A']],
+  'ui.schema.length': [[0,undefined],[0,4]],
+  'ui.schema.numeric': [['number',undefined,undefined],['number',0,undefined],['number',undefined,4],['number',0,4]],
+  'ui.schema.mismatch': [['number','value-A']], 'ui.schema.replace': [['number']],
+  'ui.logs.missing': [[42]], 'ui.logs.filtered': [[1],[2]], 'ui.logs.stats': [[2,3,4,1000]],
+  'ui.logs.fileError': [['diagnostic-A']], 'ui.logs.lossHelp': [[false],[true]],
+  'ui.notifications.dismiss': [[42]], 'ui.notifications.event': [[42]],
+  'ui.workspaces.attention': [[1],[2]], 'ui.workspaces.label': [['workspace-A']],
+  'ui.workspaces.open': [[2]], 'ui.workspaces.closeLabel': [['workspace-A']],
+  'ui.workspaces.closeTitle': [['workspace-A']],
+};
+
+for (const locale of ['en','ja']) {
+  test(`${locale} presentation messages resolve every adapter and grammar branch`,()=>{
+    function check(value,path='') {
+      if (typeof value === 'function') {
+        assert.ok(Object.hasOwn(adapterArguments,path),`Missing consumer inputs for ${path}`);
+        for (const args of adapterArguments[path]) {
+          assert.doesNotMatch(value(...args),/\{[A-Za-z][A-Za-z0-9]*\}/,`${path}: ${JSON.stringify(args)}`);
+        }
+      } else if (typeof value === 'string') {
+        assert.doesNotMatch(value,/\{[A-Za-z][A-Za-z0-9]*\}/,`Unformatted consumer message: ${path}`);
+      } else {
+        for (const [key,entry] of Object.entries(value)) check(entry,path ? `${path}.${key}` : key);
+      }
+    }
+    check(messages[locale]);
+  });
+}
+
+test('known runner entry outcomes are localized while future outcomes remain distinguishable',()=>{
+  for (const outcome of ['Returned','NotStarted','FailedOrNotStarted','NotExecuted','Unobserved']) {
+    assert.notEqual(messages.ja.ui.entryOutcome(outcome),outcome);
+  }
+  assert.equal(messages.ja.ui.entryOutcome('FutureOutcome'),'FutureOutcome');
+});
+
 test('interpolation keeps parameter-like and markup-like user values literal',()=>{
   assert.equal(interpolate('{name} / {id} / {name}',{name:'{id}<b>利用者</b>',id:7}),'{id}<b>利用者</b> / 7 / {id}<b>利用者</b>');
   assert.throws(()=>interpolate('{missing}',{}),/Missing message parameter/);

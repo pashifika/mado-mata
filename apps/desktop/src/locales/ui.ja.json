@@ -387,7 +387,9 @@
   },
   "entryOutcome": {
     "Returned": "処理から復帰",
-    "Interrupted": "中断",
-    "NotExecuted": "未実行"
+    "NotStarted": "未開始",
+    "FailedOrNotStarted": "失敗または未開始",
+    "NotExecuted": "未実行",
+    "Unobserved": "未観測"
   }
 }
