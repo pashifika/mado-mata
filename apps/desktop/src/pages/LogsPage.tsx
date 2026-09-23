@@ -1,8 +1,8 @@
 import {useEffect, useMemo} from 'react';
-import Select from './Select';
-import {LOG_LEVELS, viewLogs} from './workspace.ts';
-import type {LogFilter, LogScope} from './workspace.ts';
-import type {LogBatch, LogEntry} from './types.ts';
+import Select from '../components/Select';
+import {LOG_LEVELS, viewLogs} from '../workspace.ts';
+import type {LogFilter, LogScope} from '../workspace.ts';
+import type {LogBatch, LogEntry} from '../types.ts';
 
 export type Losses = Omit<LogBatch, 'entries'>;
 

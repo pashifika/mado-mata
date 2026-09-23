@@ -1,8 +1,8 @@
 import {useState} from 'react';
-import Select from './Select';
-import {DISCLOSURE_LIMIT, ENVIRONMENT_LANGUAGE, ENVIRONMENT_PROVIDER, ENVIRONMENT_RUNTIME_PROFILE, SUPPORTED_PROFILES, boundedText, cleanupLabel, faultSummary, initializationLabel, record, text} from './state.ts';
-import type {CheckAssociation, EnvironmentDraft} from './state.ts';
-import type {ControllerView, OcrEnvironment, WorkspaceRef} from './types.ts';
+import Select from '../components/Select';
+import {DISCLOSURE_LIMIT, ENVIRONMENT_LANGUAGE, ENVIRONMENT_PROVIDER, ENVIRONMENT_RUNTIME_PROFILE, SUPPORTED_PROFILES, boundedText, cleanupLabel, faultSummary, initializationLabel, record, text} from '../state.ts';
+import type {CheckAssociation, EnvironmentDraft} from '../state.ts';
+import type {ControllerView, OcrEnvironment, WorkspaceRef} from '../types.ts';
 
 export interface LastCheck {association: CheckAssociation; view: ControllerView}
 

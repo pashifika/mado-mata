@@ -1,12 +1,12 @@
 import {useState} from 'react';
-import SchemaForm from './SchemaForm.tsx';
-import Select from './Select';
-import ResultPanel, {FaultMessage, fault} from './ResultPanel.tsx';
-import {faultSummary, text} from './state.ts';
-import type {CheckAssociation} from './state.ts';
-import {DESCRIPTOR_LIMIT, busy, editDraft} from './workspace.ts';
-import type {Workspace} from './workspace.ts';
-import type {ControllerView, Json, OcrEnvironment, Profile} from './types.ts';
+import SchemaForm from '../components/SchemaForm.tsx';
+import Select from '../components/Select';
+import ResultPanel, {FaultMessage, fault} from '../components/ResultPanel.tsx';
+import {faultSummary, text} from '../state.ts';
+import type {CheckAssociation} from '../state.ts';
+import {DESCRIPTOR_LIMIT, busy, editDraft} from '../workspace.ts';
+import type {Workspace} from '../workspace.ts';
+import type {ControllerView, Json, OcrEnvironment, Profile} from '../types.ts';
 
 // Immutable facts captured when this frontend submitted the operation; the host view is authoritative.
 export type RunSnapshot =

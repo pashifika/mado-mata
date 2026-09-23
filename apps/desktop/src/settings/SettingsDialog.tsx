@@ -2,11 +2,11 @@ import {useEffect, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
 import EnvironmentPanel from './EnvironmentPanel.tsx';
 import type {CheckTarget, LastCheck} from './EnvironmentPanel.tsx';
-import {FaultMessage} from './ResultPanel.tsx';
-import Select from './Select';
-import {TIMEOUT_SECONDS, VISIBLE_COUNTS} from './state.ts';
-import type {EnvironmentDraft, SettingsDraft} from './state.ts';
-import type {EditableSettings, Fault, Settings} from './types.ts';
+import {FaultMessage} from '../components/ResultPanel.tsx';
+import Select from '../components/Select';
+import {TIMEOUT_SECONDS, VISIBLE_COUNTS} from '../state.ts';
+import type {EnvironmentDraft, SettingsDraft} from '../state.ts';
+import type {EditableSettings, Fault, Settings} from '../types.ts';
 
 type Category = 'notifications' | 'environment' | 'logs';
 const CATEGORIES: {id: Category; label: string}[] = [

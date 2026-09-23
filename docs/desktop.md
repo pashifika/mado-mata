@@ -107,6 +107,21 @@ choose or prepare a private application directory deliberately.
 The current Tauri setup path reports this refusal on stderr and aborts startup;
 it does not open a recovery UI. The existing directory and its files are unchanged.
 
+## Frontend source layout
+
+TSX files under `apps/desktop/src/` are grouped by responsibility:
+
+| Path | Responsibility |
+| --- | --- |
+| `main.tsx`, `App.tsx` | Bootstrap and application composition |
+| `components/` | Shared selection, schema forms, results, notifications, and workspace navigation |
+| `pages/` | Run and Logs page views |
+| `settings/` | App settings dialog and OCR environment view |
+
+Imports point directly to the owning file. Non-visual TypeScript modules and
+their tests remain at the source root; the Rust layout under `src-tauri/` is
+unchanged.
+
 ## Package workspaces and App settings
 
 The compact navigation row holds at most **eight session-local workspaces**,

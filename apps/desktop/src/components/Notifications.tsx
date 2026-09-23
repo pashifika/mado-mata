@@ -1,4 +1,4 @@
-import type {Card} from './notifications.ts';
+import type {Card} from '../notifications.ts';
 
 const SEVERITY_LABEL: Record<Card['severity'], string> = {success: 'Success', warning: 'Warning', error: 'Error'};
 const SEVERITY_SYMBOL: Record<Card['severity'], string> = {success: '✓', warning: '!', error: '×'};

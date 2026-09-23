@@ -1,5 +1,5 @@
-import {DISCLOSURE_LIMIT, boundedText, cleanupLabel, initializationLabel, record, text} from './state.ts';
-import type {ControllerView, Fault, Json} from './types.ts';
+import {DISCLOSURE_LIMIT, boundedText, cleanupLabel, initializationLabel, record, text} from '../state.ts';
+import type {ControllerView, Fault, Json} from '../types.ts';
 
 export function fault(error: unknown): Fault {
   if (error !== null && typeof error === 'object' && 'message' in error) {

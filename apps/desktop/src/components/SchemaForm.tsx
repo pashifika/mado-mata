@@ -1,5 +1,5 @@
 import Select from './Select';
-import type {Json, Schema} from './types.ts';
+import type {Json, Schema} from '../types.ts';
 
 interface FormProps {
   schema: Schema;
