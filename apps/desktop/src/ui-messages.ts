@@ -36,7 +36,7 @@ function catalog(data: typeof enData) {
       staleHelp: (reasons: string[]) => interpolate(data.environment.staleHelp, {reasons: reasons.join(data.environment.reasonSeparator)}),
       wait: (reason: string) => interpolate(data.environment.wait, {reason}),
       unsupported: (profile: string) => interpolate(data.environment.unsupported, {profile}),
-      profileLabel: (profile: string, fallback: string) => known(data.environment.profileLabels, fallback, profile),
+      profileLabel: (profile: keyof typeof data.environment.profileLabels) => data.environment.profileLabels[profile],
       mismatch: (model: string, language: string, provider: string, runtime: string) => interpolate(data.environment.mismatch, {model, language, provider, runtime}),
     },
     run: {

@@ -17,7 +17,7 @@ import WorkspaceSwitcher from './components/WorkspaceSwitcher.tsx';
 import type {WorkspaceOption} from './components/WorkspaceSwitcher.tsx';
 import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards} from './notifications.ts';
 import type {Card, CardStack} from './notifications.ts';
-import {DEFAULT_NOTIFICATIONS, acceptController, environmentDraft, faultSummary, readDraft, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, staleReasons, text} from './state.ts';
+import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readDraft, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, settingsDraftAfterSave, settingsDraftFrom, staleReasons, text} from './state.ts';
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
 import {DESCRIPTOR_LIMIT, WORKSPACE_LIMIT, applyCommand, applyIfCurrent, busy, closeWorkspace, freshWorkspace, ingestResults, needsAttention, newDraft, openWorkspace, originLabel, retainClosed, selectProfile, updateWorkspace, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {ClosedWorkspace, LogFilter, LogScope, Origin, ProfileCatalog, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
@@ -32,14 +32,6 @@ interface Operation {run: string; kind: 'run' | 'check'; workspace: WorkspaceRef
 interface Starting {workspaceId: string | null; kind: 'run' | 'check'}
 interface DialogError {kind: 'save' | 'check'; value: Fault}
 
-function settingsDraftFrom(settings: Settings | null): SettingsDraft {
-  return {
-    locale: settings?.locale ?? 'en',
-    logLimit: String(settings?.gui_log_limit ?? 1000),
-    notifications: {...(settings?.notifications ?? DEFAULT_NOTIFICATIONS)},
-    environment: environmentDraft(settings?.ocr_environment ?? null),
-  };
-}
 
 function derive(workspace: Workspace, savedEnvironment: OcrEnvironment | null, locale: Locale): Derived {
   const t = messages[locale].app;
@@ -476,7 +468,7 @@ export default function App() {
   }
 
   function openSettings() {
-    if (appBusy === 'loadingSettings') return;
+    if (settings === null) return;
     menuButton.current?.focus();
     setMenuOpen(false);
     setSettingsDraft(settingsDraftFrom(settings));
@@ -487,7 +479,7 @@ export default function App() {
 
   async function saveSettings() {
     const editable = parsedSettings.settings;
-    if (!editable || appBusy || commandReason !== null) return;
+    if (settings === null || !editable || appBusy || commandReason !== null) return;
     const submitted = settingsDraft;
     setAppBusy('savingSettings');
     setDialogError(null);
@@ -498,8 +490,7 @@ export default function App() {
       preferences.current = saved.notifications;
       setLogs(old => retainLogs(old, [], saved.gui_log_limit));
       setCards(old => trimCards(old, saved.notifications.visible_count));
-      // Edits made while the save was in flight stay in the draft.
-      setSettingsDraft(current => current === submitted ? settingsDraftFrom(saved) : current);
+      setSettingsDraft(current => settingsDraftAfterSave(current, submitted, saved));
       setSaveNotice(saved.ocr_environment ? {key: 'settingsSaved', args: [saved.ocr_environment.profile]} : {key: 'settingsSavedEmpty'});
     } catch (cause) {
       setDialogError({kind: 'save', value: fault(cause)});
@@ -612,7 +603,7 @@ export default function App() {
         <div className="menu-anchor">
           <button id="application-menu" ref={menuButton} type="button" aria-haspopup="menu" aria-expanded={menuOpen} aria-controls="application-menu-items" onClick={() => setMenuOpen(open => !open)}>{t.application} ▾</button>
           {menuOpen && <div id="application-menu-items" ref={menu} className="dropdown" role="menu" aria-labelledby="application-menu" onKeyDown={menuKeys}>
-            <button type="button" role="menuitem" id="menu-settings" disabled={appBusy === 'loadingSettings'} onClick={openSettings}>{t.appSettings}</button>
+            <button type="button" role="menuitem" id="menu-settings" disabled={settings === null} onClick={openSettings}>{t.appSettings}</button>
             <button type="button" role="menuitem" id="menu-application-logs" aria-current={nav.kind === 'application' ? 'page' : undefined} onClick={() => {setMenuOpen(false); go({kind: 'application'});}}>{t.applicationLogs}<span className="count">{logCounts[''] ?? 0}</span></button>
             <button type="button" role="menuitem" id="close" disabled={closing} onClick={async () => {
               setMenuOpen(false);

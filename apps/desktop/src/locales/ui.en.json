@@ -46,6 +46,7 @@
     "introduction": "Shared across all workspaces. Your workspace stays where it is. Opening this dialog performs no native operation.",
     "close": "Close settings without saving",
     "categories": "Settings categories",
+    "categorySeparator": ", ",
     "saving": "Saving…",
     "saveFailed": "Previous stored settings are unchanged. Correct the draft and save again.",
     "unsaved": "Unsaved changes · Cancel or Escape discards them",

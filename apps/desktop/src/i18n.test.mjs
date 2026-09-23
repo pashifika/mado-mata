@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {messages,renderMessage,LocalFault} from './i18n.ts';
 import {interpolate} from './i18n-format.ts';
-import {readDraft,readSettingsDraft,environmentDraft,DEFAULT_NOTIFICATIONS} from './state.ts';
+import {readDraft,readSettingsDraft,environmentDraft,DEFAULT_NOTIFICATIONS,SUPPORTED_PROFILES} from './state.ts';
 import {applyIfCurrent,editDraft,openWorkspace,viewLogs} from './workspace.ts';
 import {emptyStack,ingestCards,interactCard,tickCards} from './notifications.ts';
 
@@ -41,7 +41,7 @@ const adapterArguments = {
   'ui.settings.logLimitHelp': [[null],[1000]],
   'ui.environment.truncated': [[1],[2]], 'ui.environment.staleHelp': [[['reason-A','reason-B']]],
   'ui.environment.wait': [['reason-A']], 'ui.environment.unsupported': [['profile-A']],
-  'ui.environment.profileLabel': [['unknown','fallback-A']],
+  'ui.environment.profileLabel': SUPPORTED_PROFILES.map(({profile})=>[profile]),
   'ui.environment.mismatch': [['model-A','language-A','provider-A','runtime-A']],
   'ui.run.heading': [['profile-A']], 'ui.run.owned': [[null],['run-A']],
   'ui.run.settled': [[null],['run-A']], 'ui.run.inspected': [[2]],

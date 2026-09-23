@@ -201,6 +201,10 @@ profile values, or input authority.
 New installations and older settings without `locale` use English without a
 read-time rewrite. Package-location hint updates do not add a missing locale.
 An invalid present locale is refused without replacing the settings file.
+If the initial settings read fails, App settings stays unavailable: a failed read
+is not a new installation, and the UI cannot Save a replacement default draft.
+Resolve the reported read error and restart the application to load the existing
+settings before editing them.
 After explicit Save, older strict binaries may reject the new field: preserve
 the file before rollback and deliberately restore a compatible backup or remove
 only `locale`. Do not reset profiles or other settings.

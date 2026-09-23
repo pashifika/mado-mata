@@ -79,7 +79,7 @@ export default function EnvironmentPanel(props: Props) {
     <div className="field"><label htmlFor="ocr-profile">{t.environment.supportedProfile}</label>
       <Select id="ocr-profile" value={draft.profile} disabled={locked} aria-invalid={Boolean(errors.profile)} onChange={value => field('profile', value)}
         options={[{value: '', label: t.environment.notConfigured},
-          ...SUPPORTED_PROFILES.map(item => ({value: item.profile, label: t.environment.profileLabel(item.profile, item.label)})),
+          ...SUPPORTED_PROFILES.map(item => ({value: item.profile, label: t.environment.profileLabel(item.profile)})),
           ...(draft.profile && !supported ? [{value: draft.profile, label: t.environment.unsupported(draft.profile), disabled: true}] : [])]}/>
       {errors.profile && <p className="field-error">{errors.profile}</p>}</div>
     <dl className="fixed-facts">

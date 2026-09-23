@@ -1,6 +1,6 @@
 import {messages} from './i18n.ts';
 import type {Locale} from './i18n.ts';
-import type {ControllerView, EditableSettings, Fault, LogEntry, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Json, WorkspaceRef} from './types.ts';
+import type {ControllerView, EditableSettings, Fault, LogEntry, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Settings, Json, WorkspaceRef} from './types.ts';
 
 export const DISCLOSURE_LIMIT = 512 * 1024;
 
@@ -108,10 +108,10 @@ export function cleanupLabel(result:ControllerView['result'], fallback:Record<st
 export const ENVIRONMENT_LANGUAGE = 'horizontal-ja-basic-latin-ascii-digits-ui-symbols-v1';
 export const ENVIRONMENT_PROVIDER = 'cpu';
 export const ENVIRONMENT_RUNTIME_PROFILE = 'onnxruntime-1.29.0-api17-cpu';
-export const SUPPORTED_PROFILES: readonly {profile:string; model:string; label:string}[] = [
-  {profile:'g-004-rapidocr-ppocrv4-det-v6-rec-small-v1', model:'g-004-rapidocr-ppocrv4-det-v6-rec-small-v1', label:'G-004 · RapidOCR PP-OCRv4 det v6 / rec small v1'},
-  {profile:'phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2', model:'phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2', label:'Phase 3.1 · bounded detector v2'},
-];
+export const SUPPORTED_PROFILES = [
+  {profile:'g-004-rapidocr-ppocrv4-det-v6-rec-small-v1', model:'g-004-rapidocr-ppocrv4-det-v6-rec-small-v1'},
+  {profile:'phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2', model:'phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2'},
+] as const;
 
 export interface EnvironmentDraft {profile:string; model_root:string; runtime_path:string; library_paths:string}
 
@@ -191,6 +191,20 @@ export const TIMEOUT_SECONDS: readonly number[] = [5, 8, 12];
 export const DEFAULT_NOTIFICATIONS: NotificationPreferences = {visible_count: 2, timeout_seconds: 8, show_success: true};
 
 export interface SettingsDraft {locale:Locale; logLimit:string; notifications:NotificationPreferences; environment:EnvironmentDraft}
+
+export function settingsDraftFrom(settings: Settings | null): SettingsDraft {
+  return {
+    locale: settings?.locale ?? 'en',
+    logLimit: String(settings?.gui_log_limit ?? 1000),
+    notifications: {...(settings?.notifications ?? DEFAULT_NOTIFICATIONS)},
+    environment: environmentDraft(settings?.ocr_environment ?? null),
+  };
+}
+
+// A completed Save must not discard later edits, even when they are invalid.
+export function settingsDraftAfterSave(current:SettingsDraft, submitted:SettingsDraft, saved:Settings):SettingsDraft {
+  return current === submitted ? settingsDraftFrom(saved) : current;
+}
 
 // The dialog edits one draft; the whole edit is validated together before a single atomic save.
 export function readSettingsDraft(draft:SettingsDraft, locale:Locale = 'en'):{settings:EditableSettings|null; errors:Record<string,string>} {

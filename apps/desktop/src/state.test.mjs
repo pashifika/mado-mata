@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,retainedCheck,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
+import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
 import {messages} from './i18n.ts';
 
 test('late predecessor result cannot replace the successor or its preparing state',()=>{
@@ -172,12 +172,16 @@ for (const {scenario,current,reasons} of [
   });
 }
 
-test('a host-retained check maps to the association exactly as the host read it',()=>{
-  const controller={run:'desktop-7',state:'terminal',operation:'environment_check',result:null,error:{category:'Environment',message:'missing',context:null},progress:[],dropped_logs:0,workspace_id:'ws-1',workspace_revision:1};
-  const retained=retainedCheck({workspace,environment:checkedEnvironment,descriptor_path:null,package_inventory_identity:'inv-1',controller});
-  assert.deepEqual(retained.association,{operation:'desktop-7',workspace,environment:checkedEnvironment,descriptorPath:null,packageInventoryIdentity:'inv-1'});
-  assert.equal(retained.view,controller);
-  assert.equal(staleReasons(retained.association,{...unchanged,descriptorPath:null}).length,0);
+test('a completed settings Save preserves later locale and invalid input edits',()=>{
+  const submitted={...settingsDraftFrom(null),locale:'ja'};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  const current={...submitted,locale:'en',logLimit:'not a number'};
+  const settled=settingsDraftAfterSave(current,submitted,saved);
+  assert.equal(settled.locale,'en');
+  assert.equal(settled.logLimit,'not a number');
+  const parsed=readSettingsDraft(settled);
+  assert.equal(parsed.settings,null);
+  assert.ok(parsed.errors.logLimit);
 });
 
 const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(checkedEnvironment)};

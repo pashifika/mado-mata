@@ -61,7 +61,7 @@ export default function SettingsDialog(props: Props) {
     if (owner) invalidCount[owner] += 1;
   }
   const invalid = Object.keys(errors).length;
-  const invalidLabels = CATEGORIES.filter(id => invalidCount[id] > 0).map(id => t.common[id]).join(', ');
+  const invalidLabels = CATEGORIES.filter(id => invalidCount[id] > 0).map(id => t.common[id]).join(t.settings.categorySeparator);
   // Errors in an unselected category and a pending host command both block Save; the footer names which.
   const status = saving ? t.settings.saving
     : invalid > 0 ? t.settings.invalid(invalid, invalidLabels)
@@ -131,7 +131,7 @@ export default function SettingsDialog(props: Props) {
       <div className="dialog-footer">
         <span role="status">{status}</span>
         <button type="button" id="cancel-settings" onClick={onCancel} disabled={saving}>{dirty ? t.common.cancel : t.common.close}</button>
-        <button type="button" id="save-settings" className="primary" disabled={saving || !dirty || parsed.settings === null || busyReason !== null} onClick={onSave}>{t.common.save}</button>
+        <button type="button" id="save-settings" className="primary" disabled={settings === null || saving || !dirty || parsed.settings === null || busyReason !== null} onClick={onSave}>{t.common.save}</button>
       </div>
     </>}
   </dialog>;
