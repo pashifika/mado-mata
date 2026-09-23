@@ -37,6 +37,7 @@ pub struct LogEntry {
     pub source: String,
     pub level: String,
     pub run: Option<String>,
+    pub workspace_id: Option<String>,
     pub code: String,
     pub message: String,
     pub fields: Value,
@@ -108,11 +109,13 @@ impl Logger {
         source: &str,
         level: &str,
         run: Option<&str>,
+        workspace_id: Option<&str>,
         code: &str,
         message: &str,
         fields: Value,
     ) {
-        self.layer.emit(source, level, run, code, message, fields);
+        self.layer
+            .emit(source, level, run, workspace_id, code, message, fields);
     }
 
     /// Install this dispatch explicitly on every thread emitting Rust diagnostics.
@@ -321,6 +324,7 @@ impl OutputLayer {
         source: &str,
         level: &str,
         run: Option<&str>,
+        workspace_id: Option<&str>,
         code: &str,
         message: &str,
         fields: Value,
@@ -336,6 +340,7 @@ impl OutputLayer {
             source: safe_text(source, FIELD_BYTES),
             level: safe_text(level, FIELD_BYTES),
             run: run.map(|value| safe_text(value, FIELD_BYTES)),
+            workspace_id: workspace_id.map(|value| safe_text(value, FIELD_BYTES)),
             code: safe_text(code, FIELD_BYTES),
             message: safe_text(message, MESSAGE_BYTES),
             fields,
@@ -352,10 +357,12 @@ impl<S: Subscriber> Layer<S> for OutputLayer {
             .unwrap_or_else(|| event.metadata().target().into());
         let message = take_text(&mut visitor.fields, "message").unwrap_or_default();
         let run = take_text(&mut visitor.fields, "run");
+        let workspace_id = take_text(&mut visitor.fields, "workspace_id");
         self.emit(
             &source,
             event.metadata().level().as_str(),
             run.as_deref(),
+            workspace_id.as_deref(),
             &code,
             &message,
             Value::Object(visitor.fields),
@@ -771,7 +778,15 @@ mod tests {
     }
 
     fn emit(layer: &OutputLayer) {
-        layer.emit("Rust", "INFO", None, "app.ready", "Ready", Value::Null);
+        layer.emit(
+            "Rust",
+            "INFO",
+            None,
+            None,
+            "app.ready",
+            "Ready",
+            Value::Null,
+        );
     }
 
     #[test]
@@ -814,6 +829,7 @@ mod tests {
             "Script",
             "INFO",
             Some("run-1"),
+            Some("workspace-1"),
             "decision.selected",
             "ocr",
             json!({
@@ -827,12 +843,19 @@ mod tests {
             }),
         );
         logger.with_dispatch(|| {
-            tracing::info!(run = "run-1", code = "backend.ready", count = 7u64, "Ready");
+            tracing::info!(
+                run = "run-1",
+                workspace_id = "workspace-1",
+                code = "backend.ready",
+                count = 7u64,
+                "Ready"
+            );
         });
         logger.emit(
             "Script",
             "INFO",
             Some("run-1"),
+            Some("workspace-1"),
             "workflow.step",
             "task-1",
             json!({"details": "(sk-alpha987)"}),
@@ -853,6 +876,10 @@ mod tests {
             .map(|entry| serde_json::to_value(entry).unwrap())
             .collect();
         assert_eq!(disk, gui);
+        assert!(
+            disk.iter()
+                .all(|entry| entry["workspace_id"] == "workspace-1")
+        );
         assert_eq!(disk[0]["message"], "ocr");
         assert_eq!(disk[2]["message"], "task-1");
         assert_eq!(disk[2]["fields"]["details"], REDACTED);
@@ -900,6 +927,7 @@ mod tests {
             "Script",
             "INFO",
             None,
+            None,
             "bounded.value",
             &"x".repeat(100_000),
             json!({
@@ -925,7 +953,15 @@ mod tests {
         for _ in 0..5 {
             fields = json!([fields]);
         }
-        layer.emit("Rust", "INFO", None, "bounded.depth", "Depth limit", fields);
+        layer.emit(
+            "Rust",
+            "INFO",
+            None,
+            None,
+            "bounded.depth",
+            "Depth limit",
+            fields,
+        );
         let entry = output.drain().entries.pop().unwrap();
         assert!(serde_json::to_vec(&entry).unwrap().len() < 64 * 1024);
     }
@@ -937,7 +973,15 @@ mod tests {
         let partial = b"{\"interrupted\":";
         fs::write(&path, partial).unwrap();
         let logger = Logger::new(directory.0.clone()).unwrap();
-        logger.emit("Rust", "INFO", None, "app.ready", "Ready", Value::Null);
+        logger.emit(
+            "Rust",
+            "INFO",
+            None,
+            None,
+            "app.ready",
+            "Ready",
+            Value::Null,
+        );
         let status = logger.shutdown();
         assert_eq!(status.file_errors, 1);
         assert_eq!(status.file_written, 0);
@@ -978,7 +1022,15 @@ mod tests {
         let directory = Directory::new();
         fs::create_dir(directory.0.join(FILE_NAMES[0])).unwrap();
         let logger = Logger::new(directory.0.clone()).unwrap();
-        logger.emit("Rust", "WARN", None, "app.ready", "Ready", Value::Null);
+        logger.emit(
+            "Rust",
+            "WARN",
+            None,
+            None,
+            "app.ready",
+            "Ready",
+            Value::Null,
+        );
         let status = logger.shutdown();
         assert_eq!(status.file_errors, 1);
         assert_eq!(status.file_dropped, 1);

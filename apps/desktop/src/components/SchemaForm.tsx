@@ -1,4 +1,5 @@
-import type {Json, Schema} from './types.ts';
+import Select from './Select.tsx';
+import type {Json, Schema} from '../types.ts';
 
 interface FormProps {
   schema: Schema;
@@ -80,12 +81,10 @@ function Field({schema, value, path, onChange, errors}: FieldProps) {
   }
   if (schema.enum && (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')) {
     const index = schema.enum.findIndex(item => item === value);
-    return <select id={id} aria-label={path} value={index < 0 ? '' : String(index)} onChange={event => {
-      if (event.target.value !== '') onChange(schema.enum![Number(event.target.value)]);
-    }}>
-      <option value="" disabled>{index < 0 && value !== '' ? `Invalid value: ${String(value)}` : 'Choose a value'}</option>
-      {schema.enum.map((item, at) => <option key={at} value={at}>{String(item)}</option>)}
-    </select>;
+    return <Select id={id} aria-label={path} value={index < 0 ? '' : String(index)}
+      onChange={selected => {if (selected !== '') onChange(schema.enum![Number(selected)]);}}
+      options={[{value: '', label: index < 0 && value !== '' ? `Invalid value: ${String(value)}` : 'Choose a value', disabled: true},
+        ...schema.enum.map((item, at) => ({value: String(at), label: String(item)}))]}/>;
   }
   if (schema.type === 'boolean' && typeof value === 'boolean') {
     return <label className="checkbox-label"><input id={id} aria-label={path} type="checkbox" checked={value}

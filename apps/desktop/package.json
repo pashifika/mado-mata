@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
-    "test": "node --experimental-strip-types --test src/state.test.mjs",
+    "test": "node --experimental-strip-types --test src/state.test.mjs src/workspace.test.mjs src/notifications.test.mjs",
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri"
   },
