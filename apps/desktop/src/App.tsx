@@ -508,8 +508,10 @@ export default function App() {
 
   function tabKeys(event: KeyboardEvent<HTMLDivElement>) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || workspaces.length === 0) return;
+    const focused = (event.target as HTMLElement).closest('[role="tab"]');
+    const index = workspaces.findIndex(workspace => `tab-${workspace.id}` === focused?.id);
+    if (index < 0) return;
     event.preventDefault();
-    const index = nav.kind === 'workspace' ? workspaces.findIndex(workspace => workspace.id === nav.id) : -1;
     const target = event.key === 'Home' ? 0 : event.key === 'End' ? workspaces.length - 1
       : event.key === 'ArrowRight' ? (index + 1) % workspaces.length : (index - 1 + workspaces.length) % workspaces.length;
     go({kind: 'workspace', id: workspaces[target].id});
@@ -579,7 +581,7 @@ export default function App() {
             : facts.dirty && workspace.touched ? {kind: 'dirty', text: 'Unsaved draft'}
             : {kind: 'ready', text: `Ready · ${facts.selectedProfile ? facts.selectedProfile.name : 'draft'}`};
           return <div key={workspace.id} className={`game-tab ${isSelected ? 'selected' : ''} status-${status.kind}`} role="presentation">
-            <button id={`tab-${workspace.id}`} type="button" role="tab" aria-selected={isSelected} aria-controls="workspace-panel" tabIndex={isSelected ? 0 : -1}
+            <button id={`tab-${workspace.id}`} type="button" role="tab" aria-selected={isSelected} aria-controls="workspace-panel" tabIndex={workspace.id === (selected?.id ?? workspaces[0]?.id) ? 0 : -1}
               title={`${label}\n${workspace.packagePath}`} onClick={() => go({kind: 'workspace', id: workspace.id})}>
               <span className="game-avatar" aria-hidden="true">{label.slice(0, 1).toUpperCase()}</span>
               <span className="tab-text"><span className="tab-title">{label}</span><span className="tab-status">{status.kind === 'attention' && <span aria-hidden="true">! </span>}{status.text}</span></span>

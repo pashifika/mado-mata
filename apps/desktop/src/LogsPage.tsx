@@ -23,6 +23,9 @@ export default function LogsPage(props: Props) {
   const filtering = filter.text.trim() !== '' || filter.level !== '';
   const revealed = reveal !== null && items.some(entry => entry.sequence === reveal);
   useEffect(() => {
+    document.getElementById('logs-page-heading')?.focus({preventScroll: true});
+  }, []);
+  useEffect(() => {
     if (reveal === null) return;
     const target = document.getElementById(`log-${reveal}`) ?? document.getElementById('logs-page-heading');
     target?.focus({preventScroll: true});
