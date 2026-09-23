@@ -1,3 +1,5 @@
+import {messages} from './i18n.ts';
+import type {Locale} from './i18n.ts';
 import type {ControllerView, EditableSettings, Fault, LogEntry, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Json, WorkspaceRef} from './types.ts';
 
 export const DISCLOSURE_LIMIT = 512 * 1024;
@@ -49,25 +51,26 @@ function exactIntegerText(text: string, number: number): boolean {
 }
 
 // Numeric editor text is preserved until the command boundary, never coerced to null or zero.
-export function readDraft(schema: Schema, draft: Record<string, Json>) {
+export function readDraft(schema: Schema, draft: Record<string, Json>, locale: Locale = 'en') {
+  const t = messages[locale].validation;
   const errors: Record<string, string> = {};
   function convert(node: Schema, value: Json, path: string): Json {
     if ((node.type === 'number' || node.type === 'integer') && (typeof value === 'string' || typeof value === 'number')) {
       const number = typeof value === 'string' ? Number(value) : value;
       if (!Number.isFinite(number) || (typeof value === 'string' && !/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(value.trim()))) {
-        errors[path] = 'Enter a finite number; an empty field is not zero.';
+        errors[path] = t.finiteNumber;
         return value;
       }
       if (Object.is(number, -0)) {
-        errors[path] = 'Negative zero cannot round-trip through desktop JSON without losing its sign.';
+        errors[path] = t.negativeZero;
         return value;
       }
       if (node.type === 'integer' && (!Number.isSafeInteger(number) || (typeof value === 'string' && !exactIntegerText(value, number)))) {
-        errors[path] = 'Enter an exact integer within the JavaScript safe integer range.';
+        errors[path] = t.safeInteger;
         return value;
       }
       if (typeof value === 'string' && /^-?(?:0|[1-9]\d*)$/.test(value.trim()) && BigInt(value.trim()) !== BigInt(number)) {
-        errors[path] = 'This integer cannot be represented exactly by the numeric editor.';
+        errors[path] = t.exactNumber;
         return value;
       }
       return number;
@@ -91,12 +94,13 @@ export function verifiedCleanup(result:ControllerView['result']):boolean {
 }
 
 // Preparation faults settle before any child: their context may carry the only cleanup truth.
-export function cleanupLabel(result:ControllerView['result'], fallback:Record<string,Json>):string {
-  if (verifiedCleanup(result)) return 'Clean';
+export function cleanupLabel(result:ControllerView['result'], fallback:Record<string,Json>, locale:Locale = 'en'):string {
+  const t = messages[locale].validation;
+  if (verifiedCleanup(result)) return t.clean;
   const cleanup = record(result?.cleanup ?? fallback.cleanup);
-  if (!result && cleanup.clean === true && cleanup.child_started === false) return 'Clean · no child started';
-  if (cleanup.clean === false || result?.forced === true || (typeof result?.exit_code === 'number' && result.exit_code !== 0)) return 'Incomplete / not clean';
-  return 'Unverified';
+  if (!result && cleanup.clean === true && cleanup.child_started === false) return t.cleanNoChild;
+  if (cleanup.clean === false || result?.forced === true || (typeof result?.exit_code === 'number' && result.exit_code !== 0)) return t.incomplete;
+  return t.unverified;
 }
 
 // Supported OCR tuples mirror the pinned engine's accepted set; the backend Check/Start
@@ -118,17 +122,18 @@ export function environmentDraft(saved:OcrEnvironment|null):EnvironmentDraft {
 }
 
 // A wholly blank draft means unconfigured; anything else must be a complete supported tuple.
-export function readEnvironment(draft:EnvironmentDraft):{environment:OcrEnvironment|null; errors:Record<string,string>} {
+export function readEnvironment(draft:EnvironmentDraft, locale:Locale = 'en'):{environment:OcrEnvironment|null; errors:Record<string,string>} {
+  const t = messages[locale].validation;
   const modelRoot = draft.model_root.trim();
   const runtimePath = draft.runtime_path.trim();
   const libraries = draft.library_paths.split(/\r?\n/).map(line => line.trim()).filter(line => line !== '');
   if (!draft.profile && !modelRoot && !runtimePath && libraries.length === 0) return {environment:null, errors:{}};
   const errors:Record<string,string> = {};
   const supported = SUPPORTED_PROFILES.find(item => item.profile === draft.profile);
-  if (!supported) errors.profile = draft.profile ? 'This saved profile is not supported by this desktop build.' : 'Choose a supported OCR profile.';
-  if (!modelRoot) errors.model_root = 'Enter the model root directory.';
-  if (!runtimePath) errors.runtime_path = 'Enter the OCR runtime library path.';
-  if (libraries.length < 1 || libraries.length > 64) errors.library_paths = 'Enter 1–64 reviewed native library paths, one per line.';
+  if (!supported) errors.profile = draft.profile ? t.unsupportedProfile : t.chooseProfile;
+  if (!modelRoot) errors.model_root = t.modelRoot;
+  if (!runtimePath) errors.runtime_path = t.runtimePath;
+  if (libraries.length < 1 || libraries.length > 64) errors.library_paths = t.libraries;
   if (Object.keys(errors).length > 0 || !supported) return {environment:null, errors};
   return {environment:{
     model:supported.model, profile:supported.profile, language:ENVIRONMENT_LANGUAGE, provider:ENVIRONMENT_PROVIDER,
@@ -159,13 +164,14 @@ export function sameWorkspace(left:WorkspaceRef|null, right:WorkspaceRef|null):b
 }
 
 // A check is evidence for exactly what it observed; any later edit detaches it.
-export function staleReasons(association:CheckAssociation, current:CheckContext):string[] {
+export function staleReasons(association:CheckAssociation, current:CheckContext, locale:Locale = 'en'):string[] {
+  const t = messages[locale].validation;
   const reasons:string[] = [];
-  if (!sameEnvironment(association.environment, current.saved)) reasons.push('the saved environment changed');
-  if (current.draftDirty) reasons.push('the environment draft has unsaved edits');
-  if (association.descriptorPath !== current.descriptorPath) reasons.push('a different corpus descriptor is selected');
-  if (association.packageInventoryIdentity !== current.packageInventoryIdentity) reasons.push('a different package is inspected');
-  else if (!sameWorkspace(association.workspace, current.workspace)) reasons.push('a different workspace or selection revision is current');
+  if (!sameEnvironment(association.environment, current.saved)) reasons.push(t.environmentChanged);
+  if (current.draftDirty) reasons.push(t.draftChanged);
+  if (association.descriptorPath !== current.descriptorPath) reasons.push(t.descriptorChanged);
+  if (association.packageInventoryIdentity !== current.packageInventoryIdentity) reasons.push(t.packageChanged);
+  else if (!sameWorkspace(association.workspace, current.workspace)) reasons.push(t.workspaceChanged);
   return reasons;
 }
 
@@ -184,21 +190,23 @@ export const VISIBLE_COUNTS: readonly number[] = [1, 2];
 export const TIMEOUT_SECONDS: readonly number[] = [5, 8, 12];
 export const DEFAULT_NOTIFICATIONS: NotificationPreferences = {visible_count: 2, timeout_seconds: 8, show_success: true};
 
-export interface SettingsDraft {logLimit:string; notifications:NotificationPreferences; environment:EnvironmentDraft}
+export interface SettingsDraft {locale:Locale; logLimit:string; notifications:NotificationPreferences; environment:EnvironmentDraft}
 
 // The dialog edits one draft; the whole edit is validated together before a single atomic save.
-export function readSettingsDraft(draft:SettingsDraft):{settings:EditableSettings|null; errors:Record<string,string>} {
+export function readSettingsDraft(draft:SettingsDraft, locale:Locale = 'en'):{settings:EditableSettings|null; errors:Record<string,string>} {
+  const t = messages[locale].validation;
   const errors:Record<string,string> = {};
   const limitText = draft.logLimit.trim();
   const limit = Number(limitText);
-  if (!/^\d+$/.test(limitText) || !Number.isSafeInteger(limit) || limit < 1 || limit > 10000) errors.logLimit = 'GUI log limit must be an integer from 1 to 10000.';
-  if (!VISIBLE_COUNTS.includes(draft.notifications.visible_count)) errors.visibleCount = 'Choose one or two visible cards.';
-  if (!TIMEOUT_SECONDS.includes(draft.notifications.timeout_seconds)) errors.timeoutSeconds = 'Choose 5, 8, or 12 seconds.';
-  if (typeof draft.notifications.show_success !== 'boolean') errors.showSuccess = 'Success visibility must be on or off.';
-  const environment = readEnvironment(draft.environment);
+  if (!/^\d+$/.test(limitText) || !Number.isSafeInteger(limit) || limit < 1 || limit > 10000) errors.logLimit = t.logLimit;
+  if (!VISIBLE_COUNTS.includes(draft.notifications.visible_count)) errors.visibleCount = t.visibleCount;
+  if (!TIMEOUT_SECONDS.includes(draft.notifications.timeout_seconds)) errors.timeoutSeconds = t.timeout;
+  if (typeof draft.notifications.show_success !== 'boolean') errors.showSuccess = t.success;
+  if (draft.locale !== 'en' && draft.locale !== 'ja') errors.locale = t.locale;
+  const environment = readEnvironment(draft.environment, locale);
   Object.assign(errors, environment.errors);
   if (Object.keys(errors).length > 0) return {settings: null, errors};
-  return {settings: {gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications}}, errors};
+  return {settings: {locale:draft.locale, gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications}}, errors};
 }
 
 export function sameNotifications(left:NotificationPreferences, right:NotificationPreferences):boolean {
@@ -211,10 +219,11 @@ export function boundedText(source:string, limit:number):{text:string; truncated
 }
 
 // Initialization truth comes from the child's own milestones, never from a status word.
-export function initializationLabel(progress:Record<string,Json>[]):string {
+export function initializationLabel(progress:Record<string,Json>[], locale:Locale = 'en'):string {
+  const t = messages[locale].validation;
   const events = progress.map(event => text(event.event));
-  if (events.includes('BackendInitialized')) return 'Initialized · child reported BackendInitialized';
-  if (events.includes('BackendInitializationStarted')) return 'Started · completion not reported';
-  if (events.includes('EnginePreparationStarted')) return 'Not reached · preparation only';
-  return 'Not attempted';
+  if (events.includes('BackendInitialized')) return t.initialized;
+  if (events.includes('BackendInitializationStarted')) return t.initializationStarted;
+  if (events.includes('EnginePreparationStarted')) return t.preparationOnly;
+  return t.notAttempted;
 }

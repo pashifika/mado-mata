@@ -1,3 +1,5 @@
+import type {Locale} from './i18n.ts';
+
 export type Json = null | boolean | number | string | Json[] | {[key: string]: Json};
 export interface Fault {category:string; message:string; context:Json}
 export interface Schema {
@@ -21,10 +23,10 @@ export interface OcrEnvironment {
 export interface NotificationPreferences {visible_count:number; timeout_seconds:number; show_success:boolean}
 export interface Settings {
   version:number; gui_log_limit:number; package_path:string|null; ocr_environment:OcrEnvironment|null;
-  notifications:NotificationPreferences;
+  notifications:NotificationPreferences; locale:Locale;
 }
 // The only settings the dialog may write; version and package hint stay host-owned.
-export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvironment|null; notifications:NotificationPreferences}
+export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvironment|null; notifications:NotificationPreferences; locale:Locale}
 // Host-issued session identity; revisions increment on reinspect and ids are never reused.
 export interface WorkspaceRef {workspace_id:string; revision:number}
 export interface Selection extends WorkspaceRef {package:PackageInfo; profiles:Profile[]; profiles_error:Fault|null; package_path:string}

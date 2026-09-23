@@ -54,9 +54,44 @@ impl Default for NotificationPreferences {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+pub enum Locale {
+    #[default]
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "ja")]
+    Japanese,
+}
+
+impl<'de> Deserialize<'de> for Locale {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct LocaleVisitor;
+
+        impl serde::de::Visitor<'_> for LocaleVisitor {
+            type Value = Locale;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("\"en\" or \"ja\"")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Locale, E> {
+                match value {
+                    "en" => Ok(Locale::English),
+                    "ja" => Ok(Locale::Japanese),
+                    _ => Err(E::unknown_variant(value, &["en", "ja"])),
+                }
+            }
+        }
+
+        // Enum deserialization also accepts objects; settings require a string.
+        deserializer.deserialize_str(LocaleVisitor)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EditableSettings {
+    pub locale: Locale,
     pub gui_log_limit: usize,
     pub ocr_environment: Option<OcrEnvironment>,
     pub notifications: NotificationPreferences,
@@ -66,6 +101,8 @@ pub struct EditableSettings {
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub version: u32,
+    #[serde(default)]
+    pub locale: Locale,
     pub gui_log_limit: usize,
     pub package_path: Option<String>,
     #[serde(default)]
@@ -78,6 +115,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             version: VERSION,
+            locale: Locale::default(),
             gui_log_limit: 1000,
             package_path: None,
             ocr_environment: None,
@@ -199,6 +237,7 @@ impl Store {
 
     pub fn save_preferences(&self, preferences: EditableSettings) -> Result<Settings, Fault> {
         let mut settings = self.settings()?;
+        settings.locale = preferences.locale;
         settings.gui_log_limit = preferences.gui_log_limit;
         settings.ocr_environment = preferences.ocr_environment;
         settings.notifications = preferences.notifications;
@@ -1214,6 +1253,8 @@ mod tests {
             br#"{"version":2,"version":1,"gui_log_limit":12,"package_path":null}"#.as_slice(),
             br#"{"version":1,"gui_log_limit":12,"gui_log_limit":34,"package_path":null}"#
                 .as_slice(),
+            br#"{"version":1,"gui_log_limit":12,"locale":"invalid","locale":"ja"}"#
+                .as_slice(),
             br#"{"version":1,"gui_log_limit":12,"package_path":null,"notifications":{"visible_count":1,"visible_count":2,"timeout_seconds":8,"show_success":true}}"#
                 .as_slice(),
             b"not JSON".as_slice(),
@@ -1243,6 +1284,7 @@ mod tests {
 
     fn editable_settings() -> EditableSettings {
         EditableSettings {
+            locale: Locale::English,
             gui_log_limit: 1000,
             ocr_environment: None,
             notifications: NotificationPreferences::default(),
@@ -1250,19 +1292,80 @@ mod tests {
     }
 
     #[test]
+    fn editable_settings_requires_an_explicit_locale() {
+        let mut preferences = serde_json::to_value(editable_settings()).unwrap();
+        preferences.as_object_mut().unwrap().remove("locale");
+        assert!(serde_json::from_value::<EditableSettings>(preferences.clone()).is_err());
+        for (value, expected) in [("en", Locale::English), ("ja", Locale::Japanese)] {
+            preferences["locale"] = json!(value);
+            let decoded: EditableSettings = serde_json::from_value(preferences.clone()).unwrap();
+            assert_eq!(decoded.locale, expected);
+        }
+    }
+
+    #[test]
+    fn invalid_locale_refuses_reads_and_writes_without_changing_bytes() {
+        let directory = Directory::new();
+        let store = directory.store();
+        store.save_preferences(editable_settings()).unwrap();
+        let path = directory.0.join("settings.json");
+        for locale in [
+            Value::Null,
+            json!("fr"),
+            json!(1),
+            json!(true),
+            json!(["ja"]),
+            json!({"ja": null}),
+        ] {
+            let mut preferences = serde_json::to_value(editable_settings()).unwrap();
+            preferences["locale"] = locale.clone();
+            assert!(serde_json::from_value::<EditableSettings>(preferences).is_err());
+            let document = json!({
+                "version": 1,
+                "gui_log_limit": 12,
+                "package_path": "old-root",
+                "locale": locale
+            });
+            let bytes = serde_json::to_vec(&document).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(store.settings().unwrap_err().category, "StorageFormat");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            for hint in ["old-root", "other-root"] {
+                assert_eq!(
+                    store.save_package_hint(hint.into()).unwrap_err().category,
+                    "StorageFormat"
+                );
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+            }
+            assert_eq!(
+                store
+                    .save_preferences(editable_settings())
+                    .unwrap_err()
+                    .category,
+                "StorageFormat"
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
     fn old_settings_load_without_rewrite_and_explicit_save_persists_preferences() {
         let directory = Directory::new();
         let store = directory.store();
+        assert_eq!(store.settings().unwrap().locale, Locale::English);
+        assert!(!directory.0.join("settings.json").exists());
         store.save_preferences(editable_settings()).unwrap();
         let path = directory.0.join("settings.json");
         let original = br#"{ "version":1, "gui_log_limit":12, "package_path":"old-root" }"#;
         fs::write(&path, original).unwrap();
         let loaded = store.settings().unwrap();
+        assert_eq!(loaded.locale, Locale::English);
         assert_eq!(loaded.notifications, NotificationPreferences::default());
         assert_eq!(fs::read(&path).unwrap(), original);
 
         let saved = store
             .save_preferences(EditableSettings {
+                locale: Locale::Japanese,
                 gui_log_limit: 24,
                 ocr_environment: None,
                 notifications: NotificationPreferences {
@@ -1274,13 +1377,18 @@ mod tests {
             .unwrap();
         assert_eq!(saved.package_path.as_deref(), Some("old-root"));
         assert_eq!(saved.version, VERSION);
+        assert_eq!(saved.locale, Locale::Japanese);
+        let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored["locale"], "ja");
         let reopened = directory.store().settings().unwrap();
+        assert_eq!(reopened.locale, Locale::Japanese);
         assert_eq!(reopened.gui_log_limit, 24);
         assert_eq!(reopened.notifications, saved.notifications);
         assert_eq!(reopened.package_path.as_deref(), Some("old-root"));
 
         let updated = store
             .save_preferences(EditableSettings {
+                locale: saved.locale,
                 notifications: NotificationPreferences {
                     visible_count: 2,
                     timeout_seconds: 12,
@@ -1293,6 +1401,11 @@ mod tests {
             directory.store().settings().unwrap().notifications,
             updated.notifications
         );
+        assert_eq!(directory.store().settings().unwrap().locale, Locale::Japanese);
+        store.save_preferences(editable_settings()).unwrap();
+        let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored["locale"], "en");
+        assert_eq!(directory.store().settings().unwrap().locale, Locale::English);
     }
 
     #[test]
@@ -1309,6 +1422,7 @@ mod tests {
             json!({"version": 1, "gui_log_limit": 1000, "package_path": "first-root"})
         );
         let fresh = directory.store().settings().unwrap();
+        assert_eq!(fresh.locale, Locale::English);
         assert_eq!(fresh.package_path.as_deref(), Some("first-root"));
         assert_eq!(fresh.notifications, NotificationPreferences::default());
         assert!(fresh.ocr_environment.is_none());
@@ -1322,6 +1436,7 @@ mod tests {
             json!({"version": 1, "gui_log_limit": 12, "package_path": "new-root"})
         );
         let loaded = directory.store().settings().unwrap();
+        assert_eq!(loaded.locale, Locale::English);
         assert_eq!(loaded.package_path.as_deref(), Some("new-root"));
         assert_eq!(loaded.notifications, NotificationPreferences::default());
 
@@ -1330,9 +1445,10 @@ mod tests {
         store.save_package_hint("new-root".into()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), unchanged);
 
-        // Only an explicit Save introduces the preference field, and later hints keep it exact.
+        // Only an explicit Save introduces preferences; later hints preserve them.
         let saved = store
             .save_preferences(EditableSettings {
+                locale: Locale::Japanese,
                 gui_log_limit: 24,
                 notifications: NotificationPreferences {
                     visible_count: 1,
@@ -1351,6 +1467,7 @@ mod tests {
         expected["package_path"] = json!("third-root");
         assert_eq!(stored(), expected);
         let reopened = directory.store().settings().unwrap();
+        assert_eq!(reopened.locale, Locale::Japanese);
         assert_eq!(reopened.package_path.as_deref(), Some("third-root"));
         assert_eq!(reopened.notifications, saved.notifications);
         assert_eq!(reopened.gui_log_limit, 24);
@@ -1429,6 +1546,7 @@ mod tests {
         let store = directory.store();
         store.save_package_hint("first-root".into()).unwrap();
         let mut dialog = editable_settings();
+        dialog.locale = Locale::Japanese;
         dialog.gui_log_limit = 31;
         dialog.notifications.show_success = false;
 
@@ -1436,8 +1554,10 @@ mod tests {
             .save_package_hint("newly-inspected-root".into())
             .unwrap();
         let saved = store.save_preferences(dialog).unwrap();
+        assert_eq!(saved.locale, Locale::Japanese);
         assert_eq!(saved.package_path.as_deref(), Some("newly-inspected-root"));
         let reopened = directory.store().settings().unwrap();
+        assert_eq!(reopened.locale, Locale::Japanese);
         assert_eq!(
             reopened.package_path.as_deref(),
             Some("newly-inspected-root")
@@ -1451,7 +1571,12 @@ mod tests {
         let directory = Directory::new();
         let store = directory.store();
         let path = directory.0.join("settings.json");
-        store.save_preferences(editable_settings()).unwrap();
+        store
+            .save_preferences(EditableSettings {
+                locale: Locale::Japanese,
+                ..editable_settings()
+            })
+            .unwrap();
         let before = fs::read(&path).unwrap();
         let pending = path.with_extension("pending");
         fs::write(&pending, b"unfinished previous write").unwrap();
@@ -1463,8 +1588,10 @@ mod tests {
         assert_eq!(fs::read(&pending).unwrap(), b"unfinished previous write");
         fs::remove_file(&pending).unwrap();
         assert!(directory.store().settings().unwrap().package_path.is_none());
+        assert_eq!(directory.store().settings().unwrap().locale, Locale::Japanese);
 
         let mut updated = store.settings().unwrap();
+        updated.locale = Locale::English;
         updated.gui_log_limit = 31;
         let bytes = encode(&updated, MAX_SETTINGS_BYTES).unwrap();
         let fault = write_atomic(&path, &bytes, |temporary, destination| {
@@ -1476,6 +1603,7 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(!pending.exists());
         assert_eq!(directory.store().settings().unwrap().gui_log_limit, 1000);
+        assert_eq!(directory.store().settings().unwrap().locale, Locale::Japanese);
     }
 
     #[test]
@@ -1525,6 +1653,7 @@ mod tests {
         };
         store
             .save_preferences(EditableSettings {
+                locale: settings.locale,
                 gui_log_limit: settings.gui_log_limit,
                 ocr_environment: Some(environment.clone()),
                 notifications: settings.notifications,
@@ -1541,6 +1670,7 @@ mod tests {
         assert!(
             store
                 .save_preferences(EditableSettings {
+                    locale: invalid.locale,
                     gui_log_limit: invalid.gui_log_limit,
                     ocr_environment: invalid.ocr_environment,
                     notifications: invalid.notifications,

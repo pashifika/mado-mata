@@ -2039,6 +2039,7 @@ mod tests {
         let settings = application.settings().unwrap();
         application
             .save_settings(EditableSettings {
+                locale: settings.locale,
                 gui_log_limit: settings.gui_log_limit,
                 ocr_environment: Some(environment.clone()),
                 notifications: settings.notifications,
@@ -2064,6 +2065,7 @@ mod tests {
         let settings = application.settings().unwrap();
         application
             .save_settings(EditableSettings {
+                locale: settings.locale,
                 gui_log_limit: settings.gui_log_limit,
                 ocr_environment: None,
                 notifications: settings.notifications,

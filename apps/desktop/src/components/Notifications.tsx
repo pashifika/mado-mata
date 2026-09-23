@@ -1,7 +1,8 @@
 import {useEffect, useRef} from 'react';
 import type {Card} from '../notifications.ts';
+import {messages} from '../i18n.ts';
+import {useLocale} from '../locale.tsx';
 
-const SEVERITY_LABEL: Record<Card['severity'], string> = {success: 'Success', warning: 'Warning', error: 'Error'};
 const SEVERITY_SYMBOL: Record<Card['severity'], string> = {success: '✓', warning: '!', error: '×'};
 
 interface Props {
@@ -13,6 +14,8 @@ interface Props {
 }
 
 export default function Notifications({cards, scopeLabel, onDismiss, onOpen, onInteract}: Props) {
+  const locale = useLocale();
+  const t = messages[locale].ui;
   // The card that currently owns keyboard focus, kept apart from the store's pause flag: when × or a newer outcome
   // removes that card, focus is handed to the card now in its slot, else back to where focus entered the stack.
   const owned = useRef<number | null>(null);
@@ -36,7 +39,7 @@ export default function Notifications({cards, scopeLabel, onDismiss, onOpen, onI
     (origin?.isConnected && !(origin as HTMLButtonElement).disabled ? origin : document.getElementById('application-menu'))?.focus();
   }, [cards]);
   if (cards.length === 0) return null;
-  return <div id="notifications" className="toast-stack" role="region" aria-label="Notifications"
+  return <div id="notifications" className="toast-stack" role="region" aria-label={t.common.notifications}
     onFocus={event => {
       const from = event.relatedTarget;
       if (from instanceof HTMLElement && !event.currentTarget.contains(from)) returnTo.current = from;
@@ -55,15 +58,15 @@ export default function Notifications({cards, scopeLabel, onDismiss, onOpen, onI
       <div className="toast-body">
         <span className="toast-symbol" aria-hidden="true">{SEVERITY_SYMBOL[card.severity]}</span>
         <div className="toast-content">
-          <div className="toast-scope">{scopeLabel(card.workspaceId)} · {SEVERITY_LABEL[card.severity]}</div>
+          <div className="toast-scope">{scopeLabel(card.workspaceId)} · {t.severity(card.severity)}</div>
           <strong>{card.message}</strong>
           <p className="toast-tags"><code>{card.code}</code>{card.category && <span className="tag">{card.category}</span>}{card.action && <span className="tag">{card.action}</span>}</p>
         </div>
-        <button type="button" className="dismiss" aria-label={`Dismiss notification ${card.id}`} onClick={() => onDismiss(card.id)}>×</button>
+        <button type="button" className="dismiss" aria-label={t.notifications.dismiss(card.id)} onClick={() => onDismiss(card.id)}>×</button>
       </div>
       <div className="toast-footer">
-        <span>Event #{card.id}{card.run ? <> · <code>{card.run}</code></> : ''}{card.hovered || card.focused ? ' · paused' : ''}</span>
-        <button type="button" className="link" onClick={() => {owned.current = null; onOpen(card);}}>View logs</button>
+        <span>{t.notifications.event(card.id)}{card.run ? <> · <code>{card.run}</code></> : ''}{card.hovered || card.focused ? ` · ${t.notifications.paused}` : ''}</span>
+        <button type="button" className="link" onClick={() => {owned.current = null; onOpen(card);}}>{t.notifications.viewLogs}</button>
       </div>
       <div className="toast-progress" style={{transform: `scaleX(${Math.max(0, card.remainingMs / card.timeoutMs)})`}} aria-hidden="true"/>
     </article>)}
