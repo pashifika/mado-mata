@@ -1401,11 +1401,17 @@ mod tests {
             directory.store().settings().unwrap().notifications,
             updated.notifications
         );
-        assert_eq!(directory.store().settings().unwrap().locale, Locale::Japanese);
+        assert_eq!(
+            directory.store().settings().unwrap().locale,
+            Locale::Japanese
+        );
         store.save_preferences(editable_settings()).unwrap();
         let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(stored["locale"], "en");
-        assert_eq!(directory.store().settings().unwrap().locale, Locale::English);
+        assert_eq!(
+            directory.store().settings().unwrap().locale,
+            Locale::English
+        );
     }
 
     #[test]
@@ -1588,7 +1594,10 @@ mod tests {
         assert_eq!(fs::read(&pending).unwrap(), b"unfinished previous write");
         fs::remove_file(&pending).unwrap();
         assert!(directory.store().settings().unwrap().package_path.is_none());
-        assert_eq!(directory.store().settings().unwrap().locale, Locale::Japanese);
+        assert_eq!(
+            directory.store().settings().unwrap().locale,
+            Locale::Japanese
+        );
 
         let mut updated = store.settings().unwrap();
         updated.locale = Locale::English;
@@ -1603,7 +1612,10 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(!pending.exists());
         assert_eq!(directory.store().settings().unwrap().gui_log_limit, 1000);
-        assert_eq!(directory.store().settings().unwrap().locale, Locale::Japanese);
+        assert_eq!(
+            directory.store().settings().unwrap().locale,
+            Locale::Japanese
+        );
     }
 
     #[test]
