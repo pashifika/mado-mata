@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,SUPPORTED_PROFILES} from './state.ts';
+import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,retainedCheck,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
 
 test('late predecessor result cannot replace the successor or its preparing state',()=>{
   const current={run:'next',state:'preparing',result:null};
@@ -149,19 +149,53 @@ test('environment draft round-trips through the fixed supported tuple with trimm
 });
 
 const checkedEnvironment=readEnvironment({profile:SUPPORTED_PROFILES[0].profile,model_root:'/models',runtime_path:'/rt.dylib',library_paths:'/lib/a.dylib'}).environment;
-const association={operation:'desktop-1',environment:checkedEnvironment,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
-const unchanged={saved:checkedEnvironment,draftDirty:false,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
+const workspace={workspace_id:'ws-1',revision:1};
+const association={operation:'desktop-1',workspace,environment:checkedEnvironment,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
+const unchanged={saved:checkedEnvironment,draftDirty:false,workspace,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
 for (const {scenario,current,reasons} of [
   {scenario:'nothing changed since the check',current:unchanged,reasons:0},
   {scenario:'the environment was saved again with another path',current:{...unchanged,saved:{...checkedEnvironment,model_root:'/models-2'}},reasons:1},
   {scenario:'the draft has unsaved edits even though saved settings match',current:{...unchanged,draftDirty:true},reasons:1},
   {scenario:'another descriptor is selected',current:{...unchanged,descriptorPath:null},reasons:1},
-  {scenario:'another package is inspected',current:{...unchanged,packageInventoryIdentity:'inv-2'},reasons:1},
-  {scenario:'the inspected package was forgotten',current:{...unchanged,packageInventoryIdentity:null},reasons:1},
+  {scenario:'another package is inspected',current:{...unchanged,packageInventoryIdentity:'inv-2',workspace:{workspace_id:'ws-2',revision:1}},reasons:1},
+  {scenario:'the inspected package was forgotten',current:{...unchanged,packageInventoryIdentity:null,workspace:null},reasons:1},
+  {scenario:'the same package inventory is selected through another workspace',current:{...unchanged,workspace:{workspace_id:'ws-2',revision:1}},reasons:1},
+  {scenario:'the workspace was reinspected to a newer revision',current:{...unchanged,workspace:{workspace_id:'ws-1',revision:2}},reasons:1},
   {scenario:'the environment was cleared after the check',current:{...unchanged,saved:null,draftDirty:true},reasons:2},
 ]) {
   test(`check association: ${scenario}`,()=>{
     assert.equal(staleReasons(association,current).length,reasons);
+  });
+}
+
+test('a host-retained check maps to the association exactly as the host read it',()=>{
+  const controller={run:'desktop-7',state:'terminal',operation:'environment_check',result:null,error:{category:'Environment',message:'missing',context:null},progress:[],dropped_logs:0,workspace_id:'ws-1',workspace_revision:1};
+  const retained=retainedCheck({workspace,environment:checkedEnvironment,descriptor_path:null,package_inventory_identity:'inv-1',controller});
+  assert.deepEqual(retained.association,{operation:'desktop-7',workspace,environment:checkedEnvironment,descriptorPath:null,packageInventoryIdentity:'inv-1'});
+  assert.equal(retained.view,controller);
+  assert.equal(staleReasons(retained.association,{...unchanged,descriptorPath:null}).length,0);
+});
+
+const validSettingsDraft={logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(checkedEnvironment)};
+test('a complete settings draft becomes one editable settings object without version or package hint',()=>{
+  const parsed=readSettingsDraft(validSettingsDraft);
+  assert.deepEqual(parsed.errors,{});
+  assert.deepEqual(parsed.settings,{gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true}});
+  assert.equal(readSettingsDraft({...validSettingsDraft,environment:environmentDraft(null)}).settings.ocr_environment,null);
+});
+
+for (const {scenario,draft,field} of [
+  {scenario:'a zero log limit',draft:{...validSettingsDraft,logLimit:'0'},field:'logLimit'},
+  {scenario:'a log limit above 10000',draft:{...validSettingsDraft,logLimit:'10001'},field:'logLimit'},
+  {scenario:'a non-integer log limit',draft:{...validSettingsDraft,logLimit:'1e3'},field:'logLimit'},
+  {scenario:'three visible cards',draft:{...validSettingsDraft,notifications:{...DEFAULT_NOTIFICATIONS,visible_count:3}},field:'visibleCount'},
+  {scenario:'a ten second timeout',draft:{...validSettingsDraft,notifications:{...DEFAULT_NOTIFICATIONS,timeout_seconds:10}},field:'timeoutSeconds'},
+  {scenario:'a partial environment',draft:{...validSettingsDraft,environment:{...environmentDraft(checkedEnvironment),model_root:''}},field:'model_root'},
+]) {
+  test(`settings draft refuses ${scenario} without producing a save payload`,()=>{
+    const parsed=readSettingsDraft(draft);
+    assert.equal(parsed.settings,null);
+    assert.ok(parsed.errors[field]);
   });
 }
 

@@ -1,5 +1,5 @@
-use mado_mata_desktop::application::{Application, Poll, Selection};
-use mado_mata_desktop::storage::{Profile, Settings};
+use mado_mata_desktop::application::{Application, Poll, Selection, WorkspaceRef};
+use mado_mata_desktop::storage::{EditableSettings, Profile, Settings};
 use mado_runtime_comparison::desktop::StartRequest;
 use mado_runtime_comparison::model::Fault;
 use serde_json::Value;
@@ -27,10 +27,20 @@ async fn background<T: Send + 'static>(
 #[tauri::command]
 async fn inspect(
     package_path: String,
+    workspace: Option<WorkspaceRef>,
     state: tauri::State<'_, Backend>,
 ) -> Result<Selection, Fault> {
     let application = state.application.clone();
-    background(move || application.select(Path::new(&package_path))).await
+    background(move || application.inspect(Path::new(&package_path), workspace.as_ref())).await
+}
+
+#[tauri::command]
+async fn close_workspace(
+    workspace: WorkspaceRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), Fault> {
+    let application = state.application.clone();
+    background(move || application.close_workspace(&workspace)).await
 }
 
 #[tauri::command]
@@ -41,7 +51,7 @@ async fn settings(state: tauri::State<'_, Backend>) -> Result<Settings, Fault> {
 
 #[tauri::command]
 async fn save_settings(
-    settings: Settings,
+    settings: EditableSettings,
     state: tauri::State<'_, Backend>,
 ) -> Result<Settings, Fault> {
     let application = state.application.clone();
@@ -49,61 +59,76 @@ async fn save_settings(
 }
 
 #[tauri::command]
-async fn validate(values: Value, state: tauri::State<'_, Backend>) -> Result<Value, Fault> {
+async fn validate(
+    workspace: WorkspaceRef,
+    values: Value,
+    state: tauri::State<'_, Backend>,
+) -> Result<Value, Fault> {
     let application = state.application.clone();
-    background(move || application.validate(values)).await
+    background(move || application.validate(&workspace, values)).await
 }
 
 #[tauri::command]
-async fn profiles(state: tauri::State<'_, Backend>) -> Result<Vec<Profile>, Fault> {
+async fn profiles(
+    workspace: WorkspaceRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<Vec<Profile>, Fault> {
     let application = state.application.clone();
-    background(move || application.profiles()).await
+    background(move || application.profiles(&workspace)).await
 }
 
 #[tauri::command]
 async fn save_profile(
+    workspace: WorkspaceRef,
     id: Option<String>,
     name: String,
     values: Value,
     state: tauri::State<'_, Backend>,
 ) -> Result<Profile, Fault> {
     let application = state.application.clone();
-    background(move || application.save_profile(id.as_deref(), &name, values)).await
+    background(move || application.save_profile(&workspace, id.as_deref(), &name, values)).await
 }
 
 #[tauri::command]
 async fn rename_profile(
+    workspace: WorkspaceRef,
     id: String,
     name: String,
     state: tauri::State<'_, Backend>,
 ) -> Result<Profile, Fault> {
     let application = state.application.clone();
-    background(move || application.rename_profile(&id, &name)).await
+    background(move || application.rename_profile(&workspace, &id, &name)).await
 }
 
 #[tauri::command]
-async fn delete_profile(id: String, state: tauri::State<'_, Backend>) -> Result<(), Fault> {
+async fn delete_profile(
+    workspace: WorkspaceRef,
+    id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), Fault> {
     let application = state.application.clone();
-    background(move || application.delete_profile(&id)).await
+    background(move || application.delete_profile(&workspace, &id)).await
 }
 
 #[tauri::command]
-async fn start(request: StartRequest, state: tauri::State<'_, Backend>) -> Result<String, Fault> {
+async fn start(
+    workspace: WorkspaceRef,
+    request: StartRequest,
+    state: tauri::State<'_, Backend>,
+) -> Result<String, Fault> {
     let application = state.application.clone();
-    background(move || application.start(request)).await
+    background(move || application.start(&workspace, request)).await
 }
 
 #[tauri::command]
 async fn check_environment(
+    workspace: Option<WorkspaceRef>,
     replay_descriptor_path: Option<String>,
-    package_inventory_identity: Option<String>,
     state: tauri::State<'_, Backend>,
 ) -> Result<String, Fault> {
     let application = state.application.clone();
-    background(move || {
-        application.check_environment(replay_descriptor_path, package_inventory_identity)
-    })
-    .await
+    background(move || application.check_environment(workspace.as_ref(), replay_descriptor_path))
+        .await
 }
 
 #[tauri::command]
@@ -112,8 +137,9 @@ fn stop(run: String, state: tauri::State<'_, Backend>) -> Result<(), Fault> {
 }
 
 #[tauri::command]
-fn poll(state: tauri::State<'_, Backend>) -> Poll {
-    state.application.poll()
+async fn poll(state: tauri::State<'_, Backend>) -> Result<Poll, Fault> {
+    let application = state.application.clone();
+    background(move || Ok(application.poll())).await
 }
 
 fn close(app: &tauri::AppHandle) {
@@ -174,6 +200,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             inspect,
+            close_workspace,
             settings,
             save_settings,
             validate,

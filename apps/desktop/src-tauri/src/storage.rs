@@ -36,6 +36,32 @@ pub struct Profile {
     pub values: Value,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationPreferences {
+    pub visible_count: usize,
+    pub timeout_seconds: u64,
+    pub show_success: bool,
+}
+
+impl Default for NotificationPreferences {
+    fn default() -> Self {
+        Self {
+            visible_count: 2,
+            timeout_seconds: 8,
+            show_success: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditableSettings {
+    pub gui_log_limit: usize,
+    pub ocr_environment: Option<OcrEnvironment>,
+    pub notifications: NotificationPreferences,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -44,6 +70,8 @@ pub struct Settings {
     pub package_path: Option<String>,
     #[serde(default)]
     pub ocr_environment: Option<OcrEnvironment>,
+    #[serde(default)]
+    pub notifications: NotificationPreferences,
 }
 
 impl Default for Settings {
@@ -53,6 +81,7 @@ impl Default for Settings {
             gui_log_limit: 1000,
             package_path: None,
             ocr_environment: None,
+            notifications: NotificationPreferences::default(),
         }
     }
 }
@@ -171,10 +200,23 @@ impl Store {
         }
     }
 
+    pub fn save_preferences(&self, preferences: EditableSettings) -> Result<Settings, Fault> {
+        let mut settings = self.settings()?;
+        settings.gui_log_limit = preferences.gui_log_limit;
+        settings.ocr_environment = preferences.ocr_environment;
+        settings.notifications = preferences.notifications;
+        validate_settings(&settings)?;
+        self.write_settings(settings)
+    }
+
     pub fn save_settings(&self, settings: Settings) -> Result<Settings, Fault> {
         validate_settings(&settings)?;
         // Do not overwrite an incompatible or malformed previous version.
         self.settings()?;
+        self.write_settings(settings)
+    }
+
+    fn write_settings(&self, settings: Settings) -> Result<Settings, Fault> {
         let bytes = encode(&settings, MAX_SETTINGS_BYTES)?;
         write_atomic(&self.root.join("settings.json"), &bytes, |from, to| {
             fs::rename(from, to)
@@ -561,6 +603,14 @@ fn validate_settings(settings: &Settings) -> Result<(), Fault> {
     }
     if let Some(environment) = &settings.ocr_environment {
         environment.validate()?;
+    }
+    if !matches!(settings.notifications.visible_count, 1 | 2)
+        || !matches!(settings.notifications.timeout_seconds, 5 | 8 | 12)
+    {
+        return Err(Fault::new(
+            "Settings",
+            "notification count must be 1 or 2 and timeout must be 5, 8, or 12 seconds",
+        ));
     }
     // This is a location hint, not a captured inventory or permission grant.
     Ok(())
@@ -1126,6 +1176,181 @@ mod tests {
         }
     }
 
+    fn editable_settings() -> EditableSettings {
+        EditableSettings {
+            gui_log_limit: 1000,
+            ocr_environment: None,
+            notifications: NotificationPreferences::default(),
+        }
+    }
+
+    #[test]
+    fn old_settings_load_without_rewrite_and_explicit_save_persists_preferences() {
+        let directory = Directory::new();
+        let store = directory.store();
+        store.save_settings(Settings::default()).unwrap();
+        let path = directory.0.join("settings.json");
+        let original = br#"{ "version":1, "gui_log_limit":12, "package_path":"old-root" }"#;
+        fs::write(&path, original).unwrap();
+        let loaded = store.settings().unwrap();
+        assert_eq!(loaded.notifications, NotificationPreferences::default());
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        let saved = store
+            .save_preferences(EditableSettings {
+                gui_log_limit: 24,
+                ocr_environment: None,
+                notifications: NotificationPreferences {
+                    visible_count: 1,
+                    timeout_seconds: 5,
+                    show_success: false,
+                },
+            })
+            .unwrap();
+        assert_eq!(saved.package_path.as_deref(), Some("old-root"));
+        assert_eq!(saved.version, VERSION);
+        let reopened = directory.store().settings().unwrap();
+        assert_eq!(reopened.gui_log_limit, 24);
+        assert_eq!(reopened.notifications, saved.notifications);
+        assert_eq!(reopened.package_path.as_deref(), Some("old-root"));
+
+        let updated = store
+            .save_preferences(EditableSettings {
+                notifications: NotificationPreferences {
+                    visible_count: 2,
+                    timeout_seconds: 12,
+                    show_success: true,
+                },
+                ..editable_settings()
+            })
+            .unwrap();
+        assert_eq!(
+            directory.store().settings().unwrap().notifications,
+            updated.notifications
+        );
+    }
+
+    #[test]
+    fn invalid_notification_values_and_incompatible_settings_preserve_bytes() {
+        let directory = Directory::new();
+        let store = directory.store();
+        let path = directory.0.join("settings.json");
+        store.save_settings(Settings::default()).unwrap();
+        let before = fs::read(&path).unwrap();
+        for (visible_count, timeout_seconds) in [(0, 8), (3, 8), (2, 0), (2, 13)] {
+            let mut invalid = editable_settings();
+            invalid.notifications.visible_count = visible_count;
+            invalid.notifications.timeout_seconds = timeout_seconds;
+            assert_eq!(
+                store.save_preferences(invalid).unwrap_err().category,
+                "Settings"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        let mut invalid = editable_settings();
+        invalid.gui_log_limit = 0;
+        assert_eq!(
+            store.save_preferences(invalid).unwrap_err().category,
+            "Settings"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        let base = json!({
+            "version": 1,
+            "gui_log_limit": 12,
+            "package_path": null,
+            "notifications": {"visible_count": 2, "timeout_seconds": 8, "show_success": true}
+        });
+        let mut malformed = Vec::new();
+        for (field, value) in [
+            ("visible_count", json!(3)),
+            ("timeout_seconds", json!(7)),
+            ("show_success", json!("true")),
+            ("extra", json!(true)),
+        ] {
+            let mut candidate = base.clone();
+            candidate["notifications"][field] = value;
+            malformed.push(candidate);
+        }
+        let mut missing = base.clone();
+        missing["notifications"]
+            .as_object_mut()
+            .unwrap()
+            .remove("show_success");
+        malformed.push(missing);
+        let mut null = base.clone();
+        null["notifications"] = Value::Null;
+        malformed.push(null);
+        let mut unknown_version = base.clone();
+        unknown_version["version"] = json!(2);
+        malformed.push(unknown_version);
+        let mut unknown_setting = base.clone();
+        unknown_setting["new_setting"] = json!(true);
+        malformed.push(unknown_setting);
+        for candidate in malformed {
+            let bytes = serde_json::to_vec(&candidate).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            assert!(store.settings().is_err());
+            assert!(store.save_preferences(editable_settings()).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn stale_dialog_save_preserves_newer_package_hint() {
+        let directory = Directory::new();
+        let store = directory.store();
+        let mut inspected = Settings {
+            package_path: Some("first-root".into()),
+            ..Settings::default()
+        };
+        store.save_settings(inspected.clone()).unwrap();
+        let mut dialog = editable_settings();
+        dialog.gui_log_limit = 31;
+        dialog.notifications.show_success = false;
+
+        inspected.package_path = Some("newly-inspected-root".into());
+        store.save_settings(inspected).unwrap();
+        let saved = store.save_preferences(dialog).unwrap();
+        assert_eq!(saved.package_path.as_deref(), Some("newly-inspected-root"));
+        let reopened = directory.store().settings().unwrap();
+        assert_eq!(
+            reopened.package_path.as_deref(),
+            Some("newly-inspected-root")
+        );
+        assert_eq!(reopened.gui_log_limit, 31);
+        assert!(!reopened.notifications.show_success);
+    }
+
+    #[test]
+    fn failed_settings_atomic_writes_preserve_previous_bytes() {
+        let directory = Directory::new();
+        let store = directory.store();
+        let path = directory.0.join("settings.json");
+        store.save_settings(Settings::default()).unwrap();
+        let before = fs::read(&path).unwrap();
+        let pending = path.with_extension("pending");
+        fs::write(&pending, b"unfinished previous write").unwrap();
+        let fault = store.save_preferences(editable_settings()).unwrap_err();
+        assert_eq!(fault.context["operation"], "create atomic write");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(&pending).unwrap(), b"unfinished previous write");
+        fs::remove_file(&pending).unwrap();
+
+        let mut updated = store.settings().unwrap();
+        updated.gui_log_limit = 31;
+        let bytes = encode(&updated, MAX_SETTINGS_BYTES).unwrap();
+        let fault = write_atomic(&path, &bytes, |temporary, destination| {
+            assert_eq!(fs::read(temporary)?, bytes);
+            fs::rename(temporary, destination.join("not-a-directory"))
+        })
+        .unwrap_err();
+        assert_eq!(fault.context["operation"], "replace stored file");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!pending.exists());
+        assert_eq!(directory.store().settings().unwrap().gui_log_limit, 1000);
+    }
+
     #[test]
     fn environment_settings_are_structural_and_preserve_existing_data() {
         use mado_runtime_comparison::environment::{
@@ -1144,7 +1369,7 @@ mod tests {
         let original =
             br#"{ "version":1, "gui_log_limit":12, "package_path":"remembered-package" }"#;
         fs::write(&path, original).unwrap();
-        let mut settings = store.settings().unwrap();
+        let settings = store.settings().unwrap();
         assert!(settings.ocr_environment.is_none());
         assert_eq!(fs::read(&path).unwrap(), original);
         let environment = OcrEnvironment {
@@ -1171,8 +1396,13 @@ mod tests {
                     .into_owned(),
             ],
         };
-        settings.ocr_environment = Some(environment.clone());
-        store.save_settings(settings).unwrap();
+        store
+            .save_preferences(EditableSettings {
+                gui_log_limit: settings.gui_log_limit,
+                ocr_environment: Some(environment.clone()),
+                notifications: settings.notifications,
+            })
+            .unwrap();
         let reopened = directory.store().settings().unwrap();
         assert_eq!(reopened.ocr_environment, Some(environment));
         assert_eq!(reopened.gui_log_limit, 12);
@@ -1181,7 +1411,15 @@ mod tests {
         let saved = fs::read(&path).unwrap();
         let mut invalid = reopened.clone();
         invalid.ocr_environment.as_mut().unwrap().provider = "cuda".into();
-        assert!(store.save_settings(invalid).is_err());
+        assert!(
+            store
+                .save_preferences(EditableSettings {
+                    gui_log_limit: invalid.gui_log_limit,
+                    ocr_environment: invalid.ocr_environment,
+                    notifications: invalid.notifications,
+                })
+                .is_err()
+        );
         assert_eq!(fs::read(&path).unwrap(), saved);
         for field in ["provider", "target"] {
             let mut corrupted = serde_json::to_value(&reopened).unwrap();
@@ -1190,6 +1428,7 @@ mod tests {
             fs::write(&path, &bytes).unwrap();
             assert!(store.settings().is_err());
             assert!(store.save_settings(reopened.clone()).is_err());
+            assert!(store.save_preferences(editable_settings()).is_err());
             assert_eq!(fs::read(&path).unwrap(), bytes);
         }
     }

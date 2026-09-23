@@ -107,10 +107,40 @@ choose or prepare a private application directory deliberately.
 The current Tauri setup path reports this refusal on stderr and aborts startup;
 it does not open a recovery UI. The existing directory and its files are unchanged.
 
+## Package workspaces and App settings
+
+The top strip holds at most **eight session-local workspaces**, each backed by a
+real inspected package root. **+** opens another package; opening the same
+canonical root activates its existing tab without resetting its draft. Tabs
+keep independent profile drafts, execution choices, and Run/Logs navigation.
+Unsaved tabs and drafts are not restored after restart. Only the last package
+location is remembered and revalidated.
+
+**Run control** and **Logs** in the sidebar belong to the selected workspace.
+Switching tabs does not transfer an operation. There is **one application-wide
+operation slot** for Start and OCR Check; the owner and Stop remain available
+across navigation and inside App settings. The host retains the latest terminal
+outcome for each open workspace independently of log retention.
+
+Close a tab with **×**. A touched unsaved draft requires confirmation. An active
+owner or a workspace command still in progress must settle before closure.
+Closing discards only session state, not saved profiles or package files.
+**Reinspect** validates again and resets the draft to schema defaults with a new
+selection revision. Prior results remain labeled with their original revision;
+they are not validation of the new selection.
+
+Use **Application → App settings** for Notifications, OCR environment, and Logs.
+Categories share one draft and one **Save changes** action. **Cancel**, the
+dialog close button, or **Escape** discards unsaved edits; merely opening the
+dialog initializes no recognition backend. Save atomically updates editable
+preferences while preserving the latest package-location hint. Active operations
+keep the settings they already captured. **Application → Application logs** opens
+application-wide diagnostics; **Close window** follows the bounded shutdown path.
+
 ## Inspect, edit, and save profiles
 
-1. Enter the selected package directory and choose **Inspect**. For the shipped
-   controlled example, use the absolute path to
+1. Enter a package directory in the opening screen or **+** form and choose
+   **Inspect**. For the shipped controlled example, use the absolute path to
    `tools/runtime-comparison/fixtures/typescript` in this checkout. Inspection
    validates inventory, schema, assets, and static dependencies without executing
    package automation. JavaScript syntax and module bindings are checked without
@@ -170,30 +200,33 @@ valid `.json` file intact.
 
 ## Save and check an OCR environment
 
-1. In **OCR environment**, choose an offered supported profile and enter the
-   absolute model root, pinned ONNX Runtime library, and reviewed non-system
+1. Open **Application → App settings → OCR environment**, choose an offered
+   supported profile, and enter the absolute model root, pinned ONNX Runtime
+   library, and reviewed non-system
    library locations, **1–64 libraries**, one per line. Blank lines are ignored
    and surrounding whitespace is trimmed. Use the pinned
    [engine prerequisites](runtime-native.md#install-the-engine-prerequisites).
    Model bytes must match the selected profile; a filename alone is insufficient.
    Rust resolves selected aliases to canonical paths and derives byte lengths,
    hashes, and SDK identity; operators do not edit identity fields.
-2. **Save environment** validates structure and atomically saves settings. It
-   does not load libraries, models, or a backend. **Clear draft** followed by
-   **Save as unconfigured** removes the optional environment. Existing M1
-   settings with no environment remain unconfigured without a read-time rewrite.
-   Failed saves and incompatible stored data preserve the previous bytes.
-3. Inspect the recorded package and enter a **Recorded corpus descriptor**.
+2. **Save changes** validates and atomically saves the dialog's editable settings.
+   It does not load libraries, models, or a backend. **Clear draft** followed by
+   **Save changes** removes the optional environment. Existing settings with no
+   environment remain unconfigured without a read-time rewrite. Failed saves and
+   incompatible stored data preserve the previous bytes.
+3. On the selected workspace's **Run control** page, enter a **Recorded corpus
+   descriptor** for its inspected recorded package.
    The descriptor is the `replay` object from the [existing replay format](runtime-native.md#prepare-a-private-replay-package-and-plan),
    not a Plan or complete `native_config`. Its assets must already belong to the
    inspected package inventory. No arbitrary asset paths, executable override,
    native authority, or unknown fields are accepted.
-4. Choose **Check saved environment**. Unsaved environment edits must be saved
-   first. Check uses the currently inspected package identity, never a forgotten
-   selection retained by the backend. With no inspected package, it can still
-   validate environment files but cannot initialize a corpus. A mismatched
-   package identity is refused before an operation starts. Check reserves the
-   same operation slot as Start before settings or resource I/O; it is cancellable
+4. Return to **App settings → OCR environment** and choose **Check saved
+   environment**. Unsaved environment edits must be saved first. Check uses that
+   workspace and selection revision; its target is shown in the dialog. With no
+   selected workspace, it can validate environment files but cannot initialize a
+   corpus. A stale or closed workspace is refused before an operation starts.
+   Check reserves the same operation slot as Start before settings or resource
+   I/O; it is cancellable
    through **Stop**. Without a corpus it reports file-validation progress and the
    missing prerequisite, never readiness.
 5. With a valid corpus, Check starts the real owned engine child and initializes
@@ -269,15 +302,22 @@ run result.
 ## Logs and retention
 
 Rust diagnostics and explicitly imported Script records share structured event
-identity, source, severity, run attribution, and sanitized fields before fan-out.
+identity, source, severity, workspace/run attribution, and sanitized fields before fan-out.
 A process-local Rust subscriber does not implicitly collect child logs. The GUI
 and file outputs are independent; delivery to one is not proof of delivery to the
 other, and neither is the authoritative result channel.
 
+Workspace **Logs** filters the single shared buffer by the originating workspace,
+not the visible tab at delivery time. Application logs can show application-only
+or all retained events. Text search covers event code, message, source, and run;
+private diagnostic fields are not searched. Severity and text filters do not
+increase retention. A notification's **View logs** action opens its original
+scope; closed origins and evicted events are labeled explicitly.
+
 - **GUI retained-item limit:** integer **1–10,000**, initially **1,000**, saved
-  through **Save settings** as an application setting, not a profile value.
-  Lowering it immediately keeps only the newest items. Invalid input preserves
-  the previous valid limit.
+  through **Application → App settings → Logs → Save changes**, not a profile
+  value. Lowering it immediately keeps only the newest items across all scopes.
+  Invalid input preserves the previous valid limit.
 - **Delivery queues:** at most **256 records each** for the application GUI and
   file queues. A larger display limit does not enlarge these queues.
 - **Files:** sanitized JSONL under the data root's `logs/`, rotating across at
@@ -293,6 +333,20 @@ other, and neither is the authoritative result channel.
   failed, or incomplete file delivery is also reported through an independent,
   sanitized stderr diagnostic with its own **50 ms** wait bound. Expired flush
   and abrupt exit do not guarantee persistence.
+
+### Notification cards
+
+Cards summarize command and terminal outcomes without replacing persistent
+errors, cleanup evidence, or logs. **App settings → Notifications** supports
+**one or two cards**, **5, 8, or 12 seconds**, and success visibility; defaults are
+**two**, **8 seconds**, and **enabled**. Older settings lacking this field use
+those defaults without a read-time rewrite. Invalid present values are refused.
+
+New outcomes displace the oldest visible card; there is no hidden unbounded
+backlog. Lowering the saved count trims immediately. Each card keeps its original
+timeout, paused while hovered or keyboard-focused. Dismissal or expiry does not
+erase its diagnostic record. Disabling success cards never suppresses warning
+or error cards. Cards outside the modal are inert while App settings is open.
 
 Keep app data, execution diagnostics, and any private fixture copies out of
 public commits and CI artifacts. Redaction is not authorization to publish raw
@@ -332,11 +386,20 @@ scope separately from [hosted build/core checks](ci.md#local-check-scope).
    trigger an original-source TypeScript error. Verify explicit refusal or source
    diagnostics, preserved saved data, and an independent cleanup outcome. Do not
    edit tracked fixtures or enable native authority to manufacture these cases.
-6. Change GUI retention, lower it below displayed history, and restart. Check the
-   newest-item bound, persistence, invalid-value refusal, structured Rust/Script
-   attribution, and independent file output. Exercise queue pressure/file failure
-   only in the disposable data root; confirm loss/failure counters do not erase
-   results or disable Stop.
+6. Open both TypeScript and JavaScript packages; switch tabs during work. Check
+   independent drafts, owner-bound Stop, retained outcomes, canonical-root
+   deduplication, stale-revision refusal, the eight-workspace limit, and repeated
+   close/reopen without deleting profiles. Use private copies for bound cycling.
+7. In App settings, change notification count/duration/success visibility and
+   GUI retention. Exercise Save, Cancel, Escape, focus restoration, invalid-value
+   refusal, immediate trimming, and restart persistence. Verify card overflow,
+   deduplication, hover/focus pause, failure visibility, and origin-linked Logs
+   after tab switches, closure, and log eviction.
+8. Verify Run, Logs, the Application menu, and App settings at 1440, 1024, and
+   900 CSS-pixel widths, including keyboard navigation and modal Stop. Check
+   structured Rust/Script attribution and independent file output. Exercise
+   queue pressure/file failure only in the disposable data root; loss/failure
+   counters must not erase results or disable Stop.
 
 ### Recorded-replay acceptance
 

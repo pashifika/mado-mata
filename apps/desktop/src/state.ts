@@ -1,4 +1,4 @@
-import type {ControllerView, Fault, LogEntry, OcrEnvironment, Schema, Json} from './types.ts';
+import type {ControllerView, EditableSettings, Fault, LogEntry, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Json, WorkspaceRef} from './types.ts';
 
 export const DISCLOSURE_LIMIT = 512 * 1024;
 
@@ -147,10 +147,15 @@ export function sameEnvironment(left:OcrEnvironment|null, right:OcrEnvironment|n
 
 // What a Check observed when it was requested; the backend result carries the derived identities.
 export interface CheckAssociation {
-  operation:string; environment:OcrEnvironment|null; descriptorPath:string|null; packageInventoryIdentity:string|null;
+  operation:string; workspace:WorkspaceRef|null; environment:OcrEnvironment|null; descriptorPath:string|null; packageInventoryIdentity:string|null;
 }
 export interface CheckContext {
-  saved:OcrEnvironment|null; draftDirty:boolean; descriptorPath:string|null; packageInventoryIdentity:string|null;
+  saved:OcrEnvironment|null; draftDirty:boolean; workspace:WorkspaceRef|null; descriptorPath:string|null; packageInventoryIdentity:string|null;
+}
+
+export function sameWorkspace(left:WorkspaceRef|null, right:WorkspaceRef|null):boolean {
+  if (left === null || right === null) return left === right;
+  return left.workspace_id === right.workspace_id && left.revision === right.revision;
 }
 
 // A check is evidence for exactly what it observed; any later edit detaches it.
@@ -160,7 +165,44 @@ export function staleReasons(association:CheckAssociation, current:CheckContext)
   if (current.draftDirty) reasons.push('the environment draft has unsaved edits');
   if (association.descriptorPath !== current.descriptorPath) reasons.push('a different corpus descriptor is selected');
   if (association.packageInventoryIdentity !== current.packageInventoryIdentity) reasons.push('a different package is inspected');
+  else if (!sameWorkspace(association.workspace, current.workspace)) reasons.push('a different workspace or selection revision is current');
   return reasons;
+}
+
+// The host holds the last terminal Check; its association is exactly what the host read.
+export function retainedCheck(retained:RetainedCheck):{association:CheckAssociation; view:ControllerView} {
+  return {
+    association: {
+      operation: retained.controller.run ?? 'unknown', workspace: retained.workspace, environment: retained.environment,
+      descriptorPath: retained.descriptor_path, packageInventoryIdentity: retained.package_inventory_identity,
+    },
+    view: retained.controller,
+  };
+}
+
+export const VISIBLE_COUNTS: readonly number[] = [1, 2];
+export const TIMEOUT_SECONDS: readonly number[] = [5, 8, 12];
+export const DEFAULT_NOTIFICATIONS: NotificationPreferences = {visible_count: 2, timeout_seconds: 8, show_success: true};
+
+export interface SettingsDraft {logLimit:string; notifications:NotificationPreferences; environment:EnvironmentDraft}
+
+// The dialog edits one draft; the whole edit is validated together before a single atomic save.
+export function readSettingsDraft(draft:SettingsDraft):{settings:EditableSettings|null; errors:Record<string,string>} {
+  const errors:Record<string,string> = {};
+  const limitText = draft.logLimit.trim();
+  const limit = Number(limitText);
+  if (!/^\d+$/.test(limitText) || !Number.isSafeInteger(limit) || limit < 1 || limit > 10000) errors.logLimit = 'GUI log limit must be an integer from 1 to 10000.';
+  if (!VISIBLE_COUNTS.includes(draft.notifications.visible_count)) errors.visibleCount = 'Choose one or two visible cards.';
+  if (!TIMEOUT_SECONDS.includes(draft.notifications.timeout_seconds)) errors.timeoutSeconds = 'Choose 5, 8, or 12 seconds.';
+  if (typeof draft.notifications.show_success !== 'boolean') errors.showSuccess = 'Success visibility must be on or off.';
+  const environment = readEnvironment(draft.environment);
+  Object.assign(errors, environment.errors);
+  if (Object.keys(errors).length > 0) return {settings: null, errors};
+  return {settings: {gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications}}, errors};
+}
+
+export function sameNotifications(left:NotificationPreferences, right:NotificationPreferences):boolean {
+  return left.visible_count === right.visible_count && left.timeout_seconds === right.timeout_seconds && left.show_success === right.show_success;
 }
 
 export function boundedText(source:string, limit:number):{text:string; truncated:number} {
