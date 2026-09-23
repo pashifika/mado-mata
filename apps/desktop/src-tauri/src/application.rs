@@ -38,6 +38,12 @@ pub struct Selection {
     pub profiles_error: Option<Fault>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ProfileCatalog {
+    pub profiles: Vec<Profile>,
+    pub profiles_error: Option<Fault>,
+}
+
 #[derive(Clone, Serialize)]
 pub struct WorkspaceResult {
     pub workspace: WorkspaceRef,
@@ -541,12 +547,17 @@ impl Application {
         self.outcome(Some(workspace), "validate", None, result)
     }
 
-    pub fn profiles(&self, workspace: &WorkspaceRef) -> Result<Vec<Profile>, Fault> {
+    pub fn profiles(&self, workspace: &WorkspaceRef) -> Result<ProfileCatalog, Fault> {
         let result = (|| {
             let (_command, state) = self.command_state()?;
             let selected = state.resolve(workspace)?.clone();
             drop(state);
-            validated_profiles(&lock(&self.store), &selected.inventory).map(|listing| listing.0)
+            let (profiles, profiles_error) =
+                validated_profiles(&lock(&self.store), &selected.inventory)?;
+            Ok(ProfileCatalog {
+                profiles,
+                profiles_error,
+            })
         })();
         self.outcome(Some(workspace), "profiles", None, result)
     }
@@ -1501,7 +1512,14 @@ mod tests {
             error.context["rejected"][0]["context"]["cause"]["context"]["value"],
             "9007199254740993"
         );
-        assert!(application.profiles(&workspace).unwrap().is_empty());
+        let catalog = application.profiles(&workspace).unwrap();
+        assert!(catalog.profiles.is_empty());
+        let warning = catalog.profiles_error.unwrap();
+        assert_eq!(warning.category, "ProfileRejected");
+        assert_eq!(
+            warning.context["rejected"][0]["context"]["profile_id"],
+            saved.id
+        );
         assert_eq!(
             application
                 .save_profile(

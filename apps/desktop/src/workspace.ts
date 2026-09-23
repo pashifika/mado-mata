@@ -17,8 +17,7 @@ export type Page = 'run' | 'logs';
 // Session-local UI state for one inspected package root. Nothing here is persisted.
 export interface Workspace {
   id:string; revision:number; packagePath:string; package:PackageInfo;
-  // The catalog from the last readable listing of this package/schema identity (empty until one); the fault is this
-  // workspace's own latest listing.
+  // Last readable catalog and its current listing fault, shared only after an authoritative read.
   profiles:Profile[]; profilesError:Fault|null;
   selectedId:string|null; name:string; preset:string; draft:Record<string,Json>;
   // Local edit counter: a validation or save that raced a later edit must not overwrite it.
@@ -36,6 +35,12 @@ export interface Workspace {
 export interface ClosedWorkspace {id:string; revision:number; label:string; result:ControllerView|null}
 
 export interface Origin {id:string; revision:number; draftRevision?:number}
+
+export type ProfileCatalog = Pick<Selection,'profiles'|'profiles_error'>;
+export interface WorkspaceCommand {
+  update:(workspace:Workspace) => Workspace;
+  catalog?:ProfileCatalog;
+}
 
 // Execution configuration and navigation survive a reinspection; package-bound draft state does not.
 export function freshWorkspace(selection:Selection, previous?:Workspace):Workspace {
@@ -64,7 +69,7 @@ export function openWorkspace(list:Workspace[], selection:Selection):Workspace[]
   }
   const next = [...list];
   if (existing) next[index] = opened; else next.push(opened);
-  return shareCatalog(next, selection.workspace_id);
+  return shareCatalog(next, selection.workspace_id, selection);
 }
 
 // The host lists the whole store or nothing: one malformed, oversized, or unsupported file fails the entire listing,
@@ -99,18 +104,21 @@ function reconcileProfiles(workspace:Workspace, profiles:Profile[]):Workspace {
   };
 }
 
-// Saved profiles are stored per package/schema identity, not per root, so after one workspace saved, renamed, deleted,
-// or re-read its catalog, every other open workspace of that identity shows the same list. Drafts stay per workspace.
-// A source whose own listing failed as a whole has no catalog to share; each workspace's `profilesError` stays its own.
-export function shareCatalog(list:Workspace[], sourceId:string):Workspace[] {
+// Only an authoritative listing can replace sibling catalogs or clear their old listing faults.
+// A failed read says nothing about stored profiles; keep every catalog and report it only at the origin.
+export function shareCatalog(list:Workspace[], sourceId:string, catalog:ProfileCatalog):Workspace[] {
   const source = list.find(item => item.id === sourceId);
-  if (!source || !catalogKnown(source.profilesError)) return list;
+  if (!source) return list;
+  if (!catalogKnown(catalog.profiles_error)) {
+    return updateWorkspace(list, sourceId, item => ({...item, profilesError: catalog.profiles_error}));
+  }
   let changed = false;
   const next = list.map(item => {
-    if (item.id === sourceId || item.package.package_id !== source.package.package_id || item.package.schema_identity !== source.package.schema_identity) return item;
-    const reconciled = reconcileProfiles(item, source.profiles);
-    if (reconciled !== item) changed = true;
-    return reconciled;
+    if (item.package.package_id !== source.package.package_id || item.package.schema_identity !== source.package.schema_identity) return item;
+    const reconciled = reconcileProfiles(item, catalog.profiles);
+    const updated = reconciled.profilesError === catalog.profiles_error ? reconciled : {...reconciled, profilesError: catalog.profiles_error};
+    if (updated !== item) changed = true;
+    return updated;
   });
   return changed ? next : list;
 }
@@ -133,6 +141,12 @@ export function applyIfCurrent(list:Workspace[], origin:Origin, update:(workspac
   const next = [...list];
   next[index] = update(current);
   return next;
+}
+
+// Validation and failed commands carry no fresh listing and cannot republish a stale cache.
+export function applyCommand(list:Workspace[], origin:Origin, command:WorkspaceCommand):Workspace[] {
+  const next = applyIfCurrent(list, origin, command.update);
+  return next === list || !command.catalog ? next : shareCatalog(next, origin.id, command.catalog);
 }
 
 export function updateWorkspace(list:Workspace[], id:string, update:(workspace:Workspace) => Workspace):Workspace[] {

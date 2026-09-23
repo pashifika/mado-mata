@@ -227,16 +227,21 @@ Saved profiles are versioned and bind a stable ID/name, package ID, schema
 identity, and values. They are separate files under `profiles/`, not edits to the
 package's declared preset files. A relocated compatible package can reuse its
 profiles after validation. Because the store is keyed by package/schema identity,
-a profile saved, renamed, or deleted in one workspace updates the list in every
-open workspace of the same package; local draft values never change without your
-action. Incompatible schemas are reported separately from compatible profiles,
-and their files remain untouched. Malformed data or unsupported storage versions
-refuse profile operations without silent reset, quarantine, or migration. When
-the store cannot be listed as a whole, the workspace that read it shows the
-fault and, like every other open workspace, keeps the list and selection it had
-until a later read succeeds; Reinspect resets the workspace and shows the
-listing as it is. Diagnostics identify the affected profile/file. Preserve it
-before deliberate recovery; do not rewrite identity fields to bypass refusal.
+each successful save, rename, or deletion is followed by a fresh catalog read.
+A readable catalog updates every compatible workspace and replaces old listing
+faults without changing local draft values. Validation and failed commands do
+not republish cached lists. Incompatible profiles remain reported separately
+from compatible profiles, and their files remain untouched.
+
+Malformed data or unsupported storage versions refuse profile operations
+without silent reset, quarantine, or migration. A whole-listing failure leaves
+known profiles and other workspaces unchanged; Reinspect still resets its own
+draft and displays the failed listing. If a write succeeds but its follow-up
+read fails, the write remains successful and its workspace shows the listing
+fault; no partial cache is shared. After deliberate storage repair, a successful
+listing, including one after a profile write, refreshes compatible workspaces
+and clears resolved faults. Diagnostics identify the affected profile/file.
+Preserve it before recovery; do not rewrite identity fields to bypass refusal.
 
 Writes validate first and use a same-directory temporary file plus atomic
 replacement. A failed save preserves the previous valid file. Storage is bounded
@@ -452,6 +457,10 @@ scope separately from [hosted build/core checks](ci.md#local-check-scope).
    independent drafts, owner-bound Stop, retained outcomes, canonical-root
    deduplication, stale-revision refusal, the eight-workspace limit, and repeated
    close/reopen without deleting profiles. Use private copies for bound cycling.
+   In an isolated store, preserve a profile file before making it unreadable.
+   Reinspect one root, restore the original bytes, then save through that root.
+   Confirm the complete catalog recovers in both roots without losing another
+   saved profile or either draft; Validate must not roll either catalog back.
 7. In App settings, change notification count/duration/success visibility and
    GUI retention. Exercise Save, Cancel, Escape, focus restoration, invalid-value
    refusal, immediate trimming, and restart persistence. Verify card overflow,

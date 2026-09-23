@@ -1,4 +1,4 @@
-use mado_mata_desktop::application::{Application, Poll, Selection, WorkspaceRef};
+use mado_mata_desktop::application::{Application, Poll, ProfileCatalog, Selection, WorkspaceRef};
 use mado_mata_desktop::storage::{EditableSettings, Profile, Settings};
 use mado_runtime_comparison::desktop::StartRequest;
 use mado_runtime_comparison::model::Fault;
@@ -72,7 +72,7 @@ async fn validate(
 async fn profiles(
     workspace: WorkspaceRef,
     state: tauri::State<'_, Backend>,
-) -> Result<Vec<Profile>, Fault> {
+) -> Result<ProfileCatalog, Fault> {
     let application = state.application.clone();
     background(move || application.profiles(&workspace)).await
 }

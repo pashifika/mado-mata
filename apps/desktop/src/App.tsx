@@ -16,8 +16,8 @@ import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards
 import type {Card, CardStack} from './notifications.ts';
 import {DEFAULT_NOTIFICATIONS, acceptController, environmentDraft, faultSummary, readDraft, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, staleReasons, text} from './state.ts';
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
-import {DESCRIPTOR_LIMIT, WORKSPACE_LIMIT, applyIfCurrent, busy, closeWorkspace, freshWorkspace, ingestResults, needsAttention, newDraft, openWorkspace, originLabel, retainClosed, selectProfile, shareCatalog, updateWorkspace, workspaceLabel, workspaceRef} from './workspace.ts';
-import type {ClosedWorkspace, LogFilter, LogScope, Origin, RetainedResult, Workspace} from './workspace.ts';
+import {DESCRIPTOR_LIMIT, WORKSPACE_LIMIT, applyCommand, applyIfCurrent, busy, closeWorkspace, freshWorkspace, ingestResults, needsAttention, newDraft, openWorkspace, originLabel, retainClosed, selectProfile, updateWorkspace, workspaceLabel, workspaceRef} from './workspace.ts';
+import type {ClosedWorkspace, LogFilter, LogScope, Origin, ProfileCatalog, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
 import type {ControllerView, Fault, Json, OcrEnvironment, Poll, Profile, Selection, Settings, StartRequest, WorkspaceRef} from './types.ts';
 
 const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0, workspace_id: null, workspace_revision: null};
@@ -240,25 +240,32 @@ export default function App() {
     setWorkspaces(list => updateWorkspace(list, id, update));
   }
 
-  // Every workspace command applies its completion only to the workspace/revision that started it. A completion that
-  // changed or re-read the saved-profile catalog is then shared with the origin's package/schema siblings.
-  async function runCommand(origin: Origin, label: string, action: () => Promise<(workspace: Workspace) => Workspace>) {
+  // Keep command admission through the follow-up listing; only a fresh read is shared with sibling roots.
+  async function runCommand(origin: Origin, label: string, action: () => Promise<WorkspaceCommand>) {
     if (hostCommand.current !== null) return;
     hostCommand.current = label;
     change(origin.id, workspace => ({...workspace, busy: label, error: null, notice: ''}));
-    let update: (workspace: Workspace) => Workspace;
+    let command: WorkspaceCommand;
     try {
-      update = await action();
+      command = await action();
     } catch (cause) {
       const error = fault(cause);
-      update = workspace => ({...workspace, error});
+      command = {update: workspace => ({...workspace, error})};
     } finally {
       hostCommand.current = null;
     }
     setWorkspaces(list => {
-      const applied = applyIfCurrent(list, origin, update);
-      return updateWorkspace(applied === list ? list : shareCatalog(applied, origin.id), origin.id, workspace => ({...workspace, busy: null}));
+      return updateWorkspace(applyCommand(list, origin, command), origin.id, workspace => ({...workspace, busy: null}));
     });
+  }
+
+  async function readProfiles(workspace: WorkspaceRef): Promise<ProfileCatalog> {
+    try {
+      return await invoke<ProfileCatalog>('profiles', {workspace});
+    } catch (cause) {
+      // The mutation already succeeded. Preserve that result without treating a failed read as an empty catalog.
+      return {profiles: [], profiles_error: fault(cause)};
+    }
   }
 
   function valuesForCommand(workspace: Workspace): Record<string, Json> {
@@ -304,9 +311,9 @@ export default function App() {
         void runCommand(origin, 'Validating draft', async () => {
           const values = valuesForCommand(workspace);
           const effective = await invoke<Record<string, Json>>('validate', {workspace: ref, values});
-          return item => item.draftRevision === checked
+          return {update: item => item.draftRevision === checked
             ? {...item, validation: effective, notice: 'Draft validated by the backend. Start will validate again.'}
-            : {...item, notice: 'An earlier draft was validated. Current edits still need validation.'};
+            : {...item, notice: 'An earlier draft was validated. Current edits still need validation.'}};
         });
       },
       saveProfile: () => {
@@ -315,12 +322,13 @@ export default function App() {
         void runCommand(origin, 'Saving profile', async () => {
           const values = valuesForCommand(workspace);
           const profile = await invoke<Profile>('save_profile', {workspace: ref, id: workspace.selectedId, name: workspace.name, values});
-          return item => ({
+          const catalog = await readProfiles(ref);
+          return {catalog, update: item => ({
             ...item, profiles: [...item.profiles.filter(entry => entry.id !== profile.id), profile].sort((a, b) => a.name.localeCompare(b.name)),
             selectedId: profile.id, preset: '',
             ...(item.draftRevision === checked ? {draft: structuredClone(profile.values), validation: null, touched: false} : {}),
             notice: `Saved “${profile.name}” · ${profile.id}. Active runs are unchanged.`,
-          });
+          })};
         });
       },
       renameProfile: () => {
@@ -328,7 +336,8 @@ export default function App() {
         const id = workspace.selectedId;
         void runCommand(origin, 'Renaming profile', async () => {
           const profile = await invoke<Profile>('rename_profile', {workspace: ref, id, name: workspace.name});
-          return item => ({...item, profiles: item.profiles.map(entry => entry.id === profile.id ? profile : entry), notice: `Renamed saved profile to “${profile.name}”. Draft values are unchanged.`});
+          const catalog = await readProfiles(ref);
+          return {catalog, update: item => ({...item, profiles: item.profiles.map(entry => entry.id === profile.id ? profile : entry), notice: `Renamed saved profile to “${profile.name}”. Draft values are unchanged.`})};
         });
       },
       deleteProfile: () => {
@@ -336,8 +345,9 @@ export default function App() {
         const id = workspace.selectedId;
         void runCommand(origin, 'Deleting profile', async () => {
           await invoke('delete_profile', {workspace: ref, id});
-          return item => ({...item, profiles: item.profiles.filter(entry => entry.id !== id), selectedId: item.selectedId === id ? null : item.selectedId, touched: true,
-            notice: 'Saved profile deleted. Its values remain in this unsaved draft; active runs are unchanged.'});
+          const catalog = await readProfiles(ref);
+          return {catalog, update: item => ({...item, profiles: item.profiles.filter(entry => entry.id !== id), selectedId: item.selectedId === id ? null : item.selectedId, touched: true,
+            notice: 'Saved profile deleted. Its values remain in this unsaved draft; active runs are unchanged.'})};
         });
       },
       reinspect: () => {
@@ -345,7 +355,7 @@ export default function App() {
         if (locked || (current.live && busy(current.view.state))) return;
         void runCommand(origin, 'Reinspecting package', async () => {
           const selection = await invoke<Selection>('inspect', {packagePath: workspace.packagePath, workspace: ref});
-          return item => ({...freshWorkspace(selection, item), notice: 'Package reinspected. The draft was reset to schema defaults; Start will revalidate its identity.'});
+          return {catalog: selection, update: item => ({...freshWorkspace(selection, item), notice: 'Package reinspected. The draft was reset to schema defaults; Start will revalidate its identity.'})};
         });
       },
       start: () => void startRun(workspace),
