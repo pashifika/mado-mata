@@ -1,35 +1,167 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {applyIfCurrent,closeWorkspace,editDraft,freshWorkspace,ingestResults,inScope,matchesFilter,needsAttention,newDraft,openWorkspace,originLabel,retainClosed,selectProfile,viewLogs,workspaceLabel,CLOSED_LIMIT} from './workspace.ts';
+import {applyIfCurrent,closeWorkspace,editDraft,freshWorkspace,ingestResults,inScope,matchesFilter,needsAttention,newDraft,openWorkspace,originLabel,retainClosed,selectProfile,shareCatalog,viewLogs,workspaceLabel,CLOSED_LIMIT} from './workspace.ts';
 
 const schema={type:'object',properties:{count:{type:'integer',default:1},mode:{type:'string'}}};
-function selection(id,revision,path='/pkg/'+id,packageId='pkg-'+id){
-  return {workspace_id:id,revision,package_path:path,profiles_error:null,profiles:[
-    {version:1,id:'prof-'+id,name:'Saved '+id,package_id:packageId,schema_identity:'schema-1',values:{count:5}},
-  ],package:{package_id:packageId,inventory_identity:'inv-'+id,schema_identity:'schema-1',runtime:'quickjs',schema,profiles:{fast:{options:{count:9}}},effective_defaults:null}};
+function profile(id,name,values,packageId='pkg-a',schemaIdentity='schema-1'){
+  return {version:1,id,name,package_id:packageId,schema_identity:schemaIdentity,values};
+}
+function selection(id,revision,path='/pkg/'+id,packageId='pkg-'+id,profiles=[profile('prof-'+id,'Saved '+id,{count:5},packageId)],schemaIdentity='schema-1'){
+  return {workspace_id:id,revision,package_path:path,profiles_error:null,profiles,
+    package:{package_id:packageId,inventory_identity:'inv-'+id,schema_identity:schemaIdentity,runtime:'quickjs',schema,profiles:{fast:{options:{count:9}}},effective_defaults:null}};
 }
 function terminal(run,extra={}){
   return {run,state:'terminal',operation:'run',result:{status:'PASS',cleanup:{clean:true},forced:false,exit_code:0},error:null,progress:[],dropped_logs:0,workspace_id:'a',workspace_revision:1,...extra};
 }
+// Two roots of one package/schema, as in /games/alpha and /games/beta, both listing saved profile P.
+const shared=profile('P','Review',{count:5},'shared');
+function sharedRoots(){
+  const alpha=openWorkspace([],selection('a',1,'/games/alpha','shared',[shared]));
+  return openWorkspace(alpha,selection('b',1,'/games/beta','shared',[shared]));
+}
+// The host lists the whole store or nothing: one malformed file arrives as an empty catalog plus this fault.
+const unreadable={category:'StorageFormat',message:'stored JSON is malformed or incompatible; original data was preserved',context:null};
+function unreadableListing(revision){
+  return {...selection('a',revision,'/games/alpha','shared',[]),profiles_error:unreadable};
+}
 
-test('opening the same root again keeps the existing draft while a new revision resets it on purpose',()=>{
+test('opening the same root again keeps the existing draft and takes the fresh catalog; a new revision resets on purpose',()=>{
   const first=openWorkspace([],selection('a',1));
-  const edited=[editDraft({...first.list[0],lane:'replay',descriptorPath:'/corpus.json'},{count:'7'})];
-  const again=openWorkspace(edited,selection('a',1));
-  assert.equal(again.reused,true);
-  assert.equal(again.list,edited);
+  const edited=[editDraft({...first[0],lane:'replay',descriptorPath:'/corpus.json'},{count:'7'})];
+  const refreshed=[profile('prof-a','Saved a',{count:5}),profile('prof-new','Added elsewhere',{count:2})];
+  const again=openWorkspace(edited,selection('a',1,undefined,undefined,refreshed));
+  assert.equal(again.length,1);
+  assert.equal(again[0].revision,1);
+  assert.deepEqual(again[0].draft,{count:'7'});
+  assert.equal(again[0].draftRevision,edited[0].draftRevision);
+  assert.equal(again[0].lane,'replay');
+  assert.deepEqual(again[0].profiles.map(item=>item.id),['prof-a','prof-new']);
   const reinspected=openWorkspace(edited,selection('a',2));
-  assert.equal(reinspected.reused,false);
-  assert.deepEqual(reinspected.list[0].draft,{count:1});
-  assert.equal(reinspected.list[0].revision,2);
-  assert.equal(reinspected.list[0].touched,false);
-  assert.equal(reinspected.list[0].lane,'replay');
-  assert.equal(reinspected.list[0].descriptorPath,'/corpus.json');
-  assert.ok(reinspected.list[0].draftRevision>edited[0].draftRevision);
+  assert.deepEqual(reinspected[0].draft,{count:1});
+  assert.equal(reinspected[0].revision,2);
+  assert.equal(reinspected[0].touched,false);
+  assert.equal(reinspected[0].lane,'replay');
+  assert.equal(reinspected[0].descriptorPath,'/corpus.json');
+  assert.ok(reinspected[0].draftRevision>edited[0].draftRevision);
+});
+
+test('a profile saved through one root reaches the other root of the same package/schema and no other',()=>{
+  let list=openWorkspace(sharedRoots(),selection('c',1,'/games/gamma','shared',[],'schema-2'));
+  list=applyIfCurrent(list,{id:'b',revision:1},item=>editDraft(item,{count:'3'}));
+  const updated=profile('P','Review',{count:7},'shared');
+  const synced=shareCatalog(applyIfCurrent(list,{id:'a',revision:1},item=>({...item,profiles:[updated]})),'a');
+  assert.deepEqual(synced[1].profiles,[updated]);
+  assert.deepEqual(synced[2].profiles,[]);
+  assert.deepEqual(synced[1].draft,{count:'3'});
+  assert.equal(synced[1].selectedId,null);
+  assert.equal(synced[1].notice,'');
+});
+
+test('opening a second root of the same package refreshes the first root without resetting its draft',()=>{
+  const alpha=applyIfCurrent(openWorkspace([],selection('a',1,'/games/alpha','shared',[shared])),{id:'a',revision:1},item=>editDraft(item,{count:'3'}));
+  const list=openWorkspace(alpha,selection('b',1,'/games/beta','shared',[shared,profile('Q','Added on disk',{count:1},'shared')]));
+  assert.deepEqual(list[0].profiles.map(item=>item.id),['P','Q']);
+  assert.deepEqual(list[0].draft,{count:'3'});
+  assert.equal(list[0].draftRevision,alpha[0].draftRevision);
+});
+
+for (const {scenario,localName,expectedName} of [
+  {scenario:'an unedited name follows the rename',localName:'Review',expectedName:'Reviewed again'},
+  {scenario:'a locally edited name is preserved',localName:'Mine',expectedName:'Mine'},
+]) {
+  test(`a selected profile updated elsewhere keeps the local draft as a draft and ${scenario}`,()=>{
+    let list=applyIfCurrent(sharedRoots(),{id:'b',revision:1},item=>({...selectProfile(item,'P'),name:localName}));
+    list=applyIfCurrent(list,{id:'b',revision:1},item=>({...editDraft(item,{count:'8'}),validation:{count:8}}));
+    const before=list[1];
+    list=shareCatalog(applyIfCurrent(list,{id:'a',revision:1},item=>({...item,profiles:[profile('P','Reviewed again',{count:7},'shared')]})),'a');
+    const beta=list[1];
+    assert.equal(beta.selectedId,'P');
+    assert.deepEqual(beta.draft,{count:'8'});
+    assert.equal(beta.draftRevision,before.draftRevision);
+    assert.deepEqual(beta.validation,{count:8});
+    assert.equal(beta.name,expectedName);
+    assert.match(beta.notice,/updated outside this workspace/);
+    assert.deepEqual(beta.profiles[0].values,{count:7});
+  });
+}
+
+test('a selected profile deleted elsewhere becomes an explained unsaved draft with its values kept',()=>{
+  let list=applyIfCurrent(sharedRoots(),{id:'b',revision:1},item=>selectProfile(item,'P'));
+  list=shareCatalog(applyIfCurrent(list,{id:'a',revision:1},item=>({...item,profiles:[],selectedId:null})),'a');
+  const beta=list[1];
+  assert.equal(beta.selectedId,null);
+  assert.deepEqual(beta.profiles,[]);
+  assert.deepEqual(beta.draft,{count:5});
+  assert.equal(beta.name,'Review');
+  assert.equal(beta.touched,true);
+  assert.match(beta.notice,/deleted outside this workspace/);
+});
+
+test('reopening a root whose listing failed keeps its catalog, selection and draft, shows the fault, and recovers on the next readable listing',()=>{
+  let list=applyIfCurrent(sharedRoots(),{id:'a',revision:1},item=>editDraft(selectProfile(item,'P'),{count:'4'}));
+  list=openWorkspace(list,unreadableListing(1));
+  const alpha=list[0];
+  assert.deepEqual(alpha.profiles,[shared]);
+  assert.equal(alpha.selectedId,'P');
+  assert.equal(alpha.name,'Review');
+  assert.deepEqual(alpha.draft,{count:'4'});
+  assert.deepEqual(alpha.profilesError,unreadable);
+  assert.doesNotMatch(alpha.notice,/deleted/);
+  assert.deepEqual(list[1].profiles,[shared]);
+  const added=profile('Q','Added on disk',{count:1},'shared');
+  list=openWorkspace(list,selection('a',1,'/games/alpha','shared',[shared,added]));
+  assert.deepEqual(list[0].profiles,[shared,added]);
+  assert.equal(list[0].profilesError,null);
+  assert.equal(list[0].selectedId,'P');
+  assert.deepEqual(list[0].draft,{count:'4'});
+  assert.deepEqual(list[1].profiles,[shared,added]);
+});
+
+test('a failed listing in one root leaves the other root as it was; the next readable listing reaches it',()=>{
+  let list=applyIfCurrent(sharedRoots(),{id:'b',revision:1},item=>editDraft(selectProfile(item,'P'),{count:'6'}));
+  // Reinspect in alpha: the new revision takes the host's listing as it is, here empty plus the fault.
+  list=shareCatalog(applyIfCurrent(list,{id:'a',revision:1},item=>freshWorkspace(unreadableListing(2),item)),'a');
+  assert.deepEqual(list[0].profiles,[]);
+  assert.deepEqual(list[0].profilesError,unreadable);
+  const beta=list[1];
+  assert.equal(beta.selectedId,'P');
+  assert.deepEqual(beta.profiles,[shared]);
+  assert.deepEqual(beta.draft,{count:'6'});
+  assert.equal(beta.notice,'');
+  assert.equal(beta.profilesError,null);
+  const added=profile('Q','Added on disk',{count:1},'shared');
+  list=shareCatalog(applyIfCurrent(list,{id:'a',revision:2},item=>freshWorkspace(selection('a',3,'/games/alpha','shared',[shared,added]),item)),'a');
+  assert.deepEqual(list[1].profiles,[shared,added]);
+  assert.equal(list[1].selectedId,'P');
+  assert.deepEqual(list[1].draft,{count:'6'});
+  assert.equal(list[1].notice,'');
+});
+
+test('a ProfileRejected listing is a real partial catalog and reaches the other root',()=>{
+  const rejected={category:'ProfileRejected',message:'Some saved profiles are incompatible; their files were preserved',context:{rejected:[{profile_id:'P'}]}};
+  let list=applyIfCurrent(sharedRoots(),{id:'b',revision:1},item=>selectProfile(item,'P'));
+  list=shareCatalog(applyIfCurrent(list,{id:'a',revision:1},item=>freshWorkspace({...selection('a',2,'/games/alpha','shared',[]),profiles_error:rejected},item)),'a');
+  const beta=list[1];
+  assert.deepEqual(beta.profiles,[]);
+  assert.equal(beta.selectedId,null);
+  assert.deepEqual(beta.draft,{count:5});
+  assert.equal(beta.name,'Review');
+});
+
+test('an unchanged catalog or an unknown source leaves same-package roots as they were',()=>{
+  const list=applyIfCurrent(sharedRoots(),{id:'b',revision:1},item=>editDraft(selectProfile(item,'P'),{count:'2'}));
+  for (const synced of [shareCatalog(list,'a'),shareCatalog(list,'gone')]) {
+    const beta=synced[1];
+    assert.equal(beta.selectedId,'P');
+    assert.deepEqual(beta.profiles,[shared]);
+    assert.deepEqual(beta.draft,{count:'2'});
+    assert.equal(beta.notice,'');
+    assert.equal(synced[0].notice,list[0].notice);
+  }
 });
 
 test('two workspaces keep independent drafts and switching never touches the other',()=>{
-  let list=openWorkspace(openWorkspace([],selection('a',1)).list,selection('b',1)).list;
+  let list=openWorkspace(openWorkspace([],selection('a',1)),selection('b',1));
   list=applyIfCurrent(list,{id:'a',revision:1},item=>selectProfile(item,'prof-a'));
   list=applyIfCurrent(list,{id:'b',revision:1},item=>newDraft(item,'fast'));
   assert.deepEqual(list[0].draft,{count:5});
@@ -41,12 +173,12 @@ test('two workspaces keep independent drafts and switching never touches the oth
 });
 
 test('a completion for a closed, replaced, or stale workspace is discarded without touching another tab',()=>{
-  const open=openWorkspace(openWorkspace([],selection('a',1)).list,selection('b',1)).list;
+  const open=openWorkspace(openWorkspace([],selection('a',1)),selection('b',1));
   const update=item=>({...item,validation:{count:1}});
   const afterClose=applyIfCurrent(closeWorkspace(open,'a'),{id:'a',revision:1},update);
   assert.equal(afterClose.length,1);
   assert.equal(afterClose[0].validation,null);
-  const reinspected=openWorkspace(open,selection('a',2)).list;
+  const reinspected=openWorkspace(open,selection('a',2));
   assert.equal(applyIfCurrent(reinspected,{id:'a',revision:1},update),reinspected);
   const staleDraft=applyIfCurrent(open,{id:'a',revision:1,draftRevision:open[0].draftRevision+1},update);
   assert.equal(staleDraft,open);
@@ -56,14 +188,14 @@ test('a completion for a closed, replaced, or stale workspace is discarded witho
 });
 
 test('same package ids from different roots stay distinguishable by location',()=>{
-  const list=openWorkspace(openWorkspace([],selection('a',1,'/games/alpha','shared')).list,selection('b',1,'/games/beta','shared')).list;
+  const list=openWorkspace(openWorkspace([],selection('a',1,'/games/alpha','shared')),selection('b',1,'/games/beta','shared'));
   assert.equal(workspaceLabel(list[0],list),'shared · alpha');
   assert.equal(workspaceLabel(list[1],list),'shared · beta');
   assert.equal(workspaceLabel(list[0],[list[0]]),'shared');
 });
 
 test('origins report open, closed, unknown, and application scopes without reassigning events',()=>{
-  const open=openWorkspace([],selection('a',1)).list;
+  const open=openWorkspace([],selection('a',1));
   const closed=retainClosed([],{id:'z',revision:3,label:'pkg-z',result:null});
   assert.deepEqual(originLabel('a',open,closed),{kind:'open',label:'pkg-a'});
   assert.equal(originLabel('z',open,closed).kind,'closed');
@@ -76,7 +208,7 @@ test('origins report open, closed, unknown, and application scopes without reass
 });
 
 test('host results replace only changed entries and drop owners that are no longer open',()=>{
-  const open=openWorkspace(openWorkspace([],selection('a',1)).list,selection('b',1)).list;
+  const open=openWorkspace(openWorkspace([],selection('a',1)),selection('b',1));
   const first=ingestResults({},[{workspace:{workspace_id:'a',revision:1},controller:terminal('run-1')}],open);
   const same=ingestResults(first,[{workspace:{workspace_id:'a',revision:1},controller:terminal('run-1')}],open);
   assert.equal(same,first);
@@ -88,7 +220,7 @@ test('host results replace only changed entries and drop owners that are no long
   assert.equal(successor.a.view.run,'run-2');
   assert.equal(successor.b.view.run,'run-3');
   assert.equal(successor.closed,undefined);
-  const olderRevision=ingestResults(successor,[{workspace:{workspace_id:'a',revision:1},controller:terminal('run-2')}],openWorkspace(open,selection('a',2)).list);
+  const olderRevision=ingestResults(successor,[{workspace:{workspace_id:'a',revision:1},controller:terminal('run-2')}],openWorkspace(open,selection('a',2)));
   assert.equal(olderRevision.a.ref.revision,1);
 });
 

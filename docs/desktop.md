@@ -168,15 +168,25 @@ workspace command still in progress must settle before closure.
 Closing discards only session state, not saved profiles or package files.
 **Reinspect** validates again and resets the draft to schema defaults with a new
 selection revision. Prior results remain labeled with their original revision;
-they are not validation of the new selection.
+they are not validation of the new selection. Reinspecting a touched draft asks
+for inline confirmation; **Keep draft** returns focus to **Reinspect**. The host
+runs one workspace command at a time; while one is in flight, profile and execution
+controls and workspace command buttons are disabled. Schema options remain editable;
+Stop and navigation stay available. The reason is shown in the issuing workspace, in
+the workspace dropdown, and in the **+** form.
 
 Use **Application → App settings** for Notifications, OCR environment, and Logs.
 Categories share one draft and one **Save changes** action. **Cancel**, the
 dialog close button, or **Escape** discards unsaved edits; merely opening the
-dialog initializes no recognition backend. Save atomically updates editable
-preferences while preserving the latest package-location hint. Active operations
-keep the settings they already captured. **Application → Application logs** opens
-application-wide diagnostics; **Close window** follows the bounded shutdown path.
+dialog initializes no recognition backend. A category whose fields are invalid
+is marked in the category list and named in the footer, including while another
+category is shown. **Save changes** and **Check saved environment** wait while a
+package or workspace command is in flight; the Check panel names the reason
+beside its button, the footer names it once the draft has changes, and
+**Cancel** stays available. Save atomically updates editable preferences while
+preserving the latest package-location hint. Active operations keep the settings
+they already captured. **Application → Application logs** opens application-wide
+diagnostics; **Close window** follows the bounded shutdown path.
 
 ## Inspect, edit, and save profiles
 
@@ -216,11 +226,17 @@ such as `1.0`, `1e18`, and `1e100` whose JSON spelling may change in transit.
 Saved profiles are versioned and bind a stable ID/name, package ID, schema
 identity, and values. They are separate files under `profiles/`, not edits to the
 package's declared preset files. A relocated compatible package can reuse its
-profiles after validation. Incompatible schemas are reported separately from
-compatible profiles, and their files remain untouched. Malformed data or
-unsupported storage versions refuse profile operations without silent reset,
-quarantine, or migration. Diagnostics identify the affected profile/file. Preserve
-it before deliberate recovery; do not rewrite identity fields to bypass refusal.
+profiles after validation. Because the store is keyed by package/schema identity,
+a profile saved, renamed, or deleted in one workspace updates the list in every
+open workspace of the same package; local draft values never change without your
+action. Incompatible schemas are reported separately from compatible profiles,
+and their files remain untouched. Malformed data or unsupported storage versions
+refuse profile operations without silent reset, quarantine, or migration. When
+the store cannot be listed as a whole, the workspace that read it shows the
+fault and, like every other open workspace, keeps the list and selection it had
+until a later read succeeds; Reinspect resets the workspace and shows the
+listing as it is. Diagnostics identify the affected profile/file. Preserve it
+before deliberate recovery; do not rewrite identity fields to bypass refusal.
 
 Writes validate first and use a same-directory temporary file plus atomic
 replacement. A failed save preserves the previous valid file. Storage is bounded
@@ -388,8 +404,11 @@ those defaults without a read-time rewrite. Invalid present values are refused.
 New outcomes displace the oldest visible card; there is no hidden unbounded
 backlog. Lowering the saved count trims immediately. Each card keeps its original
 timeout, paused while hovered or keyboard-focused. Dismissal or expiry does not
-erase its diagnostic record. Disabling success cards never suppresses warning
-or error cards. Cards outside the modal are inert while App settings is open.
+erase its diagnostic record. When a keyboard-focused card is dismissed or
+displaced, focus moves to the card now in its place, or back to where focus
+entered the stack; cards that expire or are dismissed without focus leave focus
+untouched. Disabling success cards never suppresses warning or error cards. Cards
+outside the modal are inert while App settings is open.
 
 Keep app data, execution diagnostics, and any private fixture copies out of
 public commits and CI artifacts. Redaction is not authorization to publish raw

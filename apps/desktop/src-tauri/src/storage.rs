@@ -187,13 +187,10 @@ impl Store {
     }
 
     pub fn settings(&self) -> Result<Settings, Fault> {
-        check_directory(&self.root)?;
-        let path = self.root.join("settings.json");
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Settings::default()),
-            Err(error) => Err(storage("inspect settings", error)),
-            Ok(_) => {
-                let (settings, _) = read_json(&path, MAX_SETTINGS_BYTES)?;
+        match self.read_settings()? {
+            None => Ok(Settings::default()),
+            Some(bytes) => {
+                let settings: Settings = decode(&bytes)?;
                 validate_settings(&settings)?;
                 Ok(settings)
             }
@@ -206,22 +203,56 @@ impl Store {
         settings.ocr_environment = preferences.ocr_environment;
         settings.notifications = preferences.notifications;
         validate_settings(&settings)?;
-        self.write_settings(settings)
+        self.write_settings(&settings)?;
+        Ok(settings)
     }
 
-    pub fn save_settings(&self, settings: Settings) -> Result<Settings, Fault> {
+    /// Remembers the inspected package location by changing only `package_path` in the stored
+    /// document. Optional preferences that are absent stay absent until an explicit Save, so an
+    /// older binary can still read the file after a rollback.
+    pub fn save_package_hint(&self, package_path: String) -> Result<(), Fault> {
+        let (mut stored, mut settings) = match self.read_settings()? {
+            None => (required_settings(), Settings::default()),
+            Some(bytes) => {
+                // The typed parse of the captured bytes is the gate, exactly as in `settings()`:
+                // it refuses duplicate keys, unknown fields and out-of-range numbers. A generic
+                // `Value` parsed alone keeps the last duplicate, so validating it would accept a
+                // document nobody wrote and rewrite the file with it.
+                let settings: Settings = decode(&bytes)?;
+                validate_settings(&settings)?;
+                let stored: Value = decode(&bytes)?;
+                (stored, settings)
+            }
+        };
+        if settings.package_path.as_deref() == Some(package_path.as_str()) {
+            return Ok(());
+        }
+        settings.package_path = Some(package_path);
         validate_settings(&settings)?;
-        // Do not overwrite an incompatible or malformed previous version.
-        self.settings()?;
-        self.write_settings(settings)
+        let Some(fields) = stored.as_object_mut() else {
+            return Err(malformed());
+        };
+        fields.insert("package_path".to_owned(), settings.package_path.into());
+        self.write_settings(&stored)
     }
 
-    fn write_settings(&self, settings: Settings) -> Result<Settings, Fault> {
-        let bytes = encode(&settings, MAX_SETTINGS_BYTES)?;
+    /// Reads the bounded bytes of the stored settings document, or `None` when none has been
+    /// written yet. Callers decode this one capture, so no path reads the file twice.
+    fn read_settings(&self) -> Result<Option<Vec<u8>>, Fault> {
+        check_directory(&self.root)?;
+        let path = self.root.join("settings.json");
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(storage("inspect settings", error)),
+            Ok(_) => read_bytes(&path, MAX_SETTINGS_BYTES).map(Some),
+        }
+    }
+
+    fn write_settings(&self, document: &impl Serialize) -> Result<(), Fault> {
+        let bytes = encode(document, MAX_SETTINGS_BYTES)?;
         write_atomic(&self.root.join("settings.json"), &bytes, |from, to| {
             fs::rename(from, to)
-        })?;
-        Ok(settings)
+        })
     }
 
     fn profile_path(&self, id: &str) -> PathBuf {
@@ -246,8 +277,8 @@ impl Store {
         let result = (|| {
             check_directory(&self.root)?;
             check_directory(&self.root.join("profiles"))?;
-            let (profile, size): (Profile, _) =
-                read_json(&self.profile_path(id), MAX_PROFILE_BYTES)?;
+            let bytes = read_bytes(&self.profile_path(id), MAX_PROFILE_BYTES)?;
+            let profile: Profile = decode(&bytes)?;
             validate_profile(&profile)?;
             if profile.id != id {
                 return Err(Fault::new(
@@ -255,7 +286,7 @@ impl Store {
                     "profile ID does not match its filename",
                 ));
             }
-            Ok((profile, size))
+            Ok((profile, bytes.len()))
         })();
         result.map_err(|fault| profile_fault(fault, id))
     }
@@ -616,6 +647,13 @@ fn validate_settings(settings: &Settings) -> Result<(), Fault> {
     Ok(())
 }
 
+/// The stored fields every supported settings version requires. A file created by an implicit
+/// hint write carries only these plus the hint; optional preferences wait for an explicit Save.
+fn required_settings() -> Value {
+    let defaults = Settings::default();
+    json!({"version": defaults.version, "gui_log_limit": defaults.gui_log_limit})
+}
+
 fn private_directory(path: &Path) -> Result<(), Fault> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.file_type().is_dir() => {
@@ -680,7 +718,10 @@ fn checked_file(path: &Path, maximum: usize) -> Result<fs::Metadata, Fault> {
     Ok(metadata)
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path, maximum: usize) -> Result<(T, usize), Fault> {
+/// Reads a private regular file of at most `maximum` bytes, refusing one that changes between
+/// the metadata check and the open. Decoding is separate so a caller can parse one capture
+/// more than once without reading the file again.
+fn read_bytes(path: &Path, maximum: usize) -> Result<Vec<u8>, Fault> {
     let before = checked_file(path, maximum)?;
     let file = File::open(path).map_err(|error| storage("open stored file", error))?;
     let opened = file
@@ -706,13 +747,11 @@ fn read_json<T: DeserializeOwned>(path: &Path, maximum: usize) -> Result<(T, usi
     if bytes.len() > maximum {
         return Err(limit("stored file exceeds its byte bound"));
     }
-    let value = serde_json::from_slice(&bytes).map_err(|_| {
-        Fault::new(
-            "StorageFormat",
-            "stored JSON is malformed or incompatible; original data was preserved",
-        )
-    })?;
-    Ok((value, bytes.len()))
+    Ok(bytes)
+}
+
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Fault> {
+    serde_json::from_slice(bytes).map_err(|_| malformed())
 }
 
 fn exists(path: &Path) -> Result<bool, Fault> {
@@ -794,6 +833,13 @@ fn write_atomic(
 
 fn limit(message: &str) -> Fault {
     Fault::new("StorageLimit", message)
+}
+
+fn malformed() -> Fault {
+    Fault::new(
+        "StorageFormat",
+        "stored JSON is malformed or incompatible; original data was preserved",
+    )
 }
 
 fn storage(operation: &str, error: io::Error) -> Fault {
@@ -1133,47 +1179,66 @@ mod tests {
         let directory = Directory::new();
         let store = directory.store();
         store
-            .save_settings(Settings {
+            .save_preferences(EditableSettings {
                 gui_log_limit: 12,
-                package_path: Some("/private/local/package".into()),
-                ..Settings::default()
+                ..editable_settings()
             })
+            .unwrap();
+        store
+            .save_package_hint("/private/local/package".into())
             .unwrap();
         let path = directory.0.join("settings.json");
         let before = fs::read(&path).unwrap();
-        for invalid in [
-            Settings {
-                gui_log_limit: 0,
-                ..Settings::default()
-            },
-            Settings {
-                gui_log_limit: 10001,
-                ..Settings::default()
-            },
-            Settings {
-                version: 2,
-                ..Settings::default()
-            },
-            Settings {
-                package_path: Some(String::new()),
-                ..Settings::default()
-            },
+        let mut invalid = editable_settings();
+        invalid.gui_log_limit = 10001;
+        assert!(store.save_preferences(invalid).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        for hint in [
+            String::new(),
+            "x".repeat(MAX_PATH_BYTES + 1),
+            "line\nbreak".to_owned(),
         ] {
-            assert!(store.save_settings(invalid).is_err());
+            assert_eq!(
+                store.save_package_hint(hint).unwrap_err().category,
+                "Settings"
+            );
             assert_eq!(fs::read(&path).unwrap(), before);
         }
         assert_eq!(directory.store().settings().unwrap().gui_log_limit, 12);
+        // Duplicate keys are refused as written: a generic JSON parse would keep the last value,
+        // turning an unknown `version: 2` marker into a valid document and rewriting the file.
         for malformed in [
             br#"{"version":1,"gui_log_limit":-1,"package_path":null}"#.as_slice(),
             br#"{"version":1,"gui_log_limit":1.5,"package_path":null}"#.as_slice(),
             br#"{"version":2,"gui_log_limit":12,"package_path":null}"#.as_slice(),
+            br#"{"version":2,"version":1,"gui_log_limit":12,"package_path":null}"#.as_slice(),
+            br#"{"version":1,"gui_log_limit":12,"gui_log_limit":34,"package_path":null}"#
+                .as_slice(),
+            br#"{"version":1,"gui_log_limit":12,"package_path":null,"notifications":{"visible_count":1,"visible_count":2,"timeout_seconds":8,"show_success":true}}"#
+                .as_slice(),
             b"not JSON".as_slice(),
         ] {
             fs::write(&path, malformed).unwrap();
             assert!(store.settings().is_err());
-            assert!(store.save_settings(Settings::default()).is_err());
+            assert!(store.save_preferences(editable_settings()).is_err());
+            assert!(
+                store
+                    .save_package_hint("/private/local/other".into())
+                    .is_err()
+            );
             assert_eq!(fs::read(&path).unwrap(), malformed);
         }
+        // A JSON sequence is refused by the hint write instead of being indexed as an object.
+        let sequence = br#"[1,12,"/private/local/package"]"#;
+        fs::write(&path, sequence).unwrap();
+        assert_eq!(
+            store
+                .save_package_hint("/private/local/other".into())
+                .unwrap_err()
+                .category,
+            "StorageFormat"
+        );
+        assert_eq!(fs::read(&path).unwrap(), sequence);
     }
 
     fn editable_settings() -> EditableSettings {
@@ -1188,7 +1253,7 @@ mod tests {
     fn old_settings_load_without_rewrite_and_explicit_save_persists_preferences() {
         let directory = Directory::new();
         let store = directory.store();
-        store.save_settings(Settings::default()).unwrap();
+        store.save_preferences(editable_settings()).unwrap();
         let path = directory.0.join("settings.json");
         let original = br#"{ "version":1, "gui_log_limit":12, "package_path":"old-root" }"#;
         fs::write(&path, original).unwrap();
@@ -1231,11 +1296,72 @@ mod tests {
     }
 
     #[test]
+    fn package_hint_changes_only_the_stored_path_until_an_explicit_save() {
+        let directory = Directory::new();
+        let store = directory.store();
+        let path = directory.0.join("settings.json");
+        let stored = || -> Value { serde_json::from_slice(&fs::read(&path).unwrap()).unwrap() };
+
+        // A fresh store gets only the required fields plus the hint; preferences stay implicit.
+        store.save_package_hint("first-root".into()).unwrap();
+        assert_eq!(
+            stored(),
+            json!({"version": 1, "gui_log_limit": 1000, "package_path": "first-root"})
+        );
+        let fresh = directory.store().settings().unwrap();
+        assert_eq!(fresh.package_path.as_deref(), Some("first-root"));
+        assert_eq!(fresh.notifications, NotificationPreferences::default());
+        assert!(fresh.ocr_environment.is_none());
+
+        // A pre-change file keeps every absent optional field absent after the hint changes.
+        let legacy = br#"{ "version":1, "gui_log_limit":12, "package_path":"old-root" }"#;
+        fs::write(&path, legacy).unwrap();
+        store.save_package_hint("new-root".into()).unwrap();
+        assert_eq!(
+            stored(),
+            json!({"version": 1, "gui_log_limit": 12, "package_path": "new-root"})
+        );
+        let loaded = directory.store().settings().unwrap();
+        assert_eq!(loaded.package_path.as_deref(), Some("new-root"));
+        assert_eq!(loaded.notifications, NotificationPreferences::default());
+
+        // Repeating the current hint does not rewrite the file.
+        let unchanged = fs::read(&path).unwrap();
+        store.save_package_hint("new-root".into()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), unchanged);
+
+        // Only an explicit Save introduces the preference field, and later hints keep it exact.
+        let saved = store
+            .save_preferences(EditableSettings {
+                gui_log_limit: 24,
+                notifications: NotificationPreferences {
+                    visible_count: 1,
+                    timeout_seconds: 5,
+                    show_success: false,
+                },
+                ..editable_settings()
+            })
+            .unwrap();
+        assert_eq!(
+            stored()["notifications"],
+            json!({"visible_count": 1, "timeout_seconds": 5, "show_success": false})
+        );
+        store.save_package_hint("third-root".into()).unwrap();
+        let mut expected = serde_json::to_value(&saved).unwrap();
+        expected["package_path"] = json!("third-root");
+        assert_eq!(stored(), expected);
+        let reopened = directory.store().settings().unwrap();
+        assert_eq!(reopened.package_path.as_deref(), Some("third-root"));
+        assert_eq!(reopened.notifications, saved.notifications);
+        assert_eq!(reopened.gui_log_limit, 24);
+    }
+
+    #[test]
     fn invalid_notification_values_and_incompatible_settings_preserve_bytes() {
         let directory = Directory::new();
         let store = directory.store();
         let path = directory.0.join("settings.json");
-        store.save_settings(Settings::default()).unwrap();
+        store.save_preferences(editable_settings()).unwrap();
         let before = fs::read(&path).unwrap();
         for (visible_count, timeout_seconds) in [(0, 8), (3, 8), (2, 0), (2, 13)] {
             let mut invalid = editable_settings();
@@ -1292,6 +1418,7 @@ mod tests {
             fs::write(&path, &bytes).unwrap();
             assert!(store.settings().is_err());
             assert!(store.save_preferences(editable_settings()).is_err());
+            assert!(store.save_package_hint("other-root".into()).is_err());
             assert_eq!(fs::read(&path).unwrap(), bytes);
         }
     }
@@ -1300,17 +1427,14 @@ mod tests {
     fn stale_dialog_save_preserves_newer_package_hint() {
         let directory = Directory::new();
         let store = directory.store();
-        let mut inspected = Settings {
-            package_path: Some("first-root".into()),
-            ..Settings::default()
-        };
-        store.save_settings(inspected.clone()).unwrap();
+        store.save_package_hint("first-root".into()).unwrap();
         let mut dialog = editable_settings();
         dialog.gui_log_limit = 31;
         dialog.notifications.show_success = false;
 
-        inspected.package_path = Some("newly-inspected-root".into());
-        store.save_settings(inspected).unwrap();
+        store
+            .save_package_hint("newly-inspected-root".into())
+            .unwrap();
         let saved = store.save_preferences(dialog).unwrap();
         assert_eq!(saved.package_path.as_deref(), Some("newly-inspected-root"));
         let reopened = directory.store().settings().unwrap();
@@ -1327,15 +1451,18 @@ mod tests {
         let directory = Directory::new();
         let store = directory.store();
         let path = directory.0.join("settings.json");
-        store.save_settings(Settings::default()).unwrap();
+        store.save_preferences(editable_settings()).unwrap();
         let before = fs::read(&path).unwrap();
         let pending = path.with_extension("pending");
         fs::write(&pending, b"unfinished previous write").unwrap();
         let fault = store.save_preferences(editable_settings()).unwrap_err();
         assert_eq!(fault.context["operation"], "create atomic write");
+        let fault = store.save_package_hint("blocked-root".into()).unwrap_err();
+        assert_eq!(fault.context["operation"], "create atomic write");
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(fs::read(&pending).unwrap(), b"unfinished previous write");
         fs::remove_file(&pending).unwrap();
+        assert!(directory.store().settings().unwrap().package_path.is_none());
 
         let mut updated = store.settings().unwrap();
         updated.gui_log_limit = 31;
@@ -1359,7 +1486,7 @@ mod tests {
 
         let directory = Directory::new();
         let store = directory.store();
-        store.save_settings(Settings::default()).unwrap();
+        store.save_preferences(editable_settings()).unwrap();
         let profile = store
             .save(&inventory(), None, "Portable", options())
             .unwrap();
@@ -1427,7 +1554,7 @@ mod tests {
             let bytes = serde_json::to_vec(&corrupted).unwrap();
             fs::write(&path, &bytes).unwrap();
             assert!(store.settings().is_err());
-            assert!(store.save_settings(reopened.clone()).is_err());
+            assert!(store.save_package_hint("other-package".into()).is_err());
             assert!(store.save_preferences(editable_settings()).is_err());
             assert_eq!(fs::read(&path).unwrap(), bytes);
         }

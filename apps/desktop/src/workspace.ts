@@ -17,6 +17,8 @@ export type Page = 'run' | 'logs';
 // Session-local UI state for one inspected package root. Nothing here is persisted.
 export interface Workspace {
   id:string; revision:number; packagePath:string; package:PackageInfo;
+  // The catalog from the last readable listing of this package/schema identity (empty until one); the fault is this
+  // workspace's own latest listing.
   profiles:Profile[]; profilesError:Fault|null;
   selectedId:string|null; name:string; preset:string; draft:Record<string,Json>;
   // Local edit counter: a validation or save that raced a later edit must not overwrite it.
@@ -47,16 +49,70 @@ export function freshWorkspace(selection:Selection, previous?:Workspace):Workspa
   };
 }
 
-// Opening an already open root keeps its draft; a new revision of a known id is a deliberate reset.
+// Opening an already open root keeps its draft but takes the host's fresh saved-profile catalog; a new revision of a
+// known id is a deliberate reset. Either way the catalog reaches every open workspace of the same package/schema.
 // The host enforces the workspace limit; the UI only reflects it.
-export function openWorkspace(list:Workspace[], selection:Selection):{list:Workspace[]; reused:boolean} {
+export function openWorkspace(list:Workspace[], selection:Selection):Workspace[] {
   const index = list.findIndex(item => item.id === selection.workspace_id);
-  if (index < 0) return {list: [...list, freshWorkspace(selection)], reused: false};
-  const existing = list[index];
-  if (existing.revision === selection.revision) return {list, reused: true};
+  const existing = index < 0 ? undefined : list[index];
+  let opened:Workspace;
+  if (existing && existing.revision === selection.revision) {
+    const reopened = {...existing, profilesError: selection.profiles_error, notice: 'This package root is already open; its draft is unchanged.'};
+    opened = catalogKnown(selection.profiles_error) ? reconcileProfiles(reopened, selection.profiles) : reopened;
+  } else {
+    opened = {...freshWorkspace(selection, existing), notice: 'Package inspected. Start will revalidate its identity and capture current values.'};
+  }
   const next = [...list];
-  next[index] = freshWorkspace(selection, existing);
-  return {list: next, reused: false};
+  if (existing) next[index] = opened; else next.push(opened);
+  return shareCatalog(next, selection.workspace_id);
+}
+
+// The host lists the whole store or nothing: one malformed, oversized, or unsupported file fails the entire listing,
+// which then arrives as `[]` plus a fault. That says nothing about the profiles themselves, so the last known
+// catalog, selection, and draft stay until a later read succeeds. Only `ProfileRejected` is a real, partial catalog:
+// the compatible profiles are listed and the rejected ones are named in the fault.
+function catalogKnown(error:Fault|null):boolean {
+  return error === null || error.category === 'ProfileRejected';
+}
+
+// Takes a fresh catalog without touching draft values. A selected profile that changed elsewhere leaves the local
+// values as an explained draft, so Start never carries an identity the store no longer matches; the profile name
+// follows a rename only while it was not edited locally, so a stale name cannot undo the rename on the next save.
+function reconcileProfiles(workspace:Workspace, profiles:Profile[]):Workspace {
+  const known = workspace.profiles;
+  if (known === profiles || (known.length === profiles.length && JSON.stringify(known) === JSON.stringify(profiles))) return workspace;
+  const previous = known.find(item => item.id === workspace.selectedId);
+  if (!previous) return {...workspace, profiles};
+  const current = profiles.find(item => item.id === previous.id);
+  if (!current) {
+    return {...workspace, profiles, selectedId: null, touched: true,
+      notice: `Saved profile “${previous.name}” was deleted outside this workspace. Its values remain in this unsaved draft.`};
+  }
+  const renamed = previous.name !== current.name;
+  const changed = JSON.stringify(previous.values) !== JSON.stringify(current.values);
+  if (!renamed && !changed) return {...workspace, profiles};
+  return {
+    ...workspace, profiles, name: renamed && workspace.name === previous.name ? current.name : workspace.name,
+    notice: changed
+      ? `Saved profile “${current.name}” was updated outside this workspace. This draft keeps its own values: Update profile overwrites the saved ones; to load them instead, pick “Unsaved draft” and then the profile.`
+      : `Saved profile was renamed to “${current.name}” outside this workspace. Draft values are unchanged.`,
+  };
+}
+
+// Saved profiles are stored per package/schema identity, not per root, so after one workspace saved, renamed, deleted,
+// or re-read its catalog, every other open workspace of that identity shows the same list. Drafts stay per workspace.
+// A source whose own listing failed as a whole has no catalog to share; each workspace's `profilesError` stays its own.
+export function shareCatalog(list:Workspace[], sourceId:string):Workspace[] {
+  const source = list.find(item => item.id === sourceId);
+  if (!source || !catalogKnown(source.profilesError)) return list;
+  let changed = false;
+  const next = list.map(item => {
+    if (item.id === sourceId || item.package.package_id !== source.package.package_id || item.package.schema_identity !== source.package.schema_identity) return item;
+    const reconciled = reconcileProfiles(item, source.profiles);
+    if (reconciled !== item) changed = true;
+    return reconciled;
+  });
+  return changed ? next : list;
 }
 
 export function closeWorkspace(list:Workspace[], id:string):Workspace[] {

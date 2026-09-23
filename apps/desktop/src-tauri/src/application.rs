@@ -299,7 +299,8 @@ impl Application {
         let terminal = value["state"] == "terminal";
         let controller = Arc::new(value);
         if terminal {
-            let (level, message) = terminal_notice(&controller);
+            let outcome = TerminalOutcome::from_view(&controller);
+            let (level, message) = outcome.notice();
             self.logger.emit(
                 "Rust",
                 level,
@@ -307,7 +308,7 @@ impl Application {
                 workspace_id,
                 "run.terminal",
                 message,
-                json!({"action":controller["operation"],"state":"terminal"}),
+                outcome.fields(&controller["operation"]),
             );
             if let Some(workspace) = workspace {
                 if let Some(selected) = state
@@ -454,12 +455,7 @@ impl Application {
                 state.open.push(selected);
             }
             drop(state);
-            let store = lock(&self.store);
-            let saved_hint = store.settings().and_then(|mut settings| {
-                settings.package_path = Some(canonical_path);
-                store.save_settings(settings)
-            });
-            drop(store);
+            let saved_hint = lock(&self.store).save_package_hint(canonical_path);
             if let Err(error) = saved_hint {
                 self.logger.with_dispatch(|| {
                     tracing::warn!(
@@ -814,16 +810,74 @@ impl Application {
     }
 }
 
-fn terminal_notice(controller: &Value) -> (&'static str, &'static str) {
-    if !controller["error"].is_null()
-        || !controller["result"]["primary"].is_null()
-        || controller["result"]["cleanup"]["clean"] != true
-    {
-        ("error", "Operation failed or cleanup is incomplete")
-    } else if controller["result"]["status"] != "PASS" {
-        ("warn", "Operation settled without success")
-    } else {
-        ("info", "Operation completed")
+/// Display-independent facts of a settled operation for the durable record.
+/// Absent evidence stays absent; no field is a path, message, or recognized text.
+struct TerminalOutcome<'a> {
+    status: Option<&'a str>,
+    category: Option<&'a str>,
+    entry_outcome: Option<&'a str>,
+    cleanup_clean: Option<bool>,
+    child_started: Option<bool>,
+    forced: Option<bool>,
+}
+
+impl<'a> TerminalOutcome<'a> {
+    fn from_view(controller: &'a Value) -> Self {
+        let result = &controller["result"];
+        let error = &controller["error"];
+        // A result record owns its cleanup and containment facts; without one, only
+        // the returning worker's fault context can attest them (never inferred).
+        let (cleanup, boundary) = if result.is_null() {
+            (&error["context"]["cleanup"], &error["context"])
+        } else {
+            (&result["cleanup"], result)
+        };
+        Self {
+            status: result["status"].as_str(),
+            category: result["primary"]["category"]
+                .as_str()
+                .or_else(|| error["category"].as_str()),
+            entry_outcome: result["entry_outcome"].as_str(),
+            cleanup_clean: cleanup["clean"].as_bool(),
+            child_started: cleanup["child_started"]
+                .as_bool()
+                .or_else(|| boundary["child_started"].as_bool()),
+            forced: boundary["forced"].as_bool(),
+        }
+    }
+
+    fn notice(&self) -> (&'static str, &'static str) {
+        if self.category.is_none() && self.cleanup_clean == Some(true) {
+            return if self.status == Some("PASS") {
+                ("info", "Operation completed")
+            } else {
+                ("warn", "Operation settled without success")
+            };
+        }
+        let message = match (self.cleanup_clean, self.forced, self.child_started) {
+            (Some(false), _, _) | (_, Some(true), _) => {
+                "Operation failed; cleanup is incomplete or forced"
+            }
+            (Some(true), Some(false), _) => "Operation failed; cleanup is clean",
+            (Some(true), None, Some(false)) => {
+                "Operation failed before a child started; cleanup is clean"
+            }
+            _ => "Operation failed; cleanup is unverified",
+        };
+        ("error", message)
+    }
+
+    fn fields(&self, action: &Value) -> Value {
+        json!({
+            "action":action,
+            "state":"terminal",
+            "status":self.status,
+            "category":self.category,
+            "entry_outcome":self.entry_outcome,
+            "cleanup_clean":self.cleanup_clean,
+            "child_started":self.child_started,
+            "forced":self.forced,
+        })
     }
 }
 
@@ -1332,10 +1386,7 @@ mod tests {
         let fixture = Fixture::new();
         let application = &fixture.application;
         lock(&application.store)
-            .save_settings(Settings {
-                package_path: Some("previous-package".into()),
-                ..Settings::default()
-            })
+            .save_package_hint("previous-package".into())
             .unwrap();
         let settings_path = fixture.root.join("settings.json");
         let before = fs::read(&settings_path).unwrap();
@@ -2106,16 +2157,130 @@ mod tests {
     }
 
     #[test]
-    fn terminal_notice_never_reports_primary_or_cleanup_failure_as_success() {
-        let mut view = json!({"error":null,"result":{"status":"PASS","primary":null,"cleanup":{"clean":true}}});
-        assert_eq!(terminal_notice(&view).0, "info");
-        view["result"]["cleanup"]["clean"] = json!(false);
-        assert_eq!(terminal_notice(&view).0, "error");
-        view["result"]["cleanup"]["clean"] = json!(true);
-        view["result"]["primary"] = json!({"category":"Cancelled"});
-        assert_eq!(terminal_notice(&view).0, "error");
-        view["result"] = Value::Null;
-        view["error"] = json!({"category":"EnvironmentUnset"});
-        assert_eq!(terminal_notice(&view).0, "error");
+    fn terminal_outcomes_keep_severity_and_distinguish_cleanup_without_private_detail() {
+        let passed = json!({"operation":"run","error":null,"result":{
+            "status":"PASS","primary":null,"entry_outcome":"Returned",
+            "cleanup":{"clean":true,"status":"CleanupFinished"},"forced":false,"exit_code":0}});
+        let outcome = TerminalOutcome::from_view(&passed);
+        assert_eq!(outcome.notice().0, "info");
+        assert_eq!(
+            outcome.fields(&passed["operation"]),
+            json!({"action":"run","state":"terminal","status":"PASS","category":null,
+                "entry_outcome":"Returned","cleanup_clean":true,"child_started":null,"forced":false})
+        );
+
+        // Script failure with clean cleanup: an error, but not an incomplete cleanup.
+        let clean_failure = json!({"operation":"run","error":null,"result":{
+            "status":"FAIL","entry_outcome":"Returned","forced":false,"exit_code":0,
+            "primary":{"category":"Script","message":"recognized private words","context":{"path":"/private/root"}},
+            "cleanup":{"clean":true,"status":"CleanupFinished"}}});
+        let outcome = TerminalOutcome::from_view(&clean_failure);
+        assert_eq!(outcome.notice().0, "error");
+        let fields = outcome.fields(&clean_failure["operation"]);
+        assert_eq!(fields["status"], "FAIL");
+        assert_eq!(fields["category"], "Script");
+        assert_eq!(fields["cleanup_clean"], true);
+        assert_eq!(fields["forced"], false);
+        assert!(!fields.to_string().contains("private"));
+
+        // Forced containment with a returned entry: distinct from the clean failure above.
+        let forced = json!({"operation":"run","error":null,"result":{
+            "status":"FAIL","primary":null,"entry_outcome":"Returned","forced":true,"exit_code":124,
+            "cleanup":{"clean":false,"status":"IncompleteCleanup","outcome":"ForcedOrIncomplete"}}});
+        let outcome = TerminalOutcome::from_view(&forced);
+        assert_eq!(outcome.notice().0, "error");
+        let fields = outcome.fields(&forced["operation"]);
+        assert_eq!(fields["category"], Value::Null);
+        assert_eq!(fields["entry_outcome"], "Returned");
+        assert_eq!(fields["cleanup_clean"], false);
+        assert_eq!(fields["forced"], true);
+
+        // Settled without success but with clean cleanup and no primary stays a warning.
+        let unsuccessful = json!({"operation":"run","error":null,"result":{
+            "status":"FAIL","primary":null,"entry_outcome":"Returned","forced":false,"exit_code":3,
+            "cleanup":{"clean":true}}});
+        assert_eq!(TerminalOutcome::from_view(&unsuccessful).notice().0, "warn");
+
+        // Pre-child fault: the worker attests clean cleanup and no child; no status exists.
+        let pre_child = json!({"operation":"environment_check","result":null,"error":{
+            "category":"EnvironmentUnset","message":"Save an OCR environment","context":{
+                "stage":"environment_validation","cleanup":{"clean":true,"child_started":false}}}});
+        let outcome = TerminalOutcome::from_view(&pre_child);
+        assert_eq!(outcome.notice().0, "error");
+        assert_eq!(
+            outcome.fields(&pre_child["operation"]),
+            json!({"action":"environment_check","state":"terminal","status":null,
+                "category":"EnvironmentUnset","entry_outcome":null,"cleanup_clean":true,
+                "child_started":false,"forced":null})
+        );
+
+        // A started child without cleanup evidence stays unverified, never clean or false.
+        let unattested = json!({"operation":"run","result":null,"error":{
+            "category":"ChildStartup","message":"child exited before startup record",
+            "context":{"child_started":true,"forced":false,"exit_code":1}}});
+        let outcome = TerminalOutcome::from_view(&unattested);
+        assert_eq!(outcome.notice().0, "error");
+        let fields = outcome.fields(&unattested["operation"]);
+        assert_eq!(fields["cleanup_clean"], Value::Null);
+        assert_eq!(fields["child_started"], true);
+        assert_eq!(fields["forced"], false);
+    }
+
+    #[test]
+    fn shutdown_during_preparation_persists_a_distinguishable_terminal_record() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let selection = application.inspect(&package_path(), None).unwrap();
+        let workspace = workspace_ref(&selection);
+        let store = lock(&application.store);
+        let starting = application.clone();
+        let starting_ref = workspace.clone();
+        let start_request = request(&selection);
+        let starter = std::thread::spawn(move || starting.start(&starting_ref, start_request));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let run = loop {
+            let poll = application.poll();
+            if poll.controller["state"] == "preparing" {
+                break poll.controller["run"].as_str().unwrap().to_owned();
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        };
+        let closing = application.clone();
+        let shutdown = std::thread::spawn(move || closing.shutdown());
+        // Release the blocked worker only once shutdown has cancelled it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while application.runner.poll().state != "stopping" {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        drop(store);
+        starter.join().unwrap().unwrap();
+        shutdown.join().unwrap().unwrap();
+        let status = application.logger.status();
+        assert_eq!(status.file_errors, 0);
+        assert_eq!(status.file_pending, 0);
+        let persisted =
+            fs::read_to_string(fixture.root.join("logs").join("application.jsonl")).unwrap();
+        let terminal: Vec<crate::logging::LogEntry> = persisted
+            .lines()
+            .map(|line| serde_json::from_str::<crate::logging::LogEntry>(line).unwrap())
+            .filter(|entry| entry.code == "run.terminal")
+            .collect();
+        assert_eq!(terminal.len(), 1);
+        let record = &terminal[0];
+        assert_eq!(record.run.as_deref(), Some(run.as_str()));
+        assert_eq!(
+            record.workspace_id.as_deref(),
+            Some(workspace.workspace_id.as_str())
+        );
+        assert_eq!(record.level, "error");
+        assert_eq!(record.fields["action"], "run");
+        assert_eq!(record.fields["category"], "Cancelled");
+        assert_eq!(record.fields["cleanup_clean"], true);
+        assert_eq!(record.fields["child_started"], false);
+        assert_eq!(record.fields["status"], Value::Null);
+        assert_eq!(record.fields["forced"], Value::Null);
+        assert!(!persisted.contains(&selection.package_path));
     }
 }

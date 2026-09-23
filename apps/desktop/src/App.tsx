@@ -16,7 +16,7 @@ import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards
 import type {Card, CardStack} from './notifications.ts';
 import {DEFAULT_NOTIFICATIONS, acceptController, environmentDraft, faultSummary, readDraft, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, staleReasons, text} from './state.ts';
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
-import {DESCRIPTOR_LIMIT, WORKSPACE_LIMIT, applyIfCurrent, busy, closeWorkspace, freshWorkspace, ingestResults, needsAttention, newDraft, openWorkspace, originLabel, retainClosed, selectProfile, updateWorkspace, workspaceLabel, workspaceRef} from './workspace.ts';
+import {DESCRIPTOR_LIMIT, WORKSPACE_LIMIT, applyIfCurrent, busy, closeWorkspace, freshWorkspace, ingestResults, needsAttention, newDraft, openWorkspace, originLabel, retainClosed, selectProfile, shareCatalog, updateWorkspace, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {ClosedWorkspace, LogFilter, LogScope, Origin, RetainedResult, Workspace} from './workspace.ts';
 import type {ControllerView, Fault, Json, OcrEnvironment, Poll, Profile, Selection, Settings, StartRequest, WorkspaceRef} from './types.ts';
 
@@ -98,6 +98,10 @@ export default function App() {
   const expectedRun = useRef<string | null>(null);
   const epoch = useRef(0);
   const startInFlight = useRef(false);
+  // The host admits one package/workspace command at a time behind a try-lock and refuses the rest as WorkspaceBusy.
+  // This mirrors that gate synchronously, so a second click before a render is refused here instead of landing as
+  // another workspace's error. It names the command; rendered controls derive the same reason from state below.
+  const hostCommand = useRef<string | null>(null);
   const retention = useRef(1000);
   const preferences = useRef(DEFAULT_NOTIFICATIONS);
   const openWorkspaces = useRef(workspaces);
@@ -112,6 +116,13 @@ export default function App() {
   const closedSelected = nav.kind === 'closed' ? closed.find(item => item.id === nav.id) : undefined;
   const noSelection = nav.kind === 'none' || (nav.kind === 'workspace' && !selected);
   const labelOf = (workspaceId: string | null) => originLabel(workspaceId, workspaces, closed).label;
+  // Rendered counterpart of hostCommand: the outstanding host command with its origin, or null. The settings save
+  // is excluded because it never takes the host command lock and the dialog reports it through `saving`.
+  const busyWorkspace = workspaces.find(workspace => workspace.busy !== null);
+  const commandReason = appBusy !== null && appBusy !== 'Saving settings' ? appBusy
+    : busyWorkspace ? `${busyWorkspace.busy} · ${workspaceLabel(busyWorkspace, workspaces)}`
+    : starting ? `${starting.kind === 'check' ? 'Admitting environment check' : 'Admitting run'} · ${labelOf(starting.workspaceId)}`
+    : null;
   const logCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const entry of logs.items) {
@@ -229,8 +240,11 @@ export default function App() {
     setWorkspaces(list => updateWorkspace(list, id, update));
   }
 
-  // Every workspace command applies its completion only to the workspace/revision that started it.
+  // Every workspace command applies its completion only to the workspace/revision that started it. A completion that
+  // changed or re-read the saved-profile catalog is then shared with the origin's package/schema siblings.
   async function runCommand(origin: Origin, label: string, action: () => Promise<(workspace: Workspace) => Workspace>) {
+    if (hostCommand.current !== null) return;
+    hostCommand.current = label;
     change(origin.id, workspace => ({...workspace, busy: label, error: null, notice: ''}));
     let update: (workspace: Workspace) => Workspace;
     try {
@@ -238,8 +252,13 @@ export default function App() {
     } catch (cause) {
       const error = fault(cause);
       update = workspace => ({...workspace, error});
+    } finally {
+      hostCommand.current = null;
     }
-    setWorkspaces(list => updateWorkspace(applyIfCurrent(list, origin, update), origin.id, workspace => ({...workspace, busy: null})));
+    setWorkspaces(list => {
+      const applied = applyIfCurrent(list, origin, update);
+      return updateWorkspace(applied === list ? list : shareCatalog(applied, origin.id), origin.id, workspace => ({...workspace, busy: null}));
+    });
   }
 
   function valuesForCommand(workspace: Workspace): Record<string, Json> {
@@ -251,24 +270,22 @@ export default function App() {
 
   async function openPackage(path: string) {
     setAppError(null);
+    hostCommand.current = 'Inspecting package';
     try {
       const selection = await invoke<Selection>('inspect', {packagePath: path, workspace: null});
-      setWorkspaces(list => {
-        const opened = openWorkspace(list, selection);
-        return updateWorkspace(opened.list, selection.workspace_id, workspace => ({...workspace, notice: opened.reused
-          ? 'This package root is already open; its draft is unchanged.'
-          : 'Package inspected. Start will revalidate its identity and capture current values.'}));
-      });
+      setWorkspaces(list => openWorkspace(list, selection));
       go({kind: 'workspace', id: selection.workspace_id});
       setOpenForm(false);
       setOpenPath('');
     } catch (cause) {
       setAppError(fault(cause));
+    } finally {
+      hostCommand.current = null;
     }
   }
 
   async function openFromForm() {
-    if (appBusy || !openPath.trim()) return;
+    if (hostCommand.current !== null || appBusy || !openPath.trim()) return;
     setAppBusy('Inspecting package');
     try {await openPackage(openPath);} finally {setAppBusy(null);}
   }
@@ -276,7 +293,7 @@ export default function App() {
   function handlers(workspace: Workspace): RunHandlers {
     const ref = workspaceRef(workspace);
     const origin: Origin = {id: workspace.id, revision: workspace.revision};
-    const locked = workspace.busy !== null || closing;
+    const locked = commandReason !== null || closing;
     return {
       change: update => change(workspace.id, update),
       selectProfile: id => change(workspace.id, item => selectProfile(item, id)),
@@ -338,7 +355,7 @@ export default function App() {
 
   async function startRun(workspace: Workspace) {
     const facts = derived[workspace.id];
-    if (startInFlight.current || active || workspace.busy || closing || facts.startBlock || facts.descriptorError) return;
+    if (hostCommand.current !== null || active || closing || facts.startBlock || facts.descriptorError) return;
     let values: Record<string, Json>;
     try {values = valuesForCommand(workspace);} catch (cause) {const error = fault(cause); change(workspace.id, item => ({...item, error})); return;}
     const profile = facts.selectedProfile;
@@ -352,6 +369,7 @@ export default function App() {
     };
     const profileName = profile && !facts.valuesDirty ? profile.name : workspace.name || 'Untitled draft';
     const ref = workspaceRef(workspace);
+    hostCommand.current = 'Admitting run';
     startInFlight.current = true;
     epoch.current += 1;
     setStarting({workspaceId: workspace.id, kind: 'run'});
@@ -369,6 +387,7 @@ export default function App() {
     } finally {
       epoch.current += 1;
       startInFlight.current = false;
+      hostCommand.current = null;
       setStarting(null);
     }
   }
@@ -387,12 +406,13 @@ export default function App() {
 
   // Check reads saved settings only; the association records exactly what the backend will read.
   async function checkEnvironment() {
-    if (startInFlight.current || active || closing || envDirty || appBusy) return;
+    if (hostCommand.current !== null || active || closing || envDirty || appBusy) return;
     if (selected && derived[selected.id].descriptorError) {
       setDialogError({kind: 'check', value: {category: 'Draft', message: derived[selected.id].descriptorError!, context: null}});
       return;
     }
     const target = checkTarget;
+    hostCommand.current = 'Admitting environment check';
     startInFlight.current = true;
     epoch.current += 1;
     setStarting({workspaceId: target.workspace?.workspace_id ?? null, kind: 'check'});
@@ -413,6 +433,7 @@ export default function App() {
     } finally {
       epoch.current += 1;
       startInFlight.current = false;
+      hostCommand.current = null;
       setStarting(null);
     }
   }
@@ -445,7 +466,7 @@ export default function App() {
 
   async function saveSettings() {
     const editable = parsedSettings.settings;
-    if (!editable || appBusy) return;
+    if (!editable || appBusy || commandReason !== null) return;
     const submitted = settingsDraft;
     setAppBusy('Saving settings');
     setDialogError(null);
@@ -475,10 +496,11 @@ export default function App() {
 
   async function closeTab(workspace: Workspace, confirmed: boolean) {
     const current = runView(workspace);
-    if (workspace.busy) {change(workspace.id, item => ({...item, notice: `Wait for “${item.busy}” to settle before closing this workspace.`})); return;}
+    if (hostCommand.current !== null) {const pending = hostCommand.current; change(workspace.id, item => ({...item, notice: `Wait for “${pending}” to settle before closing this workspace.`})); return;}
     if (current.live && busy(current.view.state)) {change(workspace.id, item => ({...item, notice: 'This workspace owns the active operation. Stop it and wait for the terminal outcome before closing.'})); return;}
     if (derived[workspace.id].dirty && workspace.touched && !confirmed) {setPendingClose(workspace.id); return;}
     setPendingClose(null);
+    hostCommand.current = 'Closing workspace';
     change(workspace.id, item => ({...item, busy: 'Closing workspace', error: null}));
     try {
       await invoke('close_workspace', {workspace: workspaceRef(workspace)});
@@ -497,6 +519,7 @@ export default function App() {
       const error = fault(cause);
       change(workspace.id, item => ({...item, busy: null, error}));
     } finally {
+      hostCommand.current = null;
       focusWorkspaceSelection();
     }
   }
@@ -545,7 +568,7 @@ export default function App() {
       : {kind: 'ready', text: `Ready · ${facts.selectedProfile ? facts.selectedProfile.name : 'draft'}`};
     return {id: workspace.id, path: workspace.packagePath, label: workspaceLabel(workspace, workspaces), status, running: owns, attention};
   });
-  const openDisabled = appBusy !== null || closing;
+  const openDisabled = commandReason !== null || closing;
   const openFormView = <section className="panel open-form" aria-labelledby="open-heading">
     <div className="panel-body">
       <h2 id="open-heading">Open a package workspace</h2>
@@ -555,7 +578,7 @@ export default function App() {
           onChange={event => {setOpenPath(event.target.value); setAppError(null);}} onKeyDown={event => {if (event.key === 'Enter') void openFromForm();}}/></div>
         <button id="inspect" className="primary" disabled={openDisabled || !openPath.trim()} onClick={() => void openFromForm()}>Inspect</button>
         {workspaces.length > 0 && <button type="button" onClick={() => {setOpenForm(false); setAppError(null);}}>Cancel</button>}</div>
-      <div className="operation-status" role="status">{appBusy ?? (workspaces.length >= WORKSPACE_LIMIT ? `The ${WORKSPACE_LIMIT}-workspace limit is reached. Existing roots still activate their workspaces; close a workspace before adding another.` : '')}</div>
+      <div className="operation-status" role="status">{commandReason ?? (workspaces.length >= WORKSPACE_LIMIT ? `The ${WORKSPACE_LIMIT}-workspace limit is reached. Existing roots still activate their workspaces; close a workspace before adding another.` : '')}</div>
       {appError && <><FaultMessage title="Package could not be opened" value={appError}/><p className="muted">No package is authorized for Start from this path. Correct the directory or package, then Inspect again.</p></>}
     </div>
   </section>;
@@ -584,8 +607,8 @@ export default function App() {
       <div className="workspace-switcher">
         <WorkspaceSwitcher items={workspaceItems} selectedId={selected?.id ?? null} onSelect={id => go({kind: 'workspace', id})}
           onClose={selected ? () => void closeTab(selected, false) : null}
-          closeReason={active && owner === selected?.id ? 'Owns the active operation' : selected?.busy ?? (closing ? 'Application is closing' : null)}/>
-        {workspaces.length > 0 && <button id="open-workspace" type="button" className="workspace-action" aria-label="Open another package workspace" aria-expanded={openForm} disabled={openDisabled}
+          closeReason={active && owner === selected?.id ? 'Owns the active operation' : commandReason ?? (closing ? 'Application is closing' : null)}/>
+        {workspaces.length > 0 && <button id="open-workspace" type="button" className="workspace-action" aria-label="Open another package workspace" aria-expanded={openForm} disabled={appBusy !== null || closing}
           title={workspaces.length >= WORKSPACE_LIMIT ? 'Activate an existing root, or close a workspace to add another' : 'Open another package workspace'} onClick={() => {setOpenForm(open => !open); setAppError(null);}}>+</button>}
         <span id="workspace-summary" className="visually-hidden">One operation at a time. Workspaces are package sessions, not attached games.</span>
       </div>
@@ -610,7 +633,7 @@ export default function App() {
       <main id="workspace-panel" className="content" aria-label={selected ? `${workspaceLabel(selected, workspaces)} workspace` : undefined}>
         {selected && selected.page === 'run' && <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)}
           snapshot={operation && operation.workspace?.workspace_id === selected.id ? operation.snapshot : null}
-          locked={selected.busy !== null || closing} active={active} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
+          locked={commandReason !== null || closing} active={active} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
           savedEnvironment={savedEnvironment} handlers={handlers(selected)}/>}
         {selected && selected.page === 'logs' && <LogsPage eyebrow={`${workspaceLabel(selected, workspaces)} / Activity`} heading="Logs" description="Events the host attributed to this workspace, including run events and dismissed notifications."
           items={logs.items} evicted={logs.evicted} limit={settings?.gui_log_limit ?? retention.current} scope={{kind: 'workspace', id: selected.id}}
@@ -643,7 +666,7 @@ export default function App() {
     <Notifications cards={cards.cards} scopeLabel={labelOf} onDismiss={id => setCards(old => dismissCard(old, id))} onOpen={openDiagnostics}
       onInteract={(id, interaction) => setCards(old => interactCard(old, id, interaction))}/>
     <SettingsDialog open={dialogOpen} onCancel={() => setDialogOpen(false)} settings={settings} draft={settingsDraft} onDraft={next => {setSettingsDraft(next); setSaveNotice('');}}
-      parsed={parsedSettings} dirty={dialogDirty} saving={appBusy === 'Saving settings'} saveError={dialogError?.kind === 'save' ? dialogError.value : null} saveNotice={saveNotice} onSave={() => void saveSettings()}
+      parsed={parsedSettings} dirty={dialogDirty} saving={appBusy === 'Saving settings'} busyReason={commandReason} saveError={dialogError?.kind === 'save' ? dialogError.value : null} saveNotice={saveNotice} onSave={() => void saveSettings()}
       envDirty={envDirty} active={active} target={checkTarget} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale} originLabel={labelOf}
       checkError={dialogError?.kind === 'check' ? dialogError.value : null}
       retained={logs.items.length} evicted={logs.evicted} strip={strip('dialog')}/>

@@ -1,5 +1,5 @@
 import {useEffect, useMemo} from 'react';
-import Select from '../components/Select';
+import Select from '../components/Select.tsx';
 import {LOG_LEVELS, viewLogs} from '../workspace.ts';
 import type {LogFilter, LogScope} from '../workspace.ts';
 import type {LogBatch, LogEntry} from '../types.ts';

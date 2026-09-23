@@ -3,7 +3,7 @@ import type {ReactNode} from 'react';
 import EnvironmentPanel from './EnvironmentPanel.tsx';
 import type {CheckTarget, LastCheck} from './EnvironmentPanel.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
-import Select from '../components/Select';
+import Select from '../components/Select.tsx';
 import {TIMEOUT_SECONDS, VISIBLE_COUNTS} from '../state.ts';
 import type {EnvironmentDraft, SettingsDraft} from '../state.ts';
 import type {EditableSettings, Fault, Settings} from '../types.ts';
@@ -12,12 +12,21 @@ type Category = 'notifications' | 'environment' | 'logs';
 const CATEGORIES: {id: Category; label: string}[] = [
   {id: 'notifications', label: 'Notifications'}, {id: 'environment', label: 'OCR environment'}, {id: 'logs', label: 'Logs'},
 ];
+// state.ts stays the validation authority; this only maps its error keys to the category whose fields show them.
+const ERROR_CATEGORY: Record<string, Category> = {
+  visibleCount: 'notifications', timeoutSeconds: 'notifications', showSuccess: 'notifications',
+  logLimit: 'logs',
+  profile: 'environment', model_root: 'environment', runtime_path: 'environment', library_paths: 'environment',
+};
 
 interface Props {
   open: boolean; onCancel: () => void;
   settings: Settings | null; draft: SettingsDraft; onDraft: (next: SettingsDraft) => void;
   parsed: {settings: EditableSettings | null; errors: Record<string, string>};
   dirty: boolean; saving: boolean; saveError: Fault | null; saveNotice: string; onSave: () => void;
+  // Label of the package/workspace host command that keeps Save and Check unavailable; distinct from saving so
+  // Cancel, Escape and editing stay available while another command is in flight.
+  busyReason: string | null;
   envDirty: boolean; active: boolean; target: CheckTarget; onCheck: () => void; checkError: Fault | null;
   lastCheck: LastCheck | null; stale: string[]; originLabel: (workspaceId: string | null) => string;
   retained: number; evicted: number;
@@ -25,7 +34,7 @@ interface Props {
 }
 
 export default function SettingsDialog(props: Props) {
-  const {open, onCancel, settings, draft, onDraft, parsed, dirty, saving, saveError, saveNotice, onSave, envDirty, active, target, onCheck, checkError, lastCheck, stale, originLabel, retained, evicted, strip} = props;
+  const {open, onCancel, settings, draft, onDraft, parsed, dirty, saving, saveError, saveNotice, onSave, busyReason, envDirty, active, target, onCheck, checkError, lastCheck, stale, originLabel, retained, evicted, strip} = props;
   const dialog = useRef<HTMLDialogElement>(null);
   const opener = useRef<Element | null>(null);
   const [category, setCategory] = useState<Category>('notifications');
@@ -43,6 +52,19 @@ export default function SettingsDialog(props: Props) {
     }
   }, [open]);
   const errors = parsed.errors;
+  const invalidCount: Record<Category, number> = {notifications: 0, environment: 0, logs: 0};
+  for (const key of Object.keys(errors)) {
+    const owner = ERROR_CATEGORY[key];
+    if (owner) invalidCount[owner] += 1;
+  }
+  const invalid = Object.keys(errors).length;
+  const invalidLabels = CATEGORIES.filter(item => invalidCount[item.id] > 0).map(item => item.label).join(', ');
+  // Errors in an unselected category and a pending host command both block Save; the footer names which.
+  const status = saving ? 'Saving…'
+    : invalid > 0 ? `Correct ${invalid} invalid ${invalid === 1 ? 'field' : 'fields'}${invalidLabels ? ` in ${invalidLabels}` : ''} before saving · Cancel or Escape discards all edits`
+    : dirty && busyReason ? `Save waits until “${busyReason}” settles · Cancel or Escape discards unsaved edits`
+    : saveError ? 'Previous stored settings are unchanged. Correct the draft and save again.'
+    : dirty ? 'Unsaved changes · Cancel or Escape discards them' : saveNotice || 'No unsaved changes';
   return <dialog id="app-settings" ref={dialog} className="settings-dialog" aria-labelledby="settings-heading"
     onCancel={event => {event.preventDefault(); if (!saving) onCancel();}}>
     {open && <>
@@ -51,7 +73,8 @@ export default function SettingsDialog(props: Props) {
       {strip}
       <div className="dialog-layout">
         <nav className="settings-nav" role="tablist" aria-label="Settings categories">
-          {CATEGORIES.map(item => <button key={item.id} id={`settings-tab-${item.id}`} type="button" role="tab" aria-selected={category === item.id} aria-controls="settings-content" onClick={() => setCategory(item.id)}>{item.label}</button>)}
+          {CATEGORIES.map(item => <button key={item.id} id={`settings-tab-${item.id}`} type="button" role="tab" aria-selected={category === item.id} aria-controls="settings-content" onClick={() => setCategory(item.id)}>
+            {item.label}{invalidCount[item.id] > 0 && <span className="field-error"> · {invalidCount[item.id]} invalid</span>}</button>)}
         </nav>
         <div id="settings-content" className="settings-content" role="tabpanel">
           {category === 'notifications' && <section aria-labelledby="notifications-heading">
@@ -87,16 +110,16 @@ export default function SettingsDialog(props: Props) {
           {category === 'environment' && <>
             {checkError && <FaultMessage title="Check was not started" value={checkError}/>}
             <EnvironmentPanel draft={draft.environment} errors={errors} onDraft={(next: EnvironmentDraft) => onDraft({...draft, environment: next})}
-              saved={settings?.ocr_environment ?? null} loaded={settings !== null} dirty={envDirty} locked={saving} active={active}
+              saved={settings?.ocr_environment ?? null} loaded={settings !== null} dirty={envDirty} locked={saving} active={active} busyReason={busyReason}
               target={target} onCheck={onCheck} lastCheck={lastCheck} stale={stale} originLabel={originLabel}/>
           </>}
           {saveError && <FaultMessage title="Settings were not saved · draft kept" value={saveError}/>}
         </div>
       </div>
       <div className="dialog-footer">
-        <span role="status">{saving ? 'Saving…' : saveError ? 'Previous stored settings are unchanged. Correct the draft and save again.' : dirty ? 'Unsaved changes · Cancel or Escape discards them' : saveNotice || 'No unsaved changes'}</span>
+        <span role="status">{status}</span>
         <button type="button" id="cancel-settings" onClick={onCancel} disabled={saving}>{dirty ? 'Cancel' : 'Close'}</button>
-        <button type="button" id="save-settings" className="primary" disabled={saving || !dirty || parsed.settings === null} onClick={onSave}>Save changes</button>
+        <button type="button" id="save-settings" className="primary" disabled={saving || !dirty || parsed.settings === null || busyReason !== null} onClick={onSave}>Save changes</button>
       </div>
     </>}
   </dialog>;

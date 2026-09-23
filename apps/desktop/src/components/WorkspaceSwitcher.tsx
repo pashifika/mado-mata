@@ -1,4 +1,4 @@
-import Select from './Select';
+import Select from './Select.tsx';
 
 export interface WorkspaceOption {
   id: string;

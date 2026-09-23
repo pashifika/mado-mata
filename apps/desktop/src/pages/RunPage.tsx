@@ -1,6 +1,6 @@
-import {useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import SchemaForm from '../components/SchemaForm.tsx';
-import Select from '../components/Select';
+import Select from '../components/Select.tsx';
 import ResultPanel, {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import {faultSummary, text} from '../state.ts';
 import type {CheckAssociation} from '../state.ts';
@@ -39,6 +39,22 @@ const LANE_LABEL: Record<string, string> = {controlled: 'Controlled', replay: 'R
 export default function RunPage({workspace, label, derived, run, snapshot, locked, active, starting, stopping, closing, savedEnvironment, handlers}: Props) {
   const {parsed, numericErrors, valuesDirty, dirty, bound, selectedProfile, startBlock, descriptorError} = derived;
   const [confirmReinspect, setConfirmReinspect] = useState(false);
+  const reinspectButton = useRef<HTMLButtonElement>(null);
+  const confirmRow = useRef<HTMLDivElement>(null);
+  // Set only when the confirmation row closes while it owns focus. Focus returns to Reinspect; once the submitted
+  // command locks that button (and a fresh revision remounts this page), the stable Run control page tab takes it.
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (confirmReinspect || !refocus.current) return;
+    refocus.current = false;
+    const button = reinspectButton.current;
+    (button && !button.disabled ? button : document.getElementById('page-run'))?.focus();
+  }, [confirmReinspect]);
+  function closeConfirm(reinspect: boolean) {
+    refocus.current = confirmRow.current?.contains(document.activeElement) ?? false;
+    setConfirmReinspect(false);
+    if (reinspect) handlers.reinspect();
+  }
   const view = run.view;
   const phase = starting ? 'preparing' : view.state;
   const check = view.operation === 'environment_check';
@@ -85,11 +101,11 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
               <span className="mono" title={workspace.packagePath}>{workspace.package.runtime} · {workspace.packagePath}</span></div>
             <span className="tag">Inspected · revision {workspace.revision}</span>
             {confirmReinspect
-              ? <div className="confirm-row" role="group" aria-label="Confirm reinspect">
-                <span>Discard the unsaved draft and reinspect this package?</span>
-                <button type="button" className="danger-text" onClick={() => {setConfirmReinspect(false); handlers.reinspect();}}>Discard and reinspect</button>
-                <button type="button" onClick={() => setConfirmReinspect(false)}>Keep draft</button></div>
-              : <button id="reinspect" disabled={locked || starting || (run.live && busy(view.state))} title={run.live && busy(view.state) ? 'Inspection is refused while this workspace owns an operation' : undefined}
+              ? <div ref={confirmRow} className="confirm-row" role="alertdialog" aria-labelledby="confirm-reinspect-text">
+                <span id="confirm-reinspect-text">Discard the unsaved draft and reinspect this package?</span>
+                <button type="button" className="danger-text" onClick={() => closeConfirm(true)}>Discard and reinspect</button>
+                <button type="button" autoFocus onClick={() => closeConfirm(false)}>Keep draft</button></div>
+              : <button id="reinspect" ref={reinspectButton} disabled={locked || starting || (run.live && busy(view.state))} title={run.live && busy(view.state) ? 'Inspection is refused while this workspace owns an operation' : undefined}
                 onClick={() => dirty && workspace.touched ? setConfirmReinspect(true) : handlers.reinspect()}>Reinspect</button>}
           </div>
           <p className="field-help">Reinspection validates inventory, schema, and static dependencies without executing package code; it increments the selection revision and resets the draft.</p>

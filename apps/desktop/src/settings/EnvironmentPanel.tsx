@@ -1,5 +1,5 @@
 import {useState} from 'react';
-import Select from '../components/Select';
+import Select from '../components/Select.tsx';
 import {DISCLOSURE_LIMIT, ENVIRONMENT_LANGUAGE, ENVIRONMENT_PROVIDER, ENVIRONMENT_RUNTIME_PROFILE, SUPPORTED_PROFILES, boundedText, cleanupLabel, faultSummary, initializationLabel, record, text} from '../state.ts';
 import type {CheckAssociation, EnvironmentDraft} from '../state.ts';
 import type {ControllerView, OcrEnvironment, WorkspaceRef} from '../types.ts';
@@ -12,6 +12,8 @@ export interface CheckTarget {workspace: WorkspaceRef | null; label: string; des
 interface Props {
   draft: EnvironmentDraft; errors: Record<string, string>; onDraft: (next: EnvironmentDraft) => void;
   saved: OcrEnvironment | null; loaded: boolean; dirty: boolean; locked: boolean; active: boolean;
+  // Label of the package/workspace host command that keeps Check unavailable; editing the draft stays possible.
+  busyReason: string | null;
   target: CheckTarget; onCheck: () => void;
   lastCheck: LastCheck | null; stale: string[];
   originLabel: (workspaceId: string | null) => string;
@@ -53,12 +55,13 @@ function CheckCard({check, stale, originLabel}: {check: LastCheck; stale: string
 }
 
 export default function EnvironmentPanel(props: Props) {
-  const {draft, errors, onDraft, saved, loaded, dirty, locked, active, target, onCheck, lastCheck, stale, originLabel} = props;
+  const {draft, errors, onDraft, saved, loaded, dirty, locked, active, busyReason, target, onCheck, lastCheck, stale, originLabel} = props;
   const supported = SUPPORTED_PROFILES.find(item => item.profile === draft.profile);
   const savedModel = saved ? SUPPORTED_PROFILES.find(item => item.profile === saved.profile)?.model : undefined;
   const fixedMismatch = saved !== null && (saved.language !== ENVIRONMENT_LANGUAGE || saved.provider !== ENVIRONMENT_PROVIDER || saved.runtime_profile !== ENVIRONMENT_RUNTIME_PROFILE || saved.model !== savedModel);
   const checkBlock = !loaded ? 'Settings are not loaded.' : !saved ? 'Save an OCR environment to enable Check.'
-    : dirty ? 'Check reads saved settings only. Save changes first.' : active ? 'Another operation owns the runner until its terminal outcome is recorded.' : null;
+    : dirty ? 'Check reads saved settings only. Save changes first.' : active ? 'Another operation owns the runner until its terminal outcome is recorded.'
+    : busyReason ? `${busyReason} · Check waits until this command settles.` : null;
   const blank = !draft.profile && !draft.model_root.trim() && !draft.runtime_path.trim() && !draft.library_paths.trim();
   function field(key: keyof EnvironmentDraft, value: string) {
     onDraft({...draft, [key]: value});
