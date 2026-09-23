@@ -582,13 +582,11 @@ export default function App() {
     </header>
     <div className="workspace-bar">
       <div className="workspace-switcher">
-        <WorkspaceSwitcher items={workspaceItems} selectedId={selected?.id ?? null} onSelect={id => go({kind: 'workspace', id})}/>
+        <WorkspaceSwitcher items={workspaceItems} selectedId={selected?.id ?? null} onSelect={id => go({kind: 'workspace', id})}
+          onClose={selected ? () => void closeTab(selected, false) : null}
+          closeReason={active && owner === selected?.id ? 'Owns the active operation' : selected?.busy ?? (closing ? 'Application is closing' : null)}/>
         {workspaces.length > 0 && <button id="open-workspace" type="button" className="workspace-action" aria-label="Open another package workspace" aria-expanded={openForm} disabled={openDisabled}
           title={workspaces.length >= WORKSPACE_LIMIT ? 'Activate an existing root, or close a workspace to add another' : 'Open another package workspace'} onClick={() => {setOpenForm(open => !open); setAppError(null);}}>+</button>}
-        {selected && <button id="close-workspace" type="button" className="workspace-action workspace-close" aria-label={`Close workspace ${labelOf(selected.id)}`}
-          disabled={selected.busy !== null || (active && owner === selected.id) || closing}
-          title={active && owner === selected.id ? 'Owns the active operation' : selected.busy ? `Busy: ${selected.busy}` : 'Close selected workspace'}
-          onClick={() => void closeTab(selected, false)}>×</button>}
         <span id="workspace-summary" className="visually-hidden">One operation at a time. Workspaces are package sessions, not attached games.</span>
       </div>
       <nav className="workspace-pages" aria-label={selected ? 'Selected workspace pages' : 'Current scope'}>

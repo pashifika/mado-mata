@@ -14,13 +14,16 @@ interface Props {
   items: WorkspaceOption[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onClose: (() => void) | null;
+  closeReason: string | null;
 }
 
-export default function WorkspaceSwitcher({items, selectedId, onSelect}: Props) {
+export default function WorkspaceSwitcher({items, selectedId, onSelect, onClose, closeReason}: Props) {
   const [open, setOpen] = useState(false);
   const anchor = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const list = useRef<HTMLDivElement>(null);
+  const closeAction = useRef<HTMLButtonElement>(null);
   const search = useRef({text: '', time: 0});
   const selected = items.find(item => item.id === selectedId);
   let running = 0;
@@ -58,7 +61,13 @@ export default function WorkspaceSwitcher({items, selectedId, onSelect}: Props) 
     const options = Array.from(list.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? []);
     const index = options.indexOf(document.activeElement as HTMLElement);
     if (event.key === 'Escape') {event.preventDefault(); close(); return;}
-    if (event.key === 'Tab') {close(); return;}
+    if (event.key === 'Tab') {
+      if (!event.shiftKey && closeAction.current && !closeAction.current.disabled) {
+        event.preventDefault();
+        closeAction.current.focus();
+      } else close();
+      return;
+    }
     if ((event.key === 'Enter' || event.key === ' ') && index >= 0) {
       event.preventDefault();
       choose(items[index].id);
@@ -111,11 +120,28 @@ export default function WorkspaceSwitcher({items, selectedId, onSelect}: Props) 
         <div id="workspace-options" ref={list} role="listbox" aria-label="Workspaces" onKeyDown={keys}>
           {items.map(item => <button id={`workspace-option-${item.id}`} key={item.id} type="button" role="option" tabIndex={-1}
             aria-selected={item.id === selectedId} title={item.path} onClick={() => choose(item.id)}>
-            <span className={`workspace-status status-${item.status.kind}`} aria-hidden="true">{item.status.kind === 'attention' ? '!' : ''}</span>
-            <span className="workspace-option-text"><span className="workspace-option-label">{item.label}</span><span className={`workspace-option-status status-${item.status.kind}`}>{item.status.text}</span></span>
+            <span className="workspace-option-text"><span className="workspace-option-label">{item.label}</span>
+              <span className={`workspace-option-status status-${item.status.kind}`}>
+                <span className={`workspace-status status-${item.status.kind}`} aria-hidden="true"/>
+                <span>{item.status.text}</span>
+              </span>
+            </span>
             {item.id === selectedId && <span className="workspace-selected-mark" aria-hidden="true"/>}
           </button>)}
         </div>
+        {selected && onClose && <div className="workspace-popup-actions">
+          <button id="close-workspace" ref={closeAction} type="button" disabled={closeReason !== null}
+            aria-label={`Close selected workspace: ${selected.label}`} title={closeReason ?? `Close ${selected.label}`}
+            onClick={() => {close(); onClose();}} onKeyDown={event => {
+              if (event.key === 'Escape') {event.preventDefault(); close();}
+              else if (event.key === 'Tab' && event.shiftKey) {
+                event.preventDefault();
+                list.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
+              }
+            }}>
+            <span className="workspace-close-symbol" aria-hidden="true">×</span>Close selected workspace
+          </button>
+        </div>}
       </div>}
     </div>
   </>;

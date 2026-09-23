@@ -120,13 +120,14 @@ remembered and revalidated.
 The summary shows **Running n/ALL**, where ALL is the number of open workspaces.
 **Errors n** appears only while one or more workspaces need attention; it counts
 workspaces, not log entries. Individual states appear inside the styled dropdown,
-not as an always-visible row. Its small indicators distinguish ready, unsaved,
-attention, and active work; text remains available and CSS animation respects
-reduced-motion preferences.
+not as an always-visible row. Small indicators beside secondary status text
+distinguish ready, unsaved, attention, and active work using the existing palette.
+Text remains available and CSS animation respects reduced-motion preferences.
 
 Use arrow keys, Home/End, or type-ahead to move through the dropdown without
 switching workspaces. Enter/Space selects; Escape cancels and returns focus to the
-trigger. Tab or clicking outside dismisses it.
+trigger. Tab reaches the enabled close action in the popup footer; Shift+Tab
+returns from that action to the selected option. Leaving the popup dismisses it.
 
 **Run control** and **Logs** beside the dropdown belong to the selected workspace.
 Switching workspaces does not transfer an operation. There is **one application-wide
@@ -134,8 +135,9 @@ operation slot** for Start and OCR Check; the owner and Stop remain available
 across navigation and inside App settings. The host retains the latest terminal
 outcome for each open workspace independently of log retention.
 
-Close the selected workspace with **×**. A touched unsaved draft requires confirmation. An active
-owner or a workspace command still in progress must settle before closure.
+Use **Close selected workspace** in the dropdown footer to close the current
+workspace. A touched unsaved draft requires confirmation. An active owner or a
+workspace command still in progress must settle before closure.
 Closing discards only session state, not saved profiles or package files.
 **Reinspect** validates again and resets the draft to schema defaults with a new
 selection revision. Prior results remain labeled with their original revision;
