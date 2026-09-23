@@ -109,20 +109,32 @@ it does not open a recovery UI. The existing directory and its files are unchang
 
 ## Package workspaces and App settings
 
-The top strip holds at most **eight session-local workspaces**, each backed by a
-real inspected package root. **+** opens another package; opening the same
-canonical root activates its existing tab without resetting its draft. Tabs
-keep independent profile drafts, execution choices, and Run/Logs navigation.
-Unsaved tabs and drafts are not restored after restart. Only the last package
-location is remembered and revalidated.
+The compact navigation row holds at most **eight session-local workspaces**,
+each backed by a real inspected package root. Choose one from the **Workspace**
+dropdown; **+** opens another package. Opening the same canonical root activates
+its existing workspace without resetting its draft. Workspaces keep independent
+profile drafts, execution choices, and Run/Logs navigation. Unsaved workspaces
+and drafts are not restored after restart. Only the last package location is
+remembered and revalidated.
 
-**Run control** and **Logs** in the sidebar belong to the selected workspace.
-Switching tabs does not transfer an operation. There is **one application-wide
+The summary shows **Running n/ALL**, where ALL is the number of open workspaces.
+**Errors n** appears only while one or more workspaces need attention; it counts
+workspaces, not log entries. Individual states appear inside the styled dropdown,
+not as an always-visible row. Its small indicators distinguish ready, unsaved,
+attention, and active work; text remains available and CSS animation respects
+reduced-motion preferences.
+
+Use arrow keys, Home/End, or type-ahead to move through the dropdown without
+switching workspaces. Enter/Space selects; Escape cancels and returns focus to the
+trigger. Tab or clicking outside dismisses it.
+
+**Run control** and **Logs** beside the dropdown belong to the selected workspace.
+Switching workspaces does not transfer an operation. There is **one application-wide
 operation slot** for Start and OCR Check; the owner and Stop remain available
 across navigation and inside App settings. The host retains the latest terminal
 outcome for each open workspace independently of log retention.
 
-Close a tab with **×**. A touched unsaved draft requires confirmation. An active
+Close the selected workspace with **×**. A touched unsaved draft requires confirmation. An active
 owner or a workspace command still in progress must settle before closure.
 Closing discards only session state, not saved profiles or package files.
 **Reinspect** validates again and resets the draft to schema defaults with a new
@@ -308,8 +320,10 @@ and file outputs are independent; delivery to one is not proof of delivery to th
 other, and neither is the authoritative result channel.
 
 Workspace **Logs** filters the single shared buffer by the originating workspace,
-not the visible tab at delivery time. Application logs can show application-only
-or all retained events. Text search covers event code, message, source, and run;
+not the visible workspace at delivery time. Application logs can show application-only
+or all retained events. The log-level selector sits on the left inside the search
+field, followed by text search; both controls are separately labeled and their
+filters combine. Text search covers event code, message, source, and run;
 private diagnostic fields are not searched. Severity and text filters do not
 increase retention. A notification's **View logs** action opens its original
 scope; closed origins and evicted events are labeled explicitly.
@@ -386,7 +400,7 @@ scope separately from [hosted build/core checks](ci.md#local-check-scope).
    trigger an original-source TypeScript error. Verify explicit refusal or source
    diagnostics, preserved saved data, and an independent cleanup outcome. Do not
    edit tracked fixtures or enable native authority to manufacture these cases.
-6. Open both TypeScript and JavaScript packages; switch tabs during work. Check
+6. Open both TypeScript and JavaScript packages; switch workspaces during work. Check
    independent drafts, owner-bound Stop, retained outcomes, canonical-root
    deduplication, stale-revision refusal, the eight-workspace limit, and repeated
    close/reopen without deleting profiles. Use private copies for bound cycling.
@@ -394,9 +408,11 @@ scope separately from [hosted build/core checks](ci.md#local-check-scope).
    GUI retention. Exercise Save, Cancel, Escape, focus restoration, invalid-value
    refusal, immediate trimming, and restart persistence. Verify card overflow,
    deduplication, hover/focus pause, failure visibility, and origin-linked Logs
-   after tab switches, closure, and log eviction.
+   after workspace switches, closure, and log eviction.
 8. Verify Run, Logs, the Application menu, and App settings at 1440, 1024, and
-   900 CSS-pixel widths, including keyboard navigation and modal Stop. Check
+   900 CSS-pixel widths, including keyboard navigation and modal Stop.
+   Verify the compact aggregate counters, conditional Errors count, styled
+   dropdown selection/dismissal, and the shared level/text log-search field. Check
    structured Rust/Script attribution and independent file output. Exercise
    queue pressure/file failure only in the disposable data root; loss/failure
    counters must not erase results or disable Stop.

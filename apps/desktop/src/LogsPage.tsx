@@ -44,13 +44,15 @@ export default function LogsPage(props: Props) {
     <section className="panel logs-panel" aria-labelledby="logs-heading">
       <h2 id="logs-heading" className="visually-hidden">{heading}</h2>
       <div className="log-toolbar">
-        <div className="search"><label htmlFor="log-search" className="visually-hidden">Search code, message, source, or run</label>
+        <div className="log-search-field" role="group" aria-label="Log filters">
+          <label htmlFor="log-level" className="visually-hidden">Log level</label>
+          <select id="log-level" value={filter.level} onChange={event => onFilter({...filter, level: event.target.value})}>
+            <option value="">All levels</option>{LOG_LEVELS.map(level => <option key={level} value={level}>{level.toUpperCase()}</option>)}
+          </select>
+          <label htmlFor="log-search" className="visually-hidden">Search code, message, source, or run</label>
           <input id="log-search" type="search" value={filter.text} placeholder="Search code, message, source, or run ID" spellCheck={false}
-            onChange={event => onFilter({...filter, text: event.target.value})}/></div>
-        <label htmlFor="log-level" className="visually-hidden">Severity</label>
-        <select id="log-level" value={filter.level} onChange={event => onFilter({...filter, level: event.target.value})}>
-          <option value="">All levels</option>{LOG_LEVELS.map(level => <option key={level} value={level}>{level.toUpperCase()}</option>)}
-        </select>
+            onChange={event => onFilter({...filter, text: event.target.value})}/>
+        </div>
         {filtering && <button type="button" onClick={() => onFilter({text: '', level: ''})}>Clear filters</button>}
       </div>
       {view.shown.length > 0 ? <ol id="log-list" className="log-list">{[...view.shown].reverse().map(entry => {

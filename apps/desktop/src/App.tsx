@@ -10,6 +10,8 @@ import ResultPanel, {FaultMessage, fault} from './ResultPanel.tsx';
 import RunPage from './RunPage.tsx';
 import type {Derived, RunHandlers, RunSnapshot, RunView} from './RunPage.tsx';
 import SettingsDialog from './SettingsDialog.tsx';
+import WorkspaceSwitcher from './WorkspaceSwitcher.tsx';
+import type {WorkspaceOption} from './WorkspaceSwitcher.tsx';
 import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards} from './notifications.ts';
 import type {Card, CardStack} from './notifications.ts';
 import {DEFAULT_NOTIFICATIONS, acceptController, environmentDraft, faultSummary, readDraft, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, staleReasons, text} from './state.ts';
@@ -415,7 +417,7 @@ export default function App() {
     }
   }
 
-  // Stop addresses the retained operation ID, never the visible tab, and never waits on workspace state.
+  // Stop addresses the retained operation ID, never the visible workspace, and never waits on workspace state.
   async function stopRun() {
     if (!view.run || stopping || !busy(view.state)) return;
     const run = view.run;
@@ -464,6 +466,13 @@ export default function App() {
     }
   }
 
+  function focusWorkspaceSelection() {
+    requestAnimationFrame(() => {
+      const selector = document.getElementById('workspace-select') as HTMLButtonElement | null;
+      (selector && !selector.disabled ? selector : document.getElementById('package-path'))?.focus();
+    });
+  }
+
   async function closeTab(workspace: Workspace, confirmed: boolean) {
     const current = runView(workspace);
     if (workspace.busy) {change(workspace.id, item => ({...item, notice: `Wait for “${item.busy}” to settle before closing this workspace.`})); return;}
@@ -487,6 +496,8 @@ export default function App() {
     } catch (cause) {
       const error = fault(cause);
       change(workspace.id, item => ({...item, busy: null, error}));
+    } finally {
+      focusWorkspaceSelection();
     }
   }
 
@@ -506,18 +517,6 @@ export default function App() {
     setReveal({scope: card.workspaceId ?? 'application', sequence: card.id});
   }
 
-  function tabKeys(event: KeyboardEvent<HTMLDivElement>) {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || workspaces.length === 0) return;
-    const focused = (event.target as HTMLElement).closest('[role="tab"]');
-    const index = workspaces.findIndex(workspace => `tab-${workspace.id}` === focused?.id);
-    if (index < 0) return;
-    event.preventDefault();
-    const target = event.key === 'Home' ? 0 : event.key === 'End' ? workspaces.length - 1
-      : event.key === 'ArrowRight' ? (index + 1) % workspaces.length : (index - 1 + workspaces.length) % workspaces.length;
-    go({kind: 'workspace', id: workspaces[target].id});
-    document.getElementById(`tab-${workspaces[target].id}`)?.focus();
-  }
-
   function menuKeys(event: KeyboardEvent<HTMLDivElement>) {
     const items = Array.from(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
     const index = items.indexOf(document.activeElement as HTMLElement);
@@ -532,17 +531,31 @@ export default function App() {
   const stripKind = (starting?.kind ?? operation?.kind ?? (view.operation === 'environment_check' ? 'check' : 'run')) === 'check' ? 'Environment check' : 'Run';
   const strip = (idPrefix: string): ReactNode => active ? <OperationStrip idPrefix={idPrefix} owner={owner === null ? 'Application · no package' : labelOf(owner)} kind={stripKind} phase={phase} run={starting ? null : view.run}
     message={stripMessage} stopDisabled={!view.run || !busy(view.state) || view.state === 'stopping' || stopping || starting !== null || closing} onStop={() => void stopRun()}/> : null;
+  const workspaceItems: WorkspaceOption[] = workspaces.map(workspace => {
+    const current = runView(workspace);
+    const facts = derived[workspace.id];
+    const owns = starting?.workspaceId === workspace.id || (current.live && busy(current.view.state));
+    const issue = workspace.error?.category ?? workspace.profilesError?.category
+      ?? (facts.numericErrors ? 'Invalid fields' : !facts.bound ? 'Stale profile' : facts.descriptorError ? 'Invalid replay descriptor' : null);
+    const attention = issue !== null || needsAttention(current.view);
+    const status: WorkspaceOption['status'] = owns ? {kind: 'busy', text: `${starting?.workspaceId === workspace.id ? 'preparing' : current.view.state} · ${starting?.workspaceId === workspace.id ? starting.kind : current.view.operation === 'environment_check' ? 'check' : 'run'}`}
+      : workspace.busy ? {kind: 'busy', text: workspace.busy}
+      : attention ? {kind: 'attention', text: `Needs attention · ${issue ?? current.view.error?.category ?? text(current.view.result?.status) ?? 'unresolved outcome'}`}
+      : facts.dirty && workspace.touched ? {kind: 'dirty', text: 'Unsaved draft'}
+      : {kind: 'ready', text: `Ready · ${facts.selectedProfile ? facts.selectedProfile.name : 'draft'}`};
+    return {id: workspace.id, path: workspace.packagePath, label: workspaceLabel(workspace, workspaces), status, running: owns, attention};
+  });
   const openDisabled = appBusy !== null || closing;
   const openFormView = <section className="panel open-form" aria-labelledby="open-heading">
     <div className="panel-body">
       <h2 id="open-heading">Open a package workspace</h2>
-      <p className="muted">Inspection loads the schema and compatible saved profiles without executing package code. Up to {WORKSPACE_LIMIT} workspaces; the same canonical root activates its existing tab.</p>
+      <p className="muted">Inspection loads the schema and compatible saved profiles without executing package code. Up to {WORKSPACE_LIMIT} workspaces; the same canonical root activates its existing workspace.</p>
       <div className="open-row"><div className="field"><label htmlFor="package-path">Package directory</label>
         <input id="package-path" type="text" value={openPath} disabled={appBusy !== null || closing} placeholder="Absolute path to a package directory" spellCheck={false}
           onChange={event => {setOpenPath(event.target.value); setAppError(null);}} onKeyDown={event => {if (event.key === 'Enter') void openFromForm();}}/></div>
         <button id="inspect" className="primary" disabled={openDisabled || !openPath.trim()} onClick={() => void openFromForm()}>Inspect</button>
         {workspaces.length > 0 && <button type="button" onClick={() => {setOpenForm(false); setAppError(null);}}>Cancel</button>}</div>
-      <div className="operation-status" role="status">{appBusy ?? (workspaces.length >= WORKSPACE_LIMIT ? `The ${WORKSPACE_LIMIT}-workspace limit is reached. Existing roots still activate their tabs; close a workspace before adding another.` : '')}</div>
+      <div className="operation-status" role="status">{appBusy ?? (workspaces.length >= WORKSPACE_LIMIT ? `The ${WORKSPACE_LIMIT}-workspace limit is reached. Existing roots still activate their workspaces; close a workspace before adding another.` : '')}</div>
       {appError && <><FaultMessage title="Package could not be opened" value={appError}/><p className="muted">No package is authorized for Start from this path. Correct the directory or package, then Inspect again.</p></>}
     </div>
   </section>;
@@ -567,55 +580,36 @@ export default function App() {
         </div>
       </div>
     </header>
-    <div className="gamebar">
-      <div id="workspace-tabs" className="tabs" role="tablist" aria-label="Package workspaces" onKeyDown={tabKeys}>
-        {workspaces.map(workspace => {
-          const current = runView(workspace);
-          const facts = derived[workspace.id];
-          const isSelected = nav.kind === 'workspace' && nav.id === workspace.id;
-          const label = workspaceLabel(workspace, workspaces);
-          const attention = workspace.error !== null || needsAttention(current.view);
-          const owns = starting?.workspaceId === workspace.id || (current.live && busy(current.view.state));
-          const status = owns ? {kind: 'busy', text: `${starting?.workspaceId === workspace.id ? 'preparing' : current.view.state} · ${current.view.operation === 'environment_check' ? 'check' : 'run'}`}
-            : attention ? {kind: 'attention', text: `Needs attention · ${workspace.error?.category ?? current.view.error?.category ?? text(current.view.result?.status) ?? 'unresolved outcome'}`}
-            : facts.dirty && workspace.touched ? {kind: 'dirty', text: 'Unsaved draft'}
-            : {kind: 'ready', text: `Ready · ${facts.selectedProfile ? facts.selectedProfile.name : 'draft'}`};
-          return <div key={workspace.id} className={`game-tab ${isSelected ? 'selected' : ''} status-${status.kind}`} role="presentation">
-            <button id={`tab-${workspace.id}`} type="button" role="tab" aria-selected={isSelected} aria-controls="workspace-panel" tabIndex={workspace.id === (selected?.id ?? workspaces[0]?.id) ? 0 : -1}
-              title={`${label}\n${workspace.packagePath}`} onClick={() => go({kind: 'workspace', id: workspace.id})}>
-              <span className="game-avatar" aria-hidden="true">{label.slice(0, 1).toUpperCase()}</span>
-              <span className="tab-text"><span className="tab-title">{label}</span><span className="tab-status">{status.kind === 'attention' && <span aria-hidden="true">! </span>}{status.text}</span></span>
-            </button>
-            <button type="button" className="tab-close" aria-label={`Close workspace ${label}`} disabled={workspace.busy !== null || owns || closing}
-              title={owns ? 'Owns the active operation' : workspace.busy ? `Busy: ${workspace.busy}` : undefined} onClick={() => void closeTab(workspace, false)}>×</button>
-          </div>;
-        })}
-        {workspaces.length > 0 && <button id="open-workspace" type="button" className="add-game" aria-label="Open another package workspace" aria-expanded={openForm} disabled={openDisabled}
-          title={workspaces.length >= WORKSPACE_LIMIT ? `Activate an existing root, or close a workspace to add another` : undefined} onClick={() => {setOpenForm(open => !open); setAppError(null);}}>+</button>}
+    <div className="workspace-bar">
+      <div className="workspace-switcher">
+        <WorkspaceSwitcher items={workspaceItems} selectedId={selected?.id ?? null} onSelect={id => go({kind: 'workspace', id})}/>
+        {workspaces.length > 0 && <button id="open-workspace" type="button" className="workspace-action" aria-label="Open another package workspace" aria-expanded={openForm} disabled={openDisabled}
+          title={workspaces.length >= WORKSPACE_LIMIT ? 'Activate an existing root, or close a workspace to add another' : 'Open another package workspace'} onClick={() => {setOpenForm(open => !open); setAppError(null);}}>+</button>}
+        {selected && <button id="close-workspace" type="button" className="workspace-action workspace-close" aria-label={`Close workspace ${labelOf(selected.id)}`}
+          disabled={selected.busy !== null || (active && owner === selected.id) || closing}
+          title={active && owner === selected.id ? 'Owns the active operation' : selected.busy ? `Busy: ${selected.busy}` : 'Close selected workspace'}
+          onClick={() => void closeTab(selected, false)}>×</button>}
+        <span id="workspace-summary" className="visually-hidden">One operation at a time. Workspaces are package sessions, not attached games.</span>
       </div>
-      <span className="tab-hint">{workspaces.length} / {WORKSPACE_LIMIT} workspaces · one operation at a time · a tab is a package session, not an attached game</span>
+      <nav className="workspace-pages" aria-label={selected ? 'Selected workspace pages' : 'Current scope'}>
+        {selected && <>
+          <button id="page-run" type="button" className="nav-item" aria-current={selected.page === 'run' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'run'}));}}>Run control</button>
+          <button id="page-logs" type="button" className="nav-item" aria-current={selected.page === 'logs' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'logs'}));}}>Logs<span className="count">{logCounts[selected.id] ?? 0}</span></button>
+        </>}
+        {nav.kind === 'application' && <span className="scope-label">Application logs</span>}
+        {nav.kind === 'closed' && <span className="scope-label">Closed workspace diagnostics</span>}
+      </nav>
     </div>
     {pendingClose && workspaces.some(workspace => workspace.id === pendingClose) && <div className="confirm-bar" role="alertdialog" aria-labelledby="confirm-close-text">
       <span id="confirm-close-text">Workspace “{labelOf(pendingClose)}” has an unsaved draft. Closing discards it; saved profiles and file logs are kept.</span>
       <button type="button" className="danger-text" onClick={() => {const workspace = workspaces.find(item => item.id === pendingClose); if (workspace) void closeTab(workspace, true);}}>Discard and close</button>
-      <button type="button" autoFocus onClick={() => setPendingClose(null)}>Keep open</button>
+      <button type="button" autoFocus onClick={() => {setPendingClose(null); focusWorkspaceSelection();}}>Keep open</button>
     </div>}
     {strip('app')}
     {pollError && <div className="content-wide"><FaultMessage title="Controller connection failed · last known state retained" value={pollError}/></div>}
     {openForm && !noSelection && <div className="content-wide">{openFormView}</div>}
     <div className="workspace">
-      <aside className="sidebar">
-        {selected && <>
-          <span className="eyebrow">This workspace</span>
-          <button type="button" className="nav-item" aria-current={selected.page === 'run' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'run'}));}}>Run control</button>
-          <button type="button" className="nav-item" aria-current={selected.page === 'logs' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'logs'}));}}>Logs<span className="count">{logCounts[selected.id] ?? 0}</span></button>
-        </>}
-        {nav.kind === 'application' && <><span className="eyebrow">Application</span><button type="button" className="nav-item" aria-current="page">Logs<span className="count">{logCounts[''] ?? 0}</span></button></>}
-        {nav.kind === 'closed' && <><span className="eyebrow">Closed workspace</span><button type="button" className="nav-item" aria-current="page">Retained diagnostics</button></>}
-        {noSelection && <span className="eyebrow">No workspace selected</span>}
-        <div className="sidebar-note"><strong>No live authority</strong>Controlled sink only. Nothing here captures, launches, or controls a game.</div>
-      </aside>
-      <main id="workspace-panel" className="content" role={selected ? 'tabpanel' : undefined} aria-labelledby={selected ? `tab-${selected.id}` : undefined}>
+      <main id="workspace-panel" className="content" aria-label={selected ? `${workspaceLabel(selected, workspaces)} workspace` : undefined}>
         {selected && selected.page === 'run' && <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)}
           snapshot={operation && operation.workspace?.workspace_id === selected.id ? operation.snapshot : null}
           locked={selected.busy !== null || closing} active={active} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
@@ -643,7 +637,7 @@ export default function App() {
         </>}
         {noSelection && <>
           <div className="page-heading"><div><span className="eyebrow">Workspace</span><h1>{workspaces.length === 0 ? 'No open workspaces' : 'Choose a workspace'}</h1>
-            <p>{workspaces.length === 0 ? 'Inspect a package to open its workspace. Only the remembered package location is restored at launch; unsaved drafts are session-local.' : 'Select a tab above or open another package.'}</p></div></div>
+            <p>{workspaces.length === 0 ? 'Inspect a package to open its workspace. Only the remembered package location is restored at launch; unsaved drafts are session-local.' : 'Choose a workspace from the dropdown above or open another package.'}</p></div></div>
           {openFormView}
         </>}
       </main>

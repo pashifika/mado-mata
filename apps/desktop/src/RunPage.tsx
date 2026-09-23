@@ -146,7 +146,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           {run.olderRevision !== null && <p className="inline-warning">This outcome belongs to selection revision {run.olderRevision}; the workspace is now at revision {workspace.revision}. It is not evidence for the current draft.</p>}
           <div className="run-buttons">
             <button id="stop" className="stop-button" disabled={!stopAvailable} onClick={handlers.stop}>{stopping ? 'Requesting Stop…' : 'Stop'}</button>
-            <span className="muted">Stop targets operation <code>{run.live && view.run ? view.run : 'none'}</code> regardless of the visible tab.</span>
+            <span className="muted">Stop targets operation <code>{run.live && view.run ? view.run : 'none'}</code> regardless of the visible workspace.</span>
           </div>
           <p className="authority-note">Submitted does not prove effect; Stop does not prove cleanup. Stop covers checks and runs alike.</p>
           <dl className="run-identity"><dt>Operation ID</dt><dd id="run-id">{view.run ?? 'No operation yet'}</dd>
