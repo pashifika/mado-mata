@@ -14,6 +14,7 @@ import type {Losses} from './pages/LogsPage.tsx';
 import CreateWorkspaceDialog from './components/CreateWorkspaceDialog.tsx';
 import type {CreateDraft} from './components/CreateWorkspaceDialog.tsx';
 import Notifications from './components/Notifications.tsx';
+import type {RecoveryHandlers} from './components/ProfileRecovery.tsx';
 import ResultPanel, {FaultMessage, fault} from './components/ResultPanel.tsx';
 import RunPage from './pages/RunPage.tsx';
 import type {RunHandlers, RunSnapshot, RunView} from './pages/RunPage.tsx';
@@ -26,13 +27,15 @@ import {INITIAL_BOOTSTRAP, PollGate, initialSettings, reconstructed, reduceBoots
 import type {Admission, BootstrapAction} from './bootstrap.ts';
 import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards} from './notifications.ts';
 import type {Card, CardStack} from './notifications.ts';
-import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, settingsDraftAfterSave, settingsDraftFrom, staleReasons, text} from './state.ts';
+import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readDraft, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, settingsDraftAfterSave, settingsDraftFrom, staleReasons, text} from './state.ts';
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
-import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyCommand, applyIfCurrent, bindSelection, busy, closeWorkspace, commandValues, deriveBound, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
-import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, ProfileCatalog, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
+import {editRecovery, recoveryTicket, selectRecovery} from './recovery.ts';
+import type {RecoveryState, RecoveryTicket} from './recovery.ts';
+import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyCommand, applyIfCurrent, applyInspection, applyRecoveryMutation, applyWorkspaceView, busy, closeWorkspace, commandValues, deriveBound, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
+import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
 import {beginTarget, checkedTarget, currentTargetDraft, discardTarget, editTarget, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
 import type {TargetOperation, TargetState} from './target.ts';
-import type {BootstrapStatus, ControllerView, Fault, Json, LegacyImport, Poll, Profile, Selection, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {BootstrapStatus, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
 
 const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0, workspace_id: null, workspace_revision: null};
 const EMPTY_FILTER: LogFilter = {text: '', level: ''};
@@ -42,6 +45,19 @@ type Nav = {kind: 'none'} | {kind: 'workspace'; id: string} | {kind: 'applicatio
 interface Operation {run: string; kind: 'run' | 'check'; workspace: WorkspaceRef | null; snapshot: RunSnapshot}
 interface Starting {workspaceId: string | null; kind: 'run' | 'check'}
 interface DialogError {kind: 'save' | 'check'; value: Fault}
+
+// The notice for a typed inspection result. A binding failure is the Tab's error, not a notice; a recovery-required
+// candidate and automatic per-profile outcomes are named so the operator finds the recovery panel.
+function inspectionNotice(outcome: InspectionOutcome, rebinding: boolean, retry: boolean): Message | null {
+  if (outcome.kind === 'binding_failed') return null;
+  if (outcome.kind === 'recovery_required') return {key: 'recoveryRequired'};
+  if (retry) return {key: 'recoveryBound'};
+  if (outcome.outcomes.length > 0) {
+    const saved = outcome.outcomes.filter(item => item.status === 'saved').length;
+    return {key: 'inspectionOutcomes', args: [saved, outcome.outcomes.length - saved]};
+  }
+  return {key: rebinding ? 'reinspected' : 'bound'};
+}
 
 function OperationStrip({idPrefix, owner, kind, phase, run, message, stopDisabled, onStop}: {
   idPrefix: string; owner: string; kind: string; phase: string; run: string | null; message: {text: string; error: boolean} | null; stopDisabled: boolean; onStop: () => void;
@@ -377,7 +393,8 @@ export default function App() {
   // Package commands need a real inspected selection; an unbound Tab is refused here and again by the host.
   const valuesForCommand = (workspace: Workspace) => commandValues(workspace, workspace.bound ? derived[workspace.id] : undefined);
 
-  // Inspection is scoped to the initiating Tab and publishes only after the host's durable bind.
+  // Inspection is scoped to the initiating Tab. A bound outcome publishes only after the host's durable bind; a
+  // recovery-required candidate never passes through binding and a failed binding keeps the saved reference.
   function inspectFor(workspace: Workspace) {
     const path = workspace.inspectPath.trim();
     if (!path || commandReason !== null || closing) return;
@@ -387,9 +404,57 @@ export default function App() {
     const ref = workspaceRef(workspace);
     const rebinding = workspace.bound !== null;
     void runCommand(origin, rebinding ? 'reinspectingPackage' : 'inspectingPackage', async () => {
-      const selection = await invoke<Selection>('inspect', {packagePath: path, workspace: ref});
-      return {update: item => bindSelection(item, selection, {key: rebinding ? 'reinspected' : 'bound'})};
+      const outcome = await invoke<InspectionOutcome>('inspect', {packagePath: path, workspace: ref});
+      return {update: item => applyInspection(item, outcome, inspectionNotice(outcome, rebinding, false), false)};
     });
+  }
+
+  // Recovery commands carry only the host context reference, profile ID and values; replies are guarded by
+  // Workspace/revision (runCommand) and by the ticket's token, profile and draft revision.
+  function recoveryHandlers(workspace: Workspace): RecoveryHandlers {
+    const origin: Origin = {id: workspace.id, revision: workspace.revision};
+    const locked = commandReason !== null || closing;
+    const state = workspace.recovery;
+    const edit = (update: (state: RecoveryState) => RecoveryState) =>
+      change(workspace.id, item => item.recovery ? {...item, recovery: update(item.recovery), notice: null} : item);
+    function mutate(label: Command, call: (ticket: RecoveryTicket, values: Record<string, Json>) => Promise<RecoveryMutation>) {
+      if (locked || !state) return;
+      const ticket = recoveryTicket(state);
+      if (!ticket) return;
+      const parsed = readDraft(state.view.package.schema, state.draft, locale);
+      if (Object.keys(parsed.errors).length > 0) {
+        const error = new LocalFault({key: 'numericFields'});
+        change(workspace.id, item => ({...item, error}));
+        return;
+      }
+      void runCommand(origin, label, async () => {
+        const mutation = await call(ticket, parsed.values);
+        return {update: item => applyRecoveryMutation(item, ticket, mutation)};
+      });
+    }
+    return {
+      select: id => edit(current => selectRecovery(current, id)),
+      edit: values => edit(current => editRecovery(current, values)),
+      save: () => mutate('repairingProfile', (ticket, values) => invoke<RecoveryMutation>('repair_profile', {context: ticket.context, id: ticket.profileId, values})),
+      // Reset reaches the host only through the confirmed button; Cancel in the panel never gets here.
+      reset: () => mutate('resettingProfile', ticket => invoke<RecoveryMutation>('reset_profile', {context: ticket.context, id: ticket.profileId, confirm: true})),
+      retry: () => {
+        if (locked || !state) return;
+        const context = state.view.context;
+        void runCommand(origin, 'retryingBinding', async () => {
+          const outcome = await invoke<InspectionOutcome>('retry_binding', {context});
+          return {update: item => applyInspection(item, outcome, inspectionNotice(outcome, true, true), true)};
+        });
+      },
+      discard: () => {
+        if (locked || !state) return;
+        const context = state.view.context;
+        void runCommand(origin, 'discardingRecovery', async () => {
+          const view = await invoke<WorkspaceView>('discard_recovery', {context});
+          return {update: item => applyWorkspaceView(item, view, {key: 'recoveryDiscarded'})};
+        });
+      },
+    };
   }
 
   async function targetCommand(workspace: BoundWorkspace, operation: TargetOperation, reviewedResolution?: TargetResolution) {
@@ -528,6 +593,7 @@ export default function App() {
         });
       },
       reinspect: () => inspectFor(workspace),
+      recovery: recoveryHandlers(workspace),
       start: () => void startRun(workspace),
       stop: () => void stopRun(),
     };
@@ -867,6 +933,7 @@ export default function App() {
     const sourceIssue = workspace.sourceError ? workspace.sourceError.category === UNSUPPORTED_SOURCE ? t.unsupportedSource : t.unavailableSource : null;
     const issue = workspace.error?.category ?? workspace.bound?.profilesError?.category
       ?? workspace.bound?.target.readError?.category ?? workspace.bound?.target.issue?.fault.category ?? sourceIssue
+      ?? (workspace.recovery !== null && workspace.recovery.view.profiles.length > 0 ? t.repairRequired : null)
       ?? (facts ? facts.numericErrors ? t.invalidFields : !facts.bound ? t.staleProfile : facts.descriptorError ? t.invalidDescriptor : null : null);
     const attention = issue !== null || needsAttention(current.view);
     const optionStatus: WorkspaceOption['status'] = owns ? {kind: 'busy', text: `${ui.phase(starting?.workspaceId === workspace.id ? 'preparing' : current.view.state)} · ${ui.operation(starting?.workspaceId === workspace.id ? starting.kind === 'check' ? 'environment_check' : 'run' : current.view.operation)}`}
@@ -936,7 +1003,8 @@ export default function App() {
             locked={commandReason !== null || closing} active={active} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
             savedEnvironment={savedEnvironment} handlers={handlers(selected)}/>
           : <GuidancePage workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
-            onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}/>)}
+            onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
+            recovery={recoveryHandlers(selected)}/>)}
         {selected && selected.page === 'logs' && <LogsPage eyebrow={t.activity(workspaceLabel(selected, workspaces))} heading={t.logs} description={t.workspaceLogHelp}
           items={logs.items} evicted={logs.evicted} limit={settings?.gui_log_limit ?? retention.current} scope={{kind: 'workspace', id: selected.id}}
           filter={selected.logFilter} onFilter={filter => {setReveal(null); change(selected.id, item => ({...item, logFilter: filter}));}}

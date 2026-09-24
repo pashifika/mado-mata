@@ -129,11 +129,13 @@ fn target_context(selected: &Selected) -> TargetContext {
 
 fn target_view(selected: &Selected, record: TargetRecord) -> TargetView {
     let compatible = record.binding.as_ref().is_some_and(|binding| {
-        binding.package_id == selected.inventory.package_id
-            && selected.package.target.as_ref().is_some_and(|declaration| {
-                binding.target_id == declaration.id
-                    && Some(&binding.declaration_identity)
-                        == selected.package.target_identity.as_ref()
+        selected
+            .package
+            .target
+            .as_ref()
+            .zip(selected.package.target_identity.as_deref())
+            .is_some_and(|(declaration, identity)| {
+                binding.compatible(&selected.inventory.package_id, &declaration.id, identity)
             })
     });
     TargetView {

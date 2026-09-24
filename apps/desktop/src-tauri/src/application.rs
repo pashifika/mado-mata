@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod operations;
 mod profiles;
+mod recovery;
 mod targets;
 mod workspaces;
 
@@ -61,6 +62,7 @@ pub struct WorkspaceView {
     pub saved_package: Option<PackageReference>,
     pub selection: Option<Selection>,
     pub source_error: Option<Fault>,
+    pub recovery: Option<RecoveryView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,6 +76,72 @@ pub struct WorkspaceCatalog {
 pub struct ProfileCatalog {
     pub profiles: Vec<Profile>,
     pub profiles_error: Option<Fault>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryRef {
+    pub workspace: WorkspaceRef,
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecoverableProfile {
+    pub profile: Profile,
+    pub issue: Fault,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecoveryView {
+    pub context: RecoveryRef,
+    pub relocation: bool,
+    pub package_path: String,
+    #[serde(serialize_with = "serialize_shared")]
+    pub package: Arc<PackageInfo>,
+    pub profiles: Vec<RecoverableProfile>,
+    pub profiles_error: Option<Fault>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryStatus {
+    Saved,
+    RepairRequired,
+    StorageFailed,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProfileRecoveryOutcome {
+    pub profile_id: String,
+    pub name: String,
+    pub status: RecoveryStatus,
+    pub issue: Option<Fault>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InspectionKind {
+    Bound,
+    RecoveryRequired,
+    BindingFailed,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InspectionOutcome {
+    pub kind: InspectionKind,
+    pub workspace: WorkspaceView,
+    pub outcomes: Vec<ProfileRecoveryOutcome>,
+    pub binding_error: Option<Fault>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecoveryMutation {
+    pub saved: Option<Profile>,
+    pub draft: Option<Value>,
+    pub issue: Option<Fault>,
+    pub recovery: Option<RecoveryView>,
+    pub catalog: Option<ProfileCatalog>,
+    pub refresh_error: Option<Fault>,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,6 +233,7 @@ struct Workspace {
     selected: Option<Selected>,
     source_error: Option<Fault>,
     terminal: Option<WorkspaceResult>,
+    recovery: Option<Arc<recovery::RecoveryContext>>,
 }
 
 struct CheckInputs {

@@ -232,11 +232,12 @@ impl TargetBinding {
     pub fn compatible(
         &self,
         package: &str,
-        declaration: &TargetDeclaration,
-    ) -> Result<bool, Fault> {
-        Ok(self.package_id == package
-            && self.target_id == declaration.id
-            && self.declaration_identity == declaration.identity()?)
+        target_id: &str,
+        declaration_identity: &str,
+    ) -> bool {
+        self.package_id == package
+            && self.target_id == target_id
+            && self.declaration_identity == declaration_identity
     }
 }
 

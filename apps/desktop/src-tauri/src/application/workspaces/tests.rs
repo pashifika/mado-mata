@@ -1,4 +1,5 @@
 use super::*;
+use crate::application::InspectionKind;
 use crate::application::test_support::*;
 use crate::storage::{PackageReference, Store};
 use std::fs;
@@ -79,7 +80,11 @@ fn failed_durable_bind_close_and_reopen_preserve_host_and_saved_authority() {
     let pending = path.with_extension("pending");
     let before = fs::read(&path).unwrap();
     fs::write(&pending, b"interrupted Tab write").unwrap();
-    assert!(application.inspect(&package_path(), &reference).is_err());
+    let failed = application.inspect(&package_path(), &reference).unwrap();
+    assert_eq!(failed.kind, InspectionKind::BindingFailed);
+    assert!(failed.binding_error.is_some());
+    assert!(failed.workspace.saved_package.is_none());
+    let reference = view_ref(&failed.workspace);
     assert!(application.close_workspace(&reference).is_err());
     assert_eq!(fs::read(&path).unwrap(), before);
     let current = application.workspace_catalog().unwrap().open.remove(0);
@@ -87,24 +92,39 @@ fn failed_durable_bind_close_and_reopen_preserve_host_and_saved_authority() {
     assert!(current.selection.is_none());
     assert_eq!(fs::read(&pending).unwrap(), b"interrupted Tab write");
     fs::remove_file(&pending).unwrap();
-    let bound = application.inspect(&package_path(), &reference).unwrap();
+    let bound = application
+        .retry_binding(&failed.workspace.recovery.unwrap().context)
+        .unwrap()
+        .workspace
+        .selection
+        .unwrap();
     let bound_ref = workspace_ref(&bound);
     let bound_bytes = fs::read(&path).unwrap();
     fs::write(&pending, b"interrupted Tab write").unwrap();
+    let failed = application
+        .inspect(&fixture.numeric_package(), &bound_ref)
+        .unwrap();
+    assert_eq!(failed.kind, InspectionKind::BindingFailed);
+    assert!(failed.workspace.selection.is_none());
+    assert_eq!(fs::read(&path).unwrap(), bound_bytes);
+    let retained = failed.workspace.saved_package.as_ref().unwrap();
+    assert_eq!(retained.package_id, bound.package.package_id);
+    assert!(
+        matches!(&retained.source, PackageSource::Directory { path } if path == &bound.package_path)
+    );
     assert!(
         application
-            .inspect(&fixture.numeric_package(), &bound_ref)
+            .validate(&bound_ref, json!({"priorities":["ocr"]}))
             .is_err()
     );
-    assert_eq!(fs::read(&path).unwrap(), bound_bytes);
-    assert_eq!(
+    let failed_ref = view_ref(&failed.workspace);
+    assert!(
         application
-            .validate(&bound_ref, json!({"priorities":["ocr"]}))
-            .unwrap()["priorities"],
-        json!(["ocr"])
+            .validate(&failed_ref, json!({"priorities":["ocr"]}))
+            .is_err()
     );
     fs::remove_file(&pending).unwrap();
-    application.close_workspace(&bound_ref).unwrap();
+    application.close_workspace(&failed_ref).unwrap();
     let closed_bytes = fs::read(&path).unwrap();
     fs::write(&pending, b"interrupted reopen").unwrap();
     assert!(application.reopen_workspace("Main").is_err());
@@ -193,7 +213,12 @@ fn saved_package_projects_the_durable_reference_without_granting_authority() {
             .saved_package
             .is_none()
     );
-    let rebound = restarted.inspect(&relocated, &view_ref(moved)).unwrap();
+    let rebound = restarted
+        .inspect(&relocated, &view_ref(moved))
+        .unwrap()
+        .workspace
+        .selection
+        .unwrap();
     let repaired = restarted
         .workspace_catalog()
         .unwrap()

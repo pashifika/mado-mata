@@ -1,6 +1,6 @@
 use super::{Application, ProfileCatalog, WorkspaceRef, lock};
 use crate::storage::{LegacyImport, Profile, ProfileStore};
-use mado_runtime_comparison::host::resolve_options;
+use mado_runtime_comparison::host::{option_path, resolve_options};
 use mado_runtime_comparison::inventory::Inventory;
 use mado_runtime_comparison::model::Fault;
 use serde_json::{Value, json};
@@ -120,20 +120,13 @@ impl Application {
             let store = lock(&self.store);
             let store =
                 store.profile_store(&selected.internal_name, &selected.inventory.package_id)?;
-            let belongs = store
-                .list(
-                    &selected.inventory.package_id,
-                    &selected.package.schema_identity,
-                )?
-                .profiles
-                .iter()
-                .any(|profile| profile.id == id);
-            if !belongs {
-                return Err(Fault::new(
-                    "ProfileNotFound",
-                    "Saved profile does not belong to this workspace",
-                ));
-            }
+            let profile = checked_profile(
+                &store,
+                &selected.inventory.package_id,
+                &selected.package.schema_identity,
+                id,
+            )?;
+            desktop_options(&selected.inventory, profile.values)?;
             store.delete(id)
         })();
         self.outcome(
@@ -176,7 +169,7 @@ pub(super) fn check_webview_value(value: &Value, path: &str) -> Result<(), Fault
         }
         Value::Object(fields) => {
             for (name, value) in fields {
-                check_webview_value(value, &format!("{path}.{name}"))?;
+                check_webview_value(value, &option_path(path, name))?;
             }
         }
         _ => {}

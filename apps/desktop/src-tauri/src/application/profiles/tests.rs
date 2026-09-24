@@ -156,3 +156,19 @@ fn signed_zero_sources_are_refused_without_rewriting_profiles() {
     assert_eq!(fs::read(schema_path).unwrap(), source_before);
     assert_eq!(fs::read(stored_path).unwrap(), before);
 }
+
+#[test]
+fn numeric_faults_distinguish_literal_keys_from_nested_paths() {
+    let unsafe_number = json!(9_007_199_254_740_993u64);
+    for (value, expected_path) in [
+        (json!({"a.b": unsafe_number}), "$[\"a.b\"]"),
+        (json!({"a": {"b": unsafe_number}}), "$.a.b"),
+        (json!({"items[0]": unsafe_number}), "$[\"items[0]\"]"),
+        (json!({"items": [unsafe_number]}), "$.items[0]"),
+    ] {
+        assert_eq!(
+            check_webview_value(&value, "$").unwrap_err().context["path"],
+            expected_path
+        );
+    }
+}

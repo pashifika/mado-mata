@@ -38,7 +38,12 @@ fn target_operations_require_inspected_declaration_and_current_workspace() {
             .category,
         "WorkspaceUnbound"
     );
-    let selection = application.inspect(&package_path(), &empty_ref).unwrap();
+    let selection = application
+        .inspect(&package_path(), &empty_ref)
+        .unwrap()
+        .workspace
+        .selection
+        .unwrap();
     let workspace = workspace_ref(&selection);
     assert_eq!(
         application.read_target(&empty_ref).unwrap_err().category,

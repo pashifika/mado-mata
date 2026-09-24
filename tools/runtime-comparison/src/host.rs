@@ -3,7 +3,7 @@ mod options;
 mod sequence;
 
 pub(crate) use admission::{HandleBudget, HandlePermit, Managed};
-pub use options::resolve_options;
+pub use options::{option_path, resolve_options};
 
 #[cfg(test)]
 mod test_support;

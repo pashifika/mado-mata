@@ -1,9 +1,11 @@
 import {LocalFault, messages} from './i18n.ts';
 import type {Locale, Message} from './i18n.ts';
 import {defaultDraft, readDraft} from './state.ts';
+import {mutatedRecovery, recoveryState, sameRecoveryContext, upsertOutcomes} from './recovery.ts';
+import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {targetDirty, targetState} from './target.ts';
 import type {TargetState} from './target.ts';
-import type {ControllerView, Fault, Json, LegacyImport, LogEntry, OcrEnvironment, PackageInfo, PackageReference, Profile, Selection, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, WorkspaceRef, WorkspaceView} from './types.ts';
 
 export const WORKSPACE_LIMIT = 8;
 export const SAVED_LIMIT = 64;
@@ -53,6 +55,11 @@ export interface Workspace {
   // Inspect form draft for this Tab; a path is only a request, never a binding.
   inspectPath:string;
   legacyImport:LegacyImport|null;
+  // Host-issued profile recovery context with the operator's repair draft; null while this Tab has no current context.
+  recovery:RecoveryState|null;
+  // Per-profile publication facts from the last explicit inspection or repair. Kept when the context is discarded or
+  // superseded and when binding or refresh fails afterwards: a committed write is never hidden or claimed rolled back.
+  recoveryOutcomes:ProfileRecoveryOutcome[];
 }
 
 export type BoundWorkspace = Workspace & {bound:Bound};
@@ -62,7 +69,6 @@ export interface ClosedWorkspace {id:string; revision:number; label:string; resu
 
 export interface Origin {id:string; revision:number; draftRevision?:number}
 
-export type ProfileCatalog = Pick<Selection,'profiles'|'profiles_error'>;
 export interface WorkspaceCommand {
   update:(workspace:Workspace) => Workspace;
   catalog?:ProfileCatalog;
@@ -110,6 +116,7 @@ export function workspaceFromView(view:WorkspaceView, notice:Message|null = null
     bound: view.selection ? fromSelection(view.selection) : null, sourceError: view.source_error, savedPackage: saved,
     page: 'run', error: null, notice, logFilter: {text: '', level: ''}, busy: null,
     inspectPath: view.selection?.package_path ?? (saved !== null && saved.source.kind === 'directory' ? saved.source.path : ''), legacyImport: null,
+    recovery: view.recovery ? recoveryState(view.recovery, null) : null, recoveryOutcomes: [],
   };
 }
 
@@ -170,6 +177,48 @@ export function applyCatalog(workspace:Workspace, catalog:ProfileCatalog):Worksp
   if (next === bound) return workspace;
   const notice = catalogNotice(bound, next);
   return {...workspace, bound: next, notice: notice ?? workspace.notice};
+}
+
+// A selection binds a new revision or, at the same revision, only refreshes the catalog; no selection (candidate or
+// failed binding) ends the package session while the saved reference stays as reported. Same recovery token keeps its draft.
+export function applyWorkspaceView(workspace:Workspace, view:WorkspaceView, notice:Message|null):Workspace {
+  const selection = view.selection;
+  const base = selection === null
+    ? {...workspace, revision: view.revision, bound: null, error: null, notice, legacyImport: null}
+    : workspace.bound !== null && selection.revision === workspace.revision
+      ? applyCatalog({...workspace, error: null, notice}, selection)
+      : bindSelection(workspace, selection, notice);
+  return {...base, sourceError: view.source_error, savedPackage: view.saved_package,
+    recovery: view.recovery ? recoveryState(view.recovery, workspace.recovery) : null};
+}
+
+// Explicit inspection replaces the per-profile facts; a binding retry adds to them so earlier saves stay reported.
+export function applyInspection(workspace:Workspace, outcome:InspectionOutcome, notice:Message|null, retry:boolean):Workspace {
+  const next = applyWorkspaceView(workspace, outcome.workspace, notice);
+  return {...next, error: outcome.binding_error,
+    recoveryOutcomes: retry ? upsertOutcomes(workspace.recoveryOutcomes, outcome.outcomes) : outcome.outcomes};
+}
+
+// Commit facts survive refresh failure; tickets protect only the draft.
+export function applyRecoveryMutation(workspace:Workspace, ticket:RecoveryTicket, mutation:RecoveryMutation):Workspace {
+  const saved = mutation.saved;
+  let next = workspace;
+  if (saved !== null) {
+    next = updateBound({...next, recoveryOutcomes: upsertOutcomes(next.recoveryOutcomes, [{profile_id: saved.id, name: saved.name, status: 'saved', issue: null}])},
+      bound => ({...bound, profiles: [...bound.profiles.filter(entry => entry.id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name))}));
+  }
+  if (mutation.catalog) next = applyCatalog(next, mutation.catalog);
+  else if (mutation.refresh_error) next = applyCatalog(next, {profiles: [], profiles_error: mutation.refresh_error});
+  const state = workspace.recovery;
+  if (!state || !sameRecoveryContext(state.view.context, ticket.context)) {
+    return saved === null ? next : {...next, notice: {key: 'recoverySaved', args: [saved.name, saved.id]}};
+  }
+  const current = state.selectedId === ticket.profileId && state.draftRevision === ticket.draftRevision;
+  const notice:Message|null = saved !== null
+    ? current ? {key: 'recoverySaved', args: [saved.name, saved.id]} : {key: 'recoveryEarlierSaved', args: [saved.name, saved.id]}
+    : mutation.draft !== null && current ? {key: 'recoveryResetIncomplete'} : null;
+  // A mutation reply never ends the context; Close/Discard and reinspection are the explicit ways out.
+  return {...next, recovery: mutatedRecovery(state, ticket, mutation), notice: notice ?? next.notice};
 }
 
 export function closeWorkspace(list:Workspace[], id:string):Workspace[] {
@@ -236,7 +285,8 @@ export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, l
 }
 
 export function hasWorkspaceEdits(workspace:Workspace, facts:Derived|undefined):boolean {
-  return workspace.bound !== null && ((workspace.bound.touched && facts?.dirty === true) || targetDirty(workspace.bound.target));
+  return (workspace.bound !== null && ((workspace.bound.touched && facts?.dirty === true) || targetDirty(workspace.bound.target)))
+    || workspace.recovery?.touched === true;
 }
 
 // Package commands carry values only from a real inspected selection. A genuine named Tab without one is refused

@@ -119,6 +119,11 @@ function catalog(data: typeof enData) {
       limit: (limit: number) => interpolate(data.reopen.limit, {limit}),
       reopenLabel: (name: string) => interpolate(data.reopen.reopenLabel, {name}),
     },
+    recovery: {
+      ...data.recovery,
+      outcomeStatus: (value: string) => known(data.recovery.outcomeStatus, value),
+      confirmReset: (name: string, id: string, owner: string, packageId: string) => interpolate(data.recovery.confirmReset, {name, id, owner, package: packageId}),
+    },
     guidance: {
       ...data.guidance,
       scope: (label: string) => interpolate(data.guidance.scope, {label}),

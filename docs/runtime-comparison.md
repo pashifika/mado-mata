@@ -95,8 +95,10 @@ application success. Raw result files can contain private execution details.
 For the package/profile GUI, use the [desktop build and run guide](desktop.md).
 It retains app-local named profiles separately from package source and captures
 one immutable run at Start. Draft edits and later profile saves affect only a
-subsequent run. Package/schema mismatches are refused without migrating stored
-data, and Stop/cleanup remain independent of the bounded GUI and file logs.
+subsequent run. Start refuses package/schema mismatches; only an explicit desktop
+Inspect/Reinspect can reconcile safe owned profiles through the
+[profile recovery flow](desktop.md#recover-profiles-after-a-schema-change).
+Stop/cleanup remain independent of the bounded GUI and file logs.
 The shell uses fixed checkout-owned runner/compiler paths, not a release bundle.
 
 ## Package and host contracts
@@ -182,6 +184,23 @@ capture-pixel `x`, `y`, and `left`/`right`/`middle` button. Native sequences bal
 their keys, charge expanded events against finite authority, and preserve actual
 SDK receipt/cleanup outcomes. The TypeScript SDK describes these action variants
 and optional native receipt facts. See the [native contract](runtime-native.md#native-target-selection-and-finite-authority).
+
+## Rust source ownership
+
+Public entry points stay in their existing root namespaces; child modules are
+private implementation boundaries:
+
+| Root | Child ownership |
+| --- | --- |
+| `host.rs` | `options` validates schemas and values; `admission` owns permits and admission; `sequence` owns input dispatch and release |
+| `desktop.rs` | `packages` inspects inventory and profile selection; `operation` owns reservation, workers, polling, and shutdown |
+| `inventory.rs` | `capture` performs bounded filesystem capture and verification; `validation` validates manifest content and identities |
+| `runner.rs` | `protocol` owns framing; `child` executes captured inputs; `supervision` contains and reaps processes; `evidence` owns bounded lifecycle/log transport |
+
+Host and controller state retain their original lock ownership. Evidence channels
+and statics have one owner. Execution consumes the captured inventory rather than
+reopening package source. Owner-local unit tests follow the implementation;
+`check/lifecycle.rs` and `check/loading.rs` remain executable check scenarios.
 
 ## Containment and measurements
 

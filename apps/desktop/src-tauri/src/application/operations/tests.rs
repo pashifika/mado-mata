@@ -19,7 +19,7 @@ fn environment_check_refuses_missing_or_stale_package_selection() {
     let replacement = application
         .inspect(&fixture.numeric_package(), &workspace)
         .unwrap();
-    assert_eq!(replacement.workspace_id, workspace.workspace_id);
+    assert_eq!(replacement.workspace.workspace_id, workspace.workspace_id);
     let error = application
         .check_environment(Some(&workspace), None)
         .unwrap_err();

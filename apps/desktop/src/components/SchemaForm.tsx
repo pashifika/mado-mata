@@ -2,12 +2,15 @@ import Select from './Select.tsx';
 import type {Json, Schema} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
+import {optionPath} from '../state.ts';
 
 interface FormProps {
   schema: Schema;
   value: Record<string, Json>;
   onChange: (value: Record<string, Json>) => void;
   errors: Record<string, string>;
+  // Distinguishes field IDs when two editors of the same schema are on one page; the default is the ordinary editor.
+  idPrefix?: string;
 }
 
 function object(value: Json): value is Record<string, Json> {
@@ -27,21 +30,22 @@ interface FieldProps {
   path: string;
   onChange: (value: Json) => void;
   errors: Record<string, string>;
+  idPrefix: string;
 }
 
-function Field({schema, value, path, onChange, errors}: FieldProps) {
+function Field({schema, value, path, onChange, errors, idPrefix}: FieldProps) {
   const locale = useLocale();
   const t = messages[locale].ui;
-  const id = `option-${encodeURIComponent(path)}`;
+  const id = `${idPrefix}-${encodeURIComponent(path)}`;
   if (schema.type === 'object' && object(value)) {
     return <div id={id} className="object-fields" role="group" aria-label={path}>
       {Object.entries(schema.properties ?? {}).map(([name, child]) => {
         const present = Object.hasOwn(value, name);
-        const childPath = `${path}.${name}`;
+        const childPath = optionPath(path, name);
         const topDefault = path === '$' && child.default !== undefined;
         return <section className="schema-field" key={name}>
           <div className="field-heading">
-            <label htmlFor={`option-${encodeURIComponent(childPath)}`}>{name}</label>
+            <label htmlFor={`${idPrefix}-${encodeURIComponent(childPath)}`}>{name}</label>
             <span className="field-type">{child.type} · {schema.required?.includes(name) ? t.schema.required : t.schema.optional}</span>
             <button className="text-button" type="button" aria-label={t.schema.fieldAction(present, childPath)} onClick={() => {
               const next = {...value};
@@ -50,13 +54,13 @@ function Field({schema, value, path, onChange, errors}: FieldProps) {
               onChange(next);
             }}>{present ? t.schema.omit : t.schema.addField}</button>
           </div>
-          {present ? <Field schema={child} value={value[name]} path={childPath} errors={errors}
+          {present ? <Field schema={child} value={value[name]} path={childPath} errors={errors} idPrefix={idPrefix}
             onChange={next => onChange({...value, [name]: next})}/>
             : <p className="muted omitted">{topDefault ? t.schema.omittedDefault(JSON.stringify(child.default)) : t.schema.omitted}</p>}
         </section>;
       })}
       {Object.keys(value).filter(name => !Object.hasOwn(schema.properties ?? {}, name)).map(name => <div className="inline-warning" key={name}>
-        {t.schema.unknown(`${path}.${name}`, JSON.stringify(value[name]))}
+        {t.schema.unknown(optionPath(path, name), JSON.stringify(value[name]))}
         <button type="button" onClick={() => {const next = {...value}; delete next[name]; onChange(next);}}>{t.schema.removeField}</button>
       </div>)}
     </div>;
@@ -71,7 +75,7 @@ function Field({schema, value, path, onChange, errors}: FieldProps) {
       <p className="muted">{t.schema.ordered(value.length, schema.minItems, schema.maxItems)}</p>
       {value.map((item, index) => <div className="array-item" key={index}>
         <span className="item-index">{index + 1}</span>
-        <div className="array-value"><Field schema={schema.items!} value={item} path={`${path}[${index}]`} errors={errors}
+        <div className="array-value"><Field schema={schema.items!} value={item} path={`${path}[${index}]`} errors={errors} idPrefix={idPrefix}
           onChange={next => onChange(value.map((old, at) => at === index ? next : old))}/></div>
         <div className="array-actions">
           <button type="button" aria-label={t.schema.moveUp(`${path}[${index}]`)} disabled={index === 0} onClick={() => move(index, -1)}>{t.schema.up}</button>
@@ -109,6 +113,6 @@ function Field({schema, value, path, onChange, errors}: FieldProps) {
   </div>;
 }
 
-export default function SchemaForm({schema, value, onChange, errors}: FormProps) {
-  return <Field schema={schema} value={value} path="$" errors={errors} onChange={next => onChange(next as Record<string, Json>)}/>;
+export default function SchemaForm({schema, value, onChange, errors, idPrefix = 'option'}: FormProps) {
+  return <Field schema={schema} value={value} path="$" errors={errors} idPrefix={idPrefix} onChange={next => onChange(next as Record<string, Json>)}/>;
 }

@@ -32,18 +32,37 @@ export interface Settings {
 export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvironment|null; notifications:NotificationPreferences; locale:Locale; backup_directory:string|null}
 // Host-issued session identity; revisions increment on reinspect and ids are never reused.
 export interface WorkspaceRef {workspace_id:string; revision:number}
+export interface ProfileCatalog {profiles:Profile[]; profiles_error:Fault|null}
 // A real inspected package bound to one named Tab session.
-export interface Selection extends WorkspaceRef {internal_name:string; display_name:string; package:PackageInfo; profiles:Profile[]; profiles_error:Fault|null; package_path:string}
+export interface Selection extends WorkspaceRef, ProfileCatalog {internal_name:string; display_name:string; package:PackageInfo; package_path:string}
 // Persisted package source forms. Only `directory` is inspectable by this desktop; `custom_archive` is retained unsupported.
 export type PackageSource = {kind:'directory'; path:string} | {kind:'custom_archive'; path:string};
 export interface PackageReference {package_id:string; source:PackageSource}
 // The durable Tab record; names and references persist, sessions do not.
 export interface TabRecord {version:number; internal_name:string; display_name:string; open:boolean; packages:PackageReference[]; selected_package_id:string|null}
+// Host-issued recovery context: an opaque bounded token tied to one Workspace revision. It is never an authoritative
+// path/schema/owner tuple and grants recovery actions only, not run or ordinary profile authority.
+export interface RecoveryRef {workspace:WorkspaceRef; token:string}
+// A safely decoded owned profile the inspected schema rejects, with the current attributed validation issue.
+export interface RecoverableProfile {profile:Profile; issue:Fault}
+// The Tab's current repair context. `relocation` marks a same-package candidate directory whose source is not durably
+// bound: it is not a Selection, cannot run, and only repair/reset/retry/discard apply to it.
+export interface RecoveryView {context:RecoveryRef; relocation:boolean; package_path:string; package:PackageInfo; profiles:RecoverableProfile[]; profiles_error:Fault|null}
+export type RecoveryStatus = 'saved'|'repair_required'|'storage_failed';
+// One profile's publication fact from explicit inspection; a saved outcome stays true if binding fails afterwards.
+export interface ProfileRecoveryOutcome {profile_id:string; name:string; status:RecoveryStatus; issue:Fault|null}
 // One open Tab as the host sees it: a fresh session identity, a real selection when inspection succeeded, or the
 // owner-scoped reason its saved source could not be used. Both null means no saved package. `saved_package` is the
 // selected durable reference: kept when inspection failed or is unsupported, updated by a successful bind, null only
-// for a genuinely unbound Tab. It is metadata and grants no inspected or run authority.
-export interface WorkspaceView {workspace_id:string; revision:number; internal_name:string; display_name:string; selection:Selection|null; source_error:Fault|null; saved_package:PackageReference|null}
+// for a genuinely unbound Tab. It is metadata and grants no inspected or run authority. `recovery` is the host's
+// current repair context for rejected profiles, present with or without a selection.
+export interface WorkspaceView {workspace_id:string; revision:number; internal_name:string; display_name:string; selection:Selection|null; source_error:Fault|null; saved_package:PackageReference|null; recovery:RecoveryView|null}
+// Typed result of explicit inspection or binding retry. `bound` published a Selection; `recovery_required` established
+// a non-runnable candidate; `binding_failed` kept the saved reference. Outcomes are per-profile facts in every case.
+export interface InspectionOutcome {kind:'bound'|'recovery_required'|'binding_failed'; workspace:WorkspaceView; outcomes:ProfileRecoveryOutcome[]; binding_error:Fault|null}
+// Result of one repair Save or confirmed Reset. `saved` is the committed record regardless of the later refresh;
+// `draft` is the host's default-based draft when Reset could not form a valid profile; `issue` is the current failure.
+export interface RecoveryMutation {saved:Profile|null; draft:Record<string,Json>|null; issue:Fault|null; recovery:RecoveryView|null; catalog:ProfileCatalog|null; refresh_error:Fault|null}
 export interface WorkspaceCatalog {open:WorkspaceView[]; closed:TabRecord[]; faults:Fault[]}
 // `loading` is the transient first read before the shell has resolved the root; it carries no defaults or catalog.
 export type BootstrapState = 'loading'|'setup'|'ready'|'recovery';

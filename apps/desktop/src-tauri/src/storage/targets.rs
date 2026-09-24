@@ -90,8 +90,13 @@ impl Store {
                     "resolution": check.resolution,
                 })));
             }
+            let declaration_identity = declaration.identity()?;
             let id = match &record.binding {
-                Some(binding) if binding.compatible(package, declaration)? => binding.id.clone(),
+                Some(binding)
+                    if binding.compatible(package, &declaration.id, &declaration_identity) =>
+                {
+                    binding.id.clone()
+                }
                 _ => new_id()?,
             };
             record.revision = revision;
@@ -99,7 +104,7 @@ impl Store {
                 id,
                 package_id: package.to_owned(),
                 target_id: declaration.id.clone(),
-                declaration_identity: declaration.identity()?,
+                declaration_identity,
                 configuration,
                 resolution: check.resolution.clone(),
             });

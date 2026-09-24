@@ -69,7 +69,12 @@ fn target_owner_conflicts_reinspection_and_native_refusal_preserve_configuration
     assert_eq!(fs::read(&file).unwrap(), bytes);
 
     declare_target(&path, Some("changed-target"));
-    let changed = application.inspect(&path, &first_ref).unwrap();
+    let changed = application
+        .inspect(&path, &first_ref)
+        .unwrap()
+        .workspace
+        .selection
+        .unwrap();
     let changed_ref = workspace_ref(&changed);
     assert_eq!(
         application.read_target(&first_ref).unwrap_err().category,
@@ -79,7 +84,12 @@ fn target_owner_conflicts_reinspection_and_native_refusal_preserve_configuration
     assert!(!incompatible.compatible);
     assert_eq!(fs::read(&file).unwrap(), bytes);
     declare_target(&path, None);
-    let targetless = application.inspect(&path, &changed_ref).unwrap();
+    let targetless = application
+        .inspect(&path, &changed_ref)
+        .unwrap()
+        .workspace
+        .selection
+        .unwrap();
     let targetless_ref = workspace_ref(&targetless);
     let preserved = application.read_target(&targetless_ref).unwrap();
     assert!(!preserved.compatible);
@@ -895,22 +905,35 @@ fn same_id_source_replacement_checks_profiles_before_durable_binding() {
     let profile_path = profile_path(&fixture, "Main", &saved);
     let original_tab = fs::read(&tab_path).unwrap();
     let original_profile = fs::read(&profile_path).unwrap();
-    let error = application
-        .inspect(&fixture.numeric_package(), &workspace)
-        .unwrap_err();
-    assert_eq!(error.category, "PackageCompatibility");
+    let incompatible = fixture.package_at("incompatible-relocation");
+    let schema_path = incompatible.join("schema.json");
+    let mut schema: Value = serde_json::from_slice(&fs::read(&schema_path).unwrap()).unwrap();
+    schema["properties"]["priorities"]["minItems"] = json!(2);
+    fs::write(schema_path, serde_json::to_vec(&schema).unwrap()).unwrap();
+    let outcome = application.inspect(&incompatible, &workspace).unwrap();
+    assert_eq!(outcome.kind, InspectionKind::RecoveryRequired);
+    assert_eq!(
+        outcome.binding_error.unwrap().category,
+        "PackageCompatibility"
+    );
     assert_eq!(fs::read(&tab_path).unwrap(), original_tab);
     assert_eq!(fs::read(&profile_path).unwrap(), original_profile);
-    let current = application.workspace_catalog().unwrap().open.remove(0);
-    assert_eq!(view_ref(&current), workspace);
+    let current = outcome.workspace;
+    assert_eq!(current.revision, workspace.revision + 1);
+    assert!(current.selection.is_none());
     assert_eq!(
-        current.selection.unwrap().package_path,
-        original.package_path
+        current.recovery.as_ref().unwrap().profiles[0].profile.id,
+        saved.id
     );
     let relocated = fixture.package_at("compatible-relocation");
-    let replacement = application.inspect(&relocated, &workspace).unwrap();
+    let replacement = application
+        .inspect(&relocated, &view_ref(&current))
+        .unwrap()
+        .workspace
+        .selection
+        .unwrap();
     assert_eq!(replacement.workspace_id, workspace.workspace_id);
-    assert_eq!(replacement.revision, workspace.revision + 1);
+    assert_eq!(replacement.revision, current.revision + 1);
     assert_eq!(replacement.profiles[0].id, saved.id);
     assert_eq!(replacement.profiles[0].values, saved.values);
     assert_eq!(fs::read(profile_path).unwrap(), original_profile);
@@ -1053,7 +1076,12 @@ fn stale_revisions_and_foreign_profiles_cannot_mutate_saved_values() {
             .category,
         "ProfileNotFound"
     );
-    let replacement = application.inspect(&package_path(), &original).unwrap();
+    let replacement = application
+        .inspect(&package_path(), &original)
+        .unwrap()
+        .workspace
+        .selection
+        .unwrap();
     let current = workspace_ref(&replacement);
     assert_eq!(current.revision, original.revision + 1);
     assert_eq!(

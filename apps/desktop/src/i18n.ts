@@ -7,7 +7,8 @@ export type Locale = 'en' | 'ja';
 export type Command = "initializing" | "retrying" | "importingRoot" | "restoring" | "recovering" | "refreshingStatus"
   | "creatingWorkspace" | "reopeningWorkspace" | "inspectingPackage" | "validatingDraft" | "savingProfile" | "renamingProfile"
   | "deletingProfile" | "importingProfiles" | "reinspectingPackage" | "admittingRun" | "admittingCheck" | "savingSettings" | "closingWorkspace"
-  | "readingTarget" | "checkingTarget" | "savingTarget" | "removingTarget";
+  | "readingTarget" | "checkingTarget" | "savingTarget" | "removingTarget"
+  | "repairingProfile" | "resettingProfile" | "retryingBinding" | "discardingRecovery";
 
 function appMessages(copy: typeof en) {
   return {...copy.app,
@@ -31,6 +32,9 @@ function appMessages(copy: typeof en) {
     stopFailed: (diagnostic: string) => interpolate(copy.app.stopFailed, {diagnostic}),
     settingsSaved: (profile: string) => interpolate(copy.app.settingsSaved, {profile}),
     waitForCommand: (command: Command) => interpolate(copy.app.waitForCommand, {command: copy.app[command]}),
+    recoverySaved: (name: string, id: string) => interpolate(copy.app.recoverySaved, {name, id}),
+    recoveryEarlierSaved: (name: string, id: string) => interpolate(copy.app.recoveryEarlierSaved, {name, id}),
+    inspectionOutcomes: (saved: number, pending: number) => interpolate(copy.app.inspectionOutcomes, {saved, pending}),
   };
 }
 
@@ -40,8 +44,9 @@ export const messages = {
 };
 
 type AppMessages = typeof messages.en.app;
-export type Message = {[Key in keyof AppMessages]: AppMessages[Key] extends (...args: infer Args) => string
-  ? {key: Key; args: Args} : {key: Key}}[keyof AppMessages];
+type TextMessageKey = {[Key in keyof AppMessages]: AppMessages[Key] extends string ? Key : never}[keyof AppMessages];
+export type Message = {key: TextMessageKey} | {[Key in keyof AppMessages]: AppMessages[Key] extends (...args: infer Args) => string
+  ? {key: Key; args: Args} : never}[keyof AppMessages];
 
 export function renderMessage(locale: Locale, message: Message | null): string {
   if (message === null) return '';

@@ -1,10 +1,33 @@
 use super::object;
 use crate::model::Fault;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
+
+/// Appends an unambiguous property segment to a diagnostic value path.
+pub fn option_path(parent: &str, key: &str) -> String {
+    let mut bytes = key.bytes();
+    if bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+    {
+        return format!("{parent}.{key}");
+    }
+    let mut path = Vec::with_capacity(parent.len() + key.len() + 4);
+    path.extend_from_slice(parent.as_bytes());
+    path.push(b'[');
+    serde_json::to_writer(&mut path, key).expect("serializing a string to a vector cannot fail");
+    path.push(b']');
+    String::from_utf8(path).expect("JSON property paths are UTF-8")
+}
+
+fn option_fault(category: &str, message: impl Into<String>, path: &str) -> Fault {
+    Fault::new(category, message).with_context(json!({"path": path}))
+}
 
 /// The supported schema is deliberately small; unsupported keywords never become annotations.
 pub fn resolve_options(schema: &Value, profile: &Value, package_id: &str) -> Result<Value, Fault> {
+    let path = "$";
     let root = object(
         schema,
         &[
@@ -23,11 +46,12 @@ pub fn resolve_options(schema: &Value, profile: &Value, package_id: &str) -> Res
             "additionalProperties",
         ],
     )
-    .map_err(|error| Fault::new("Schema", error.message))?;
+    .map_err(|error| option_fault("Schema", error.message, path))?;
     if root["version"].as_u64() != Some(1) || root["type"] != "object" {
-        return Err(Fault::new(
+        return Err(option_fault(
             "Schema",
             "unsupported root schema version or type",
+            path,
         ));
     }
     validate_schema(schema, "$", true, 0)?;
@@ -36,24 +60,29 @@ pub fn resolve_options(schema: &Value, profile: &Value, package_id: &str) -> Res
         &["package_id", "schema_version", "options"],
         &["package_id", "schema_version", "options"],
     )
-    .map_err(|error| Fault::new("Profile", error.message))?;
+    .map_err(|error| option_fault("Profile", error.message, path))?;
     if profile["package_id"].as_str() != Some(package_id)
         || profile["schema_version"] != root["version"]
     {
-        return Err(Fault::new(
+        return Err(option_fault(
             "ProfileIdentity",
             "profile package or schema identity does not match",
+            path,
         ));
     }
     let supplied = profile["options"]
         .as_object()
-        .ok_or_else(|| Fault::new("Profile", "options must be an object"))?;
+        .ok_or_else(|| option_fault("Profile", "options must be an object", path))?;
     let properties = root["properties"]
         .as_object()
-        .ok_or_else(|| Fault::new("Schema", "properties must be an object"))?;
+        .ok_or_else(|| option_fault("Schema", "properties must be an object", path))?;
     for key in supplied.keys() {
         if !properties.contains_key(key) {
-            return Err(Fault::new("Profile", format!("unknown option: {key}")));
+            return Err(option_fault(
+                "Profile",
+                format!("unknown option: {key}"),
+                &option_path(path, key),
+            ));
         }
     }
     let mut resolved = Map::new();
@@ -69,15 +98,15 @@ pub fn resolve_options(schema: &Value, profile: &Value, package_id: &str) -> Res
 
 fn validate_schema(schema: &Value, path: &str, root: bool, depth: usize) -> Result<(), Fault> {
     if depth > 32 {
-        return Err(Fault::new("Schema", "schema nesting exceeds 32"));
+        return Err(option_fault("Schema", "schema nesting exceeds 32", path));
     }
     let map = schema
         .as_object()
-        .ok_or_else(|| Fault::new("Schema", format!("{path}: schema must be an object")))?;
+        .ok_or_else(|| option_fault("Schema", format!("{path}: schema must be an object"), path))?;
     let kind = map
         .get("type")
         .and_then(Value::as_str)
-        .ok_or_else(|| Fault::new("Schema", format!("{path}: type is required")))?;
+        .ok_or_else(|| option_fault("Schema", format!("{path}: type is required"), path))?;
     let specific: &[&str] = match kind {
         "object" => &["properties", "required", "additionalProperties"],
         "array" => &["items", "minItems", "maxItems"],
@@ -85,9 +114,10 @@ fn validate_schema(schema: &Value, path: &str, root: bool, depth: usize) -> Resu
         "integer" | "number" => &["minimum", "maximum"],
         "boolean" => &[],
         _ => {
-            return Err(Fault::new(
+            return Err(option_fault(
                 "Schema",
                 format!("{path}: unsupported type {kind}"),
+                path,
             ));
         }
     };
@@ -97,52 +127,59 @@ fn validate_schema(schema: &Value, path: &str, root: bool, depth: usize) -> Resu
             && !(root && key == "version")
             && !specific.contains(&key.as_str())
         {
-            return Err(Fault::new(
+            return Err(option_fault(
                 "Schema",
                 format!("{path}: unsupported keyword {key}"),
+                path,
             ));
         }
     }
     match kind {
         "object" => {
             if map.get("additionalProperties") != Some(&Value::Bool(false)) {
-                return Err(Fault::new(
+                return Err(option_fault(
                     "Schema",
                     format!("{path}: additionalProperties must be false"),
+                    path,
                 ));
             }
             let properties = map
                 .get("properties")
                 .and_then(Value::as_object)
                 .ok_or_else(|| {
-                    Fault::new("Schema", format!("{path}: properties must be an object"))
+                    option_fault(
+                        "Schema",
+                        format!("{path}: properties must be an object"),
+                        path,
+                    )
                 })?;
             let required = map
                 .get("required")
                 .and_then(Value::as_array)
                 .ok_or_else(|| {
-                    Fault::new("Schema", format!("{path}: required must be an array"))
+                    option_fault("Schema", format!("{path}: required must be an array"), path)
                 })?;
             let mut names = BTreeSet::new();
             for item in required {
-                let name = item
-                    .as_str()
-                    .ok_or_else(|| Fault::new("Schema", "required entries must be strings"))?;
+                let name = item.as_str().ok_or_else(|| {
+                    option_fault("Schema", "required entries must be strings", path)
+                })?;
                 if !properties.contains_key(name) || !names.insert(name) {
-                    return Err(Fault::new(
+                    return Err(option_fault(
                         "Schema",
                         format!("{path}: invalid or duplicate required field {name}"),
+                        path,
                     ));
                 }
             }
             for (name, node) in properties {
-                validate_schema(node, &format!("{path}.{name}"), false, depth + 1)?;
+                validate_schema(node, &option_path(path, name), false, depth + 1)?;
             }
         }
         "array" => {
             let items = map
                 .get("items")
-                .ok_or_else(|| Fault::new("Schema", format!("{path}: items required")))?;
+                .ok_or_else(|| option_fault("Schema", format!("{path}: items required"), path))?;
             validate_schema(items, &format!("{path}[]"), false, depth + 1)?;
             validate_bounds(map, "minItems", "maxItems", true, path)?;
         }
@@ -153,17 +190,22 @@ fn validate_schema(schema: &Value, path: &str, root: bool, depth: usize) -> Resu
                     .as_array()
                     .filter(|items| !items.is_empty())
                     .ok_or_else(|| {
-                        Fault::new("Schema", format!("{path}: enum must be nonempty"))
+                        option_fault("Schema", format!("{path}: enum must be nonempty"), path)
                     })?;
                 let mut seen = BTreeSet::new();
                 for value in values {
                     let value = value.as_str().ok_or_else(|| {
-                        Fault::new("Schema", format!("{path}: enum entries must be strings"))
+                        option_fault(
+                            "Schema",
+                            format!("{path}: enum entries must be strings"),
+                            path,
+                        )
                     })?;
                     if !seen.insert(value) {
-                        return Err(Fault::new(
+                        return Err(option_fault(
                             "Schema",
                             format!("{path}: duplicate enum value"),
+                            path,
                         ));
                     }
                 }
@@ -173,8 +215,10 @@ fn validate_schema(schema: &Value, path: &str, root: bool, depth: usize) -> Resu
         _ => {}
     }
     if let Some(default) = map.get("default") {
-        validate_value(schema, default, path)
-            .map_err(|error| Fault::new("SchemaDefault", error.message))?;
+        validate_value(schema, default, path).map_err(|mut error| {
+            error.category = "SchemaDefault".into();
+            error
+        })?;
     }
     Ok(())
 }
@@ -191,7 +235,11 @@ fn validate_bounds(
             if value.as_f64().is_none_or(|n| !n.is_finite())
                 || (integral && value.as_u64().is_none())
             {
-                return Err(Fault::new("Schema", format!("{path}: invalid {key}")));
+                return Err(option_fault(
+                    "Schema",
+                    format!("{path}: invalid {key}"),
+                    path,
+                ));
             }
         }
     }
@@ -200,14 +248,18 @@ fn validate_bounds(
         map.get(upper).and_then(Value::as_f64),
     ) {
         if low > high {
-            return Err(Fault::new("Schema", format!("{path}: reversed bounds")));
+            return Err(option_fault(
+                "Schema",
+                format!("{path}: reversed bounds"),
+                path,
+            ));
         }
     }
     Ok(())
 }
 
 fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<(), Fault> {
-    let invalid = |detail: &str| Fault::new("Profile", format!("{path}: {detail}"));
+    let invalid = |detail: &str| option_fault("Profile", format!("{path}: {detail}"), path);
     match schema["type"].as_str() {
         Some("object") => {
             let map = value
@@ -224,17 +276,24 @@ fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<(), Fault
                     .as_str()
                     .ok_or_else(|| invalid("invalid required field"))?;
                 if !map.contains_key(key) {
-                    return Err(Fault::new(
+                    let child_path = option_path(path, key);
+                    return Err(option_fault(
                         "Profile",
-                        format!("{path}.{key}: required field missing"),
+                        format!("{child_path}: required field missing"),
+                        &child_path,
                     ));
                 }
             }
             for (key, value) in map {
-                let node = properties
-                    .get(key)
-                    .ok_or_else(|| Fault::new("Profile", format!("{path}.{key}: unknown field")))?;
-                validate_value(node, value, &format!("{path}.{key}"))?;
+                let child_path = option_path(path, key);
+                let node = properties.get(key).ok_or_else(|| {
+                    option_fault(
+                        "Profile",
+                        format!("{child_path}: unknown field"),
+                        &child_path,
+                    )
+                })?;
+                validate_value(node, value, &child_path)?;
             }
         }
         Some("array") => {
@@ -277,7 +336,7 @@ fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<(), Fault
         }
         Some("boolean") if value.is_boolean() => {}
         Some("boolean") => return Err(invalid("expected boolean")),
-        _ => return Err(Fault::new("Schema", "unsupported schema type")),
+        _ => return Err(option_fault("Schema", "unsupported schema type", path)),
     }
     Ok(())
 }
@@ -298,9 +357,10 @@ fn validate_length(
             .and_then(Value::as_u64)
             .is_some_and(|n| (length as u64) > n)
     {
-        return Err(Fault::new(
+        return Err(option_fault(
             "Profile",
             format!("{path}: length outside declared bounds"),
+            path,
         ));
     }
     Ok(())

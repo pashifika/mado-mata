@@ -1,6 +1,6 @@
 use mado_mata_desktop::application::{
-    Poll, ProfileCatalog, Selection, TargetCheckResponse, TargetSaveResponse, TargetView,
-    WorkspaceCatalog, WorkspaceRef, WorkspaceView,
+    InspectionOutcome, Poll, ProfileCatalog, RecoveryMutation, RecoveryRef, TargetCheckResponse,
+    TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView,
 };
 use mado_mata_desktop::backup::SnapshotReceipt;
 use mado_mata_desktop::bootstrap::{Bootstrap, BootstrapStatus, selected_roots};
@@ -131,9 +131,49 @@ async fn inspect(
     package_path: String,
     workspace: WorkspaceRef,
     state: tauri::State<'_, Backend>,
-) -> Result<Selection, Fault> {
+) -> Result<InspectionOutcome, Fault> {
     let application = state.bootstrap.application()?;
     background(move || application.inspect(Path::new(&package_path), &workspace)).await
+}
+
+#[tauri::command]
+async fn repair_profile(
+    context: RecoveryRef,
+    id: String,
+    values: Value,
+    state: tauri::State<'_, Backend>,
+) -> Result<RecoveryMutation, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.repair_profile(&context, &id, values)).await
+}
+
+#[tauri::command]
+async fn reset_profile(
+    context: RecoveryRef,
+    id: String,
+    confirm: bool,
+    state: tauri::State<'_, Backend>,
+) -> Result<RecoveryMutation, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.reset_profile(&context, &id, confirm)).await
+}
+
+#[tauri::command]
+async fn retry_binding(
+    context: RecoveryRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<InspectionOutcome, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.retry_binding(&context)).await
+}
+
+#[tauri::command]
+async fn discard_recovery(
+    context: RecoveryRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<WorkspaceView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.discard_recovery(&context)).await
 }
 
 #[tauri::command]
@@ -394,6 +434,10 @@ fn main() {
             reopen_workspace,
             workspace_catalog,
             inspect,
+            repair_profile,
+            reset_profile,
+            retry_binding,
+            discard_recovery,
             close_workspace,
             settings,
             save_settings,

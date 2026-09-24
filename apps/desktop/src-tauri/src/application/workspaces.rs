@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 impl Workspaces {
-    fn resolve_workspace(&self, workspace: &WorkspaceRef) -> Result<&Workspace, Fault> {
+    pub(super) fn resolve_workspace(&self, workspace: &WorkspaceRef) -> Result<&Workspace, Fault> {
         self.open
             .iter()
             .find(|selected| selected.workspace == *workspace)
@@ -207,10 +207,11 @@ impl Application {
             selected,
             source_error,
             terminal: None,
+            recovery: None,
         }
     }
 
-    fn inspect_selection(
+    pub(super) fn inspect_selection(
         runner: &DesktopController,
         path: &Path,
         workspace: WorkspaceRef,
@@ -249,85 +250,6 @@ impl Application {
         })
     }
 
-    pub fn inspect(&self, path: &Path, workspace: &WorkspaceRef) -> Result<Selection, Fault> {
-        let result = (|| {
-            let (_command, mut state) = self.command_state()?;
-            let previous = state.resolve_workspace(workspace)?.clone();
-            self.collect(&mut state);
-            state.idle()?;
-            let revision = workspace
-                .revision
-                .checked_add(1)
-                .filter(|revision| *revision <= MAX_SESSION_COUNTER)
-                .ok_or_else(|| Fault::new("WorkspaceLimit", "Workspace revision limit reached"))?;
-            drop(state);
-            let selected = Self::inspect_selection(
-                &self.runner,
-                path,
-                WorkspaceRef {
-                    workspace_id: workspace.workspace_id.clone(),
-                    revision,
-                },
-                &previous.internal_name,
-                &previous.display_name,
-            )?;
-            let saved_package = {
-                let store = lock(&self.store);
-                let tab = store.tab(&selected.internal_name)?;
-                let replacing_source = tab.packages.iter()
-                    .find(|reference| reference.package_id == selected.inventory.package_id)
-                    .is_some_and(|reference| !matches!(
-                        &reference.source,
-                        PackageSource::Directory { path } if Path::new(path) == selected.path.as_path()
-                    ));
-                if replacing_source {
-                    let profiles = store
-                        .profile_store(&selected.internal_name, &selected.inventory.package_id)?;
-                    let (_, incompatible) = validated_profiles(&profiles, &selected.inventory)?;
-                    if let Some(cause) = incompatible {
-                        return Err(Fault::new(
-                            "PackageCompatibility",
-                            "Replacement source is incompatible with this Tab's saved profiles",
-                        )
-                        .with_context(json!({
-                            "internal_name":selected.internal_name,
-                            "package_id":selected.inventory.package_id,
-                            "cause":cause,
-                        })));
-                    }
-                }
-                let bound = store.bind_package(
-                    &selected.internal_name,
-                    &selected.inventory.package_id,
-                    &selected.path,
-                )?;
-                bound
-                    .packages
-                    .into_iter()
-                    .find(|reference| reference.package_id == selected.inventory.package_id)
-            };
-            let selection = self.selection(&selected);
-            let mut state = lock(&self.workspaces);
-            let current = state
-                .open
-                .iter_mut()
-                .find(|value| value.workspace == *workspace)
-                .expect("command admission retains the initiating workspace");
-            current.workspace = selected.workspace.clone();
-            current.saved_package = saved_package;
-            current.selected = Some(selected);
-            current.source_error = None;
-            // A previous revision's outcome remains attributable, not applicable.
-            Ok(selection)
-        })();
-        self.outcome(
-            Some(workspace),
-            "inspect",
-            Some(("workspace.reinspected", "Workspace package inspected")),
-            result,
-        )
-    }
-
     fn selection(&self, selected: &Selected) -> Selection {
         let store = lock(&self.store);
         let listing = store
@@ -349,7 +271,7 @@ impl Application {
         }
     }
 
-    fn workspace_view(&self, workspace: &Workspace) -> WorkspaceView {
+    pub(super) fn workspace_view(&self, workspace: &Workspace) -> WorkspaceView {
         WorkspaceView {
             workspace_id: workspace.workspace.workspace_id.clone(),
             revision: workspace.workspace.revision,
@@ -361,6 +283,7 @@ impl Application {
                 .as_ref()
                 .map(|selected| self.selection(selected)),
             source_error: workspace.source_error.clone(),
+            recovery: workspace.recovery.as_ref().map(|context| context.view()),
         }
     }
 

@@ -100,7 +100,12 @@ pub(super) fn inspect_named(
     path: &Path,
 ) -> Result<Selection, Fault> {
     let workspace = application.create_workspace(internal_name, internal_name)?;
-    application.inspect(path, &view_ref(&workspace))
+    let outcome = application.inspect(path, &view_ref(&workspace))?;
+    assert_eq!(outcome.kind, InspectionKind::Bound);
+    Ok(outcome
+        .workspace
+        .selection
+        .expect("new fixture package is bound"))
 }
 
 pub(super) fn preferences() -> EditableSettings {

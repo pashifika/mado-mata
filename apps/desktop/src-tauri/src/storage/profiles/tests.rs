@@ -48,12 +48,25 @@ fn malformed_profiles_and_wrong_containing_identities_preserve_data() {
     let inv = inventory();
     let saved = store.save(&inv, None, "Original", options()).unwrap();
     let path = store.profile_path(&saved.id);
+    let expected = store.recovery_records().unwrap().pop().unwrap();
     let mut malformed = vec![b"not JSON".to_vec()];
+    let mut nested = Value::Null;
+    for _ in 0..MAX_VALUE_DEPTH {
+        nested = json!([nested]);
+    }
     for (key, value) in [
         ("version", json!(2)),
         ("id", json!(new_id().unwrap())),
         ("package_id", json!("other-owner")),
         ("values", json!({"nested":{"api_key":"credential"}})),
+        ("values", json!({"label":"/private/model"})),
+        ("values", json!([])),
+        ("values", json!({"items":vec![0; MAX_VALUE_NODES]})),
+        ("values", json!({"nested":nested})),
+        ("values", json!({"label":"x".repeat(MAX_PROFILE_BYTES)})),
+        ("name", json!("../foreign")),
+        ("schema_identity", json!("not-an-identity")),
+        ("unexpected", json!(true)),
     ] {
         let mut document = serde_json::to_value(&saved).unwrap();
         document[key] = value;
@@ -74,6 +87,16 @@ fn malformed_profiles_and_wrong_containing_identities_preserve_data() {
         );
         assert!(store.rename(&inv, &saved.id, "Renamed").is_err());
         assert!(store.delete(&saved.id).is_err());
+        let recovery_fault = store.recovery_records().unwrap_err();
+        assert_eq!(recovery_fault.category, fault.category);
+        assert_eq!(recovery_fault.context["profile_id"], saved.id);
+        assert_eq!(
+            store
+                .replace_recovery(&inv, &expected, options())
+                .unwrap_err()
+                .category,
+            fault.category
+        );
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
     assert!(store.delete("../settings").is_err());
@@ -143,6 +166,7 @@ fn pending_profiles_block_mutation_but_foreign_notes_remain_untouched() {
     fs::write(&notes, b"operator notes").unwrap();
     store.rename(&inv, &saved.id, "Renamed").unwrap();
     let pending = store.profile_path(&saved.id).with_extension("pending");
+    let expected = store.recovery_records().unwrap().pop().unwrap();
     put(&pending, b"unfinished");
     let before = fs::read(store.profile_path(&saved.id)).unwrap();
     assert!(store.list(&inv.package_id, &saved.schema_identity).is_err());
@@ -152,6 +176,16 @@ fn pending_profiles_block_mutation_but_foreign_notes_remain_untouched() {
             .is_err()
     );
     assert!(store.delete(&saved.id).is_err());
+    assert_eq!(
+        store.recovery_records().unwrap_err().category,
+        "StoragePending"
+    );
+    let fault = store
+        .replace_recovery(&inv, &expected, options())
+        .unwrap_err();
+    assert_eq!(fault.category, "StoragePending");
+    assert_eq!(fault.context["file"], format!("{}.pending", saved.id));
+    assert!(fault.context.get("profile_id").is_none());
     assert_eq!(fs::read(store.profile_path(&saved.id)).unwrap(), before);
     assert_eq!(fs::read(&pending).unwrap(), b"unfinished");
     assert_eq!(fs::read(&notes).unwrap(), b"operator notes");
@@ -183,6 +217,7 @@ fn failed_profile_publication_retains_previous_bytes() {
     let mut profile = store.save(&inv, None, "Original", options()).unwrap();
     let path = store.profile_path(&profile.id);
     let before = fs::read(&path).unwrap();
+    let expected = store.recovery_records().unwrap().pop().unwrap();
     profile.name = "Unsaved".into();
     let bytes = encode(&profile, MAX_PROFILE_BYTES).unwrap();
     assert!(
@@ -194,6 +229,15 @@ fn failed_profile_publication_retains_previous_bytes() {
     );
     assert_eq!(fs::read(&path).unwrap(), before);
     assert!(!path.with_extension("pending").exists());
+    assert_eq!(
+        store.recovery_records().unwrap()[0].fingerprint,
+        expected.fingerprint
+    );
+    let recovered = store
+        .replace_recovery(&inv, &expected, json!({"priorities":["left"]}))
+        .unwrap();
+    assert_eq!(recovered.name, "Original");
+    assert_eq!(recovered.values, json!({"priorities":["left"]}));
     let reopened = directory
         .store()
         .profile_store("Owner", &inv.package_id)
@@ -230,6 +274,10 @@ fn portability_checks_fields_paths_and_defaults_not_arbitrary_words() {
     let directory = Directory::new();
     let store = directory.profiles("Owner");
     let mut inv = inventory();
+    let saved = store.save(&inv, None, "Original", options()).unwrap();
+    let expected = store.recovery_records().unwrap().pop().unwrap();
+    let path = store.profile_path(&saved.id);
+    let before = fs::read(&path).unwrap();
     inv.schema["properties"]["label"]["default"] = json!("/private/default-model");
     assert_eq!(
         store
@@ -238,6 +286,14 @@ fn portability_checks_fields_paths_and_defaults_not_arbitrary_words() {
             .category,
         "ProfileAuthority"
     );
+    assert_eq!(
+        store
+            .replace_recovery(&inv, &expected, json!({"priorities":["left"]}))
+            .unwrap_err()
+            .category,
+        "ProfileAuthority"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
 }
 
 fn legacy_profile(sequence: u64, name: &str) -> Profile {
@@ -415,6 +471,7 @@ fn unsafe_owner_directories_and_linked_profiles_are_refused_without_repair() {
     let saved = scoped
         .save(&inventory(), None, "Original", options())
         .unwrap();
+    let expected = scoped.recovery_records().unwrap().pop().unwrap();
     let path = scoped.profile_path(&saved.id);
     assert_eq!(fs::metadata(&directory.0).unwrap().mode() & 0o777, 0o700);
     assert_eq!(
@@ -437,12 +494,33 @@ fn unsafe_owner_directories_and_linked_profiles_are_refused_without_repair() {
             .is_err()
     );
     assert!(scoped.delete(&saved.id).is_err());
+    assert!(scoped.recovery_records().is_err());
+    assert!(
+        scoped
+            .replace_recovery(&inventory(), &expected, options())
+            .is_err()
+    );
     assert_eq!(fs::read(&outside).unwrap(), before);
     fs::remove_file(&path).unwrap();
     fs::hard_link(&outside, &path).unwrap();
     assert!(scoped.delete(&saved.id).is_err());
+    assert!(scoped.recovery_records().is_err());
+    assert!(
+        scoped
+            .replace_recovery(&inventory(), &expected, options())
+            .is_err()
+    );
     fs::remove_file(&path).unwrap();
     fs::rename(&outside, &path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(scoped.recovery_records().is_err());
+    assert!(
+        scoped
+            .replace_recovery(&inventory(), &expected, options())
+            .is_err()
+    );
+    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o644);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     for owner in [
         directory.0.clone(),
         directory.0.join("tabs"),
@@ -455,8 +533,394 @@ fn unsafe_owner_directories_and_linked_profiles_are_refused_without_repair() {
                 .list(&inventory().package_id, &saved.schema_identity)
                 .is_err()
         );
+        assert!(scoped.recovery_records().is_err());
+        assert!(
+            scoped
+                .replace_recovery(&inventory(), &expected, options())
+                .is_err()
+        );
         assert_eq!(fs::metadata(&owner).unwrap().mode() & 0o777, 0o755);
         fs::set_permissions(&owner, fs::Permissions::from_mode(0o700)).unwrap();
     }
     assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn recovery_replaces_only_owned_values_and_schema_without_loosening_normal_save() {
+    use super::super::fixtures::{preferences, tab_path, target_path};
+
+    let directory = Directory::new();
+    directory.store().initialize(preferences()).unwrap();
+    let store = directory.profiles("Owner");
+    let other = directory.profiles("Other");
+    let mut inv = inventory();
+    let supplied = json!({
+        "priorities":["right","left","right"],
+        "window":{"width":31,"height":47},
+        "label":"retained"
+    });
+    let saved = store
+        .save(&inv, None, "Original", supplied.clone())
+        .unwrap();
+    let unrelated = store.save(&inv, None, "Unrelated", options()).unwrap();
+    let foreign = other.save(&inv, None, "Foreign", options()).unwrap();
+    let target = target_path(&directory, "Owner");
+    put(&target, b"retained target evidence");
+    put(
+        &target.with_extension("pending"),
+        b"retained target pending",
+    );
+    put(
+        &other.profile_path(&foreign.id).with_extension("pending"),
+        b"unrelated pending",
+    );
+    let unchanged: Vec<_> = [
+        directory.0.join("settings.json"),
+        tab_path(&directory, "Owner"),
+        tab_path(&directory, "Other"),
+        store.profile_path(&unrelated.id),
+        other.profile_path(&foreign.id),
+        other.profile_path(&foreign.id).with_extension("pending"),
+        target.clone(),
+        target.with_extension("pending"),
+    ]
+    .into_iter()
+    .map(|path| {
+        let bytes = fs::read(&path).unwrap();
+        (path, bytes)
+    })
+    .collect();
+    let original = fs::read(store.profile_path(&saved.id)).unwrap();
+    inv.schema["properties"]["added"] = json!({"type":"boolean","default":true});
+    let schema = identity(&inv.schema).unwrap();
+    assert!(
+        store
+            .list(&inv.package_id, &schema)
+            .unwrap()
+            .profiles
+            .is_empty()
+    );
+    assert!(
+        store
+            .save(&inv, Some(&saved.id), "Renamed", supplied.clone())
+            .is_err()
+    );
+    let expected = store
+        .recovery_records()
+        .unwrap()
+        .into_iter()
+        .find(|record| record.profile.id == saved.id)
+        .unwrap();
+    assert_eq!(expected.profile.values, supplied);
+    assert_eq!(fs::read(store.profile_path(&saved.id)).unwrap(), original);
+    let mut candidate = supplied;
+    candidate["added"] = json!(true);
+    let recovered = store
+        .replace_recovery(&inv, &expected, candidate.clone())
+        .unwrap();
+    assert_eq!(recovered.id, saved.id);
+    assert_eq!(recovered.name, saved.name);
+    assert_eq!(recovered.package_id, saved.package_id);
+    assert_eq!(recovered.version, saved.version);
+    assert_eq!(recovered.schema_identity, schema);
+    assert_eq!(recovered.values, candidate);
+    let reopened = directory
+        .store()
+        .profile_store("Owner", &inv.package_id)
+        .unwrap();
+    let listing = reopened.list(&inv.package_id, &schema).unwrap();
+    assert_eq!(listing.profiles[0].id, saved.id);
+    assert_eq!(listing.profiles[0].values, candidate);
+    assert_eq!(listing.rejected[0].context["profile_id"], unrelated.id);
+    for (path, bytes) in unchanged {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(store.profile_path(&saved.id)).unwrap().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn recovery_refuses_invalid_candidates_without_consuming_expected_original() {
+    let directory = Directory::new();
+    let store = directory.profiles("Owner");
+    let mut inv = inventory();
+    let saved = store.save(&inv, None, "Original", options()).unwrap();
+    let expected = store.recovery_records().unwrap().pop().unwrap();
+    let path = store.profile_path(&saved.id);
+    let before = fs::read(&path).unwrap();
+    inv.schema["properties"]["label"]["maxLength"] = json!(20);
+    inv.schema["properties"]["window"]["properties"]["width"]["minimum"] = json!(10);
+    inv.schema["properties"]["window"]["properties"]["height"]["default"] = json!(20);
+    for invalid in [
+        json!({}),
+        json!({"priorities":"left"}),
+        json!({"priorities":["up"]}),
+        json!({"priorities":[]}),
+        json!({"priorities":["left"],"obsolete":true}),
+        json!({"priorities":["left"],"label":"x".repeat(21)}),
+        json!({"priorities":["left"],"window":{"width":9,"height":20}}),
+        json!({"priorities":["left"],"window":{"width":10}}),
+        json!({"priorities":["left"],"label":"/private/model"}),
+        json!({"priorities":["left"],"token":"credential"}),
+    ] {
+        let fault = store
+            .replace_recovery(&inv, &expected, invalid)
+            .unwrap_err();
+        assert_eq!(fault.context["profile_id"], saved.id);
+        assert_eq!(fault.context["internal_name"], "Owner");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!path.with_extension("pending").exists());
+    }
+    let recovered = store.replace_recovery(&inv, &expected, options()).unwrap();
+    assert_eq!(recovered.id, saved.id);
+    assert_eq!(recovered.values, options());
+    assert_eq!(recovered.schema_identity, identity(&inv.schema).unwrap());
+}
+
+#[test]
+fn recovery_compares_original_bytes_and_never_recreates_deleted_records() {
+    let directory = Directory::new();
+    let store = directory.profiles("Owner");
+    let inv = inventory();
+    let saved = store.save(&inv, None, "Original", options()).unwrap();
+    let expected = store.recovery_records().unwrap().pop().unwrap();
+    let path = store.profile_path(&saved.id);
+    let mut changed = fs::read(&path).unwrap();
+    changed.push(b'\n');
+    fs::write(&path, &changed).unwrap();
+    let fault = store
+        .replace_recovery(&inv, &expected, options())
+        .unwrap_err();
+    assert_eq!(fault.category, "ProfileConflict");
+    assert_eq!(fault.context["profile_id"], saved.id);
+    assert_eq!(fs::read(&path).unwrap(), changed);
+    let refreshed = store.recovery_records().unwrap().pop().unwrap();
+    assert_eq!(refreshed.profile.values, expected.profile.values);
+    assert_ne!(refreshed.fingerprint, expected.fingerprint);
+    fs::remove_file(&path).unwrap();
+    let fault = store
+        .replace_recovery(&inv, &refreshed, options())
+        .unwrap_err();
+    assert_eq!(fault.category, "ProfileNotFound");
+    assert!(!path.exists());
+    assert!(!path.with_extension("pending").exists());
+    fs::remove_dir(store.directory()).unwrap();
+    assert_eq!(
+        store
+            .replace_recovery(&inv, &refreshed, options())
+            .unwrap_err()
+            .category,
+        "ProfileNotFound"
+    );
+    assert!(!store.directory().exists());
+}
+
+#[test]
+fn recovery_refuses_foreign_inventory_profiles_and_closed_owners() {
+    let directory = Directory::new();
+    let first = directory.profiles("First");
+    let second = directory.profiles("Second");
+    let mut inv = inventory();
+    let saved = first.save(&inv, None, "Original", options()).unwrap();
+    let expected = first.recovery_records().unwrap().pop().unwrap();
+    let path = first.profile_path(&saved.id);
+    let before = fs::read(&path).unwrap();
+    assert_eq!(
+        second
+            .replace_recovery(&inv, &expected, options())
+            .unwrap_err()
+            .category,
+        "ProfileNotFound"
+    );
+    assert!(!second.directory().exists());
+    inv.package_id = "foreign-package".into();
+    assert_eq!(
+        first
+            .replace_recovery(&inv, &expected, options())
+            .unwrap_err()
+            .category,
+        "ProfileIdentity"
+    );
+    directory.store().set_tab_open("First", false).unwrap();
+    assert_eq!(first.recovery_records().unwrap_err().category, "TabClosed");
+    assert_eq!(
+        first
+            .replace_recovery(&inventory(), &expected, options())
+            .unwrap_err()
+            .category,
+        "TabClosed"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn recovery_preserves_record_count_directory_and_owner_byte_bounds() {
+    let directory = Directory::new();
+    let store = directory.profiles("Owner");
+    let inv = inventory();
+    let saved = store.save(&inv, None, "Original", options()).unwrap();
+    let expected = store.recovery_records().unwrap().pop().unwrap();
+    let path = store.profile_path(&saved.id);
+    let before = fs::read(&path).unwrap();
+    for sequence in 1..MAX_PROFILES {
+        let retained = legacy_profile(sequence as u64, "Retained");
+        put(
+            &store.profile_path(&retained.id),
+            &encode(&retained, MAX_PROFILE_BYTES).unwrap(),
+        );
+    }
+    let recovered = store.replace_recovery(&inv, &expected, options()).unwrap();
+    assert_eq!(recovered.id, saved.id);
+    let excess = legacy_profile(MAX_PROFILES as u64, "Excess");
+    let excess_path = store.profile_path(&excess.id);
+    put(&excess_path, &encode(&excess, MAX_PROFILE_BYTES).unwrap());
+    assert_eq!(
+        store.recovery_records().unwrap_err().category,
+        "StorageLimit"
+    );
+    assert_eq!(
+        store
+            .replace_recovery(&inv, &expected, options())
+            .unwrap_err()
+            .category,
+        "StorageLimit"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    fs::remove_file(&excess_path).unwrap();
+    for index in 0..MAX_DIRECTORY_ENTRIES - MAX_PROFILES {
+        fs::write(
+            store.directory().join(format!("note-{index}.txt")),
+            b"retained",
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        store.recovery_records().unwrap_err().category,
+        "StorageLimit"
+    );
+    assert_eq!(
+        store
+            .replace_recovery(&inv, &expected, options())
+            .unwrap_err()
+            .category,
+        "StorageLimit"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+
+    let large = directory.profiles("Large");
+    let saved = large.save(&inv, None, "Original", options()).unwrap();
+    let expected = large.recovery_records().unwrap().pop().unwrap();
+    let path = large.profile_path(&saved.id);
+    let before = fs::read(&path).unwrap();
+    let large_values = json!({"priorities":["left"],"label":"x".repeat(59 * 1024)});
+    for sequence in 1..=17 {
+        let mut retained = legacy_profile(sequence, "Large");
+        retained.values = large_values.clone();
+        put(
+            &large.profile_path(&retained.id),
+            &encode(&retained, MAX_PROFILE_BYTES).unwrap(),
+        );
+    }
+    for values in [
+        large_values,
+        json!({"priorities":["left"],"label":"x".repeat(MAX_PROFILE_BYTES)}),
+    ] {
+        let fault = large.replace_recovery(&inv, &expected, values).unwrap_err();
+        assert_eq!(fault.category, "StorageLimit");
+        assert_eq!(fault.context["profile_id"], saved.id);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!path.with_extension("pending").exists());
+    }
+    let mut excess = legacy_profile(18, "Excess");
+    excess.values = json!({"priorities":["left"],"label":"x".repeat(59 * 1024)});
+    put(
+        &large.profile_path(&excess.id),
+        &encode(&excess, MAX_PROFILE_BYTES).unwrap(),
+    );
+    assert_eq!(
+        large.recovery_records().unwrap_err().category,
+        "StorageLimit"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn recovery_refuses_filename_aliases_without_restoring_the_expected_path() {
+    let directory = Directory::new();
+    let store = directory.profiles("Owner");
+    let inv = inventory();
+    let saved = store.save(&inv, None, "Original", options()).unwrap();
+    let expected = store.recovery_records().unwrap().pop().unwrap();
+    let path = store.profile_path(&saved.id);
+    let before = fs::read(&path).unwrap();
+    let alias = store
+        .directory()
+        .join(format!("{}.config", saved.id.to_uppercase()));
+    fs::rename(&path, &alias).unwrap();
+    assert!(store.recovery_records().is_err());
+    assert!(store.replace_recovery(&inv, &expected, options()).is_err());
+    assert_eq!(fs::read(&alias).unwrap(), before);
+    assert!(!path.with_extension("pending").exists());
+    let names: Vec<_> = fs::read_dir(store.directory())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, [alias.file_name().unwrap().to_os_string()]);
+}
+
+#[test]
+fn failed_atomic_cleanup_remains_visible_and_blocks_recovery() {
+    let directory = Directory::new();
+    let store = directory.profiles("Owner");
+    let inv = inventory();
+    let saved = store.save(&inv, None, "Original", options()).unwrap();
+    let expected = store.recovery_records().unwrap().pop().unwrap();
+    let path = store.profile_path(&saved.id);
+    let before = fs::read(&path).unwrap();
+    let mut candidate = saved;
+    candidate.values = json!({"priorities":["left"]});
+    let bytes = encode(&candidate, MAX_PROFILE_BYTES).unwrap();
+    let fault = write_atomic(&path, &bytes, |temporary, _| {
+        fs::remove_file(temporary)?;
+        fs::create_dir(temporary)?;
+        Err(std::io::Error::other("forced publication refusal"))
+    })
+    .unwrap_err();
+    assert_eq!(fault.context["temporary_cleanup"], "failed");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(path.with_extension("pending").is_dir());
+    assert!(store.recovery_records().is_err());
+    assert!(store.replace_recovery(&inv, &expected, options()).is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(path.with_extension("pending").is_dir());
+}
+
+#[test]
+fn recovery_preserves_other_profile_fault_attribution() {
+    let directory = Directory::new();
+    let store = directory.profiles("Owner");
+    let inv = inventory();
+    let saved = store.save(&inv, None, "Repair", options()).unwrap();
+    let other = store.save(&inv, None, "Damaged", options()).unwrap();
+    let expected = store
+        .recovery_records()
+        .unwrap()
+        .into_iter()
+        .find(|record| record.profile.id == saved.id)
+        .unwrap();
+    let before = fs::read(store.profile_path(&saved.id)).unwrap();
+    fs::write(store.profile_path(&other.id), b"invalid JSON").unwrap();
+    let error = store
+        .replace_recovery(&inv, &expected, options())
+        .unwrap_err();
+    assert_eq!(error.category, "StorageFormat");
+    assert_eq!(error.context["profile_id"], other.id);
+    assert_eq!(fs::read(store.profile_path(&saved.id)).unwrap(), before);
+    assert_eq!(
+        fs::read(store.profile_path(&other.id)).unwrap(),
+        b"invalid JSON"
+    );
 }

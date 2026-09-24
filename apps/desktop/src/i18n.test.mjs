@@ -32,7 +32,9 @@ const adapterArguments = {
   'app.profilesImported': [[0,0],[2,1]], 'app.profilesImportPartial': [[1,0]],
   'app.updatedElsewhere': [['profile-A']], 'app.renamedElsewhere': [['profile-A']],
   'app.stopFailed': [['diagnostic-A']], 'app.settingsSaved': [['profile-A']],
-  'app.waitForCommand': [['savingSettings'],['creatingWorkspace'],['importingProfiles']],
+  'app.waitForCommand': [['savingSettings'],['creatingWorkspace'],['importingProfiles'],['repairingProfile']],
+  'app.recoverySaved': [['profile-A','P']], 'app.recoveryEarlierSaved': [['profile-A','P']],
+  'app.inspectionOutcomes': [[0,1],[2,0]],
   'ui.phase': [['idle']], 'ui.operation': [['run']], 'ui.lane': [['controlled']],
   'ui.severity': [['ERROR']], 'ui.entryOutcome': [['Returned']],
   'ui.common.revision': [['package-A',2]],
@@ -74,6 +76,8 @@ const adapterArguments = {
   'ui.reopen.directory': [['pkg-A']], 'ui.reopen.archive': [['pkg-A']], 'ui.reopen.references': [[2]],
   'ui.reopen.saved': [[3,64]], 'ui.reopen.limit': [[8]], 'ui.reopen.reopenLabel': [['workspace-A']],
   'ui.guidance.scope': [['workspace-A']],
+  'ui.recovery.outcomeStatus': [['saved'],['repair_required'],['storage_failed'],['future-status']],
+  'ui.recovery.confirmReset': [['profile-A','P','workspace-A','pkg-A']],
 };
 
 for (const locale of ['en','ja']) {

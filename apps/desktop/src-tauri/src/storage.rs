@@ -12,7 +12,7 @@ pub(crate) use fs::{
     check_directory, checked_file, decode, encode, exists, filesystem_key, private_directory,
     read_bytes, write_atomic,
 };
-pub(crate) use profiles::validate_profile;
+pub(crate) use profiles::{RecoveryRecord, portable_values, validate_profile};
 pub(crate) use settings::validate_settings;
 pub(crate) use tabs::{validate_internal_name, validate_tab};
 
@@ -551,6 +551,13 @@ mod tests {
         let directory = Directory::new();
         let store = directory.store();
         store.initialize(preferences()).unwrap();
+        let profiles = directory.profiles("Recovery");
+        let saved = profiles
+            .save(&inventory(), None, "Original", options())
+            .unwrap();
+        let expected = profiles.recovery_records().unwrap().pop().unwrap();
+        let profile_path = profiles.profile_path(&saved.id);
+        let profile_before = fs::read(&profile_path).unwrap();
         for package in 0..5 {
             for profile in 0..64 {
                 put(
@@ -567,6 +574,13 @@ mod tests {
         assert!(store.create_tab("Blocked", "Budget").is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(!tab_path(&directory, "Blocked").exists());
+        let fault = profiles
+            .replace_recovery(&inventory(), &expected, options())
+            .unwrap_err();
+        assert_eq!(fault.category, "StorageLimit");
+        assert_eq!(fault.context["profile_id"], saved.id);
+        assert_eq!(fs::read(&profile_path).unwrap(), profile_before);
+        assert!(!profile_path.with_extension("pending").exists());
     }
 
     #[test]
@@ -885,27 +899,21 @@ mod tests {
             id: "different-game".into(),
             window_title: None,
         };
-        assert!(
-            !updated
-                .binding
-                .as_ref()
-                .unwrap()
-                .compatible(&package, &changed)
-                .unwrap()
-        );
+        assert!(!updated.binding.as_ref().unwrap().compatible(
+            &package,
+            &changed.id,
+            &changed.identity().unwrap()
+        ));
         assert_eq!(store.read_target("First", &package).unwrap(), updated);
         let changed_title = TargetDeclaration {
             id: declaration().id,
             window_title: Some("Another exact title".into()),
         };
-        assert!(
-            !updated
-                .binding
-                .as_ref()
-                .unwrap()
-                .compatible(&package, &changed_title)
-                .unwrap()
-        );
+        assert!(!updated.binding.as_ref().unwrap().compatible(
+            &package,
+            &changed_title.id,
+            &changed_title.identity().unwrap(),
+        ));
         let (replaced, _) = store
             .save_target(
                 "First",

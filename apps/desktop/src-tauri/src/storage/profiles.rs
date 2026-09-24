@@ -6,8 +6,8 @@ use super::{
     MAX_VALUE_NODES, ProfileStore, Store, VERSION, check_budget, decode, encode, exists,
     filesystem_key, new_id, private_directory, read_bytes, validate_id, write_atomic,
 };
-use crate::configuration::publish_no_replace;
-use mado_runtime_comparison::host::resolve_options;
+use crate::configuration::{digest, publish_no_replace};
+use mado_runtime_comparison::host::{option_path, resolve_options};
 use mado_runtime_comparison::inventory::Inventory;
 use mado_runtime_comparison::model::{Fault, identity};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,14 @@ pub struct ProfileListing {
     pub profiles: Vec<Profile>,
     pub rejected: Vec<Fault>,
 }
+
+/// Host-only capture; desktop numeric safety is checked at the application boundary.
+#[derive(Clone, Debug)]
+pub(crate) struct RecoveryRecord {
+    pub(crate) profile: Profile,
+    pub(crate) fingerprint: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct LegacyImport {
     pub imported: Vec<String>,
@@ -158,6 +166,86 @@ impl ProfileStore {
         Ok(ProfileListing { profiles, rejected })
     }
 
+    pub(crate) fn recovery_records(&self) -> Result<Vec<RecoveryRecord>, Fault> {
+        let mut records = self
+            .scan_profiles(|profile, bytes| RecoveryRecord {
+                profile,
+                fingerprint: digest(bytes),
+            })
+            .map_err(|fault| self.owner_fault(fault))?;
+        records.sort_by(|a, b| {
+            a.profile
+                .name
+                .cmp(&b.profile.name)
+                .then_with(|| a.profile.id.cmp(&b.profile.id))
+        });
+        Ok(records)
+    }
+
+    /// Callers hold Store serialization across capture validation and publication.
+    pub(crate) fn replace_recovery(
+        &self,
+        inventory: &Inventory,
+        expected: &RecoveryRecord,
+        values: Value,
+    ) -> Result<Profile, Fault> {
+        let id = &expected.profile.id;
+        let result = (|| {
+            validate_id(id)?;
+            self.check_package(&inventory.package_id)?;
+            self.check_package(&expected.profile.package_id)?;
+            let schema_identity = identity(&inventory.schema)?;
+            validate_identity(&inventory.package_id, &schema_identity)?;
+            let mut found = false;
+            let mut retained_bytes = 0;
+            for (profile_id, size) in
+                self.scan_profiles(|profile, bytes| (profile.id, bytes.len()))?
+            {
+                if profile_id == *id {
+                    found = true;
+                } else {
+                    retained_bytes += size;
+                }
+            }
+            if !found {
+                return Err(profile_fault(
+                    Fault::new(
+                        "ProfileNotFound",
+                        "saved profile no longer exists in this Tab/package",
+                    ),
+                    id,
+                ));
+            }
+            let values =
+                validate_values(inventory, values).map_err(|fault| profile_fault(fault, id))?;
+            // Compare raw bytes, including formatting, not a re-encoded profile.
+            let (mut profile, original) = self.read_record(id)?;
+            if digest(&original) != expected.fingerprint {
+                return Err(profile_fault(
+                    Fault::new(
+                        "ProfileConflict",
+                        "saved profile changed after recovery inspection; inspect it again",
+                    ),
+                    id,
+                ));
+            }
+            profile.schema_identity = schema_identity;
+            profile.values = values;
+            let bytes =
+                encode(&profile, MAX_PROFILE_BYTES).map_err(|fault| profile_fault(fault, id))?;
+            if retained_bytes + bytes.len() > MAX_TOTAL_BYTES {
+                return Err(profile_fault(
+                    limit("stored profiles exceed the 1 MiB aggregate limit"),
+                    id,
+                ));
+            }
+            self.write_profile(id, &bytes, true)
+                .map_err(|fault| profile_fault(fault, id))?;
+            Ok(profile)
+        })();
+        result.map_err(|fault| self.owner_fault(fault))
+    }
+
     pub fn save(
         &self,
         inventory: &Inventory,
@@ -248,6 +336,11 @@ impl ProfileStore {
     }
 
     pub(super) fn read_profile(&self, id: &str) -> Result<(Profile, usize), Fault> {
+        self.read_record(id)
+            .map(|(profile, bytes)| (profile, bytes.len()))
+    }
+
+    fn read_record(&self, id: &str) -> Result<(Profile, Vec<u8>), Fault> {
         let result = (|| {
             validate_id(id)?;
             self.check_owner()?;
@@ -261,12 +354,16 @@ impl ProfileStore {
                     "profile identity does not match its containing Tab/package/file",
                 ));
             }
-            Ok((profile, bytes.len()))
+            Ok((profile, bytes))
         })();
         result.map_err(|fault| self.owner_fault(profile_fault(fault, id)))
     }
 
     fn profiles(&self) -> Result<Vec<(Profile, usize)>, Fault> {
+        self.scan_profiles(|profile, bytes| (profile, bytes.len()))
+    }
+
+    fn scan_profiles<T>(&self, record: impl Fn(Profile, &[u8]) -> T) -> Result<Vec<T>, Fault> {
         self.check_owner()?;
         let directory = self.directory();
         if !exists(&directory)? {
@@ -305,14 +402,16 @@ impl ProfileStore {
             let id = name.strip_suffix(".config").ok_or_else(malformed)?;
             validate_id(id).map_err(with_filename)?;
             if result.len() >= MAX_PROFILES {
-                return Err(limit("profile count exceeds 64"));
+                return Err(self.owner_fault(limit("profile count exceeds 64")));
             }
-            let (profile, size) = self.read_profile(id)?;
-            bytes += size;
+            let (profile, contents) = self.read_record(id)?;
+            bytes += contents.len();
             if bytes > MAX_TOTAL_BYTES {
-                return Err(limit("stored profiles exceed the 1 MiB aggregate limit"));
+                return Err(
+                    self.owner_fault(limit("stored profiles exceed the 1 MiB aggregate limit"))
+                );
             }
-            result.push((profile, size));
+            result.push(record(profile, &contents));
         }
         Ok(result)
     }
@@ -411,7 +510,7 @@ fn validate_values(inventory: &Inventory, values: Value) -> Result<Value, Fault>
     Ok(wrapper["options"].take())
 }
 
-fn portable_values(values: &Value) -> Result<(), Fault> {
+pub(crate) fn portable_values(values: &Value) -> Result<(), Fault> {
     if !values.is_object() {
         return Err(Fault::new("Profile", "profile values must be an object"));
     }
@@ -437,9 +536,9 @@ fn visit_values(value: &Value, path: &str, depth: usize, nodes: &mut usize) -> R
                         "ProfileAuthority",
                         "machine authority and credentials are not portable profile options",
                     )
-                    .with_context(json!({"field": format!("{path}.{key}")})));
+                    .with_context(json!({"path": option_path(path, key)})));
                 }
-                visit_values(value, &format!("{path}.{key}"), depth + 1, nodes)?;
+                visit_values(value, &option_path(path, key), depth + 1, nodes)?;
             }
         }
         Value::Array(items) => {
@@ -455,7 +554,7 @@ fn visit_values(value: &Value, path: &str, depth: usize, nodes: &mut usize) -> R
                 "ProfileAuthority",
                 "machine-local paths are not portable profile values",
             )
-            .with_context(json!({"field": path})));
+            .with_context(json!({"path": path})));
         }
         _ => {}
     }
