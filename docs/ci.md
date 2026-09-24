@@ -62,7 +62,7 @@ The version and integrity sources are:
 | TypeScript | 5.9.3 | [Compiler manifest](../tools/runtime-comparison/compiler/package.json) and [lockfile](../tools/runtime-comparison/compiler/package-lock.json) |
 | Desktop frontend | React 19.3.0, TypeScript 5.9.3, Vite 8.3.0, Tauri API 2.11.1 / CLI 2.11.5 | [App manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json) |
 | Desktop Rust | Tauri 2.11.6, tauri-build 2.6.3, tracing 0.1.41, tracing-subscriber 0.3.20 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
-| Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | GitHub Actions | Full commit SHAs | [Workflow](../.github/workflows/ci.yml) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
@@ -70,6 +70,14 @@ CI uses Python 3.13, `ubuntu-24.04`, `macos-15`, and `windows-2025`. The macOS j
 prints and requires `arm64`; runtime checks also print their actual host identity.
 Update versions, integrity values, workflow references, and this guide together
 through a checked Change. A new installer host needs a verified release asset.
+
+Target metadata parsing uses `plist` in-process, with the exactly pinned
+`enable_unstable_features_that_may_break_with_minor_version_bumps` feature for
+bounded XML/binary streaming. No system plist helper is executed. Unix core
+checks exercise executable/bundle metadata with isolated fixtures; portable
+record/restore checks do not require an installed target. Actual macOS WebView
+setup acceptance remains separate from hosted checks and grants no native
+execution authority.
 
 ## Local check scope
 

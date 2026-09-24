@@ -50,6 +50,7 @@ const adapterArguments = {
   'ui.run.startUses': [[null,false,null,null],['profile-A',false,null,null],[null,true,null,null],['profile-A',true,'environment-A','corpus-A']],
   'ui.run.olderRevision': [[1,2]], 'ui.run.stopTarget': [[null],['run-A']],
   'ui.run.runKind': [['controlled']],
+  'ui.target.argument': [[1],[32]], 'ui.target.revision': [[0],[2]],
   'ui.result.truncated': [[1],[2]], 'ui.result.disclosureHelp': [[false,512],[true,512]],
   'ui.schema.fieldAction': [[false,'$.field'],[true,'$.field']],
   'ui.schema.omittedDefault': [['default-A']], 'ui.schema.unknown': [['$.field','value-A']],
@@ -106,7 +107,7 @@ test('interpolation keeps parameter-like and markup-like user values literal',()
 });
 
 test('a retained asynchronous notice renders in the current language without changing attribution or later drafts',()=>{
-  const selection=id=>({workspace_id:id,revision:1,internal_name:id,display_name:'Tab '+id,package_path:`/packages/${id}`,package:{package_id:id,schema_identity:'schema',inventory_identity:'inventory',schema:{type:'object',properties:{count:{type:'integer'}}},profiles:{}},profiles:[],profiles_error:null});
+  const selection=id=>({workspace_id:id,revision:1,internal_name:id,display_name:'Tab '+id,package_path:`/packages/${id}`,package:{package_id:id,schema_identity:'schema',inventory_identity:'inventory',schema:{type:'object',properties:{count:{type:'integer'}}},profiles:{},target:null,target_identity:null},profiles:[],profiles_error:null});
   const view=id=>({workspace_id:id,revision:0,internal_name:id,display_name:'Tab '+id,selection:null,source_error:null,saved_package:null});
   let workspaces=[bindSelection(workspaceFromView(view('a')),selection('a')),bindSelection(workspaceFromView(view('b')),selection('b'))];
   workspaces=workspaces.map(item=>updateBound(item,bound=>editDraft(bound,{count:item.id === 'a' ? '7' : '9'})));

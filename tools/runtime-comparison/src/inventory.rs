@@ -38,6 +38,90 @@ pub struct Entries {
     pub workflow: Entry,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TargetDeclaration {
+    pub id: String,
+    pub window_title: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for TargetDeclaration {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct TargetVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TargetVisitor {
+            type Value = TargetDeclaration;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a portable target declaration object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Fields {
+                    id: String,
+                    window_title: Option<String>,
+                }
+
+                let fields =
+                    Fields::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(TargetDeclaration {
+                    id: fields.id,
+                    window_title: fields.window_title,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(TargetVisitor)
+    }
+}
+
+impl TargetDeclaration {
+    pub fn validate(&self) -> Result<(), Fault> {
+        portable_component(&self.id).map_err(|_| {
+            invalid("target ID must be a portable component of at most 128 bytes")
+                .with_context(json!({"path":"package.json","field":"target.id"}))
+        })?;
+        if self.window_title.as_ref().is_some_and(|title| {
+            title.is_empty() || title.len() > 512 || title.chars().any(char::is_control)
+        }) {
+            return Err(invalid(
+                "target window title must be nonempty, at most 512 bytes and free of controls",
+            )
+            .with_context(json!({"path":"package.json","field":"target.window_title"})));
+        }
+        Ok(())
+    }
+
+    pub fn identity(&self) -> Result<String, Fault> {
+        self.validate()?;
+        #[derive(Serialize)]
+        struct Content<'a> {
+            contract: &'static str,
+            declaration: &'a TargetDeclaration,
+        }
+        let mut writer = HashWriter(Sha256::new());
+        serde_json::to_writer(
+            &mut writer,
+            &Content {
+                contract: "mado-target-declaration-v1",
+                declaration: self,
+            },
+        )
+        .map_err(|error| invalid(format!("cannot identify target declaration: {error}")))?;
+        Ok(format!("sha256:{:x}", writer.0.finalize()))
+    }
+}
+
+fn present_target<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<TargetDeclaration>, D::Error> {
+    TargetDeclaration::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Inventory {
@@ -67,6 +151,12 @@ struct Manifest {
     assets: BTreeMap<String, Asset>,
     source_maps: BTreeMap<String, String>,
     dependencies: BTreeMap<String, String>,
+    #[serde(
+        default,
+        deserialize_with = "present_target",
+        skip_serializing_if = "Option::is_none"
+    )]
+    target: Option<TargetDeclaration>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -227,6 +317,26 @@ impl Inventory {
         inventory.refresh_identity()?;
         capture.check()?;
         Ok(inventory)
+    }
+
+    pub fn target(&self) -> Result<Option<TargetDeclaration>, Fault> {
+        let manifest = self
+            .metadata
+            .get("manifest")
+            .and_then(Value::as_object)
+            .ok_or_else(|| invalid("inventory manifest is missing or invalid"))?;
+        manifest
+            .get("target")
+            .map(|value| {
+                let target = TargetDeclaration::deserialize(value).map_err(|error| {
+                    invalid("invalid inventory target declaration").with_context(json!({
+                        "path":"package.json","field":"target","cause":error.to_string()
+                    }))
+                })?;
+                target.validate()?;
+                Ok(target)
+            })
+            .transpose()
     }
 
     pub fn resolve(&self, from: &str, specifier: &str) -> Result<String, Fault> {
@@ -920,6 +1030,9 @@ fn windows_file_identity(file: &File) -> Result<(u32, u32, u32), Fault> {
 
 fn validate_manifest(manifest: &Manifest) -> Result<(), Fault> {
     portable_component(&manifest.package_id)?;
+    if let Some(target) = &manifest.target {
+        target.validate()?;
+    }
     if manifest.version != 1
         || !matches!(
             manifest.runtime.as_str(),

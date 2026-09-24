@@ -8,6 +8,7 @@ use crate::storage::{
     check_directory, checked_file, decode, encode, exists, filesystem_key, read_bytes,
     validate_package_id, validate_profile, validate_settings, validate_tab,
 };
+use crate::target::{MAX_TARGET_BYTES, TargetRecord};
 use mado_runtime_comparison::model::Fault;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -70,6 +71,16 @@ pub fn validate(capture: &Capture) -> Result<(), Fault> {
                     return Err(invalid(
                         "package configuration is not owned by a saved Tab reference",
                     ));
+                }
+                if parts[3] == "target.config" {
+                    if bytes.len() > MAX_TARGET_BYTES {
+                        return Err(invalid("target configuration exceeds its byte bound"));
+                    }
+                    let target: TargetRecord = decode(bytes)?;
+                    target.validate_owned(parts[1], parts[2])?;
+                    // Target has its own per-file limit; Capture enforces the shared
+                    // file/byte budget without consuming a portable-profile slot.
+                    continue;
                 }
                 let profile: Profile = decode(bytes)
                     .map_err(|_| invalid("unsupported or malformed package configuration owner"))?;
@@ -1274,5 +1285,119 @@ pub(crate) mod tests {
         assert!(validate(&Capture::from_files(files.clone(), true).unwrap()).is_err());
         files.remove("settings.json");
         assert!(validate(&Capture::from_files(files, true).unwrap()).is_err());
+    }
+
+    fn target_record() -> TargetRecord {
+        let declaration = crate::target::tests::declaration();
+        TargetRecord {
+            version: 1,
+            internal_name: "Owner".into(),
+            package_id: "pkg".into(),
+            revision: 7,
+            binding: Some(crate::target::TargetBinding {
+                id: profile_id(),
+                package_id: "pkg".into(),
+                target_id: declaration.id.clone(),
+                declaration_identity: declaration.identity().unwrap(),
+                configuration: crate::target::tests::configuration("/offline/not-installed/game"),
+                resolution: crate::target::TargetResolution {
+                    game: crate::target::ResolvedLocation {
+                        path: "/offline/not-installed/game".into(),
+                        executable: "/offline/not-installed/game".into(),
+                    },
+                    launcher: None,
+                    working_directory: None,
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn complete_snapshot_restores_target_intent_without_installation_metadata() {
+        let source = Root::new();
+        source.put("settings.json", &settings(200));
+        source.put("tabs/Owner/tab.config", &tab("Owner", true));
+        source.put(
+            &format!("tabs/Owner/pkg/{}.config", profile_id()),
+            &profile(),
+        );
+        let record = target_record();
+        let bytes = serde_json::to_vec(&record).unwrap();
+        source.put("tabs/Owner/pkg/target.config", &bytes);
+        let snapshot = capture(&source.0).unwrap();
+        assert_eq!(snapshot.files["tabs/Owner/pkg/target.config"], bytes);
+        validate(&snapshot).unwrap();
+        let destination = Root::new();
+        destination.put("settings.json", &settings(100));
+        destination.put("logs/retained.log", b"unrelated");
+        let before = capture(&destination.0).unwrap();
+        install(&destination.0, snapshot.clone(), Some(&before.generation)).unwrap();
+        assert_eq!(capture(&destination.0).unwrap(), snapshot);
+        assert_eq!(
+            Store::new(destination.0.clone())
+                .unwrap()
+                .read_target("Owner", "pkg")
+                .unwrap(),
+            record
+        );
+        assert_eq!(
+            fs::read(destination.0.join("logs/retained.log")).unwrap(),
+            b"unrelated"
+        );
+    }
+
+    #[test]
+    fn restore_target_owner_schema_and_shared_budget_are_strict_without_using_profile_slots() {
+        let mut files = replacement(200).files;
+        files.insert("tabs/Owner/tab.config".into(), tab("Owner", true));
+        for index in 0..MAX_PROFILES {
+            let mut profile: Profile = decode(&profile()).unwrap();
+            profile.id = format!("p-{index:032x}-{:08x}-{:016x}", 0, 0);
+            files.insert(
+                format!("tabs/Owner/pkg/{}.config", profile.id),
+                serde_json::to_vec(&profile).unwrap(),
+            );
+        }
+        let record = target_record();
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let path = "tabs/Owner/pkg/target.config";
+        files.insert(path.into(), bytes.clone());
+        validate(&Capture::from_files(files.clone(), true).unwrap()).unwrap();
+        for (field, value) in [
+            ("version", json!(2)),
+            ("internal_name", json!("Other")),
+            ("package_id", json!("other")),
+            ("revision", json!(0)),
+            ("revision", json!(crate::target::MAX_TARGET_REVISION + 1)),
+            ("binding", json!(["not", "an", "object"])),
+            ("approval", json!(true)),
+        ] {
+            let mut invalid = serde_json::to_value(&record).unwrap();
+            invalid[field] = value;
+            files.insert(path.into(), serde_json::to_vec(&invalid).unwrap());
+            assert!(
+                validate(&Capture::from_files(files.clone(), true).unwrap()).is_err(),
+                "{field}"
+            );
+        }
+        let mut at_bound = bytes;
+        at_bound.resize(MAX_TARGET_BYTES, b' ');
+        files.insert(path.into(), at_bound.clone());
+        validate(&Capture::from_files(files.clone(), true).unwrap()).unwrap();
+        at_bound.push(b' ');
+        files.insert(path.into(), at_bound);
+        assert!(Capture::from_files(files, true).is_err());
+
+        // Each target file participates in the same 16 MiB captured-byte budget.
+        let mut aggregate = BTreeMap::new();
+        for index in 0..configuration::MAX_BYTES / MAX_TARGET_BYTES {
+            aggregate.insert(
+                format!("tabs/T{index}/pkg/target.config"),
+                vec![b' '; MAX_TARGET_BYTES],
+            );
+        }
+        assert!(Capture::from_files(aggregate.clone(), true).is_ok());
+        aggregate.insert("tabs/Overflow/pkg/target.config".into(), vec![b' ']);
+        assert!(Capture::from_files(aggregate, true).is_err());
     }
 }

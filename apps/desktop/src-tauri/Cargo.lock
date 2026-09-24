@@ -1972,6 +1972,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "mado-runtime-comparison",
+ "plist",
  "serde",
  "serde_json",
  "sha2",

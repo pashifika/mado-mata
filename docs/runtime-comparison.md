@@ -109,6 +109,42 @@ violations. The selected root may lie below an OS path alias; capture anchors it
 canonical location. Captured content, not later edits or ambient `node_modules`,
 is used for compilation, preflight, module loading, and assets.
 
+### Optional portable target declaration
+
+Version-1 manifests may include a strict `target` object:
+
+```json
+{
+  "target": {
+    "id": "example-game",
+    "window_title": "Exact Game Title"
+  }
+}
+```
+
+`id` uses the existing portable-component rules and is limited to 128 UTF-8
+bytes. `window_title` is an optional exact, nonempty title, limited to 512 UTF-8
+bytes without control characters. Omitting it or setting it to `null` leaves the
+local setup responsible for an exact title. The declaration itself cannot be
+`null`, an array, or contain unknown/duplicate fields. Paths, launch arguments,
+process identities, credentials, and permission grants do not belong here.
+
+Inspection validates the declaration without evaluating package code. Its
+captured bytes affect inventory identity; a separate host-derived target identity
+uses only normalized supported declaration fields. Script/schema changes and
+manifest formatting therefore do not require a new local binding when target
+intent is unchanged. Changing the ID or exact title retains an old binding as
+incompatible until explicitly replaced or removed.
+
+The [desktop Target section](desktop.md#local-target-configuration) stores
+machine-local configuration separately for each Tab/package. Packages without
+`target` remain valid; neither absence nor an invalid local binding blocks an
+otherwise valid controlled/replay invocation. Declaring or saving a target
+grants no native authority. Older strict manifest readers can reject the new
+field rather than silently ignore it.
+
+### Dependencies and execution
+
 The application approves `@mado/helper` 1.0.0 and its private transitive helper
 `@mado/order` 1.0.0. Packages request a catalog entry; they cannot approve code,
 versions, transitive permissions, compiler plugins, or install scripts. Static

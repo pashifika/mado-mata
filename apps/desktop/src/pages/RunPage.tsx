@@ -1,10 +1,12 @@
 import {useEffect, useRef, useState} from 'react';
 import SchemaForm from '../components/SchemaForm.tsx';
 import Select from '../components/Select.tsx';
+import TargetPanel from '../components/TargetPanel.tsx';
+import type {TargetHandlers} from '../components/TargetPanel.tsx';
 import ResultPanel, {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import {faultSummary, text} from '../state.ts';
 import type {CheckAssociation} from '../state.ts';
-import {DESCRIPTOR_LIMIT, busy, editDraft} from '../workspace.ts';
+import {DESCRIPTOR_LIMIT, busy, editDraft, hasWorkspaceEdits} from '../workspace.ts';
 import type {Bound, BoundWorkspace, Derived} from '../workspace.ts';
 import type {ControllerView, Json, OcrEnvironment} from '../types.ts';
 import {messages, renderMessage} from '../i18n.ts';
@@ -24,6 +26,7 @@ export interface RunHandlers {
   validate: () => void; saveProfile: () => void; renameProfile: () => void; deleteProfile: () => void;
   newDraft: (preset?: string) => void; selectProfile: (id: string) => void;
   reinspect: () => void; inspectPath: (value: string) => void; importLegacy: () => void; start: () => void; stop: () => void;
+  target: TargetHandlers;
 }
 
 interface Props {
@@ -107,7 +110,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                 <button type="button" className="danger-text" onClick={() => closeConfirm(true)}>{t.run.discardReinspect}</button>
                 <button type="button" autoFocus onClick={() => closeConfirm(false)}>{t.run.keepDraft}</button></div>
               : <button id="reinspect" ref={reinspectButton} disabled={locked || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()} title={run.live && busy(view.state) ? t.run.reinspectBlocked : undefined}
-                onClick={() => dirty && bound.touched ? setConfirmReinspect(true) : handlers.reinspect()}>{t.run.reinspect}</button>}
+                onClick={() => hasWorkspaceEdits(workspace, derived) ? setConfirmReinspect(true) : handlers.reinspect()}>{t.run.reinspect}</button>}
           </div>
           <div className="field"><label htmlFor="package-path">{t.guidance.packageDirectory}</label>
             <input id="package-path" type="text" value={workspace.inspectPath} disabled={locked} spellCheck={false} placeholder={t.guidance.packagePlaceholder}
@@ -192,5 +195,6 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
         </div>
       </section>
     </div>
+    <TargetPanel state={bound.target} handlers={handlers.target} locked={locked} active={active}/>
   </>;
 }

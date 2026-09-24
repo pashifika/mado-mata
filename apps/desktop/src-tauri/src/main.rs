@@ -1,9 +1,11 @@
 use mado_mata_desktop::application::{
-    Poll, ProfileCatalog, Selection, WorkspaceCatalog, WorkspaceRef, WorkspaceView,
+    Poll, ProfileCatalog, Selection, TargetCheckResponse, TargetSaveResponse, TargetView,
+    WorkspaceCatalog, WorkspaceRef, WorkspaceView,
 };
 use mado_mata_desktop::backup::SnapshotReceipt;
 use mado_mata_desktop::bootstrap::{Bootstrap, BootstrapStatus, selected_roots};
 use mado_mata_desktop::storage::{EditableSettings, LegacyImport, Profile, Settings};
+use mado_mata_desktop::target::{TargetConfiguration, TargetExpectation, TargetResolution};
 use mado_runtime_comparison::desktop::StartRequest;
 use mado_runtime_comparison::model::Fault;
 use serde_json::Value;
@@ -194,6 +196,56 @@ async fn profiles(
 }
 
 #[tauri::command]
+async fn read_target(
+    workspace: WorkspaceRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.read_target(&workspace)).await
+}
+
+#[tauri::command]
+async fn check_target(
+    workspace: WorkspaceRef,
+    expected: TargetExpectation,
+    configuration: TargetConfiguration,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetCheckResponse, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.check_target(&workspace, &expected, &configuration)).await
+}
+
+#[tauri::command]
+async fn save_target(
+    workspace: WorkspaceRef,
+    expected: TargetExpectation,
+    configuration: TargetConfiguration,
+    reviewed_resolution: Option<TargetResolution>,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetSaveResponse, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || {
+        application.save_target(
+            &workspace,
+            &expected,
+            configuration,
+            reviewed_resolution.as_ref(),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn remove_target(
+    workspace: WorkspaceRef,
+    expected: TargetExpectation,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.remove_target(&workspace, &expected)).await
+}
+
+#[tauri::command]
 async fn import_legacy_profiles(
     workspace: WorkspaceRef,
     state: tauri::State<'_, Backend>,
@@ -347,6 +399,10 @@ fn main() {
             save_settings,
             validate,
             profiles,
+            read_target,
+            check_target,
+            save_target,
+            remove_target,
             import_legacy_profiles,
             save_profile,
             rename_profile,
