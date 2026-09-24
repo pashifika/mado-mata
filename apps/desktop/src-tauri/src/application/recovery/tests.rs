@@ -1608,3 +1608,108 @@ fn in_place_binding_retry_keeps_unrepaired_profiles_editable() {
         ]
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn committed_recovery_survives_catalog_read_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    const CHILD_RECEIPT: &str = "MADO_TEST_RECOVERY_REFRESH_RECEIPT";
+    let Some(receipt) = std::env::var_os(CHILD_RECEIPT) else {
+        // umask is process-wide; never change it in the parallel test process.
+        let fixture = Fixture::new();
+        let receipt = fixture.root.join("committed-values.json");
+        let thread = std::thread::current();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", thread.name().unwrap(), "--test-threads=1"])
+            .env(CHILD_RECEIPT, &receipt)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated recovery test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Actual durable values also prove the child ran, rather than matching zero tests.
+        let committed: Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+        assert_eq!(
+            committed,
+            json!([{"count":2,"order":["second"]}, {"count":1,"order":["first"]}])
+        );
+        return;
+    };
+
+    let mut committed = Vec::new();
+    for (name, reset, expected) in [
+        ("Repair", false, json!({"count":2,"order":["second"]})),
+        ("Reset", true, json!({"count":1,"order":["first"]})),
+    ] {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let (path, selected) = initial(&fixture);
+        let original = save(&fixture, &selected, name, json!({"count":9}));
+        install_schema(&path, &schema(5), json!({}));
+        let context = recovery(&fixture, &path, &selected);
+        let file = profile_path(&fixture, "Main", &original);
+
+        // Existing records stay readable; only the newly published file loses read access.
+        // SAFETY: scalar POSIX call, confined to this single-test subprocess.
+        let previous = unsafe { libc::umask(0o400) };
+        let result = if reset {
+            application.reset_profile(&context, &original.id, true)
+        } else {
+            application.repair_profile(&context, &original.id, expected.clone())
+        };
+        // SAFETY: restore this subprocess's original mask before assertions or new fixtures.
+        unsafe { libc::umask(previous) };
+
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o200
+        );
+        let unreadable = fs::read(&file)
+            .expect_err("this permission-denial test requires an unprivileged Unix user");
+        assert_eq!(unreadable.kind(), std::io::ErrorKind::PermissionDenied);
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mutation = result.expect("a catalog read failure must not erase a committed save");
+        assert!(mutation.issue.is_none());
+        assert!(mutation.draft.is_none());
+        assert!(mutation.catalog.is_none());
+        let refresh = mutation.refresh_error.unwrap();
+        assert_eq!(refresh.category, "Storage");
+        assert_eq!(refresh.context["kind"], "PermissionDenied");
+        assert_eq!(refresh.context["profile_id"], original.id);
+        assert_eq!(refresh.context["internal_name"], "Main");
+        assert_eq!(refresh.context["package_id"], original.package_id);
+
+        let saved = mutation
+            .saved
+            .expect("the committed profile must be returned");
+        assert_eq!(saved.id, original.id);
+        assert_eq!(saved.name, original.name);
+        assert_eq!(saved.package_id, original.package_id);
+        assert_eq!(saved.version, original.version);
+        assert_ne!(saved.schema_identity, original.schema_identity);
+        assert_eq!(saved.values, expected);
+        let remaining = mutation.recovery.unwrap();
+        assert_eq!(remaining.context, context);
+        assert!(remaining.profiles.is_empty());
+        assert_eq!(saved.schema_identity, remaining.package.schema_identity);
+
+        let durable: Profile = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&durable).unwrap(),
+            serde_json::to_value(&saved).unwrap()
+        );
+        let catalog = application.profiles(&context.workspace).unwrap();
+        assert!(catalog.profiles_error.is_none());
+        assert_eq!(catalog.profiles.len(), 1);
+        assert_eq!(catalog.profiles[0].id, original.id);
+        assert_eq!(catalog.profiles[0].values, expected);
+        committed.push(durable.values);
+    }
+    fs::write(receipt, serde_json::to_vec(&committed).unwrap()).unwrap();
+}
