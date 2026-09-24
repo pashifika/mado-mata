@@ -576,8 +576,8 @@ fn saved_auto_reconciliation_survives_durable_binding_failure_and_discard() {
         "Saved before binding",
         json!({"count":2}),
     );
-    // A real directory can be inspected, but a control character cannot be persisted as a source.
-    let candidate = fixture.package_at("invalid\nsource-reference");
+    // DEL is a valid filesystem character on Windows too, but not a persisted source character.
+    let candidate = fixture.package_at("invalid\u{7f}source-reference");
     install_schema(&candidate, &schema(5), json!({}));
     let tab = fixture.root.join("tabs/Main/tab.config");
     let original_tab = fs::read(&tab).unwrap();
