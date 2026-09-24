@@ -932,7 +932,7 @@ mod tests {
             packages: vec![PackageReference {
                 package_id: "pkg".into(),
                 source: PackageSource::Directory {
-                    path: "/package".into(),
+                    path: std::env::temp_dir().join("package").to_str().unwrap().into(),
                 },
             }],
             selected_package_id: Some("pkg".into()),
