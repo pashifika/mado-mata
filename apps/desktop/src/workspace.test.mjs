@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {applyCatalog,applyCommand,applyIfCurrent,bindSelection,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
 import {LocalFault} from './i18n.ts';
-import {checkedTarget,currentTargetDraft,discardTarget,editTarget,readTarget,readTargetDraft,removedTarget,savedTarget,targetDirty,targetExpectation,targetFailed,targetReadFailed,targetState,targetTicket} from './target.ts';
+import {beginTarget,checkedTarget,currentTargetDraft,discardTarget,editTarget,readTarget,readTargetDraft,removedTarget,savedTarget,targetDirty,targetExpectation,targetFailed,targetReadFailed,targetState,targetTicket} from './target.ts';
 
 const schema={type:'object',properties:{count:{type:'integer',default:1},mode:{type:'string'}}};
 function profile(id,name,values,packageId='pkg-a',schemaIdentity='schema-1'){
@@ -543,28 +543,117 @@ test('failed initial read can recover the saved form without resetting storage o
   assert.equal(targetDirty(restored),false);
 });
 
-test('changed resolution requires a review attributed to that draft; edits invalidate the review without adopting the location',()=>{
+test('changed resolution requires a review attributed to that draft, not a failure; edits invalidate the review without adopting the location',()=>{
   const initial=loadedTarget();
   const ticket=targetTicket(initial);
   const previous=initial.view.record.binding.resolution;
   const resolution={...previous,game:{path:'/metadata/redirected',executable:'/metadata/redirected'}};
   const state=targetFailed(initial,ticket,{category:'TargetResolutionChanged',message:'Review changed resolution',context:{previous_resolution:previous,resolution}});
+  assert.equal(state.issue,null);
+  assert.equal(state.reconcile,false);
   assert.deepEqual(state.review.previous,previous);
   assert.deepEqual(state.review.resolution,resolution);
   assert.equal(currentTargetDraft(state,state.review.ticket),true);
   assert.deepEqual(state.view.record.binding.resolution,previous);
+  assert.deepEqual(targetExpectation(state),targetExpectation(initial));
   const edited=editTarget(state,{...state.draft,arguments:['changed']});
   assert.equal(edited.review,null);
   assert.equal(edited.observation,null);
   assert.deepEqual(edited.view.record.binding.resolution,previous);
 });
 
-test('removal keeps an unsaved draft and revision progression; old checks cannot resurrect the removed record',()=>{
+for (const {scenario,context} of [
+  {scenario:'no context',context:null},
+  {scenario:'a missing resolution',context:{previous_resolution:null}},
+  {scenario:'a non-object resolution',context:{previous_resolution:null,resolution:'/metadata/redirected'}},
+  {scenario:'an array resolution',context:{previous_resolution:null,resolution:[]}},
+]) {
+  test(`a changed-resolution refusal with ${scenario} stays a failure that offers no reviewed Save`,()=>{
+    const initial=loadedTarget();
+    const ticket=targetTicket(initial);
+    const error={category:'TargetResolutionChanged',message:'Review changed resolution',context};
+    const state=targetFailed(initial,ticket,error);
+    assert.equal(state.review,null);
+    assert.equal(state.issue.fault,error);
+    assert.equal(currentTargetDraft(state,state.issue.ticket),true);
+    assert.equal(state.reconcile,false);
+  });
+}
+
+test('a completed save survives its failed refresh and recovery reload, then retires on a later edit',()=>{
+  let state=loadedTarget();
+  state=editTarget(state,{...state.draft,gamePath:'/metadata/saved-edit'});
+  const ticket=targetTicket(state);
+  const committed=targetView(state,{revision:2,configuration:readTargetDraft(state.draft).configuration});
+  state=savedTarget(beginTarget(state,'save'),ticket,{view:committed,check:targetCheck(ticket,'/metadata/saved-edit').check});
+  state=targetReadFailed(state,unreadable);
+  state=beginTarget({...state,operation:null},'read');
+  assert.equal(state.persisted,'saved');
+  assert.equal(state.readError,null);
+  assert.equal(state.refreshRequired,true);
+  state=targetReadFailed(state,unreadable);
+  assert.equal(state.persisted,'saved');
+  state=readTarget(beginTarget({...state,operation:null},'read'),committed);
+  assert.equal(state.persisted,'saved');
+  assert.equal(state.refreshRequired,false);
+  assert.equal(targetDirty(state),false);
+  const edited=editTarget(state,{...state.draft,gamePath:'/metadata/next-edit'});
+  assert.equal(edited.persisted,null);
+  assert.equal(edited.draft.gamePath,'/metadata/next-edit');
+  assert.equal(edited.view.record.revision,2);
+  assert.deepEqual(targetExpectation(edited),{revision:2,binding_id:'binding-1'});
+});
+
+for (const {operation,persisted,configuration,complete} of [
+  {operation:'save',persisted:'saved',configuration:targetConfiguration(),complete:(state,ticket,view)=>savedTarget(state,ticket,{view,check:targetCheck(ticket).check})},
+  {operation:'remove',persisted:'removed',configuration:null,complete:removedTarget},
+]) {
+  test(`edits after completed ${operation} retain its outcome until the owed refresh recovers`,()=>{
+    let state=loadedTarget();
+    const ticket=targetTicket(state);
+    const committed=targetView(state,{revision:2,configuration});
+    state=complete(beginTarget(state,operation),ticket,committed);
+    state=editTarget(state,{...state.draft,arguments:['edited while refreshing']});
+    assert.equal(state.persisted,persisted);
+    state=targetReadFailed(state,unreadable);
+    state=editTarget(state,{...state.draft,arguments:['edited after refresh failure']});
+    assert.equal(state.persisted,persisted);
+    assert.equal(state.readError,unreadable);
+    assert.equal(state.refreshRequired,true);
+    assert.equal(targetExpectation(state),null);
+    state=beginTarget({...state,operation:null},'read');
+    assert.equal(state.persisted,persisted);
+    state=readTarget(state,committed);
+    assert.deepEqual(state.draft.arguments,['edited after refresh failure']);
+    assert.deepEqual(state.view,committed);
+    assert.equal(state.refreshRequired,false);
+    state=editTarget(state,{...state.draft,arguments:['edited after recovery']});
+    assert.equal(state.persisted,null);
+  });
+}
+
+test('an unrelated reload after a refreshed save retires the notice, so its own failure reads as a plain read fault',()=>{
+  let state=loadedTarget();
+  const ticket=targetTicket(state);
+  const committed=targetView(state,{revision:2,configuration:targetConfiguration()});
+  state=readTarget(savedTarget(beginTarget(state,'save'),ticket,{view:committed,check:targetCheck(ticket).check}),committed);
+  assert.equal(state.persisted,'saved');
+  state=beginTarget({...state,operation:null},'read');
+  assert.equal(state.persisted,null);
+  state=targetReadFailed(state,unreadable);
+  assert.equal(state.persisted,null);
+  assert.equal(state.readError,unreadable);
+  assert.equal(state.refreshRequired,true);
+  assert.equal(state.view.record.revision,2);
+  assert.equal(readTarget(beginTarget({...state,operation:null},'read'),committed).persisted,null);
+});
+
+test('removal keeps an unsaved draft and revision progression until Discard; old checks cannot resurrect the removed record',()=>{
   let state=loadedTarget();
   state=editTarget(state,{...state.draft,gamePath:'/metadata/keep-draft'});
   const ticket=targetTicket(state);
   const removed=targetView(state,{revision:2});
-  state=removedTarget(state,ticket,removed);
+  state=removedTarget(beginTarget(state,'remove'),ticket,removed);
   state=readTarget(state,removed);
   assert.equal(state.persisted,'removed');
   assert.equal(state.view.record.binding,null);
@@ -572,7 +661,9 @@ test('removal keeps an unsaved draft and revision progression; old checks cannot
   assert.equal(state.draft.gamePath,'/metadata/keep-draft');
   assert.equal(targetDirty(state),true);
   assert.equal(checkedTarget(state,ticket,targetCheck(ticket)),state);
-  assert.equal(discardTarget(state).draft.gamePath,'');
+  const discarded=discardTarget(state);
+  assert.equal(discarded.persisted,null);
+  assert.equal(discarded.draft.gamePath,'');
 });
 
 for (const {scenario,declaration} of [

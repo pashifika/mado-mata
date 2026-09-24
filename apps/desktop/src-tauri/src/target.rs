@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
+pub(crate) const TARGET_VERSION: u32 = 1;
 pub(crate) const MAX_TARGET_BYTES: usize = 64 * 1024;
 pub const MAX_TARGET_REVISION: u64 = 9_007_199_254_740_991;
 const MAX_METADATA_BYTES: usize = 64 * 1024;
@@ -273,7 +274,7 @@ impl TargetRecord {
 
     /// Restore and load share this pure validation, even for removed installations.
     pub(crate) fn validate_owned(&self, tab: &str, package: &str) -> Result<(), Fault> {
-        if self.version != 1 {
+        if self.version != TARGET_VERSION {
             return Err(Fault::new(
                 "TargetVersion",
                 "unsupported target configuration version; original data was preserved",

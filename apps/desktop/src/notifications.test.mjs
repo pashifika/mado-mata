@@ -29,10 +29,10 @@ test('severity follows the log level so a failed terminal run is never a success
 });
 
 test('success suppression never hides warnings or errors',()=>{
-  const quiet={...preferences,show_success:false};
-  const stack=ingestCards(emptyStack,[entry(1,'profile.saved'),entry(2,'workspace.opened','INFO'),entry(3,'run.terminal','WARN'),entry(4,'command.failed','ERROR')],quiet);
-  assert.deepEqual(stack.cards.map(card=>card.id),[3,4]);
-  assert.equal(stack.lastSequence,4);
+  const quiet={...preferences,visible_count:3,show_success:false};
+  const stack=ingestCards(emptyStack,[entry(1,'profile.saved'),entry(2,'workspace.opened','INFO'),entry(3,'run.terminal','WARN'),entry(4,'command.failed','ERROR'),entry(5,'target.review_required','WARN')],quiet);
+  assert.deepEqual(stack.cards.map(card=>card.id),[3,4,5]);
+  assert.equal(stack.lastSequence,5);
 });
 
 test('overflow displaces the oldest visible card and a lower limit trims immediately',()=>{

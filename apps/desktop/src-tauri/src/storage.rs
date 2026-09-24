@@ -492,7 +492,7 @@ impl Store {
         let result = (|| {
             let directory = self.target_directory(tab, package)?;
             let mut record = TargetRecord {
-                version: VERSION,
+                version: target::TARGET_VERSION,
                 internal_name: tab.to_owned(),
                 package_id: package.to_owned(),
                 revision: 0,

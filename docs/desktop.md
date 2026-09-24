@@ -345,10 +345,17 @@ invalid, or incompatible local target is not an execution prerequisite.
    write. Both inspect only filesystem metadata: executable accessibility,
    bounded XML/binary bundle metadata, contained bundle executable, working
    directory, and canonical paths. No executable or helper is launched.
-5. Review changed canonical locations explicitly. **Save reviewed resolution**
-   resolves them again and refuses a different result. Merely checking cannot
-   replace saved locations. In-place executable updates at the same canonical
-   location remain compatible; this is not a signed-binary or content check.
+5. Review changed canonical locations explicitly. A direct Save also opens this
+   review without writing; its warning is not a metadata-check failure.
+   **Save reviewed resolution** resolves them again and refuses a different
+   result. Merely checking cannot replace saved locations. In-place executable
+   updates at the same canonical location remain compatible; this is not a
+   signed-binary or content check.
+
+Required values are listed at the start of the form. Empty fields and unselected
+options are not marked as errors. Check and Save stay disabled until the required
+values form a valid configuration; populated invalid values and host validation
+failures are still shown.
 
 Neither action finds processes/windows, connects, captures, performs OCR, sends
 input, changes focus, or requests permissions. A passed check is **configuration
@@ -374,13 +381,17 @@ draft uses the existing discard confirmation alongside profile edits.
 A stale record revision/binding ID is refused: Reload before another mutation,
 then deliberately keep the draft or Discard. If persistence succeeds but its
 follow-up read fails, the write remains completed; repair and retry the read,
-not the completed mutation. Malformed target storage is reported independently
-of profiles. Preserve the file before external repair.
+not the completed mutation. Draft edits retain the completed-write notice while
+that read is outstanding; an edit after recovery retires it. Malformed target
+storage is reported independently of profiles. Preserve the file before external
+repair.
 
 Changing/removing the portable declaration retains an incompatible record
-without applying it to the form. Save deliberately replaces it after validation;
-confirmed **Remove binding** clears only this owner's binding and increments its
-record revision. It keeps the current draft until Discard, and never deletes
+without applying it to the form. With a current declaration, Save deliberately
+replaces it after validation. Without one, declare a target in the manifest and
+Reinspect before replacing it. Confirmed **Remove binding** clears only this
+owner's binding and increments its record revision. When a declaration makes the
+form available, its current draft remains until Discard. Removal never deletes
 installed programs, package source, profiles, or another Tab's configuration.
 Check, Save, and Remove refuse active runs/OCR checks; read, navigation, polling,
 and Stop retain their existing roles.

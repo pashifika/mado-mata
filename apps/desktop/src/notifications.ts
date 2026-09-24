@@ -5,6 +5,7 @@ const OUTCOME_CODES: Record<string, true> = {
   'workspace.opened': true, 'workspace.reinspected': true, 'workspace.closed': true,
   'profile.saved': true, 'profile.renamed': true, 'profile.deleted': true,
   'settings.saved': true, 'command.failed': true, 'run.terminal': true,
+  'target.review_required': true,
 };
 
 export type Severity = 'success' | 'warning' | 'error';

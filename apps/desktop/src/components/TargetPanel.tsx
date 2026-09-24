@@ -57,7 +57,8 @@ export default function TargetPanel({state, handlers, locked, active}: {
   };
   function fieldError(name:TargetField):string|null {
     if (currentIssue && field && hostFields[field] === name) return state.issue!.fault.message;
-    const error = parsed.errors[name];
+    // Empty fields are not yet mistakes; Save/Check still require a valid configuration.
+    const error = draft[name] === '' ? undefined : parsed.errors[name];
     return error ? t.fieldErrors[error] : null;
   }
   function fieldBox(name:TargetField, id:string, label:string, control:ReactNode) {
@@ -75,7 +76,7 @@ export default function TargetPanel({state, handlers, locked, active}: {
   }
   const kinds = [{value:'', label:t.choose}, {value:'executable', label:t.executable}, {value:'bundle', label:t.bundle}];
   const status = currentIssue ? t.failed : review ? t.changed : currentObservation ? t.passed : targetDirty(state) ? t.modified
-    : binding ? state.view?.compatible ? t.unchecked : t.incompatibleStatus : t.noBinding;
+    : binding ? state.view?.compatible ? t.unchecked : state.declaration ? t.incompatibleStatus : t.undeclaredStatus : t.noBinding;
   function moveArgument(index:number, offset:number) {
     const arguments_ = [...draft.arguments];
     [arguments_[index], arguments_[index + offset]] = [arguments_[index + offset], arguments_[index]];
@@ -112,15 +113,17 @@ export default function TargetPanel({state, handlers, locked, active}: {
       <div className="button-row"><button id="target-reload" type="button" disabled={locked || state.operation !== null} onClick={handlers.reload}>{t.reload}</button>
         {state.view && <span className="muted">{t.revision(state.view.record.revision)}</span>}</div>
       {binding && <>
-        {!state.view?.compatible && <p id="target-incompatible" className="inline-warning">{t.incompatible}</p>}
+        {!state.view?.compatible && <p id="target-incompatible" className="inline-warning">{state.declaration ? t.incompatible : t.undeclaredRetained}</p>}
         <details id="target-saved"><summary>{state.view?.compatible ? t.savedResolution : t.retained}</summary>
           <dl className="run-identity"><dt>{t.bindingId}</dt><dd>{binding.id}</dd><dt>{t.declaration}</dt><dd>{binding.target_id}</dd></dl>
           <BoundedRecord value={binding as unknown as Json}/></details>
       </>}
       {state.declaration && <>
         <p className="authority-note">{t.privacy}</p>
-        <fieldset className="target-fields" disabled={editingDisabled}>
-          <legend>{t.game}</legend>
+        <fieldset className="target-fields" disabled={editingDisabled} aria-describedby="target-required-fields">
+          <legend>{t.configuration}</legend>
+          <p id="target-required-fields" className="field-help">{t.requiredFields}</p>
+          <h3>{t.game}</h3>
           <div className="two-col">
             {fieldBox('gameKind', 'target-game-kind', t.gameKind,
               <Select id="target-game-kind" value={draft.gameKind} options={kinds} disabled={editingDisabled} {...attributes('gameKind', 'target-game-kind')}

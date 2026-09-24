@@ -80,16 +80,21 @@ function currentRecord(state:TargetState, ticket:TargetTicket):boolean {
     && (state.view.record.binding?.id ?? null) === ticket.expected.binding_id;
 }
 
+// Keep a completed mutation visible while its refresh is owed; later edits retire settled notices.
 export function editTarget(state:TargetState, draft:TargetDraft):TargetState {
-  return {...state, draft, draftRevision:state.draftRevision + 1, observation:null, issue:null, review:null};
+  return {...state, draft, draftRevision:state.draftRevision + 1, observation:null, issue:null, review:null,
+    persisted:state.refreshRequired ? state.persisted : null};
 }
 
 export function discardTarget(state:TargetState):TargetState {
   return editTarget(state, savedDraft(state));
 }
 
+// A mutation's own refresh never passes through here (App.targetCommand reads inline), so a read beginning while a refresh
+// is still owed is the recovery Reload and keeps the completed mutation's notice; any other Reload retires it.
 export function beginTarget(state:TargetState, operation:TargetOperation):TargetState {
-  return {...state, operation, ...(operation === 'read' ? {readError:null} : {issue:null, persisted:null})};
+  return {...state, operation, ...(operation === 'read'
+    ? {readError:null, persisted:state.refreshRequired ? state.persisted : null} : {issue:null, persisted:null})};
 }
 
 // Reads refresh only saved truth. The first read may initialize an untouched form; later reads never replace edits.
@@ -130,13 +135,15 @@ export function removedTarget(state:TargetState, ticket:TargetTicket, view:Targe
   return {...state, view, refreshRequired:true, persisted:'removed', issue:null, review:null, observation:null};
 }
 
+// An attributed usable changed-resolution result is the review-needed state, not a fault; a malformed or missing
+// resolution context stays a real failure.
 export function targetFailed(state:TargetState, ticket:TargetTicket, error:Fault):TargetState {
   if (!sameContext(state.context, ticket.context)) return state;
   const context = error.context !== null && typeof error.context === 'object' && !Array.isArray(error.context) ? error.context : null;
   const resolution = context?.resolution;
   const review = error.category === 'TargetResolutionChanged' && resolution !== null && typeof resolution === 'object' && !Array.isArray(resolution)
     ? {ticket, previous:(context?.previous_resolution ?? null) as unknown as TargetResolution|null, resolution:resolution as unknown as TargetResolution} : null;
-  return {...state, issue:{fault:error, ticket}, observation:null, review,
+  return {...state, issue:review ? null : {fault:error, ticket}, observation:null, review,
     reconcile:state.reconcile || error.category === 'TargetConflict'};
 }
 
