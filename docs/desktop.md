@@ -173,7 +173,7 @@ them even where Initialize can use the same location. This environment is outsid
 the supported import contract; the application does not rewrite links, repair
 the machine's directory layout, or silently choose a different destination.
 
-## Frontend source layout
+## Source layout
 
 TSX files under `apps/desktop/src/` are grouped by responsibility:
 
@@ -187,8 +187,23 @@ TSX files under `apps/desktop/src/` are grouped by responsibility:
 | `i18n.ts`, `ui-messages.ts`, `locale.tsx` | Typed formatting and saved-locale presentation |
 
 Imports point directly to the owning file. Non-visual TypeScript modules and
-their tests remain at the source root. Rust bootstrap, storage, snapshot, and
-restore responsibilities reside in separate modules under `src-tauri/src/`.
+their tests remain at the source root.
+
+### Rust ownership
+
+The shell-independent core retains its public root namespaces:
+
+| Root | Private children |
+| --- | --- |
+| `application.rs` | `workspaces` owns Tab/session transitions; `profiles` owns ordinary profile commands and desktop value checks; `recovery` owns schema reconciliation, repair/reset authority, and explicit binding retry; `targets` owns target commands; `operations` owns execution, collection, and shutdown |
+| `storage.rs` | `settings`, `tabs`, `profiles`, and `targets` own their records and persistence; `fs` owns bounded reads, safe paths, and atomic file publication |
+
+`Application` retains command admission and authoritative workspace/Store locks.
+`Store` and `ProfileStore` retain owner and shared-budget coordination.
+Bootstrap, snapshots, restore, configuration primitives, logging, and target
+metadata validation keep their existing separate modules. Tests follow their
+behavior owner; cross-owner tests stay at the root. Module extraction does not
+change persisted formats, filesystem protections, or runtime authority.
 
 ## Package workspaces and App settings
 
@@ -409,8 +424,10 @@ concurrent external filesystem edits.
    dependencies without executing package automation. JavaScript syntax and
    module bindings are checked without evaluating module bodies, including
    requested executable `.d.ts` dependencies. Successful binding requires saving
-   the owning Tab's reference before publishing the new selection; a failed
-   write leaves the previous binding intact. No remembered path grants authority.
+   the owning Tab's reference before publishing the new selection. A failed
+   binding write retains the durable reference, any prior inspected selection,
+   and its unsaved draft; it never publishes the attempted replacement as runnable.
+   No remembered path grants authority.
 2. Select a package preset or a saved profile. Presets such as `template-first`
    and `ocr-first` become editable drafts; they are not automatically persisted
    application profiles. The form covers supported scalar, enum, nested-object,
@@ -441,17 +458,71 @@ identity, and values. Each belongs to one Tab/package scope under
 the package's preset files. Saving, renaming, or deleting refreshes only that
 owner's catalog; another Tab using the same source retains its own profiles and
 draft. A relocated source with the same package ID can reuse that Tab's profiles
-only after compatibility validation. Changing the selected package does not
-delete other saved package settings.
+only after compatibility validation and a durable Tab-reference update. Changing
+the selected package does not delete other saved package settings.
 
-Malformed data, unsupported versions, and incompatible profiles are reported
-without silent reset, quarantine, or migration. A listing failure preserves the
-owner's known catalog and draft; Reinspect still resets its own draft and reports
-the failed listing. If a write succeeds but its follow-up read fails, the write
-remains successful and the owner shows the listing fault. After deliberate repair,
-a successful listing refreshes that owner and clears resolved faults. Diagnostics
-identify the Tab/package/profile scope. Preserve affected files before repair;
-do not rewrite identity fields to bypass refusal.
+### Recover profiles after a schema change
+
+Explicit **Inspect** or **Reinspect** reconciles safe owned profiles with the
+captured schema. Supplied values are retained, and only absent top-level options
+with declared defaults are added. Optional options without defaults stay absent.
+Present nested objects and arrays are complete replacements: recovery does not
+recursively fill them, coerce types, guess renamed fields, remove unknown fields,
+or execute package-provided migration code. Already-compatible profiles are not
+rewritten. Startup, catalog reads, Validate, and Start do not perform recovery
+writes.
+
+Each successful replacement preserves the profile's ID, name, package ID, and
+version while updating its schema identity. Profiles commit independently: a
+later profile, binding, or catalog-refresh failure does not undo an earlier save.
+The result distinguishes saved profiles, profiles needing repair, and storage
+failures. A valid profile can remain usable on an in-place source while another
+profile needs repair.
+
+The recovery editor is available on the Run or workspace guidance page. It
+shows the original values and structured field issue against the captured schema.
+Stored strings under numeric fields remain type mismatches until deliberately
+replaced or edited; an untouched numeric-looking string is not converted on Save.
+Repair changes only the selected profile. Reset requires a confirmation scoped
+to that Tab and recovery context, ignores the discarded draft's parse errors, and
+uses the schema's top-level defaults; cancellation changes nothing. If those
+defaults cannot form a valid profile, reset preserves the original file and
+returns an unsaved draft with the invalid value or individual-profile limit
+identified. Aggregate storage exhaustion is a publication failure, not an
+incomplete-default draft. Complete a returned draft and save deliberately.
+
+When the old source has moved, inspecting a same-ID replacement does not require
+the old directory to exist. Rejected profiles produce a **non-runnable recovery
+candidate**, not a new binding. Repair or reset never binds it implicitly.
+Explicitly retry binding after recovery; the host rechecks the captured source,
+strict profile catalog, and durable Tab-reference write before publishing a
+normal selection. Discarding or superseding a candidate invalidates its recovery
+context but does not undo completed saves. Recovery never consumes the global
+operation slot or changes an existing operation's Stop authority.
+
+Failed source binding has an explicit **Retry binding** action even for a first
+inspection or an in-place update. Its failure is separate from an earlier
+saved-source inspection error. In-place retry does not require unrelated rejected
+profiles to be repaired; their recovery access and unsaved drafts remain available.
+If a failed binding retained a previous selection, repairing the attempted
+package cannot replace that selection's draft or another package/schema's catalog.
+Discard leaves the retained selection authoritative; it does not recreate one
+that a recovery-only candidate already invalidated.
+
+Before each recovery save the host re-reads the original file under storage
+serialization. A changed or missing original is refused rather than overwritten
+or recreated; Reinspect to obtain a current context. Malformed, foreign,
+unsupported-version, unsafe-value, pending-write, and unsafe-path records remain
+storage faults, not editable synthetic profiles. Preserve affected files before
+external repair; do not rewrite identity fields to bypass refusal.
+
+Navigation and late replies retain their originating workspace/profile identity.
+Newer editor drafts are not replaced by older responses. If a write succeeds but
+its follow-up read fails, repair and retry the read rather than repeating the
+completed mutation. Ordinary listing failures preserve the owner's known catalog
+and draft. Inspect/Reinspect asks before discarding edited recovery values,
+including Enter in the guidance path field; a confirmed new inspection replaces
+its own editor context.
 
 ### Configuration files and limits
 
@@ -822,8 +893,8 @@ Japanese. Do not replace actual WebView interaction with mocked command results.
    references/profiles, with healthy Tabs usable. A supported saved custom-archive
    reference must show unsupported-source guidance, not a fake empty package.
    Repair and Inspect a real directory; a failed durable bind must retain the
-   previous selection. Check that changing a selected package keeps other saved
-   package settings.
+   previous saved reference without publishing a runnable replacement. Check that
+   changing a selected package keeps other saved package settings.
 5. In a disposable root, distinguish missing settings from malformed, unsupported,
    or unreadable present settings. Verify Setup only for absence; verify Recovery
    retains stage/cause and original bytes otherwise. Correct the external fault
@@ -887,6 +958,41 @@ Japanese. Do not replace actual WebView interaction with mocked command results.
    only the committed direction may complete. Do not delete journal evidence or
    invent production fault-injection commands. Record unavailable interruption
    or writer-timeout scenarios as unexecuted, not passed.
+
+### Profile schema recovery acceptance
+
+Use disposable copies of the shipped controlled package and a private data root.
+Keep package presets valid when changing the schema; do not edit tracked fixtures.
+
+1. Save two profiles with distinct supplied values and array order. Add a
+   top-level default and change a constraint so only one profile remains valid.
+   Reinspect: verify one automatic save, unchanged bytes for the rejected profile,
+   stable IDs/names, and usable compatible profiles. Restart and verify reuse.
+2. Repair the rejected profile through the shared editor, including deliberate
+   removal of an unknown field or replacement of a wrong type. Verify an untouched
+   stored numeric string is not coerced. Cancel Reset and compare both draft and
+   saved bytes; confirm Reset even when the discarded value has a numeric parse
+   error. Switch between two Tabs with the same profile ID while a confirmation
+   is open; it must not transfer. Guidance Inspect and Enter must confirm before
+   discarding an edited recovery draft. Add a required option with no default
+   (updating presets separately), then confirm Reset: verify unchanged bytes, an
+   unsaved draft and the field issue. Complete and save that draft.
+3. Move the source so the old directory no longer exists while a profile remains
+   rejected. Inspect the same-ID destination through guidance. Verify a
+   non-runnable candidate and unchanged durable source reference. Repair/reset,
+   explicitly retry binding, and inspect the persisted new reference.
+4. In the disposable root, exercise a binding-write failure after a profile save.
+   Verify the saved fact survives separately from the failed binding. A previously
+   inspected selection and its unsaved draft must remain authoritative, never the
+   attempted candidate. Repairing another package/schema must not replace its
+   catalog. Retry an in-place binding with an unrepaired profile and edited repair
+   draft; binding may succeed without losing that draft. Check first-binding
+   failure has a reachable Retry action and does not invent a saved-source fault.
+   Navigate between Tabs while preserving origin attribution. Attempt candidate
+   mutation during another controlled operation; verify refusal and unchanged
+   owner-bound Stop. A changed/missing original must be refused without
+   replacement/recreation. Repeat failure notices in English/Japanese. Record
+   unavailable follow-up read-failure timing as unexecuted, not passed.
 
 ### Controlled run and UI acceptance
 

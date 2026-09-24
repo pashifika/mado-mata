@@ -1,9 +1,11 @@
 import {LocalFault, messages} from './i18n.ts';
 import type {Locale, Message} from './i18n.ts';
 import {defaultDraft, readDraft} from './state.ts';
+import {mutatedRecovery, recoveryState, retriedRecovery, sameRecoveryContext, upsertOutcomes} from './recovery.ts';
+import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {targetDirty, targetState} from './target.ts';
 import type {TargetState} from './target.ts';
-import type {ControllerView, Fault, Json, LegacyImport, LogEntry, OcrEnvironment, PackageInfo, PackageReference, Profile, Selection, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, WorkspaceRef, WorkspaceView} from './types.ts';
 
 export const WORKSPACE_LIMIT = 8;
 export const SAVED_LIMIT = 64;
@@ -43,7 +45,7 @@ export interface Bound {
 export interface Workspace {
   id:string; revision:number; internalName:string; displayName:string;
   bound:Bound|null;
-  // Host-reported reason the saved source could not be inspected. Null together with `bound` null means no saved package.
+  // Host-reported failure of the saved source, distinct from a failed candidate binding in `error`.
   sourceError:Fault|null;
   // The Tab's selected durable reference as the host stores it; display and prefill only, never authority to run.
   savedPackage:PackageReference|null;
@@ -53,6 +55,11 @@ export interface Workspace {
   // Inspect form draft for this Tab; a path is only a request, never a binding.
   inspectPath:string;
   legacyImport:LegacyImport|null;
+  // Host-issued profile recovery context with the operator's repair draft; null while this Tab has no current context.
+  recovery:RecoveryState|null;
+  // Per-profile publication facts from the last explicit inspection or repair. Kept when the context is discarded or
+  // superseded and when binding or refresh fails afterwards: a committed write is never hidden or claimed rolled back.
+  recoveryOutcomes:ProfileRecoveryOutcome[];
 }
 
 export type BoundWorkspace = Workspace & {bound:Bound};
@@ -62,7 +69,6 @@ export interface ClosedWorkspace {id:string; revision:number; label:string; resu
 
 export interface Origin {id:string; revision:number; draftRevision?:number}
 
-export type ProfileCatalog = Pick<Selection,'profiles'|'profiles_error'>;
 export interface WorkspaceCommand {
   update:(workspace:Workspace) => Workspace;
   catalog?:ProfileCatalog;
@@ -110,6 +116,7 @@ export function workspaceFromView(view:WorkspaceView, notice:Message|null = null
     bound: view.selection ? fromSelection(view.selection) : null, sourceError: view.source_error, savedPackage: saved,
     page: 'run', error: null, notice, logFilter: {text: '', level: ''}, busy: null,
     inspectPath: view.selection?.package_path ?? (saved !== null && saved.source.kind === 'directory' ? saved.source.path : ''), legacyImport: null,
+    recovery: view.recovery ? recoveryState(view.recovery, null) : null, recoveryOutcomes: [],
   };
 }
 
@@ -170,6 +177,80 @@ export function applyCatalog(workspace:Workspace, catalog:ProfileCatalog):Worksp
   if (next === bound) return workspace;
   const notice = catalogNotice(bound, next);
   return {...workspace, bound: next, notice: notice ?? workspace.notice};
+}
+
+// The same package session as the bound one: a failed durable bind reissues it under the host's new revision.
+function sameSession(bound:Bound, selection:Selection):boolean {
+  return bound.packagePath === selection.package_path && bound.package.inventory_identity === selection.package.inventory_identity
+    && bound.package.package_id === selection.package.package_id && bound.package.schema_identity === selection.package.schema_identity;
+}
+
+// A retained selection moves to the new revision with its profile and target drafts intact; the old target view is
+// reloaded under its new owner before another target command, and replies issued under the old revision stay stale.
+function reissueSelection(workspace:Workspace, bound:Bound, selection:Selection, notice:Message|null):Workspace {
+  const target = {...bound.target, context: {...bound.target.context, workspace: {workspace_id: selection.workspace_id, revision: selection.revision}},
+    loaded: false, view: null, observation: null, review: null};
+  return applyCatalog({...workspace, revision: selection.revision, bound: {...bound, target}, error: null, notice}, selection);
+}
+
+// A selection binds a new revision or, at the same revision, only refreshes the catalog; no selection ends the
+// package session while the saved reference stays as reported. Same recovery token keeps its draft. `retained` marks
+// a view whose selection the host kept after a failed durable bind: the same session at a new revision, so the
+// operator's drafts survive; ordinary inspection of the same directory still starts a fresh draft.
+export function applyWorkspaceView(workspace:Workspace, view:WorkspaceView, notice:Message|null, retained = false):Workspace {
+  const selection = view.selection;
+  const bound = workspace.bound;
+  const base = selection === null
+    ? {...workspace, revision: view.revision, bound: null, error: null, notice, legacyImport: null}
+    : bound !== null && selection.revision === workspace.revision
+      ? applyCatalog({...workspace, error: null, notice}, selection)
+      : bound !== null && retained && sameSession(bound, selection)
+        ? reissueSelection(workspace, bound, selection, notice)
+        : bindSelection(workspace, selection, notice);
+  return {...base, sourceError: view.source_error, savedPackage: view.saved_package,
+    recovery: view.recovery ? recoveryState(view.recovery, workspace.recovery) : null};
+}
+
+// Explicit inspection replaces the per-profile facts; a binding retry adds to them so earlier saves stay reported. A
+// failed binding keeps the prior selection (if any) as run authority and reports only this attempt in `error`. A retry
+// reply for the same context token carries the unrepaired draft across the host's revision move.
+export function applyInspection(workspace:Workspace, outcome:InspectionOutcome, notice:Message|null, retry:boolean):Workspace {
+  const context = outcome.workspace.recovery?.context;
+  const previous = retry && context && workspace.recovery ? {...workspace, recovery: retriedRecovery(workspace.recovery, context)} : workspace;
+  const next = applyWorkspaceView(previous, outcome.workspace, notice, outcome.kind === 'binding_failed');
+  return {...next, error: outcome.binding_error,
+    recoveryOutcomes: retry ? upsertOutcomes(workspace.recoveryOutcomes, outcome.outcomes) : outcome.outcomes};
+}
+
+// A recovery context's store is the bound catalog only when it names the same package and schema; a relocation or
+// in-place candidate with another schema writes records the bound selection cannot use and never merges into it.
+function ownsCatalog(bound:Bound, context:RecoveryState):boolean {
+  return bound.package.package_id === context.view.package.package_id && bound.package.schema_identity === context.view.package.schema_identity;
+}
+
+// Commit facts survive refresh failure; tickets protect only the draft.
+export function applyRecoveryMutation(workspace:Workspace, ticket:RecoveryTicket, mutation:RecoveryMutation):Workspace {
+  const saved = mutation.saved;
+  const state = workspace.recovery;
+  const owned = state !== null && sameRecoveryContext(state.view.context, ticket.context)
+    && workspace.bound !== null && ownsCatalog(workspace.bound, state);
+  let next = workspace;
+  if (saved !== null) {
+    next = {...next, recoveryOutcomes: upsertOutcomes(next.recoveryOutcomes, [{profile_id: saved.id, name: saved.name, status: 'saved', issue: null}])};
+    if (owned && workspace.bound?.package.package_id === saved.package_id && workspace.bound?.package.schema_identity === saved.schema_identity) next = updateBound(next, bound => ({...bound,
+      profiles: [...bound.profiles.filter(entry => entry.id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name))}));
+  }
+  if (owned && mutation.catalog) next = applyCatalog(next, mutation.catalog);
+  else if (owned && mutation.refresh_error) next = applyCatalog(next, {profiles: [], profiles_error: mutation.refresh_error});
+  if (!state || !sameRecoveryContext(state.view.context, ticket.context)) {
+    return saved === null ? next : {...next, notice: {key: 'recoverySaved', args: [saved.name, saved.id]}};
+  }
+  const current = state.selectedId === ticket.profileId && state.draftRevision === ticket.draftRevision;
+  const notice:Message|null = saved !== null
+    ? current ? {key: 'recoverySaved', args: [saved.name, saved.id]} : {key: 'recoveryEarlierSaved', args: [saved.name, saved.id]}
+    : mutation.draft !== null && current ? {key: 'recoveryResetIncomplete'} : null;
+  // A mutation reply never ends the context; Close/Discard and reinspection are the explicit ways out.
+  return {...next, recovery: mutatedRecovery(state, ticket, mutation), notice: notice ?? next.notice};
 }
 
 export function closeWorkspace(list:Workspace[], id:string):Workspace[] {
@@ -236,7 +317,8 @@ export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, l
 }
 
 export function hasWorkspaceEdits(workspace:Workspace, facts:Derived|undefined):boolean {
-  return workspace.bound !== null && ((workspace.bound.touched && facts?.dirty === true) || targetDirty(workspace.bound.target));
+  return (workspace.bound !== null && ((workspace.bound.touched && facts?.dirty === true) || targetDirty(workspace.bound.target)))
+    || workspace.recovery?.touched === true;
 }
 
 // Package commands carry values only from a real inspected selection. A genuine named Tab without one is refused

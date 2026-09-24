@@ -31,6 +31,15 @@ export function retainLogs(store:LogStore, incoming:LogEntry[], limit:number):Lo
   return {items:[...store.items.slice(oldDiscard),...incoming.slice(newDiscard)],evicted:store.evicted+discard};
 }
 
+const IDENTIFIER_KEY = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+// Structured value path used by host diagnostics and every frontend editor: `$.key` for an ASCII identifier key,
+// `$["a.b"]` (JSON string) otherwise, so a literal `a.b` key is never confused with nested `a` → `b`. Array items
+// stay `path[index]`. Field IDs and error lookups share this exact spelling.
+export function optionPath(path:string, key:string):string {
+  return IDENTIFIER_KEY.test(key) ? `${path}.${key}` : `${path}[${JSON.stringify(key)}]`;
+}
+
 // Only absent top-level options receive defaults; nested drafts stay explicit.
 export function defaultDraft(schema:Schema):Record<string,Json> {
   return Object.fromEntries(Object.entries(schema.properties ?? {})
@@ -50,12 +59,17 @@ function exactIntegerText(text: string, number: number): boolean {
   return significant === integerSignificant && exponent === integer.length - integerSignificant.length;
 }
 
-// Numeric editor text is preserved until the command boundary, never coerced to null or zero.
-export function readDraft(schema: Schema, draft: Record<string, Json>, locale: Locale = 'en') {
+// Numeric editor text is preserved until the command boundary, never coerced to null or zero. `stored` names the value
+// paths whose string is loaded data rather than editor text: it stays a string and blocks the command as a type mismatch.
+export function readDraft(schema: Schema, draft: Record<string, Json>, locale: Locale = 'en', stored?: ReadonlySet<string>) {
   const t = messages[locale].validation;
   const errors: Record<string, string> = {};
   function convert(node: Schema, value: Json, path: string): Json {
     if ((node.type === 'number' || node.type === 'integer') && (typeof value === 'string' || typeof value === 'number')) {
+      if (typeof value === 'string' && stored?.has(path)) {
+        errors[path] = t.storedText;
+        return value;
+      }
       const number = typeof value === 'string' ? Number(value) : value;
       if (!Number.isFinite(number) || (typeof value === 'string' && !/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(value.trim()))) {
         errors[path] = t.finiteNumber;
@@ -77,7 +91,7 @@ export function readDraft(schema: Schema, draft: Record<string, Json>, locale: L
     }
     if (node.type === 'object' && value !== null && typeof value === 'object' && !Array.isArray(value)) {
       return Object.fromEntries(Object.entries(value).map(([key, child]) => [key,
-        node.properties?.[key] ? convert(node.properties[key], child, `${path}.${key}`) : child]));
+        node.properties?.[key] ? convert(node.properties[key], child, optionPath(path, key)) : child]));
     }
     if (node.type === 'array' && Array.isArray(value) && node.items) {
       return value.map((child, index) => convert(node.items!, child, `${path}[${index}]`));

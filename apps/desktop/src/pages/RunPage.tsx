@@ -1,4 +1,6 @@
 import {useEffect, useRef, useState} from 'react';
+import ProfileRecovery from '../components/ProfileRecovery.tsx';
+import type {RecoveryHandlers} from '../components/ProfileRecovery.tsx';
 import SchemaForm from '../components/SchemaForm.tsx';
 import Select from '../components/Select.tsx';
 import TargetPanel from '../components/TargetPanel.tsx';
@@ -6,7 +8,7 @@ import type {TargetHandlers} from '../components/TargetPanel.tsx';
 import ResultPanel, {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import {faultSummary, text} from '../state.ts';
 import type {CheckAssociation} from '../state.ts';
-import {DESCRIPTOR_LIMIT, busy, editDraft, hasWorkspaceEdits} from '../workspace.ts';
+import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, editDraft, hasWorkspaceEdits} from '../workspace.ts';
 import type {Bound, BoundWorkspace, Derived} from '../workspace.ts';
 import type {ControllerView, Json, OcrEnvironment} from '../types.ts';
 import {messages, renderMessage} from '../i18n.ts';
@@ -27,6 +29,7 @@ export interface RunHandlers {
   newDraft: (preset?: string) => void; selectProfile: (id: string) => void;
   reinspect: () => void; inspectPath: (value: string) => void; importLegacy: () => void; start: () => void; stop: () => void;
   target: TargetHandlers;
+  recovery: RecoveryHandlers;
 }
 
 interface Props {
@@ -57,6 +60,10 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
     setConfirmReinspect(false);
     if (reinspect) handlers.reinspect();
   }
+  // Every Reinspect entry point, including the rejected-profile recovery route, passes the same unsaved-edits check.
+  function confirmedReinspect() {
+    if (hasWorkspaceEdits(workspace, derived)) setConfirmReinspect(true); else handlers.reinspect();
+  }
   const view = run.view;
   const phase = starting ? 'preparing' : view.state;
   const check = view.operation === 'environment_check';
@@ -78,6 +85,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
     </div>
     <div id="error">
       {workspace.error && <FaultMessage title={t.run.actionFailed} value={workspace.error}/>}
+      {workspace.sourceError && <FaultMessage title={workspace.sourceError.category === UNSUPPORTED_SOURCE ? t.guidance.unsupportedHeading : t.guidance.unavailableHeading} value={workspace.sourceError}/>}
       {primary && (privatePrimary || check
         ? <section className="fault" role="alert"><strong>{check ? t.run.checkError : t.run.runError} · {faultSummary(primary, !privatePrimary)}</strong>
             <p>{t.run.diagnosticHelp}</p></section>
@@ -110,13 +118,16 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                 <button type="button" className="danger-text" onClick={() => closeConfirm(true)}>{t.run.discardReinspect}</button>
                 <button type="button" autoFocus onClick={() => closeConfirm(false)}>{t.run.keepDraft}</button></div>
               : <button id="reinspect" ref={reinspectButton} disabled={locked || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()} title={run.live && busy(view.state) ? t.run.reinspectBlocked : undefined}
-                onClick={() => hasWorkspaceEdits(workspace, derived) ? setConfirmReinspect(true) : handlers.reinspect()}>{t.run.reinspect}</button>}
+                onClick={confirmedReinspect}>{t.run.reinspect}</button>}
           </div>
           <div className="field"><label htmlFor="package-path">{t.guidance.packageDirectory}</label>
             <input id="package-path" type="text" value={workspace.inspectPath} disabled={locked} spellCheck={false} placeholder={t.guidance.packagePlaceholder}
               onChange={event => handlers.inspectPath(event.target.value)}/>
             <p className="field-help">{t.run.reinspectHelp}</p></div>
-          {bound.profilesError && <><FaultMessage title={t.run.profilesError} value={bound.profilesError}/><p className="muted">{t.run.profilesHelp}</p></>}
+          {bound.profilesError && <><FaultMessage title={t.run.profilesError} value={bound.profilesError}/>
+            {bound.profilesError.category === 'ProfileRejected' && workspace.recovery === null
+              ? <p className="muted">{t.run.rejectedHelp} <button id="recover-reinspect" type="button" className="link" disabled={locked || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()} onClick={confirmedReinspect}>{t.run.recoverReinspect}</button></p>
+              : <p className="muted">{t.run.profilesHelp}</p>}</>}
           <div className="two-col">
             <div className="field"><label htmlFor="profile-select">{t.run.savedProfile}</label>
               <Select id="profile-select" value={bound.selectedId ?? ''} disabled={locked} onChange={handlers.selectProfile}
@@ -195,6 +206,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
         </div>
       </section>
     </div>
+    <ProfileRecovery idPrefix="recovery" label={label} state={workspace.recovery} outcomes={workspace.recoveryOutcomes} locked={locked} handlers={handlers.recovery}/>
     <TargetPanel state={bound.target} handlers={handlers.target} locked={locked} active={active}/>
   </>;
 }
