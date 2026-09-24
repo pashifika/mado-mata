@@ -190,7 +190,8 @@ export const VISIBLE_COUNTS: readonly number[] = [1, 2];
 export const TIMEOUT_SECONDS: readonly number[] = [5, 8, 12];
 export const DEFAULT_NOTIFICATIONS: NotificationPreferences = {visible_count: 2, timeout_seconds: 8, show_success: true};
 
-export interface SettingsDraft {locale:Locale; logLimit:string; notifications:NotificationPreferences; environment:EnvironmentDraft}
+// `backupDirectory` is a text draft; blank means the default destination, and an unsaved edit is never used by Back up now.
+export interface SettingsDraft {locale:Locale; logLimit:string; notifications:NotificationPreferences; environment:EnvironmentDraft; backupDirectory:string}
 
 export function settingsDraftFrom(settings: Settings | null): SettingsDraft {
   return {
@@ -198,6 +199,7 @@ export function settingsDraftFrom(settings: Settings | null): SettingsDraft {
     logLimit: String(settings?.gui_log_limit ?? 1000),
     notifications: {...(settings?.notifications ?? DEFAULT_NOTIFICATIONS)},
     environment: environmentDraft(settings?.ocr_environment ?? null),
+    backupDirectory: settings?.backup_directory ?? '',
   };
 }
 
@@ -220,7 +222,8 @@ export function readSettingsDraft(draft:SettingsDraft, locale:Locale = 'en'):{se
   const environment = readEnvironment(draft.environment, locale);
   Object.assign(errors, environment.errors);
   if (Object.keys(errors).length > 0) return {settings: null, errors};
-  return {settings: {locale:draft.locale, gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications}}, errors};
+  const destination = draft.backupDirectory.trim();
+  return {settings: {locale:draft.locale, gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications}, backup_directory: destination === '' ? null : destination}, errors};
 }
 
 export function sameNotifications(left:NotificationPreferences, right:NotificationPreferences):boolean {

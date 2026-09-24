@@ -4,11 +4,12 @@ import {uiMessages} from './ui-messages.ts';
 import {interpolate} from './i18n-format.ts';
 
 export type Locale = 'en' | 'ja';
-export type Command = "loadingSettings" | "restoringPackage" | "inspectingPackage" | "validatingDraft" | "savingProfile" | "renamingProfile" | "deletingProfile" | "reinspectingPackage" | "admittingRun" | "admittingCheck" | "savingSettings" | "closingWorkspace";
+export type Command = "loadingBootstrap" | "initializing" | "retrying" | "importingRoot" | "restoring" | "recovering" | "refreshingStatus" | "snapshotting"
+  | "creatingWorkspace" | "reopeningWorkspace" | "loadingCatalog" | "inspectingPackage" | "validatingDraft" | "savingProfile" | "renamingProfile"
+  | "deletingProfile" | "importingProfiles" | "reinspectingPackage" | "admittingRun" | "admittingCheck" | "savingSettings" | "closingWorkspace";
 
 function appMessages(copy: typeof en) {
   return {...copy.app,
-    openHelp: (limit: number) => interpolate(copy.app.openHelp, {limit}),
     workspaceLimit: (limit: number) => interpolate(copy.app.workspaceLimit, {limit}),
     closeConfirm: (name: string) => interpolate(copy.app.closeConfirm, {name}),
     workspaceAria: (name: string) => interpolate(copy.app.workspaceAria, {name}),
@@ -21,6 +22,8 @@ function appMessages(copy: typeof en) {
     descriptorLimit: (limit: number) => interpolate(copy.app.descriptorLimit, {limit}),
     profileSaved: (name: string, id: string) => interpolate(copy.app.profileSaved, {name, id}),
     profileRenamed: (name: string) => interpolate(copy.app.profileRenamed, {name}),
+    profilesImported: (imported: number, unchanged: number) => interpolate(copy.app.profilesImported, {imported, unchanged}),
+    profilesImportPartial: (imported: number, unchanged: number) => interpolate(copy.app.profilesImportPartial, {imported, unchanged}),
     deletedElsewhere: (name: string) => interpolate(copy.app.deletedElsewhere, {name}),
     updatedElsewhere: (name: string) => interpolate(copy.app.updatedElsewhere, {name}),
     renamedElsewhere: (name: string) => interpolate(copy.app.renamedElsewhere, {name}),

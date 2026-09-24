@@ -89,23 +89,79 @@ compilation checks. Moving a binary alone does not supply the fixed paths.
 An absent engine artifact or failure before Rust startup remains a typed
 diagnostic in the non-native GUI; controlled execution remains independent.
 
-By default, profiles, settings, and logs live in Tauri's application-local data
-directory. For isolated acceptance work, use a dedicated private directory:
+The default configuration root is `$HOME/.config/mado-mata`, not Tauri's
+application-local data directory. For isolated acceptance, select a private root:
 
 ```sh
-apps/desktop/src-tauri/target/debug/mado-mata-desktop --data-dir "$HOME/Library/Application Support/MadoMata-acceptance"
+apps/desktop/src-tauri/target/debug/mado-mata-desktop --data-dir "$HOME/.config/mado-mata-acceptance"
 ```
 
-`--data-dir PATH` selects the data root, not the runner, compiler, package, or an
-input route. Keep it outside package source and public tracked files. Reuse the
-same root when checking restart persistence; use a different private root to
-isolate another session without deleting existing data.
+`--data-dir PATH` selects the root explicitly and skips historical-root discovery.
+It does not select the runner, compiler, package, or an input route. Keep the root
+outside package source and public tracked files. Reuse it for restart checks;
+choose another private root to isolate work without deleting existing data.
+An absent root is not created merely by launching the application.
 
-New data directories use private Unix permissions. An existing data root or
-profile directory with group/other access is refused without changing its mode;
-choose or prepare a private application directory deliberately.
-The current Tauri setup path reports this refusal on stderr and aborts startup;
-it does not open a recovery UI. The existing directory and its files are unchanged.
+New application-owned directories use private Unix permissions. Existing managed
+directories or files with group/other access, unsafe types, or links are refused
+without changing their modes. Root and configuration failures open **Recovery**;
+the desktop performs no automatic repair, elevation, or fallback to another root.
+See [ADR 0005](adr/0005-desktop-configuration-recovery.md) for the configuration
+ownership and reconstruction boundary.
+
+## Setup and Recovery
+
+**Loading** waits for the selected root and saved configuration to be read; it
+does not expose a default settings draft or start normal application polling.
+A missing root or missing `settings.json` leads to **Setup**. Choose **Saved
+language** and an optional backup directory, then click **Initialize**. The host
+validates before publishing missing settings without replacement. Existing data
+is not cleared, and a settings file that appears meanwhile is read, not replaced.
+Initialization creates no Tab, inspects no package, and starts no run or OCR work.
+
+A present but unreadable, malformed, unsupported, or invalid settings file leads
+to **Recovery**, not Setup. The screen retains the selected root, failing stage,
+and original cause until an authoritative action resolves them. Editing a form
+or dismissing an action error does not clear the bootstrap failure. App settings
+cannot save replacement defaults over a failed read.
+
+**Display language for this screen** is temporary during Setup or Recovery.
+It neither reads language from a failed document nor writes settings. Setup's
+**Saved language** is a separate explicit choice written only by Initialize;
+successfully loaded saved settings determine normal application presentation.
+
+After preserving the affected data and repairing files or permissions externally,
+choose **Retry** to reread and reconstruct without restarting. A later settings
+or catalog failure retains the existing Application, polling, and owner-bound
+**Stop**. Reconstruction waits for active operations and commands to settle.
+Whenever an Application is retained, Retry requires explicit session-disposal
+confirmation even if no profile is dirty. Successful reconstruction drops drafts,
+transient results, Last check, cards, and the in-memory log buffer; file logs and
+saved configuration remain. It assigns fresh session identities and ignores
+responses from the retired generation.
+
+If shutdown reports `LoggingShutdown`, its incomplete writer state is sticky:
+use **Exit** or **Close window**, then relaunch. Retry cannot start a second writer
+or turn a previous timeout into a successful flush. This is distinct from a
+repairable settings read failure.
+
+### Import the historical default root
+
+Only when the new default root is absent, launch may offer the historical
+`$HOME/Library/Application Support/dev.madomata.desktop` root. Choose **Import
+historical root**, or explicitly confirm **Start fresh without importing the
+historical root** before Initialize. Explicit `--data-dir` roots do not discover
+or import this location.
+
+Import validates and copies only recognized `settings.json` and legacy
+`profiles/*.json` into private staging, then publishes the complete root without
+replacement. It refuses an existing destination, source changes, invalid owned
+files, and interrupted `.pending` writes; it neither merges nor deletes the
+source. Limits are **32 KiB** for settings, **64 profiles**, **64 KiB per profile**,
+**1 MiB total profile bytes**, and **128 entries** in the legacy profile directory.
+Logs, backups, package payloads, and unrecognized files stay in the old root.
+Imported legacy profiles still require the separate per-workspace import below;
+the historical package-location hint does not create or bind a Tab.
 
 ## Frontend source layout
 
@@ -114,25 +170,52 @@ TSX files under `apps/desktop/src/` are grouped by responsibility:
 | Path | Responsibility |
 | --- | --- |
 | `main.tsx`, `App.tsx` | Bootstrap and application composition |
-| `components/` | Shared selection, schema forms, results, notifications, and workspace navigation |
-| `pages/` | Run and Logs page views |
+| `components/` | Shared selection, schema forms, results, notifications, and named-workspace dialogs/navigation |
+| `pages/` | Setup/Recovery, unbound-package guidance, Run, and Logs views |
 | `settings/` | App settings dialog and OCR environment view |
 | `locales/` | Bundled English/Japanese JSON text resources |
 | `i18n.ts`, `ui-messages.ts`, `locale.tsx` | Typed formatting and saved-locale presentation |
 
 Imports point directly to the owning file. Non-visual TypeScript modules and
-their tests remain at the source root; the Rust layout under `src-tauri/` is
-unchanged.
+their tests remain at the source root. Rust bootstrap, storage, snapshot, and
+restore responsibilities reside in separate modules under `src-tauri/src/`.
 
 ## Package workspaces and App settings
 
-The compact navigation row holds at most **eight session-local workspaces**,
-each backed by a real inspected package root. Choose one from the **Workspace**
-dropdown; **+** opens another package. Opening the same canonical root activates
-its existing workspace without resetting its draft. Workspaces keep independent
-profile drafts, execution choices, and Run/Logs navigation. Unsaved workspaces
-and drafts are not restored after restart. Only the last package location is
-remembered and revalidated.
+A Workspace is an open session of a saved **Tab**, not a game attachment.
+**+** opens **New workspace**, asking only for two immutable names:
+
+- **Internal name:** **1–64 ASCII letters, `_`, or `-`**, with no digits, spaces,
+  trimming, or automatic suffix. It is unique across open and closed saved Tabs
+  without regard to ASCII case; its entered case is preserved.
+- **Display name:** **1–80 Unicode scalar values**, nonblank and without control
+  characters. Entered text is preserved. Duplicate display names are allowed and
+  are disambiguated with internal names.
+
+Creation immediately saves an open, unbound Tab. It requires no package path,
+OCR environment, or target. At most **eight Tabs are open** and **64 are saved**;
+reaching a limit never evicts an existing Tab. Names are not profile names, run
+IDs, or host-issued session identities.
+
+Saved-open Tabs return at launch with fresh sessions. Their selected directory
+references are reinspected against real package inventory before package commands
+become available. Saved-closed Tabs stay closed; choose **Saved workspaces** in
+the Workspace dropdown and **Reopen** to create a fresh session. Names, package
+references, and saved profiles persist; unsaved drafts, execution choices,
+navigation, results, and runs do not.
+
+An unbound Tab shows **Edit guidance** and a separate real **Inspect a local
+package directory** action. Package authoring (**Edit**), custom-package archive
+loading/execution, remote download, and a package-catalog UI are not implemented.
+Author packages outside the desktop, then inspect their directories. A missing
+or changed saved source shows **Saved source unavailable**; a custom archive
+reference shows **Unsupported saved source**. Both preserve the reference rather
+than inventing inventory, substituting defaults, or claiming that no package
+exists. A source failure belongs to its Tab; healthy Tabs remain usable.
+
+Different Tabs may inspect the same canonical source and remain independent.
+Inspecting that source does not activate or merge another Tab. Profile drafts,
+saved profiles, execution choices, and Run/Logs navigation belong to their owner.
 
 The summary shows **Running n/ALL**, where ALL is the number of open workspaces.
 **Errors n** appears only while one or more workspaces need attention; it counts
@@ -143,8 +226,9 @@ Text remains available and CSS animation respects reduced-motion preferences.
 
 Use arrow keys, Home/End, or type-ahead to move through the dropdown without
 switching workspaces. Enter/Space selects; Escape cancels and returns focus to the
-trigger. Tab reaches the enabled close action in the popup footer; Shift+Tab
-returns from that action to the selected option. Leaving the popup dismisses it.
+trigger. Tab reaches enabled footer actions, including **Saved workspaces** and
+the selected workspace's close action; Shift+Tab returns through those actions.
+Leaving the popup dismisses it.
 
 Profile, preset, execution, schema-enum, App settings, and log-filter controls use
 the same styled single-select as workspace navigation. Arrow keys, Home/End, and
@@ -167,17 +251,19 @@ outcome for each open workspace independently of log retention.
 Use **Close selected workspace** in the dropdown footer to close the current
 workspace. A touched unsaved draft requires confirmation. An active owner or a
 workspace command still in progress must settle before closure.
-Closing discards only session state, not saved profiles or package files.
+Closing persists the Tab's closed state before removing its session. It keeps
+the saved Tab, profiles, package references, and package source files.
 **Reinspect** validates again and resets the draft to schema defaults with a new
 selection revision. Prior results remain labeled with their original revision;
 they are not validation of the new selection. Reinspecting a touched draft asks
 for inline confirmation; **Keep draft** returns focus to **Reinspect**. The host
 runs one workspace command at a time; while one is in flight, profile and execution
 controls and workspace command buttons are disabled. Schema options remain editable;
-Stop and navigation stay available. The reason is shown in the issuing workspace, in
-the workspace dropdown, and in the **+** form.
+Stop and navigation stay available. The reason is shown in the issuing workspace,
+the workspace dropdown, and the **+** dialog.
 
-Use **Application → App settings** for Display, Notifications, OCR environment, and Logs.
+Use **Application → App settings** for Display, Notifications, OCR environment,
+Logs, and Backups.
 Categories share one draft and one **Save changes** action. **Cancel**, the
 dialog close button, or **Escape** discards unsaved edits; merely opening the
 dialog initializes no recognition backend. A category whose fields are invalid
@@ -185,9 +271,11 @@ is marked in the category list and named in the footer, including while another
 category is shown. **Save changes** and **Check saved environment** wait while a
 package or workspace command is in flight; the Check panel names the reason
 beside its button, the footer names it once the draft has changes, and
-**Cancel** stays available. Save atomically updates editable preferences while
-preserving the latest package-location hint. Active operations keep the settings
-they already captured. **Application → Application logs** opens application-wide
+**Cancel** stays available. Save atomically updates editable App preferences.
+Inspection writes the owning Tab's package reference, not an App package hint;
+the legacy `package_path` field is preserved but is not used to reopen packages.
+Active operations keep the settings they already captured.
+**Application → Application logs** opens application-wide
 diagnostics; **Close window** follows the bounded shutdown path.
 
 ### Display language
@@ -198,16 +286,14 @@ Cancel, Escape, and failed Save keep the previous language; edits made during a
 pending Save remain unsaved. Language does not change OCR recognition settings,
 profile values, or input authority.
 
-New installations and older settings without `locale` use English without a
-read-time rewrite. Package-location hint updates do not add a missing locale.
-An invalid present locale is refused without replacing the settings file.
-If the initial settings read fails, App settings stays unavailable: a failed read
-is not a new installation, and the UI cannot Save a replacement default draft.
-Resolve the reported read error and restart the application to load the existing
-settings before editing them.
-After explicit Save, older strict binaries may reject the new field: preserve
-the file before rollback and deliberately restore a compatible backup or remove
-only `locale`. Do not reset profiles or other settings.
+Setup initially offers English; Initialize writes the explicitly chosen saved
+language. Older valid settings without `locale` use English without a read-time
+rewrite. An invalid present locale is refused without replacing the file.
+A failed initial settings read leads to Recovery with App settings unavailable;
+repair and Retry, or deliberately restore a supported snapshot. A failed read is
+not a new installation. Older strict binaries may reject newly saved fields;
+preserve the configuration before rollback and use a compatible backup rather
+than resetting profiles or removing unrelated settings.
 
 UI labels, help, accessible names, and frontend validation are localized.
 All log bodies, log-derived notification bodies, backend/SDK errors, and raw
@@ -220,15 +306,15 @@ placeholders. See [ADR 0004](adr/0004-desktop-localization-resources.md).
 
 ## Inspect, edit, and save profiles
 
-1. Enter a package directory in the opening screen or **+** form and choose
-   **Inspect**. For the shipped controlled example, use the absolute path to
-   `tools/runtime-comparison/fixtures/typescript` in this checkout. Inspection
-   validates inventory, schema, assets, and static dependencies without executing
-   package automation. JavaScript syntax and module bindings are checked without
-   evaluating module bodies, including requested executable `.d.ts` dependencies.
-   A remembered package path is only a revalidated location hint, not an authority
-   grant. Failure to save that hint produces a warning but does not invalidate a
-   successfully inspected package; existing settings and pending files survive.
+1. Create or reopen a named workspace, enter a local package directory in its
+   guidance page, and choose **Inspect**. For the shipped controlled example, use
+   the absolute path to `tools/runtime-comparison/fixtures/typescript` in this
+   checkout. Inspection validates inventory, schema, assets, and static
+   dependencies without executing package automation. JavaScript syntax and
+   module bindings are checked without evaluating module bodies, including
+   requested executable `.d.ts` dependencies. Successful binding requires saving
+   the owning Tab's reference before publishing the new selection; a failed
+   write leaves the previous binding intact. No remembered path grants authority.
 2. Select a package preset or a saved profile. Presets such as `template-first`
    and `ocr-first` become editable drafts; they are not automatically persisted
    application profiles. The form covers supported scalar, enum, nested-object,
@@ -254,41 +340,170 @@ values before validation, saving, and saved-profile comparison, including values
 such as `1.0`, `1e18`, and `1e100` whose JSON spelling may change in transit.
 
 Saved profiles are versioned and bind a stable ID/name, package ID, schema
-identity, and values. They are separate files under `profiles/`, not edits to the
-package's declared preset files. A relocated compatible package can reuse its
-profiles after validation. Because the store is keyed by package/schema identity,
-each successful save, rename, or deletion is followed by a fresh catalog read.
-A readable catalog updates every compatible workspace and replaces old listing
-faults without changing local draft values. Validation and failed commands do
-not republish cached lists. Incompatible profiles remain reported separately
-from compatible profiles, and their files remain untouched.
+identity, and values. Each belongs to one Tab/package scope under
+`tabs/<internal_name>/<package_id>/<profile_id>.config`, not a global catalog or
+the package's preset files. Saving, renaming, or deleting refreshes only that
+owner's catalog; another Tab using the same source retains its own profiles and
+draft. A relocated source with the same package ID can reuse that Tab's profiles
+only after compatibility validation. Changing the selected package does not
+delete other saved package settings.
 
-Malformed data or unsupported storage versions refuse profile operations
-without silent reset, quarantine, or migration. A whole-listing failure leaves
-known profiles and other workspaces unchanged; Reinspect still resets its own
-draft and displays the failed listing. If a write succeeds but its follow-up
-read fails, the write remains successful and its workspace shows the listing
-fault; no partial cache is shared. After deliberate storage repair, a successful
-listing, including one after a profile write, refreshes compatible workspaces
-and clears resolved faults. Diagnostics identify the affected profile/file.
-Preserve it before recovery; do not rewrite identity fields to bypass refusal.
+Malformed data, unsupported versions, and incompatible profiles are reported
+without silent reset, quarantine, or migration. A listing failure preserves the
+owner's known catalog and draft; Reinspect still resets its own draft and reports
+the failed listing. If a write succeeds but its follow-up read fails, the write
+remains successful and the owner shows the listing fault. After deliberate repair,
+a successful listing refreshes that owner and clears resolved faults. Diagnostics
+identify the Tab/package/profile scope. Preserve affected files before repair;
+do not rewrite identity fields to bypass refusal.
+
+### Configuration files and limits
+
+Paths below are relative to the selected root:
+
+| Path | Owner and bound |
+| --- | --- |
+| `settings.json` | App preferences; **32 KiB** |
+| `tabs/<internal_name>/tab.config` | Version, names, open state, package references, and selected package ID; **128 KiB**, **16 references per Tab** |
+| `tabs/<internal_name>/<package_id>/<profile_id>.config` | One saved profile; **64 KiB**, **64 profiles / 1 MiB per Tab/package** |
+| `tabs/<internal_name>/<package_id>/target.config` | Reserved for later target binding; not created or supported for restore here |
+| `profiles/<profile_id>.json` | Recognized legacy profiles; explicit import only |
+| `logs/` | File diagnostics; not configuration |
+| `backups/app.config.<unix_time>` | Default manual snapshot destination |
+
+The managed set is bounded to **4,096 files / 16 MiB**, across open and closed
+Tabs, settings, and recognized legacy files. Bounded store directories permit
+at most **128 entries**; snapshot enumeration permits **16,384 entries** overall.
+Source paths and explicit backup destinations are absolute UTF-8 paths of at most
+**4,096 bytes**. Filesystem case/normalization aliases and containing-identity
+mismatches are refused rather than selecting another owner's data.
 
 Writes validate first and use a same-directory temporary file plus atomic
-replacement. A failed save preserves the previous valid file. Storage is bounded
-to **64 profiles**, **64 KiB per encoded profile**, and **1 MiB total profile
-bytes**. Settings are separately stored in `settings.json`. Portable profile
+publication. A failed save preserves the previous valid file. Portable profile
 values exclude executable/model paths, credentials, permission grants, and input
-authority. Package location hints and the optional OCR environment belong only
-in application settings; neither is execution authority.
+authority. OCR configuration belongs to App settings; package locations belong
+to Tab references. Neither is execution authority.
 
-Only `.json` and `.pending` entries belong to the profile store. Other entries,
-such as filesystem metadata, are ignored without being opened, but still count
-toward the directory-entry bound. An invalid owned file is not ignored.
+Only `.config` and `.pending` entries belong to the active package profile store;
+`target.config` is reserved, not loaded as a profile. Other regular entries such
+as filesystem metadata are ignored without being opened but still count toward
+directory-entry limits. An invalid owned file is not ignored.
 
 An interrupted save may leave a `.pending` file. The application preserves it
 instead of silently discarding evidence or overwriting it. Close the app and move
 that file outside the data root before explicitly retrying; keep the prior
-valid `.json` file intact.
+valid `.config` or `.json` file intact.
+
+### Import legacy profiles
+
+After real inspection, **Import legacy profiles** copies compatible
+`profiles/*.json` from the selected root into that Tab's package scope. It
+preserves IDs and exact bytes, validates values against the inspected schema,
+and keeps source files. Nothing is adopted automatically or shared with another
+Tab. Byte-identical committed entries are skipped on retry; a conflicting ID is
+refused without overwriting either file. Partial success remains committed and
+the UI reports imported, already-present, and failed entries separately.
+
+## Configuration snapshots and restore
+
+**Application → App settings → Backups** owns the saved backup directory.
+Blank means `<root>/backups`; **Save changes** persists a different private
+absolute destination. **Back up now** is a separate explicit action using the
+saved destination, never an unsaved settings draft. Ready also exposes
+**Application → Restore a snapshot**; Setup and Recovery expose snapshot and
+restore controls directly. **Destination for this snapshot** overrides only that
+action. When saved settings cannot be decoded and validated, blank uses the
+default destination without repairing or rewriting settings.
+
+### Snapshot scope and publication
+
+The filename is exactly `app.config.<unix_time>`, using decimal UTC Unix seconds,
+with **no `.zip` suffix**. Its format is a versioned standard ZIP with **stored
+(uncompressed), unencrypted entries**, not the reserved custom-package archive
+format. The manifest records relative managed paths, kinds, lengths, SHA-256
+digests, and observed root/settings absence. Checksums detect corruption; they
+do not authenticate the archive or grant execution authority.
+
+A snapshot includes present `settings.json`, all saved open and closed Tab
+`tab.config` files, package `.config` files, and recognized legacy profiles.
+Capture is structural, not dependent on successfully decoding a registry:
+safe readable malformed, unsupported, and orphaned configuration is preserved
+byte for byte. Missing entries remain absent. An empty managed set reports
+`NothingToBackUp` without creating a destination or archive.
+
+Package directories and custom archives, models, logs, other roots, earlier
+backups, unrelated files, and temporary/journal data are excluded. An unresolved
+owned `.pending` write or restore transaction blocks capture rather than being
+silently omitted. Unsafe, unreadable, linked, aliased, oversized, or changing
+managed data is refused. Capture serializes with configuration writers; archive
+I/O does not hold the operation-control lock, so owner-bound Stop stays available.
+
+Limits are **4,096 payload files**, **16 MiB payload bytes**, **4 MiB manifest**,
+and **32 MiB archive**. The host creates a missing private destination and refuses
+an unsafe existing one without chmod. Explicit destinations cannot enter the
+root's `tabs/`, `profiles/`, or any `.restore*` storage, including aliases resolved
+through existing ancestors.
+
+The host writes and syncs private staging, validates the archive, and publishes
+with no-replace semantics. A same-second or other existing-name collision is
+refused without overwrite, suffix, or undisclosed alternate name. Wait for a
+later second and click again, or select another safe destination. Success returns
+the archive path, source generation, file count, and payload bytes. Dismissing a
+dialog does not cancel an already dispatched snapshot; its outcome is retained.
+Failures identify retained attempt-owned artifacts rather than claiming rollback
+after publication.
+
+Archives contain raw configuration, including local paths and potentially private
+malformed bytes. Keep them private and outside public commits and CI artifacts;
+log redaction does not sanitize the archive. Deliberately disclosed receipt paths
+are not permission to publish its contents.
+
+### Replace the managed configuration
+
+1. Open **Application → Restore a snapshot** while Ready, or use the restore
+   section in Setup/Recovery. Enter a supported snapshot's path. A configuration
+   archive is not a package archive and does not install or execute package code.
+2. If any managed configuration exists, separately click **Back up now** in this
+   application session before replacement. Restore requires its successful
+   receipt to match the current source generation and verifies that the
+   preservation archive still exists unchanged. A file edited, created, or
+   removed since capture requires a new click. Restore never makes a hidden
+   substitute snapshot; unsafe or unreadable preimages block replacement.
+3. Wait for operations and commands to settle. Confirm replacement of **all saved
+   App, Tab, and package configuration**, including closed Tabs and legacy
+   profiles, not just the selected workspace. If an Application is retained,
+   separately confirm session reconstruction and disposal even when profiles
+   are clean. This drops unsaved drafts and transient results, not file logs.
+4. Click **Restore**. Container version, manifest/entry agreement, sizes, hashes,
+   supported document schemas, and owning identities are validated before live
+   mutation. Traversal, links, duplicate/aliased paths, encryption, unsupported
+   ZIP features, unknown owners/versions, and unlisted payloads are refused.
+   A raw preservation snapshot with malformed data, orphaned package files,
+   reserved `target.config`, or no valid App settings is not an installable
+   restore; preserve it for external repair.
+5. Read the resulting state and cause. Confirmation resets after each attempt.
+   A refused attempt does not erase an earlier valid preimage receipt; installed
+   or recovered configuration consumes it. Successful reconstruction reloads
+   saved-open Tabs with fresh identities and real source inspection, not old
+   drafts, runs, Last check, cards, or in-memory logs.
+
+Restore replaces the whole managed file set; it is not a profile merge or a
+whole-root swap. Package payloads, file logs, backups, and unrelated data stay
+outside its write set. Before the first managed write, it stages incoming bytes
+and rollback preimages privately and persists `.restore-journal`. Completion
+requires checking the entire installed generation. Failure rolls back or keeps
+Recovery with the journal/preimages and explicit incomplete-cleanup diagnostics;
+installed configuration and successful reconstruction are separate outcomes.
+
+Before deleting preimages, cleanup publishes `.restore-completion`. This marker
+keeps restart admission blocked even after partial journal deletion. Restart with
+either artifact enters Recovery, not a mixed configuration. Explicitly confirm
+the recovery scope and choose **Complete restore** or **Roll back restore**.
+Once the completion marker commits a direction, only that same direction can
+finish cleanup; the opposite action is refused. Do not delete these artifacts
+to bypass Recovery. Retry, Restore, and transaction recovery share idle and
+session-disposal requirements; incomplete log-writer shutdown requires Exit and
+relaunch before any reconstruction.
 
 ## Save and check an OCR environment
 
@@ -457,8 +672,107 @@ the actual macOS application and an isolated private data root, with no native
 capture/input permission or game target. Record observed results and unexecuted
 scope separately from [hosted build/core checks](ci.md#local-check-scope).
 
-1. Inspect the shipped TypeScript package and confirm that selection alone does
-   not start a run. Save both package presets as named application profiles:
+Preserve original bytes before fault cases. Use only disposable copies and private
+roots; do not modify tracked fixtures or the operator's normal configuration.
+Run the Setup, Recovery, naming, snapshot, and restore checks in both English and
+Japanese. Do not replace actual WebView interaction with mocked command results.
+
+### Setup, Recovery, and named workspaces
+
+1. Launch with an absent explicit root. Observe Loading followed by Setup and
+   confirm that merely opening or closing Setup creates no root. Relaunch, choose
+   temporary Japanese presentation while keeping saved English, and Initialize.
+   Confirm saved English, valid settings, no package/run/OCR work, and no Tab.
+   Confirm that an existing settings file cannot be overwritten by Initialize.
+2. Create a Tab using internal name `Alpha` and display name `共有`, without a
+   path or target. Check its saved unbound record and main Edit guidance; there
+   must be no invented schema, profile, runnable package, or functioning Edit
+   button. Create another Tab with the same display name and a different internal
+   name; verify disambiguated labels. Refuse case-only internal-name collisions,
+   digits/spaces, blank/control display names, and limits beyond 64 ASCII letters
+   or 80 Unicode scalars. Include supplementary Unicode in the scalar-count check.
+3. Inspect the real TypeScript directory separately in two Tabs. Save different
+   profile values and confirm distinct catalogs, drafts, and durable
+   Tab/package files. Close one, restart, and verify only saved-open Tabs return.
+   Reopen the closed Tab through Saved workspaces; names/profiles remain but its
+   old draft, results, and run do not. Repeat close/reopen, verify the eight-open
+   and 64-saved limits without eviction, and confirm no name-renaming operation.
+4. With private source copies, move a bound directory or change its package ID,
+   then restart. Verify owner-specific unavailable-source guidance and preserved
+   references/profiles, with healthy Tabs usable. A supported saved custom-archive
+   reference must show unsupported-source guidance, not a fake empty package.
+   Repair and Inspect a real directory; a failed durable bind must retain the
+   previous selection. Check that changing a selected package keeps other saved
+   package settings.
+5. In a disposable root, distinguish missing settings from malformed, unsupported,
+   or unreadable present settings. Verify Setup only for absence; verify Recovery
+   retains stage/cause and original bytes otherwise. Correct the external fault
+   and Retry without a restart. Temporary language or form changes must not clear
+   the cause, save defaults, or spawn duplicate polling/writer owners.
+6. During a real controlled operation, make settings unusable in the disposable
+   root and trigger their read through App settings. Verify retained polling,
+   owner-bound Stop, and refusal of Retry/Restore while work is active. After
+   settlement, repair and confirm session disposal before Retry, including when
+   profiles are clean. Verify old results, cards, Last check, and in-memory logs
+   do not enter the new session. If an actual `LoggingShutdown` timeout is
+   observed, verify Exit/relaunch is required; do not manufacture a passing flush.
+7. Test historical discovery only in an isolated account/configuration environment
+   where the new default root is absent. Verify explicit import or fresh-start
+   confirmation, source preservation, bounded recognized-file copying, and
+   refusal of a conflicting destination or invalid source. Repeat launch with
+   `--data-dir` and confirm discovery is skipped. Within a bound Tab, explicitly
+   import compatible legacy profiles: check exact bytes/IDs, idempotent retry,
+   conflict refusal, partial-success reporting, and independence from another
+   Tab inspecting the same source.
+
+### Configuration snapshot and restore acceptance
+
+1. Save settings and profiles in open and closed Tabs. Click Back up now and
+   inspect the resulting standard stored ZIP privately. Verify exact filename,
+   manifest/entry agreement, exact managed bytes, and exclusion of payloads,
+   models, logs, earlier backups, and temporary data. The receipt must identify
+   the actual path, generation, file count, and byte count.
+2. Edit the backup destination without saving. Click Back up now and verify the
+   saved destination is used and the draft remains unsaved. Dismiss the dialog
+   while a dispatched snapshot is pending, then reopen it and inspect its real
+   outcome. Exercise an existing-name collision and confirm unchanged archive
+   bytes with no suffix or replacement. Verify unsafe destinations and paths
+   inside managed/restore storage are refused, including ancestor aliases.
+3. Preserve a valid snapshot, then place malformed settings or orphaned package
+   configuration only in the disposable root. In Recovery, choose a private
+   temporary destination and verify raw bytes are captured without repairing
+   their source. Verify NothingToBackUp for an empty managed set. Unsafe,
+   unreadable, changed, pending, or oversized data must produce refusal rather
+   than a claimed complete archive.
+4. From Ready, open Application → Restore a snapshot. Attempt replacement without
+   a separately clicked current preimage receipt, then after changing saved
+   configuration since a receipt. Both must refuse before mutation. Repeat with
+   an unchanged valid receipt, explicit whole-scope confirmation, and separate
+   session disposal. Verify missing confirmations and active commands/operations
+   block reconstruction; every attempt must reset consent.
+5. Restore the valid snapshot from both Ready and Recovery. Verify settings,
+   saved-open/closed Tabs, and all package-profile scopes match it, while payloads,
+   backups, and file logs remain. Reinspect restored directory references and
+   verify fresh session identities with no transferred draft, run, result, card,
+   Last check, or in-memory log. Failed attempts must not erase a still-valid
+   earlier receipt; successful installation/recovery must consume it.
+6. Try corrupt, unsupported, aliased, traversal, or unlisted archive entries only
+   with disposable copies. Verify pre-mutation refusal and preserved live data.
+   A byte-preserving archive of malformed/orphaned/future configuration must not
+   be treated as a supported restore.
+7. Where an actual interrupted transaction can be observed safely, restart with
+   its real journal and verify Recovery blocks mixed configuration. Exercise
+   confirmed completion and rollback in separate cases. Check incomplete cleanup
+   with `.restore-completion`, including restart after partial journal removal:
+   only the committed direction may complete. Do not delete journal evidence or
+   invent production fault-injection commands. Record unavailable interruption
+   or writer-timeout scenarios as unexecuted, not passed.
+
+### Controlled run and UI acceptance
+
+1. In a named workspace, Inspect the shipped TypeScript package and confirm that
+   selection alone does not start a run. Save both package presets as named
+   application profiles:
 
    | Preset | Ordered priorities | Actions | Expected controlled key |
    | --- | --- | --- | --- |
@@ -483,14 +797,13 @@ scope separately from [hosted build/core checks](ci.md#local-check-scope).
    trigger an original-source TypeScript error. Verify explicit refusal or source
    diagnostics, preserved saved data, and an independent cleanup outcome. Do not
    edit tracked fixtures or enable native authority to manufacture these cases.
-6. Open both TypeScript and JavaScript packages; switch workspaces during work. Check
-   independent drafts, owner-bound Stop, retained outcomes, canonical-root
-   deduplication, stale-revision refusal, the eight-workspace limit, and repeated
-   close/reopen without deleting profiles. Use private copies for bound cycling.
-   In an isolated store, preserve a profile file before making it unreadable.
-   Reinspect one root, restore the original bytes, then save through that root.
-   Confirm the complete catalog recovers in both roots without losing another
-   saved profile or either draft; Validate must not roll either catalog back.
+6. Inspect TypeScript and JavaScript packages in separate named Tabs and switch
+   workspaces during work. Check independent drafts, owner-bound Stop, retained
+   outcomes, stale-revision refusal, and close/reopen without deleting profiles.
+   In an isolated store, preserve one owner's profile before making it unreadable.
+   Reinspect that Tab, restore the original bytes, then save through that Tab.
+   Confirm its catalog recovers without changing another Tab's catalog or draft,
+   even when both inspect the same source. Validate must not republish stale lists.
 7. In App settings, change notification count/duration/success visibility and
    GUI retention. Exercise Save, Cancel, Escape, focus restoration, invalid-value
    refusal, immediate trimming, and restart persistence. Verify card overflow,
@@ -511,9 +824,9 @@ scope separately from [hosted build/core checks](ci.md#local-check-scope).
    counters must not erase results or disable Stop.
 9. Repeat the UI checks in English and Japanese. Save and restart; cancel an
    uncommitted language edit; provoke a Save failure only in the disposable
-   store and verify unchanged saved bytes and effective language. Check document
-   language, validation, and retained notices after switching, including an
-   asynchronous completion and edits made during Save.
+   store and verify unchanged saved bytes, retained language, and Recovery.
+   Check document language, validation, and retained notices after switching,
+   including asynchronous completion and edits made during Save.
    Switch language during a controlled run, then Stop the same operation.
    Verify independent drafts, card pause/duration, log filters and original
    diagnostic bodies. A synthetic fault checks payload preservation, not actual

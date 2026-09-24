@@ -1,5 +1,9 @@
+use crate::configuration::{self, Capture};
 use crate::logging::{LogBatch, LogStatus, Logger};
-use crate::storage::{EditableSettings, Profile, Settings, Store};
+use crate::storage::{
+    EditableSettings, LegacyImport, PackageSource, Profile, ProfileStore, Settings, Store,
+    TabRecord,
+};
 use mado_runtime_comparison::desktop::{DesktopController, PackageInfo, StartRequest};
 use mado_runtime_comparison::environment::OcrEnvironment;
 use mado_runtime_comparison::host::resolve_options;
@@ -11,14 +15,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, OnceLock, TryLockError,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_WORKSPACES: usize = 8;
 const MAX_SESSION_COUNTER: u64 = 9_007_199_254_740_991;
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -31,11 +36,30 @@ pub struct WorkspaceRef {
 pub struct Selection {
     pub workspace_id: String,
     pub revision: u64,
+    pub internal_name: String,
+    pub display_name: String,
     pub package_path: String,
     #[serde(serialize_with = "serialize_shared")]
     pub package: Arc<PackageInfo>,
     pub profiles: Vec<Profile>,
     pub profiles_error: Option<Fault>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceView {
+    pub workspace_id: String,
+    pub revision: u64,
+    pub internal_name: String,
+    pub display_name: String,
+    pub selection: Option<Selection>,
+    pub source_error: Option<Fault>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceCatalog {
+    pub open: Vec<WorkspaceView>,
+    pub closed: Vec<TabRecord>,
+    pub faults: Vec<Fault>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,9 +112,20 @@ fn serialize_optional_shared<T: Serialize, S: Serializer>(
 #[derive(Clone)]
 struct Selected {
     workspace: WorkspaceRef,
+    internal_name: String,
+    display_name: String,
     path: PathBuf,
     inventory: Arc<Inventory>,
     package: Arc<PackageInfo>,
+}
+
+#[derive(Clone)]
+struct Workspace {
+    workspace: WorkspaceRef,
+    internal_name: String,
+    display_name: String,
+    selected: Option<Selected>,
+    source_error: Option<Fault>,
     terminal: Option<WorkspaceResult>,
 }
 
@@ -108,7 +143,8 @@ struct OperationOwner {
 }
 
 struct Workspaces {
-    open: Vec<Selected>,
+    open: Vec<Workspace>,
+    session: String,
     next_id: u64,
     owner: Option<OperationOwner>,
     controller: Arc<Value>,
@@ -116,7 +152,7 @@ struct Workspaces {
 }
 
 impl Workspaces {
-    fn resolve(&self, workspace: &WorkspaceRef) -> Result<&Selected, Fault> {
+    fn resolve_workspace(&self, workspace: &WorkspaceRef) -> Result<&Workspace, Fault> {
         self.open
             .iter()
             .find(|selected| selected.workspace == *workspace)
@@ -126,6 +162,31 @@ impl Workspaces {
                     "Workspace is closed, unknown, or reinspected",
                 )
             })
+    }
+
+    fn resolve(&self, workspace: &WorkspaceRef) -> Result<&Selected, Fault> {
+        self.resolve_workspace(workspace)?
+            .selected
+            .as_ref()
+            .ok_or_else(|| {
+                Fault::new(
+                    "WorkspaceUnbound",
+                    "Workspace has no available inspected package",
+                )
+            })
+    }
+
+    fn next_workspace(&self) -> Result<WorkspaceRef, Fault> {
+        if self.open.len() >= MAX_WORKSPACES || self.next_id > MAX_SESSION_COUNTER {
+            return Err(Fault::new(
+                "WorkspaceLimit",
+                "Workspace session or open limit reached",
+            ));
+        }
+        Ok(WorkspaceRef {
+            workspace_id: format!("workspace-{}-{}", self.session, self.next_id),
+            revision: 0,
+        })
     }
 
     fn idle(&self) -> Result<(), Fault> {
@@ -162,46 +223,108 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl Application {
     pub fn new(root: PathBuf, controlled: PathBuf, engine: PathBuf) -> Result<Arc<Self>, Fault> {
-        let application = Arc::new(Self {
-            runner: DesktopController::new(controlled, engine),
-            store: Arc::new(Mutex::new(Store::new(root.clone())?)),
-            commands: Mutex::new(()),
-            #[cfg(test)]
-            command_admitted: AtomicBool::new(false),
-            workspaces: Mutex::new(Workspaces {
-                open: Vec::new(),
-                next_id: 1,
-                owner: None,
-                controller: Arc::new(json!({
-                    "state":"idle","run":null,"operation":"run","result":null,
-                    "error":null,"progress":[],"logs":[],"dropped_logs":0,
-                    "workspace_id":null,"workspace_revision":null
-                })),
-                last_check: None,
-            }),
-            logger: Logger::new(root.join("logs"))?,
-            closing: AtomicBool::new(false),
-            bridge: Mutex::new(None),
-            shutdown_outcome: OnceLock::new(),
-        });
-        let weak = Arc::downgrade(&application);
+        #[cfg(not(test))]
+        {
+            Self::build(root, controlled, engine, Logger::new)
+        }
+        #[cfg(test)]
+        {
+            Self::build(root, controlled, engine, Logger::new, None)
+        }
+    }
+
+    fn build(
+        root: PathBuf,
+        controlled: PathBuf,
+        engine: PathBuf,
+        make_logger: impl FnOnce(PathBuf) -> Result<Logger, Fault>,
+        #[cfg(test)] bridge_exit: Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>,
+    ) -> Result<Arc<Self>, Fault> {
+        let store = Store::new(root.clone())?;
+        store.settings()?;
+        let runner = DesktopController::new(controlled, engine);
+        let mut workspaces = Workspaces {
+            open: Vec::new(),
+            session: format!(
+                "{}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|error| Fault::new("Application", error.to_string()))?
+                    .as_nanos(),
+                NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
+            ),
+            next_id: 1,
+            owner: None,
+            controller: Arc::new(json!({
+                "state":"idle","run":null,"operation":"run","result":null,
+                "error":null,"progress":[],"logs":[],"dropped_logs":0,
+                "workspace_id":null,"workspace_revision":null
+            })),
+            last_check: None,
+        };
+        for tab in store.tabs()?.tabs.into_iter().filter(|tab| tab.open) {
+            let workspace = workspaces.next_workspace()?;
+            workspaces
+                .open
+                .push(Self::restore_workspace(&runner, tab, workspace));
+            workspaces.next_id += 1;
+        }
+        // Start the bridge first, but give it no Application until all workers
+        // exist. A logger-start failure can join this waiting bridge immediately,
+        // without leaving a detached file writer for Retry to duplicate.
+        let (publish, ready) = mpsc::sync_channel::<std::sync::Weak<Self>>(1);
         let bridge = std::thread::Builder::new()
             .name("desktop-log-bridge".into())
             .spawn(move || {
-                loop {
-                    let Some(application) = weak.upgrade() else {
-                        break;
-                    };
-                    if application.closing.load(Ordering::Acquire) {
-                        break;
+                if let Ok(weak) = ready.recv() {
+                    loop {
+                        let Some(application) = weak.upgrade() else {
+                            break;
+                        };
+                        if application.closing.load(Ordering::Acquire) {
+                            break;
+                        }
+                        application.collect(&mut lock(&application.workspaces));
+                        drop(application);
+                        std::thread::sleep(Duration::from_millis(50));
                     }
-                    application.collect(&mut lock(&application.workspaces));
-                    drop(application);
-                    std::thread::sleep(Duration::from_millis(50));
+                }
+                #[cfg(test)]
+                if let Some((exiting, released)) = bridge_exit {
+                    let _ = exiting.send(());
+                    let _ = released.recv();
                 }
             })
             .map_err(|error| Fault::new("Application", error.to_string()))?;
-        *lock(&application.bridge) = Some(bridge);
+        let logger = match make_logger(root.join("logs")) {
+            Ok(logger) => logger,
+            Err(error) => {
+                drop(publish);
+                let _ = bridge.join();
+                return Err(error);
+            }
+        };
+        let application = Arc::new(Self {
+            runner,
+            store: Arc::new(Mutex::new(store)),
+            commands: Mutex::new(()),
+            #[cfg(test)]
+            command_admitted: AtomicBool::new(false),
+            workspaces: Mutex::new(workspaces),
+            logger,
+            closing: AtomicBool::new(false),
+            bridge: Mutex::new(Some(bridge)),
+            shutdown_outcome: OnceLock::new(),
+        });
+        if publish.send(Arc::downgrade(&application)).is_err() {
+            let cleanup = application.shutdown();
+            return Err(
+                Fault::new("Application", "Log bridge stopped before publication").with_context(
+                    json!({"cleanup":cleanup.err(),"logging":application.logger.status()}),
+                ),
+            );
+        }
         application.logger.with_dispatch(|| {
             tracing::info!(
                 code = "application.ready",
@@ -234,6 +357,11 @@ impl Application {
                 ));
             }
         };
+        // Recheck under admission: reconstruction may have closed the application
+        // between the optimistic check above and acquiring this mutex.
+        if self.closing.load(Ordering::Acquire) {
+            return Err(Fault::new("Closing", "Application is closing"));
+        }
         #[cfg(test)]
         self.command_admitted.store(true, Ordering::Release);
         Ok((command, lock(&self.workspaces)))
@@ -353,161 +481,301 @@ impl Application {
     }
 
     pub fn save_settings(&self, settings: EditableSettings) -> Result<Settings, Fault> {
+        let result = (|| {
+            let (_command, state) = self.command_state()?;
+            drop(state);
+            lock(&self.store).save_preferences(settings)
+        })();
         self.outcome(
             None,
             "save_settings",
             Some(("settings.saved", "Settings saved")),
-            lock(&self.store).save_preferences(settings),
+            result,
         )
     }
 
-    pub fn inspect(
+    pub fn capture_configuration(&self) -> Result<Capture, Fault> {
+        let store = lock(&self.store);
+        configuration::capture(store.root())
+    }
+
+    pub fn prepare_reconstruction(&self) -> Result<(), Fault> {
+        {
+            let (_command, mut state) = self.command_state().map_err(|error| {
+                if self.closing.load(Ordering::Acquire) {
+                    retired_fault(error)
+                } else {
+                    error
+                }
+            })?;
+            self.collect(&mut state);
+            state.idle()?;
+            self.closing.store(true, Ordering::Release);
+        }
+        self.shutdown().map_err(retired_fault)?;
+        let status = self.logger.status();
+        if status.shutdown_timed_out || status.file_pending != 0 {
+            return Err(Fault::new(
+                "LoggingShutdown",
+                "Configuration was not replaced because log-writer shutdown was incomplete; exit and relaunch before retrying",
+            ).with_context(json!({"logging":status,"application_retired":true})));
+        }
+        Ok(())
+    }
+
+    pub fn create_workspace(
         &self,
+        internal_name: &str,
+        display_name: &str,
+    ) -> Result<WorkspaceView, Fault> {
+        let (_command, state) = self.command_state()?;
+        let reference = state.next_workspace()?;
+        drop(state);
+        let tab = lock(&self.store).create_tab(internal_name, display_name)?;
+        let workspace = Self::restore_workspace(&self.runner, tab, reference);
+        let view = self.workspace_view(&workspace);
+        let mut state = lock(&self.workspaces);
+        state.next_id += 1;
+        state.open.push(workspace);
+        Ok(view)
+    }
+
+    pub fn reopen_workspace(&self, internal_name: &str) -> Result<WorkspaceView, Fault> {
+        let (_command, mut state) = self.command_state()?;
+        if state
+            .open
+            .iter()
+            .any(|tab| tab.internal_name == internal_name)
+        {
+            return Err(Fault::new("WorkspaceConflict", "Workspace is already open"));
+        }
+        self.collect(&mut state);
+        state.idle()?;
+        let reference = state.next_workspace()?;
+        drop(state);
+        let tab = lock(&self.store).tab(internal_name)?;
+        if tab.open {
+            return Err(Fault::new(
+                "WorkspaceConflict",
+                "Saved open state changed; reload configuration",
+            ));
+        }
+        let workspace = Self::restore_workspace(&self.runner, tab, reference);
+        lock(&self.store).set_tab_open(internal_name, true)?;
+        let view = self.workspace_view(&workspace);
+        let mut state = lock(&self.workspaces);
+        state.next_id += 1;
+        state.open.push(workspace);
+        Ok(view)
+    }
+
+    pub fn workspace_catalog(&self) -> Result<WorkspaceCatalog, Fault> {
+        let (_command, state) = self.command_state()?;
+        let open = state.open.clone();
+        drop(state);
+        let listing = lock(&self.store).tabs()?;
+        Ok(WorkspaceCatalog {
+            open: open
+                .iter()
+                .map(|workspace| self.workspace_view(workspace))
+                .collect(),
+            closed: listing.tabs.into_iter().filter(|tab| !tab.open).collect(),
+            faults: listing.faults,
+        })
+    }
+
+    fn restore_workspace(
+        runner: &DesktopController,
+        tab: TabRecord,
+        mut workspace: WorkspaceRef,
+    ) -> Workspace {
+        let mut source_error = None;
+        let mut selected = None;
+        if let Some(package_id) = &tab.selected_package_id {
+            let result = tab
+                .packages
+                .iter()
+                .find(|package| &package.package_id == package_id)
+                .ok_or_else(|| {
+                    Fault::new(
+                        "PackageSource",
+                        "Saved selected package reference is missing",
+                    )
+                })
+                .and_then(|reference| match &reference.source {
+                    PackageSource::Directory { path } => {
+                        let mut reference = workspace.clone();
+                        reference.revision = 1;
+                        let selected = Self::inspect_selection(
+                            runner,
+                            Path::new(path),
+                            reference,
+                            &tab.internal_name,
+                            &tab.display_name,
+                        )?;
+                        if selected.inventory.package_id != *package_id {
+                            return Err(Fault::new(
+                                "PackageIdentity",
+                                "Saved source now identifies another package",
+                            ));
+                        }
+                        Ok(selected)
+                    }
+                    PackageSource::CustomArchive { .. } => Err(Fault::new(
+                        "UnsupportedPackageSource",
+                        "Custom package archives are not supported",
+                    )),
+                });
+            match result {
+                Ok(value) => {
+                    workspace = value.workspace.clone();
+                    selected = Some(value);
+                }
+                Err(mut error) => {
+                    let cause = std::mem::take(&mut error.context);
+                    source_error = Some(error.with_context(json!({
+                        "internal_name":tab.internal_name,"package_id":package_id,"cause":cause,
+                    })));
+                }
+            }
+        }
+        Workspace {
+            workspace,
+            internal_name: tab.internal_name,
+            display_name: tab.display_name,
+            selected,
+            source_error,
+            terminal: None,
+        }
+    }
+
+    fn inspect_selection(
+        runner: &DesktopController,
         path: &Path,
-        workspace: Option<&WorkspaceRef>,
-    ) -> Result<Selection, Fault> {
+        workspace: WorkspaceRef,
+        internal_name: &str,
+        display_name: &str,
+    ) -> Result<Selected, Fault> {
+        let path = path
+            .canonicalize()
+            .map_err(|_| Fault::new("Package", "Package location cannot be resolved"))?;
+        let package = runner.inspect(&path)?;
+        check_webview_value(&package.schema, "$.schema")?;
+        for (name, preset) in &package.profiles {
+            check_webview_value(preset, &format!("$.presets[{name:?}]"))?;
+        }
+        if let Some(defaults) = &package.effective_defaults {
+            check_webview_value(defaults, "$.effective_defaults")?;
+        }
+        let plan: Plan = serde_json::from_str(include_str!(
+            "../../../../tools/runtime-comparison/fixtures/manual-plan.json"
+        ))
+        .map_err(|error| Fault::new("Application", error.to_string()))?;
+        let inventory = Inventory::capture(&path, &plan.limits)?;
+        if inventory.identity != package.inventory_identity {
+            return Err(Fault::new(
+                "InventoryChanged",
+                "Package changed during inspection; inspect it again",
+            ));
+        }
+        Ok(Selected {
+            workspace,
+            internal_name: internal_name.to_owned(),
+            display_name: display_name.to_owned(),
+            path,
+            inventory: Arc::new(inventory),
+            package: Arc::new(package),
+        })
+    }
+
+    pub fn inspect(&self, path: &Path, workspace: &WorkspaceRef) -> Result<Selection, Fault> {
         let result = (|| {
             let (_command, mut state) = self.command_state()?;
+            let previous = state.resolve_workspace(workspace)?.clone();
             self.collect(&mut state);
-            let replacing = workspace
-                .map(|reference| {
-                    state.resolve(reference)?;
-                    Ok::<_, Fault>(reference.clone())
-                })
-                .transpose()?;
-            drop(state);
-            let path = path
-                .canonicalize()
-                .map_err(|_| Fault::new("Package", "Package location cannot be resolved"))?;
-            let state = lock(&self.workspaces);
-            if let Some(existing) = state.open.iter().find(|selected| selected.path == path) {
-                if replacing.as_ref().is_none() {
-                    let existing = existing.clone();
-                    drop(state);
-                    return Ok(self.selection(&existing));
-                }
-                if replacing.as_ref() != Some(&existing.workspace) {
-                    return Err(Fault::new(
-                        "WorkspaceConflict",
-                        "Package is already open in another workspace",
-                    ));
-                }
-            }
             state.idle()?;
-            if replacing.is_none() && state.open.len() == MAX_WORKSPACES {
-                return Err(Fault::new(
-                    "WorkspaceLimit",
-                    "At most eight workspaces may be open",
-                ));
-            }
-            let reference = if let Some(previous) = replacing {
-                WorkspaceRef {
-                    workspace_id: previous.workspace_id,
-                    revision: previous
-                        .revision
-                        .checked_add(1)
-                        .filter(|revision| *revision <= MAX_SESSION_COUNTER)
-                        .ok_or_else(|| {
-                            Fault::new("WorkspaceLimit", "Workspace revision limit reached")
-                        })?,
-                }
-            } else {
-                if state.next_id > MAX_SESSION_COUNTER {
-                    return Err(Fault::new(
-                        "WorkspaceLimit",
-                        "Workspace identity limit reached",
-                    ));
-                }
-                WorkspaceRef {
-                    workspace_id: format!("workspace-{}", state.next_id),
-                    revision: 1,
-                }
-            };
+            let revision = workspace
+                .revision
+                .checked_add(1)
+                .filter(|revision| *revision <= MAX_SESSION_COUNTER)
+                .ok_or_else(|| Fault::new("WorkspaceLimit", "Workspace revision limit reached"))?;
             drop(state);
-            let package = self.runner.inspect(&path)?;
-            check_webview_value(&package.schema, "$.schema")?;
-            for (name, preset) in &package.profiles {
-                check_webview_value(preset, &format!("$.presets[{name:?}]"))?;
-            }
-            if let Some(defaults) = &package.effective_defaults {
-                check_webview_value(defaults, "$.effective_defaults")?;
-            }
-            let plan: Plan = serde_json::from_str(include_str!(
-                "../../../../tools/runtime-comparison/fixtures/manual-plan.json"
-            ))
-            .map_err(|error| Fault::new("Application", error.to_string()))?;
-            let inventory = Inventory::capture(&path, &plan.limits)?;
-            if inventory.identity != package.inventory_identity {
-                return Err(Fault::new(
-                    "InventoryChanged",
-                    "Package changed during inspection; inspect it again",
-                ));
-            }
-            let selected = Selected {
-                workspace: reference.clone(),
+            let selected = Self::inspect_selection(
+                &self.runner,
                 path,
-                inventory: Arc::new(inventory),
-                package: Arc::new(package),
-                terminal: None,
-            };
-            let selection = self.selection(&selected);
-            let canonical_path = selection.package_path.clone();
-            let mut state = lock(&self.workspaces);
-            if let Some(index) = state
-                .open
-                .iter()
-                .position(|value| value.workspace.workspace_id == reference.workspace_id)
+                WorkspaceRef {
+                    workspace_id: workspace.workspace_id.clone(),
+                    revision,
+                },
+                &previous.internal_name,
+                &previous.display_name,
+            )?;
             {
-                // A previous revision's outcome remains attributable, not applicable.
-                let terminal = state.open[index].terminal.take();
-                state.open[index] = selected;
-                state.open[index].terminal = terminal;
-            } else {
-                state.next_id += 1;
-                state.open.push(selected);
+                let store = lock(&self.store);
+                let tab = store.tab(&selected.internal_name)?;
+                let replacing_source = tab.packages.iter()
+                    .find(|reference| reference.package_id == selected.inventory.package_id)
+                    .is_some_and(|reference| !matches!(
+                        &reference.source,
+                        PackageSource::Directory { path } if Path::new(path) == selected.path.as_path()
+                    ));
+                if replacing_source {
+                    let profiles = store
+                        .profile_store(&selected.internal_name, &selected.inventory.package_id)?;
+                    let (_, incompatible) = validated_profiles(&profiles, &selected.inventory)?;
+                    if let Some(cause) = incompatible {
+                        return Err(Fault::new(
+                            "PackageCompatibility",
+                            "Replacement source is incompatible with this Tab's saved profiles",
+                        )
+                        .with_context(json!({
+                            "internal_name":selected.internal_name,
+                            "package_id":selected.inventory.package_id,
+                            "cause":cause,
+                        })));
+                    }
+                }
+                store.bind_package(
+                    &selected.internal_name,
+                    &selected.inventory.package_id,
+                    &selected.path,
+                )?;
             }
-            drop(state);
-            let saved_hint = lock(&self.store).save_package_hint(canonical_path);
-            if let Err(error) = saved_hint {
-                self.logger.with_dispatch(|| {
-                    tracing::warn!(
-                        code = "settings.package_hint_not_saved",
-                        category = %error.category,
-                        "Package inspected, but its location hint was not saved"
-                    )
-                });
-            }
-            self.logger.emit(
-                "Rust",
-                "info",
-                None,
-                Some(&reference.workspace_id),
-                if workspace.is_some() {
-                    "workspace.reinspected"
-                } else {
-                    "workspace.opened"
-                },
-                if workspace.is_some() {
-                    "Workspace reinspected"
-                } else {
-                    "Workspace opened"
-                },
-                json!({"action":"inspect"}),
-            );
+            let selection = self.selection(&selected);
+            let mut state = lock(&self.workspaces);
+            let current = state
+                .open
+                .iter_mut()
+                .find(|value| value.workspace == *workspace)
+                .expect("command admission retains the initiating workspace");
+            current.workspace = selected.workspace.clone();
+            current.selected = Some(selected);
+            current.source_error = None;
+            // A previous revision's outcome remains attributable, not applicable.
             Ok(selection)
         })();
-        self.outcome(workspace, "inspect", None, result)
+        self.outcome(
+            Some(workspace),
+            "inspect",
+            Some(("workspace.reinspected", "Workspace package inspected")),
+            result,
+        )
     }
 
     fn selection(&self, selected: &Selected) -> Selection {
-        let (profiles, profiles_error) =
-            match validated_profiles(&lock(&self.store), &selected.inventory) {
-                Ok(listing) => listing,
-                Err(error) => (Vec::new(), Some(error)),
-            };
+        let store = lock(&self.store);
+        let listing = store
+            .profile_store(&selected.internal_name, &selected.inventory.package_id)
+            .and_then(|store| validated_profiles(&store, &selected.inventory));
+        let (profiles, profiles_error) = match listing {
+            Ok(listing) => listing,
+            Err(error) => (Vec::new(), Some(error)),
+        };
         Selection {
             workspace_id: selected.workspace.workspace_id.clone(),
             revision: selected.workspace.revision,
+            internal_name: selected.internal_name.clone(),
+            display_name: selected.display_name.clone(),
             package_path: selected.path.to_string_lossy().into_owned(),
             package: selected.package.clone(),
             profiles,
@@ -515,11 +783,25 @@ impl Application {
         }
     }
 
+    fn workspace_view(&self, workspace: &Workspace) -> WorkspaceView {
+        WorkspaceView {
+            workspace_id: workspace.workspace.workspace_id.clone(),
+            revision: workspace.workspace.revision,
+            internal_name: workspace.internal_name.clone(),
+            display_name: workspace.display_name.clone(),
+            selection: workspace
+                .selected
+                .as_ref()
+                .map(|selected| self.selection(selected)),
+            source_error: workspace.source_error.clone(),
+        }
+    }
+
     pub fn close_workspace(&self, workspace: &WorkspaceRef) -> Result<(), Fault> {
         let result =
             (|| {
                 let (_command, mut state) = self.command_state()?;
-                state.resolve(workspace)?;
+                let internal_name = state.resolve_workspace(workspace)?.internal_name.clone();
                 self.collect(&mut state);
                 if state.owner.as_ref().is_some_and(|owner| {
                     !owner.terminal && owner.workspace.as_ref() == Some(workspace)
@@ -529,7 +811,9 @@ impl Application {
                         "Workspace owns an unsettled operation",
                     ));
                 }
-                state
+                drop(state);
+                lock(&self.store).set_tab_open(&internal_name, false)?;
+                lock(&self.workspaces)
                     .open
                     .retain(|selected| selected.workspace != *workspace);
                 Ok(())
@@ -542,11 +826,20 @@ impl Application {
         )
     }
 
+    pub fn import_legacy_profiles(&self, workspace: &WorkspaceRef) -> Result<LegacyImport, Fault> {
+        let (_command, state) = self.command_state()?;
+        let selected = state.resolve(workspace)?.clone();
+        drop(state);
+        lock(&self.store).import_legacy_profiles(&selected.internal_name, &selected.inventory)
+    }
+
     pub fn validate(&self, workspace: &WorkspaceRef, mut values: Value) -> Result<Value, Fault> {
         let result = (|| {
             let (_command, state) = self.command_state()?;
             let selected = state.resolve(workspace)?.clone();
             drop(state);
+            lock(&self.store)
+                .profile_store(&selected.internal_name, &selected.inventory.package_id)?;
             normalize_editor_numbers(&selected.inventory.schema, &mut values);
             desktop_options(&selected.inventory, values)
         })();
@@ -558,8 +851,10 @@ impl Application {
             let (_command, state) = self.command_state()?;
             let selected = state.resolve(workspace)?.clone();
             drop(state);
-            let (profiles, profiles_error) =
-                validated_profiles(&lock(&self.store), &selected.inventory)?;
+            let store = lock(&self.store);
+            let scoped =
+                store.profile_store(&selected.internal_name, &selected.inventory.package_id)?;
+            let (profiles, profiles_error) = validated_profiles(&scoped, &selected.inventory)?;
             Ok(ProfileCatalog {
                 profiles,
                 profiles_error,
@@ -589,6 +884,8 @@ impl Application {
             normalize_editor_numbers(&selected.inventory.schema, &mut values);
             desktop_options(&selected.inventory, values.clone())?;
             let store = lock(&self.store);
+            let store =
+                store.profile_store(&selected.internal_name, &selected.inventory.package_id)?;
             if let Some(id) = id {
                 checked_profile(&store, &current.package_id, &current.schema_identity, id)?;
             }
@@ -613,6 +910,8 @@ impl Application {
             let selected = state.resolve(workspace)?.clone();
             drop(state);
             let store = lock(&self.store);
+            let store =
+                store.profile_store(&selected.internal_name, &selected.inventory.package_id)?;
             let profile = checked_profile(
                 &store,
                 &selected.inventory.package_id,
@@ -636,6 +935,8 @@ impl Application {
             let selected = state.resolve(workspace)?.clone();
             drop(state);
             let store = lock(&self.store);
+            let store =
+                store.profile_store(&selected.internal_name, &selected.inventory.package_id)?;
             let belongs = store
                 .list(
                     &selected.inventory.package_id,
@@ -681,6 +982,7 @@ impl Application {
             request.package_path = selected.path.to_string_lossy().into_owned();
             normalize_editor_numbers(&selected.inventory.schema, &mut request.values);
             desktop_options(&selected.inventory, request.values.clone())?;
+            let internal_name = selected.internal_name.clone();
             self.collect(&mut state);
             // Never let reserve refresh away an uncollected terminal outcome.
             state.idle()?;
@@ -697,9 +999,10 @@ impl Application {
                     } else {
                         None
                     };
+                    let profiles = store.profile_store(&internal_name, &request.package_id)?;
                     if request.profile_id != "draft" {
                         let profile = checked_profile(
-                            &store,
+                            &profiles,
                             &request.package_id,
                             &request.schema_identity,
                             &request.profile_id,
@@ -747,12 +1050,17 @@ impl Application {
                 ));
             }
             let (_command, mut state) = self.command_state()?;
-            let package = workspace
-                .map(|workspace| {
-                    let selected = state.resolve(workspace)?;
-                    Ok::<_, Fault>((selected.path.clone(), selected.inventory.identity.clone()))
-                })
+            let selected = workspace
+                .map(|workspace| state.resolve(workspace))
                 .transpose()?;
+            let package = selected
+                .map(|selected| (selected.path.clone(), selected.inventory.identity.clone()));
+            let scope = selected.map(|selected| {
+                (
+                    selected.internal_name.clone(),
+                    selected.inventory.package_id.clone(),
+                )
+            });
             self.collect(&mut state);
             state.idle()?;
             let environment = Arc::new(OnceLock::new());
@@ -771,6 +1079,9 @@ impl Application {
                     let store = lock(&store);
                     let _ = acquired.send(());
                     control.check()?;
+                    if let Some((internal_name, package_id)) = &scope {
+                        store.profile_store(internal_name, package_id)?;
+                    }
                     let environment = store.settings()?.ocr_environment;
                     let _ = captured.set(environment.clone());
                     Ok(environment)
@@ -825,6 +1136,11 @@ impl Application {
             })
             .clone()
     }
+}
+
+fn retired_fault(mut error: Fault) -> Fault {
+    let cause = std::mem::take(&mut error.context);
+    error.with_context(json!({"application_retired":true,"cause":cause}))
 }
 
 /// Display-independent facts of a settled operation for the durable record.
@@ -1004,7 +1320,7 @@ fn desktop_options(inventory: &Inventory, values: Value) -> Result<Value, Fault>
 }
 
 fn checked_profile(
-    store: &Store,
+    store: &ProfileStore,
     package_id: &str,
     schema_identity: &str,
     id: &str,
@@ -1065,7 +1381,7 @@ fn same_json_values(left: &Value, right: &Value) -> bool {
 }
 
 fn validated_profiles(
-    store: &Store,
+    store: &ProfileStore,
     inventory: &Inventory,
 ) -> Result<(Vec<Profile>, Option<Fault>), Fault> {
     let listing = store.list(
@@ -1118,6 +1434,10 @@ mod tests {
                 std::process::id(),
                 NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed),
             ));
+            Store::new(root.clone())
+                .unwrap()
+                .initialize(preferences())
+                .unwrap();
             let application = Application::new(
                 root.clone(),
                 root.join("runner-must-not-be-launched"),
@@ -1178,6 +1498,42 @@ mod tests {
         }
     }
 
+    fn view_ref(workspace: &WorkspaceView) -> WorkspaceRef {
+        WorkspaceRef {
+            workspace_id: workspace.workspace_id.clone(),
+            revision: workspace.revision,
+        }
+    }
+
+    fn inspect_named(
+        application: &Application,
+        internal_name: &str,
+        path: &Path,
+    ) -> Result<Selection, Fault> {
+        let workspace = application.create_workspace(internal_name, internal_name)?;
+        application.inspect(path, &view_ref(&workspace))
+    }
+
+    fn preferences() -> EditableSettings {
+        let settings = Settings::default();
+        EditableSettings {
+            locale: settings.locale,
+            gui_log_limit: settings.gui_log_limit,
+            ocr_environment: settings.ocr_environment,
+            notifications: settings.notifications,
+            backup_directory: settings.backup_directory,
+        }
+    }
+
+    fn profile_path(fixture: &Fixture, internal_name: &str, profile: &Profile) -> PathBuf {
+        fixture
+            .root
+            .join("tabs")
+            .join(internal_name)
+            .join(&profile.package_id)
+            .join(format!("{}.config", profile.id))
+    }
+
     fn request(selection: &Selection) -> StartRequest {
         StartRequest {
             package_path: selection.package_path.clone(),
@@ -1190,6 +1546,398 @@ mod tests {
             scenario: "workflow".into(),
             replay_descriptor_path: None,
         }
+    }
+
+    #[test]
+    fn unbound_commands_refuse_without_borrowing_another_tabs_inventory() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let bound = inspect_named(application, "Bound", &package_path()).unwrap();
+        let empty = application.create_workspace("Empty", "No package").unwrap();
+        let workspace = view_ref(&empty);
+        assert_eq!(workspace.revision, 0);
+        assert!(empty.selection.is_none());
+        assert!(empty.source_error.is_none());
+        let errors = [
+            application.validate(&workspace, json!({})).unwrap_err(),
+            application.profiles(&workspace).unwrap_err(),
+            application
+                .save_profile(&workspace, None, "No owner", json!({}))
+                .unwrap_err(),
+            application
+                .rename_profile(&workspace, "missing", "No owner")
+                .unwrap_err(),
+            application
+                .delete_profile(&workspace, "missing")
+                .unwrap_err(),
+            application.start(&workspace, request(&bound)).unwrap_err(),
+            application
+                .check_environment(Some(&workspace), None)
+                .unwrap_err(),
+            application
+                .import_legacy_profiles(&workspace)
+                .err()
+                .unwrap(),
+        ];
+        for error in errors {
+            assert_eq!(error.category, "WorkspaceUnbound");
+        }
+        assert!(application.runner.poll().run.is_none());
+        assert!(
+            application
+                .inspect(&fixture.root.join("absent"), &workspace)
+                .is_err()
+        );
+        let catalog = application.workspace_catalog().unwrap();
+        let unchanged = catalog
+            .open
+            .iter()
+            .find(|tab| tab.internal_name == "Empty")
+            .unwrap();
+        assert_eq!(view_ref(unchanged), workspace);
+        assert!(unchanged.selection.is_none());
+        let run = application.check_environment(None, None).unwrap();
+        let terminal = settled(application);
+        assert_eq!(terminal.run.as_deref(), Some(run.as_str()));
+        assert_eq!(terminal.error.unwrap().category, "EnvironmentUnset");
+        assert!(application.poll().controller["workspace_id"].is_null());
+    }
+
+    #[test]
+    fn naming_boundaries_preserve_scalars_and_closed_name_ownership() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        for (internal, display) in [
+            ("", "Name"),
+            ("name1", "Name"),
+            ("../escape", "Name"),
+            (" white", "Name"),
+            ("Valid", ""),
+            ("Valid", " \t"),
+            ("Valid", "line\nbreak"),
+        ] {
+            assert!(application.create_workspace(internal, display).is_err());
+        }
+        assert!(
+            application
+                .create_workspace(&"a".repeat(65), "Name")
+                .is_err()
+        );
+        assert!(
+            application
+                .create_workspace("LongDisplay", &"\u{10400}".repeat(81))
+                .is_err()
+        );
+        assert!(application.workspace_catalog().unwrap().open.is_empty());
+        let internal = "A".repeat(64);
+        let display = "\u{10400}".repeat(80);
+        let saved = application.create_workspace(&internal, &display).unwrap();
+        assert_eq!(saved.display_name, display);
+        application.close_workspace(&view_ref(&saved)).unwrap();
+        assert!(
+            application
+                .create_workspace(&internal.to_lowercase(), "Alias")
+                .is_err()
+        );
+        let duplicate = application.create_workspace("Duplicate", &display).unwrap();
+        assert_eq!(duplicate.display_name, display);
+        let reopened = application.reopen_workspace(&internal).unwrap();
+        assert_eq!(reopened.internal_name, internal);
+        assert_eq!(reopened.display_name, display);
+        assert_ne!(reopened.workspace_id, saved.workspace_id);
+        assert!(reopened.selection.is_none());
+    }
+
+    #[test]
+    fn failed_durable_bind_close_and_reopen_preserve_host_and_saved_authority() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let empty = application.create_workspace("Main", "Saved name").unwrap();
+        let reference = view_ref(&empty);
+        let path = fixture.root.join("tabs/Main/tab.config");
+        let pending = path.with_extension("pending");
+        let before = fs::read(&path).unwrap();
+        fs::write(&pending, b"interrupted Tab write").unwrap();
+        assert!(application.inspect(&package_path(), &reference).is_err());
+        assert!(application.close_workspace(&reference).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let current = application.workspace_catalog().unwrap().open.remove(0);
+        assert_eq!(view_ref(&current), reference);
+        assert!(current.selection.is_none());
+        assert_eq!(fs::read(&pending).unwrap(), b"interrupted Tab write");
+        fs::remove_file(&pending).unwrap();
+        let bound = application.inspect(&package_path(), &reference).unwrap();
+        let bound_ref = workspace_ref(&bound);
+        let bound_bytes = fs::read(&path).unwrap();
+        fs::write(&pending, b"interrupted Tab write").unwrap();
+        assert!(
+            application
+                .inspect(&fixture.numeric_package(), &bound_ref)
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), bound_bytes);
+        assert_eq!(
+            application
+                .validate(&bound_ref, json!({"priorities":["ocr"]}))
+                .unwrap()["priorities"],
+            json!(["ocr"])
+        );
+        fs::remove_file(&pending).unwrap();
+        application.close_workspace(&bound_ref).unwrap();
+        let closed_bytes = fs::read(&path).unwrap();
+        fs::write(&pending, b"interrupted reopen").unwrap();
+        assert!(application.reopen_workspace("Main").is_err());
+        assert!(application.workspace_catalog().unwrap().open.is_empty());
+        assert_eq!(fs::read(&path).unwrap(), closed_bytes);
+        fs::remove_file(pending).unwrap();
+        let reopened = application.reopen_workspace("Main").unwrap();
+        assert_ne!(reopened.workspace_id, reference.workspace_id);
+        assert!(reopened.selection.is_some());
+    }
+
+    #[test]
+    fn restart_revalidates_saved_open_sources_and_scopes_faults_without_rewriting_them() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let good = inspect_named(application, "Good", &package_path()).unwrap();
+        let old = workspace_ref(&good);
+        let saved = application
+            .save_profile(&old, None, "Durable", json!({"priorities":["ocr"]}))
+            .unwrap();
+        let missing_path = fixture.package_at("disappearing-source");
+        inspect_named(application, "Missing", &missing_path).unwrap();
+        inspect_named(application, "Archive", &package_path()).unwrap();
+        inspect_named(application, "Changed", &package_path()).unwrap();
+        application.create_workspace("Empty", "No package").unwrap();
+        let closed = application
+            .create_workspace("Closed", "Retained closed")
+            .unwrap();
+        application.close_workspace(&view_ref(&closed)).unwrap();
+        application.create_workspace("Broken", "Malformed").unwrap();
+        application.start(&old, request(&good)).unwrap();
+        settled(application);
+        application.shutdown().unwrap();
+        fs::rename(&missing_path, fixture.root.join("relocated-source")).unwrap();
+        let archive_path = fixture.root.join("tabs/Archive/tab.config");
+        let mut archive = lock(&application.store).tab("Archive").unwrap();
+        archive.packages[0].source = PackageSource::CustomArchive {
+            path: fixture
+                .root
+                .join("unsupported.czip")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let archive_bytes = serde_json::to_vec(&archive).unwrap();
+        fs::write(&archive_path, &archive_bytes).unwrap();
+        let changed_path = fixture.root.join("tabs/Changed/tab.config");
+        let mut changed = lock(&application.store).tab("Changed").unwrap();
+        changed.packages[0].package_id = "another-package".into();
+        changed.selected_package_id = Some("another-package".into());
+        let changed_bytes = serde_json::to_vec(&changed).unwrap();
+        fs::write(&changed_path, &changed_bytes).unwrap();
+        let broken_path = fixture.root.join("tabs/Broken/tab.config");
+        fs::write(&broken_path, b"malformed retained Tab").unwrap();
+        let capture = application.capture_configuration().unwrap();
+        assert_eq!(
+            capture.files["tabs/Broken/tab.config"],
+            b"malformed retained Tab"
+        );
+        assert!(capture.files.contains_key("tabs/Closed/tab.config"));
+        assert!(!capture.files.keys().any(|path| path.starts_with("logs/")));
+        let restarted = Application::new(
+            fixture.root.clone(),
+            fixture.root.join("absent-runner"),
+            fixture.root.join("absent-engine"),
+        )
+        .unwrap();
+        let catalog = restarted.workspace_catalog().unwrap();
+        let restored = catalog
+            .open
+            .iter()
+            .find(|tab| tab.internal_name == "Good")
+            .unwrap();
+        assert_ne!(restored.workspace_id, old.workspace_id);
+        assert_eq!(
+            restored.selection.as_ref().unwrap().profiles[0].id,
+            saved.id
+        );
+        assert_eq!(
+            restarted.validate(&old, json!({})).unwrap_err().category,
+            "StaleIdentity"
+        );
+        let missing = catalog
+            .open
+            .iter()
+            .find(|tab| tab.internal_name == "Missing")
+            .unwrap();
+        assert!(missing.selection.is_none());
+        assert_eq!(
+            missing.source_error.as_ref().unwrap().context["internal_name"],
+            "Missing"
+        );
+        assert_eq!(
+            restarted.profiles(&view_ref(missing)).unwrap_err().category,
+            "WorkspaceUnbound"
+        );
+        let unsupported = catalog
+            .open
+            .iter()
+            .find(|tab| tab.internal_name == "Archive")
+            .unwrap();
+        assert!(unsupported.selection.is_none());
+        assert_eq!(
+            unsupported.source_error.as_ref().unwrap().category,
+            "UnsupportedPackageSource"
+        );
+        let changed = catalog
+            .open
+            .iter()
+            .find(|tab| tab.internal_name == "Changed")
+            .unwrap();
+        assert!(changed.selection.is_none());
+        assert_eq!(
+            changed.source_error.as_ref().unwrap().category,
+            "PackageIdentity"
+        );
+        assert_eq!(fs::read(changed_path).unwrap(), changed_bytes);
+        let empty = catalog
+            .open
+            .iter()
+            .find(|tab| tab.internal_name == "Empty")
+            .unwrap();
+        assert!(empty.selection.is_none() && empty.source_error.is_none());
+        assert_eq!(catalog.closed[0].internal_name, "Closed");
+        assert_eq!(catalog.faults.len(), 1);
+        assert_eq!(fs::read(archive_path).unwrap(), archive_bytes);
+        assert_eq!(fs::read(broken_path).unwrap(), b"malformed retained Tab");
+        let poll = restarted.poll();
+        assert!(poll.workspace_results.is_empty());
+        assert!(poll.last_check.is_none());
+        assert!(poll.controller["run"].is_null());
+        restarted.shutdown().unwrap();
+    }
+
+    #[test]
+    fn reconstruction_requires_settled_commands_and_closes_all_future_admission() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let workspace = application.create_workspace("Empty", "Empty").unwrap();
+        let store = lock(&application.store);
+        application.command_admitted.store(false, Ordering::Release);
+        let saving = application.clone();
+        let writer = std::thread::spawn(move || saving.save_settings(preferences()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !application.command_admitted.load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let refusal = application.prepare_reconstruction().unwrap_err();
+        assert_eq!(refusal.category, "WorkspaceBusy");
+        assert_ne!(refusal.context["application_retired"], true);
+        assert!(!application.closing.load(Ordering::Acquire));
+        drop(store);
+        writer.join().unwrap().unwrap();
+        application.prepare_reconstruction().unwrap();
+        assert_eq!(
+            application
+                .create_workspace("Late", "Late")
+                .unwrap_err()
+                .category,
+            "Closing"
+        );
+        assert_eq!(
+            application
+                .close_workspace(&view_ref(&workspace))
+                .unwrap_err()
+                .category,
+            "Closing"
+        );
+        assert_eq!(
+            application
+                .save_settings(preferences())
+                .unwrap_err()
+                .category,
+            "Closing"
+        );
+        assert_eq!(
+            application.prepare_reconstruction().unwrap_err().context["application_retired"],
+            true
+        );
+        assert!(lock(&application.store).tab("Empty").unwrap().open);
+        assert!(application.poll().controller["run"].is_null());
+    }
+
+    #[test]
+    fn invalid_settings_precede_worker_creation() {
+        let fixture = Fixture::new();
+        fixture.application.shutdown().unwrap();
+        let settings_path = fixture.root.join("settings.json");
+        let bytes = fs::read(&settings_path).unwrap();
+        for invalid in [None, Some(b"invalid settings".as_slice())] {
+            match invalid {
+                Some(bytes) => {
+                    Store::new(fixture.root.clone())
+                        .unwrap()
+                        .initialize(preferences())
+                        .unwrap();
+                    fs::write(&settings_path, bytes).unwrap();
+                }
+                None => {
+                    fs::remove_file(&settings_path).unwrap();
+                }
+            }
+            let result = Application::build(
+                fixture.root.clone(),
+                fixture.root.join("runner"),
+                fixture.root.join("engine"),
+                |_| panic!("invalid settings must be rejected before starting workers"),
+                None,
+            );
+            assert!(result.is_err());
+        }
+        fs::write(settings_path, bytes).unwrap();
+    }
+
+    #[test]
+    fn writer_start_failure_waits_for_bridge_termination_before_retry() {
+        let fixture = Fixture::new();
+        fixture.application.shutdown().unwrap();
+        let root = fixture.root.clone();
+        let (exiting, exit) = mpsc::sync_channel(1);
+        let (release, released) = mpsc::sync_channel(1);
+        let (returned, result) = mpsc::sync_channel(1);
+        let constructor = std::thread::spawn(move || {
+            let failure = Application::build(
+                root.clone(),
+                root.join("runner"),
+                root.join("engine"),
+                |_| {
+                    Err(Fault::new(
+                        "LoggingInitialization",
+                        "Injected writer creation failure",
+                    ))
+                },
+                Some((exiting, released)),
+            );
+            let _ = returned.send(failure);
+        });
+        // The actual bridge has observed failed publication, but cannot exit
+        // until released. Construction must still own and await that thread.
+        exit.recv_timeout(Duration::from_secs(2)).unwrap();
+        let premature = result.recv_timeout(Duration::from_millis(100));
+        release.send(()).unwrap();
+        assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)));
+        let failure = result.recv_timeout(Duration::from_secs(2)).unwrap();
+        constructor.join().unwrap();
+        assert_eq!(failure.err().unwrap().category, "LoggingInitialization");
+        let retried = Application::new(
+            fixture.root.clone(),
+            fixture.root.join("runner"),
+            fixture.root.join("engine"),
+        )
+        .unwrap();
+        assert!(retried.workspace_catalog().unwrap().open.is_empty());
+        retried.shutdown().unwrap();
     }
 
     fn settled(application: &Application) -> mado_runtime_comparison::desktop::ControllerView {
@@ -1219,10 +1967,10 @@ mod tests {
             .check_environment(Some(&unknown), None)
             .unwrap_err();
         assert_eq!(error.category, "StaleIdentity");
-        let selection = application.inspect(&package_path(), None).unwrap();
+        let selection = inspect_named(application, "Main", &package_path()).unwrap();
         let workspace = workspace_ref(&selection);
         let replacement = application
-            .inspect(&fixture.numeric_package(), Some(&workspace))
+            .inspect(&fixture.numeric_package(), &workspace)
             .unwrap();
         assert_eq!(replacement.workspace_id, workspace.workspace_id);
         let error = application
@@ -1236,7 +1984,7 @@ mod tests {
     fn environment_check_without_package_does_not_inherit_cached_selection() {
         let fixture = Fixture::new();
         let application = &fixture.application;
-        let selection = application.inspect(&package_path(), None).unwrap();
+        let selection = inspect_named(application, "Main", &package_path()).unwrap();
         let run = application.check_environment(None, None).unwrap();
         let terminal = settled(application);
         assert_eq!(terminal.run.as_deref(), Some(run.as_str()));
@@ -1267,7 +2015,7 @@ mod tests {
         let fixture = Fixture::new();
         let application = &fixture.application;
         let path = package_path();
-        let selection = application.inspect(&path, None).unwrap();
+        let selection = inspect_named(application, "Main", &path).unwrap();
         let workspace = workspace_ref(&selection);
         let plan: Plan = serde_json::from_str(include_str!(
             "../../../../tools/runtime-comparison/fixtures/manual-plan.json"
@@ -1275,23 +2023,20 @@ mod tests {
         .unwrap();
         let inventory = Inventory::capture(&path, &plan.limits).unwrap();
         let values = inventory.profiles["template-first"]["options"].clone();
-        let saved = lock(&application.store)
-            .save(&inventory, None, "Saved choice", values.clone())
+        let saved = application
+            .save_profile(&workspace, None, "Saved choice", values.clone())
             .unwrap();
         let mut replacement = values.clone();
         replacement["priorities"] = json!(["ocr", "template"]);
-        lock(&application.store)
-            .save(
-                &inventory,
+        application
+            .save_profile(
+                &workspace,
                 Some(&saved.id),
                 "Saved choice",
                 replacement.clone(),
             )
             .unwrap();
-        let stored_path = fixture
-            .root
-            .join("profiles")
-            .join(format!("{}.json", saved.id));
+        let stored_path = profile_path(&fixture, "Main", &saved);
         let before = fs::read(&stored_path).unwrap();
         let run = application
             .start(
@@ -1319,9 +2064,7 @@ mod tests {
             json!({"clean":true,"child_started":false})
         );
         assert_eq!(fs::read(&stored_path).unwrap(), before);
-        let profiles = lock(&application.store)
-            .list(&saved.package_id, &saved.schema_identity)
-            .unwrap();
+        let profiles = application.profiles(&workspace).unwrap();
         assert_eq!(profiles.profiles[0].values, replacement);
     }
 
@@ -1330,7 +2073,7 @@ mod tests {
         let fixture = Fixture::new();
         let application = &fixture.application;
         let path = package_path();
-        let selection = application.inspect(&path, None).unwrap();
+        let selection = inspect_named(application, "Main", &path).unwrap();
         let workspace = workspace_ref(&selection);
         let values = selection.package.profiles["template-first"]["options"].clone();
         let saved = application
@@ -1399,39 +2142,32 @@ mod tests {
     }
 
     #[test]
-    fn pending_settings_do_not_block_selection_or_hide_the_warning() {
+    fn inspection_preserves_unrelated_app_preferences_and_legacy_hint() {
         let fixture = Fixture::new();
         let application = &fixture.application;
-        lock(&application.store)
-            .save_package_hint("previous-package".into())
-            .unwrap();
         let settings_path = fixture.root.join("settings.json");
+        let mut legacy = application.settings().unwrap();
+        legacy.package_path = Some("previous-package".into());
+        fs::write(&settings_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let before = fs::read(&settings_path).unwrap();
-        let pending_path = fixture.root.join("settings.pending");
-        let pending = b"interrupted settings write";
-        fs::write(&pending_path, pending).unwrap();
-
-        let selection = application.inspect(&package_path(), None).unwrap();
+        let selection = inspect_named(application, "Main", &package_path()).unwrap();
         let workspace = workspace_ref(&selection);
-        assert_eq!(selection.package.package_id, "m0-workload");
-        let validated = application
-            .validate(&workspace, json!({"priorities":["ocr", "template"]}))
-            .unwrap();
-        assert_eq!(validated["priorities"], json!(["ocr", "template"]));
-        assert_eq!(fs::read(&settings_path).unwrap(), before);
-        assert_eq!(fs::read(&pending_path).unwrap(), pending.as_slice());
+        assert_eq!(
+            application
+                .validate(&workspace, json!({"priorities":["ocr"]}))
+                .unwrap()["priorities"],
+            json!(["ocr"])
+        );
+        assert_eq!(fs::read(settings_path).unwrap(), before);
         assert_eq!(
             application.settings().unwrap().package_path.as_deref(),
             Some("previous-package")
         );
-        let logs = application.poll().logs;
-        let warning = logs
-            .entries
-            .iter()
-            .find(|entry| entry.code == "settings.package_hint_not_saved")
-            .expect("the GUI must receive the hint-persistence warning");
-        assert!(warning.level.eq_ignore_ascii_case("warn"));
-        assert_eq!(warning.fields["category"], "Storage");
+        let tab = lock(&application.store).tab("Main").unwrap();
+        assert_eq!(
+            tab.selected_package_id.as_deref(),
+            Some(selection.package.package_id.as_str())
+        );
     }
 
     #[test]
@@ -1465,9 +2201,7 @@ mod tests {
             *value.pointer_mut(pointer).unwrap() = json!(9_007_199_254_740_993_u64);
             fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
             let before = fs::read(&path).unwrap();
-            let error = fixture
-                .application
-                .inspect(&package, None)
+            let error = inspect_named(&fixture.application, "Main", &package)
                 .err()
                 .expect("unsafe source must be refused");
             assert_eq!(error.category, "NumericPrecision", "{source}");
@@ -1482,7 +2216,7 @@ mod tests {
         let fixture = Fixture::new();
         let application = &fixture.application;
         let path = fixture.numeric_package();
-        let selection = application.inspect(&path, None).unwrap();
+        let selection = inspect_named(application, "Main", &path).unwrap();
         let workspace = workspace_ref(&selection);
         let inventory = lock(&application.workspaces)
             .resolve(&workspace)
@@ -1491,6 +2225,8 @@ mod tests {
             .as_ref()
             .clone();
         let saved = lock(&application.store)
+            .profile_store(&selection.internal_name, &inventory.package_id)
+            .unwrap()
             .save(
                 &inventory,
                 None,
@@ -1498,12 +2234,9 @@ mod tests {
                 json!({"amount":9_007_199_254_740_993_u64}),
             )
             .unwrap();
-        let stored_path = fixture
-            .root
-            .join("profiles")
-            .join(format!("{}.json", saved.id));
+        let stored_path = profile_path(&fixture, "Main", &saved);
         let before = fs::read(&stored_path).unwrap();
-        let reopened = application.inspect(&path, None).unwrap();
+        let reopened = application.profiles(&workspace).unwrap();
         assert!(reopened.profiles.is_empty());
         let error = reopened.profiles_error.unwrap();
         assert_eq!(
@@ -1570,9 +2303,9 @@ mod tests {
     fn omitted_defaults_are_checked_without_replacing_explicit_values() {
         let fixture = Fixture::new();
         let path = fixture.numeric_package();
-        fixture.application.inspect(&path, None).unwrap();
+        inspect_named(&fixture.application, "Main", &path).unwrap();
         let mut selected = lock(&fixture.application.workspaces);
-        let inventory = Arc::make_mut(&mut selected.open[0].inventory);
+        let inventory = Arc::make_mut(&mut selected.open[0].selected.as_mut().unwrap().inventory);
         inventory.schema["properties"]["amount"]["default"] = json!(9_007_199_254_740_993_u64);
         let error = desktop_options(inventory, json!({})).unwrap_err();
         assert_eq!(error.category, "NumericPrecision");
@@ -1619,7 +2352,7 @@ mod tests {
         let fixture = Fixture::new();
         let application = &fixture.application;
         let path = fixture.numeric_package();
-        let selection = application.inspect(&path, None).unwrap();
+        let selection = inspect_named(application, "Main", &path).unwrap();
         let workspace = workspace_ref(&selection);
         let inventory = lock(&application.workspaces)
             .resolve(&workspace)
@@ -1632,9 +2365,11 @@ mod tests {
         )
         .unwrap();
         let stored = lock(&application.store)
+            .profile_store(&selection.internal_name, &inventory.package_id)
+            .unwrap()
             .save(&inventory, None, "Floating values", source.clone())
             .unwrap();
-        let selection = application.inspect(&path, None).unwrap();
+        let selection = application.profiles(&workspace).unwrap();
         assert_eq!(selection.profiles[0].values, source);
         // These are the integer spellings emitted by WebView JSON.stringify.
         let submitted: Value = serde_json::from_str(
@@ -1651,16 +2386,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(saved.values, source);
-        let reopened = application.inspect(&path, None).unwrap();
+        let reopened = application.profiles(&workspace).unwrap();
         assert!(reopened.profiles_error.is_none());
         assert_eq!(reopened.profiles[0].values, source);
-        let before = fs::read(
-            fixture
-                .root
-                .join("profiles")
-                .join(format!("{}.json", saved.id)),
-        )
-        .unwrap();
+        let stored_path = profile_path(&fixture, "Main", &saved);
+        let before = fs::read(&stored_path).unwrap();
         let run = application
             .start(
                 &workspace,
@@ -1684,16 +2414,7 @@ mod tests {
             terminal.error.unwrap().context["operation_stage"],
             "execution"
         );
-        assert_eq!(
-            fs::read(
-                fixture
-                    .root
-                    .join("profiles")
-                    .join(format!("{}.json", saved.id))
-            )
-            .unwrap(),
-            before,
-        );
+        assert_eq!(fs::read(stored_path).unwrap(), before);
     }
 
     #[test]
@@ -1701,7 +2422,7 @@ mod tests {
         let fixture = Fixture::new();
         let application = &fixture.application;
         let path = package_path();
-        let selection = application.inspect(&path, None).unwrap();
+        let selection = inspect_named(application, "Main", &path).unwrap();
         let workspace = workspace_ref(&selection);
         let settings_path = fixture.root.join("settings.json");
         let preserved = b"unreadable OCR settings must not disable controlled runs";
@@ -1736,7 +2457,7 @@ mod tests {
         let fixture = Fixture::new();
         let application = &fixture.application;
         let path = fixture.numeric_package();
-        let selection = application.inspect(&path, None).unwrap();
+        let selection = inspect_named(application, "Main", &path).unwrap();
         let workspace = workspace_ref(&selection);
         let inventory = lock(&application.workspaces)
             .resolve(&workspace)
@@ -1745,14 +2466,13 @@ mod tests {
             .as_ref()
             .clone();
         let saved = lock(&application.store)
+            .profile_store(&selection.internal_name, &inventory.package_id)
+            .unwrap()
             .save(&inventory, None, "Signed zero", json!({"amount":-0.0}))
             .unwrap();
-        let stored_path = fixture
-            .root
-            .join("profiles")
-            .join(format!("{}.json", saved.id));
+        let stored_path = profile_path(&fixture, "Main", &saved);
         let before = fs::read(&stored_path).unwrap();
-        let reopened = application.inspect(&path, None).unwrap();
+        let reopened = application.profiles(&workspace).unwrap();
         assert!(reopened.profiles.is_empty());
         let error = reopened.profiles_error.unwrap();
         assert_eq!(
@@ -1787,7 +2507,7 @@ mod tests {
         fs::write(&schema_path, serde_json::to_vec(&schema).unwrap()).unwrap();
         let source_before = fs::read(&schema_path).unwrap();
         let error = application
-            .inspect(&path, Some(&workspace))
+            .inspect(&path, &workspace)
             .err()
             .expect("signed-zero default must be refused");
         assert_eq!(error.category, "NumericPrecision");
@@ -1798,78 +2518,159 @@ mod tests {
     }
 
     #[test]
-    fn canonical_deduplication_limit_and_closed_ids_preserve_other_workspaces() {
+    fn same_id_source_replacement_checks_profiles_before_durable_binding() {
         let fixture = Fixture::new();
         let application = &fixture.application;
-        let path = fixture.package_at("first");
-        let first = application.inspect(&path, None).unwrap();
+        let original = inspect_named(application, "Main", &package_path()).unwrap();
+        let workspace = workspace_ref(&original);
+        let saved = application
+            .save_profile(
+                &workspace,
+                None,
+                "Retained profile",
+                json!({"priorities":["ocr"]}),
+            )
+            .unwrap();
+        let tab_path = fixture.root.join("tabs/Main/tab.config");
+        let profile_path = profile_path(&fixture, "Main", &saved);
+        let original_tab = fs::read(&tab_path).unwrap();
+        let original_profile = fs::read(&profile_path).unwrap();
+        let error = application
+            .inspect(&fixture.numeric_package(), &workspace)
+            .unwrap_err();
+        assert_eq!(error.category, "PackageCompatibility");
+        assert_eq!(fs::read(&tab_path).unwrap(), original_tab);
+        assert_eq!(fs::read(&profile_path).unwrap(), original_profile);
+        let current = application.workspace_catalog().unwrap().open.remove(0);
+        assert_eq!(view_ref(&current), workspace);
+        assert_eq!(
+            current.selection.unwrap().package_path,
+            original.package_path
+        );
+        let relocated = fixture.package_at("compatible-relocation");
+        let replacement = application.inspect(&relocated, &workspace).unwrap();
+        assert_eq!(replacement.workspace_id, workspace.workspace_id);
+        assert_eq!(replacement.revision, workspace.revision + 1);
+        assert_eq!(replacement.profiles[0].id, saved.id);
+        assert_eq!(replacement.profiles[0].values, saved.values);
+        assert_eq!(fs::read(profile_path).unwrap(), original_profile);
+        let tab = lock(&application.store).tab("Main").unwrap();
+        assert_eq!(tab.packages.len(), 1);
+        assert_eq!(
+            tab.packages[0].source,
+            PackageSource::Directory {
+                path: relocated
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn same_source_tabs_keep_independent_profiles_and_fresh_reopened_sessions() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let first = inspect_named(application, "Main", &package_path()).unwrap();
+        let second = inspect_named(application, "Other", &package_path().join(".")).unwrap();
         let original = workspace_ref(&first);
-        fs::write(path.join("main.js"), b"not valid JavaScript !!!").unwrap();
-        let duplicate = application.inspect(&path.join("."), None).unwrap();
-        assert_eq!(workspace_ref(&duplicate), original);
-        assert_eq!(
-            duplicate.package.inventory_identity,
-            first.package.inventory_identity
-        );
-        let mut opened = vec![original.clone()];
-        for index in 1..MAX_WORKSPACES {
-            let selection = application
-                .inspect(&fixture.package_at(&format!("package-{index}")), None)
-                .unwrap();
-            opened.push(workspace_ref(&selection));
-        }
-        let ninth = fixture.package_at("ninth");
-        assert_eq!(
-            application.inspect(&ninth, None).unwrap_err().category,
-            "WorkspaceLimit"
-        );
-        let conflict = application.inspect(&ninth, Some(&original)).unwrap();
-        let current = workspace_ref(&conflict);
+        let other = workspace_ref(&second);
+        assert_ne!(original.workspace_id, other.workspace_id);
+        let saved = application
+            .save_profile(&original, None, "First", json!({"priorities":["ocr"]}))
+            .unwrap();
+        assert!(application.profiles(&other).unwrap().profiles.is_empty());
         assert_eq!(
             application
-                .inspect(Path::new(&conflict.package_path), Some(&opened[1]))
+                .rename_profile(&other, &saved.id, "Foreign")
                 .unwrap_err()
                 .category,
-            "WorkspaceConflict"
+            "ProfileNotFound"
         );
-        application.close_workspace(&current).unwrap();
         assert_eq!(
             application
-                .validate(&current, json!({}))
+                .delete_profile(&other, &saved.id)
+                .unwrap_err()
+                .category,
+            "ProfileNotFound"
+        );
+        let mut foreign_request = request(&second);
+        foreign_request.profile_id = saved.id.clone();
+        foreign_request.values = saved.values.clone();
+        application.start(&other, foreign_request).unwrap();
+        assert_eq!(
+            settled(application).error.unwrap().category,
+            "ProfileNotFound"
+        );
+        let independent = application
+            .save_profile(&other, None, "Second", json!({"priorities":["template"]}))
+            .unwrap();
+        application
+            .rename_profile(&original, &saved.id, "Renamed")
+            .unwrap();
+        assert_eq!(
+            application.profiles(&other).unwrap().profiles[0].name,
+            independent.name
+        );
+        assert_eq!(
+            application.profiles(&other).unwrap().profiles[0].values["priorities"],
+            json!(["template"])
+        );
+        let stored_path = profile_path(&fixture, "Main", &saved);
+        let before = fs::read(&stored_path).unwrap();
+        fs::write(&stored_path, b"malformed owner profile").unwrap();
+        assert!(application.profiles(&original).is_err());
+        assert_eq!(
+            application.profiles(&other).unwrap().profiles[0].id,
+            independent.id
+        );
+        assert_eq!(fs::read(&stored_path).unwrap(), b"malformed owner profile");
+        fs::write(stored_path, before).unwrap();
+        application.close_workspace(&original).unwrap();
+        let reopened = application.reopen_workspace("Main").unwrap();
+        assert_ne!(reopened.workspace_id, original.workspace_id);
+        assert_eq!(
+            application
+                .validate(&original, json!({}))
                 .unwrap_err()
                 .category,
             "StaleIdentity"
         );
-        let reopened = application.inspect(&ninth, None).unwrap();
-        assert_ne!(reopened.workspace_id, original.workspace_id);
-        for workspace in &opened[1..] {
-            assert_eq!(
-                application
-                    .validate(workspace, json!({"priorities":["ocr"]}))
-                    .unwrap()["priorities"],
-                json!(["ocr"])
-            );
+        assert_eq!(reopened.selection.unwrap().profiles[0].id, saved.id);
+        for name in ["A", "B", "C", "D", "E", "F"] {
+            application.create_workspace(name, name).unwrap();
         }
+        assert_eq!(
+            application
+                .create_workspace("Ninth", "Ninth")
+                .unwrap_err()
+                .category,
+            "WorkspaceLimit"
+        );
+        application.close_workspace(&other).unwrap();
+        let last = application.create_workspace("Ninth", "Ninth").unwrap();
+        assert!(last.selection.is_none());
+        assert_eq!(
+            application.reopen_workspace("Other").unwrap_err().category,
+            "WorkspaceLimit"
+        );
+        assert!(!lock(&application.store).tab("Other").unwrap().open);
     }
 
     #[test]
     fn stale_revisions_and_foreign_profiles_cannot_mutate_saved_values() {
         let fixture = Fixture::new();
         let application = &fixture.application;
-        let first = application.inspect(&package_path(), None).unwrap();
+        let first = inspect_named(application, "Main", &package_path()).unwrap();
         let original = workspace_ref(&first);
-        let second = application
-            .inspect(&fixture.numeric_package(), None)
-            .unwrap();
+        let second = inspect_named(application, "Other", &fixture.numeric_package()).unwrap();
         let foreign = workspace_ref(&second);
         let values = first.package.profiles["template-first"]["options"].clone();
         let profile = application
             .save_profile(&original, None, "Original", values.clone())
             .unwrap();
-        let path = fixture
-            .root
-            .join("profiles")
-            .join(format!("{}.json", profile.id));
+        let path = profile_path(&fixture, "Main", &profile);
         let before = fs::read(&path).unwrap();
         assert_eq!(
             application
@@ -1892,9 +2693,7 @@ mod tests {
                 .category,
             "ProfileNotFound"
         );
-        let replacement = application
-            .inspect(&package_path(), Some(&original))
-            .unwrap();
+        let replacement = application.inspect(&package_path(), &original).unwrap();
         let current = workspace_ref(&replacement);
         assert_eq!(current.revision, original.revision + 1);
         assert_eq!(
@@ -1952,11 +2751,9 @@ mod tests {
     fn busy_owner_refuses_close_reinspection_and_competitors_without_blocking_stop() {
         let fixture = Fixture::new();
         let application = &fixture.application;
-        let first = application.inspect(&package_path(), None).unwrap();
+        let first = inspect_named(application, "Main", &package_path()).unwrap();
         let origin = workspace_ref(&first);
-        let other = application
-            .inspect(&fixture.numeric_package(), None)
-            .unwrap();
+        let other = inspect_named(application, "Other", &fixture.numeric_package()).unwrap();
         let other_ref = workspace_ref(&other);
         let store = lock(&application.store);
         let starting = application.clone();
@@ -1973,14 +2770,29 @@ mod tests {
             std::thread::yield_now();
         };
         let run = preparing.controller["run"].as_str().unwrap().to_owned();
+        let damaged_settings = b"settings became invalid after operation admission";
+        fs::write(fixture.root.join("settings.json"), damaged_settings).unwrap();
         let close = application.close_workspace(&origin);
-        let inspect = application.inspect(&package_path(), Some(&origin));
+        let inspect = application.inspect(&package_path(), &origin);
         let competing_start = application.start(&other_ref, request(&other));
         let competing_check = application.check_environment(Some(&other_ref), None);
+        let reconstruct = application.prepare_reconstruction();
+        assert!(!application.closing.load(Ordering::Acquire));
+        let capturing = application.clone();
+        let (entered, entry) = mpsc::sync_channel(1);
+        let snapshot = std::thread::spawn(move || {
+            entered.send(()).unwrap();
+            capturing.capture_configuration()
+        });
+        entry.recv_timeout(Duration::from_secs(2)).unwrap();
         let stopped = application.stop(&run);
         let stopped_state = application.poll();
         drop(store);
         starter.join().unwrap().unwrap();
+        let captured = snapshot.join().unwrap().unwrap();
+        assert_eq!(captured.files["settings.json"], damaged_settings);
+        assert!(application.settings().is_err());
+        assert_eq!(reconstruct.unwrap_err().category, "RunActive");
         assert_eq!(close.unwrap_err().category, "RunActive");
         assert_eq!(inspect.unwrap_err().category, "RunActive");
         assert_eq!(competing_start.unwrap_err().category, "RunActive");
@@ -2012,11 +2824,9 @@ mod tests {
         application.closing.store(true, Ordering::Release);
         lock(&application.bridge).take().unwrap().join().unwrap();
         application.closing.store(false, Ordering::Release);
-        let first = application.inspect(&package_path(), None).unwrap();
+        let first = inspect_named(application, "Main", &package_path()).unwrap();
         let origin = workspace_ref(&first);
-        let second = application
-            .inspect(&fixture.numeric_package(), None)
-            .unwrap();
+        let second = inspect_named(application, "Other", &fixture.numeric_package()).unwrap();
         let next = workspace_ref(&second);
         let environment = OcrEnvironment {
             model: mado_runtime_comparison::environment::G004_PROFILE.into(),
@@ -2046,6 +2856,7 @@ mod tests {
         application
             .save_settings(EditableSettings {
                 locale: settings.locale,
+                backup_directory: settings.backup_directory,
                 gui_log_limit: settings.gui_log_limit,
                 ocr_environment: Some(environment.clone()),
                 notifications: settings.notifications,
@@ -2072,6 +2883,7 @@ mod tests {
         application
             .save_settings(EditableSettings {
                 locale: settings.locale,
+                backup_directory: settings.backup_directory,
                 gui_log_limit: settings.gui_log_limit,
                 ocr_environment: None,
                 notifications: settings.notifications,
@@ -2157,7 +2969,7 @@ mod tests {
     fn close_refuses_inflight_profile_save_without_deleting_saved_data() {
         let fixture = Fixture::new();
         let application = &fixture.application;
-        let selection = application.inspect(&package_path(), None).unwrap();
+        let selection = inspect_named(application, "Main", &package_path()).unwrap();
         let workspace = workspace_ref(&selection);
         let values = selection.package.profiles["template-first"]["options"].clone();
         let store = lock(&application.store);
@@ -2178,7 +2990,11 @@ mod tests {
         let profile = saver.join().unwrap().unwrap();
         assert_eq!(close.unwrap_err().category, "WorkspaceBusy");
         application.close_workspace(&workspace).unwrap();
-        let reopened = application.inspect(&package_path(), None).unwrap();
+        let reopened = application
+            .reopen_workspace("Main")
+            .unwrap()
+            .selection
+            .unwrap();
         assert_ne!(reopened.workspace_id, workspace.workspace_id);
         assert_eq!(reopened.profiles[0].id, profile.id);
         assert_eq!(reopened.profiles[0].values, profile.values);
@@ -2258,7 +3074,7 @@ mod tests {
     fn shutdown_during_preparation_persists_a_distinguishable_terminal_record() {
         let fixture = Fixture::new();
         let application = &fixture.application;
-        let selection = application.inspect(&package_path(), None).unwrap();
+        let selection = inspect_named(application, "Main", &package_path()).unwrap();
         let workspace = workspace_ref(&selection);
         let store = lock(&application.store);
         let starting = application.clone();

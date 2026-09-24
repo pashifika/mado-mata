@@ -92,6 +92,29 @@ function catalog(data: typeof enData) {
       closeLabel: (name: string) => interpolate(data.workspaces.closeLabel, {name}),
       closeTitle: (name: string) => interpolate(data.workspaces.closeTitle, {name}),
     },
+    bootstrap: {
+      ...data.bootstrap,
+      state: (value: string) => known(data.bootstrap.state, value),
+      legacyHelp: (path: string) => interpolate(data.bootstrap.legacyHelp, {path}),
+      block: (kind: keyof typeof data.bootstrap.block) => data.bootstrap.block[kind],
+    },
+    create: {
+      ...data.create,
+      count: (count: number, limit: number) => interpolate(data.create.count, {count, limit}),
+      openLimit: (limit: number) => interpolate(data.create.openLimit, {limit}),
+      savedLimit: (limit: number) => interpolate(data.create.savedLimit, {limit}),
+      errors: (kind: keyof typeof data.create.errors) => data.create.errors[kind],
+    },
+    reopen: {
+      ...data.reopen,
+      directory: (id: string) => interpolate(data.reopen.directory, {id}),
+      archive: (id: string) => interpolate(data.reopen.archive, {id}),
+      references: (count: number) => interpolate(data.reopen.references, {count}),
+      saved: (count: number, limit: number) => interpolate(data.reopen.saved, {count, limit}),
+      limit: (limit: number) => interpolate(data.reopen.limit, {limit}),
+      reopenLabel: (name: string) => interpolate(data.reopen.reopenLabel, {name}),
+    },
+    guidance: data.guidance,
   };
 }
 
