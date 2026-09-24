@@ -559,9 +559,19 @@ impl Bootstrap {
         Ok(self.status())
     }
 
+    /// Contain the published Application first: an in-flight snapshot may hold
+    /// `actions` across archive I/O, and Stop containment must not wait for it.
+    /// The action is still awaited afterwards so a load that passed its closing
+    /// check before `closing` was set cannot publish an Application nobody retires.
+    /// A hung filesystem call inside that action is still not interruptible.
     pub fn shutdown(&self) -> Result<(), Fault> {
         self.closing.store(true, Ordering::Release);
+        let published = self.shutdown_published();
         let _action = lock(&self.actions);
+        published.and(self.shutdown_published())
+    }
+
+    fn shutdown_published(&self) -> Result<(), Fault> {
         let application = lock(&self.state).application.clone();
         application.map_or(Ok(()), |application| application.shutdown())
     }
@@ -720,7 +730,7 @@ fn import_legacy(source: &Path, destination: &Path) -> Result<(), Fault> {
 mod tests {
     use super::*;
     use crate::storage::{Locale, NotificationPreferences};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     struct Home(PathBuf);
 
@@ -1086,6 +1096,50 @@ mod tests {
             workspace.workspace_id
         );
         bootstrap.shutdown().unwrap();
+    }
+
+    #[test]
+    fn shutdown_contains_the_published_application_before_an_in_flight_action_settles() {
+        let home = Home::new();
+        let root = home.0.join("in-flight");
+        let bootstrap = Arc::new(home.bootstrap(root.clone()));
+        bootstrap
+            .initialize(preferences(Locale::English), false)
+            .unwrap();
+        let published = bootstrap.application().unwrap();
+        // Stands in for snapshot archive I/O: the action stays in flight until released.
+        let action = bootstrap.begin().unwrap();
+        let closer = std::thread::spawn({
+            let bootstrap = Arc::clone(&bootstrap);
+            move || bootstrap.shutdown()
+        });
+        // `Application::shutdown` closes command admission as its first step. Wait on
+        // that observable condition with a failure bound, never on assumed timing.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while published.workspace_catalog().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "shutdown waited for the in-flight action before containing the Application"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            published.workspace_catalog().unwrap_err().category,
+            "Closing"
+        );
+        // Containment completes while the action is still held; only afterwards does
+        // the shutdown thread wait for that action.
+        published.shutdown().unwrap();
+        assert!(!closer.is_finished());
+        assert_eq!(bootstrap.application().err().unwrap().category, "Closing");
+        // A load that passed its closing check before `closing` was set publishes
+        // under the held action; that Application is retired once the action settles.
+        let late =
+            Application::new(root, home.0.join("no-runner"), home.0.join("no-engine")).unwrap();
+        lock(&bootstrap.state).application = Some(Arc::clone(&late));
+        drop(action);
+        closer.join().unwrap().unwrap();
+        assert_eq!(late.workspace_catalog().unwrap_err().category, "Closing");
     }
 
     #[cfg(unix)]

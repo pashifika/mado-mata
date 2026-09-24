@@ -6,7 +6,8 @@ export type BootstrapAction = 'initializing' | 'retrying' | 'importingRoot' | 'r
 
 // Setup's saved-language draft is an explicit choice written by Initialize; it is not the temporary presentation.
 export interface SetupDraft {locale:Locale; backupDirectory:string; startFresh:boolean}
-export interface RestoreDraft {archivePath:string; confirm:boolean; recoverConfirm:boolean; discard:boolean}
+// Each reconstructing action carries its own session-disposal consent; ticking one never pre-consents another.
+export interface RestoreDraft {archivePath:string; confirm:boolean; discard:boolean; recoverConfirm:boolean; recoverDiscard:boolean; retryDiscard:boolean}
 
 // A dispatched snapshot keeps its real outcome after the requesting view is gone.
 export type SnapshotOutcome = {kind:'receipt'; receipt:SnapshotReceipt} | {kind:'fault'; fault:Fault};
@@ -30,7 +31,7 @@ export interface BootstrapUi {
 export const INITIAL_BOOTSTRAP: BootstrapUi = {
   status: null, presentation: 'en',
   setup: {locale: 'en', backupDirectory: '', startFresh: false},
-  restore: {archivePath: '', confirm: false, recoverConfirm: false, discard: false},
+  restore: {archivePath: '', confirm: false, discard: false, recoverConfirm: false, recoverDiscard: false, retryDiscard: false},
   snapshotDestination: '', pending: null, actionError: null, snapshotPending: false, snapshotOutcome: null, receiptGeneration: null,
 };
 
@@ -58,7 +59,7 @@ export function reduceBootstrap(ui:BootstrapUi, event:BootstrapEvent):BootstrapU
     case 'pending': {
       const settled = event.action === null && ui.pending !== null && ui.pending !== 'refreshingStatus';
       return {...ui, pending:event.action, actionError:event.action === null ? ui.actionError : null,
-        restore:settled ? {...ui.restore, confirm:false, recoverConfirm:false, discard:false} : ui.restore};
+        restore:settled ? {...ui.restore, confirm:false, discard:false, recoverConfirm:false, recoverDiscard:false, retryDiscard:false} : ui.restore};
     }
     case 'actionFailed': return {...ui, actionError: event.fault};
     case 'dismissActionError': return {...ui, actionError: null};
@@ -92,6 +93,55 @@ export function reconstructed(status:BootstrapStatus, current:readonly {id:strin
   const catalog = status.catalog;
   if (catalog === null || status.state !== 'ready' || status.fault !== null) return false;
   return !catalog.open.some(view => current.some(workspace => workspace.id === view.workspace_id));
+}
+
+export type RestoreOutcome = 'installed' | 'rolledBack' | 'cleanupIncomplete';
+
+// A changed configuration set and incomplete transaction cleanup have different recovery actions.
+// `configuration_installed` means the restored or completed set is in place, `rolled_back` that the interrupted
+// restore was reverted first. Cleanup failure precedes reconstruction and requires transaction recovery, not Retry.
+// Only the host's boolean flags count; a missing or non-object context reports nothing.
+export function restoreOutcome(fault:Fault|null):RestoreOutcome|null {
+  const context = fault?.context;
+  if (context === undefined || context === null || typeof context !== 'object' || Array.isArray(context)) return null;
+  if (context.cleanup_incomplete === true) return 'cleanupIncomplete';
+  if (context.configuration_installed !== true) return null;
+  return context.rolled_back === true ? 'rolledBack' : 'installed';
+}
+
+// Serializes polling against session reconstruction. A constructing action holds the gate synchronously, so no new
+// poll is dispatched once the host may publish a rebuilt Application, and waits for the poll already in flight to
+// finish ingesting into the old session. Polls are delayed, never dropped; the hold ends when the action settles.
+export class PollGate {
+  private holds = 0;
+  private inflight:Promise<void>|null = null;
+  private settle:(() => void)|null = null;
+
+  // The poll loop claims the gate before each dispatch; a refused claim means try again on the next tick.
+  // Executor form: the project's ES2022 lib has no `Promise.withResolvers` typing.
+  claim():boolean {
+    if (this.holds > 0 || this.inflight !== null) return false;
+    this.inflight = new Promise(resolve => {this.settle = resolve;});
+    return true;
+  }
+
+  // Called once the response is ingested or the poll failed, whichever ends the claim.
+  release():void {
+    const settle = this.settle;
+    this.inflight = null;
+    this.settle = null;
+    settle?.();
+  }
+
+  // Pauses new dispatch immediately; the returned promise resolves once the in-flight poll has released.
+  hold():Promise<void> {
+    this.holds += 1;
+    return this.inflight ?? Promise.resolve();
+  }
+
+  resume():void {
+    this.holds -= 1;
+  }
 }
 
 export interface Admission {active:boolean; command:boolean; anyDirty:boolean}

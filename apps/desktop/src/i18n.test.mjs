@@ -72,6 +72,7 @@ const adapterArguments = {
   'ui.create.errors': ['internalEmpty','internalLong','internalChars','displayBlank','displayLong','displayControl'].map(kind=>[kind]),
   'ui.reopen.directory': [['pkg-A']], 'ui.reopen.archive': [['pkg-A']], 'ui.reopen.references': [[2]],
   'ui.reopen.saved': [[3,64]], 'ui.reopen.limit': [[8]], 'ui.reopen.reopenLabel': [['workspace-A']],
+  'ui.guidance.scope': [['workspace-A']],
 };
 
 for (const locale of ['en','ja']) {
@@ -106,7 +107,7 @@ test('interpolation keeps parameter-like and markup-like user values literal',()
 
 test('a retained asynchronous notice renders in the current language without changing attribution or later drafts',()=>{
   const selection=id=>({workspace_id:id,revision:1,internal_name:id,display_name:'Tab '+id,package_path:`/packages/${id}`,package:{package_id:id,schema_identity:'schema',inventory_identity:'inventory',schema:{type:'object',properties:{count:{type:'integer'}}},profiles:{}},profiles:[],profiles_error:null});
-  const view=id=>({workspace_id:id,revision:0,internal_name:id,display_name:'Tab '+id,selection:null,source_error:null});
+  const view=id=>({workspace_id:id,revision:0,internal_name:id,display_name:'Tab '+id,selection:null,source_error:null,saved_package:null});
   let workspaces=[bindSelection(workspaceFromView(view('a')),selection('a')),bindSelection(workspaceFromView(view('b')),selection('b'))];
   workspaces=workspaces.map(item=>updateBound(item,bound=>editDraft(bound,{count:item.id === 'a' ? '7' : '9'})));
   const before=structuredClone(workspaces);

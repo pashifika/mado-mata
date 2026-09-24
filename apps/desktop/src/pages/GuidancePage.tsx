@@ -4,29 +4,34 @@ import type {Workspace} from '../workspace.ts';
 import {messages, renderMessage} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
+// Who holds the single operation slot while this Tab is shown: the Application (a package-less check) or another Tab.
+export type ActiveOwner = 'application' | 'other' | null;
+
 interface Props {
   workspace: Workspace; label: string;
   // True while another command or the closing application refuses new inspection; the path stays editable.
   locked: boolean; lockReason: string | null;
   onPath: (value: string) => void; onInspect: () => void;
-  // Stop for a foreign owner lives in the strip; the page only says so.
-  foreignOperation: boolean;
+  // Stop for a foreign owner lives in the strip; the page only names the owner's scope.
+  activeOwner: ActiveOwner;
 }
 
 // Main content for a Tab without a usable package. Three honest states: no saved package (Edit guidance), a saved
 // custom archive this desktop cannot inspect, or a saved directory whose inspection failed. Inspect is the one real
-// action and is separate from creation; it never invents inventory.
-export default function GuidancePage({workspace, label, locked, lockReason, onPath, onInspect, foreignOperation}: Props) {
+// action and is separate from creation; it never invents inventory. The saved reference is shown so the operator
+// knows which source to repair; showing it grants nothing.
+export default function GuidancePage({workspace, label, locked, lockReason, onPath, onInspect, activeOwner}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const g = t.guidance;
   const source = workspace.sourceError;
+  const saved = workspace.savedPackage;
   const unsupported = source !== null && source.category === UNSUPPORTED_SOURCE;
   const eyebrow = source === null ? g.eyebrow : unsupported ? g.unsupportedEyebrow : g.unavailableEyebrow;
   const heading = source === null ? g.heading : unsupported ? g.unsupportedHeading : g.unavailableHeading;
   const path = workspace.inspectPath;
   return <>
-    <div className="page-heading"><div><span className="eyebrow">{t.run.heading(label)}</span><h1>{heading}</h1>
+    <div className="page-heading"><div><span className="eyebrow">{g.scope(label)}</span><h1>{heading}</h1>
       <p>{source === null ? g.intro : unsupported ? g.unsupportedHelp : g.unavailableHelp}</p></div></div>
     <div className="operation-status" role="status">{renderMessage(locale, workspace.busy ?? workspace.notice)}</div>
     <section className="panel guidance-panel" aria-labelledby="guidance-heading">
@@ -35,7 +40,8 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
       <div className="panel-body">
         {source === null && <p className="muted">{g.where}</p>}
         {source !== null && <FaultMessage title={heading} value={source}/>}
-        {foreignOperation && <p className="authority-note">{g.stopHelp}</p>}
+        {saved !== null && <dl className="run-identity"><dt>{saved.source.kind === 'directory' ? t.reopen.directory(saved.package_id) : t.reopen.archive(saved.package_id)}</dt><dd className="mono">{saved.source.path}</dd></dl>}
+        {activeOwner !== null && <p className="authority-note">{activeOwner === 'application' ? g.applicationStopHelp : g.stopHelp}</p>}
       </div>
     </section>
     <section className="panel open-form" aria-labelledby="inspect-heading">

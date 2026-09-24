@@ -8,6 +8,7 @@ import {LocaleContext, useLocale} from './locale.tsx';
 import type {CheckTarget, LastCheck} from './settings/EnvironmentPanel.tsx';
 import BootstrapPage from './pages/BootstrapPage.tsx';
 import GuidancePage from './pages/GuidancePage.tsx';
+import type {ActiveOwner} from './pages/GuidancePage.tsx';
 import LogsPage from './pages/LogsPage.tsx';
 import type {Losses} from './pages/LogsPage.tsx';
 import CreateWorkspaceDialog from './components/CreateWorkspaceDialog.tsx';
@@ -21,7 +22,7 @@ import Select from './components/Select.tsx';
 import SettingsDialog from './settings/SettingsDialog.tsx';
 import WorkspaceSwitcher from './components/WorkspaceSwitcher.tsx';
 import type {WorkspaceOption} from './components/WorkspaceSwitcher.tsx';
-import {INITIAL_BOOTSTRAP, initialSettings, reconstructed, reduceBootstrap, surface} from './bootstrap.ts';
+import {INITIAL_BOOTSTRAP, PollGate, initialSettings, reconstructed, reduceBootstrap, surface} from './bootstrap.ts';
 import type {Admission, BootstrapAction} from './bootstrap.ts';
 import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards} from './notifications.ts';
 import type {Card, CardStack} from './notifications.ts';
@@ -109,6 +110,8 @@ export default function App() {
   const bootstrapBusy = useRef(false);
   // Set when a constructing action ended Ready before its catalog could be read; the next catalog decides the rebuild.
   const pendingReconstruction = useRef(false);
+  // Serializes polls against reconstruction: a constructing action holds it before its host call (see PollGate).
+  const [pollGate] = useState(() => new PollGate());
   const snapshotBusy = useRef(false);
   const retention = useRef(1000);
   const preferences = useRef(DEFAULT_NOTIFICATIONS);
@@ -216,9 +219,15 @@ export default function App() {
     if (bootstrapBusy.current) return;
     bootstrapBusy.current = true;
     dispatch({type: 'pending', action});
+    // A constructing action may replace the Application. Holding the gate before the host call keeps the poll already
+    // in flight inside the old session and dispatches no new poll until the resulting status, and with it the session
+    // reset, has been applied; a refusal simply resumes polling on the retained session. Nothing drained is discarded.
+    const held = constructing ? pollGate.hold() : null;
     try {
+      if (held) await held;
       const next = await call();
       const context = next.fault?.context;
+      // A rollback awaiting cleanup needs a Recovery notice but has not consumed the original generation's receipt.
       const installed = next.state === 'ready' || (context !== null && typeof context === 'object' && !Array.isArray(context) && context.configuration_installed === true);
       if ((action === 'restoring' || action === 'recovering') && installed) dispatch({type:'receiptConsumed'});
       applyStatus(next, constructing);
@@ -230,6 +239,7 @@ export default function App() {
       dispatch({type: 'actionFailed', fault: fault(cause)});
       try {applyStatus(await invoke<BootstrapStatus>('bootstrap_status'), false);} catch {/* last known status retained */}
     } finally {
+      if (held) pollGate.resume();
       bootstrapBusy.current = false;
       dispatch({type: 'pending', action: null});
     }
@@ -249,11 +259,17 @@ export default function App() {
   }, [loading, status]);
 
   // Polling starts only once an Application exists and keeps running through a later Recovery so Stop stays reachable.
+  // A held gate or a reconstruction awaiting its catalog defers the tick instead of polling; the rebuilt Application's
+  // first events are then drained only after the session reset has been applied.
   useEffect(() => {
     if (!pollEnabled) return;
     let alive = true;
     let timer: number | undefined;
     async function tick() {
+      if (pendingReconstruction.current || !pollGate.claim()) {
+        if (alive) timer = window.setTimeout(tick, 150);
+        return;
+      }
       const pollEpoch = epoch.current;
       const pollSession = sessionGeneration.current;
       try {
@@ -287,6 +303,7 @@ export default function App() {
       } catch (cause) {
         if (alive && pollSession === sessionGeneration.current) setPollError(fault(cause));
       } finally {
+        pollGate.release();
         if (alive) timer = window.setTimeout(tick, 150);
       }
     }
@@ -597,13 +614,13 @@ export default function App() {
   const receiptGeneration = bootstrap.receiptGeneration;
   const bootstrapHandlers = {
     onInitialize: () => void bootstrapAction('initializing', () => invoke<BootstrapStatus>('initialize', {settings: initialSettings(bootstrap.setup), confirmFresh: status?.legacy_root !== null && bootstrap.setup.startFresh}), true),
-    onRetry: () => void bootstrapAction('retrying', () => invoke<BootstrapStatus>('retry_bootstrap', {discard: bootstrap.restore.discard}), true),
+    onRetry: () => void bootstrapAction('retrying', () => invoke<BootstrapStatus>('retry_bootstrap', {discard: bootstrap.restore.retryDiscard}), true),
     onImportRoot: () => void bootstrapAction('importingRoot', () => invoke<BootstrapStatus>('import_legacy_root'), true),
     onSnapshot: () => void snapshot(bootstrap.snapshotDestination.trim() || null),
     onRestore: () => void bootstrapAction('restoring', () => invoke<BootstrapStatus>('restore_snapshot', {
       archivePath: bootstrap.restore.archivePath.trim(), receiptGeneration, confirm: bootstrap.restore.confirm, discard: bootstrap.restore.discard,
     }), true),
-    onRecover: (rollback: boolean) => void bootstrapAction('recovering', () => invoke<BootstrapStatus>('recover_restore', {rollback, confirm: bootstrap.restore.recoverConfirm, discard: bootstrap.restore.discard}), true),
+    onRecover: (rollback: boolean) => void bootstrapAction('recovering', () => invoke<BootstrapStatus>('recover_restore', {rollback, confirm: bootstrap.restore.recoverConfirm, discard: bootstrap.restore.recoverDiscard}), true),
     onExit: () => void exitApplication(),
     onDismiss: () => {setConfigurationOpen(false); menuButton.current?.focus();},
   };
@@ -767,7 +784,7 @@ export default function App() {
             {bootstrap.actionError && <FaultMessage title={ui.bootstrap.actionFailed} value={bootstrap.actionError}/>}
           </main>
         </div>
-        : <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={false} strip={null}/>}
+        : <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={false}/>}
     </LocaleContext>;
   }
 
@@ -788,7 +805,8 @@ export default function App() {
     return {id: workspace.id, title: workspace.bound?.packagePath ?? workspace.internalName, label: workspaceLabel(workspace, workspaces), status: optionStatus, running: owns, attention};
   });
   const inShellRecovery = status !== null && status.state === 'recovery';
-  const foreignOperation = (workspace: Workspace) => active && owner !== workspace.id;
+  // Guidance names the owner's scope truthfully: an Application-scoped check has no owning workspace.
+  const activeOwner = (workspace: Workspace): ActiveOwner => !active || owner === workspace.id ? null : owner === null ? 'application' : 'other';
 
   return <LocaleContext value={locale}><div className="app">
     <header className="topbar">
@@ -819,7 +837,7 @@ export default function App() {
       </div>
       <nav className="workspace-pages" aria-label={selected ? t.selectedPages : t.currentScope}>
         {selected && <>
-          <button id="page-run" type="button" className="nav-item" aria-current={selected.page === 'run' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'run'}));}}>{t.runControl}</button>
+          <button id="page-run" type="button" className="nav-item" aria-current={selected.page === 'run' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'run'}));}}>{isBound(selected) ? t.runControl : t.guidance}</button>
           <button id="page-logs" type="button" className="nav-item" aria-current={selected.page === 'logs' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'logs'}));}}>{t.logs}<span className="count">{logCounts[selected.id] ?? 0}</span></button>
         </>}
         {nav.kind === 'application' && <span className="scope-label">{t.applicationLogs}</span>}
@@ -833,7 +851,7 @@ export default function App() {
     </div>}
     {strip('app')}
     {pollError && <div className="content-wide"><FaultMessage title={t.connectionFailed} value={pollError}/></div>}
-    {(inShellRecovery || configurationOpen) && status && <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={true} strip={null}/>}
+    {(inShellRecovery || configurationOpen) && status && <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={true}/>}
     {status?.state === 'ready' && status.fault && <div className="content-wide"><FaultMessage title={`${ui.bootstrap.stage} · ${status.stage}`} value={status.fault}/>
       <div className="button-row"><button id="refresh-status" type="button" disabled={bootstrap.pending !== null} onClick={() => void bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false)}>{ui.reopen.refresh}</button>
         <span className="muted">{ui.bootstrap.actionFailedHelp}</span></div></div>}
@@ -845,7 +863,7 @@ export default function App() {
             locked={commandReason !== null || closing} active={active} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
             savedEnvironment={savedEnvironment} handlers={handlers(selected)}/>
           : <GuidancePage workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
-            onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} foreignOperation={foreignOperation(selected)}/>)}
+            onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}/>)}
         {selected && selected.page === 'logs' && <LogsPage eyebrow={t.activity(workspaceLabel(selected, workspaces))} heading={t.logs} description={t.workspaceLogHelp}
           items={logs.items} evicted={logs.evicted} limit={settings?.gui_log_limit ?? retention.current} scope={{kind: 'workspace', id: selected.id}}
           filter={selected.logFilter} onFilter={filter => {setReveal(null); change(selected.id, item => ({...item, logFilter: filter}));}}

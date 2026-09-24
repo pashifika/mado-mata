@@ -114,7 +114,10 @@ function catalog(data: typeof enData) {
       limit: (limit: number) => interpolate(data.reopen.limit, {limit}),
       reopenLabel: (name: string) => interpolate(data.reopen.reopenLabel, {name}),
     },
-    guidance: data.guidance,
+    guidance: {
+      ...data.guidance,
+      scope: (label: string) => interpolate(data.guidance.scope, {label}),
+    },
   };
 }
 

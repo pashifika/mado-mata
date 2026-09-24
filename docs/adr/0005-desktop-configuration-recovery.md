@@ -86,7 +86,10 @@ Reconstruction admits only settled commands and an idle controller, closes futur
 admission, and retires owned resources before replacement. An incomplete logger
 shutdown requires Exit and relaunch; duplicate Retry writers are not a recovery
 strategy. Failed attempts retain the previous valid receipt; successful install
-or recovery consumes it.
+or recovery consumes it. Window close and native Quit contain a published
+Application before waiting for an in-flight snapshot or recovery action, and
+retire an Application published by a load that raced ahead of closing once that
+action settles; the wait does not make a hung filesystem call interruptible.
 
 [`restore`](../../apps/desktop/src-tauri/src/restore.rs) stages and syncs the
 journal and preimages before the first managed replacement. It verifies the
@@ -96,8 +99,14 @@ payloads must remain outside the write set. Before deleting preimages, publish
 the bounded `.restore-completion` marker. `pending` recognizes both that marker
 and `.restore-journal`; cleanup revalidates the committed generation and retains
 its direction through partial deletion and restart. Unknown files are preserved,
-not recursively erased to force cleanup success. Installed bytes, incomplete
-cleanup, and failed Application reconstruction remain distinct outcomes.
+not recursively erased to force cleanup success. After full-generation
+verification, install and rollback remove without recursion the Tab and package
+containers the generation no longer owns. Retiring Tabs also enumerate their
+immediate children without following links and remove only empty directories:
+deleting the last profile can leave a package container absent from both file
+generations. Discovery must not report an invented orphan; a container still
+holding unmanaged data is kept and remains attributable. Installed bytes,
+incomplete cleanup, and failed Application reconstruction remain distinct outcomes.
 
 Snapshot, import, and restore publication sync directories on Unix. Windows
 directory sync is not implemented, so Windows crash durability remains
@@ -120,13 +129,17 @@ The source regressions exercise these contracts:
   `raw_roundtrip_collision_and_explicit_destination` and
   `refuses_malicious_features_and_manifest_disagreement_at_reader`.
 - [`bootstrap.rs`](../../apps/desktop/src-tauri/src/bootstrap.rs):
-  `restore_requires_a_clicked_current_preservation_receipt`.
+  `restore_requires_a_clicked_current_preservation_receipt` and
+  `shutdown_contains_the_published_application_before_an_in_flight_action_settles`.
 - [`restore.rs`](../../apps/desktop/src-tauri/src/restore.rs):
   `each_publication_and_file_failure_restores_original_generation`,
   `interrupted_committed_cleanup_remains_pending_until_restart_recovery_finishes`,
-  and `committed_cleanup_revalidates_live_generation_before_removing_evidence`.
+  `committed_cleanup_revalidates_live_generation_before_removing_evidence`,
+  `restore_removing_a_tab_with_package_configuration_frees_its_name_and_slots`,
+  `restore_after_deleting_the_last_profile_does_not_invent_an_orphan`,
+  and `rolled_back_restore_that_adds_a_tab_with_a_profile_leaves_no_orphan`.
 
-The recorded local core run passed 104 tests with:
+The original pre-review local core run passed 104 tests with:
 
 ```sh
 cargo +1.98.1 test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --no-default-features --lib

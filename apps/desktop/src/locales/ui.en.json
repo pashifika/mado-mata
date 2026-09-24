@@ -393,6 +393,9 @@
     "recoveryHeading": "Recovery",
     "recoveryIntro": "The configuration at the selected location could not be used. The original data was preserved: nothing was replaced, repaired or reset automatically.",
     "laterFault": "Configuration became unusable after start. The existing Application, polling and Stop stay available; Retry and Restore wait until operations and commands settle.",
+    "installedNotReconstructed": "The restored configuration was installed and is now the managed configuration set; nothing was rolled back. Rebuilding the application from it failed. Repair the cause below, then Retry instead of restoring again.",
+    "rolledBackNotReconstructed": "The interrupted restore was rolled back and the previous configuration set is in place. Rebuilding the application from it failed. Repair the cause below, then Retry.",
+    "cleanupIncomplete": "The managed configuration has been installed or rolled back, but restore cleanup is incomplete. Resolve the cause below, then finish the pending restore with the recovery controls. Retry is unavailable until the transaction is complete.",
     "applicationUnavailable": "Normal workspace commands are unavailable until the application is ready.",
     "root": "Selected root",
     "rootUnresolved": "Not resolved",
@@ -506,6 +509,7 @@
   },
   "guidance": {
     "eyebrow": "Edit guidance",
+    "scope": "{label} / Guidance",
     "heading": "No package yet",
     "intro": "This workspace is saved with its names only. Package authoring (Edit), custom package archives and remote download are not delivered in this desktop build; there is no placeholder editor, sample package or fake form here.",
     "where": "Package authoring will belong to a later Edit surface that produces an ordinary package directory or a custom packaged artifact for this workspace. Until then, author packages outside the desktop and inspect their directory below.",
@@ -522,7 +526,8 @@
     "unavailableEyebrow": "Saved source unavailable",
     "unavailableHeading": "Saved package could not be inspected",
     "unavailableHelp": "The saved directory reference is kept and package-dependent commands are refused. Nothing was replaced with defaults. Repair the package or inspect another directory.",
-    "stopHelp": "An operation owned by another workspace keeps its Stop in the strip above; nothing on this page starts, stops or retargets it."
+    "stopHelp": "An operation owned by another workspace keeps its Stop in the strip above; nothing on this page starts, stops or retargets it.",
+    "applicationStopHelp": "An application-scoped environment check, owned by no workspace, keeps its Stop in the strip above; nothing on this page starts, stops or retargets it."
   },
   "phase": {
     "idle": "Idle",

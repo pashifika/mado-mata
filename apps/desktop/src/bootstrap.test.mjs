@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {INITIAL_BOOTSTRAP,initialSettings,reconstructed,reconstructionBlock,reduceBootstrap,restoreBlock,surface} from './bootstrap.ts';
+import {INITIAL_BOOTSTRAP,PollGate,initialSettings,reconstructed,reconstructionBlock,reduceBootstrap,restoreBlock,restoreOutcome,surface} from './bootstrap.ts';
 import {DEFAULT_NOTIFICATIONS} from './state.ts';
 
 const fault={category:'StorageFormat',message:'settings.json is not valid JSON',context:{stage:'settings'}};
@@ -8,7 +8,7 @@ function status(overrides={}){
   return {state:'ready',stage:'ready',root:'/data',legacy_root:null,fault:null,settings:null,application_available:true,pending_restore:false,catalog:null,...overrides};
 }
 function catalog(...ids){
-  return {open:ids.map(id=>({workspace_id:id,revision:0,internal_name:id,display_name:id,selection:null,source_error:null})),closed:[],faults:[]};
+  return {open:ids.map(id=>({workspace_id:id,revision:0,internal_name:id,display_name:id,selection:null,source_error:null,saved_package:null})),closed:[],faults:[]};
 }
 const recovery=status({state:'recovery',stage:'settings',fault,application_available:false});
 const idle={active:false,command:false,anyDirty:false};
@@ -111,14 +111,14 @@ test('retry and recovery require settled operations and explicit retained-sessio
   assert.equal(reconstructionBlock(recovery,idle,false),null);
 });
 
-test('settled reconstruction consumes consent without erasing the snapshot outcome or recovery cause',()=>{
+test('settled reconstruction consumes every action consent without erasing the snapshot outcome or recovery cause',()=>{
   const receipt={path:'/backups/app.config.42',generation:'g1',files:1,bytes:20};
   let ui=reduceBootstrap(INITIAL_BOOTSTRAP,{type:'snapshotSettled',outcome:{kind:'receipt',receipt}});
-  ui=reduceBootstrap(ui,{type:'restore',draft:{archivePath:'/a',confirm:true,recoverConfirm:false,discard:true}});
+  ui=reduceBootstrap(ui,{type:'restore',draft:{archivePath:'/a',confirm:true,discard:true,recoverConfirm:true,recoverDiscard:true,retryDiscard:true}});
   ui=reduceBootstrap(ui,{type:'pending',action:'restoring'});
   ui=reduceBootstrap(ui,{type:'status',status:status({state:'recovery',fault,pending_restore:true,application_available:false})});
   ui=reduceBootstrap(ui,{type:'pending',action:null});
-  assert.deepEqual(ui.restore,{archivePath:'/a',confirm:false,recoverConfirm:false,discard:false});
+  assert.deepEqual(ui.restore,{archivePath:'/a',confirm:false,discard:false,recoverConfirm:false,recoverDiscard:false,retryDiscard:false});
   assert.equal(ui.receiptGeneration,'g1');
   ui=reduceBootstrap(ui,{type:'snapshotSettled',outcome:{kind:'fault',fault}});
   assert.equal(ui.receiptGeneration,'g1');
@@ -129,4 +129,51 @@ test('settled reconstruction consumes consent without erasing the snapshot outco
   assert.deepEqual(ui.status.fault,fault);
   ui=reduceBootstrap(ui,{type:'snapshotSettled',outcome:{kind:'receipt',receipt}});
   assert.equal(ui.receiptGeneration,'g1');
+});
+
+test('a recovery fault reports an installed or rolled-back configuration only from the host flags',()=>{
+  const cause={category:'Application',message:'log sink unavailable'};
+  assert.equal(restoreOutcome(null),null);
+  assert.equal(restoreOutcome({...cause,context:null}),null);
+  assert.equal(restoreOutcome({...cause,context:{stage:'application'}}),null);
+  assert.equal(restoreOutcome({...cause,context:{configuration_installed:true}}),'installed');
+  assert.equal(restoreOutcome({...cause,context:{configuration_installed:true,rolled_back:false}}),'installed');
+  assert.equal(restoreOutcome({...cause,context:{configuration_installed:true,rolled_back:true}}),'rolledBack');
+  assert.equal(restoreOutcome({...cause,context:{configuration_installed:true,rolled_back:false,cleanup_incomplete:true}}),'cleanupIncomplete');
+  assert.equal(restoreOutcome({...cause,context:{configuration_installed:false,rolled_back:true,cleanup_incomplete:true}}),'cleanupIncomplete');
+  // A completed rollback preserves the original set and needs no changed-configuration notice.
+  assert.equal(restoreOutcome({...cause,context:{configuration_installed:false,rolled_back:true}}),null);
+  assert.equal(restoreOutcome({...cause,context:{configuration_installed:'true'}}),null);
+  assert.equal(restoreOutcome({...cause,context:['configuration_installed']}),null);
+});
+
+test('a constructing action waits for the poll in flight, refuses new polls until it settles, and drops nothing',async()=>{
+  const gate=new PollGate();
+  const events=[];
+  // A poll is already in flight when the action starts; its response has not been ingested yet.
+  assert.equal(gate.claim(),true);
+  let respond;
+  const poll=new Promise(resolve=>{respond=resolve;}).then(()=>{events.push('ingested');gate.release();});
+  const action=gate.hold().then(()=>{events.push('construct');});
+  // From the hold on, no new poll is dispatched and the constructing call has not started.
+  assert.equal(gate.claim(),false);
+  await Promise.resolve();
+  assert.deepEqual(events,[]);
+  respond();
+  await Promise.all([poll,action]);
+  assert.deepEqual(events,['ingested','construct']);
+  // Polling stays refused while the action's status is being applied and resumes once it settles.
+  assert.equal(gate.claim(),false);
+  gate.resume();
+  assert.equal(gate.claim(),true);
+  gate.release();
+  // With nothing in flight the hold resolves immediately; a refused action resumes the retained session unchanged.
+  let constructed=false;
+  const refusal=gate.hold().then(()=>{constructed=true;});
+  assert.equal(gate.claim(),false);
+  await refusal;
+  assert.equal(constructed,true);
+  gate.resume();
+  assert.equal(gate.claim(),true);
+  gate.release();
 });

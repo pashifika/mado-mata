@@ -135,10 +135,15 @@ choose **Retry** to reread and reconstruct without restarting. A later settings
 or catalog failure retains the existing Application, polling, and owner-bound
 **Stop**. Reconstruction waits for active operations and commands to settle.
 Whenever an Application is retained, Retry requires explicit session-disposal
-confirmation even if no profile is dirty. Successful reconstruction drops drafts,
+confirmation even if no profile is dirty; Retry, Restore and interrupted-restore
+recovery each have their own confirmation. Successful reconstruction drops drafts,
 transient results, Last check, cards, and the in-memory log buffer; file logs and
 saved configuration remain. It assigns fresh session identities and ignores
-responses from the retired generation.
+responses from the retired generation. From the moment a reconstructing action is
+dispatched until its resulting status is adopted, the desktop dispatches no new
+poll and first finishes ingesting the poll already in flight, so the rebuilt
+Application's first events are never drained into the retired session. A refused
+action resumes polling on the retained session unchanged.
 
 If shutdown reports `LoggingShutdown`, its incomplete writer state is sticky:
 use **Exit** or **Close window**, then relaunch. Retry cannot start a second writer
@@ -211,10 +216,13 @@ An unbound Tab shows **Edit guidance** and a separate real **Inspect a local
 package directory** action. Package authoring (**Edit**), custom-package archive
 loading/execution, remote download, and a package-catalog UI are not implemented.
 Author packages outside the desktop, then inspect their directories. A missing
-or changed saved source shows **Saved source unavailable**; a custom archive
-reference shows **Unsupported saved source**. Both preserve the reference rather
-than inventing inventory, substituting defaults, or claiming that no package
-exists. A source failure belongs to its Tab; healthy Tabs remain usable.
+or changed saved source shows **Saved source unavailable** with the saved
+directory reference displayed and prefilled in the Inspect field; a custom archive
+reference shows **Unsupported saved source** with its path displayed but never
+prefilled. Both preserve the reference rather than inventing inventory,
+substituting defaults, or claiming that no package exists, and the displayed
+reference grants no package command. A source failure belongs to its Tab;
+healthy Tabs remain usable.
 
 Different Tabs may inspect the same canonical source and remain independent.
 Inspecting that source does not activate or merge another Tab. Profile drafts,
@@ -245,7 +253,8 @@ Popups scroll within the viewport and open above the trigger when needed. Inside
 App settings they remain within the native modal, outside its content scroller.
 Escape dismisses an open selector without cancelling the settings draft.
 
-**Run control** and **Logs** beside the dropdown belong to the selected workspace.
+**Run control** (bound) or **Guidance** (unbound) and **Logs** beside the dropdown
+belong to the selected workspace.
 Switching workspaces does not transfer an operation. There is **one application-wide
 operation slot** for Start and OCR Check; the owner and Stop remain available
 across navigation and inside App settings. The host retains the latest terminal
@@ -488,7 +497,11 @@ are not permission to publish its contents.
    A refused attempt does not erase an earlier valid preimage receipt; installed
    or recovered configuration consumes it. Successful reconstruction reloads
    saved-open Tabs with fresh identities and real source inspection, not old
-   drafts, runs, Last check, cards, or in-memory logs.
+   drafts, runs, Last check, cards, or in-memory logs. If the configuration was
+   installed (or an interrupted restore rolled back) but the Application could
+   not be rebuilt from it, Recovery says so explicitly instead of claiming that
+   nothing was replaced; repair the cause and **Retry** rather than restoring
+   again.
 
 Restore replaces the whole managed file set; it is not a profile merge or a
 whole-root swap. Package payloads, file logs, backups, and unrelated data stay
@@ -507,6 +520,11 @@ finish cleanup; the opposite action is refused. Do not delete these artifacts
 to bypass Recovery. Retry, Restore, and transaction recovery share idle and
 session-disposal requirements; incomplete log-writer shutdown requires Exit and
 relaunch before any reconstruction.
+
+When transaction cleanup is incomplete, Recovery identifies that outcome
+separately from failed Application reconstruction. Resolve the displayed cause
+and use the pending-restore controls in the committed direction; **Retry** is not
+offered until that transaction finishes.
 
 ## Save and check an OCR environment
 

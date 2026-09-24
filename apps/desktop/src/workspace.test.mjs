@@ -11,8 +11,8 @@ function selection(id,revision,{path='/pkg/'+id,packageId='pkg-'+id,profiles=[pr
   return {workspace_id:id,revision,internal_name:internal,display_name:display,package_path:path,profiles_error:null,profiles,
     package:{package_id:packageId,inventory_identity:'inv-'+id,schema_identity:schemaIdentity,runtime:'quickjs',schema,profiles:{fast:{options:{count:9}}},effective_defaults:null}};
 }
-function view(id,{internal=id,display='Tab '+id,selection:bound=null,sourceError=null}={}){
-  return {workspace_id:id,revision:bound?bound.revision:0,internal_name:internal,display_name:display,selection:bound,source_error:sourceError};
+function view(id,{internal=id,display='Tab '+id,selection:bound=null,sourceError=null,savedPackage=null}={}){
+  return {workspace_id:id,revision:bound?bound.revision:0,internal_name:internal,display_name:display,selection:bound,source_error:sourceError,saved_package:savedPackage};
 }
 function terminal(run,extra={}){
   return {run,state:'terminal',operation:'run',result:{status:'PASS',cleanup:{clean:true},forced:false,exit_code:0},error:null,progress:[],dropped_logs:0,workspace_id:'a',workspace_revision:1,...extra};
@@ -80,6 +80,26 @@ test('binding publishes the host revision, resolves a source fault and keeps exe
   assert.equal(again.bound.descriptorPath,'/corpus.json');
   assert.ok(again.bound.draftRevision>edited.bound.draftRevision);
   assert.equal(again.legacyImport,null);
+});
+
+test('a failed saved directory is kept visible and prefilled, a saved custom archive is never offered as a directory request, and binding adopts the inspected directory',()=>{
+  const gone={category:'Package',message:'Package location cannot be resolved',context:{internal_name:'a',package_id:'pkg-a'}};
+  const directory={package_id:'pkg-a',source:{kind:'directory',path:'/games/alpha'}};
+  const unavailable=workspaceFromView(view('a',{sourceError:gone,savedPackage:directory}));
+  assert.equal(unavailable.bound,null);
+  assert.deepEqual(unavailable.savedPackage,directory);
+  assert.equal(unavailable.inspectPath,'/games/alpha');
+  // The retained reference conveys no authority: package commands stay refused until a real inspection binds.
+  assert.throws(()=>commandValues(unavailable,undefined),error=>error instanceof LocalFault&&error.presentation.key==='unboundWorkspace');
+  const archive={package_id:'pkg-b',source:{kind:'custom_archive',path:'/games/beta.mmpkg'}};
+  const unsupported=workspaceFromView(view('b',{sourceError:{category:UNSUPPORTED_SOURCE,message:'custom archive',context:null},savedPackage:archive}));
+  assert.deepEqual(unsupported.savedPackage,archive);
+  assert.equal(unsupported.inspectPath,'');
+  assert.equal(workspaceFromView(view('c')).savedPackage,null);
+  const repaired=bindSelection(unavailable,selection('a',1,{path:'/games/alpha-moved',packageId:'pkg-a'}));
+  assert.equal(repaired.sourceError,null);
+  assert.deepEqual(repaired.savedPackage,{package_id:'pkg-a',source:{kind:'directory',path:'/games/alpha-moved'}});
+  assert.equal(repaired.inspectPath,'/games/alpha-moved');
 });
 
 test('a catalog from one Tab never reaches another Tab bound to the same package source',()=>{

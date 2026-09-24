@@ -1,4 +1,4 @@
-use crate::configuration::{capture, publish_no_replace};
+use crate::configuration::publish_no_replace;
 use mado_runtime_comparison::environment::OcrEnvironment;
 use mado_runtime_comparison::host::resolve_options;
 use mado_runtime_comparison::inventory::Inventory;
@@ -28,6 +28,8 @@ const MAX_OPEN_TABS: usize = 8;
 const MAX_PACKAGES: usize = 16;
 const MAX_MANAGED_FILES: usize = 4096;
 const MAX_MANAGED_BYTES: usize = 16 * 1024 * 1024;
+// Matches the snapshot enumeration bound; a write budget never walks more entries than a capture.
+const MAX_MANAGED_ENTRIES: usize = 16_384;
 const MAX_NAME_BYTES: usize = 128;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_VALUE_NODES: usize = 8192;
@@ -671,8 +673,8 @@ impl ProfileStore {
     pub fn delete(&self, id: &str) -> Result<(), Fault> {
         validate_id(id)?;
         self.read_profile(id)?;
-        // Refuse an unresolved write, including an unrelated owner pending file.
-        capture(&self.root)?;
+        // Refuse this owner's unresolved write; unrelated owners are not this store's concern.
+        self.profiles()?;
         fs::remove_file(self.profile_path(id))
             .map_err(|error| self.owner_fault(storage("delete profile", error)))
     }
@@ -1022,16 +1024,166 @@ pub(crate) fn validate_tab(tab: &TabRecord) -> Result<(), Fault> {
     Ok(())
 }
 
+/// Admits one write against the 4096-file/16 MiB managed bound from metadata alone: no
+/// content is read or hashed, no link is followed and no owner's mode is judged, so one
+/// owner's unresolved or unsafe entry never blocks another owner's write. Only a tree that
+/// cannot be measured or the aggregate itself refuses, each naming the managed path it
+/// concerns relative to the root. Snapshot capture stays strict and separate.
 fn check_budget(root: &Path, relative: &str, size: usize) -> Result<(), Fault> {
-    let current = capture(root)?;
-    let previous = current.files.get(relative);
-    let count = current.files.len() + usize::from(previous.is_none());
-    let bytes =
-        current.files.values().map(Vec::len).sum::<usize>() - previous.map_or(0, Vec::len) + size;
-    if count > MAX_MANAGED_FILES || bytes > MAX_MANAGED_BYTES {
-        return Err(limit("managed configuration exceeds 4096 files or 16 MiB"));
+    let mut budget = Budget {
+        replacing: relative,
+        files: 0,
+        bytes: 0,
+        enumerated: 0,
+    };
+    budget.measure(root)?;
+    let files = budget.files + 1;
+    let bytes = budget.bytes.saturating_add(size as u64);
+    if files > MAX_MANAGED_FILES || bytes > MAX_MANAGED_BYTES as u64 {
+        return Err(limit("managed configuration exceeds 4096 files or 16 MiB")
+            .with_context(json!({"path": relative, "files": files, "bytes": bytes})));
     }
     Ok(())
+}
+
+struct Budget<'a> {
+    replacing: &'a str,
+    files: usize,
+    bytes: u64,
+    enumerated: usize,
+}
+
+impl Budget<'_> {
+    fn measure(&mut self, root: &Path) -> Result<(), Fault> {
+        if !exists(root)? {
+            return Ok(());
+        }
+        for (path, name, metadata) in self.entries(root, ".")? {
+            let key = filesystem_key(&name);
+            match key.as_str() {
+                "settings.json" | "settings.pending" => {
+                    self.account(&name, &key, &metadata, MAX_SETTINGS_BYTES);
+                }
+                "profiles" => {
+                    if self.container(&name, &metadata)? {
+                        for (_, child, metadata) in self.entries(&path, &name)? {
+                            let key = filesystem_key(&child);
+                            if key.ends_with(".json") || key.ends_with(".pending") {
+                                let relative = format!("{name}/{child}");
+                                self.account(&relative, &key, &metadata, MAX_PROFILE_BYTES);
+                            }
+                        }
+                    }
+                }
+                "tabs" => {
+                    if self.container(&name, &metadata)? {
+                        self.measure_tabs(&path, &name)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn measure_tabs(&mut self, tabs: &Path, relative: &str) -> Result<(), Fault> {
+        for (tab_path, tab, tab_metadata) in self.entries(tabs, relative)? {
+            let tab_relative = format!("{relative}/{tab}");
+            if !self.container(&tab_relative, &tab_metadata)? {
+                continue;
+            }
+            for (child_path, child, child_metadata) in self.entries(&tab_path, &tab_relative)? {
+                let key = filesystem_key(&child);
+                let child_relative = format!("{tab_relative}/{child}");
+                if key == "tab.config" || key == "tab.pending" {
+                    self.account(&child_relative, &key, &child_metadata, MAX_TAB_BYTES);
+                } else if self.container(&child_relative, &child_metadata)? {
+                    for (_, file, metadata) in self.entries(&child_path, &child_relative)? {
+                        let key = filesystem_key(&file);
+                        if key.ends_with(".config") || key.ends_with(".pending") {
+                            let relative = format!("{child_relative}/{file}");
+                            self.account(&relative, &key, &metadata, MAX_PROFILE_BYTES);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Lists one real directory without following a link or judging its mode; a directory
+    /// that cannot be listed is unmeasurable and refuses with its managed path.
+    fn entries(
+        &mut self,
+        directory: &Path,
+        relative: &str,
+    ) -> Result<Vec<(PathBuf, String, fs::Metadata)>, Fault> {
+        let listing = fs::read_dir(directory).map_err(|error| {
+            measure_fault(storage("measure managed configuration", error), relative)
+        })?;
+        let mut entries = Vec::new();
+        for entry in listing {
+            self.enumerated += 1;
+            if self.enumerated > MAX_MANAGED_ENTRIES {
+                return Err(measure_fault(
+                    limit("managed configuration enumeration exceeds its bound"),
+                    relative,
+                ));
+            }
+            let entry = entry
+                .map_err(|error| measure_fault(storage("read managed entry", error), relative))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                measure_fault(storage("inspect managed entry", error), relative)
+            })?;
+            entries.push((
+                path,
+                entry.file_name().to_string_lossy().into_owned(),
+                metadata,
+            ));
+        }
+        Ok(entries)
+    }
+
+    /// A container is descended only as a real directory. A plain file there holds nothing;
+    /// a link or other entry hides unknown capacity and refuses rather than being skipped.
+    fn container(&self, relative: &str, metadata: &fs::Metadata) -> Result<bool, Fault> {
+        let kind = metadata.file_type();
+        if kind.is_dir() {
+            return Ok(true);
+        }
+        if kind.is_file() {
+            return Ok(false);
+        }
+        Err(measure_fault(
+            Fault::new(
+                "Storage",
+                "managed configuration container is not a real directory and cannot be measured",
+            ),
+            relative,
+        ))
+    }
+
+    /// A committed regular file counts at its length. A pending, linked or otherwise
+    /// non-regular entry counts at its kind maximum without being read or followed. The
+    /// file this write replaces is excluded.
+    fn account(&mut self, relative: &str, key: &str, metadata: &fs::Metadata, maximum: usize) {
+        if relative == self.replacing {
+            return;
+        }
+        self.files += 1;
+        let bytes = if key.ends_with(".pending") || !metadata.file_type().is_file() {
+            maximum as u64
+        } else {
+            metadata.len()
+        };
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
+}
+
+fn measure_fault(mut fault: Fault, relative: &str) -> Fault {
+    fault.context["path"] = json!(relative);
+    fault
 }
 
 fn profile_fault(mut fault: Fault, id: &str) -> Fault {
@@ -1525,6 +1677,13 @@ pub(crate) fn write_atomic(
         checked_file(destination, MAX_TAB_BYTES)?;
     }
     let temporary = destination.with_extension("pending");
+    // The exclusive create below refuses as well; name the cause rather than an I/O code.
+    if exists(&temporary)? {
+        return Err(Fault::new(
+            "StoragePending",
+            "an unresolved write to this destination must be preserved or repaired first",
+        ));
+    }
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -2357,6 +2516,87 @@ mod tests {
         assert!(store.create_tab("Blocked", "Budget").is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(!tab_path(&directory, "Blocked").exists());
+    }
+
+    #[test]
+    fn foreign_owner_pending_and_unsafe_entries_do_not_block_other_owners() {
+        let directory = Directory::new();
+        let store = directory.store();
+        store.initialize(preferences()).unwrap();
+        let blocked = directory.profiles("Blocked");
+        let healthy = directory.profiles("Healthy");
+        let inv = inventory();
+        let saved = blocked.save(&inv, None, "Original", options()).unwrap();
+        let profile_before = fs::read(blocked.profile_path(&saved.id)).unwrap();
+        let pending = blocked.profile_path(&saved.id).with_extension("pending");
+        put(&pending, b"unfinished");
+        let tab_pending = tab_path(&directory, "Blocked").with_extension("pending");
+        put(&tab_pending, b"interrupted");
+        // A Tab copied back without private modes is unsafe for capture, yet measurable.
+        let copied = tab_path(&directory, "Copied");
+        put(&copied, b"{}");
+        #[cfg(unix)]
+        {
+            fs::set_permissions(copied.parent().unwrap(), fs::Permissions::from_mode(0o755))
+                .unwrap();
+            fs::set_permissions(&copied, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert!(
+            blocked
+                .save(&inv, Some(&saved.id), "Unsaved", options())
+                .is_err()
+        );
+        assert!(blocked.delete(&saved.id).is_err());
+        assert!(store.set_tab_open("Blocked", false).is_err());
+        let independent = healthy.save(&inv, None, "Independent", options()).unwrap();
+        assert_eq!(
+            healthy.read_profile(&independent.id).unwrap().0.name,
+            "Independent"
+        );
+        store.save_preferences(preferences()).unwrap();
+        store.create_tab("Fresh", "Fresh").unwrap();
+        assert!(!store.set_tab_open("Healthy", false).unwrap().open);
+        assert!(store.set_tab_open("Healthy", true).unwrap().open);
+        assert_eq!(
+            fs::read(blocked.profile_path(&saved.id)).unwrap(),
+            profile_before
+        );
+        assert_eq!(fs::read(&pending).unwrap(), b"unfinished");
+        assert_eq!(fs::read(&tab_pending).unwrap(), b"interrupted");
+        assert_eq!(fs::read(&copied).unwrap(), b"{}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unmeasurable_foreign_container_refuses_writes_with_its_managed_path() {
+        let directory = Directory::new();
+        let store = directory.store();
+        store.initialize(preferences()).unwrap();
+        let healthy = directory.profiles("Healthy");
+        store.create_tab("Linked", "Linked").unwrap();
+        store.set_tab_open("Linked", false).unwrap();
+        let outside = directory.0.join("outside");
+        private_directory(&outside).unwrap();
+        let link = directory.0.join("tabs/Linked/package");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let settings = directory.0.join("settings.json");
+        let before = fs::read(&settings).unwrap();
+        let refusal = store.save_preferences(preferences()).unwrap_err();
+        assert_eq!(refusal.context["path"], "tabs/Linked/package");
+        assert_eq!(
+            healthy
+                .save(&inventory(), None, "Blocked", options())
+                .unwrap_err()
+                .context["path"],
+            "tabs/Linked/package"
+        );
+        assert_eq!(fs::read(&settings).unwrap(), before);
+        assert!(!healthy.directory().exists());
+        fs::remove_file(&link).unwrap();
+        store.save_preferences(preferences()).unwrap();
+        healthy
+            .save(&inventory(), None, "Unblocked", options())
+            .unwrap();
     }
 
     #[test]

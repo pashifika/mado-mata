@@ -1,7 +1,6 @@
-import type {ReactNode} from 'react';
 import Select from '../components/Select.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
-import {reconstructionBlock, restoreBlock} from '../bootstrap.ts';
+import {reconstructionBlock, restoreBlock, restoreOutcome} from '../bootstrap.ts';
 import type {Admission, BootstrapEvent, BootstrapUi} from '../bootstrap.ts';
 import type {BootstrapStatus} from '../types.ts';
 import {messages} from '../i18n.ts';
@@ -16,9 +15,9 @@ export interface BootstrapHandlers {
 interface Props {
   ui: BootstrapUi; status: BootstrapStatus; dispatch: (event: BootstrapEvent) => void; handlers: BootstrapHandlers;
   admission: Admission; exiting: boolean;
-  // Inside the Ready shell the Application keeps running; presentation choice and Initialize are not offered there.
+  // Inside the Ready shell the Application keeps running; presentation choice and Initialize are not offered there,
+  // and the page heading sits below the shell's own top-level heading.
   inShell: boolean;
-  strip: ReactNode;
 }
 
 function Facts({status}: {status: BootstrapStatus}) {
@@ -45,7 +44,7 @@ function Receipt({ui}: {ui: BootstrapUi}) {
 
 // Setup and Recovery are root-level surfaces. The host status is authoritative: its stage and cause stay visible
 // through form edits, failed actions and notices until an authoritative action replaces the status.
-export default function BootstrapPage({ui, status, dispatch, handlers, admission, exiting, inShell, strip}: Props) {
+export default function BootstrapPage({ui, status, dispatch, handlers, admission, exiting, inShell}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const b = t.bootstrap;
@@ -53,11 +52,17 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
   const ready = status.state === 'ready';
   const discardRequired = status.application_available || admission.anyDirty;
   const Content = inShell ? 'section' : 'main';
+  const Heading = inShell ? 'h2' : 'h1';
   const pending = ui.pending !== null;
   const legacy = status.legacy_root;
   const initializeBlocked = pending || exiting || (legacy !== null && !ui.setup.startFresh);
-  const reconstruction = reconstructionBlock(status, admission, ui.restore.discard);
+  // Retry, Recover and Restore each read their own discard consent; one ticked box never enables another action.
+  const retryBlock = reconstructionBlock(status, admission, ui.restore.retryDiscard);
+  const recoverBlock = reconstructionBlock(status, admission, ui.restore.recoverDiscard);
   const restore = restoreBlock(status, ui.restore, admission);
+  // A Recovery reached after the configuration set already changed says so instead of the generic "nothing replaced" intro.
+  const outcome = restoreOutcome(status.fault);
+  const recoveryIntro = outcome === 'cleanupIncomplete' ? b.cleanupIncomplete : outcome === 'installed' ? b.installedNotReconstructed : outcome === 'rolledBack' ? b.rolledBackNotReconstructed : inShell ? b.laterFault : b.recoveryIntro;
   const receiptGeneration = ui.receiptGeneration;
   const languageOptions = [{value: 'en', label: t.settings.languageNames.en}, {value: 'ja', label: t.settings.languageNames.ja}];
   const asLocale = (value: string, apply: (locale: Locale) => void) => {if (value === 'en' || value === 'ja') apply(value);};
@@ -92,10 +97,9 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
         <Select id="presentation-locale" value={ui.presentation} options={languageOptions} onChange={value => asLocale(value, next => dispatch({type: 'presentation', locale: next}))}/></div>
         <button id="bootstrap-exit" type="button" disabled={exiting} onClick={handlers.onExit}>{exiting ? b.exiting : b.exit}</button></div>
     </header>}
-    {strip}
     <Content className="content bootstrap-content" aria-labelledby="bootstrap-heading">
-      <div className="page-heading"><div><span className="eyebrow">{b.state(status.state)}</span><h1 id="bootstrap-heading">{setup ? b.setupHeading : ready ? b.restoreHeading : b.recoveryHeading}</h1>
-        <p>{setup ? b.setupIntro : ready ? b.restoreHelp : inShell ? b.laterFault : b.recoveryIntro}</p></div>
+      <div className="page-heading"><div><span className="eyebrow">{b.state(status.state)}</span><Heading id="bootstrap-heading">{setup ? b.setupHeading : ready ? b.restoreHeading : b.recoveryHeading}</Heading>
+        <p>{setup ? b.setupIntro : ready ? b.restoreHelp : recoveryIntro}</p></div>
         {ready && inShell && <button type="button" onClick={handlers.onDismiss}>{t.common.close}</button>}
       </div>
       {!inShell && <p className="field-help">{b.presentationHelp}</p>}
@@ -103,7 +107,7 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
         <Select id="recovery-presentation" value={ui.presentation} options={languageOptions} onChange={value => asLocale(value, next => dispatch({type:'presentation', locale:next}))}/></div>}
       <section className="panel" aria-label={b.stateLabel}><div className="panel-body">
         <Facts status={status}/>
-        {status.fault && <><h3>{b.cause}</h3><FaultMessage title={b.cause} value={status.fault}/><p className="muted">{b.causeHelp}</p><p className="muted">{b.repairHelp}</p></>}
+        {status.fault && <><FaultMessage title={b.cause} value={status.fault}/><p className="muted">{b.causeHelp}</p><p className="muted">{b.repairHelp}</p></>}
         {!status.application_available && <p className="inline-warning">{b.applicationUnavailable}</p>}
         {ui.actionError && <><FaultMessage title={b.actionFailed} value={ui.actionError}/>
           <div className="button-row"><button type="button" onClick={() => dispatch({type: 'dismissActionError'})}>{t.common.close}</button><span className="muted">{b.actionFailedHelp}</span></div></>}
@@ -114,11 +118,11 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
         <div className="switch-row"><label htmlFor="recover-confirm">{b.recoverConfirm}</label>
           <input id="recover-confirm" type="checkbox" checked={ui.restore.recoverConfirm} disabled={pending} onChange={event => dispatch({type: 'restore', draft: {...ui.restore, recoverConfirm: event.target.checked}})}/></div>
         {discardRequired && <div className="switch-row"><label htmlFor="recover-discard">{b.discardConfirm}</label>
-          <input id="recover-discard" type="checkbox" checked={ui.restore.discard} disabled={pending} onChange={event => dispatch({type: 'restore', draft: {...ui.restore, discard: event.target.checked}})}/></div>}
+          <input id="recover-discard" type="checkbox" checked={ui.restore.recoverDiscard} disabled={pending} onChange={event => dispatch({type: 'restore', draft: {...ui.restore, recoverDiscard: event.target.checked}})}/></div>}
         <div className="button-row">
-          <button id="recover-complete" type="button" className="primary" disabled={pending || exiting || !ui.restore.recoverConfirm || reconstruction !== null} onClick={() => handlers.onRecover(false)}>{b.complete}</button>
-          <button id="recover-rollback" type="button" className="danger-text" disabled={pending || exiting || !ui.restore.recoverConfirm || reconstruction !== null} onClick={() => handlers.onRecover(true)}>{b.rollback}</button>
-          <span className="muted" role="status">{reconstruction ? b.block(reconstruction) : ''}</span></div>
+          <button id="recover-complete" type="button" className="primary" disabled={pending || exiting || !ui.restore.recoverConfirm || recoverBlock !== null} onClick={() => handlers.onRecover(false)}>{b.complete}</button>
+          <button id="recover-rollback" type="button" className="danger-text" disabled={pending || exiting || !ui.restore.recoverConfirm || recoverBlock !== null} onClick={() => handlers.onRecover(true)}>{b.rollback}</button>
+          <span className="muted" role="status">{recoverBlock ? b.block(recoverBlock) : ''}</span></div>
       </div></section>}
       {setup && !status.pending_restore && <section className="panel" aria-labelledby="setup-form-heading"><div className="panel-body">
         <h2 id="setup-form-heading">{b.initialize}</h2>
@@ -143,9 +147,9 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
       {!setup && !ready && !status.pending_restore && <section className="panel" aria-labelledby="retry-heading"><div className="panel-body">
         <h2 id="retry-heading">{b.retry}</h2><p className="muted">{b.retryHelp}</p>
         {discardRequired && <div className="switch-row"><label htmlFor="retry-discard">{b.discardConfirm}</label>
-          <input id="retry-discard" type="checkbox" checked={ui.restore.discard} disabled={pending} onChange={event => dispatch({type: 'restore', draft: {...ui.restore, discard: event.target.checked}})}/></div>}
-        <div className="button-row"><button id="retry-bootstrap" type="button" className="primary" disabled={pending || exiting || reconstruction !== null} onClick={handlers.onRetry}>{b.retry}</button>
-          <span className="muted" role="status">{reconstruction ? b.block(reconstruction) : ''}</span></div>
+          <input id="retry-discard" type="checkbox" checked={ui.restore.retryDiscard} disabled={pending} onChange={event => dispatch({type: 'restore', draft: {...ui.restore, retryDiscard: event.target.checked}})}/></div>}
+        <div className="button-row"><button id="retry-bootstrap" type="button" className="primary" disabled={pending || exiting || retryBlock !== null} onClick={handlers.onRetry}>{b.retry}</button>
+          <span className="muted" role="status">{retryBlock ? b.block(retryBlock) : ''}</span></div>
       </div></section>}
       {setup ? <details className="bootstrap-advanced"><summary>{b.snapshotHeading} · {b.restoreHeading}</summary>{snapshotSection}{restoreSection}</details> : <>{snapshotSection}{restoreSection}</>}
     </Content>

@@ -381,6 +381,7 @@ details[open] > summary { font-weight: 600; }
 .bootstrap-facts { grid-template-columns: 120px minmax(0, 1fr); margin-bottom: 12px; }
 .bootstrap-inline { border-bottom: 1px solid var(--border); background: var(--warn-soft); }
 .bootstrap-inline .bootstrap-content { padding-top: 18px; padding-bottom: 18px; }
+.bootstrap-inline .page-heading h2 { font-size: 20px; letter-spacing: -.5px; margin: 4px 0 0; }
 .bootstrap-advanced { border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 16px 12px; background: var(--surface); }
 .bootstrap-advanced > summary { font-weight: 600; font-size: 12px; }
 .bootstrap-advanced .panel { border: 0; box-shadow: none; }

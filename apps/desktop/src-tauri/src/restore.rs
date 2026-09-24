@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io;
 use std::path::Path;
 
 const JOURNAL: &str = ".restore-journal";
@@ -121,14 +122,6 @@ struct Journal {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Progress {
-    rollback: bool,
-    completed_paths: usize,
-    verified: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Completion {
     version: u32,
     rollback: bool,
@@ -141,6 +134,7 @@ enum Point {
     AfterJournal,
     Displaced { index: usize, rollback: bool },
     Installed { index: usize, rollback: bool },
+    Verified { rollback: bool },
     BeforeRollback,
     BeforeCleanup,
     AfterCleanupCommit,
@@ -198,17 +192,6 @@ fn install_with(
             &staging.join("journal.json"),
             &encode(&journal, MAX_JOURNAL)?,
         )?;
-        configuration::write_private(
-            &staging.join("progress.json"),
-            &encode(
-                &Progress {
-                    rollback: false,
-                    completed_paths: 0,
-                    verified: false,
-                },
-                1024,
-            )?,
-        )?;
         configuration::sync_directory(&staging)?;
         // Creating an absent root changes only its presence flag, not source files.
         if capture(root)? != before {
@@ -223,16 +206,16 @@ fn install_with(
     })();
     if let Err(mut fault) = staged {
         if published {
-            return rollback_failure(root, &journal, &before, &new, fault, hook);
+            return rollback_failure(root, &before, &new, fault, hook);
         }
         if let Err(cleanup) = cleanup_owned(&staging) {
             fault.context["staging_cleanup"] = json!({"path": staging, "fault": cleanup});
         }
         return Err(fault);
     }
-    match apply(root, &journal, &before, &new, false, hook) {
+    match apply(root, &before, &new, false, hook) {
         Ok(()) => finish(root, false, hook),
-        Err(fault) => rollback_failure(root, &journal, &before, &new, fault, hook),
+        Err(fault) => rollback_failure(root, &before, &new, fault, hook),
     }
 }
 
@@ -255,9 +238,10 @@ fn load_capture(directory: &Path, prefix: &str, manifest: &Manifest) -> Result<C
     manifest.capture(files)
 }
 
-/// Restart recovery never trusts a progress counter to imply that an individual
-/// replacement happened. Uncommitted bytes are reconciled with preimages;
-/// committed cleanup verifies its target manifest even after preimages are gone.
+/// Restart recovery infers per-file progress from current bytes; no recorded
+/// counter implies that an individual replacement happened. Uncommitted bytes are
+/// reconciled with preimages; committed cleanup verifies its target manifest even
+/// after preimages are gone.
 pub fn recover(root: &Path, rollback: bool) -> Result<(), Fault> {
     if !pending(root)? {
         return Err(invalid("there is no pending restore to recover"));
@@ -279,7 +263,7 @@ pub fn recover(root: &Path, rollback: bool) -> Result<(), Fault> {
         configuration::check_aliases(path, &mut aliases)?;
     }
     let mut hook = |_| Ok(());
-    apply(root, &journal, &before, &after, rollback, &mut hook).map_err(|mut fault| {
+    apply(root, &before, &after, rollback, &mut hook).map_err(|mut fault| {
         fault.context["pending_restore"] = json!(true);
         fault
     })?;
@@ -288,14 +272,13 @@ pub fn recover(root: &Path, rollback: bool) -> Result<(), Fault> {
 
 fn rollback_failure(
     root: &Path,
-    journal: &Journal,
     before: &Capture,
     after: &Capture,
     mut original: Fault,
     hook: &mut impl FnMut(Point) -> Result<(), Fault>,
 ) -> Result<(), Fault> {
     let rollback =
-        hook(Point::BeforeRollback).and_then(|()| apply(root, journal, before, after, true, hook));
+        hook(Point::BeforeRollback).and_then(|()| apply(root, before, after, true, hook));
     match rollback {
         Ok(()) => {
             original.context["rolled_back"] = json!(true);
@@ -313,7 +296,6 @@ fn rollback_failure(
 
 fn apply(
     root: &Path,
-    _journal: &Journal,
     before: &Capture,
     after: &Capture,
     rollback: bool,
@@ -337,14 +319,6 @@ fn apply(
         }
     }
     let directory = root.join(JOURNAL);
-    write_progress(
-        &directory,
-        &Progress {
-            rollback,
-            completed_paths: 0,
-            verified: false,
-        },
-    )?;
     for (index, path) in paths.iter().enumerate() {
         let destination = root.join(path);
         let current = if exists(&destination)? {
@@ -396,28 +370,14 @@ fn apply(
             configuration::sync_directory(destination.parent().expect("managed path has parent"))?;
         }
         hook(Point::Installed { index, rollback })?;
-        write_progress(
-            &directory,
-            &Progress {
-                rollback,
-                completed_paths: index + 1,
-                verified: false,
-            },
-        )?;
     }
     if capture(root)? != *target {
         return Err(invalid(
             "installed configuration failed full generation verification",
         ));
     }
-    write_progress(
-        &directory,
-        &Progress {
-            rollback,
-            completed_paths: paths.len(),
-            verified: true,
-        },
-    )
+    hook(Point::Verified { rollback })?;
+    remove_emptied_containers(root, &paths, target)
 }
 
 fn ensure_parents(root: &Path, relative: &str) -> Result<(), Fault> {
@@ -445,15 +405,86 @@ fn ensure_parents(root: &Path, relative: &str) -> Result<(), Fault> {
     Ok(())
 }
 
-fn write_progress(directory: &Path, progress: &Progress) -> Result<(), Fault> {
-    let temporary = configuration::temporary(directory, "progress");
-    configuration::write_private(&temporary, &encode(progress, 1024)?)?;
-    let destination = directory.join("progress.json");
-    checked_file(&destination, 1024)?;
-    // Replacing this transaction-owned small record is intentional; never a
-    // publication primitive for an operator file or another transaction.
-    fs::rename(&temporary, &destination).map_err(|e| io_fault("record restore progress", e))?;
-    configuration::sync_directory(directory)
+/// Verification compares managed bytes, but discovery treats a Tab container that
+/// holds only an emptied package directory as an orphan that blocks its name and
+/// consumes saved/open slots. Remove, without recursion, the containers this
+/// generation no longer owns; one still holding unmanaged data is kept and stays
+/// attributable. Restart recovery repeats this step, so an absent container is fine.
+fn remove_emptied_containers(
+    root: &Path,
+    paths: &BTreeSet<String>,
+    target: &Capture,
+) -> Result<(), Fault> {
+    let mut containers: BTreeMap<&str, bool> = BTreeMap::new();
+    for path in paths {
+        if target.files.contains_key(path) {
+            continue;
+        }
+        let kind = path_kind(path)?;
+        if !matches!(kind, Kind::Tab | Kind::Package) {
+            continue;
+        }
+        let mut child = path.as_str();
+        while let Some((container, _)) = child.rsplit_once('/') {
+            if container == "tabs" {
+                break;
+            }
+            *containers.entry(container).or_insert(false) |= kind == Kind::Tab;
+            child = container;
+        }
+    }
+    let mut entries_seen = 0;
+    // A parent sorts before its children; remove package containers before Tabs.
+    for (container, retire_tab) in containers.iter().rev() {
+        let directory = root.join(container);
+        if *retire_tab && exists(&directory)? {
+            check_directory(&directory)?;
+            // A deleted last profile leaves an empty package absent from both generations.
+            // Finish bounded, non-following enumeration before changing this directory.
+            let mut children = Vec::new();
+            for entry in fs::read_dir(&directory)
+                .map_err(|error| io_fault("enumerate retiring Tab containers", error))?
+            {
+                entries_seen += 1;
+                if entries_seen > 16_384 {
+                    return Err(invalid("retiring Tab enumeration exceeds its bound"));
+                }
+                let entry = entry.map_err(|error| io_fault("read retiring Tab entry", error))?;
+                if entry
+                    .file_type()
+                    .map_err(|error| io_fault("inspect retiring Tab entry", error))?
+                    .is_dir()
+                {
+                    children.push(entry.path());
+                }
+            }
+            for child in children {
+                remove_empty_container(&child)?;
+            }
+        }
+        remove_empty_container(&directory)?;
+    }
+    Ok(())
+}
+
+fn remove_empty_container(directory: &Path) -> Result<(), Fault> {
+    match fs::remove_dir(directory) {
+        Ok(()) => {
+            configuration::sync_directory(directory.parent().expect("managed container has parent"))
+        }
+        // rmdir reports retained content as ENOTEMPTY or EEXIST.
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::DirectoryNotEmpty
+                    | io::ErrorKind::AlreadyExists
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(io_fault("remove emptied configuration container", error)),
+    }
 }
 
 fn finish(
@@ -567,11 +598,10 @@ fn cleanup_owned_with(
         let name = name
             .to_str()
             .ok_or_else(|| invalid("unrecognized restore staging entry"))?;
-        if !matches!(name, "journal.json" | "progress.json")
+        if name != "journal.json"
             && !name.starts_with("old-")
             && !name.starts_with("new-")
             && !name.starts_with("held-")
-            && !name.starts_with(".progress-")
             && !name.starts_with(".install-")
             && !name.starts_with(".completion-")
         {
@@ -599,6 +629,7 @@ fn invalid(message: &str) -> Fault {
 mod tests {
     use super::*;
     use crate::configuration::tests::Root;
+    use crate::storage::{PackageReference, PackageSource, Store};
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     fn settings(limit: usize) -> Vec<u8> {
@@ -635,6 +666,40 @@ mod tests {
             fs::read(root.0.join("backups/app.config.1")).unwrap(),
             b"keep operator snapshot"
         );
+    }
+    fn profile_id() -> String {
+        format!("p-{}-{}-{}", "0".repeat(32), "0".repeat(8), "0".repeat(16))
+    }
+    fn tab(name: &str, open: bool) -> Vec<u8> {
+        serde_json::to_vec(&TabRecord {
+            version: 1,
+            internal_name: name.into(),
+            display_name: name.into(),
+            open,
+            packages: vec![PackageReference {
+                package_id: "pkg".into(),
+                source: PackageSource::Directory {
+                    path: std::env::temp_dir()
+                        .join("package")
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                },
+            }],
+            selected_package_id: Some("pkg".into()),
+        })
+        .unwrap()
+    }
+    fn profile() -> Vec<u8> {
+        serde_json::to_vec(&Profile {
+            version: 1,
+            id: profile_id(),
+            name: "Profile".into(),
+            package_id: "pkg".into(),
+            schema_identity: "a".repeat(64),
+            values: json!({}),
+        })
+        .unwrap()
     }
 
     #[test]
@@ -921,9 +986,154 @@ mod tests {
         assert_unrelated(&root);
     }
 
+    /// Alpha stays; Beta is removed and emptied; Gamma is removed but keeps an
+    /// unmanaged file, so it must remain an attributable orphan.
+    fn tabbed_fixture() -> (Root, Capture, Capture) {
+        let root = Root::new();
+        root.put("settings.json", &settings(100));
+        root.put("tabs/Alpha/tab.config", &tab("Alpha", true));
+        root.put("tabs/Beta/tab.config", &tab("Beta", false));
+        root.put(
+            &format!("tabs/Beta/pkg/{}.config", profile_id()),
+            &profile(),
+        );
+        root.put("tabs/Gamma/tab.config", &tab("Gamma", false));
+        root.put(
+            &format!("tabs/Gamma/pkg/{}.config", profile_id()),
+            &profile(),
+        );
+        root.put("tabs/Gamma/pkg/notes.txt", b"unmanaged operator data");
+        root.put("payload/model.bin", b"keep payload");
+        let old = capture(&root.0).unwrap();
+        let mut files = replacement(200).files;
+        files.insert("tabs/Alpha/tab.config".into(), tab("Alpha", true));
+        (root, old, Capture::from_files(files, true).unwrap())
+    }
+    fn assert_converged_catalog(root: &Root, new: &Capture) {
+        assert_eq!(capture(&root.0).unwrap(), *new);
+        assert!(!pending(&root.0).unwrap());
+        assert_eq!(
+            fs::read(root.0.join("tabs/Gamma/pkg/notes.txt")).unwrap(),
+            b"unmanaged operator data"
+        );
+        assert_eq!(
+            fs::read(root.0.join("payload/model.bin")).unwrap(),
+            b"keep payload"
+        );
+        let store = Store::new(root.0.clone()).unwrap();
+        let listing = store.tabs().unwrap();
+        assert_eq!(
+            listing
+                .tabs
+                .iter()
+                .map(|tab| tab.internal_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Alpha"]
+        );
+        assert_eq!(listing.faults.len(), 1, "{:?}", listing.faults);
+        assert_eq!(listing.faults[0].category, "TabOrphan");
+        assert_eq!(listing.faults[0].context["internal_name"], "Gamma");
+        store.create_tab("Beta", "Beta").unwrap();
+        assert_eq!(
+            store.create_tab("Gamma", "Gamma").unwrap_err().category,
+            "TabExists"
+        );
+    }
+
+    #[test]
+    fn restore_removing_a_tab_with_package_configuration_frees_its_name_and_slots() {
+        let (root, old, new) = tabbed_fixture();
+        install(&root.0, new.clone(), Some(&old.generation)).unwrap();
+        assert_converged_catalog(&root, &new);
+    }
+
+    #[test]
+    fn restore_after_deleting_the_last_profile_does_not_invent_an_orphan() {
+        let (root, _, new) = tabbed_fixture();
+        let store = Store::new(root.0.clone()).unwrap();
+        store.set_tab_open("Beta", true).unwrap();
+        store
+            .profile_store("Beta", "pkg")
+            .unwrap()
+            .delete(&profile_id())
+            .unwrap();
+        let old = capture(&root.0).unwrap();
+        install(&root.0, new.clone(), Some(&old.generation)).unwrap();
+        assert_converged_catalog(&root, &new);
+    }
+
+    #[test]
+    fn container_reconciliation_interrupted_after_verification_converges_on_restart() {
+        let (root, _, new) = tabbed_fixture();
+        let store = Store::new(root.0.clone()).unwrap();
+        store.set_tab_open("Beta", true).unwrap();
+        store
+            .profile_store("Beta", "pkg")
+            .unwrap()
+            .delete(&profile_id())
+            .unwrap();
+        let old = capture(&root.0).unwrap();
+        let mut hook = |at| {
+            if at == (Point::Verified { rollback: false }) {
+                panic!("simulated exit after verification");
+            }
+            Ok(())
+        };
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| install_with(
+                &root.0,
+                new.clone(),
+                Some(&old.generation),
+                &mut hook
+            )))
+            .is_err()
+        );
+        assert!(pending(&root.0).unwrap());
+        assert!(root.0.join("tabs/Beta/pkg").is_dir());
+        recover(&root.0, false).unwrap();
+        assert_converged_catalog(&root, &new);
+    }
+
+    #[test]
+    fn rolled_back_restore_that_adds_a_tab_with_a_profile_leaves_no_orphan() {
+        let root = Root::new();
+        root.put("settings.json", &settings(100));
+        root.put("tabs/Alpha/tab.config", &tab("Alpha", true));
+        let old = capture(&root.0).unwrap();
+        let mut files = old.files.clone();
+        files.insert("tabs/Gamma/tab.config".into(), tab("Gamma", false));
+        files.insert(format!("tabs/Gamma/pkg/{}.config", profile_id()), profile());
+        let new = Capture::from_files(files, true).unwrap();
+        // Sorted paths install the Gamma profile (index 2) before its tab.config,
+        // so the failure leaves a freshly created Tab and package container behind.
+        let mut fired = false;
+        let mut hook = |at| {
+            if at
+                == (Point::Installed {
+                    index: 2,
+                    rollback: false,
+                })
+            {
+                fired = true;
+                Err(invalid("injected restore failure"))
+            } else {
+                Ok(())
+            }
+        };
+        let fault = install_with(&root.0, new, Some(&old.generation), &mut hook).unwrap_err();
+        assert!(fired);
+        assert_eq!(fault.context["rolled_back"], true);
+        assert_eq!(capture(&root.0).unwrap(), old);
+        assert!(!pending(&root.0).unwrap());
+        let store = Store::new(root.0.clone()).unwrap();
+        let listing = store.tabs().unwrap();
+        assert!(listing.faults.is_empty(), "{:?}", listing.faults);
+        assert_eq!(listing.tabs.len(), 1);
+        store.create_tab("Gamma", "Gamma").unwrap();
+    }
+
     #[test]
     fn typed_validation_rejects_unknown_owners_and_wrong_scopes() {
-        use crate::storage::{PackageReference, PackageSource};
         let tab = TabRecord {
             version: 1,
             internal_name: "One".into(),
@@ -932,7 +1142,11 @@ mod tests {
             packages: vec![PackageReference {
                 package_id: "pkg".into(),
                 source: PackageSource::Directory {
-                    path: std::env::temp_dir().join("package").to_str().unwrap().into(),
+                    path: std::env::temp_dir()
+                        .join("package")
+                        .to_str()
+                        .unwrap()
+                        .into(),
                 },
             }],
             selected_package_id: Some("pkg".into()),

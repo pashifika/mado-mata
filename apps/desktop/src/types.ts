@@ -39,8 +39,10 @@ export interface PackageReference {package_id:string; source:PackageSource}
 // The durable Tab record; names and references persist, sessions do not.
 export interface TabRecord {version:number; internal_name:string; display_name:string; open:boolean; packages:PackageReference[]; selected_package_id:string|null}
 // One open Tab as the host sees it: a fresh session identity, a real selection when inspection succeeded, or the
-// owner-scoped reason its saved source could not be used. Both null means no saved package.
-export interface WorkspaceView {workspace_id:string; revision:number; internal_name:string; display_name:string; selection:Selection|null; source_error:Fault|null}
+// owner-scoped reason its saved source could not be used. Both null means no saved package. `saved_package` is the
+// selected durable reference: kept when inspection failed or is unsupported, updated by a successful bind, null only
+// for a genuinely unbound Tab. It is metadata and grants no inspected or run authority.
+export interface WorkspaceView {workspace_id:string; revision:number; internal_name:string; display_name:string; selection:Selection|null; source_error:Fault|null; saved_package:PackageReference|null}
 export interface WorkspaceCatalog {open:WorkspaceView[]; closed:TabRecord[]; faults:Fault[]}
 // `loading` is the transient first read before the shell has resolved the root; it carries no defaults or catalog.
 export type BootstrapState = 'loading'|'setup'|'ready'|'recovery';

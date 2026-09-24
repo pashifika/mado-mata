@@ -1,7 +1,7 @@
 import {LocalFault, messages} from './i18n.ts';
 import type {Locale, Message} from './i18n.ts';
 import {defaultDraft, readDraft} from './state.ts';
-import type {ControllerView, Fault, Json, LegacyImport, LogEntry, OcrEnvironment, PackageInfo, Profile, Selection, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {ControllerView, Fault, Json, LegacyImport, LogEntry, OcrEnvironment, PackageInfo, PackageReference, Profile, Selection, WorkspaceRef, WorkspaceView} from './types.ts';
 
 export const WORKSPACE_LIMIT = 8;
 export const SAVED_LIMIT = 64;
@@ -42,6 +42,8 @@ export interface Workspace {
   bound:Bound|null;
   // Host-reported reason the saved source could not be inspected. Null together with `bound` null means no saved package.
   sourceError:Fault|null;
+  // The Tab's selected durable reference as the host stores it; display and prefill only, never authority to run.
+  savedPackage:PackageReference|null;
   page:Page; error:Fault|null; notice:Message|null; logFilter:LogFilter;
   // Label of the in-flight state-changing command owned by this workspace, if any.
   busy:Message|null;
@@ -96,20 +98,24 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
 }
 
 // A host view becomes a session: unbound, unusable saved source, or bound to real inventory. No draft is restored.
+// A failed saved directory stays visible and prefilled so repairing it needs no retyping of an unseen path; a saved
+// custom archive is shown but never offered as a directory request.
 export function workspaceFromView(view:WorkspaceView, notice:Message|null = null):Workspace {
+  const saved = view.saved_package;
   return {
     id: view.workspace_id, revision: view.revision, internalName: view.internal_name, displayName: view.display_name,
-    bound: view.selection ? fromSelection(view.selection) : null, sourceError: view.source_error,
+    bound: view.selection ? fromSelection(view.selection) : null, sourceError: view.source_error, savedPackage: saved,
     page: 'run', error: null, notice, logFilter: {text: '', level: ''}, busy: null,
-    inspectPath: view.selection?.package_path ?? '', legacyImport: null,
+    inspectPath: view.selection?.package_path ?? (saved !== null && saved.source.kind === 'directory' ? saved.source.path : ''), legacyImport: null,
   };
 }
 
 // Binding publishes the host's new revision; execution configuration and navigation survive, package-bound draft
-// state does not. A previous source error is resolved by the successful inspection.
+// state does not. A previous source error is resolved by the successful inspection, which is now the saved reference.
 export function bindSelection(workspace:Workspace, selection:Selection, notice:Message|null = null):Workspace {
   return {
     ...workspace, revision: selection.revision, bound: fromSelection(selection, workspace.bound ?? undefined), sourceError: null,
+    savedPackage: {package_id: selection.package.package_id, source: {kind: 'directory', path: selection.package_path}},
     error: null, notice, inspectPath: selection.package_path, legacyImport: null,
   };
 }

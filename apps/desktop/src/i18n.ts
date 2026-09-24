@@ -4,8 +4,8 @@ import {uiMessages} from './ui-messages.ts';
 import {interpolate} from './i18n-format.ts';
 
 export type Locale = 'en' | 'ja';
-export type Command = "loadingBootstrap" | "initializing" | "retrying" | "importingRoot" | "restoring" | "recovering" | "refreshingStatus" | "snapshotting"
-  | "creatingWorkspace" | "reopeningWorkspace" | "loadingCatalog" | "inspectingPackage" | "validatingDraft" | "savingProfile" | "renamingProfile"
+export type Command = "initializing" | "retrying" | "importingRoot" | "restoring" | "recovering" | "refreshingStatus"
+  | "creatingWorkspace" | "reopeningWorkspace" | "inspectingPackage" | "validatingDraft" | "savingProfile" | "renamingProfile"
   | "deletingProfile" | "importingProfiles" | "reinspectingPackage" | "admittingRun" | "admittingCheck" | "savingSettings" | "closingWorkspace";
 
 function appMessages(copy: typeof en) {
