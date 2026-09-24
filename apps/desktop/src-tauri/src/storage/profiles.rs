@@ -183,6 +183,8 @@ impl ProfileStore {
     }
 
     /// Callers hold Store serialization across capture validation and publication.
+    /// Candidate validation (including the full record's byte limit) is marked separately
+    /// from owner, conflict, aggregate-budget, and publication faults for reset drafts.
     pub(crate) fn replace_recovery(
         &self,
         inventory: &Inventory,
@@ -216,8 +218,8 @@ impl ProfileStore {
                     id,
                 ));
             }
-            let values =
-                validate_values(inventory, values).map_err(|fault| profile_fault(fault, id))?;
+            let values = validate_values(inventory, values)
+                .map_err(|fault| profile_validation_fault(fault, id))?;
             // Compare raw bytes, including formatting, not a re-encoded profile.
             let (mut profile, original) = self.read_record(id)?;
             if digest(&original) != expected.fingerprint {
@@ -231,8 +233,8 @@ impl ProfileStore {
             }
             profile.schema_identity = schema_identity;
             profile.values = values;
-            let bytes =
-                encode(&profile, MAX_PROFILE_BYTES).map_err(|fault| profile_fault(fault, id))?;
+            let bytes = encode(&profile, MAX_PROFILE_BYTES)
+                .map_err(|fault| profile_validation_fault(fault, id))?;
             if retained_bytes + bytes.len() > MAX_TOTAL_BYTES {
                 return Err(profile_fault(
                     limit("stored profiles exceed the 1 MiB aggregate limit"),
@@ -437,6 +439,12 @@ fn profile_fault(mut fault: Fault, id: &str) -> Fault {
     fault.context["profile_id"] = json!(id);
     fault
 }
+
+fn profile_validation_fault(mut fault: Fault, id: &str) -> Fault {
+    fault.context["stage"] = json!("profile_validation");
+    profile_fault(fault, id)
+}
+
 fn validate_name(name: &str) -> Result<(), Fault> {
     if name.trim().is_empty()
         || name.len() > MAX_NAME_BYTES

@@ -1,7 +1,7 @@
 use super::*;
 use crate::application::test_support::*;
 use crate::application::{RecoveryStatus, Selection};
-use crate::storage::Profile;
+use crate::storage::{MAX_PROFILE_BYTES, Profile};
 use std::fs;
 use std::path::PathBuf;
 
@@ -30,6 +30,21 @@ fn install_schema(path: &Path, schema: &Value, preset_values: Value) {
     }
 }
 
+fn foreign_package(fixture: &Fixture, name: &str, package_id: &str) -> PathBuf {
+    let path = fixture.package_at(name);
+    for relative in [
+        "package.json",
+        "profiles/template-first.json",
+        "profiles/ocr-first.json",
+    ] {
+        let file = path.join(relative);
+        let mut document: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        document["package_id"] = json!(package_id);
+        fs::write(file, serde_json::to_vec(&document).unwrap()).unwrap();
+    }
+    path
+}
+
 fn initial(fixture: &Fixture) -> (PathBuf, Selection) {
     let path = fixture.package_at("source");
     install_schema(&path, &schema(10), json!({}));
@@ -53,6 +68,30 @@ fn recovery(fixture: &Fixture, path: &Path, selection: &Selection) -> RecoveryRe
         .recovery
         .unwrap()
         .context
+}
+
+/// Drains the command records attributed to one workspace since the previous drain.
+fn command_records(application: &Application, workspace_id: &str) -> Vec<(String, Value, Value)> {
+    application
+        .poll()
+        .logs
+        .entries
+        .into_iter()
+        .filter(|entry| {
+            entry.workspace_id.as_deref() == Some(workspace_id)
+                && matches!(
+                    entry.code.as_str(),
+                    "command.failed" | "workspace.reinspected" | "profile.saved"
+                )
+        })
+        .map(|entry| {
+            (
+                entry.code,
+                entry.fields["action"].clone(),
+                entry.fields["category"].clone(),
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -581,15 +620,59 @@ fn saved_auto_reconciliation_survives_durable_binding_failure_and_discard() {
     install_schema(&candidate, &schema(5), json!({}));
     let tab = fixture.root.join("tabs/Main/tab.config");
     let original_tab = fs::read(&tab).unwrap();
+    command_records(application, &selected.workspace_id);
     let outcome = application
         .inspect(&candidate, &workspace_ref(&selected))
         .unwrap();
     assert_eq!(outcome.kind, InspectionKind::BindingFailed);
     assert_eq!(outcome.binding_error.unwrap().category, "PackageSource");
     assert_eq!(outcome.outcomes[0].status, RecoveryStatus::Saved);
-    assert!(outcome.workspace.selection.is_none());
     assert_eq!(fs::read(&tab).unwrap(), original_tab);
-    let context = outcome.workspace.recovery.unwrap().context;
+    // The candidate gains nothing: the prior selection is reissued under the new
+    // revision, and the saved reference keeps its own (absent) source fault.
+    let view = outcome.workspace;
+    let retained = view
+        .selection
+        .as_ref()
+        .expect("prior selection survives the failed binding");
+    assert_eq!(retained.package_path, selected.package_path);
+    assert_eq!(retained.revision, selected.revision + 1);
+    assert_eq!(
+        view.saved_package.as_ref().unwrap().source,
+        PackageSource::Directory {
+            path: selected.package_path.clone()
+        }
+    );
+    assert!(view.source_error.is_none());
+    let recovery = view.recovery.as_ref().unwrap();
+    assert!(recovery.binding_required);
+    assert!(recovery.relocation);
+    assert_eq!(
+        recovery.package_path.as_str(),
+        candidate.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
+    assert!(recovery.profiles.is_empty());
+    let context = recovery.context.clone();
+    let current = view_ref(&view);
+    // Commands resolve the retained selection, never the candidate: 7 is valid only
+    // under the prior schema's maximum.
+    assert_eq!(
+        application
+            .validate(&workspace_ref(&selected), json!({"count":7}))
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    assert_eq!(
+        application.validate(&current, json!({"count":7})).unwrap()["count"],
+        7
+    );
+    // The migrated profile is a committed fact the retained selection reports as rejected.
+    assert!(retained.profiles.is_empty());
+    assert_eq!(
+        retained.profiles_error.as_ref().unwrap().category,
+        "ProfileRejected"
+    );
     let file = profile_path(&fixture, "Main", &saved);
     let committed = fs::read(&file).unwrap();
     let recovered: Profile = serde_json::from_slice(&committed).unwrap();
@@ -598,15 +681,98 @@ fn saved_auto_reconciliation_survives_durable_binding_failure_and_discard() {
     let retried = application.retry_binding(&context).unwrap();
     assert_eq!(retried.kind, InspectionKind::BindingFailed);
     assert_eq!(retried.outcomes[0].status, RecoveryStatus::Saved);
+    assert_eq!(view_ref(&retried.workspace), current);
+    assert_eq!(
+        retried.workspace.selection.as_ref().unwrap().package_path,
+        selected.package_path
+    );
+    assert!(retried.workspace.recovery.unwrap().binding_required);
+    assert_eq!(
+        command_records(application, &selected.workspace_id),
+        [
+            (
+                "command.failed".to_owned(),
+                json!("inspect"),
+                json!("PackageSource")
+            ),
+            (
+                "command.failed".to_owned(),
+                json!("validate"),
+                json!("StaleIdentity")
+            ),
+            (
+                "command.failed".to_owned(),
+                json!("retry_binding"),
+                json!("PackageSource")
+            ),
+        ]
+    );
     let discarded = application.discard_recovery(&context).unwrap();
-    assert!(discarded.selection.is_none());
+    assert_eq!(view_ref(&discarded), current);
+    assert_eq!(
+        discarded.selection.as_ref().unwrap().package_path,
+        selected.package_path
+    );
+    assert!(discarded.source_error.is_none());
     assert!(discarded.recovery.is_none());
     assert_eq!(
         application.retry_binding(&context).unwrap_err().category,
         "StaleIdentity"
     );
+    assert_eq!(
+        application.validate(&current, json!({"count":7})).unwrap()["count"],
+        7
+    );
     assert_eq!(fs::read(file).unwrap(), committed);
     assert_eq!(fs::read(tab).unwrap(), original_tab);
+}
+
+#[test]
+fn failed_candidate_and_discard_preserve_the_saved_source_fault() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let (path, selected) = initial(&fixture);
+    application.close_workspace(&workspace_ref(&selected)).unwrap();
+    let candidate = fixture.root.join("moved");
+    fs::rename(path, &candidate).unwrap();
+    let reopened = application.reopen_workspace("Main").unwrap();
+    assert!(reopened.selection.is_none());
+    let source_error = serde_json::to_value(reopened.source_error.as_ref().unwrap()).unwrap();
+    let tab_file = fixture.root.join("tabs/Main/tab.config");
+    let before = fs::read(&tab_file).unwrap();
+    let pending = tab_file.with_extension("pending");
+    fs::write(&pending, b"interrupted Tab write").unwrap();
+
+    let failed = application.inspect(&candidate, &view_ref(&reopened)).unwrap();
+    assert_eq!(failed.kind, InspectionKind::BindingFailed);
+    assert!(failed.binding_error.is_some());
+    assert!(failed.workspace.selection.is_none());
+    assert_eq!(
+        serde_json::to_value(failed.workspace.source_error.as_ref().unwrap()).unwrap(),
+        source_error
+    );
+    let recovery = failed.workspace.recovery.unwrap();
+    assert!(recovery.binding_required);
+    assert!(recovery.relocation);
+    let discarded = application.discard_recovery(&recovery.context).unwrap();
+    assert!(discarded.selection.is_none());
+    assert!(discarded.recovery.is_none());
+    assert_eq!(
+        discarded.saved_package.as_ref(),
+        reopened.saved_package.as_ref()
+    );
+    assert_eq!(
+        serde_json::to_value(discarded.source_error.as_ref().unwrap()).unwrap(),
+        source_error
+    );
+    assert_eq!(fs::read(&tab_file).unwrap(), before);
+
+    fs::remove_file(pending).unwrap();
+    let bound = application.inspect(&candidate, &view_ref(&discarded)).unwrap();
+    assert_eq!(bound.kind, InspectionKind::Bound);
+    assert!(bound.workspace.selection.is_some());
+    assert!(bound.workspace.source_error.is_none());
+    assert!(bound.workspace.recovery.is_none());
 }
 
 #[test]
@@ -959,8 +1125,111 @@ fn nonportable_reset_defaults_remain_an_unsaved_draft() {
     let issue = reset.issue.unwrap();
     assert_eq!(issue.category, "ProfileAuthority");
     assert_eq!(issue.context["path"], "$.label");
+    assert_eq!(issue.context["profile_id"], saved.id);
+    assert_eq!(issue.context["internal_name"], "Main");
+    assert_eq!(issue.context["package_id"], saved.package_id);
     assert_eq!(reset.draft.unwrap()["label"], "/machine-local-location");
     assert_eq!(fs::read(file).unwrap(), before);
+}
+
+#[test]
+fn reset_returns_a_draft_for_invalid_defaults_but_not_for_aggregate_exhaustion() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let path = fixture.package_at("source");
+    let mut original = schema(10);
+    original["properties"]["blob"] = json!({"type":"string"});
+    install_schema(&path, &original, json!({}));
+    let selected = inspect_named(application, "Main", &path).unwrap();
+    let target = save(&fixture, &selected, "Reset target", json!({"count":2}));
+    // Fill the aggregate budget with profiles the new schema rejects without rewriting.
+    for index in 0..16 {
+        save(
+            &fixture,
+            &selected,
+            &format!("Filler {index:02}"),
+            json!({"count":9,"blob":"x".repeat(63_000)}),
+        );
+    }
+    let file = profile_path(&fixture, "Main", &target);
+    let before = fs::read(&file).unwrap();
+    let mut updated = schema(5);
+    updated["properties"]["blob"] = json!({"type":"string"});
+    updated["properties"]["added"] = json!({"type":"string","default":"y".repeat(60_000)});
+    install_schema(&path, &updated, json!({}));
+    let inspected = application
+        .inspect(&path, &workspace_ref(&selected))
+        .unwrap();
+    assert_eq!(inspected.kind, InspectionKind::Bound);
+    let outcome = inspected
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.profile_id == target.id)
+        .unwrap();
+    assert_eq!(outcome.status, RecoveryStatus::StorageFailed);
+    assert_eq!(outcome.issue.as_ref().unwrap().category, "StorageLimit");
+    assert_eq!(fs::read(&file).unwrap(), before);
+    let view = inspected.workspace;
+    let context = view.recovery.unwrap().context;
+    let bound = view.selection.unwrap();
+    command_records(application, &selected.workspace_id);
+    // Valid defaults refused by the aggregate budget are not a draft to complete.
+    let exhausted = application
+        .reset_profile(&context, &target.id, true)
+        .unwrap();
+    assert!(exhausted.saved.is_none());
+    assert!(exhausted.draft.is_none());
+    assert_eq!(exhausted.issue.unwrap().category, "StorageLimit");
+    assert!(exhausted.recovery.is_some());
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert_eq!(
+        command_records(application, &selected.workspace_id),
+        [(
+            "command.failed".to_owned(),
+            json!("reset_profile"),
+            json!("StorageLimit")
+        )]
+    );
+    // Distinguish invalid strings, oversized values, and full-record overhead from
+    // aggregate exhaustion. Every individual-profile limit still returns a draft.
+    let mut empty_defaults = top_level_defaults(&updated);
+    empty_defaults["added"] = json!("");
+    let overhead = serde_json::to_vec(&empty_defaults).unwrap().len();
+    let mut current = workspace_ref(&bound);
+    for (length, status) in [
+        (70_000, RecoveryStatus::RepairRequired),
+        (MAX_PROFILE_BYTES, RecoveryStatus::StorageFailed),
+        (MAX_PROFILE_BYTES - overhead, RecoveryStatus::StorageFailed),
+    ] {
+        updated["properties"]["added"] = json!({"type":"string","default":"y".repeat(length)});
+        install_schema(&path, &updated, json!({}));
+        let reinspected = application.inspect(&path, &current).unwrap();
+        assert_eq!(reinspected.kind, InspectionKind::Bound);
+        assert_eq!(
+            reinspected
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.profile_id == target.id)
+                .unwrap()
+                .status,
+            status
+        );
+        current = view_ref(&reinspected.workspace);
+        let context = reinspected.workspace.recovery.unwrap().context;
+        let oversized = application
+            .reset_profile(&context, &target.id, true)
+            .unwrap();
+        assert!(oversized.saved.is_none());
+        let issue = oversized.issue.unwrap();
+        assert_eq!(issue.category, "StorageLimit");
+        assert_eq!(issue.context["profile_id"], target.id);
+        assert_eq!(issue.context["package_id"], target.package_id);
+        assert_eq!(
+            oversized.draft.unwrap()["added"].as_str().unwrap().len(),
+            length
+        );
+        assert_eq!(fs::read(&file).unwrap(), before);
+    }
 }
 
 #[test]
@@ -1077,6 +1346,140 @@ fn recovery_refuses_changed_durable_package_ownership() {
 }
 
 #[test]
+fn different_package_candidate_never_touches_the_original_packages_profiles() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let (path, selected) = initial(&fixture);
+    let saved = save(&fixture, &selected, "Original owner", json!({"count":9}));
+    let file = profile_path(&fixture, "Main", &saved);
+    let before = fs::read(&file).unwrap();
+    let profile_names = || {
+        let mut names: Vec<_> = fs::read_dir(file.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let names_before = profile_names();
+    install_schema(&path, &schema(5), json!({}));
+    let original = application
+        .inspect(&path, &workspace_ref(&selected))
+        .unwrap();
+    assert_eq!(original.kind, InspectionKind::Bound);
+    let original_ref = view_ref(&original.workspace);
+    let original_source = original.workspace.saved_package.as_ref().unwrap().clone();
+    let original_context = original.workspace.recovery.unwrap().context;
+
+    let candidate = foreign_package(&fixture, "different-package", "second-workload");
+    install_schema(&candidate, &schema(1), json!({}));
+    let tab_file = fixture.root.join("tabs/Main/tab.config");
+    let tab_before = fs::read(&tab_file).unwrap();
+    let pending = tab_file.with_extension("pending");
+    fs::write(&pending, b"interrupted Tab write").unwrap();
+    let inspected = application.inspect(&candidate, &original_ref).unwrap();
+    assert_eq!(inspected.kind, InspectionKind::BindingFailed);
+    assert!(inspected.outcomes.is_empty());
+    let failed_ref = view_ref(&inspected.workspace);
+    assert_eq!(failed_ref.revision, original_ref.revision + 1);
+    let retained = inspected.workspace.selection.as_ref().unwrap();
+    assert_eq!(retained.package.package_id, saved.package_id);
+    assert_eq!(retained.package_path, selected.package_path);
+    assert_eq!(retained.revision, failed_ref.revision);
+    assert_eq!(
+        inspected.workspace.saved_package.as_ref(),
+        Some(&original_source)
+    );
+    assert!(inspected.workspace.source_error.is_none());
+    // This value is valid for retained A, but invalid for candidate B.
+    assert_eq!(
+        application.validate(&failed_ref, json!({"count":2})).unwrap()["count"],
+        2
+    );
+    let recovery = inspected.workspace.recovery.unwrap();
+    assert!(recovery.binding_required);
+    assert!(!recovery.relocation);
+    assert_eq!(recovery.package.package_id, "second-workload");
+    assert!(recovery.profiles.is_empty());
+    assert!(recovery.profiles_error.is_none());
+    let candidate_context = recovery.context;
+    assert_eq!(
+        application
+            .repair_profile(&candidate_context, &saved.id, json!({"count":1}))
+            .unwrap_err()
+            .category,
+        "ProfileNotFound"
+    );
+    assert_eq!(
+        application
+            .reset_profile(&candidate_context, &saved.id, true)
+            .unwrap_err()
+            .category,
+        "ProfileNotFound"
+    );
+    assert_eq!(
+        application
+            .repair_profile(&original_context, &saved.id, json!({"count":2}))
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert_eq!(profile_names(), names_before);
+    assert_eq!(fs::read(&tab_file).unwrap(), tab_before);
+    assert!(!fixture.root.join("tabs/Main/second-workload").exists());
+
+    fs::remove_file(pending).unwrap();
+    let retried = application.retry_binding(&candidate_context).unwrap();
+    assert_eq!(retried.kind, InspectionKind::Bound);
+    assert!(retried.binding_error.is_none());
+    assert!(retried.outcomes.is_empty());
+    let rebound_ref = view_ref(&retried.workspace);
+    assert_eq!(rebound_ref.revision, failed_ref.revision + 1);
+    let rebound = retried.workspace.selection.as_ref().unwrap();
+    assert_eq!(rebound.package.package_id, "second-workload");
+    assert!(rebound.profiles.is_empty());
+    assert!(rebound.profiles_error.is_none());
+    assert!(retried.workspace.recovery.is_none());
+    let tab = lock(&application.store).tab("Main").unwrap();
+    assert_eq!(tab.packages.len(), 2);
+    assert_eq!(tab.selected_package_id.as_deref(), Some("second-workload"));
+    assert_eq!(
+        tab.packages
+            .iter()
+            .find(|reference| reference.package_id == saved.package_id),
+        Some(&original_source)
+    );
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert_eq!(profile_names(), names_before);
+
+    let returned = application.inspect(&path, &rebound_ref).unwrap();
+    assert_eq!(returned.kind, InspectionKind::Bound);
+    assert_eq!(
+        returned.workspace.selection.as_ref().unwrap().package.package_id,
+        saved.package_id
+    );
+    let recovery = returned.workspace.recovery.unwrap();
+    assert!(!recovery.binding_required);
+    assert_eq!(recovery.profiles.len(), 1);
+    assert_eq!(recovery.profiles[0].profile.id, saved.id);
+    assert_eq!(recovery.profiles[0].profile.package_id, saved.package_id);
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert_eq!(profile_names(), names_before);
+    let repaired = application
+        .repair_profile(&recovery.context, &saved.id, json!({"count":2}))
+        .unwrap()
+        .saved
+        .unwrap();
+    assert_eq!(repaired.values["count"], 2);
+    assert_eq!(repaired.package_id, saved.package_id);
+    assert_eq!(repaired.id, saved.id);
+    let persisted: Profile = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+    assert_eq!(persisted.values, repaired.values);
+    assert_eq!(persisted.package_id, saved.package_id);
+}
+
+#[test]
 fn inspection_recaptures_selected_package_authority_after_its_successful_bind() {
     let fixture = Fixture::new();
     let (path, selected) = initial(&fixture);
@@ -1111,5 +1514,97 @@ fn inspection_recaptures_selected_package_authority_after_its_successful_bind() 
             .selected_package_id
             .as_deref(),
         Some(saved.package_id.as_str())
+    );
+}
+
+#[test]
+fn in_place_binding_retry_keeps_unrepaired_profiles_editable() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let (path, selected) = initial(&fixture);
+    let saved = save(&fixture, &selected, "Needs repair", json!({"count":9}));
+    let other = save(&fixture, &selected, "Also stale", json!({"count":8}));
+    install_schema(&path, &schema(5), json!({}));
+    let pending = fixture.root.join("tabs/Main/tab.pending");
+    fs::write(&pending, b"interrupted Tab write").unwrap();
+    command_records(application, &selected.workspace_id);
+    let inspected = application
+        .inspect(&path, &workspace_ref(&selected))
+        .unwrap();
+    assert_eq!(inspected.kind, InspectionKind::BindingFailed);
+    let category = inspected.binding_error.as_ref().unwrap().category.clone();
+    let view = inspected.workspace;
+    // Same path, same package: not a relocation, but the Tab write never published.
+    assert_eq!(
+        view.selection.as_ref().unwrap().package_path,
+        selected.package_path
+    );
+    assert!(view.source_error.is_none());
+    let recovery = view.recovery.unwrap();
+    assert!(recovery.binding_required);
+    assert!(!recovery.relocation);
+    let rejected: Vec<&str> = recovery
+        .profiles
+        .iter()
+        .map(|entry| entry.profile.id.as_str())
+        .collect();
+    assert_eq!(rejected, [other.id.as_str(), saved.id.as_str()]);
+    let context = recovery.context;
+    fs::remove_file(&pending).unwrap();
+    let retried = application.retry_binding(&context).unwrap();
+    assert_eq!(retried.kind, InspectionKind::Bound);
+    assert!(retried.binding_error.is_none());
+    let bound = retried.workspace;
+    assert_eq!(bound.revision, context.workspace.revision + 1);
+    assert_eq!(
+        bound.selection.as_ref().unwrap().package.schema_identity,
+        recovery.package.schema_identity
+    );
+    // The bound context keeps both rejected profiles repairable under the same token.
+    let recovery = bound
+        .recovery
+        .as_ref()
+        .expect("unrepaired profiles remain recoverable");
+    assert!(!recovery.binding_required);
+    assert!(!recovery.relocation);
+    assert_eq!(recovery.context.token, context.token);
+    assert_eq!(recovery.context.workspace, view_ref(&bound));
+    assert_eq!(recovery.profiles.len(), 2);
+    assert_eq!(
+        application
+            .repair_profile(&context, &saved.id, json!({"count":2}))
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    let repaired = application
+        .repair_profile(&recovery.context, &saved.id, json!({"count":2}))
+        .unwrap();
+    assert_eq!(repaired.saved.unwrap().values["count"], 2);
+    let remaining = repaired.recovery.unwrap();
+    assert!(!remaining.binding_required);
+    assert_eq!(remaining.profiles[0].profile.id, other.id);
+    let reset = application
+        .reset_profile(&recovery.context, &other.id, true)
+        .unwrap();
+    assert_eq!(reset.saved.unwrap().values["count"], 1);
+    assert!(reset.recovery.unwrap().profiles.is_empty());
+    assert_eq!(
+        command_records(application, &selected.workspace_id),
+        [
+            ("command.failed".to_owned(), json!("inspect"), json!(category)),
+            (
+                "workspace.reinspected".to_owned(),
+                json!("retry_binding"),
+                Value::Null
+            ),
+            (
+                "command.failed".to_owned(),
+                json!("repair_profile"),
+                json!("StaleIdentity")
+            ),
+            ("profile.saved".to_owned(), json!("repair_profile"), Value::Null),
+            ("profile.saved".to_owned(), json!("reset_profile"), Value::Null),
+        ]
     );
 }

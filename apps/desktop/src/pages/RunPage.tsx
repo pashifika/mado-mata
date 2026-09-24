@@ -8,7 +8,7 @@ import type {TargetHandlers} from '../components/TargetPanel.tsx';
 import ResultPanel, {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import {faultSummary, text} from '../state.ts';
 import type {CheckAssociation} from '../state.ts';
-import {DESCRIPTOR_LIMIT, busy, editDraft, hasWorkspaceEdits} from '../workspace.ts';
+import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, editDraft, hasWorkspaceEdits} from '../workspace.ts';
 import type {Bound, BoundWorkspace, Derived} from '../workspace.ts';
 import type {ControllerView, Json, OcrEnvironment} from '../types.ts';
 import {messages, renderMessage} from '../i18n.ts';
@@ -85,6 +85,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
     </div>
     <div id="error">
       {workspace.error && <FaultMessage title={t.run.actionFailed} value={workspace.error}/>}
+      {workspace.sourceError && <FaultMessage title={workspace.sourceError.category === UNSUPPORTED_SOURCE ? t.guidance.unsupportedHeading : t.guidance.unavailableHeading} value={workspace.sourceError}/>}
       {primary && (privatePrimary || check
         ? <section className="fault" role="alert"><strong>{check ? t.run.checkError : t.run.runError} · {faultSummary(primary, !privatePrimary)}</strong>
             <p>{t.run.diagnosticHelp}</p></section>

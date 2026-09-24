@@ -1,7 +1,7 @@
 import {LocalFault, messages} from './i18n.ts';
 import type {Locale, Message} from './i18n.ts';
 import {defaultDraft, readDraft} from './state.ts';
-import {mutatedRecovery, recoveryState, sameRecoveryContext, upsertOutcomes} from './recovery.ts';
+import {mutatedRecovery, recoveryState, retriedRecovery, sameRecoveryContext, upsertOutcomes} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {targetDirty, targetState} from './target.ts';
 import type {TargetState} from './target.ts';
@@ -45,7 +45,7 @@ export interface Bound {
 export interface Workspace {
   id:string; revision:number; internalName:string; displayName:string;
   bound:Bound|null;
-  // Host-reported reason the saved source could not be inspected. Null together with `bound` null means no saved package.
+  // Host-reported failure of the saved source, distinct from a failed candidate binding in `error`.
   sourceError:Fault|null;
   // The Tab's selected durable reference as the host stores it; display and prefill only, never authority to run.
   savedPackage:PackageReference|null;
@@ -179,37 +179,69 @@ export function applyCatalog(workspace:Workspace, catalog:ProfileCatalog):Worksp
   return {...workspace, bound: next, notice: notice ?? workspace.notice};
 }
 
-// A selection binds a new revision or, at the same revision, only refreshes the catalog; no selection (candidate or
-// failed binding) ends the package session while the saved reference stays as reported. Same recovery token keeps its draft.
-export function applyWorkspaceView(workspace:Workspace, view:WorkspaceView, notice:Message|null):Workspace {
+// The same package session as the bound one: a failed durable bind reissues it under the host's new revision.
+function sameSession(bound:Bound, selection:Selection):boolean {
+  return bound.packagePath === selection.package_path && bound.package.inventory_identity === selection.package.inventory_identity
+    && bound.package.package_id === selection.package.package_id && bound.package.schema_identity === selection.package.schema_identity;
+}
+
+// A retained selection moves to the new revision with its profile and target drafts intact; the old target view is
+// reloaded under its new owner before another target command, and replies issued under the old revision stay stale.
+function reissueSelection(workspace:Workspace, bound:Bound, selection:Selection, notice:Message|null):Workspace {
+  const target = {...bound.target, context: {...bound.target.context, workspace: {workspace_id: selection.workspace_id, revision: selection.revision}},
+    loaded: false, view: null, observation: null, review: null};
+  return applyCatalog({...workspace, revision: selection.revision, bound: {...bound, target}, error: null, notice}, selection);
+}
+
+// A selection binds a new revision or, at the same revision, only refreshes the catalog; no selection ends the
+// package session while the saved reference stays as reported. Same recovery token keeps its draft. `retained` marks
+// a view whose selection the host kept after a failed durable bind: the same session at a new revision, so the
+// operator's drafts survive; ordinary inspection of the same directory still starts a fresh draft.
+export function applyWorkspaceView(workspace:Workspace, view:WorkspaceView, notice:Message|null, retained = false):Workspace {
   const selection = view.selection;
+  const bound = workspace.bound;
   const base = selection === null
     ? {...workspace, revision: view.revision, bound: null, error: null, notice, legacyImport: null}
-    : workspace.bound !== null && selection.revision === workspace.revision
+    : bound !== null && selection.revision === workspace.revision
       ? applyCatalog({...workspace, error: null, notice}, selection)
-      : bindSelection(workspace, selection, notice);
+      : bound !== null && retained && sameSession(bound, selection)
+        ? reissueSelection(workspace, bound, selection, notice)
+        : bindSelection(workspace, selection, notice);
   return {...base, sourceError: view.source_error, savedPackage: view.saved_package,
     recovery: view.recovery ? recoveryState(view.recovery, workspace.recovery) : null};
 }
 
-// Explicit inspection replaces the per-profile facts; a binding retry adds to them so earlier saves stay reported.
+// Explicit inspection replaces the per-profile facts; a binding retry adds to them so earlier saves stay reported. A
+// failed binding keeps the prior selection (if any) as run authority and reports only this attempt in `error`. A retry
+// reply for the same context token carries the unrepaired draft across the host's revision move.
 export function applyInspection(workspace:Workspace, outcome:InspectionOutcome, notice:Message|null, retry:boolean):Workspace {
-  const next = applyWorkspaceView(workspace, outcome.workspace, notice);
+  const context = outcome.workspace.recovery?.context;
+  const previous = retry && context && workspace.recovery ? {...workspace, recovery: retriedRecovery(workspace.recovery, context)} : workspace;
+  const next = applyWorkspaceView(previous, outcome.workspace, notice, outcome.kind === 'binding_failed');
   return {...next, error: outcome.binding_error,
     recoveryOutcomes: retry ? upsertOutcomes(workspace.recoveryOutcomes, outcome.outcomes) : outcome.outcomes};
+}
+
+// A recovery context's store is the bound catalog only when it names the same package and schema; a relocation or
+// in-place candidate with another schema writes records the bound selection cannot use and never merges into it.
+function ownsCatalog(bound:Bound, context:RecoveryState):boolean {
+  return bound.package.package_id === context.view.package.package_id && bound.package.schema_identity === context.view.package.schema_identity;
 }
 
 // Commit facts survive refresh failure; tickets protect only the draft.
 export function applyRecoveryMutation(workspace:Workspace, ticket:RecoveryTicket, mutation:RecoveryMutation):Workspace {
   const saved = mutation.saved;
+  const state = workspace.recovery;
+  const owned = state !== null && sameRecoveryContext(state.view.context, ticket.context)
+    && workspace.bound !== null && ownsCatalog(workspace.bound, state);
   let next = workspace;
   if (saved !== null) {
-    next = updateBound({...next, recoveryOutcomes: upsertOutcomes(next.recoveryOutcomes, [{profile_id: saved.id, name: saved.name, status: 'saved', issue: null}])},
-      bound => ({...bound, profiles: [...bound.profiles.filter(entry => entry.id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name))}));
+    next = {...next, recoveryOutcomes: upsertOutcomes(next.recoveryOutcomes, [{profile_id: saved.id, name: saved.name, status: 'saved', issue: null}])};
+    if (owned && workspace.bound?.package.package_id === saved.package_id && workspace.bound?.package.schema_identity === saved.schema_identity) next = updateBound(next, bound => ({...bound,
+      profiles: [...bound.profiles.filter(entry => entry.id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name))}));
   }
-  if (mutation.catalog) next = applyCatalog(next, mutation.catalog);
-  else if (mutation.refresh_error) next = applyCatalog(next, {profiles: [], profiles_error: mutation.refresh_error});
-  const state = workspace.recovery;
+  if (owned && mutation.catalog) next = applyCatalog(next, mutation.catalog);
+  else if (owned && mutation.refresh_error) next = applyCatalog(next, {profiles: [], profiles_error: mutation.refresh_error});
   if (!state || !sameRecoveryContext(state.view.context, ticket.context)) {
     return saved === null ? next : {...next, notice: {key: 'recoverySaved', args: [saved.name, saved.id]}};
   }

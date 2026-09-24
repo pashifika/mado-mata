@@ -59,12 +59,17 @@ function exactIntegerText(text: string, number: number): boolean {
   return significant === integerSignificant && exponent === integer.length - integerSignificant.length;
 }
 
-// Numeric editor text is preserved until the command boundary, never coerced to null or zero.
-export function readDraft(schema: Schema, draft: Record<string, Json>, locale: Locale = 'en') {
+// Numeric editor text is preserved until the command boundary, never coerced to null or zero. `stored` names the value
+// paths whose string is loaded data rather than editor text: it stays a string and blocks the command as a type mismatch.
+export function readDraft(schema: Schema, draft: Record<string, Json>, locale: Locale = 'en', stored?: ReadonlySet<string>) {
   const t = messages[locale].validation;
   const errors: Record<string, string> = {};
   function convert(node: Schema, value: Json, path: string): Json {
     if ((node.type === 'number' || node.type === 'integer') && (typeof value === 'string' || typeof value === 'number')) {
+      if (typeof value === 'string' && stored?.has(path)) {
+        errors[path] = t.storedText;
+        return value;
+      }
       const number = typeof value === 'string' ? Number(value) : value;
       if (!Number.isFinite(number) || (typeof value === 'string' && !/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(value.trim()))) {
         errors[path] = t.finiteNumber;

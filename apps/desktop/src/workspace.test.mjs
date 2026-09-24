@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyRecoveryMutation,applyWorkspaceView,bindSelection,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
 import {LocalFault} from './i18n.ts';
-import {currentRecoveryDraft,editRecovery,issuePath,recoveryIssue,recoveryState,recoveryTicket,selectRecovery} from './recovery.ts';
+import {currentRecoveryDraft,editRecovery,issuePath,readRecoveryDraft,recoveryIssue,recoveryState,recoveryTicket,selectRecovery} from './recovery.ts';
 import {optionPath,readDraft} from './state.ts';
 import {beginTarget,checkedTarget,currentTargetDraft,discardTarget,editTarget,readTarget,readTargetDraft,removedTarget,savedTarget,targetDirty,targetExpectation,targetFailed,targetReadFailed,targetState,targetTicket} from './target.ts';
 
@@ -711,9 +711,9 @@ const staleIssue={category:'ProfileRejected',message:'unknown field',context:{pa
 function rejected(entry,issue=staleIssue){
   return {profile:entry,issue:{...issue,context:{...issue.context,profile_id:entry.id}}};
 }
-function recoveryView(id,revision,{token='ctx-'+id+'-'+revision,relocation=false,path='/pkg/'+id,packageId='shared',profiles=[rejected(profile('P','Review',{count:5,legacy:true},packageId,'schema-0'))],profilesError=null}={}){
-  const selected=selection(id,revision,{path,packageId});
-  return {context:{workspace:{workspace_id:id,revision},token},relocation,package_path:path,package:selected.package,profiles,profiles_error:profilesError};
+function recoveryView(id,revision,{token='ctx-'+id+'-'+revision,relocation=false,bindingRequired=false,path='/pkg/'+id,packageId='shared',profiles=[rejected(profile('P','Review',{count:5,legacy:true},packageId,'schema-0'))],profilesError=null,schemaIdentity='schema-1'}={}){
+  const selected=selection(id,revision,{path,packageId,schemaIdentity});
+  return {context:{workspace:{workspace_id:id,revision},token},relocation,binding_required:bindingRequired,package_path:path,package:selected.package,profiles,profiles_error:profilesError};
 }
 function outcome(profile_id,name,status,issue=null){
   return {profile_id,name,status,issue};
@@ -732,8 +732,8 @@ function inPlaceTab(){
 function candidateTab(){
   const unavailable=workspaceFromView(view('a',{sourceError:{category:'Package',message:'gone',context:null},savedPackage:savedReference}));
   const typed={...unavailable,inspectPath:'/games/alpha-moved'};
-  const recovery=recoveryView('a',1,{relocation:true,path:'/games/alpha-moved'});
-  return applyInspection(typed,{kind:'recovery_required',workspace:view('a',{revision:1,savedPackage:savedReference,recovery}),
+  const recovery=recoveryView('a',1,{relocation:true,bindingRequired:true,path:'/games/alpha-moved'});
+  return applyInspection(typed,{kind:'recovery_required',workspace:view('a',{revision:1,savedPackage:savedReference,sourceError:unavailable.sourceError,recovery}),
     outcomes:[outcome('Q','Quick','saved')],binding_error:null},{key:'recoveryRequired'},false);
 }
 function mutation(extra={}){
@@ -769,22 +769,110 @@ test('a recovery-required relocation candidate is never a selection: no bound st
   assert.throws(()=>commandValues(tab,undefined),error=>error instanceof LocalFault&&error.presentation.key==='unboundWorkspace');
 });
 
-test('a binding failure after automatic saves keeps the saved facts as facts and reports the failure as the Tab error',()=>{
+test('a binding failure over a saved source retains its earlier source fault and leaves a retry context',()=>{
   const bindingError={category:'Storage',message:'tab write failed',context:null};
-  const tab=applyInspection(workspaceFromView(view('a',{savedPackage:savedReference})),{kind:'binding_failed',
-    workspace:view('a',{revision:1,savedPackage:savedReference}),outcomes:[outcome('Q','Quick','saved'),outcome('P','Review','storage_failed',unreadable)],binding_error:bindingError},null,false);
+  const prior={category:'Package',message:'saved directory missing',context:null};
+  const initial=workspaceFromView(view('a',{savedPackage:savedReference,sourceError:prior}));
+  const recovery=recoveryView('a',1,{bindingRequired:true,path:'/games/beta',profiles:[]});
+  const tab=applyInspection(initial,{kind:'binding_failed',
+    workspace:view('a',{revision:1,savedPackage:savedReference,sourceError:prior,recovery}),
+    outcomes:[outcome('Q','Quick','saved'),outcome('P','Review','storage_failed',unreadable)],binding_error:bindingError},null,false);
   assert.equal(tab.bound,null);
-  assert.equal(tab.recovery,null);
+  assert.equal(tab.recovery.view.binding_required,true);
+  assert.equal(tab.recovery.view.relocation,false);
+  assert.equal(tab.sourceError,prior);
   assert.equal(tab.error,bindingError);
   assert.deepEqual(tab.savedPackage,savedReference);
   assert.deepEqual(tab.recoveryOutcomes.map(item=>item.status),['saved','storage_failed']);
+});
+
+test('a first binding failure on a new Tab creates no saved package or spurious source fault',()=>{
+  const bindingError={category:'Storage',message:'tab write failed',context:null};
+  const recovery=recoveryView('a',1,{bindingRequired:true,path:'/games/new',profiles:[]});
+  const tab=applyInspection(workspaceFromView(view('a')),{kind:'binding_failed',
+    workspace:view('a',{revision:1,recovery}),outcomes:[],binding_error:bindingError},null,false);
+  assert.equal(tab.bound,null);
+  assert.equal(tab.savedPackage,null);
+  assert.equal(tab.sourceError,null);
+  assert.equal(tab.error,bindingError);
+  assert.equal(tab.recovery.view.binding_required,true);
+  assert.equal(tab.recovery.view.relocation,false);
+});
+
+test('a failed bind to B reissues prior A without admitting B or discarding A profile and target drafts',()=>{
+  const prior={category:'Package',message:'old saved source missing',context:null};
+  const bindingError={category:'Storage',message:'Tab write refused',context:null};
+  const selected=selection('a',1,{path:'/games/A',packageId:'A',profiles:[profile('A1','Selected A',{count:5},'A')]});
+  let tab=workspaceFromView(view('a',{selection:selected,sourceError:prior,savedPackage:{package_id:'A',source:{kind:'directory',path:'/games/A'}}}));
+  tab=updateBound(tab,bound=>({...bound,target:editTarget(bound.target,{...bound.target.draft,gamePath:'/operator/unsaved'})}));
+  tab=updateBound(tab,bound=>editDraft(selectProfile(bound,'A1'),{count:'9'}));
+  const before=tab.bound;
+  const candidate=recoveryView('a',2,{path:'/games/B',packageId:'B',bindingRequired:true,profiles:[]});
+  const reissued=selection('a',2,{path:'/games/A',packageId:'A',profiles:before.profiles});
+  const after=applyInspection(tab,{kind:'binding_failed',workspace:view('a',{
+    selection:reissued,sourceError:prior,savedPackage:tab.savedPackage,recovery:candidate,
+  }),outcomes:[],binding_error:bindingError},null,false);
+  assert.equal(after.revision,2);
+  assert.equal(after.bound.packagePath,'/games/A');
+  assert.equal(after.bound.selectedId,'A1');
+  assert.deepEqual(after.bound.draft,{count:'9'});
+  assert.equal(after.bound.touched,true);
+  assert.equal(after.bound.draftRevision,before.draftRevision);
+  assert.deepEqual(after.bound.target.draft,before.target.draft);
+  assert.deepEqual(after.bound.target.context.workspace,{workspace_id:'a',revision:2});
+  assert.equal(after.bound.target.loaded,false);
+  assert.equal(after.sourceError,prior);
+  assert.equal(after.error,bindingError);
+  assert.equal(after.recovery.view.package.package_id,'B');
+  assert.equal(after.recovery.view.binding_required,true);
+  assert.deepEqual(commandValues(after,deriveBound(after.bound,null)),{count:9});
+  assert.equal(applyIfCurrent([after],{id:'a',revision:1},item=>({...item,error:null}))[0],after);
+});
+
+for (const {scenario,candidatePackage,candidateSchema} of [
+  {scenario:'a different package',candidatePackage:'B',candidateSchema:'schema-1'},
+  {scenario:'the same package under another schema',candidatePackage:'A',candidateSchema:'schema-2'},
+]) {
+  test(`recovery of ${scenario} records B's save without merging B's record or catalog into retained A`,()=>{
+    const selected=selection('a',1,{path:'/games/A',packageId:'A',profiles:[profile('A1','Selected A',{count:5},'A')]});
+    let tab=workspaceFromView(view('a',{selection:selected,savedPackage:{package_id:'A',source:{kind:'directory',path:'/games/A'}}}));
+    tab=updateBound(tab,bound=>editDraft(selectProfile(bound,'A1'),{count:'8'}));
+    const candidate=recoveryView('a',2,{path:'/games/B',packageId:candidatePackage,schemaIdentity:candidateSchema,
+      relocation:candidatePackage === 'A',bindingRequired:true});
+    tab=applyInspection(tab,{kind:'binding_failed',workspace:view('a',{selection:selection('a',2,{path:'/games/A',packageId:'A',profiles:selected.profiles}),
+      savedPackage:tab.savedPackage,recovery:candidate}),outcomes:[],binding_error:unreadable},null,false);
+    const ticket=recoveryTicket(tab.recovery);
+    const saved=profile('P','Recovered B',{count:6},candidatePackage,candidateSchema);
+    const response=mutation({saved,catalog:{profiles:[saved],profiles_error:null},recovery:{...candidate,profiles:[]}});
+    const after=applyRecoveryMutation(tab,ticket,response);
+    assert.deepEqual(after.bound.profiles,selected.profiles);
+    assert.deepEqual(after.bound.draft,{count:'8'});
+    assert.equal(after.bound.selectedId,'A1');
+    assert.deepEqual(after.recoveryOutcomes,[outcome('P','Recovered B','saved')]);
+    assert.equal(after.recovery.view.profiles.length,0);
+    assert.equal(after.recovery.selectedId,null);
+    const refreshFailed=applyRecoveryMutation(tab,ticket,mutation({refresh_error:unreadable}));
+    assert.equal(refreshFailed.bound.profilesError,null);
+    assert.equal(refreshFailed.recovery.refreshError,unreadable);
+  });
+}
+
+test('a late saved reply for a replaced recovery token records the commit but cannot overwrite the current bound catalog',()=>{
+  const tab=inPlaceTab();
+  const ticket=recoveryTicket(tab.recovery);
+  const replaced={...tab,recovery:recoveryState({...tab.recovery.view,context:{...ticket.context,token:'replacement'}},tab.recovery)};
+  const saved=profile('P','Late repair',{count:6},'shared','schema-1');
+  const after=applyRecoveryMutation(replaced,ticket,mutation({saved,catalog:{profiles:[saved],profiles_error:null}}));
+  assert.deepEqual(after.bound.profiles,[quick]);
+  assert.equal(after.recovery,replaced.recovery);
+  assert.deepEqual(after.recoveryOutcomes.find(item=>item.profile_id==='P'),outcome('P','Late repair','saved'));
 });
 
 test('a repair save for the current draft records the fact, enters the bound catalog and moves on to the next rejected profile',()=>{
   const second=rejected(profile('R','Second',{count:'x'},'shared','schema-0'));
   let tab=inPlaceTab();
   tab={...tab,recovery:recoveryState({...tab.recovery.view,profiles:[...tab.recovery.view.profiles,second]},tab.recovery)};
-  tab={...tab,recovery:editRecovery(tab.recovery,{count:5})};
+  tab={...tab,recovery:editRecovery(tab.recovery,{count:5},{kind:'replace',path:'$'})};
   const ticket=recoveryTicket(tab.recovery);
   const repaired=profile('P','Review',{count:5},'shared','schema-1');
   const refreshed={...tab.recovery.view,profiles:[second]};
@@ -800,7 +888,7 @@ test('a repair save for the current draft records the fact, enters the bound cat
 test('a save response after a newer edit records the fact without replacing the newer draft, and says so',()=>{
   let tab=inPlaceTab();
   const ticket=recoveryTicket(tab.recovery);
-  tab={...tab,recovery:editRecovery(tab.recovery,{count:7})};
+  tab={...tab,recovery:editRecovery(tab.recovery,{count:7},{kind:'replace',path:'$'})};
   const repaired=profile('P','Review',{count:5},'shared','schema-1');
   const after=applyRecoveryMutation(tab,ticket,mutation({saved:repaired,recovery:{...tab.recovery.view,profiles:[]},catalog:{profiles:[repaired,quick],profiles_error:null}}));
   assert.deepEqual(after.recovery.draft,{count:7});
@@ -851,7 +939,7 @@ for (const {scenario,refreshed} of [
   test(`the last profile saved after a newer edit with ${scenario} keeps the newer draft detached, non-actionable and locally releasable`,()=>{
     let tab=inPlaceTab();
     const ticket=recoveryTicket(tab.recovery);
-    tab={...tab,recovery:editRecovery(tab.recovery,{count:7})};
+    tab={...tab,recovery:editRecovery(tab.recovery,{count:7},{kind:'replace',path:'$'})};
     const repaired=profile('P','Review',{count:5},'shared','schema-1');
     const after=applyRecoveryMutation(tab,ticket,mutation({saved:repaired,recovery:refreshed(tab),catalog:{profiles:[repaired,quick],profiles_error:null}}));
     assert.notEqual(after.recovery,null);
@@ -883,7 +971,7 @@ test('a Reset whose defaults are incomplete installs the unsaved default-based d
   assert.deepEqual(after.notice,{key:'recoveryResetIncomplete'});
   assert.deepEqual(after.recoveryOutcomes,[outcome('Q','Quick','saved')]);
   // Completing the draft retires the attributed failure; reloading the stored values drops the reset marker.
-  const completed=editRecovery(after.recovery,{count:1,mode:'fast'});
+  const completed=editRecovery(after.recovery,{count:1,mode:'fast'},{kind:'replace',path:'$.mode'});
   assert.equal(completed.issue,null);
   assert.equal(completed.resetDraft,true);
   assert.deepEqual(recoveryIssue(completed).fault,tab.recovery.view.profiles[0].issue);
@@ -912,12 +1000,12 @@ for (const {scenario,retarget} of [
 test('a failure attributed to an earlier draft is shown as earlier, and a superseded context keeps only the saved fact',()=>{
   let tab=candidateTab();
   const ticket=recoveryTicket(tab.recovery);
-  tab={...tab,recovery:editRecovery(tab.recovery,{count:6})};
+  tab={...tab,recovery:editRecovery(tab.recovery,{count:6},{kind:'replace',path:'$'})};
   const failed=applyRecoveryMutation(tab,ticket,mutation({issue:unreadable,recovery:tab.recovery.view}));
   assert.deepEqual(failed.recovery.draft,{count:6});
   assert.deepEqual(recoveryIssue(failed.recovery),{fault:unreadable,earlier:true});
   assert.equal(currentRecoveryDraft(failed.recovery,failed.recovery.issue.ticket),false);
-  const superseded={...tab,recovery:recoveryState(recoveryView('a',1,{token:'ctx-next',relocation:true}),tab.recovery)};
+  const superseded={...tab,recovery:recoveryState(recoveryView('a',1,{token:'ctx-next',relocation:true,bindingRequired:true}),tab.recovery)};
   assert.deepEqual(superseded.recovery.draft,{count:5,legacy:true});
   const late=applyRecoveryMutation(superseded,ticket,mutation({saved:profile('P','Review',{count:6},'shared','schema-1')}));
   assert.deepEqual(late.recovery,superseded.recovery);
@@ -941,7 +1029,7 @@ test('a recovery response for a rebound or closed Tab is discarded without touch
 
 test('discarding a candidate unbinds at the new revision, keeps the saved reference and the committed facts, and invalidates the draft',()=>{
   let tab=candidateTab();
-  tab={...tab,recovery:editRecovery(tab.recovery,{count:9})};
+  tab={...tab,recovery:editRecovery(tab.recovery,{count:9},{kind:'replace',path:'$'})};
   assert.equal(hasWorkspaceEdits(tab,undefined),true);
   const after=applyWorkspaceView(tab,view('a',{revision:2,savedPackage:savedReference,sourceError:{category:'Package',message:'gone',context:null}}),{key:'recoveryDiscarded'});
   assert.equal(after.recovery,null);
@@ -977,7 +1065,7 @@ test('a successful binding retry binds through the host view and merges outcomes
   assert.deepEqual(retried.savedPackage,moved);
   assert.deepEqual(retried.recoveryOutcomes,[outcome('Q','Quick','saved')]);
   const bindingError={category:'PackageCompatibility',message:'still incompatible',context:null};
-  const failed=applyInspection(tab,{kind:'binding_failed',workspace:view('a',{revision:1,savedPackage:savedReference,recovery:tab.recovery.view}),outcomes:[outcome('P','Review','repair_required',staleIssue)],binding_error:bindingError},null,true);
+  const failed=applyInspection(tab,{kind:'binding_failed',workspace:view('a',{revision:1,savedPackage:savedReference,sourceError:tab.sourceError,recovery:tab.recovery.view}),outcomes:[outcome('P','Review','repair_required',staleIssue)],binding_error:bindingError},null,true);
   assert.equal(failed.bound,null);
   assert.equal(failed.revision,1);
   assert.equal(failed.error,bindingError);
@@ -988,7 +1076,7 @@ test('a successful binding retry binds through the host view and merges outcomes
 
 test('the same context token keeps the operator draft across a refreshed listing while a replaced context starts fresh',()=>{
   const initial=recoveryState(recoveryView('a',1),null);
-  const edited=editRecovery(initial,{count:8});
+  const edited=editRecovery(initial,{count:8},{kind:'replace',path:'$'});
   const refreshed=recoveryState({...edited.view,profiles_error:unreadable},edited);
   assert.deepEqual(refreshed.draft,{count:8});
   assert.equal(refreshed.draftRevision,edited.draftRevision);
@@ -1021,3 +1109,89 @@ for (const {name, context, expected} of [
     assert.equal(issuePath({category:'ProfileAuthority', message:'failure', context}), expected);
   });
 }
+
+test('loaded numeric strings remain type mismatches until the operator replaces and types a value',()=>{
+  const invalid=profile('P','Review',{count:'12',legacy:true},'shared','schema-0');
+  const state=recoveryState(recoveryView('a',1,{profiles:[rejected(invalid)]}),null);
+  const loaded=readRecoveryDraft(state,'en');
+  assert.deepEqual(loaded.values,{count:'12',legacy:true});
+  assert.deepEqual(Object.keys(loaded.errors),['$.count']);
+  const replaced=editRecovery(state,{count:'',legacy:true},{kind:'replace',path:'$.count'});
+  assert.deepEqual(replaced.storedText,[]);
+  assert.deepEqual(Object.keys(readRecoveryDraft(replaced,'en').errors),['$.count']);
+  const typed=editRecovery(replaced,{count:'12',legacy:true},{kind:'replace',path:'$.count'});
+  assert.deepEqual(readRecoveryDraft(typed,'en'),{values:{count:12,legacy:true},errors:{}});
+});
+
+test('a nested loaded string remains stored while another field changes, then retires on explicit same-text replacement',()=>{
+  const nested={type:'object',properties:{group:{type:'object',properties:{count:{type:'integer'},label:{type:'string'}}}}};
+  const invalid=profile('P','Review',{group:{count:'12',label:'old'}},'shared','schema-0');
+  const view=recoveryView('a',1,{profiles:[rejected(invalid)]});
+  view.package.schema=nested;
+  const initial=recoveryState(view,null);
+  const edited=editRecovery(initial,{group:{count:'12',label:'new'}},{kind:'replace',path:'$.group.label'});
+  assert.deepEqual(Object.keys(readRecoveryDraft(edited,'en').errors),['$.group.count']);
+  assert.deepEqual(readRecoveryDraft(edited,'en').values,{group:{count:'12',label:'new'}});
+  const typed=editRecovery(edited,{group:{count:'12',label:'new'}},{kind:'replace',path:'$.group.count'});
+  assert.deepEqual(readRecoveryDraft(typed,'en'),{values:{group:{count:12,label:'new'}},errors:{}});
+});
+
+test('array move and remove follow item indices even for equal numeric strings and nested array items',()=>{
+  const arraySchema={type:'object',properties:{rows:{type:'array',items:{type:'object',properties:{value:{type:'integer'}}}}}};
+  const invalid=profile('P','Review',{rows:[{value:'12'},{value:12},{value:'12'}]},'shared','schema-0');
+  const view=recoveryView('a',1,{profiles:[rejected(invalid)]});
+  view.package.schema=arraySchema;
+  const initial=recoveryState(view,null);
+  const moved=editRecovery(initial,{rows:[{value:12},{value:'12'},{value:'12'}]},{kind:'move',path:'$.rows',index:0,other:1});
+  assert.deepEqual(moved.storedText.map(entry=>entry.path).sort(),['$.rows[1].value','$.rows[2].value']);
+  const removed=editRecovery(moved,{rows:[{value:12},{value:'12'}]},{kind:'remove',path:'$.rows',index:1});
+  assert.deepEqual(removed.storedText.map(entry=>entry.path),['$.rows[1].value']);
+  assert.deepEqual(readRecoveryDraft(removed,'en').values,{rows:[{value:12},{value:'12'}]});
+  assert.deepEqual(Object.keys(readRecoveryDraft(removed,'en').errors),['$.rows[1].value']);
+  const typed=editRecovery(removed,{rows:[{value:12},{value:'12'}]},{kind:'replace',path:'$.rows[1].value'});
+  assert.deepEqual(readRecoveryDraft(typed,'en'),{values:{rows:[{value:12},{value:12}]},errors:{}});
+});
+
+test('a failed mutation does not clear a prior refresh fault; a successful catalog refresh does',()=>{
+  const second=rejected(profile('R','Next',{count:'x'},'shared','schema-0'));
+  let tab=inPlaceTab();
+  tab={...tab,recovery:recoveryState({...tab.recovery.view,profiles:[...tab.recovery.view.profiles,second]},tab.recovery)};
+  const firstTicket=recoveryTicket(tab.recovery);
+  const saved=profile('P','Review',{count:5},'shared','schema-1');
+  const failedRefresh=applyRecoveryMutation(tab,firstTicket,mutation({saved,refresh_error:unreadable,recovery:{...tab.recovery.view,profiles:[second]}}));
+  assert.equal(failedRefresh.recovery.selectedId,'R');
+  const secondTicket=recoveryTicket(failedRefresh.recovery);
+  const unchanged=applyRecoveryMutation(failedRefresh,secondTicket,mutation({issue:staleIssue}));
+  assert.equal(unchanged.recovery.refreshError,unreadable);
+  const refreshed=applyRecoveryMutation(unchanged,secondTicket,mutation({catalog:{profiles:[quick,saved],profiles_error:null}}));
+  assert.equal(refreshed.recovery.refreshError,null);
+});
+
+test('a successful explicit retry carries the unrepaired draft and its issue to the new revision under one token',()=>{
+  let tab=inPlaceTab();
+  tab={...tab,recovery:editRecovery(tab.recovery,{count:'7',legacy:true},{kind:'replace',path:'$.count'})};
+  const ticket=recoveryTicket(tab.recovery);
+  tab=applyRecoveryMutation(tab,ticket,mutation({issue:unreadable}));
+  const nextRecovery={...tab.recovery.view,context:{...tab.recovery.view.context,workspace:{workspace_id:'a',revision:2}},binding_required:false};
+  const selected=selection('a',2,{path:'/pkg/a',packageId:'shared',profiles:[quick]});
+  const result={kind:'bound',workspace:view('a',{selection:selected,recovery:nextRecovery}),outcomes:[],binding_error:null};
+  const retried=applyInspection(tab,result,null,true);
+  assert.equal(retried.recovery.view.context.token,tab.recovery.view.context.token);
+  assert.equal(retried.recovery.view.context.workspace.revision,2);
+  assert.deepEqual(retried.recovery.draft,{count:'7',legacy:true});
+  assert.equal(retried.recovery.touched,true);
+  assert.equal(retried.recovery.draftRevision,tab.recovery.draftRevision);
+  assert.equal(retried.recovery.issue.fault,unreadable);
+  assert.equal(currentRecoveryDraft(retried.recovery,retried.recovery.issue.ticket),true);
+  assert.equal(retried.recovery.view.binding_required,false);
+  assert.equal(applyIfCurrent([retried],{id:'a',revision:1},item=>({...item,recovery:null}))[0],retried);
+  const ordinary=applyInspection(tab,result,null,false);
+  assert.deepEqual(ordinary.recovery.draft,{count:5,legacy:true});
+  assert.equal(ordinary.recovery.touched,false);
+  const different=applyInspection(tab,{...result,workspace:view('a',{selection:selected,recovery:{
+    ...nextRecovery,context:{...nextRecovery.context,token:'new-token'}}})},null,true);
+  assert.deepEqual(different.recovery.draft,{count:5,legacy:true});
+  assert.equal(different.recovery.touched,false);
+  const stale=applyRecoveryMutation(different,ticket,mutation({draft:{count:1},issue:unreadable}));
+  assert.equal(stale.recovery,different.recovery);
+});

@@ -27,9 +27,9 @@ import {INITIAL_BOOTSTRAP, PollGate, initialSettings, reconstructed, reduceBoots
 import type {Admission, BootstrapAction} from './bootstrap.ts';
 import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards} from './notifications.ts';
 import type {Card, CardStack} from './notifications.ts';
-import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readDraft, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, settingsDraftAfterSave, settingsDraftFrom, staleReasons, text} from './state.ts';
+import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, settingsDraftAfterSave, settingsDraftFrom, staleReasons, text} from './state.ts';
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
-import {editRecovery, recoveryTicket, selectRecovery} from './recovery.ts';
+import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyCommand, applyIfCurrent, applyInspection, applyRecoveryMutation, applyWorkspaceView, busy, closeWorkspace, commandValues, deriveBound, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
@@ -410,32 +410,36 @@ export default function App() {
   }
 
   // Recovery commands carry only the host context reference, profile ID and values; replies are guarded by
-  // Workspace/revision (runCommand) and by the ticket's token, profile and draft revision.
+  // Workspace/revision (runCommand) and by the ticket's token, profile and draft revision. Only Save reads the draft:
+  // Reset discards it, so a draft that cannot parse never blocks the Reset meant to replace it.
   function recoveryHandlers(workspace: Workspace): RecoveryHandlers {
     const origin: Origin = {id: workspace.id, revision: workspace.revision};
     const locked = commandReason !== null || closing;
     const state = workspace.recovery;
     const edit = (update: (state: RecoveryState) => RecoveryState) =>
       change(workspace.id, item => item.recovery ? {...item, recovery: update(item.recovery), notice: null} : item);
-    function mutate(label: Command, call: (ticket: RecoveryTicket, values: Record<string, Json>) => Promise<RecoveryMutation>) {
+    function mutate(label: Command, call: (ticket: RecoveryTicket) => Promise<RecoveryMutation>) {
       if (locked || !state) return;
       const ticket = recoveryTicket(state);
       if (!ticket) return;
-      const parsed = readDraft(state.view.package.schema, state.draft, locale);
-      if (Object.keys(parsed.errors).length > 0) {
-        const error = new LocalFault({key: 'numericFields'});
-        change(workspace.id, item => ({...item, error}));
-        return;
-      }
       void runCommand(origin, label, async () => {
-        const mutation = await call(ticket, parsed.values);
+        const mutation = await call(ticket);
         return {update: item => applyRecoveryMutation(item, ticket, mutation)};
       });
     }
     return {
       select: id => edit(current => selectRecovery(current, id)),
-      edit: values => edit(current => editRecovery(current, values)),
-      save: () => mutate('repairingProfile', (ticket, values) => invoke<RecoveryMutation>('repair_profile', {context: ticket.context, id: ticket.profileId, values})),
+      edit: (values, change) => edit(current => editRecovery(current, values, change)),
+      save: () => {
+        if (!state) return;
+        const parsed = readRecoveryDraft(state, locale);
+        if (Object.keys(parsed.errors).length > 0) {
+          const error = new LocalFault({key: 'numericFields'});
+          change(workspace.id, item => ({...item, error}));
+          return;
+        }
+        mutate('repairingProfile', ticket => invoke<RecoveryMutation>('repair_profile', {context: ticket.context, id: ticket.profileId, values: parsed.values}));
+      },
       // Reset reaches the host only through the confirmed button; Cancel in the panel never gets here.
       reset: () => mutate('resettingProfile', ticket => invoke<RecoveryMutation>('reset_profile', {context: ticket.context, id: ticket.profileId, confirm: true})),
       retry: () => {
@@ -931,9 +935,9 @@ export default function App() {
     const facts = derived[workspace.id];
     const owns = starting?.workspaceId === workspace.id || (current.live && busy(current.view.state));
     const sourceIssue = workspace.sourceError ? workspace.sourceError.category === UNSUPPORTED_SOURCE ? t.unsupportedSource : t.unavailableSource : null;
-    const issue = workspace.error?.category ?? workspace.bound?.profilesError?.category
-      ?? workspace.bound?.target.readError?.category ?? workspace.bound?.target.issue?.fault.category ?? sourceIssue
-      ?? (workspace.recovery !== null && workspace.recovery.view.profiles.length > 0 ? t.repairRequired : null)
+    const issue = workspace.error?.category ?? (workspace.recovery?.view.binding_required ? t.bindingRequired : null)
+      ?? workspace.bound?.profilesError?.category ?? workspace.bound?.target.readError?.category ?? workspace.bound?.target.issue?.fault.category
+      ?? sourceIssue ?? (workspace.recovery !== null && workspace.recovery.view.profiles.length > 0 ? t.repairRequired : null)
       ?? (facts ? facts.numericErrors ? t.invalidFields : !facts.bound ? t.staleProfile : facts.descriptorError ? t.invalidDescriptor : null : null);
     const attention = issue !== null || needsAttention(current.view);
     const optionStatus: WorkspaceOption['status'] = owns ? {kind: 'busy', text: `${ui.phase(starting?.workspaceId === workspace.id ? 'preparing' : current.view.state)} · ${ui.operation(starting?.workspaceId === workspace.id ? starting.kind === 'check' ? 'environment_check' : 'run' : current.view.operation)}`}
@@ -1002,7 +1006,7 @@ export default function App() {
             snapshot={operation && operation.workspace?.workspace_id === selected.id ? operation.snapshot : null}
             locked={commandReason !== null || closing} active={active} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
             savedEnvironment={savedEnvironment} handlers={handlers(selected)}/>
-          : <GuidancePage workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
+          : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
             recovery={recoveryHandlers(selected)}/>)}
         {selected && selected.page === 'logs' && <LogsPage eyebrow={t.activity(workspaceLabel(selected, workspaces))} heading={t.logs} description={t.workspaceLogHelp}

@@ -105,7 +105,9 @@ fn failed_durable_bind_close_and_reopen_preserve_host_and_saved_authority() {
         .inspect(&fixture.numeric_package(), &bound_ref)
         .unwrap();
     assert_eq!(failed.kind, InspectionKind::BindingFailed);
-    assert!(failed.workspace.selection.is_none());
+    let selected = failed.workspace.selection.as_ref().expect("failed binding retains prior authority");
+    assert_eq!(selected.package_path, bound.package_path);
+    assert_eq!(selected.package.package_id, bound.package.package_id);
     assert_eq!(fs::read(&path).unwrap(), bound_bytes);
     let retained = failed.workspace.saved_package.as_ref().unwrap();
     assert_eq!(retained.package_id, bound.package.package_id);
@@ -121,7 +123,7 @@ fn failed_durable_bind_close_and_reopen_preserve_host_and_saved_authority() {
     assert!(
         application
             .validate(&failed_ref, json!({"priorities":["ocr"]}))
-            .is_err()
+            .is_ok()
     );
     fs::remove_file(&pending).unwrap();
     application.close_workspace(&failed_ref).unwrap();

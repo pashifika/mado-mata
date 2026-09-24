@@ -91,10 +91,14 @@ pub struct RecoverableProfile {
     pub issue: Fault,
 }
 
+/// `relocation` means the candidate names another directory than the saved reference and
+/// must pass the strict replacement checks; `binding_required` means the candidate is not
+/// durably bound and explicit binding retry applies. Neither implies the other.
 #[derive(Debug, Serialize)]
 pub struct RecoveryView {
     pub context: RecoveryRef,
     pub relocation: bool,
+    pub binding_required: bool,
     pub package_path: String,
     #[serde(serialize_with = "serialize_shared")]
     pub package: Arc<PackageInfo>,
@@ -431,8 +435,21 @@ impl Application {
         success: Option<(&str, &str)>,
         result: Result<T, Fault>,
     ) -> Result<T, Fault> {
-        match &result {
-            Ok(_) => {
+        self.record(workspace, action, success, result.as_ref().err());
+        result
+    }
+
+    /// Command record for a reported result: `error` is the refusal a command reports,
+    /// whether it returned `Err` or a typed outcome carrying that fault.
+    fn record(
+        &self,
+        workspace: Option<&WorkspaceRef>,
+        action: &str,
+        success: Option<(&str, &str)>,
+        error: Option<&Fault>,
+    ) {
+        match error {
+            None => {
                 if let Some((code, message)) = success {
                     self.logger.emit(
                         "Rust",
@@ -445,7 +462,7 @@ impl Application {
                     );
                 }
             }
-            Err(error) => {
+            Some(error) => {
                 let (level, code, message) =
                     if action == "save_target" && error.category == "TargetResolutionChanged" {
                         (
@@ -467,7 +484,6 @@ impl Application {
                 );
             }
         }
-        result
     }
 
     pub fn settings(&self) -> Result<Settings, Fault> {

@@ -26,6 +26,7 @@ pub(super) struct RecoveryContext {
     source_reference: Option<PackageReference>,
     selected_package_id: Option<String>,
     relocation: bool,
+    binding_required: bool,
     entries: Vec<Arc<RecoveryEntry>>,
     profiles_error: Option<Fault>,
     outcomes: Vec<ProfileRecoveryOutcome>,
@@ -59,6 +60,7 @@ impl RecoveryContext {
         RecoveryView {
             context: self.reference.clone(),
             relocation: self.relocation,
+            binding_required: self.binding_required,
             package_path: self.selected.path.to_string_lossy().into_owned(),
             package: self.selected.package.clone(),
             profiles: self
@@ -210,6 +212,7 @@ impl Application {
                 source_reference: None,
                 selected_package_id: None,
                 relocation: false,
+                binding_required: true,
                 entries: Vec::new(),
                 profiles_error: None,
                 outcomes: Vec::new(),
@@ -244,12 +247,28 @@ impl Application {
             };
             Ok(self.publish_inspection(workspace, previous, context, binding))
         })();
-        self.outcome(
+        self.reported(workspace, "inspect", result)
+    }
+
+    /// Inspection and binding retry succeed as commands even when the candidate was
+    /// not bound; the record follows the binding result, not the transport.
+    fn reported(
+        &self,
+        workspace: &WorkspaceRef,
+        action: &str,
+        result: Result<InspectionOutcome, Fault>,
+    ) -> Result<InspectionOutcome, Fault> {
+        let error = match &result {
+            Ok(outcome) => outcome.binding_error.as_ref(),
+            Err(error) => Some(error),
+        };
+        self.record(
             Some(workspace),
-            "inspect",
+            action,
             Some(("workspace.reinspected", "Workspace package inspected")),
-            result,
-        )
+            error,
+        );
+        result
     }
 
     fn publish_inspection(
@@ -270,15 +289,30 @@ impl Application {
             Err(_) => InspectionKind::BindingFailed,
         };
         workspace.workspace = context.reference.workspace.clone();
-        workspace.selected = None;
-        if let Ok(saved_package) = binding {
-            context.source_reference = saved_package.clone();
-            context.selected_package_id =
-                saved_package.as_ref().map(|saved| saved.package_id.clone());
-            workspace.saved_package = saved_package;
-            workspace.selected = Some(context.selected.clone());
+        context.binding_required = binding.is_err();
+        match binding {
+            Ok(saved_package) => {
+                context.source_reference = saved_package.clone();
+                context.selected_package_id =
+                    saved_package.as_ref().map(|saved| saved.package_id.clone());
+                // The saved reference now names the candidate directory.
+                context.relocation = false;
+                workspace.saved_package = saved_package;
+                workspace.selected = Some(context.selected.clone());
+                workspace.source_error = None;
+            }
+            // A recovery-only candidate is not runnable and supersedes the prior selection
+            // until it is bound or discarded.
+            Err(_) if kind == InspectionKind::RecoveryRequired => workspace.selected = None,
+            // A failed durable mutation grants the candidate nothing: the prior selection
+            // stays runnable under the new revision, and the saved reference keeps its
+            // own source fault; `binding_error` alone names this attempt's failure.
+            Err(_) => {
+                if let Some(selected) = &mut workspace.selected {
+                    selected.workspace = workspace.workspace.clone();
+                }
+            }
         }
-        workspace.source_error = binding_error.clone();
         let outcomes = context.outcomes.clone();
         workspace.recovery = (binding_error.is_some()
             || !context.entries.is_empty()
@@ -374,12 +408,12 @@ impl Application {
                 catalog: None,
                 refresh_error: None,
             };
-            let default_draft = reset.then(|| values.clone());
             let candidate = match desktop_options(&context.selected.inventory, values) {
                 Ok(candidate) => candidate,
                 Err(error) => {
                     response.issue = Some(error);
-                    response.draft = default_draft;
+                    response.draft =
+                        reset.then(|| top_level_defaults(&context.selected.inventory.schema));
                     response.recovery = Some(context.view());
                     return Ok(response);
                 }
@@ -392,11 +426,11 @@ impl Application {
             {
                 Ok(saved) => response.saved = Some(saved),
                 Err(error) => {
-                    if matches!(
-                        error.category.as_str(),
-                        "Profile" | "ProfileAuthority" | "StorageLimit"
-                    ) {
-                        response.draft = default_draft;
+                    // The store marks candidate validation at its existing boundary;
+                    // aggregate limits, conflicts, and I/O cannot be fixed by a default draft.
+                    if reset && error.context["stage"] == "profile_validation" {
+                        response.draft =
+                            Some(top_level_defaults(&context.selected.inventory.schema));
                     }
                     response.issue = Some(error);
                     response.recovery = Some(context.view());
@@ -435,16 +469,23 @@ impl Application {
             workspace.recovery = Some(Arc::new(updated));
             Ok(response)
         })();
-        self.outcome(
+        let action = if reset {
+            "reset_profile"
+        } else {
+            "repair_profile"
+        };
+        // A refused replacement returns a typed outcome; record what was saved or refused.
+        let error = match &result {
+            Ok(mutation) => mutation.issue.as_ref(),
+            Err(error) => Some(error),
+        };
+        self.record(
             Some(&reference.workspace),
-            if reset {
-                "reset_profile"
-            } else {
-                "repair_profile"
-            },
-            None,
-            result,
-        )
+            action,
+            Some(("profile.saved", "Profile saved")),
+            error,
+        );
+        result
     }
 
     pub fn retry_binding(&self, reference: &RecoveryRef) -> Result<InspectionOutcome, Fault> {
@@ -461,7 +502,9 @@ impl Application {
                 let store = lock(&self.store);
                 (|| {
                     context.check_source_reference(&store)?;
-                    if context.source_reference.is_some() {
+                    // Only a moved source must pass the strict replacement checks; an
+                    // in-place binding never requires unrelated profiles to be repaired.
+                    if context.relocation {
                         let profiles = store.profile_store(
                             &context.selected.internal_name,
                             &context.selected.inventory.package_id,
@@ -485,14 +528,13 @@ impl Application {
                     binding_error: Some(error),
                 });
             }
+            // Rejected profiles keep their repair authority under the bound selection.
             let mut context = (*context).clone();
             context.reference.workspace = revision;
             context.selected.workspace = context.reference.workspace.clone();
-            context.entries.clear();
-            context.profiles_error = None;
             Ok(self.publish_inspection(&reference.workspace, previous, context, binding))
         })();
-        self.outcome(Some(&reference.workspace), "retry_binding", None, result)
+        self.reported(&reference.workspace, "retry_binding", result)
     }
 
     pub fn discard_recovery(&self, reference: &RecoveryRef) -> Result<WorkspaceView, Fault> {

@@ -76,6 +76,7 @@
     "invalidFields": "Invalid fields",
     "staleProfile": "Stale profile",
     "repairRequired": "Profiles need repair",
+    "bindingRequired": "Source not bound",
     "invalidDescriptor": "Invalid replay descriptor",
     "unsupportedSource": "Unsupported saved package",
     "unavailableSource": "Saved package unavailable",
@@ -118,7 +119,7 @@
     "recoveryResetIncomplete": "Reset was not saved: the current defaults do not form a valid profile. The saved original is unchanged; complete the default-based draft below and save it.",
     "recoveryRequired": "Saved profiles need repair before this directory can be bound. It is a recovery candidate only: nothing runs from it and the previous source reference is kept.",
     "recoveryBound": "Candidate bound to this workspace. Recovered profiles are usable; Start will revalidate its identity and capture current values.",
-    "recoveryDiscarded": "Recovery context discarded. Completed profile writes stay saved; the previous source reference is kept. Inspect again to bind a source.",
+    "recoveryDiscarded": "Recovery context discarded. Completed profile writes stay saved; any previous source reference is kept. Inspect again to bind a source.",
     "inspectionOutcomes": "Package inspected · {saved} saved automatically, {pending} need repair or failed; see Profile recovery below. The profile draft was reset to schema defaults."
   },
   "validation": {
@@ -126,6 +127,7 @@
     "negativeZero": "Negative zero cannot round-trip through desktop JSON without losing its sign.",
     "safeInteger": "Enter an exact integer within the JavaScript safe integer range.",
     "exactNumber": "This integer cannot be represented exactly by the numeric editor.",
+    "storedText": "The saved value is text, not a number; replace it before saving. Nothing is converted for you.",
     "unsupportedProfile": "This saved profile is not supported by this desktop build.",
     "chooseProfile": "Choose a supported OCR profile.",
     "modelRoot": "Enter the model root directory.",
