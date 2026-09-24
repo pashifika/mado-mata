@@ -1,5 +1,8 @@
 //! Raw, bounded configuration capture. No typed document loading or package traversal.
-use crate::storage::{check_directory, checked_file, exists, filesystem_key, read_bytes};
+use crate::storage::{
+    MAX_PROFILE_BYTES, MAX_SETTINGS_BYTES, MAX_TAB_BYTES, check_directory, checked_file, exists,
+    filesystem_key, read_bytes,
+};
 use mado_runtime_comparison::model::Fault;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -15,7 +18,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
 pub const MAX_FILES: usize = 4096;
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
-const MAX_ENUMERATED: usize = 16_384;
+pub(crate) const MAX_ENUMERATED: usize = 16_384;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,9 +91,9 @@ pub(crate) enum Kind {
 impl Kind {
     pub(crate) fn maximum(self) -> usize {
         match self {
-            Self::Settings => 32 * 1024,
-            Self::Tab => 128 * 1024,
-            Self::Package | Self::LegacyProfile => 64 * 1024,
+            Self::Settings => MAX_SETTINGS_BYTES,
+            Self::Tab => MAX_TAB_BYTES,
+            Self::Package | Self::LegacyProfile => MAX_PROFILE_BYTES,
         }
     }
 }

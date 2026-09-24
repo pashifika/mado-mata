@@ -168,6 +168,11 @@ Logs, backups, package payloads, and unrecognized files stay in the old root.
 Imported legacy profiles still require the separate per-workspace import below;
 the historical package-location hint does not create or bind a Tab.
 
+Legacy-root import does not support symlinked destination ancestors and refuses
+them even where Initialize can use the same location. This environment is outside
+the supported import contract; the application does not rewrite links, repair
+the machine's directory layout, or silently choose a different destination.
+
 ## Frontend source layout
 
 TSX files under `apps/desktop/src/` are grouped by responsibility:
@@ -521,10 +526,18 @@ to bypass Recovery. Retry, Restore, and transaction recovery share idle and
 session-disposal requirements; incomplete log-writer shutdown requires Exit and
 relaunch before any reconstruction.
 
-When transaction cleanup is incomplete, Recovery identifies that outcome
-separately from failed Application reconstruction. Resolve the displayed cause
-and use the pending-restore controls in the committed direction; **Retry** is not
-offered until that transaction finishes.
+Recovery distinguishes incomplete restoration, cleanup failure and failed
+Application reconstruction. If installation and automatic rollback both fail,
+the current configuration may be partly replaced; neither generation is
+claimed to be intact. Resolve the displayed cause before continuing.
+
+While a restore remains pending, use the transaction controls in its committed
+direction; **Retry** is unavailable. An unreadable or unsupported completion
+marker does not establish either direction or verify the live configuration.
+Repair the cause without deleting the recovery evidence. If the completion
+marker was removed but the final directory sync failed, cleanup completion is
+unconfirmed although no transaction remains pending. Recovery then offers
+**Retry** after repair, not controls for a transaction that no longer exists.
 
 ## Save and check an OCR environment
 

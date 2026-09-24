@@ -2,11 +2,11 @@
 //! enter the write set; an unresolved journal is an admission barrier owned by
 //! bootstrap, not an invitation to load a partially installed tree.
 use crate::backup::{MAX_MANIFEST, Manifest};
-use crate::configuration::{self, Capture, Kind, capture, io_fault, path_kind};
+use crate::configuration::{self, Capture, Kind, MAX_ENUMERATED, capture, io_fault, path_kind};
 use crate::storage::{
-    self, Profile, Settings, TabRecord, check_directory, checked_file, decode, encode, exists,
-    filesystem_key, read_bytes, validate_package_id, validate_profile, validate_settings,
-    validate_tab,
+    self, MAX_OPEN_TABS, MAX_PROFILES, MAX_TABS, MAX_TOTAL_BYTES, Profile, Settings, TabRecord,
+    check_directory, checked_file, decode, encode, exists, filesystem_key, read_bytes,
+    validate_package_id, validate_profile, validate_settings, validate_tab,
 };
 use mado_runtime_comparison::model::Fault;
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,7 @@ pub fn validate(capture: &Capture) -> Result<(), Fault> {
             tabs.insert(tab.internal_name.clone(), tab);
         }
     }
-    if tabs.len() > 64 || open > 8 {
+    if tabs.len() > MAX_TABS || open > MAX_OPEN_TABS {
         return Err(invalid("snapshot exceeds saved or open Tab limits"));
     }
     let mut budgets: BTreeMap<String, (usize, usize)> = BTreeMap::new();
@@ -98,7 +98,7 @@ fn budget(
     let value = budgets.entry(owner.to_owned()).or_default();
     value.0 += 1;
     value.1 += bytes;
-    if value.0 > 64 || value.1 > 1024 * 1024 {
+    if value.0 > MAX_PROFILES || value.1 > MAX_TOTAL_BYTES {
         return Err(invalid("snapshot exceeds its profile owner budget"));
     }
     Ok(())
@@ -140,6 +140,7 @@ enum Point {
     AfterCleanupCommit,
     CleanupRemoved { index: usize },
     CleanupDirectoryRemoved,
+    CompletionMarkerRemoved,
 }
 
 /// The receipt's session authority and idle/discard admission are shell-owned.
@@ -214,7 +215,7 @@ fn install_with(
         return Err(fault);
     }
     match apply(root, &before, &new, false, hook) {
-        Ok(()) => finish(root, false, hook),
+        Ok(()) => finish(root, false, Some(false), hook),
         Err(fault) => rollback_failure(root, &before, &new, fault, hook),
     }
 }
@@ -243,11 +244,19 @@ fn load_capture(directory: &Path, prefix: &str, manifest: &Manifest) -> Result<C
 /// reconciled with preimages; committed cleanup verifies its target manifest even
 /// after preimages are gone.
 pub fn recover(root: &Path, rollback: bool) -> Result<(), Fault> {
+    recover_with(root, rollback, &mut |_| Ok(()))
+}
+
+fn recover_with(
+    root: &Path,
+    rollback: bool,
+    hook: &mut impl FnMut(Point) -> Result<(), Fault>,
+) -> Result<(), Fault> {
     if !pending(root)? {
         return Err(invalid("there is no pending restore to recover"));
     }
     if exists(&root.join(COMPLETION))? {
-        return finish(root, rollback, &mut |_| Ok(()));
+        return finish(root, rollback, None, hook);
     }
     let directory = root.join(JOURNAL);
     check_directory(&directory)?;
@@ -262,12 +271,11 @@ pub fn recover(root: &Path, rollback: bool) -> Result<(), Fault> {
     for path in before.files.keys().chain(after.files.keys()) {
         configuration::check_aliases(path, &mut aliases)?;
     }
-    let mut hook = |_| Ok(());
-    apply(root, &before, &after, rollback, &mut hook).map_err(|mut fault| {
+    apply(root, &before, &after, rollback, hook).map_err(|mut fault| {
         fault.context["pending_restore"] = json!(true);
         fault
     })?;
-    finish(root, rollback, &mut hook)
+    finish(root, rollback, Some(rollback), hook)
 }
 
 fn rollback_failure(
@@ -282,7 +290,7 @@ fn rollback_failure(
     match rollback {
         Ok(()) => {
             original.context["rolled_back"] = json!(true);
-            if let Err(cleanup) = finish(root, true, hook) {
+            if let Err(cleanup) = finish(root, true, Some(true), hook) {
                 original.context["rollback_cleanup"] = json!(cleanup);
             }
         }
@@ -389,7 +397,7 @@ fn ensure_parents(root: &Path, relative: &str) -> Result<(), Fault> {
         let mut count = 0;
         for entry in fs::read_dir(&current).map_err(|e| io_fault("inspect restore parent", e))? {
             count += 1;
-            if count > 16_384 {
+            if count > MAX_ENUMERATED {
                 return Err(invalid("restore parent enumeration exceeds its bound"));
             }
             let entry = entry.map_err(|e| io_fault("read restore parent entry", e))?;
@@ -446,7 +454,7 @@ fn remove_emptied_containers(
                 .map_err(|error| io_fault("enumerate retiring Tab containers", error))?
             {
                 entries_seen += 1;
-                if entries_seen > 16_384 {
+                if entries_seen > MAX_ENUMERATED {
                     return Err(invalid("retiring Tab enumeration exceeds its bound"));
                 }
                 let entry = entry.map_err(|error| io_fault("read retiring Tab entry", error))?;
@@ -490,19 +498,19 @@ fn remove_empty_container(directory: &Path) -> Result<(), Fault> {
 fn finish(
     root: &Path,
     rollback: bool,
+    mut committed_rollback: Option<bool>,
     hook: &mut impl FnMut(Point) -> Result<(), Fault>,
 ) -> Result<(), Fault> {
     let directory = root.join(JOURNAL);
     let marker = root.join(COMPLETION);
-    let mut committed_rollback = rollback;
     let result = (|| {
         hook(Point::BeforeCleanup)?;
         let completion = if exists(&marker)? {
             let completion: Completion = decode(&read_bytes(&marker, MAX_JOURNAL)?)?;
-            committed_rollback = completion.rollback;
             if completion.version != 1 {
                 return Err(invalid("unsupported restore completion version"));
             }
+            committed_rollback = Some(completion.rollback);
             if completion.rollback != rollback {
                 return Err(invalid(
                     "configuration is already committed; resume its cleanup in the original completion or rollback direction",
@@ -550,11 +558,12 @@ fn finish(
         configuration::sync_directory(root)?;
         verify_completion(root, &completion.target)?;
         fs::remove_file(&marker).map_err(|e| io_fault("remove completed restore marker", e))?;
+        hook(Point::CompletionMarkerRemoved)?;
         configuration::sync_directory(root)
     })();
     result.map_err(|mut fault| {
-        fault.context["configuration_installed"] = json!(!committed_rollback);
-        fault.context["rolled_back"] = json!(committed_rollback);
+        fault.context["configuration_installed"] = json!(committed_rollback == Some(false));
+        fault.context["rolled_back"] = json!(committed_rollback == Some(true));
         fault.context["cleanup_incomplete"] = json!(true);
         fault.context["pending_restore"] = json!(pending(root).unwrap_or(true));
         fault.context["retained_staging"] = json!(directory);
@@ -626,11 +635,48 @@ fn invalid(message: &str) -> Fault {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::configuration::tests::Root;
     use crate::storage::{PackageReference, PackageSource, Store};
     use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    pub(crate) fn interrupt_install(root: &Path, new: Capture, expected_generation: &str) {
+        let mut hook = |at| {
+            if at
+                == (Point::Displaced {
+                    index: 0,
+                    rollback: false,
+                })
+            {
+                panic!("simulated process exit after displacement");
+            }
+            Ok(())
+        };
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| install_with(
+                root,
+                new,
+                Some(expected_generation),
+                &mut hook
+            )))
+            .is_err()
+        );
+        assert!(pending(root).unwrap());
+    }
+
+    pub(crate) fn fail_recovery_final_sync(root: &Path, rollback: bool) -> Result<(), Fault> {
+        recover_with(root, rollback, &mut |at| {
+            if at == Point::CompletionMarkerRemoved {
+                Err(io_fault(
+                    "sync configuration directory",
+                    io::Error::other("injected final sync failure"),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
 
     fn settings(limit: usize) -> Vec<u8> {
         serde_json::to_vec(&Settings {
@@ -953,6 +999,52 @@ mod tests {
         fs::write(root.0.join("settings.json"), settings(200)).unwrap();
         recover(&root.0, false).unwrap();
         assert!(!pending(&root.0).unwrap());
+    }
+
+    #[test]
+    fn unreadable_completion_never_claims_the_requested_direction() {
+        let (root, old) = fixture();
+        let new = replacement(200);
+        let mut hook = |at| {
+            if at == Point::AfterCleanupCommit {
+                panic!("exit after cleanup commitment");
+            }
+            Ok(())
+        };
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| install_with(
+                &root.0,
+                new.clone(),
+                Some(&old.generation),
+                &mut hook
+            )))
+            .is_err()
+        );
+        let committed = fs::read(root.0.join(COMPLETION)).unwrap();
+        let mut unsupported: serde_json::Value = serde_json::from_slice(&committed).unwrap();
+        unsupported["version"] = json!(2);
+        for marker in [b"{".to_vec(), serde_json::to_vec(&unsupported).unwrap()] {
+            fs::write(root.0.join(COMPLETION), &marker).unwrap();
+            for rollback in [false, true] {
+                let fault = recover(&root.0, rollback).unwrap_err();
+                assert_eq!(fault.context["configuration_installed"], false);
+                assert_eq!(fault.context["rolled_back"], false);
+                assert_eq!(fault.context["cleanup_incomplete"], true);
+                assert_eq!(fault.context["pending_restore"], true);
+                assert!(pending(&root.0).unwrap());
+                assert_eq!(capture(&root.0).unwrap(), new);
+                assert_eq!(fs::read(root.0.join(COMPLETION)).unwrap(), marker);
+                assert_eq!(
+                    fs::read(root.0.join(JOURNAL).join("old-0")).unwrap(),
+                    settings(100)
+                );
+            }
+        }
+        fs::write(root.0.join(COMPLETION), committed).unwrap();
+        recover(&root.0, false).unwrap();
+        assert!(!pending(&root.0).unwrap());
+        assert_eq!(capture(&root.0).unwrap(), new);
+        assert_unrelated(&root);
     }
 
     #[test]

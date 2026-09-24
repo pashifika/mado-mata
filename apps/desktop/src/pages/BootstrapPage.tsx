@@ -60,9 +60,10 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
   const retryBlock = reconstructionBlock(status, admission, ui.restore.retryDiscard);
   const recoverBlock = reconstructionBlock(status, admission, ui.restore.recoverDiscard);
   const restore = restoreBlock(status, ui.restore, admission);
-  // A Recovery reached after the configuration set already changed says so instead of the generic "nothing replaced" intro.
-  const outcome = restoreOutcome(status.fault);
-  const recoveryIntro = outcome === 'cleanupIncomplete' ? b.cleanupIncomplete : outcome === 'installed' ? b.installedNotReconstructed : outcome === 'rolledBack' ? b.rolledBackNotReconstructed : inShell ? b.laterFault : b.recoveryIntro;
+  // A Recovery reached through a restore transaction says what the configuration set now holds instead of the generic
+  // "nothing replaced" intro; cleanup guidance follows the host's pending flag, like the panels below.
+  const outcome = restoreOutcome(status);
+  const recoveryIntro = outcome !== null ? b.recoveryOutcome[outcome] : inShell ? b.laterFault : b.recoveryIntro;
   const receiptGeneration = ui.receiptGeneration;
   const languageOptions = [{value: 'en', label: t.settings.languageNames.en}, {value: 'ja', label: t.settings.languageNames.ja}];
   const asLocale = (value: string, apply: (locale: Locale) => void) => {if (value === 'en' || value === 'ja') apply(value);};

@@ -1,8 +1,8 @@
 use crate::configuration::{self, Capture};
 use crate::logging::{LogBatch, LogStatus, Logger};
 use crate::storage::{
-    EditableSettings, LegacyImport, PackageReference, PackageSource, Profile, ProfileStore,
-    Settings, Store, TabRecord,
+    EditableSettings, LegacyImport, MAX_OPEN_TABS, PackageReference, PackageSource, Profile,
+    ProfileStore, Settings, Store, TabRecord,
 };
 use mado_runtime_comparison::desktop::{DesktopController, PackageInfo, StartRequest};
 use mado_runtime_comparison::environment::OcrEnvironment;
@@ -21,7 +21,6 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const MAX_WORKSPACES: usize = 8;
 const MAX_SESSION_COUNTER: u64 = 9_007_199_254_740_991;
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
@@ -181,7 +180,7 @@ impl Workspaces {
     }
 
     fn next_workspace(&self) -> Result<WorkspaceRef, Fault> {
-        if self.open.len() >= MAX_WORKSPACES || self.next_id > MAX_SESSION_COUNTER {
+        if self.open.len() >= MAX_OPEN_TABS || self.next_id > MAX_SESSION_COUNTER {
             return Err(Fault::new(
                 "WorkspaceLimit",
                 "Workspace session or open limit reached",

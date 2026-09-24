@@ -2,7 +2,9 @@
 use crate::configuration::{
     self, Capture, Kind, MAX_BYTES, MAX_FILES, digest, io_fault, path_kind,
 };
-use crate::storage::{decode, encode, filesystem_key, private_directory, read_bytes};
+use crate::storage::{
+    MAX_PATH_BYTES, decode, encode, filesystem_key, private_directory, read_bytes,
+};
 use mado_runtime_comparison::model::Fault;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -73,7 +75,7 @@ fn bounded_manifest_entries<'de, D: serde::Deserializer<'de>>(
     impl<'de> serde::de::Visitor<'de> for Entries {
         type Value = Vec<Entry>;
         fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("at most 4096 configuration entries")
+            write!(formatter, "at most {MAX_FILES} configuration entries")
         }
         fn visit_seq<A: serde::de::SeqAccess<'de>>(
             self,
@@ -265,7 +267,7 @@ fn write_at_with(
     let default = root.join("backups");
     let directory = destination.unwrap_or(&default);
     if destination.is_some() {
-        if !directory.is_absolute() || directory.as_os_str().len() > 4096 {
+        if !directory.is_absolute() || directory.as_os_str().len() > MAX_PATH_BYTES {
             return Err(invalid(
                 "backup destination must be an absolute path of at most 4096 bytes",
             ));

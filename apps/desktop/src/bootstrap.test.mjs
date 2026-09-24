@@ -131,21 +131,50 @@ test('settled reconstruction consumes every action consent without erasing the s
   assert.equal(ui.receiptGeneration,'g1');
 });
 
-test('a recovery fault reports an installed or rolled-back configuration only from the host flags',()=>{
-  const cause={category:'Application',message:'log sink unavailable'};
-  assert.equal(restoreOutcome(null),null);
-  assert.equal(restoreOutcome({...cause,context:null}),null);
-  assert.equal(restoreOutcome({...cause,context:{stage:'application'}}),null);
-  assert.equal(restoreOutcome({...cause,context:{configuration_installed:true}}),'installed');
-  assert.equal(restoreOutcome({...cause,context:{configuration_installed:true,rolled_back:false}}),'installed');
-  assert.equal(restoreOutcome({...cause,context:{configuration_installed:true,rolled_back:true}}),'rolledBack');
-  assert.equal(restoreOutcome({...cause,context:{configuration_installed:true,rolled_back:false,cleanup_incomplete:true}}),'cleanupIncomplete');
-  assert.equal(restoreOutcome({...cause,context:{configuration_installed:false,rolled_back:true,cleanup_incomplete:true}}),'cleanupIncomplete');
-  // A completed rollback preserves the original set and needs no changed-configuration notice.
-  assert.equal(restoreOutcome({...cause,context:{configuration_installed:false,rolled_back:true}}),null);
-  assert.equal(restoreOutcome({...cause,context:{configuration_installed:'true'}}),null);
-  assert.equal(restoreOutcome({...cause,context:['configuration_installed']}),null);
-});
+// Fault shapes as the host emits them: restore::finish annotates its own cleanup fault, an automatic rollback nests the
+// cleanup or rollback fault it hit, and the bootstrap annotates a failed reconstruction after a verified transaction.
+const installFault={category:'Storage',message:'install staged configuration: permission denied',context:null};
+const reconstructionFault={category:'Application',message:'log sink unavailable',context:null};
+const failed=(context,cause=installFault)=>({...cause,context});
+function finishFault(rollback,pending){
+  return failed({configuration_installed:!rollback,rolled_back:rollback,cleanup_incomplete:true,pending_restore:pending,
+    retained_staging:'/data/.restore-journal',completion_marker:'/data/.restore-completion'},{category:'Storage',message:'remove completed restore marker: permission denied'});
+}
+function recovering(fault,pending,stage='restore'){
+  return status({state:'recovery',stage,fault,application_available:false,pending_restore:pending});
+}
+const rollbackFailure={rollback_failure:failed(null,{category:'Storage',message:'retain displaced configuration: disk full'}),pending_restore:true};
+
+for (const {scenario,current,outcome} of [
+  {scenario:'an unrelated settings fault',current:recovery,outcome:null},
+  {scenario:'a refused installation that only retained its unpublished staging',current:recovering(failed({staging_cleanup:{path:'/data/.restore-stage-1',fault:failed(null)}}),false),outcome:null},
+  {scenario:'an interrupted restore found at startup',current:recovering({category:'RestorePending',message:'An interrupted restore must be completed or rolled back',context:null},true),outcome:'unfinished'},
+  {scenario:'a recovery that failed before cleanup',current:recovering(failed({pending_restore:true}),true),outcome:'unfinished'},
+  {scenario:'a recovery failure reported unresolved after the host no longer reports it',current:recovering(failed({pending_restore:true}),false),outcome:'unfinished'},
+  {scenario:'a failed installation whose automatic rollback also failed',current:recovering(failed(rollbackFailure),true),outcome:'rollbackFailed'},
+  {scenario:'a double failure even without a host pending flag',current:recovering(failed(rollbackFailure),false),outcome:'rollbackFailed'},
+  {scenario:'a failed installation rolled back automatically',current:recovering(failed({rolled_back:true}),false),outcome:'rolledBackAutomatically'},
+  {scenario:'installation cleanup incomplete while the restore is pending',current:recovering(finishFault(false,true),true),outcome:'installedCleanupPending'},
+  {scenario:'installation cleanup error after the transaction is gone',current:recovering(finishFault(false,false),false),outcome:'installedCleanupUnconfirmed'},
+  {scenario:'recovery rollback cleanup incomplete while the restore is pending',current:recovering(finishFault(true,true),true),outcome:'rolledBackCleanupPending'},
+  {scenario:'recovery rollback cleanup error after the transaction is gone',current:recovering(finishFault(true,false),false),outcome:'rolledBackCleanupUnconfirmed'},
+  {scenario:'an automatic rollback whose nested cleanup is incomplete',current:recovering(failed({rolled_back:true,rollback_cleanup:finishFault(true,true)}),true),outcome:'rolledBackCleanupPending'},
+  {scenario:'an automatic rollback whose nested cleanup erred after the transaction is gone',current:recovering(failed({rolled_back:true,rollback_cleanup:finishFault(true,false)}),false),outcome:'rolledBackCleanupUnconfirmed'},
+  {scenario:'the host pending flag outranks a cleanup context that reported none',current:recovering(finishFault(false,false),true),outcome:'installedCleanupPending'},
+  {scenario:'the host pending flag outranks a cleanup context that reported one',current:recovering(finishFault(false,true),false),outcome:'installedCleanupUnconfirmed'},
+  {scenario:'an installed restore whose reconstruction failed',current:recovering(failed({configuration_installed:true},reconstructionFault),false,'application'),outcome:'installedNotReconstructed'},
+  {scenario:'a completed recovery whose reconstruction failed',current:recovering(failed({configuration_installed:true,rolled_back:false},reconstructionFault),false,'application'),outcome:'installedNotReconstructed'},
+  {scenario:'a rolled-back recovery whose reconstruction failed',current:recovering(failed({configuration_installed:true,rolled_back:true},reconstructionFault),false,'application'),outcome:'rolledBackNotReconstructed'},
+  {scenario:'a pending restore outranks a reconstruction annotation',current:recovering(failed({configuration_installed:true},reconstructionFault),true,'application'),outcome:'unfinished'},
+  {scenario:'a non-boolean installation flag',current:recovering(failed({configuration_installed:'true'},reconstructionFault),false,'application'),outcome:null},
+  {scenario:'an array context',current:recovering(failed(['configuration_installed'],reconstructionFault),false,'application'),outcome:null},
+  {scenario:'a cleanup flag without a verified direction',current:recovering(failed({cleanup_incomplete:true}),false),outcome:'unfinished'},
+  {scenario:'a nested cleanup fault with a malformed context',current:recovering(failed({rolled_back:true,rollback_cleanup:failed(['cleanup_incomplete'])}),false),outcome:'unfinished'},
+]) {
+  test(`restore outcome: ${scenario}`,()=>{
+    assert.equal(restoreOutcome(current),outcome);
+  });
+}
 
 test('a constructing action waits for the poll in flight, refuses new polls until it settles, and drops nothing',async()=>{
   const gate=new PollGate();

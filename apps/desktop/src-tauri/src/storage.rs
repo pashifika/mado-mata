@@ -1,4 +1,4 @@
-use crate::configuration::publish_no_replace;
+use crate::configuration::{MAX_BYTES, MAX_ENUMERATED, MAX_FILES, publish_no_replace};
 use mado_runtime_comparison::environment::OcrEnvironment;
 use mado_runtime_comparison::host::resolve_options;
 use mado_runtime_comparison::inventory::Inventory;
@@ -17,21 +17,17 @@ use unicode_normalization::UnicodeNormalization;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
 const VERSION: u32 = 1;
-const MAX_PROFILES: usize = 64;
-const MAX_PROFILE_BYTES: usize = 64 * 1024;
-const MAX_TOTAL_BYTES: usize = 1024 * 1024;
-const MAX_DIRECTORY_ENTRIES: usize = 128;
-const MAX_SETTINGS_BYTES: usize = 32 * 1024;
-const MAX_TAB_BYTES: usize = 128 * 1024;
-const MAX_TABS: usize = 64;
-const MAX_OPEN_TABS: usize = 8;
+pub(crate) const MAX_PROFILES: usize = 64;
+pub(crate) const MAX_PROFILE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_TOTAL_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_DIRECTORY_ENTRIES: usize = 128;
+pub(crate) const MAX_SETTINGS_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_TAB_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_TABS: usize = 64;
+pub(crate) const MAX_OPEN_TABS: usize = 8;
 const MAX_PACKAGES: usize = 16;
-const MAX_MANAGED_FILES: usize = 4096;
-const MAX_MANAGED_BYTES: usize = 16 * 1024 * 1024;
-// Matches the snapshot enumeration bound; a write budget never walks more entries than a capture.
-const MAX_MANAGED_ENTRIES: usize = 16_384;
 const MAX_NAME_BYTES: usize = 128;
-const MAX_PATH_BYTES: usize = 4096;
+pub(crate) const MAX_PATH_BYTES: usize = 4096;
 const MAX_VALUE_NODES: usize = 8192;
 const MAX_VALUE_DEPTH: usize = 32;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -1039,7 +1035,7 @@ fn check_budget(root: &Path, relative: &str, size: usize) -> Result<(), Fault> {
     budget.measure(root)?;
     let files = budget.files + 1;
     let bytes = budget.bytes.saturating_add(size as u64);
-    if files > MAX_MANAGED_FILES || bytes > MAX_MANAGED_BYTES as u64 {
+    if files > MAX_FILES || bytes > MAX_BYTES as u64 {
         return Err(limit("managed configuration exceeds 4096 files or 16 MiB")
             .with_context(json!({"path": relative, "files": files, "bytes": bytes})));
     }
@@ -1124,7 +1120,7 @@ impl Budget<'_> {
         let mut entries = Vec::new();
         for entry in listing {
             self.enumerated += 1;
-            if self.enumerated > MAX_MANAGED_ENTRIES {
+            if self.enumerated > MAX_ENUMERATED {
                 return Err(measure_fault(
                     limit("managed configuration enumeration exceeds its bound"),
                     relative,

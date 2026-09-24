@@ -1,6 +1,6 @@
 import type {Locale} from './i18n.ts';
-import {DEFAULT_NOTIFICATIONS} from './state.ts';
-import type {BootstrapStatus, EditableSettings, Fault, SnapshotReceipt} from './types.ts';
+import {DEFAULT_NOTIFICATIONS, record} from './state.ts';
+import type {BootstrapStatus, EditableSettings, Fault, Json, SnapshotReceipt} from './types.ts';
 
 export type BootstrapAction = 'initializing' | 'retrying' | 'importingRoot' | 'restoring' | 'recovering' | 'refreshingStatus';
 
@@ -95,18 +95,43 @@ export function reconstructed(status:BootstrapStatus, current:readonly {id:strin
   return !catalog.open.some(view => current.some(workspace => workspace.id === view.workspace_id));
 }
 
-export type RestoreOutcome = 'installed' | 'rolledBack' | 'cleanupIncomplete';
+export type RestoreOutcome =
+  | 'unfinished' | 'rollbackFailed' | 'rolledBackAutomatically'
+  | 'installedNotReconstructed' | 'rolledBackNotReconstructed'
+  | 'installedCleanupPending' | 'rolledBackCleanupPending'
+  | 'installedCleanupUnconfirmed' | 'rolledBackCleanupUnconfirmed';
 
-// A changed configuration set and incomplete transaction cleanup have different recovery actions.
-// `configuration_installed` means the restored or completed set is in place, `rolled_back` that the interrupted
-// restore was reverted first. Cleanup failure precedes reconstruction and requires transaction recovery, not Retry.
-// Only the host's boolean flags count; a missing or non-object context reports nothing.
-export function restoreOutcome(fault:Fault|null):RestoreOutcome|null {
-  const context = fault?.context;
-  if (context === undefined || context === null || typeof context !== 'object' || Array.isArray(context)) return null;
-  if (context.cleanup_incomplete === true) return 'cleanupIncomplete';
-  if (context.configuration_installed !== true) return null;
-  return context.rolled_back === true ? 'rolledBack' : 'installed';
+type Direction = 'installed' | 'rolledBack';
+
+// The generation a transaction verified before its cleanup: `rolled_back` refines `configuration_installed`.
+function direction(context:Record<string,Json>):Direction|null {
+  if (context.rolled_back === true) return 'rolledBack';
+  return context.configuration_installed === true ? 'installed' : null;
+}
+
+// Cleanup of the requested direction reports at the top level; cleanup after an automatic rollback nests its own
+// fault under `rollback_cleanup`.
+function cleanupDirection(context:Record<string,Json>):Direction|null {
+  if (context.cleanup_incomplete === true) return direction(context);
+  const nested = record(record(context.rollback_cleanup).context);
+  return nested.cleanup_incomplete === true ? direction(nested) : null;
+}
+
+// Recovery reached through a restore says what the managed configuration set now holds. The host's `pending_restore`
+// alone decides whether cleanup must still be finished with the recovery controls or Retry is offered. A replacement
+// without a verified generation (failed automatic rollback, interrupted or failed recovery, or an unrecognized
+// transaction diagnostic) never reads as untouched data. Only boolean flags select a verified outcome; a nested fault
+// counts by presence. No transaction signal reports nothing.
+export function restoreOutcome(status:BootstrapStatus):RestoreOutcome|null {
+  const context = record(status.fault?.context);
+  const cleanup = cleanupDirection(context);
+  if (cleanup === 'installed') return status.pending_restore ? 'installedCleanupPending' : 'installedCleanupUnconfirmed';
+  if (cleanup === 'rolledBack') return status.pending_restore ? 'rolledBackCleanupPending' : 'rolledBackCleanupUnconfirmed';
+  if (context.rollback_failure !== undefined) return 'rollbackFailed';
+  if (status.pending_restore || context.pending_restore === true || context.cleanup_incomplete === true
+    || context.rollback_cleanup !== undefined) return 'unfinished';
+  if (context.configuration_installed === true) return context.rolled_back === true ? 'rolledBackNotReconstructed' : 'installedNotReconstructed';
+  return context.rolled_back === true ? 'rolledBackAutomatically' : null;
 }
 
 // Serializes polling against session reconstruction. A constructing action holds the gate synchronously, so no new

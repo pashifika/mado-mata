@@ -57,6 +57,10 @@ pub struct Bootstrap {
     actions: Mutex<()>,
     state: Mutex<State>,
     closing: AtomicBool,
+    #[cfg(test)]
+    make_application: fn(PathBuf, PathBuf, PathBuf) -> Result<Arc<Application>, Fault>,
+    #[cfg(test)]
+    recover_configuration: fn(&Path, bool) -> Result<(), Fault>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -99,6 +103,10 @@ impl Bootstrap {
             engine,
             actions: Mutex::new(()),
             closing: AtomicBool::new(false),
+            #[cfg(test)]
+            make_application: Application::new,
+            #[cfg(test)]
+            recover_configuration: restore::recover,
             state: Mutex::new(State {
                 phase: Phase::Loading,
                 stage: "loading".into(),
@@ -284,7 +292,11 @@ impl Bootstrap {
         if self.closing.load(Ordering::Acquire) {
             return;
         }
-        match Application::new(root.clone(), self.controlled.clone(), self.engine.clone()) {
+        #[cfg(not(test))]
+        let make_application = Application::new;
+        #[cfg(test)]
+        let make_application = self.make_application;
+        match make_application(root.clone(), self.controlled.clone(), self.engine.clone()) {
             Ok(application) => {
                 if self.closing.load(Ordering::Acquire) {
                     let _ = application.shutdown();
@@ -542,7 +554,11 @@ impl Bootstrap {
             ));
         }
         self.retire(discard)?;
-        match restore::recover(root, rollback) {
+        #[cfg(not(test))]
+        let recover_configuration = restore::recover;
+        #[cfg(test)]
+        let recover_configuration = self.recover_configuration;
+        match recover_configuration(root, rollback) {
             Ok(()) => {
                 lock(&self.state).receipt = None;
                 self.load();
@@ -552,7 +568,7 @@ impl Bootstrap {
                 }
             }
             Err(error) => {
-                lock(&self.state).pending_restore = true;
+                lock(&self.state).pending_restore = restore::pending(root).unwrap_or(true);
                 self.fail("restore", error);
             }
         }
@@ -586,7 +602,7 @@ fn legacy_files(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, Fault> {
         ));
     }
     let mut files = BTreeMap::new();
-    let bytes = storage::read_bytes(&root.join("settings.json"), 32 * 1024)?;
+    let bytes = storage::read_bytes(&root.join("settings.json"), storage::MAX_SETTINGS_BYTES)?;
     storage::validate_settings(&storage::decode::<Settings>(&bytes)?)?;
     files.insert("settings.json".into(), bytes);
     let profiles = root.join("profiles");
@@ -598,7 +614,7 @@ fn legacy_files(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, Fault> {
     let entries =
         fs::read_dir(&profiles).map_err(|error| Fault::new("LegacyImport", error.to_string()))?;
     for (index, entry) in entries.enumerate() {
-        if index >= 128 {
+        if index >= storage::MAX_DIRECTORY_ENTRIES {
             return Err(Fault::new(
                 "StorageLimit",
                 "Historical profile directory has too many entries",
@@ -623,13 +639,13 @@ fn legacy_files(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, Fault> {
             continue;
         };
         storage::validate_id(id)?;
-        if files.len() > 64 {
+        if files.len() > storage::MAX_PROFILES {
             return Err(Fault::new(
                 "StorageLimit",
                 "Historical profile count exceeds 64",
             ));
         }
-        let bytes = storage::read_bytes(&entry.path(), 64 * 1024)?;
+        let bytes = storage::read_bytes(&entry.path(), storage::MAX_PROFILE_BYTES)?;
         let profile: Profile = storage::decode(&bytes)?;
         storage::validate_profile(&profile)?;
         if profile.id != id {
@@ -639,7 +655,7 @@ fn legacy_files(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, Fault> {
             ));
         }
         total += bytes.len();
-        if total > 1024 * 1024 {
+        if total > storage::MAX_TOTAL_BYTES {
             return Err(Fault::new(
                 "StorageLimit",
                 "Historical profiles exceed 1 MiB",
@@ -788,6 +804,40 @@ mod tests {
     fn put(path: &Path, bytes: &[u8]) {
         storage::private_directory(path.parent().unwrap()).unwrap();
         storage::write_atomic(path, bytes, |from, to| fs::rename(from, to)).unwrap();
+    }
+
+    fn restore_fixture(home: &Home) -> (Bootstrap, SnapshotReceipt, SnapshotReceipt) {
+        let source = home.bootstrap(home.0.join("source"));
+        source
+            .initialize(preferences(Locale::Japanese), false)
+            .unwrap();
+        source
+            .application()
+            .unwrap()
+            .create_workspace("Restored", "Restored")
+            .unwrap();
+        let incoming = source.snapshot(Some(&home.0.join("incoming"))).unwrap();
+        source.shutdown().unwrap();
+
+        let bootstrap = home.bootstrap(home.0.join("selected"));
+        bootstrap
+            .initialize(preferences(Locale::English), false)
+            .unwrap();
+        bootstrap
+            .application()
+            .unwrap()
+            .create_workspace("Original", "Original")
+            .unwrap();
+        let preimage = bootstrap.snapshot(Some(&home.0.join("preimage"))).unwrap();
+        (bootstrap, incoming, preimage)
+    }
+
+    fn construction_fault() -> Fault {
+        Fault::new(
+            "LoggingInitialization",
+            "injected application constructor failure",
+        )
+        .with_context(json!({"operation": "start log writer"}))
     }
 
     #[test]
@@ -1042,6 +1092,193 @@ mod tests {
         assert_eq!(restored.settings.unwrap().locale, Locale::English);
         assert!(Path::new(&current.path).exists());
         bootstrap.shutdown().unwrap();
+    }
+
+    #[test]
+    fn recovery_final_sync_failure_exposes_retry_without_a_phantom_pending_restore() {
+        let home = Home::new();
+        let (mut bootstrap, incoming, preimage) = restore_fixture(&home);
+        let root = home.0.join("selected");
+        let installed = backup::read(Path::new(&incoming.path)).unwrap();
+        bootstrap.retire(true).unwrap();
+        restore::tests::interrupt_install(&root, installed.clone(), &preimage.generation);
+        let interrupted = bootstrap.retry(false).unwrap();
+        assert!(matches!(interrupted.state, Phase::Recovery));
+        assert!(interrupted.pending_restore);
+
+        bootstrap.recover_configuration = restore::tests::fail_recovery_final_sync;
+        let failed = bootstrap.recover_restore(false, true, false).unwrap();
+        assert!(matches!(failed.state, Phase::Recovery));
+        assert_eq!(failed.stage, "restore");
+        assert!(!failed.application_available);
+        assert!(failed.settings.is_none());
+        assert!(!failed.pending_restore);
+        assert!(!restore::pending(&root).unwrap());
+        assert_eq!(configuration::capture(&root).unwrap(), installed);
+        let fault = failed.fault.as_ref().unwrap();
+        let original = configuration::io_fault(
+            "sync configuration directory",
+            io::Error::other("injected final sync failure"),
+        );
+        assert_eq!(fault.category, original.category);
+        assert_eq!(fault.message, original.message);
+        for (key, value) in original.context.as_object().unwrap() {
+            assert_eq!(&fault.context[key], value);
+        }
+        assert_eq!(fault.context["configuration_installed"], true);
+        assert_eq!(fault.context["rolled_back"], false);
+        assert_eq!(fault.context["cleanup_incomplete"], true);
+        assert_eq!(fault.context["pending_restore"], false);
+        let observed = bootstrap.ensure_started().unwrap();
+        assert!(matches!(observed.state, Phase::Recovery));
+        assert!(!observed.pending_restore);
+        assert!(!observed.application_available);
+        assert_eq!(json!(observed.fault), json!(failed.fault));
+
+        let ready = bootstrap.retry(false).unwrap();
+        assert!(matches!(ready.state, Phase::Ready));
+        assert!(ready.application_available);
+        assert!(!ready.pending_restore);
+        assert!(ready.fault.is_none());
+        assert_eq!(ready.settings.unwrap().locale, Locale::Japanese);
+        let catalog = ready.catalog.unwrap();
+        assert_eq!(catalog.open.len(), 1);
+        assert_eq!(catalog.open[0].internal_name, "Restored");
+        assert_eq!(configuration::capture(&root).unwrap(), installed);
+        bootstrap.shutdown().unwrap();
+    }
+
+    #[test]
+    fn completed_install_preserves_bytes_and_consumes_receipt_when_reconstruction_fails() {
+        let home = Home::new();
+        let (mut bootstrap, incoming, preimage) = restore_fixture(&home);
+        let root = home.0.join("selected");
+        let archive = Path::new(&incoming.path);
+        let installed = backup::read(archive).unwrap();
+        // Log-file errors are asynchronous, so inject only the constructor result.
+        // Installation, receipt admission, loading and Retry still use the real host.
+        bootstrap.make_application = |_, _, _| Err(construction_fault());
+        let failed = bootstrap
+            .restore_snapshot(archive, Some(&preimage.generation), true, true)
+            .unwrap();
+        assert!(matches!(failed.state, Phase::Recovery));
+        assert_eq!(failed.stage, "application");
+        assert!(!failed.application_available);
+        assert!(failed.settings.is_none());
+        assert!(!failed.pending_restore);
+        assert!(!restore::pending(&root).unwrap());
+        assert_eq!(configuration::capture(&root).unwrap(), installed);
+        let mut expected_fault = construction_fault();
+        expected_fault.context["configuration_installed"] = json!(true);
+        assert_eq!(json!(failed.fault), json!(Some(expected_fault)));
+        assert!(
+            failed
+                .fault
+                .as_ref()
+                .unwrap()
+                .context
+                .get("rolled_back")
+                .is_none()
+        );
+        let refused = bootstrap
+            .restore_snapshot(archive, Some(&preimage.generation), true, true)
+            .err()
+            .unwrap();
+        assert_eq!(refused.category, "PreimageRequired");
+        assert_eq!(configuration::capture(&root).unwrap(), installed);
+        let observed = bootstrap.ensure_started().unwrap();
+        assert!(matches!(observed.state, Phase::Recovery));
+        assert_eq!(json!(observed.fault), json!(failed.fault));
+
+        bootstrap.make_application = Application::new;
+        let ready = bootstrap.retry(false).unwrap();
+        assert!(matches!(ready.state, Phase::Ready));
+        assert!(ready.application_available);
+        assert!(!ready.pending_restore);
+        assert!(ready.fault.is_none());
+        assert_eq!(ready.settings.unwrap().locale, Locale::Japanese);
+        let catalog = ready.catalog.unwrap();
+        assert_eq!(catalog.open.len(), 1);
+        assert_eq!(catalog.open[0].internal_name, "Restored");
+        assert_eq!(configuration::capture(&root).unwrap(), installed);
+        bootstrap.shutdown().unwrap();
+    }
+
+    #[test]
+    fn completed_recovery_preserves_its_direction_and_consumes_receipt_when_reconstruction_fails() {
+        for rollback in [false, true] {
+            let home = Home::new();
+            let (mut bootstrap, incoming, preimage) = restore_fixture(&home);
+            let root = home.0.join("selected");
+            let archive = Path::new(&incoming.path);
+            let before = backup::read(Path::new(&preimage.path)).unwrap();
+            let after = backup::read(archive).unwrap();
+            bootstrap.retire(true).unwrap();
+            restore::tests::interrupt_install(&root, after.clone(), &preimage.generation);
+            let interrupted = bootstrap.retry(false).unwrap();
+            assert!(matches!(interrupted.state, Phase::Recovery));
+            assert!(interrupted.pending_restore);
+
+            bootstrap.make_application = |_, _, _| Err(construction_fault());
+            let failed = bootstrap.recover_restore(rollback, true, false).unwrap();
+            assert!(matches!(failed.state, Phase::Recovery));
+            assert_eq!(failed.stage, "application");
+            assert!(!failed.application_available);
+            assert!(failed.settings.is_none());
+            assert!(!failed.pending_restore);
+            assert!(!restore::pending(&root).unwrap());
+            let expected = if rollback { &before } else { &after };
+            assert_eq!(configuration::capture(&root).unwrap(), *expected);
+            let mut expected_fault = construction_fault();
+            expected_fault.context["configuration_installed"] = json!(true);
+            expected_fault.context["rolled_back"] = json!(rollback);
+            assert_eq!(json!(failed.fault), json!(Some(expected_fault)));
+            assert_eq!(
+                bootstrap
+                    .recover_restore(rollback, true, false)
+                    .err()
+                    .unwrap()
+                    .category,
+                "RestoreNotPending"
+            );
+            // Rollback restores exactly the receipted generation. Without receipt
+            // consumption this repeat would be admitted, not merely stale.
+            assert_eq!(
+                bootstrap
+                    .restore_snapshot(archive, Some(&preimage.generation), true, false)
+                    .err()
+                    .unwrap()
+                    .category,
+                "PreimageRequired"
+            );
+            assert_eq!(configuration::capture(&root).unwrap(), *expected);
+            let observed = bootstrap.ensure_started().unwrap();
+            assert!(matches!(observed.state, Phase::Recovery));
+            assert_eq!(json!(observed.fault), json!(failed.fault));
+
+            bootstrap.make_application = Application::new;
+            let ready = bootstrap.retry(false).unwrap();
+            assert!(matches!(ready.state, Phase::Ready));
+            assert!(ready.application_available);
+            assert!(!ready.pending_restore);
+            assert!(ready.fault.is_none());
+            assert_eq!(
+                ready.settings.unwrap().locale,
+                if rollback {
+                    Locale::English
+                } else {
+                    Locale::Japanese
+                }
+            );
+            let catalog = ready.catalog.unwrap();
+            assert_eq!(catalog.open.len(), 1);
+            assert_eq!(
+                catalog.open[0].internal_name,
+                if rollback { "Original" } else { "Restored" }
+            );
+            assert_eq!(configuration::capture(&root).unwrap(), *expected);
+            bootstrap.shutdown().unwrap();
+        }
     }
 
     #[test]
