@@ -51,6 +51,11 @@ function catalog(data: typeof enData) {
       stopTarget: (operation: string | null) => interpolate(data.run.stopTarget, {operation: operation ?? data.common.none}),
       runKind: (lane: string) => interpolate(data.run.runKind, {lane}),
     },
+    target: {
+      ...data.target,
+      argument: (number: number) => interpolate(data.target.argument, {number}),
+      revision: (revision: number) => interpolate(data.target.revision, {revision}),
+    },
     result: {
       ...data.result,
       truncated: (count: number) => interpolate(data.result.truncated[count === 1 ? 'one' : 'other'], {count}),

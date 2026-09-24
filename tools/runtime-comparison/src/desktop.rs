@@ -2,7 +2,7 @@
 
 use crate::environment::{OcrEnvironment, capture_environment, capture_replay};
 use crate::host::resolve_options;
-use crate::inventory::Inventory;
+use crate::inventory::{Inventory, TargetDeclaration};
 use crate::model::{Control, Fault, Limits, Plan, encode_bounded, identity};
 use crate::runner::{Observer, run_environment_check_with_executable, run_once_with_executable};
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,8 @@ pub struct PackageInfo {
     pub schema: Value,
     pub profiles: BTreeMap<String, Value>,
     pub effective_defaults: Option<Value>,
+    pub target: Option<TargetDeclaration>,
+    pub target_identity: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -247,6 +249,11 @@ impl DesktopController {
         let defaults = profile(&inventory.package_id, &inventory.schema, json!({}));
         let effective_defaults =
             resolve_options(&inventory.schema, &defaults, &inventory.package_id).ok();
+        let target = inventory.target()?;
+        let target_identity = target
+            .as_ref()
+            .map(TargetDeclaration::identity)
+            .transpose()?;
         let info = PackageInfo {
             schema_identity: identity(&inventory.schema)?,
             package_id: inventory.package_id,
@@ -255,6 +262,8 @@ impl DesktopController {
             schema: inventory.schema,
             profiles: inventory.profiles,
             effective_defaults,
+            target,
+            target_identity,
         };
         encode_bounded(&info, 2 * 1024 * 1024)?;
         Ok(info)

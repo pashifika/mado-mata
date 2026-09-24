@@ -1,7 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {applyCatalog,applyCommand,applyIfCurrent,bindSelection,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
+import {applyCatalog,applyCommand,applyIfCurrent,bindSelection,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
 import {LocalFault} from './i18n.ts';
+import {checkedTarget,currentTargetDraft,discardTarget,editTarget,readTarget,readTargetDraft,removedTarget,savedTarget,targetDirty,targetExpectation,targetFailed,targetReadFailed,targetState,targetTicket} from './target.ts';
 
 const schema={type:'object',properties:{count:{type:'integer',default:1},mode:{type:'string'}}};
 function profile(id,name,values,packageId='pkg-a',schemaIdentity='schema-1'){
@@ -9,7 +10,7 @@ function profile(id,name,values,packageId='pkg-a',schemaIdentity='schema-1'){
 }
 function selection(id,revision,{path='/pkg/'+id,packageId='pkg-'+id,profiles=[profile('prof-'+id,'Saved '+id,{count:5},packageId)],schemaIdentity='schema-1',internal=id,display='Tab '+id}={}){
   return {workspace_id:id,revision,internal_name:internal,display_name:display,package_path:path,profiles_error:null,profiles,
-    package:{package_id:packageId,inventory_identity:'inv-'+id,schema_identity:schemaIdentity,runtime:'quickjs',schema,profiles:{fast:{options:{count:9}}},effective_defaults:null}};
+    package:{package_id:packageId,inventory_identity:'inv-'+id,schema_identity:schemaIdentity,runtime:'quickjs',schema,profiles:{fast:{options:{count:9}}},effective_defaults:null,target:null,target_identity:null}};
 }
 function view(id,{internal=id,display='Tab '+id,selection:bound=null,sourceError=null,savedPackage=null}={}){
   return {workspace_id:id,revision:bound?bound.revision:0,internal_name:internal,display_name:display,selection:bound,source_error:sourceError,saved_package:savedPackage};
@@ -342,4 +343,272 @@ test('search matches display fields case-insensitively and never diagnostic fiel
   const result=viewLogs(entries,{kind:'workspace',id:'a'},{text:'failed',level:'error'});
   assert.equal(result.scoped.length,2);
   assert.deepEqual(result.shown.map(entry=>entry.sequence),[3]);
+});
+
+function targetSelection(id='a',revision=1,declaration={id:'game',window_title:'Exact title'}) {
+  const selected=selection(id,revision,{packageId:'shared'});
+  return {...selected,package:{...selected.package,target:declaration,target_identity:declaration ? 'declaration-1' : null}};
+}
+function targetConfiguration(path='/metadata/game') {
+  return {platform:'macos',game:{kind:'executable',path},launcher:null,arguments:['','--literal','two words'],
+    working_directory:null,window_title:'Exact title',input:{route:'process_directed',focus:'preserve',pointer_mode:'core_graphics',click_hold_ms:0}};
+}
+function targetView(state,{revision=0,configuration=null,compatible=true,id='binding-1'}={}) {
+  return {context:state.context,compatible,
+    record:{version:1,internal_name:state.context.internal_name,package_id:state.context.package_id,revision,
+      binding:configuration ? {id,package_id:state.context.package_id,target_id:'game',declaration_identity:'declaration-1',configuration,
+        resolution:{game:{path:configuration.game.path,executable:configuration.game.path},launcher:null,working_directory:null}} : null}};
+}
+function loadedTarget(id='a',configuration=targetConfiguration()) {
+  const state=targetState(targetSelection(id));
+  return readTarget(state,targetView(state,{revision:configuration ? 1 : 0,configuration}));
+}
+function targetCheck(ticket,path='/metadata/game') {
+  return {context:ticket.context,...ticket.expected,check:{configuration_identity:'checked-configuration',
+    resolution:{game:{path,executable:path},launcher:null,working_directory:null},previous_resolution:null,resolution_changed:false}};
+}
+function withTarget(tab,state) {
+  return updateBound(tab,bound=>({...bound,target:state}));
+}
+
+test('target form preserves literal argument boundaries, empty arguments and independent game/launcher locations',()=>{
+  const state=loadedTarget();
+  const draft={...state.draft,separateLauncher:true,launcherKind:'bundle',launcherPath:'/metadata/Launcher.app',
+    arguments:['','two words','"quoted"','$(literal)',''],workingDirectory:'/metadata/work'};
+  const {configuration,errors}=readTargetDraft(draft);
+  assert.deepEqual(errors,{});
+  assert.deepEqual(configuration.arguments,['','two words','"quoted"','$(literal)','']);
+  assert.deepEqual(configuration.game,{kind:'executable',path:'/metadata/game'});
+  assert.deepEqual(configuration.launcher,{kind:'bundle',path:'/metadata/Launcher.app'});
+  assert.equal(configuration.working_directory,'/metadata/work');
+  const saved=readTarget(targetState(targetSelection()),targetView(state,{revision:2,configuration}));
+  assert.deepEqual(saved.draft.arguments,configuration.arguments);
+  assert.equal(saved.draft.launcherPath,'/metadata/Launcher.app');
+  assert.equal(saved.observation,null);
+  assert.equal(targetDirty(saved),false);
+});
+
+for (const {scenario,update,field} of [
+  {scenario:'an unselected route',update:{route:''},field:'route'},
+  {scenario:'an unselected focus policy',update:{focus:''},field:'focus'},
+  {scenario:'an unselected process pointer mode',update:{pointerMode:''},field:'pointerMode'},
+  {scenario:'system input with preserved focus',update:{route:'system',focus:'preserve'},field:'focus'},
+  {scenario:'AppKit background with focused-only policy',update:{pointerMode:'appkit_background',focus:'require_focused'},field:'focus'},
+  {scenario:'an empty hold field',update:{clickHold:''},field:'clickHold'},
+  {scenario:'an out-of-range hold',update:{clickHold:'1001'},field:'clickHold'},
+  {scenario:'a relative path',update:{gamePath:'~/game'},field:'gamePath'},
+  {scenario:'a control character in an argument',update:{arguments:['line\nbreak']},field:'arguments'},
+  {scenario:'an argument beyond its UTF-8 byte bound',update:{arguments:['あ'.repeat(342)]},field:'arguments'},
+  {scenario:'too many empty arguments',update:{arguments:Array(33).fill('')},field:'arguments'},
+]) {
+  test(`target form refuses ${scenario} without guessing a policy or rewriting the draft`,()=>{
+    const draft={...loadedTarget().draft,...update};
+    const before=structuredClone(draft);
+    const parsed=readTargetDraft(draft);
+    assert.equal(parsed.configuration,null);
+    assert.ok(parsed.errors[field]);
+    assert.deepEqual(draft,before);
+  });
+}
+
+test('system input explicitly selected with focused-only policy carries no process-pointer mode',()=>{
+  const state=loadedTarget();
+  const parsed=readTargetDraft({...state.draft,route:'system',focus:'require_focused'});
+  assert.deepEqual(parsed.configuration.input,{route:'system',focus:'require_focused',pointer_mode:null,click_hold_ms:0});
+});
+
+test('target-only edits join close and Reinspect confirmation while controlled profile commands stay independent',()=>{
+  const tab=bindSelection(workspaceFromView(view('a')),targetSelection());
+  const loaded=withTarget(tab,loadedTarget());
+  const facts=deriveBound(loaded.bound,null);
+  assert.equal(loaded.bound.touched,false);
+  assert.equal(hasWorkspaceEdits(loaded,facts),false);
+  const edited=withTarget(loaded,editTarget(loaded.bound.target,{...loaded.bound.target.draft,gamePath:'/metadata/other'}));
+  assert.equal(hasWorkspaceEdits(edited,deriveBound(edited.bound,null)),true);
+  assert.deepEqual(commandValues(edited,deriveBound(edited.bound,null)),{count:1});
+  const failed=withTarget(edited,targetReadFailed(edited.bound.target,unreadable));
+  assert.deepEqual(commandValues(failed,deriveBound(failed.bound,null)),{count:1});
+  assert.equal(deriveBound(failed.bound,null).startBlock,null);
+  const discarded=withTarget(edited,discardTarget(edited.bound.target));
+  assert.equal(hasWorkspaceEdits(discarded,deriveBound(discarded.bound,null)),false);
+});
+
+test('a metadata check completing after navigation stays with its issuing Tab even when both Tabs share a package',()=>{
+  let tabs=['a','b'].map(id=>withTarget(bindSelection(workspaceFromView(view(id)),targetSelection(id)),loadedTarget(id)));
+  tabs[1]=withTarget(tabs[1],editTarget(tabs[1].bound.target,{...tabs[1].bound.target.draft,gamePath:'/metadata/b-private'}));
+  const beta=tabs[1];
+  const ticket=targetTicket(tabs[0].bound.target);
+  tabs=applyIfCurrent(tabs,{id:'a',revision:1},tab=>withTarget(tab,checkedTarget(tab.bound.target,ticket,targetCheck(ticket))));
+  assert.equal(tabs[1],beta);
+  assert.equal(tabs[1].bound.target.observation,null);
+  assert.equal(tabs[1].bound.target.draft.gamePath,'/metadata/b-private');
+  assert.equal(currentTargetDraft(tabs[0].bound.target,tabs[0].bound.target.observation.ticket),true);
+});
+
+test('a late check reports its original draft and cannot certify edits made while it was pending, even after an edit-back',()=>{
+  let state=loadedTarget();
+  const ticket=targetTicket(state);
+  state=editTarget(state,{...state.draft,arguments:['new']});
+  state=editTarget(state,{...state.draft,arguments:['','--literal','two words']});
+  state=checkedTarget(state,ticket,targetCheck(ticket));
+  assert.deepEqual(state.draft.arguments,['','--literal','two words']);
+  assert.equal(state.observation.check.configuration_identity,'checked-configuration');
+  assert.equal(currentTargetDraft(state,state.observation.ticket),false);
+});
+
+for (const {scenario,context} of [
+  {scenario:'another Tab',context:{workspace:{workspace_id:'b',revision:1}}},
+  {scenario:'an old workspace revision',context:{workspace:{workspace_id:'a',revision:0}}},
+  {scenario:'another package',context:{package_id:'foreign'}},
+  {scenario:'another declaration',context:{declaration_identity:'changed'}},
+  {scenario:'another persisted Tab owner',context:{internal_name:'other'}},
+]) {
+  test(`a target response for ${scenario} cannot replace this saved view or check its draft`,()=>{
+    const state=loadedTarget();
+    const ticket=targetTicket(state);
+    const response=targetCheck(ticket);
+    response.context={...response.context,...context};
+    assert.equal(checkedTarget(state,ticket,response),state);
+    const saved=targetView(state,{revision:2,configuration:targetConfiguration('/metadata/foreign')});
+    saved.context=response.context;
+    assert.equal(readTarget(state,saved),state);
+    assert.equal(savedTarget(state,ticket,{view:saved,check:response.check}),state);
+  });
+}
+
+test('reinspection and a close/reopen reject the previous session completion and invalidate target check state',()=>{
+  let tab=withTarget(bindSelection(workspaceFromView(view('a')),targetSelection()),loadedTarget());
+  const ticket=targetTicket(tab.bound.target);
+  tab=withTarget(tab,checkedTarget(tab.bound.target,ticket,targetCheck(ticket)));
+  const reinspected=bindSelection(tab,targetSelection('a',2));
+  assert.equal(reinspected.bound.target.observation,null);
+  assert.equal(reinspected.bound.target.loaded,false);
+  assert.equal(checkedTarget(reinspected.bound.target,ticket,targetCheck(ticket)),reinspected.bound.target);
+  const newSession=bindSelection(workspaceFromView(view('fresh')),targetSelection('fresh',1));
+  const list=[newSession];
+  assert.equal(applyIfCurrent(list,{id:'a',revision:1},item=>withTarget(item,savedTarget(item.bound.target,ticket,{view:targetView(tab.bound.target),check:targetCheck(ticket).check}))),list);
+});
+
+test('a stale same-owner request requires explicit reload, preserves the draft, and Discard uses the reloaded record',()=>{
+  let state=loadedTarget();
+  state=editTarget(state,{...state.draft,gamePath:'/metadata/local-edit'});
+  const ticket=targetTicket(state);
+  state=targetFailed(state,ticket,{category:'TargetConflict',message:'Saved target record changed',context:null});
+  assert.equal(state.reconcile,true);
+  assert.equal(targetTicket(state),null);
+  assert.equal(state.draft.gamePath,'/metadata/local-edit');
+  const latest=targetView(state,{revision:3,configuration:targetConfiguration('/metadata/other-writer')});
+  state=readTarget(state,latest);
+  assert.deepEqual(targetExpectation(state),{revision:3,binding_id:'binding-1'});
+  assert.equal(state.reconcile,false);
+  assert.equal(state.draft.gamePath,'/metadata/local-edit');
+  assert.equal(state.issue,null);
+  assert.equal(discardTarget(state).draft.gamePath,'/metadata/other-writer');
+  assert.equal(checkedTarget(state,ticket,targetCheck(ticket)),state);
+});
+
+test('successful save and failed reread are independent facts; retry reads without resaving or replacing newer edits',()=>{
+  let state=loadedTarget();
+  state=editTarget(state,{...state.draft,gamePath:'/metadata/saved-edit'});
+  const ticket=targetTicket(state);
+  const committed=targetView(state,{revision:2,configuration:readTargetDraft(state.draft).configuration});
+  state=editTarget(state,{...state.draft,gamePath:'/metadata/later-edit'});
+  state=savedTarget(state,ticket,{view:committed,check:targetCheck(ticket,'/metadata/saved-edit').check});
+  state=targetReadFailed(state,unreadable);
+  assert.equal(state.persisted,'saved');
+  assert.equal(state.refreshRequired,true);
+  assert.equal(state.readError,unreadable);
+  assert.equal(targetTicket(state),null);
+  assert.equal(state.view.record.revision,2);
+  assert.equal(state.draft.gamePath,'/metadata/later-edit');
+  assert.equal(currentTargetDraft(state,state.observation.ticket),false);
+  state=readTarget(state,committed);
+  assert.equal(state.persisted,'saved');
+  assert.equal(state.refreshRequired,false);
+  assert.equal(state.readError,null);
+  assert.equal(state.draft.gamePath,'/metadata/later-edit');
+  assert.deepEqual(targetExpectation(state),{revision:2,binding_id:'binding-1'});
+  assert.equal(discardTarget(state).draft.gamePath,'/metadata/saved-edit');
+});
+
+test('failed initial read can recover the saved form without resetting storage or trusting a previous check',()=>{
+  const state=targetState(targetSelection());
+  const failed=targetReadFailed(state,unreadable);
+  assert.equal(failed.view,null);
+  assert.equal(targetExpectation(failed),null);
+  const restored=readTarget(failed,targetView(state,{revision:7,configuration:targetConfiguration('/metadata/repaired')}));
+  assert.equal(restored.draft.gamePath,'/metadata/repaired');
+  assert.equal(restored.readError,null);
+  assert.equal(restored.observation,null);
+  assert.equal(targetDirty(restored),false);
+});
+
+test('changed resolution requires a review attributed to that draft; edits invalidate the review without adopting the location',()=>{
+  const initial=loadedTarget();
+  const ticket=targetTicket(initial);
+  const previous=initial.view.record.binding.resolution;
+  const resolution={...previous,game:{path:'/metadata/redirected',executable:'/metadata/redirected'}};
+  const state=targetFailed(initial,ticket,{category:'TargetResolutionChanged',message:'Review changed resolution',context:{previous_resolution:previous,resolution}});
+  assert.deepEqual(state.review.previous,previous);
+  assert.deepEqual(state.review.resolution,resolution);
+  assert.equal(currentTargetDraft(state,state.review.ticket),true);
+  assert.deepEqual(state.view.record.binding.resolution,previous);
+  const edited=editTarget(state,{...state.draft,arguments:['changed']});
+  assert.equal(edited.review,null);
+  assert.equal(edited.observation,null);
+  assert.deepEqual(edited.view.record.binding.resolution,previous);
+});
+
+test('removal keeps an unsaved draft and revision progression; old checks cannot resurrect the removed record',()=>{
+  let state=loadedTarget();
+  state=editTarget(state,{...state.draft,gamePath:'/metadata/keep-draft'});
+  const ticket=targetTicket(state);
+  const removed=targetView(state,{revision:2});
+  state=removedTarget(state,ticket,removed);
+  state=readTarget(state,removed);
+  assert.equal(state.persisted,'removed');
+  assert.equal(state.view.record.binding,null);
+  assert.deepEqual(targetExpectation(state),{revision:2,binding_id:null});
+  assert.equal(state.draft.gamePath,'/metadata/keep-draft');
+  assert.equal(targetDirty(state),true);
+  assert.equal(checkedTarget(state,ticket,targetCheck(ticket)),state);
+  assert.equal(discardTarget(state).draft.gamePath,'');
+});
+
+for (const {scenario,declaration} of [
+  {scenario:'targetless',declaration:null},
+  {scenario:'changed',declaration:{id:'new-target',window_title:'New exact title'}},
+]) {
+  test(`a ${scenario} declaration retains an incompatible record for removal but never adopts its configuration`,()=>{
+    const old=loadedTarget();
+    let state=targetState(targetSelection('a',2,declaration));
+    const retained={...old.view,context:state.context,compatible:false};
+    state=readTarget(state,retained);
+    assert.equal(state.view.record.binding.id,'binding-1');
+    assert.equal(state.draft.gamePath,'');
+    assert.equal(state.draft.windowTitle,declaration?.window_title ?? '');
+    assert.equal(targetDirty(state),false);
+    const ticket=targetTicket(state);
+    assert.deepEqual(ticket.expected,{revision:1,binding_id:'binding-1'});
+    const cleared=targetView(state,{revision:2});
+    state=readTarget(removedTarget(state,ticket,cleared),cleared);
+    assert.equal(state.view.record.binding,null);
+    assert.equal(state.persisted,'removed');
+  });
+}
+
+test('saved-view reload repairs a read fault but cannot erase an unresolved metadata failure or the edited recipe',()=>{
+  let state=loadedTarget();
+  state=editTarget(state,{...state.draft,gamePath:'/metadata/missing'});
+  const ticket=targetTicket(state);
+  const metadata={category:'TargetMetadata',message:'Selected target metadata is unavailable',context:{field:'game',stage:'canonicalize'}};
+  state=targetFailed(state,ticket,metadata);
+  state=targetReadFailed(state,unreadable);
+  state=readTarget(state,state.view);
+  assert.equal(state.readError,null);
+  assert.equal(state.issue.fault,metadata);
+  assert.equal(state.draft.gamePath,'/metadata/missing');
+  assert.equal(state.view.record.binding.configuration.game.path,'/metadata/game');
+  assert.equal(currentTargetDraft(state,state.issue.ticket),true);
+  assert.equal(state.observation,null);
 });

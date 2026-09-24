@@ -12,6 +12,7 @@ export interface PackageInfo {
   package_id:string; inventory_identity:string; schema_identity:string;
   runtime:string; schema:Schema; profiles:Record<string,{options:Record<string,Json>}>;
   effective_defaults:Record<string,Json>|null;
+  target:TargetDeclaration|null; target_identity:string|null;
 }
 export interface Profile {version:number; id:string; name:string; package_id:string; schema_identity:string; values:Record<string,Json>}
 // Machine-local OCR environment; absent means unconfigured. Field order matches the backend struct.
@@ -75,3 +76,29 @@ export interface StartRequest {
   package_path:string; inventory_identity:string; package_id:string; schema_identity:string; profile_id:string;
   values:Record<string,Json>; lane:string; scenario:string; replay_descriptor_path:string|null;
 }
+
+export interface TargetDeclaration {id:string; window_title:string|null}
+export interface TargetLocation {kind:'executable'|'bundle'; path:string}
+export interface TargetInputPolicy {
+  route:'process_directed'|'system'; focus:'preserve'|'require_focused';
+  pointer_mode:'core_graphics'|'appkit_background'|null; click_hold_ms:number;
+}
+export interface TargetConfiguration {
+  platform:'macos'; game:TargetLocation; launcher:TargetLocation|null; arguments:string[];
+  working_directory:string|null; window_title:string; input:TargetInputPolicy;
+}
+export interface ResolvedLocation {path:string; executable:string}
+export interface TargetResolution {game:ResolvedLocation; launcher:ResolvedLocation|null; working_directory:string|null}
+export interface TargetBinding {
+  id:string; package_id:string; target_id:string; declaration_identity:string;
+  configuration:TargetConfiguration; resolution:TargetResolution;
+}
+export interface TargetRecord {version:1; internal_name:string; package_id:string; revision:number; binding:TargetBinding|null}
+export interface TargetExpectation {revision:number; binding_id:string|null}
+export interface TargetCheck {
+  configuration_identity:string; resolution:TargetResolution; previous_resolution:TargetResolution|null; resolution_changed:boolean;
+}
+export interface TargetContext {workspace:WorkspaceRef; internal_name:string; package_id:string; declaration_identity:string|null}
+export interface TargetView {context:TargetContext; record:TargetRecord; compatible:boolean}
+export interface TargetCheckResponse {context:TargetContext; revision:number; binding_id:string|null; check:TargetCheck}
+export interface TargetSaveResponse {view:TargetView; check:TargetCheck}

@@ -234,6 +234,8 @@ fn inspected_package_starts_controlled_without_requiring_an_engine() {
     );
     let package = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/typescript"));
     let inspected = controller.inspect(package).unwrap();
+    assert!(inspected.target.is_none());
+    assert!(inspected.target_identity.is_none());
     let run = controller
         .start(
             StartRequest {

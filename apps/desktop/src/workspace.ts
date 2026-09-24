@@ -1,6 +1,8 @@
 import {LocalFault, messages} from './i18n.ts';
 import type {Locale, Message} from './i18n.ts';
 import {defaultDraft, readDraft} from './state.ts';
+import {targetDirty, targetState} from './target.ts';
+import type {TargetState} from './target.ts';
 import type {ControllerView, Fault, Json, LegacyImport, LogEntry, OcrEnvironment, PackageInfo, PackageReference, Profile, Selection, WorkspaceRef, WorkspaceView} from './types.ts';
 
 export const WORKSPACE_LIMIT = 8;
@@ -34,6 +36,7 @@ export interface Bound {
   lane:string; scenario:string; descriptorPath:string; disclosedRun:string|null;
   // True once the operator changed profile/draft state; a pristine default draft closes without confirmation.
   touched:boolean;
+  target:TargetState;
 }
 
 // Session-local UI state for one open named Tab. The host persists names and package references; nothing here is.
@@ -93,7 +96,7 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
     selectedId: null, name: '', preset: '', draft: defaultDraft(selection.package.schema),
     draftRevision: (previous?.draftRevision ?? 0) + 1, validation: null,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
-    disclosedRun: null, touched: false,
+    disclosedRun: null, touched: false, target: targetState(selection),
   };
 }
 
@@ -230,6 +233,10 @@ export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, l
     : bound.lane === 'replay' && !savedEnvironment ? t.replayEnvironment : null;
   const descriptorError = encoder.encode(descriptor).length > DESCRIPTOR_LIMIT ? t.descriptorLimit(DESCRIPTOR_LIMIT) : null;
   return {parsed, numericErrors, valuesDirty, dirty, bound: profileBound, selectedProfile, startBlock, descriptorError};
+}
+
+export function hasWorkspaceEdits(workspace:Workspace, facts:Derived|undefined):boolean {
+  return workspace.bound !== null && ((workspace.bound.touched && facts?.dirty === true) || targetDirty(workspace.bound.target));
 }
 
 // Package commands carry values only from a real inspected selection. A genuine named Tab without one is refused

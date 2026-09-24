@@ -4,6 +4,9 @@ use crate::storage::{
     EditableSettings, LegacyImport, MAX_OPEN_TABS, PackageReference, PackageSource, Profile,
     ProfileStore, Settings, Store, TabRecord,
 };
+use crate::target::{
+    TargetCheck, TargetConfiguration, TargetExpectation, TargetRecord, TargetResolution,
+};
 use mado_runtime_comparison::desktop::{DesktopController, PackageInfo, StartRequest};
 use mado_runtime_comparison::environment::OcrEnvironment;
 use mado_runtime_comparison::host::resolve_options;
@@ -68,6 +71,35 @@ pub struct WorkspaceCatalog {
 pub struct ProfileCatalog {
     pub profiles: Vec<Profile>,
     pub profiles_error: Option<Fault>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TargetContext {
+    pub workspace: WorkspaceRef,
+    pub internal_name: String,
+    pub package_id: String,
+    pub declaration_identity: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TargetView {
+    pub context: TargetContext,
+    pub record: TargetRecord,
+    pub compatible: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TargetCheckResponse {
+    pub context: TargetContext,
+    pub revision: u64,
+    pub binding_id: Option<String>,
+    pub check: TargetCheck,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TargetSaveResponse {
+    pub view: TargetView,
+    pub check: TargetCheck,
 }
 
 #[derive(Clone, Serialize)]
@@ -908,6 +940,117 @@ impl Application {
         self.outcome(Some(workspace), "profiles", None, result)
     }
 
+    pub fn read_target(&self, workspace: &WorkspaceRef) -> Result<TargetView, Fault> {
+        let result = (|| {
+            let (_command, state) = self.command_state()?;
+            let selected = state.resolve(workspace)?.clone();
+            drop(state);
+            let record = lock(&self.store)
+                .read_target(&selected.internal_name, &selected.inventory.package_id)?;
+            Ok(target_view(&selected, record))
+        })();
+        self.outcome(Some(workspace), "read_target", None, result)
+    }
+
+    pub fn check_target(
+        &self,
+        workspace: &WorkspaceRef,
+        expected: &TargetExpectation,
+        configuration: &TargetConfiguration,
+    ) -> Result<TargetCheckResponse, Fault> {
+        let result = (|| {
+            let (_command, mut state) = self.command_state()?;
+            let selected = state.resolve(workspace)?.clone();
+            self.collect(&mut state);
+            state.idle()?;
+            drop(state);
+            let declaration = selected
+                .package
+                .target
+                .as_ref()
+                .ok_or_else(target_undeclared)?;
+            let check = lock(&self.store).check_target(
+                &selected.internal_name,
+                &selected.inventory.package_id,
+                declaration,
+                expected,
+                configuration,
+            )?;
+            Ok(TargetCheckResponse {
+                context: target_context(&selected),
+                revision: expected.revision,
+                binding_id: expected.binding_id.clone(),
+                check,
+            })
+        })();
+        self.outcome(Some(workspace), "check_target", None, result)
+    }
+
+    pub fn save_target(
+        &self,
+        workspace: &WorkspaceRef,
+        expected: &TargetExpectation,
+        configuration: TargetConfiguration,
+        reviewed_resolution: Option<&TargetResolution>,
+    ) -> Result<TargetSaveResponse, Fault> {
+        let result = (|| {
+            let (_command, mut state) = self.command_state()?;
+            let selected = state.resolve(workspace)?.clone();
+            self.collect(&mut state);
+            state.idle()?;
+            drop(state);
+            let declaration = selected
+                .package
+                .target
+                .as_ref()
+                .ok_or_else(target_undeclared)?;
+            let (record, check) = lock(&self.store).save_target(
+                &selected.internal_name,
+                &selected.inventory.package_id,
+                declaration,
+                expected,
+                configuration,
+                reviewed_resolution,
+            )?;
+            Ok(TargetSaveResponse {
+                view: target_view(&selected, record),
+                check,
+            })
+        })();
+        self.outcome(
+            Some(workspace),
+            "save_target",
+            Some(("target.saved", "Target configuration saved")),
+            result,
+        )
+    }
+
+    pub fn remove_target(
+        &self,
+        workspace: &WorkspaceRef,
+        expected: &TargetExpectation,
+    ) -> Result<TargetView, Fault> {
+        let result = (|| {
+            let (_command, mut state) = self.command_state()?;
+            let selected = state.resolve(workspace)?.clone();
+            self.collect(&mut state);
+            state.idle()?;
+            drop(state);
+            let record = lock(&self.store).remove_target(
+                &selected.internal_name,
+                &selected.inventory.package_id,
+                expected,
+            )?;
+            Ok(target_view(&selected, record))
+        })();
+        self.outcome(
+            Some(workspace),
+            "remove_target",
+            Some(("target.removed", "Target binding removed")),
+            result,
+        )
+    }
+
     pub fn save_profile(
         &self,
         workspace: &WorkspaceRef,
@@ -1181,6 +1324,35 @@ impl Application {
             })
             .clone()
     }
+}
+
+fn target_context(selected: &Selected) -> TargetContext {
+    TargetContext {
+        workspace: selected.workspace.clone(),
+        internal_name: selected.internal_name.clone(),
+        package_id: selected.inventory.package_id.clone(),
+        declaration_identity: selected.package.target_identity.clone(),
+    }
+}
+
+fn target_view(selected: &Selected, record: TargetRecord) -> TargetView {
+    let compatible = record.binding.as_ref().is_some_and(|binding| {
+        binding.package_id == selected.inventory.package_id
+            && selected.package.target.as_ref().is_some_and(|declaration| {
+                binding.target_id == declaration.id
+                    && Some(&binding.declaration_identity)
+                        == selected.package.target_identity.as_ref()
+            })
+    });
+    TargetView {
+        context: target_context(selected),
+        record,
+        compatible,
+    }
+}
+
+fn target_undeclared() -> Fault {
+    Fault::new("TargetUndeclared", "Package has no target declaration")
 }
 
 fn retired_fault(mut error: Fault) -> Fault {
@@ -1591,6 +1763,301 @@ mod tests {
             scenario: "workflow".into(),
             replay_descriptor_path: None,
         }
+    }
+
+    fn target_configuration() -> TargetConfiguration {
+        serde_json::from_value(json!({
+            "platform":"macos",
+            "game":{"kind":"executable","path":std::env::current_exe().unwrap()},
+            "launcher":null,
+            "arguments":["", "literal $HOME", "two words"],
+            "working_directory":null,
+            "window_title":"Target metadata fixture",
+            "input":{"route":"process_directed","focus":"preserve",
+                "pointer_mode":"core_graphics","click_hold_ms":0}
+        }))
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn declare_target(path: &Path, id: Option<&str>) {
+        let manifest = path.join("package.json");
+        let mut value: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+        match id {
+            Some(id) => {
+                value["target"] = json!({"id":id});
+            }
+            None => {
+                value.as_object_mut().unwrap().remove("target");
+            }
+        }
+        fs::write(manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn target_expectation(view: &TargetView) -> TargetExpectation {
+        TargetExpectation {
+            revision: view.record.revision,
+            binding_id: view
+                .record
+                .binding
+                .as_ref()
+                .map(|binding| binding.id.clone()),
+        }
+    }
+
+    #[test]
+    fn target_operations_require_inspected_declaration_and_current_workspace() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let empty = application.create_workspace("Empty", "Empty").unwrap();
+        let empty_ref = view_ref(&empty);
+        let configuration = target_configuration();
+        let expected = TargetExpectation {
+            revision: 0,
+            binding_id: None,
+        };
+        assert_eq!(
+            application.read_target(&empty_ref).unwrap_err().category,
+            "WorkspaceUnbound"
+        );
+        assert_eq!(
+            application
+                .check_target(&empty_ref, &expected, &configuration)
+                .unwrap_err()
+                .category,
+            "WorkspaceUnbound"
+        );
+        assert_eq!(
+            application
+                .save_target(&empty_ref, &expected, configuration.clone(), None)
+                .unwrap_err()
+                .category,
+            "WorkspaceUnbound"
+        );
+        assert_eq!(
+            application
+                .remove_target(&empty_ref, &expected)
+                .unwrap_err()
+                .category,
+            "WorkspaceUnbound"
+        );
+        let selection = application.inspect(&package_path(), &empty_ref).unwrap();
+        let workspace = workspace_ref(&selection);
+        assert_eq!(
+            application.read_target(&empty_ref).unwrap_err().category,
+            "StaleIdentity"
+        );
+        assert_eq!(
+            application
+                .check_target(&workspace, &expected, &configuration)
+                .unwrap_err()
+                .category,
+            "TargetUndeclared"
+        );
+        assert_eq!(
+            application
+                .save_target(&workspace, &expected, configuration, None)
+                .unwrap_err()
+                .category,
+            "TargetUndeclared"
+        );
+        let target = application.read_target(&workspace).unwrap();
+        assert_eq!(target.record.revision, 0);
+        assert!(target.record.binding.is_none());
+        assert!(application.runner.poll().run.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_owner_conflicts_reinspection_and_native_refusal_preserve_configuration() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let path = fixture.package_at("target-package");
+        declare_target(&path, Some("metadata-fixture"));
+        let first = inspect_named(application, "First", &path).unwrap();
+        let second = inspect_named(application, "Second", &path).unwrap();
+        let first_ref = workspace_ref(&first);
+        let second_ref = workspace_ref(&second);
+        let initial = application.read_target(&first_ref).unwrap();
+        let expected = target_expectation(&initial);
+        let configuration = target_configuration();
+        let checked = application
+            .check_target(&first_ref, &expected, &configuration)
+            .unwrap();
+        assert_eq!(checked.context.workspace, first_ref);
+        assert_eq!(
+            application.read_target(&first_ref).unwrap().record.revision,
+            0
+        );
+        let saved = application
+            .save_target(&first_ref, &expected, configuration.clone(), None)
+            .unwrap();
+        assert_eq!(saved.view.context.workspace, first_ref);
+        assert!(saved.view.compatible);
+        assert_eq!(
+            saved
+                .view
+                .record
+                .binding
+                .as_ref()
+                .unwrap()
+                .configuration
+                .arguments,
+            configuration.arguments
+        );
+        let file = fixture
+            .root
+            .join("tabs/First")
+            .join(&first.package.package_id)
+            .join("target.config");
+        let bytes = fs::read(&file).unwrap();
+        assert!(
+            application
+                .save_target(&first_ref, &expected, configuration.clone(), None)
+                .is_err()
+        );
+        assert!(application.remove_target(&first_ref, &expected).is_err());
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        let other = application.read_target(&second_ref).unwrap();
+        assert!(other.record.binding.is_none());
+        assert_eq!(other.record.revision, 0);
+
+        let mut native = request(&first);
+        native.lane = "native".into();
+        application.start(&first_ref, native).unwrap();
+        let terminal = settled(application);
+        assert_eq!(terminal.error.unwrap().category, "NativeRefused");
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+
+        declare_target(&path, Some("changed-target"));
+        let changed = application.inspect(&path, &first_ref).unwrap();
+        let changed_ref = workspace_ref(&changed);
+        assert_eq!(
+            application.read_target(&first_ref).unwrap_err().category,
+            "StaleIdentity"
+        );
+        let incompatible = application.read_target(&changed_ref).unwrap();
+        assert!(!incompatible.compatible);
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        declare_target(&path, None);
+        let targetless = application.inspect(&path, &changed_ref).unwrap();
+        let targetless_ref = workspace_ref(&targetless);
+        let preserved = application.read_target(&targetless_ref).unwrap();
+        assert!(!preserved.compatible);
+        assert!(preserved.record.binding.is_some());
+        let removed = application
+            .remove_target(&targetless_ref, &target_expectation(&preserved))
+            .unwrap();
+        assert!(removed.record.binding.is_none());
+        assert_eq!(removed.record.revision, preserved.record.revision + 1);
+        assert!(
+            application
+                .profiles(&targetless_ref)
+                .unwrap()
+                .profiles_error
+                .is_none()
+        );
+        assert!(
+            application
+                .read_target(&second_ref)
+                .unwrap()
+                .record
+                .binding
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn target_storage_fault_does_not_gate_controlled_admission_and_reload_repairs() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let selection = inspect_named(application, "Main", &package_path()).unwrap();
+        let workspace = workspace_ref(&selection);
+        application
+            .save_profile(&workspace, None, "Keep", request(&selection).values)
+            .unwrap();
+        let file = fixture
+            .root
+            .join("tabs/Main")
+            .join(&selection.package.package_id)
+            .join("target.config");
+        let damaged = b"{broken target";
+        fs::write(&file, damaged).unwrap();
+        let pending = file.with_extension("pending");
+        fs::write(&pending, b"preserve unfinished target write").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(application.read_target(&workspace).is_err());
+        assert_eq!(application.profiles(&workspace).unwrap().profiles.len(), 1);
+        let mut saved_request = request(&selection);
+        saved_request.profile_id = application.profiles(&workspace).unwrap().profiles[0]
+            .id
+            .clone();
+        application.start(&workspace, saved_request).unwrap();
+        let terminal = settled(application);
+        assert_eq!(terminal.error.unwrap().category, "ChildStartup");
+        assert_eq!(fs::read(&file).unwrap(), damaged);
+        assert_eq!(
+            fs::read(&pending).unwrap(),
+            b"preserve unfinished target write"
+        );
+        fs::remove_file(&pending).unwrap();
+        fs::remove_file(&file).unwrap();
+        let repaired = application.read_target(&workspace).unwrap();
+        assert!(repaired.record.binding.is_none());
+        assert_eq!(repaired.record.revision, 0);
+    }
+
+    #[test]
+    fn target_read_during_preparation_keeps_polling_and_stop_independent() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let selection = inspect_named(application, "Main", &package_path()).unwrap();
+        let workspace = workspace_ref(&selection);
+        let store = lock(&application.store);
+        let starting = application.clone();
+        let starting_ref = workspace.clone();
+        let start_request = request(&selection);
+        let starter = std::thread::spawn(move || starting.start(&starting_ref, start_request));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let run = loop {
+            let poll = application.poll();
+            if poll.controller["state"] == "preparing" {
+                break poll.controller["run"].as_str().unwrap().to_owned();
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        };
+        application.command_admitted.store(false, Ordering::Release);
+        let reading = application.clone();
+        let read_ref = workspace.clone();
+        let reader = std::thread::spawn(move || reading.read_target(&read_ref));
+        while !application.command_admitted.load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            application.poll().controller["workspace_id"],
+            workspace.workspace_id
+        );
+        application.stop(&run).unwrap();
+        assert!(matches!(
+            application.poll().controller["state"].as_str(),
+            Some("stopping" | "terminal")
+        ));
+        drop(store);
+        assert_eq!(starter.join().unwrap().unwrap(), run);
+        let target = reader.join().unwrap().unwrap();
+        assert_eq!(target.context.workspace, workspace);
+        assert_eq!(target.record.revision, 0);
+        assert!(target.record.binding.is_none());
+        let terminal = settled(application);
+        assert_eq!(terminal.error.unwrap().category, "Cancelled");
     }
 
     #[test]
@@ -3008,6 +3475,16 @@ mod tests {
         let inspect = application.inspect(&package_path(), &origin);
         let competing_start = application.start(&other_ref, request(&other));
         let competing_check = application.check_environment(Some(&other_ref), None);
+        let target_expected = TargetExpectation {
+            revision: 0,
+            binding_id: None,
+        };
+        let target_configuration = target_configuration();
+        let target_check =
+            application.check_target(&other_ref, &target_expected, &target_configuration);
+        let target_save =
+            application.save_target(&other_ref, &target_expected, target_configuration, None);
+        let target_remove = application.remove_target(&other_ref, &target_expected);
         let reconstruct = application.prepare_reconstruction();
         assert!(!application.closing.load(Ordering::Acquire));
         let capturing = application.clone();
@@ -3029,6 +3506,9 @@ mod tests {
         assert_eq!(inspect.unwrap_err().category, "RunActive");
         assert_eq!(competing_start.unwrap_err().category, "RunActive");
         assert_eq!(competing_check.unwrap_err().category, "RunActive");
+        assert_eq!(target_check.unwrap_err().category, "RunActive");
+        assert_eq!(target_save.unwrap_err().category, "RunActive");
+        assert_eq!(target_remove.unwrap_err().category, "RunActive");
         stopped.unwrap();
         assert_eq!(stopped_state.controller["state"], "stopping");
         assert_eq!(

@@ -1,7 +1,11 @@
 use crate::configuration::{MAX_BYTES, MAX_ENUMERATED, MAX_FILES, publish_no_replace};
+use crate::target::{
+    self, MAX_TARGET_BYTES, TargetBinding, TargetCheck, TargetConfiguration, TargetExpectation,
+    TargetRecord, TargetResolution,
+};
 use mado_runtime_comparison::environment::OcrEnvironment;
 use mado_runtime_comparison::host::resolve_options;
-use mado_runtime_comparison::inventory::Inventory;
+use mado_runtime_comparison::inventory::{Inventory, TargetDeclaration};
 use mado_runtime_comparison::model::{Fault, identity};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -484,6 +488,144 @@ impl Store {
         Ok(store)
     }
 
+    pub fn read_target(&self, tab: &str, package: &str) -> Result<TargetRecord, Fault> {
+        let result = (|| {
+            let directory = self.target_directory(tab, package)?;
+            let mut record = TargetRecord {
+                version: VERSION,
+                internal_name: tab.to_owned(),
+                package_id: package.to_owned(),
+                revision: 0,
+                binding: None,
+            };
+            if !exists(&directory)? {
+                return Ok(record);
+            }
+            check_alias(&directory, "target.config")?;
+            check_alias(&directory, "target.pending")?;
+            if exists(&directory.join("target.pending"))? {
+                return Err(Fault::new(
+                    "StoragePending",
+                    "target configuration has an unresolved pending file; preserve or repair it first",
+                ));
+            }
+            let path = directory.join("target.config");
+            if exists(&path)? {
+                record = decode(&read_bytes(&path, MAX_TARGET_BYTES)?)?;
+                record.validate_owned(tab, package)?;
+            }
+            Ok(record)
+        })();
+        result.map_err(|fault| target_fault(fault, tab, package))
+    }
+
+    pub fn check_target(
+        &self,
+        tab: &str,
+        package: &str,
+        declaration: &TargetDeclaration,
+        expected: &TargetExpectation,
+        configuration: &TargetConfiguration,
+    ) -> Result<TargetCheck, Fault> {
+        let result = (|| {
+            let record = self.read_target(tab, package)?;
+            record.compare(expected)?;
+            target::check(configuration, declaration, record.binding.as_ref())
+        })();
+        result.map_err(|fault| target_fault(fault, tab, package))
+    }
+
+    /// Caller holds the Store mutex and command guard. Revisions protect drafts
+    /// in the supported single-instance root, not arbitrary external writers.
+    pub fn save_target(
+        &self,
+        tab: &str,
+        package: &str,
+        declaration: &TargetDeclaration,
+        expected: &TargetExpectation,
+        configuration: TargetConfiguration,
+        reviewed_resolution: Option<&TargetResolution>,
+    ) -> Result<(TargetRecord, TargetCheck), Fault> {
+        let result = (|| {
+            let mut record = self.read_target(tab, package)?;
+            record.compare(expected)?;
+            let revision = record.next_revision()?;
+            let check = target::check(&configuration, declaration, record.binding.as_ref())?;
+            if (check.resolution_changed && reviewed_resolution != Some(&check.resolution))
+                || reviewed_resolution.is_some_and(|reviewed| reviewed != &check.resolution)
+            {
+                return Err(Fault::new(
+                    "TargetResolutionChanged",
+                    "canonical target locations changed; review them before saving",
+                )
+                .with_context(json!({
+                    "previous_resolution": check.previous_resolution,
+                    "resolution": check.resolution,
+                })));
+            }
+            let id = match &record.binding {
+                Some(binding) if binding.compatible(package, declaration)? => binding.id.clone(),
+                _ => new_id()?,
+            };
+            record.revision = revision;
+            record.binding = Some(TargetBinding {
+                id,
+                package_id: package.to_owned(),
+                target_id: declaration.id.clone(),
+                declaration_identity: declaration.identity()?,
+                configuration,
+                resolution: check.resolution.clone(),
+            });
+            self.write_target(&record, |from, to| fs::rename(from, to))?;
+            Ok((record, check))
+        })();
+        result.map_err(|fault| target_fault(fault, tab, package))
+    }
+
+    pub fn remove_target(
+        &self,
+        tab: &str,
+        package: &str,
+        expected: &TargetExpectation,
+    ) -> Result<TargetRecord, Fault> {
+        let result = (|| {
+            let mut record = self.read_target(tab, package)?;
+            record.compare(expected)?;
+            record.revision = record.next_revision()?;
+            record.binding = None;
+            self.write_target(&record, |from, to| fs::rename(from, to))?;
+            Ok(record)
+        })();
+        result.map_err(|fault| target_fault(fault, tab, package))
+    }
+
+    fn target_directory(&self, tab: &str, package: &str) -> Result<PathBuf, Fault> {
+        // The same saved Tab/package ownership rule as profiles, without reading profiles.
+        Ok(self.profile_store(tab, package)?.directory())
+    }
+
+    fn write_target(
+        &self,
+        record: &TargetRecord,
+        replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    ) -> Result<(), Fault> {
+        record.validate_owned(&record.internal_name, &record.package_id)?;
+        let directory = self.target_directory(&record.internal_name, &record.package_id)?;
+        let bytes = encode(record, MAX_TARGET_BYTES)?;
+        check_budget(
+            &self.root,
+            &format!(
+                "tabs/{}/{}/target.config",
+                record.internal_name, record.package_id
+            ),
+            bytes.len(),
+        )?;
+        private_directory(&directory)?;
+        check_alias(&directory, "target.config")?;
+        check_alias(&directory, "target.pending")?;
+        write_atomic(&directory.join("target.config"), &bytes, replace)
+    }
+
     pub fn import_legacy_profiles(
         &self,
         tab_name: &str,
@@ -788,16 +930,19 @@ impl ProfileStore {
             let name = filename
                 .to_str()
                 .ok_or_else(|| with_filename(malformed()))?;
+            // Target failures belong to the Target view, never profile admission.
+            if matches!(
+                filesystem_key(name).as_str(),
+                "target.config" | "target.pending"
+            ) {
+                continue;
+            }
             if name.ends_with(".pending") {
                 checked_file(&entry.path(), MAX_PROFILE_BYTES).map_err(with_filename)?;
                 return Err(with_filename(Fault::new(
                     "StoragePending",
                     "package configuration has an unresolved pending file",
                 )));
-            }
-            if name == "target.config" {
-                checked_file(&entry.path(), MAX_PROFILE_BYTES).map_err(with_filename)?;
-                continue;
             }
             let id = name.strip_suffix(".config").ok_or_else(malformed)?;
             validate_id(id).map_err(with_filename)?;
@@ -840,6 +985,13 @@ fn settings_missing() -> Fault {
 
 fn tab_fault(mut fault: Fault, name: &str) -> Fault {
     fault.context["internal_name"] = json!(name);
+    fault
+}
+
+fn target_fault(mut fault: Fault, tab: &str, package: &str) -> Fault {
+    fault.context["internal_name"] = json!(tab);
+    fault.context["package_id"] = json!(package);
+    fault.context["owner"] = json!("target");
     fault
 }
 
@@ -1669,8 +1821,17 @@ pub(crate) fn write_atomic(
         .parent()
         .ok_or_else(|| Fault::new("Storage", "storage destination has no parent"))?;
     check_directory(directory)?;
+    let maximum = match destination.file_name().and_then(|name| name.to_str()) {
+        Some("settings.json") => MAX_SETTINGS_BYTES,
+        Some("tab.config") => MAX_TAB_BYTES,
+        Some("target.config") => MAX_TARGET_BYTES,
+        _ => MAX_PROFILE_BYTES,
+    };
+    if bytes.len() > maximum {
+        return Err(limit("atomic write exceeds its destination byte bound"));
+    }
     if exists(destination)? {
-        checked_file(destination, MAX_TAB_BYTES)?;
+        checked_file(destination, maximum)?;
     }
     let temporary = destination.with_extension("pending");
     // The exclusive create below refuses as well; name the cause rather than an I/O code.
@@ -2921,5 +3082,788 @@ mod tests {
             fs::set_permissions(&owner, fs::Permissions::from_mode(0o700)).unwrap();
         }
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    fn target_path(directory: &Directory, tab: &str) -> PathBuf {
+        directory
+            .0
+            .join("tabs")
+            .join(tab)
+            .join(inventory().package_id)
+            .join("target.config")
+    }
+
+    fn stored_target(tab: &str) -> TargetRecord {
+        let declaration = crate::target::tests::declaration();
+        TargetRecord {
+            version: 1,
+            internal_name: tab.into(),
+            package_id: inventory().package_id,
+            revision: 1,
+            binding: Some(TargetBinding {
+                id: new_id().unwrap(),
+                package_id: inventory().package_id,
+                target_id: declaration.id.clone(),
+                declaration_identity: declaration.identity().unwrap(),
+                configuration: crate::target::tests::configuration("/offline/game"),
+                resolution: TargetResolution {
+                    game: crate::target::ResolvedLocation {
+                        path: "/offline/game".into(),
+                        executable: "/offline/game".into(),
+                    },
+                    launcher: None,
+                    working_directory: None,
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn target_reads_are_lazy_and_removal_retains_revision_against_null_aba() {
+        let directory = Directory::new();
+        let profiles = directory.profiles("Owner");
+        let store = directory.store();
+        let package = inventory().package_id;
+        let absent = store.read_target("Owner", &package).unwrap();
+        assert_eq!(absent.revision, 0);
+        assert_eq!(absent.binding, None);
+        assert!(!profiles.directory().exists());
+        let removed = store
+            .remove_target("Owner", &package, &absent.expectation())
+            .unwrap();
+        assert_eq!(removed.revision, 1);
+        assert_eq!(removed.binding, None);
+        let bytes = fs::read(target_path(&directory, "Owner")).unwrap();
+        assert_eq!(
+            store
+                .remove_target("Owner", &package, &absent.expectation())
+                .unwrap_err()
+                .category,
+            "TargetConflict"
+        );
+        assert_eq!(fs::read(target_path(&directory, "Owner")).unwrap(), bytes);
+        assert_eq!(
+            directory.store().read_target("Owner", &package).unwrap(),
+            removed
+        );
+        let second = store
+            .remove_target("Owner", &package, &removed.expectation())
+            .unwrap();
+        assert_eq!(second.revision, 2);
+        assert_eq!(second.binding, None);
+    }
+
+    #[test]
+    fn target_storage_rejects_schema_owner_size_and_revision_without_reset_and_reloads_repairs() {
+        let directory = Directory::new();
+        directory.profiles("Owner");
+        directory.profiles("Other");
+        let store = directory.store();
+        let package = inventory().package_id;
+        let path = target_path(&directory, "Owner");
+        let saved = stored_target("Owner");
+        let good = serde_json::to_value(&saved).unwrap();
+        let bytes = serde_json::to_vec(&saved).unwrap();
+        put(&path, &bytes);
+        let mut invalid_documents = vec![
+            b"{".to_vec(),
+            b"[]".to_vec(),
+            br#"{"version":1,"version":1,"internal_name":"Owner","package_id":"portable-options","revision":1,"binding":null}"#.to_vec(),
+        ];
+        for (field, value) in [
+            ("version", json!(2)),
+            ("internal_name", json!("Other")),
+            ("package_id", json!("different")),
+            ("revision", json!(0)),
+            ("revision", json!(crate::target::MAX_TARGET_REVISION + 1)),
+            ("authority", json!(true)),
+            ("binding", json!([null])),
+        ] {
+            let mut invalid = good.clone();
+            invalid[field] = value;
+            invalid_documents.push(serde_json::to_vec(&invalid).unwrap());
+        }
+        for (field, value) in [
+            ("package_id", json!("different")),
+            ("declaration_identity", json!("not-a-hash")),
+            ("target_id", json!("../escape")),
+            ("configuration", json!([])),
+            (
+                "resolution",
+                json!({"game": {"path": "/offline/game", "executable": "/different"}, "launcher": null, "working_directory": null}),
+            ),
+        ] {
+            let mut invalid = good.clone();
+            invalid["binding"][field] = value;
+            invalid_documents.push(serde_json::to_vec(&invalid).unwrap());
+        }
+        let mut oversized = bytes.clone();
+        oversized.resize(MAX_TARGET_BYTES + 1, b' ');
+        invalid_documents.push(oversized);
+        for invalid in invalid_documents {
+            fs::write(&path, &invalid).unwrap();
+            let fault = store.read_target("Owner", &package).unwrap_err();
+            assert_eq!(fault.context["owner"], "target");
+            assert_eq!(fault.context["internal_name"], "Owner");
+            assert!(
+                store
+                    .remove_target("Owner", &package, &saved.expectation())
+                    .is_err()
+            );
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+            assert_eq!(store.read_target("Other", &package).unwrap().revision, 0);
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(store.read_target("Owner", &package).unwrap(), saved);
+        }
+        let mut exhausted = saved;
+        exhausted.revision = crate::target::MAX_TARGET_REVISION;
+        put(&path, &serde_json::to_vec(&exhausted).unwrap());
+        let before = fs::read(&path).unwrap();
+        assert_eq!(
+            store
+                .remove_target("Owner", &package, &exhausted.expectation())
+                .unwrap_err()
+                .category,
+            "TargetRevision"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn target_pending_and_malformed_data_do_not_poison_profiles_but_snapshot_refuses_pending() {
+        let directory = Directory::new();
+        let store = directory.store();
+        store.initialize(preferences()).unwrap();
+        let profiles = directory.profiles("Owner");
+        let inv = inventory();
+        let profile = profiles.save(&inv, None, "Original", options()).unwrap();
+        let path = target_path(&directory, "Owner");
+        put(&path, b"malformed target");
+        let pending = path.with_extension("pending");
+        put(&pending, b"retain interrupted target");
+        assert_eq!(
+            profiles
+                .list(&inv.package_id, &profile.schema_identity)
+                .unwrap()
+                .profiles[0]
+                .id,
+            profile.id
+        );
+        profiles.rename(&inv, &profile.id, "Still usable").unwrap();
+        assert_eq!(
+            store
+                .read_target("Owner", &inv.package_id)
+                .unwrap_err()
+                .category,
+            "StoragePending"
+        );
+        assert!(
+            store
+                .remove_target(
+                    "Owner",
+                    &inv.package_id,
+                    &TargetExpectation {
+                        revision: 0,
+                        binding_id: None
+                    }
+                )
+                .is_err()
+        );
+        assert!(crate::configuration::capture(&directory.0).is_err());
+        assert_eq!(fs::read(&pending).unwrap(), b"retain interrupted target");
+        assert_eq!(fs::read(&path).unwrap(), b"malformed target");
+        fs::remove_file(&pending).unwrap();
+        let snapshot = crate::configuration::capture(&directory.0).unwrap();
+        assert_eq!(
+            snapshot.files[&format!("tabs/Owner/{}/target.config", inv.package_id)],
+            b"malformed target"
+        );
+        assert!(crate::restore::validate(&snapshot).is_err());
+        let repaired = stored_target("Owner");
+        fs::write(&path, serde_json::to_vec(&repaired).unwrap()).unwrap();
+        assert_eq!(
+            store.read_target("Owner", &inv.package_id).unwrap(),
+            repaired
+        );
+        fs::write(&path, vec![b'x'; MAX_TARGET_BYTES + 1]).unwrap();
+        assert_eq!(
+            profiles
+                .list(&inv.package_id, &profile.schema_identity)
+                .unwrap()
+                .profiles[0]
+                .name,
+            "Still usable"
+        );
+        profiles
+            .rename(&inv, &profile.id, "Still independent")
+            .unwrap();
+    }
+
+    #[test]
+    fn target_atomic_failure_retains_preimage_and_only_cleans_its_own_pending_file() {
+        let directory = Directory::new();
+        directory.profiles("Owner");
+        let store = directory.store();
+        let mut record = stored_target("Owner");
+        let path = target_path(&directory, "Owner");
+        put(&path, &serde_json::to_vec(&record).unwrap());
+        let before = fs::read(&path).unwrap();
+        record.revision += 1;
+        record.binding = None;
+        let failure = store.write_target(&record, |temporary, destination| {
+            assert_eq!(
+                decode::<TargetRecord>(&fs::read(temporary)?).unwrap(),
+                record
+            );
+            fs::rename(temporary, destination.join("not-a-directory"))
+        });
+        assert!(failure.is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!path.with_extension("pending").exists());
+        put(&path.with_extension("pending"), b"other pending write");
+        assert!(
+            store
+                .write_target(&record, |from, to| fs::rename(from, to))
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(
+            fs::read(path.with_extension("pending")).unwrap(),
+            b"other pending write"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_links_and_public_modes_are_refused_without_poisoning_profile_admission() {
+        let directory = Directory::new();
+        let profiles = directory.profiles("Owner");
+        let inv = inventory();
+        let profile = profiles.save(&inv, None, "Profile", options()).unwrap();
+        let store = directory.store();
+        let path = target_path(&directory, "Owner");
+        let record = stored_target("Owner");
+        put(&path, &serde_json::to_vec(&record).unwrap());
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        let outside = directory.0.join("retained-target.json");
+        fs::rename(&path, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(store.read_target("Owner", &inv.package_id).is_err());
+        assert_eq!(
+            profiles
+                .list(&inv.package_id, &profile.schema_identity)
+                .unwrap()
+                .profiles[0]
+                .id,
+            profile.id
+        );
+        fs::remove_file(&path).unwrap();
+        fs::hard_link(&outside, &path).unwrap();
+        assert!(
+            store
+                .remove_target("Owner", &inv.package_id, &record.expectation())
+                .is_err()
+        );
+        fs::remove_file(&path).unwrap();
+        fs::rename(&outside, &path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(store.read_target("Owner", &inv.package_id).is_err());
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o644);
+        assert_eq!(
+            profiles
+                .list(&inv.package_id, &profile.schema_identity)
+                .unwrap()
+                .profiles[0]
+                .id,
+            profile.id
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(store.read_target("Owner", &inv.package_id).unwrap(), record);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_save_restart_owner_isolation_relocation_and_declaration_replacement() {
+        use crate::target::tests::{MetadataFixture, configuration, declaration};
+        let metadata = MetadataFixture::new();
+        let game = metadata.executable("game");
+        let launcher = metadata.executable("launcher");
+        let mut configuration = configuration(game.to_str().unwrap());
+        configuration.launcher = Some(crate::target::TargetLocation {
+            kind: "executable".into(),
+            path: launcher.to_str().unwrap().into(),
+        });
+        let directory = Directory::new();
+        let profiles = directory.profiles("First");
+        directory.profiles("Second");
+        let store = directory.store();
+        let package = inventory().package_id;
+        let empty = store.read_target("First", &package).unwrap();
+        let checked = store
+            .check_target(
+                "First",
+                &package,
+                &declaration(),
+                &empty.expectation(),
+                &configuration,
+            )
+            .unwrap();
+        assert!(!profiles.directory().exists());
+        let (saved, saved_check) = store
+            .save_target(
+                "First",
+                &package,
+                &declaration(),
+                &empty.expectation(),
+                configuration.clone(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(checked, saved_check);
+        assert_eq!(
+            directory.store().read_target("First", &package).unwrap(),
+            saved
+        );
+        assert_eq!(
+            saved.binding.as_ref().unwrap().configuration.arguments,
+            ["", "two words", "$(literal)", "\"quoted\""]
+        );
+        assert_eq!(store.read_target("Second", &package).unwrap().revision, 0);
+        let (other, _) = store
+            .save_target(
+                "Second",
+                &package,
+                &declaration(),
+                &empty.expectation(),
+                configuration.clone(),
+                None,
+            )
+            .unwrap();
+        assert_ne!(
+            saved.binding.as_ref().unwrap().id,
+            other.binding.as_ref().unwrap().id
+        );
+        store
+            .bind_package("First", &package, &directory.0.join("relocated-package"))
+            .unwrap();
+        assert_eq!(store.read_target("First", &package).unwrap(), saved);
+        let mut edited = configuration.clone();
+        edited.arguments.push("literal next".into());
+        let (updated, _) = store
+            .save_target(
+                "First",
+                &package,
+                &declaration(),
+                &saved.expectation(),
+                edited.clone(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            updated.binding.as_ref().unwrap().id,
+            saved.binding.as_ref().unwrap().id
+        );
+        assert_eq!(updated.revision, saved.revision + 1);
+        assert_eq!(
+            store
+                .save_target(
+                    "First",
+                    &package,
+                    &declaration(),
+                    &saved.expectation(),
+                    configuration,
+                    None
+                )
+                .unwrap_err()
+                .category,
+            "TargetConflict"
+        );
+        assert_eq!(
+            store
+                .remove_target("First", &package, &saved.expectation())
+                .unwrap_err()
+                .category,
+            "TargetConflict"
+        );
+        let mut wrong_id = updated.expectation();
+        wrong_id.binding_id = other.expectation().binding_id;
+        assert_eq!(
+            store
+                .check_target("First", &package, &declaration(), &wrong_id, &edited)
+                .unwrap_err()
+                .category,
+            "TargetConflict"
+        );
+        let changed = TargetDeclaration {
+            id: "different-game".into(),
+            window_title: None,
+        };
+        assert!(
+            !updated
+                .binding
+                .as_ref()
+                .unwrap()
+                .compatible(&package, &changed)
+                .unwrap()
+        );
+        assert_eq!(store.read_target("First", &package).unwrap(), updated);
+        let changed_title = TargetDeclaration {
+            id: declaration().id,
+            window_title: Some("Another exact title".into()),
+        };
+        assert!(
+            !updated
+                .binding
+                .as_ref()
+                .unwrap()
+                .compatible(&package, &changed_title)
+                .unwrap()
+        );
+        let (replaced, _) = store
+            .save_target(
+                "First",
+                &package,
+                &changed,
+                &updated.expectation(),
+                edited,
+                None,
+            )
+            .unwrap();
+        assert_ne!(
+            replaced.binding.as_ref().unwrap().id,
+            updated.binding.as_ref().unwrap().id
+        );
+        assert_eq!(store.read_target("Second", &package).unwrap(), other);
+        let removed = store
+            .remove_target("First", &package, &replaced.expectation())
+            .unwrap();
+        assert_eq!(removed.binding, None);
+        assert_eq!(removed.revision, replaced.revision + 1);
+        let stale_configuration = replaced.binding.as_ref().unwrap().configuration.clone();
+        assert_eq!(
+            store
+                .save_target(
+                    "First",
+                    &package,
+                    &changed,
+                    &empty.expectation(),
+                    stale_configuration.clone(),
+                    None
+                )
+                .unwrap_err()
+                .category,
+            "TargetConflict"
+        );
+        assert_eq!(
+            store
+                .save_target(
+                    "First",
+                    &package,
+                    &changed,
+                    &replaced.expectation(),
+                    stale_configuration,
+                    None
+                )
+                .unwrap_err()
+                .category,
+            "TargetConflict"
+        );
+        assert!(game.exists());
+        assert!(launcher.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_alias_changes_need_exact_review_and_save_rechecks_metadata() {
+        use crate::target::tests::{MetadataFixture, configuration, declaration};
+        let metadata = MetadataFixture::new();
+        let first = metadata.executable("first");
+        let second = metadata.executable("second");
+        let third = metadata.executable("third");
+        let alias = metadata.0.join("selected");
+        std::os::unix::fs::symlink(&first, &alias).unwrap();
+        let configuration = configuration(alias.to_str().unwrap());
+        let directory = Directory::new();
+        directory.profiles("Owner");
+        let store = directory.store();
+        let package = inventory().package_id;
+        let empty = store.read_target("Owner", &package).unwrap();
+        let (saved, _) = store
+            .save_target(
+                "Owner",
+                &package,
+                &declaration(),
+                &empty.expectation(),
+                configuration.clone(),
+                None,
+            )
+            .unwrap();
+        let before = fs::read(target_path(&directory, "Owner")).unwrap();
+        fs::write(&first, b"ordinary executable update in place").unwrap();
+        assert!(
+            !store
+                .check_target(
+                    "Owner",
+                    &package,
+                    &declaration(),
+                    &saved.expectation(),
+                    &configuration
+                )
+                .unwrap()
+                .resolution_changed
+        );
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&second, &alias).unwrap();
+        let check = store
+            .check_target(
+                "Owner",
+                &package,
+                &declaration(),
+                &saved.expectation(),
+                &configuration,
+            )
+            .unwrap();
+        assert!(check.resolution_changed);
+        assert_eq!(
+            check.previous_resolution,
+            Some(saved.binding.as_ref().unwrap().resolution.clone())
+        );
+        let refusal = store
+            .save_target(
+                "Owner",
+                &package,
+                &declaration(),
+                &saved.expectation(),
+                configuration.clone(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(refusal.category, "TargetResolutionChanged");
+        assert_eq!(
+            refusal.context["resolution"],
+            serde_json::to_value(&check.resolution).unwrap()
+        );
+        assert_eq!(fs::read(target_path(&directory, "Owner")).unwrap(), before);
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&third, &alias).unwrap();
+        assert_eq!(
+            store
+                .save_target(
+                    "Owner",
+                    &package,
+                    &declaration(),
+                    &saved.expectation(),
+                    configuration.clone(),
+                    Some(&check.resolution)
+                )
+                .unwrap_err()
+                .category,
+            "TargetResolutionChanged"
+        );
+        let latest = store
+            .check_target(
+                "Owner",
+                &package,
+                &declaration(),
+                &saved.expectation(),
+                &configuration,
+            )
+            .unwrap();
+        let (adopted, _) = store
+            .save_target(
+                "Owner",
+                &package,
+                &declaration(),
+                &saved.expectation(),
+                configuration.clone(),
+                Some(&latest.resolution),
+            )
+            .unwrap();
+        assert_eq!(
+            adopted.binding.as_ref().unwrap().configuration.game.path,
+            configuration.game.path
+        );
+        assert_eq!(
+            adopted.binding.as_ref().unwrap().resolution,
+            latest.resolution
+        );
+        assert_eq!(
+            adopted.binding.as_ref().unwrap().id,
+            saved.binding.as_ref().unwrap().id
+        );
+        let mut explicit_change = configuration.clone();
+        explicit_change.game.path = second.to_str().unwrap().into();
+        assert_eq!(
+            store
+                .save_target(
+                    "Owner",
+                    &package,
+                    &declaration(),
+                    &adopted.expectation(),
+                    explicit_change,
+                    None
+                )
+                .unwrap_err()
+                .category,
+            "TargetResolutionChanged"
+        );
+        let adopted_bytes = fs::read(target_path(&directory, "Owner")).unwrap();
+        fs::remove_file(&third).unwrap();
+        assert_eq!(
+            store
+                .save_target(
+                    "Owner",
+                    &package,
+                    &declaration(),
+                    &adopted.expectation(),
+                    configuration,
+                    Some(&latest.resolution)
+                )
+                .unwrap_err()
+                .category,
+            "TargetMetadata"
+        );
+        assert_eq!(
+            fs::read(target_path(&directory, "Owner")).unwrap(),
+            adopted_bytes
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_bundle_executable_metadata_changes_require_review_and_pending_save_preserves_it() {
+        use crate::target::tests::{MetadataFixture, configuration, declaration};
+        let metadata = MetadataFixture::new();
+        let bundle = metadata.bundle(true);
+        let mut configuration = configuration(bundle.to_str().unwrap());
+        configuration.game.kind = "bundle".into();
+        let directory = Directory::new();
+        directory.profiles("Owner");
+        let store = directory.store();
+        let package = inventory().package_id;
+        let empty = store.read_target("Owner", &package).unwrap();
+        let (saved, _) = store
+            .save_target(
+                "Owner",
+                &package,
+                &declaration(),
+                &empty.expectation(),
+                configuration.clone(),
+                None,
+            )
+            .unwrap();
+        let path = target_path(&directory, "Owner");
+        let before = fs::read(&path).unwrap();
+        let replacement = metadata.executable("Binary.app/Contents/MacOS/Updated");
+        plist::Value::Dictionary(plist::Dictionary::from_iter([(
+            "CFBundleExecutable",
+            plist::Value::String("Updated".into()),
+        )]))
+        .to_file_binary(bundle.join("Contents/Info.plist"))
+        .unwrap();
+        let check = store
+            .check_target(
+                "Owner",
+                &package,
+                &declaration(),
+                &saved.expectation(),
+                &configuration,
+            )
+            .unwrap();
+        assert!(check.resolution_changed);
+        assert_eq!(
+            check.resolution.game.path,
+            saved.binding.as_ref().unwrap().resolution.game.path
+        );
+        assert_eq!(
+            check.resolution.game.executable,
+            fs::canonicalize(replacement).unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            store
+                .save_target(
+                    "Owner",
+                    &package,
+                    &declaration(),
+                    &saved.expectation(),
+                    configuration.clone(),
+                    None
+                )
+                .unwrap_err()
+                .category,
+            "TargetResolutionChanged"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let pending = path.with_extension("pending");
+        put(&pending, b"interrupted original save");
+        assert_eq!(
+            store
+                .save_target(
+                    "Owner",
+                    &package,
+                    &declaration(),
+                    &saved.expectation(),
+                    configuration.clone(),
+                    Some(&check.resolution)
+                )
+                .unwrap_err()
+                .category,
+            "StoragePending"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(&pending).unwrap(), b"interrupted original save");
+        fs::remove_file(pending).unwrap();
+        let (updated, _) = store
+            .save_target(
+                "Owner",
+                &package,
+                &declaration(),
+                &saved.expectation(),
+                configuration,
+                Some(&check.resolution),
+            )
+            .unwrap();
+        assert_eq!(
+            updated.binding.as_ref().unwrap().resolution,
+            check.resolution
+        );
+        assert_eq!(
+            updated.binding.as_ref().unwrap().id,
+            saved.binding.as_ref().unwrap().id
+        );
+    }
+
+    #[test]
+    fn target_mutations_share_the_global_budget_with_retained_target_files() {
+        let directory = Directory::new();
+        directory.profiles("Owner");
+        let store = directory.store();
+        let package = inventory().package_id;
+        let empty = store.read_target("Owner", &package).unwrap();
+        let padding = vec![b' '; MAX_TARGET_BYTES];
+        for tab in 0..16 {
+            for package in 0..16 {
+                put(
+                    &directory
+                        .0
+                        .join(format!("tabs/Retained{tab}/pkg{package}/target.config")),
+                    &padding,
+                );
+            }
+        }
+        assert_eq!(
+            store
+                .remove_target("Owner", &package, &empty.expectation())
+                .unwrap_err()
+                .category,
+            "StorageLimit"
+        );
+        assert!(!target_path(&directory, "Owner").exists());
+        fs::remove_file(directory.0.join("tabs/Retained0/pkg0/target.config")).unwrap();
+        let removed = store
+            .remove_target("Owner", &package, &empty.expectation())
+            .unwrap();
+        assert_eq!(removed.revision, 1);
+        assert_eq!(removed.binding, None);
     }
 }

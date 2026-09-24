@@ -28,9 +28,11 @@ import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards
 import type {Card, CardStack} from './notifications.ts';
 import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, settingsDraftAfterSave, settingsDraftFrom, staleReasons, text} from './state.ts';
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
-import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyCommand, applyIfCurrent, bindSelection, busy, closeWorkspace, commandValues, deriveBound, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
+import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyCommand, applyIfCurrent, bindSelection, busy, closeWorkspace, commandValues, deriveBound, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, ProfileCatalog, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
-import type {BootstrapStatus, ControllerView, Fault, Json, LegacyImport, Poll, Profile, Selection, Settings, SnapshotReceipt, StartRequest, TabRecord, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
+import {beginTarget, checkedTarget, currentTargetDraft, discardTarget, editTarget, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
+import type {TargetOperation, TargetState} from './target.ts';
+import type {BootstrapStatus, ControllerView, Fault, Json, LegacyImport, Poll, Profile, Selection, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
 
 const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0, workspace_id: null, workspace_revision: null};
 const EMPTY_FILTER: LogFilter = {text: '', level: ''};
@@ -130,8 +132,8 @@ export default function App() {
   const closedSelected = nav.kind === 'closed' ? closed.find(item => item.id === nav.id) : undefined;
   const noSelection = nav.kind === 'none' || (nav.kind === 'workspace' && !selected);
   const labelOf = (workspaceId: string | null) => originLabel(workspaceId, workspaces, closed, locale).label;
-  // A dirty draft exists only on a bound Tab whose operator touched profile/draft state.
-  const dirtyDraft = (workspace: Workspace) => workspace.bound !== null && workspace.bound.touched && derived[workspace.id]?.dirty === true;
+  // Profile and machine-local target edits share the same explicit discard boundary.
+  const dirtyDraft = (workspace: Workspace) => hasWorkspaceEdits(workspace, derived[workspace.id]);
   // Settings Save has a separate gate; other pending commands expose their shared refusal reason.
   const busyWorkspace = workspaces.find(workspace => workspace.busy !== null);
   const pendingCommandReason = appBusy !== null && appBusy !== 'savingSettings' ? t[appBusy]
@@ -390,6 +392,68 @@ export default function App() {
     });
   }
 
+  async function targetCommand(workspace: BoundWorkspace, operation: TargetOperation, reviewedResolution?: TargetResolution) {
+    if (hostCommand.current !== null || closing || !normalReady || (operation !== 'read' && active)) return;
+    const target = workspace.bound.target;
+    const ticket = targetTicket(target);
+    const configuration = readTargetDraft(target.draft).configuration;
+    if (operation !== 'read' && (!ticket || (operation !== 'remove' && (!target.declaration || !configuration)))) return;
+    if (reviewedResolution && (!target.review || !currentTargetDraft(target, target.review.ticket)
+      || JSON.stringify(reviewedResolution) !== JSON.stringify(target.review.resolution))) return;
+    const labels = {read:'readingTarget', check:'checkingTarget', save:'savingTarget', remove:'removingTarget'} as const;
+    const label = labels[operation];
+    const origin = {id:workspace.id, revision:workspace.revision};
+    const ref = workspaceRef(workspace);
+    const publish = (update:(state:TargetState) => TargetState) =>
+      setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound => ({...bound, target:update(bound.target)}))));
+    hostCommand.current = label;
+    setWorkspaces(list => applyIfCurrent(list, origin, item => ({
+      ...updateBound(item, bound => ({...bound, target:beginTarget(bound.target, operation)})), busy:{key:label},
+    })));
+    async function refresh() {
+      try {
+        const view = await invoke<TargetView>('read_target', {workspace:ref});
+        publish(state => readTarget(state, view));
+      } catch (cause) {
+        const error = fault(cause);
+        publish(state => targetReadFailed(state, error));
+      }
+    }
+    try {
+      if (operation === 'read') await refresh();
+      else if (ticket) {
+        if (operation === 'check') {
+          const response = await invoke<TargetCheckResponse>('check_target', {workspace:ref, expected:ticket.expected, configuration});
+          publish(state => checkedTarget(state, ticket, response));
+        } else if (operation === 'save') {
+          const response = await invoke<TargetSaveResponse>('save_target', {workspace:ref, expected:ticket.expected, configuration, reviewedResolution:reviewedResolution ?? null});
+          publish(state => savedTarget(state, ticket, response));
+          await refresh();
+        } else {
+          const response = await invoke<TargetView>('remove_target', {workspace:ref, expected:ticket.expected});
+          publish(state => removedTarget(state, ticket, response));
+          await refresh();
+        }
+      }
+    } catch (cause) {
+      const error = fault(cause);
+      if (ticket) publish(state => targetFailed(state, ticket, error));
+    } finally {
+      hostCommand.current = null;
+      setWorkspaces(list => applyIfCurrent(list, origin, item => ({
+        ...updateBound(item, bound => ({...bound, target:{...bound.target, operation:null}})), busy:null,
+      })));
+    }
+  }
+
+  // Only the visible, inspected Run page reads its own owner lazily. Failed reads require an explicit retry.
+  useEffect(() => {
+    if (selected && isBound(selected) && selected.page === 'run' && !selected.bound.target.loaded
+      && selected.bound.target.operation === null && commandReason === null && !closing) {
+      void targetCommand(selected, 'read');
+    }
+  }, [selected?.id, selected?.revision, selected?.page, selected?.bound?.target.loaded, commandReason, closing]);
+
   function handlers(workspace: BoundWorkspace): RunHandlers {
     const ref = workspaceRef(workspace);
     const origin: Origin = {id: workspace.id, revision: workspace.revision};
@@ -398,6 +462,14 @@ export default function App() {
     const edit = (update: (bound: Bound) => Bound) => change(workspace.id, item => ({...updateBound(item, update), notice: null}));
     return {
       change: edit,
+      target: {
+        edit: draft => edit(current => ({...current, target:editTarget(current.target, draft)})),
+        reload: () => {void targetCommand(workspace, 'read');},
+        check: () => {void targetCommand(workspace, 'check');},
+        save: reviewed => {void targetCommand(workspace, 'save', reviewed);},
+        remove: () => {void targetCommand(workspace, 'remove');},
+        discard: () => edit(current => ({...current, target:discardTarget(current.target)})),
+      },
       disclose: run => change(workspace.id, item => updateBound(item, current => ({...current, disclosedRun: run}))),
       selectProfile: id => edit(current => selectProfile(current, id)),
       newDraft: preset => edit(current => newDraft(current, preset)),
@@ -793,7 +865,8 @@ export default function App() {
     const facts = derived[workspace.id];
     const owns = starting?.workspaceId === workspace.id || (current.live && busy(current.view.state));
     const sourceIssue = workspace.sourceError ? workspace.sourceError.category === UNSUPPORTED_SOURCE ? t.unsupportedSource : t.unavailableSource : null;
-    const issue = workspace.error?.category ?? workspace.bound?.profilesError?.category ?? sourceIssue
+    const issue = workspace.error?.category ?? workspace.bound?.profilesError?.category
+      ?? workspace.bound?.target.readError?.category ?? workspace.bound?.target.issue?.fault.category ?? sourceIssue
       ?? (facts ? facts.numericErrors ? t.invalidFields : !facts.bound ? t.staleProfile : facts.descriptorError ? t.invalidDescriptor : null : null);
     const attention = issue !== null || needsAttention(current.view);
     const optionStatus: WorkspaceOption['status'] = owns ? {kind: 'busy', text: `${ui.phase(starting?.workspaceId === workspace.id ? 'preparing' : current.view.state)} · ${ui.operation(starting?.workspaceId === workspace.id ? starting.kind === 'check' ? 'environment_check' : 'run' : current.view.operation)}`}

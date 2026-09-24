@@ -321,6 +321,74 @@ Translations live in JSON; formatting and typed parameters stay in TypeScript.
 The existing `npm test --prefix apps/desktop` checks cross-language keys and
 placeholders. See [ADR 0004](adr/0004-desktop-localization-resources.md).
 
+## Local target configuration
+
+The **Target** section on a bound workspace's Run page stores macOS configuration
+for that **Tab and package only**. The package must declare portable target intent
+as described in [the manifest contract](runtime-comparison.md#optional-portable-target-declaration).
+A targetless package still runs existing controlled/replay workflows; a missing,
+invalid, or incompatible local target is not an execution prerequisite.
+
+1. Choose an executable file or `.app` bundle and enter its absolute path for
+   the **actual game**. Optionally select a separate launcher and its location.
+   A launcher does not identify or replace the game.
+2. Add arguments as ordered individual fields. Empty fields remain empty
+   arguments; spaces and shell syntax are literal, never split or expanded.
+   Optionally enter an absolute working directory. Supply an exact window title
+   when the package leaves it local; a package-required title is read-only.
+3. Explicitly select the future input policy. Process-directed input requires a
+   pointer mode: Core Graphics permits either focus policy; AppKit background
+   requires preserved focus. System input requires an already focused target
+   and has no process-pointer mode. Click hold is **0–1000 ms**.
+4. **Check configuration** examines the current unsaved draft without writing.
+   **Save binding** repeats validation and metadata resolution before an atomic
+   write. Both inspect only filesystem metadata: executable accessibility,
+   bounded XML/binary bundle metadata, contained bundle executable, working
+   directory, and canonical paths. No executable or helper is launched.
+5. Review changed canonical locations explicitly. **Save reviewed resolution**
+   resolves them again and refuses a different result. Merely checking cannot
+   replace saved locations. In-place executable updates at the same canonical
+   location remain compatible; this is not a signed-binary or content check.
+
+Neither action finds processes/windows, connects, captures, performs OCR, sends
+input, changes focus, or requests permissions. A passed check is **configuration
+metadata only**, not runtime identity, authority, or native acceptance. Native
+Start remains refused; R6 and initial Windows/macOS qualification remain open.
+
+Paths are absolute UTF-8 strings of at most **4,096 bytes**. Titles are nonempty
+exact strings of at most **512 bytes**, not patterns. Arguments permit at most
+**32 entries**, **1,024 bytes each**, **8,192 bytes total**; control characters
+are refused, while an empty argument is valid. Store no credentials or secrets:
+there is no automatic secret detector. Full values appear only in the deliberate
+local form and private details, not routine logs or notifications. Configuration
+and backups contain these private values and must not be published.
+
+Each Tab has its own binding and draft, even for the same package. Navigation
+preserves drafts; edits invalidate a check's applicability. Late results remain
+attributed to their originating configuration. Reinspect/restart/reopen never
+restore a checked or connected status. Closing or reinspecting a touched target
+draft uses the existing discard confirmation alongside profile edits.
+
+**Reload saved view · keep draft** reconciles only the issuing owner.
+**Discard edits** loads the latest compatible saved values, or a blank form.
+A stale record revision/binding ID is refused: Reload before another mutation,
+then deliberately keep the draft or Discard. If persistence succeeds but its
+follow-up read fails, the write remains completed; repair and retry the read,
+not the completed mutation. Malformed target storage is reported independently
+of profiles. Preserve the file before external repair.
+
+Changing/removing the portable declaration retains an incompatible record
+without applying it to the form. Save deliberately replaces it after validation;
+confirmed **Remove binding** clears only this owner's binding and increments its
+record revision. It keeps the current draft until Discard, and never deletes
+installed programs, package source, profiles, or another Tab's configuration.
+Check, Save, and Remove refuse active runs/OCR checks; read, navigation, polling,
+and Stop retain their existing roles.
+
+Use one application instance per data root. Revision checks protect in-process
+stale requests; they are not cross-process locking or protection against
+concurrent external filesystem edits.
+
 ## Inspect, edit, and save profiles
 
 1. Create or reopen a named workspace, enter a local package directory in its
@@ -383,7 +451,7 @@ Paths below are relative to the selected root:
 | `settings.json` | App preferences; **32 KiB** |
 | `tabs/<internal_name>/tab.config` | Version, names, open state, package references, and selected package ID; **128 KiB**, **16 references per Tab** |
 | `tabs/<internal_name>/<package_id>/<profile_id>.config` | One saved profile; **64 KiB**, **64 profiles / 1 MiB per Tab/package** |
-| `tabs/<internal_name>/<package_id>/target.config` | Reserved for later target binding; not created or supported for restore here |
+| `tabs/<internal_name>/<package_id>/target.config` | Versioned local target record, revision, and optional binding; **64 KiB** |
 | `profiles/<profile_id>.json` | Recognized legacy profiles; explicit import only |
 | `logs/` | File diagnostics; not configuration |
 | `backups/app.config.<unix_time>` | Default manual snapshot destination |
@@ -401,10 +469,12 @@ values exclude executable/model paths, credentials, permission grants, and input
 authority. OCR configuration belongs to App settings; package locations belong
 to Tab references. Neither is execution authority.
 
-Only `.config` and `.pending` entries belong to the active package profile store;
-`target.config` is reserved, not loaded as a profile. Other regular entries such
-as filesystem metadata are ignored without being opened but still count toward
-directory-entry limits. An invalid owned file is not ignored.
+Only `.config` and `.pending` entries belong to the active package profile store.
+`target.config` and `target.pending` belong to the separate target store; malformed
+or interrupted target data does not block profile loading or controlled/replay
+Start. Other regular entries such as filesystem metadata are ignored without
+being opened but still count toward directory-entry limits. An invalid owned
+profile file is not ignored.
 
 An interrupted save may leave a `.pending` file. The application preserves it
 instead of silently discarding evidence or overwriting it. Close the app and move
@@ -495,9 +565,11 @@ are not permission to publish its contents.
    supported document schemas, and owning identities are validated before live
    mutation. Traversal, links, duplicate/aliased paths, encryption, unsupported
    ZIP features, unknown owners/versions, and unlisted payloads are refused.
-   A raw preservation snapshot with malformed data, orphaned package files,
-   reserved `target.config`, or no valid App settings is not an installable
-   restore; preserve it for external repair.
+   Target records are validated structurally without requiring their referenced
+   installation to exist on this machine; restored bindings remain unchecked.
+   A raw preservation snapshot with malformed data, orphaned package files, or
+   no valid App settings is not an installable restore; preserve it for external
+   repair.
 5. Read the resulting state and cause. Confirmation resets after each attempt.
    A refused attempt does not erase an earlier valid preimage receipt; installed
    or recovered configuration consumes it. Successful reconstruction reloads
