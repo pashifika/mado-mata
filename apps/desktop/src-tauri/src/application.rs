@@ -3113,9 +3113,13 @@ mod tests {
         };
         let closing = application.clone();
         let shutdown = std::thread::spawn(move || closing.shutdown());
-        // Release the blocked worker only once shutdown has cancelled it.
+        // Cancellation can finish before the worker reaches the held store lock,
+        // so polling may already report terminal rather than the transient stopping phase.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while application.runner.poll().state != "stopping" {
+        while !matches!(
+            application.runner.poll().state.as_str(),
+            "stopping" | "terminal"
+        ) {
             assert!(std::time::Instant::now() < deadline);
             std::thread::yield_now();
         }
