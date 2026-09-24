@@ -4,7 +4,7 @@ import {readFile} from 'node:fs/promises';
 import {messages,renderMessage,LocalFault} from './i18n.ts';
 import {interpolate} from './i18n-format.ts';
 import {readDraft,readSettingsDraft,environmentDraft,DEFAULT_NOTIFICATIONS,SUPPORTED_PROFILES} from './state.ts';
-import {applyIfCurrent,editDraft,openWorkspace,viewLogs} from './workspace.ts';
+import {applyIfCurrent,bindSelection,editDraft,updateBound,viewLogs,workspaceFromView} from './workspace.ts';
 import {emptyStack,ingestCards,interactCard,tickCards} from './notifications.ts';
 
 function resourceContract(value,path='') {
@@ -24,14 +24,15 @@ for (const namespace of ['app','ui']) {
 }
 
 const adapterArguments = {
-  'app.openHelp': [[4]], 'app.workspaceLimit': [[4]], 'app.closeConfirm': [['profile-A']],
+  'app.workspaceLimit': [[8]], 'app.closeConfirm': [['profile-A']],
   'app.workspaceAria': [['profile-A']], 'app.activity': [['profile-A']], 'app.closedLabel': [['profile-A']],
   'app.unknownOrigin': [['workspace-A']], 'app.retainedOutcome': [[2]], 'app.attention': [['reason-A']],
   'app.ready': [['profile-A']], 'app.descriptorLimit': [[4096]], 'app.profileSaved': [['profile-A','P']],
   'app.profileRenamed': [['profile-A']], 'app.deletedElsewhere': [['profile-A']],
+  'app.profilesImported': [[0,0],[2,1]], 'app.profilesImportPartial': [[1,0]],
   'app.updatedElsewhere': [['profile-A']], 'app.renamedElsewhere': [['profile-A']],
   'app.stopFailed': [['diagnostic-A']], 'app.settingsSaved': [['profile-A']],
-  'app.waitForCommand': [['savingSettings']],
+  'app.waitForCommand': [['savingSettings'],['creatingWorkspace'],['importingProfiles']],
   'ui.phase': [['idle']], 'ui.operation': [['run']], 'ui.lane': [['controlled']],
   'ui.severity': [['ERROR']], 'ui.entryOutcome': [['Returned']],
   'ui.common.revision': [['package-A',2]],
@@ -64,6 +65,14 @@ const adapterArguments = {
   'ui.workspaces.attention': [[1],[2]], 'ui.workspaces.label': [['workspace-A']],
   'ui.workspaces.open': [[2]], 'ui.workspaces.closeLabel': [['workspace-A']],
   'ui.workspaces.closeTitle': [['workspace-A']],
+  'ui.bootstrap.state': [['loading'],['setup'],['ready'],['recovery'],['future-state']],
+  'ui.bootstrap.legacyHelp': [['/Users/example/Library/Application Support/dev.madomata.desktop']],
+  'ui.bootstrap.block': ['pendingRestore','active','command','archivePath','confirm','discard'].map(kind=>[kind]),
+  'ui.create.count': [[0,64],[80,80]], 'ui.create.openLimit': [[8]], 'ui.create.savedLimit': [[64]],
+  'ui.create.errors': ['internalEmpty','internalLong','internalChars','displayBlank','displayLong','displayControl'].map(kind=>[kind]),
+  'ui.reopen.directory': [['pkg-A']], 'ui.reopen.archive': [['pkg-A']], 'ui.reopen.references': [[2]],
+  'ui.reopen.saved': [[3,64]], 'ui.reopen.limit': [[8]], 'ui.reopen.reopenLabel': [['workspace-A']],
+  'ui.guidance.scope': [['workspace-A']],
 };
 
 for (const locale of ['en','ja']) {
@@ -97,9 +106,10 @@ test('interpolation keeps parameter-like and markup-like user values literal',()
 });
 
 test('a retained asynchronous notice renders in the current language without changing attribution or later drafts',()=>{
-  const selection=id=>({workspace_id:id,revision:1,package_path:`/packages/${id}`,package:{package_id:id,schema_identity:'schema',inventory_identity:'inventory',schema:{type:'object',properties:{count:{type:'integer'}}},profiles:{}},profiles:[],profiles_error:null});
-  let workspaces=openWorkspace(openWorkspace([],selection('a')),selection('b'));
-  workspaces=workspaces.map(item=>editDraft(item,{count:item.id === 'a' ? '7' : '9'}));
+  const selection=id=>({workspace_id:id,revision:1,internal_name:id,display_name:'Tab '+id,package_path:`/packages/${id}`,package:{package_id:id,schema_identity:'schema',inventory_identity:'inventory',schema:{type:'object',properties:{count:{type:'integer'}}},profiles:{}},profiles:[],profiles_error:null});
+  const view=id=>({workspace_id:id,revision:0,internal_name:id,display_name:'Tab '+id,selection:null,source_error:null,saved_package:null});
+  let workspaces=[bindSelection(workspaceFromView(view('a')),selection('a')),bindSelection(workspaceFromView(view('b')),selection('b'))];
+  workspaces=workspaces.map(item=>updateBound(item,bound=>editDraft(bound,{count:item.id === 'a' ? '7' : '9'})));
   const before=structuredClone(workspaces);
   const name='{id}<profile>';
   const completed=applyIfCurrent(workspaces,{id:'a',revision:1},item=>({...item,notice:{key:'profileSaved',args:[name,'P']}}));
@@ -108,8 +118,8 @@ test('a retained asynchronous notice renders in the current language without cha
   const japanese=renderMessage('ja',notice);
   assert.notEqual(japanese,english);
   for (const text of [english,japanese]) {assert.ok(text.includes(name));assert.ok(text.includes('P'));}
-  assert.deepEqual(completed[0].draft,before[0].draft);
-  assert.equal(completed[0].draftRevision,before[0].draftRevision);
+  assert.deepEqual(completed[0].bound.draft,before[0].bound.draft);
+  assert.equal(completed[0].bound.draftRevision,before[0].bound.draftRevision);
   assert.equal(completed[1],workspaces[1]);
   assert.deepEqual(workspaces,before);
   const error=new LocalFault({key:'numericFields'});
@@ -133,7 +143,7 @@ for (const {scenario,input,value,invalid} of [
 }
 
 test('draft locale and validation presentation do not implicitly change each other',()=>{
-  const draft={locale:'ja',logLimit:'invalid',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(null)};
+  const draft={locale:'ja',logLimit:'invalid',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(null),backupDirectory:''};
   const original=structuredClone(draft);
   const en=readSettingsDraft(draft,'en');
   const ja=readSettingsDraft(draft,'ja');

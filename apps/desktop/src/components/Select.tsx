@@ -22,18 +22,21 @@ interface Props extends Pick<AriaAttributes, 'aria-label' | 'aria-labelledby' | 
   listLabel?: string;
   heading?: ReactNode;
   commitOnTab?: boolean;
-  action?: {id: string; label: ReactNode; onClick: () => void; disabled?: boolean; title?: string; ariaLabel?: string};
+  // Footer actions after the listbox; Tab walks them in order and Shift+Tab returns to the selected option.
+  actions?: readonly SelectAction[];
 }
+
+export interface SelectAction {id: string; label: ReactNode; onClick: () => void; disabled?: boolean; title?: string; ariaLabel?: string}
 
 interface Placement {left: number; top: number; width: number; maxHeight: number}
 
 export default function Select({id, value, options, onChange, disabled = false, placeholder, className, title,
-  listLabel, heading, commitOnTab = true, action, ...aria}: Props) {
+  listLabel, heading, commitOnTab = true, actions = [], ...aria}: Props) {
   const listId = `${id}-options`;
   const trigger = useRef<HTMLButtonElement>(null);
   const popup = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLDivElement>(null);
-  const footer = useRef<HTMLButtonElement>(null);
+  const footers = useRef<(HTMLButtonElement | null)[]>([]);
   const reposition = useRef<(() => void) | null>(null);
   const search = useRef({text: '', time: 0});
   const [menu, setMenu] = useState<{host: HTMLElement; value: string} | null>(null);
@@ -162,6 +165,14 @@ export default function Select({id, value, options, onChange, disabled = false, 
     return -1;
   }
 
+  function enabledFooter(start: number, step: number) {
+    for (let index = start; index >= 0 && index < actions.length; index += step) {
+      const button = footers.current[index];
+      if (button && !button.disabled) return button;
+    }
+    return null;
+  }
+
   function keys(event: KeyboardEvent<HTMLButtonElement>) {
     if (disabled || event.nativeEvent.isComposing) return;
     if (event.key === 'Escape' && open) {
@@ -171,9 +182,10 @@ export default function Select({id, value, options, onChange, disabled = false, 
       return;
     }
     if (event.key === 'Tab' && open) {
-      if (!commitOnTab && !event.shiftKey && footer.current && !footer.current.disabled) {
+      const first = enabledFooter(0, 1);
+      if (!commitOnTab && !event.shiftKey && first) {
         event.preventDefault();
-        footer.current.focus({preventScroll: true});
+        first.focus({preventScroll: true});
       } else if (commitOnTab) commit(options[activeIndex], false);
       else flushSync(() => dismiss());
       return;
@@ -236,7 +248,7 @@ export default function Select({id, value, options, onChange, disabled = false, 
     {open && menu && createPortal(<div ref={popup} className="select-popup"
       style={placement ?? {left: 0, top: 0, maxHeight: 360, visibility: 'hidden'}}
       onPointerDown={event => {
-        if (event.button === 0 && !footer.current?.contains(event.target as Node)) event.preventDefault();
+        if (event.button === 0 && !footers.current.some(button => button?.contains(event.target as Node))) event.preventDefault();
       }}>
       {heading != null && <div className="select-heading">{heading}</div>}
       <div id={listId} ref={list} className="select-options" role="listbox"
@@ -253,8 +265,8 @@ export default function Select({id, value, options, onChange, disabled = false, 
           {option.value === value && <span className="select-selected-mark" aria-hidden="true"/>}
         </div>)}
       </div>
-      {action && <div className="select-actions">
-        <button id={action.id} ref={footer} type="button" className="select-action" tabIndex={-1}
+      {actions.length > 0 && <div className="select-actions">
+        {actions.map((action, index) => <button key={action.id} id={action.id} ref={element => {footers.current[index] = element;}} type="button" className="select-action" tabIndex={-1}
           disabled={action.disabled} title={action.title} aria-label={action.ariaLabel}
           onClick={() => {
             if (disabled || action.disabled) return;
@@ -266,7 +278,11 @@ export default function Select({id, value, options, onChange, disabled = false, 
               event.stopPropagation();
               dismiss(true);
             } else if (event.key === 'Tab') {
-              if (event.shiftKey) {
+              const next = event.shiftKey ? enabledFooter(index - 1, -1) : enabledFooter(index + 1, 1);
+              if (next) {
+                event.preventDefault();
+                next.focus({preventScroll: true});
+              } else if (event.shiftKey) {
                 event.preventDefault();
                 setActiveValue(selectedValue);
                 search.current = {text: '', time: 0};
@@ -276,7 +292,7 @@ export default function Select({id, value, options, onChange, disabled = false, 
                 flushSync(() => dismiss(true));
               }
             }
-          }}>{action.label}</button>
+          }}>{action.label}</button>)}
       </div>}
     </div>, menu.host)}
   </div>;

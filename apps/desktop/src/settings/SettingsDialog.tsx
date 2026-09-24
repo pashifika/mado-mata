@@ -4,14 +4,15 @@ import EnvironmentPanel from './EnvironmentPanel.tsx';
 import type {CheckTarget, LastCheck} from './EnvironmentPanel.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
 import Select from '../components/Select.tsx';
+import type {SnapshotOutcome} from '../bootstrap.ts';
 import {TIMEOUT_SECONDS, VISIBLE_COUNTS} from '../state.ts';
 import type {EnvironmentDraft, SettingsDraft} from '../state.ts';
 import type {EditableSettings, Fault, Settings} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
-type Category = 'display' | 'notifications' | 'environment' | 'logs';
-const CATEGORIES: Category[] = ['display', 'notifications', 'environment', 'logs'];
+type Category = 'display' | 'notifications' | 'environment' | 'logs' | 'backups';
+const CATEGORIES: Category[] = ['display', 'notifications', 'environment', 'logs', 'backups'];
 // state.ts stays the validation authority; this only maps its error keys to the category whose fields show them.
 const ERROR_CATEGORY: Record<string, Category> = {
   locale: 'display',
@@ -31,13 +32,15 @@ interface Props {
   envDirty: boolean; active: boolean; target: CheckTarget; onCheck: () => void; checkError: Fault | null;
   lastCheck: LastCheck | null; stale: string[]; originLabel: (workspaceId: string | null) => string;
   retained: number; evicted: number;
+  // Back up now is separate from Save: it uses the saved destination and its outcome outlives the dialog.
+  onSnapshot: () => void; snapshotPending: boolean; snapshotOutcome: SnapshotOutcome | null;
   strip: ReactNode;
 }
 
 export default function SettingsDialog(props: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
-  const {open, onCancel, settings, draft, onDraft, parsed, dirty, saving, saveError, saveNotice, onSave, busyReason, envDirty, active, target, onCheck, checkError, lastCheck, stale, originLabel, retained, evicted, strip} = props;
+  const {open, onCancel, settings, draft, onDraft, parsed, dirty, saving, saveError, saveNotice, onSave, busyReason, envDirty, active, target, onCheck, checkError, lastCheck, stale, originLabel, retained, evicted, onSnapshot, snapshotPending, snapshotOutcome, strip} = props;
   const dialog = useRef<HTMLDialogElement>(null);
   const opener = useRef<Element | null>(null);
   const [category, setCategory] = useState<Category>('notifications');
@@ -55,13 +58,14 @@ export default function SettingsDialog(props: Props) {
     }
   }, [open]);
   const errors = parsed.errors;
-  const invalidCount: Record<Category, number> = {display: 0, notifications: 0, environment: 0, logs: 0};
+  const invalidCount: Record<Category, number> = {display: 0, notifications: 0, environment: 0, logs: 0, backups: 0};
   for (const key of Object.keys(errors)) {
     const owner = ERROR_CATEGORY[key];
     if (owner) invalidCount[owner] += 1;
   }
   const invalid = Object.keys(errors).length;
   const invalidLabels = CATEGORIES.filter(id => invalidCount[id] > 0).map(id => t.common[id]).join(t.settings.categorySeparator);
+  const backupDirty = draft.backupDirectory.trim() !== (settings?.backup_directory ?? '');
   // Errors in an unselected category and a pending host command both block Save; the footer names which.
   const status = saving ? t.settings.saving
     : invalid > 0 ? t.settings.invalid(invalid, invalidLabels)
@@ -118,6 +122,25 @@ export default function SettingsDialog(props: Props) {
               {errors.logLimit && <p className="field-error">{errors.logLimit}</p>}
               <p className="field-help">{t.settings.logLimitHelp(settings?.gui_log_limit ?? null)}</p></div>
             <dl className="fixed-facts"><dt>{t.settings.retained}</dt><dd>{retained}</dd><dt>{t.settings.evicted}</dt><dd>{evicted}</dd></dl>
+          </section>}
+          {category === 'backups' && <section aria-labelledby="backups-heading">
+            <h3 id="backups-heading">{t.settings.backupsHeading}</h3>
+            <p className="muted">{t.settings.backupsHelp}</p>
+            <div className="field"><label htmlFor="backup-directory">{t.settings.backupDirectory}</label>
+              <input id="backup-directory" type="text" value={draft.backupDirectory} spellCheck={false} placeholder={t.settings.backupDirectoryPlaceholder}
+                onChange={event => onDraft({...draft, backupDirectory: event.target.value})}/>
+              <p className="field-help">{t.settings.backupDirectoryHelp}</p></div>
+            <div className="button-row">
+              <button id="backup-now" type="button" disabled={settings === null || snapshotPending || saving} onClick={onSnapshot}>{t.settings.backupNow}</button>
+              <span className="muted">{t.settings.backupNowHelp}</span>
+            </div>
+            {backupDirty && <p className="inline-warning">{t.settings.backupUnsaved}</p>}
+            {snapshotPending && <p className="muted" role="status">{t.settings.backupPending}</p>}
+            {!snapshotPending && snapshotOutcome?.kind === 'receipt' && <div className="receipt" role="status"><strong>{t.settings.backupWritten}</strong>
+              <dl className="run-identity"><dt>{t.bootstrap.receiptPath}</dt><dd className="mono">{snapshotOutcome.receipt.path}</dd>
+                <dt>{t.bootstrap.receiptGeneration}</dt><dd><code>{snapshotOutcome.receipt.generation}</code></dd>
+                <dt>{t.bootstrap.receiptFiles}</dt><dd>{snapshotOutcome.receipt.files}</dd><dt>{t.bootstrap.receiptBytes}</dt><dd>{snapshotOutcome.receipt.bytes}</dd></dl></div>}
+            {!snapshotPending && snapshotOutcome?.kind === 'fault' && <FaultMessage title={t.settings.backupFailed} value={snapshotOutcome.fault}/>}
           </section>}
           {category === 'environment' && <>
             {checkError && <FaultMessage title={t.settings.checkFailed} value={checkError}/>}

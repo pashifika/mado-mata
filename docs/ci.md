@@ -62,6 +62,7 @@ The version and integrity sources are:
 | TypeScript | 5.9.3 | [Compiler manifest](../tools/runtime-comparison/compiler/package.json) and [lockfile](../tools/runtime-comparison/compiler/package-lock.json) |
 | Desktop frontend | React 19.3.0, TypeScript 5.9.3, Vite 8.3.0, Tauri API 2.11.1 / CLI 2.11.5 | [App manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json) |
 | Desktop Rust | Tauri 2.11.6, tauri-build 2.6.3, tracing 0.1.41, tracing-subscriber 0.3.20 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | GitHub Actions | Full commit SHAs | [Workflow](../.github/workflows/ci.yml) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
@@ -105,17 +106,23 @@ The full check has these responsibilities:
   These commands do not enable the optional `engine` feature.
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
   run its state tests, and type-check/build its trusted UI.
-- Test the Rust application core with `--no-default-features --lib`: profile
-  persistence/validation, bounded logging, and the shared controller contracts
-  are checked without loading a desktop shell or obtaining native authority.
+- Test the Rust application core with `--no-default-features --lib`: explicit
+  setup/recovery, named Tab ownership, scoped profiles, byte-preserving legacy
+  imports, bounded snapshots, archive refusals, and journaled restore/rollback
+  are checked alongside bounded logging and the shared controller contracts.
+  Restore regressions cover interrupted publication and discoverable cleanup
+  after restart, not physical power loss. The
+  [configuration recovery ADR](adr/0005-desktop-configuration-recovery.md) records
+  the storage boundaries and Windows directory-sync qualification limitation.
+  Optional OCR settings, bounded replay projection, admission races, and
+  pre-startup failures are checked without loading a real OCR backend.
 - On macOS, build the real Tauri shell with `--features custom-protocol` after
   building frontend assets. The test-only `webdriver` feature is not enabled.
-  Optional OCR settings, bounded replay projection, admission races, and
-  pre-startup failures are checked without loading a real OCR backend. The
-  separate engine artifact and actual [recorded-replay WebView acceptance](desktop.md#recorded-replay-acceptance)
+  The separate engine artifact and actual
+  [recorded-replay WebView acceptance](desktop.md#recorded-replay-acceptance)
   remain explicit local checks; no private corpus, model, or native permission
-  is added to default CI.
-  Linux and Windows explicitly report the shell build as unexecuted.
+  is added to default CI. Linux and Windows explicitly report the shell build as
+  unexecuted.
 
 For governance policy and its behavioral tests only, after Python dependency
 setup:
@@ -299,12 +306,14 @@ pinned actions/tools, bounded jobs, and event-scoped concurrency cancellation.
 It does not use secrets, administration tokens, `pull_request_target`, private
 Rasen access, or self-hosted interactive desktops. Superseding one PR run must
 not cancel another PR's run or turn a cancellation into success.
-Local macOS GUI acceptance is separate: exercise package selection, saved
+Local macOS GUI acceptance is separate: exercise Loading, Setup, Recovery, named
+Tabs, legacy imports, snapshot/restore confirmation, package selection, scoped
 profiles, actual runs, source errors, Stop, window closure, and logs using the
-[desktop procedure](desktop.md#local-gui-acceptance). Hosted compilation does not
-prove those interactions or additional-OS desktop support. Normal builds and
-release builds have no WebDriver listener; CI does not enable the test-only
-automation feature or launch a GUI session.
+[desktop procedure](desktop.md#local-gui-acceptance). Hosted compilation and core
+tests do not prove those interactions or additional-OS desktop support. A passed
+local setup smoke does not pass the remaining GUI scenarios, full CI, or native
+qualification. Normal builds and release builds have no WebDriver listener; CI
+does not enable the test-only automation feature or launch a GUI session.
 
 Administrative activation requires an observed successful PR check and its
 GitHub Actions app identity; use the

@@ -184,12 +184,19 @@ test('a completed settings Save preserves later locale and invalid input edits',
   assert.ok(parsed.errors.logLimit);
 });
 
-const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(checkedEnvironment)};
+const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(checkedEnvironment),backupDirectory:''};
 test('a complete settings draft becomes one editable settings object without version or package hint',()=>{
   const parsed=readSettingsDraft(validSettingsDraft);
   assert.deepEqual(parsed.errors,{});
-  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true}});
+  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true},backup_directory:null});
   assert.equal(readSettingsDraft({...validSettingsDraft,environment:environmentDraft(null)}).settings.ocr_environment,null);
+});
+
+test('the backup directory draft is blank for the default destination and otherwise saved as typed without padding',()=>{
+  assert.equal(settingsDraftFrom(null).backupDirectory,'');
+  assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,notifications:DEFAULT_NOTIFICATIONS,locale:'en',backup_directory:'/private/backups'}).backupDirectory,'/private/backups');
+  assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:'   '}).settings.backup_directory,null);
+  assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:' /private/backups '}).settings.backup_directory,'/private/backups');
 });
 
 for (const {scenario,draft,field} of [

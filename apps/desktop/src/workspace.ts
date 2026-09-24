@@ -1,13 +1,20 @@
-import {messages} from './i18n.ts';
+import {LocalFault, messages} from './i18n.ts';
 import type {Locale, Message} from './i18n.ts';
-import {defaultDraft} from './state.ts';
-import type {ControllerView, Fault, Json, LogEntry, PackageInfo, Profile, Selection, WorkspaceRef} from './types.ts';
+import {defaultDraft, readDraft} from './state.ts';
+import type {ControllerView, Fault, Json, LegacyImport, LogEntry, OcrEnvironment, PackageInfo, PackageReference, Profile, Selection, WorkspaceRef, WorkspaceView} from './types.ts';
 
 export const WORKSPACE_LIMIT = 8;
+export const SAVED_LIMIT = 64;
 export const CLOSED_LIMIT = 16;
+export const INTERNAL_NAME_LIMIT = 64;
+export const DISPLAY_NAME_LIMIT = 80;
 // The host caps a retained check descriptor; refuse longer paths inline instead of after a round trip.
 export const DESCRIPTOR_LIMIT = 4096;
+// The host's category for a saved custom-archive reference; every other source fault is an unavailable directory.
+export const UNSUPPORTED_SOURCE = 'UnsupportedPackageSource';
 const BUSY_PHASES: Record<string, true> = {preparing: true, running: true, stopping: true};
+const INTERNAL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+const CONTROL = /\p{Cc}/u;
 
 // The three lifecycle phases during which the runner is reserved by one operation.
 export function busy(state:string):boolean {
@@ -16,24 +23,38 @@ export function busy(state:string):boolean {
 
 export type Page = 'run' | 'logs';
 
-// Session-local UI state for one inspected package root. Nothing here is persisted.
-export interface Workspace {
-  id:string; revision:number; packagePath:string; package:PackageInfo;
-  // Last readable catalog and its current listing fault, shared only after an authoritative read.
+// Package-bound session state. Present only after real inspection in this session or host revalidation at bootstrap.
+export interface Bound {
+  packagePath:string; package:PackageInfo;
+  // Last readable catalog of this Tab/package store and its current listing fault.
   profiles:Profile[]; profilesError:Fault|null;
   selectedId:string|null; name:string; preset:string; draft:Record<string,Json>;
   // Local edit counter: a validation or save that raced a later edit must not overwrite it.
   draftRevision:number; validation:Record<string,Json>|null;
-  lane:string; scenario:string; descriptorPath:string; page:Page;
-  error:Fault|null; notice:Message|null; disclosedRun:string|null;
-  logFilter:LogFilter;
+  lane:string; scenario:string; descriptorPath:string; disclosedRun:string|null;
   // True once the operator changed profile/draft state; a pristine default draft closes without confirmation.
   touched:boolean;
-  // Label of the in-flight state-changing command owned by this workspace, if any.
-  busy:Message|null;
 }
 
-// Retained after close so diagnostics stay attributable without reopening the package.
+// Session-local UI state for one open named Tab. The host persists names and package references; nothing here is.
+export interface Workspace {
+  id:string; revision:number; internalName:string; displayName:string;
+  bound:Bound|null;
+  // Host-reported reason the saved source could not be inspected. Null together with `bound` null means no saved package.
+  sourceError:Fault|null;
+  // The Tab's selected durable reference as the host stores it; display and prefill only, never authority to run.
+  savedPackage:PackageReference|null;
+  page:Page; error:Fault|null; notice:Message|null; logFilter:LogFilter;
+  // Label of the in-flight state-changing command owned by this workspace, if any.
+  busy:Message|null;
+  // Inspect form draft for this Tab; a path is only a request, never a binding.
+  inspectPath:string;
+  legacyImport:LegacyImport|null;
+}
+
+export type BoundWorkspace = Workspace & {bound:Bound};
+
+// Retained after close so diagnostics stay attributable without reopening the Tab.
 export interface ClosedWorkspace {id:string; revision:number; label:string; result:ControllerView|null}
 
 export interface Origin {id:string; revision:number; draftRevision?:number}
@@ -44,34 +65,59 @@ export interface WorkspaceCommand {
   catalog?:ProfileCatalog;
 }
 
-// Execution configuration and navigation survive a reinspection; package-bound draft state does not.
-export function freshWorkspace(selection:Selection, previous?:Workspace):Workspace {
+export function isBound(workspace:Workspace):workspace is BoundWorkspace {
+  return workspace.bound !== null;
+}
+
+export type NameError = 'internalEmpty' | 'internalLong' | 'internalChars' | 'displayBlank' | 'displayLong' | 'displayControl';
+
+// Mirrors the host rule `^[A-Za-z0-9_-]{1,64}$`: no trimming or automatic suffix.
+export function internalNameError(value:string):NameError|null {
+  if (value === '') return 'internalEmpty';
+  if (value.length > INTERNAL_NAME_LIMIT) return 'internalLong';
+  return INTERNAL_NAME.test(value) ? null : 'internalChars';
+}
+
+// Display names count Unicode scalar values, not UTF-16 units, and are stored exactly as entered.
+export function displayNameError(value:string):NameError|null {
+  if (value === '') return null;
+  if (value.trim() === '') return 'displayBlank';
+  if (Array.from(value).length > DISPLAY_NAME_LIMIT) return 'displayLong';
+  return CONTROL.test(value) ? 'displayControl' : null;
+}
+
+function fromSelection(selection:Selection, previous?:Bound):Bound {
   return {
-    id: selection.workspace_id, revision: selection.revision, packagePath: selection.package_path, package: selection.package,
+    packagePath: selection.package_path, package: selection.package,
     profiles: selection.profiles, profilesError: selection.profiles_error,
     selectedId: null, name: '', preset: '', draft: defaultDraft(selection.package.schema),
     draftRevision: (previous?.draftRevision ?? 0) + 1, validation: null,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
-    page: previous?.page ?? 'run', error: null, notice: null, disclosedRun: null, logFilter: previous?.logFilter ?? {text: '', level: ''}, touched: false, busy: null,
+    disclosedRun: null, touched: false,
   };
 }
 
-// Opening an already open root keeps its draft but takes the host's fresh saved-profile catalog; a new revision of a
-// known id is a deliberate reset. Either way the catalog reaches every open workspace of the same package/schema.
-// The host enforces the workspace limit; the UI only reflects it.
-export function openWorkspace(list:Workspace[], selection:Selection):Workspace[] {
-  const index = list.findIndex(item => item.id === selection.workspace_id);
-  const existing = index < 0 ? undefined : list[index];
-  let opened:Workspace;
-  if (existing && existing.revision === selection.revision) {
-    const reopened:Workspace = {...existing, profilesError: selection.profiles_error, notice: {key:'alreadyOpen'}};
-    opened = catalogKnown(selection.profiles_error) ? reconcileProfiles(reopened, selection.profiles) : reopened;
-  } else {
-    opened = {...freshWorkspace(selection, existing), notice: {key:'inspected'}};
-  }
-  const next = [...list];
-  if (existing) next[index] = opened; else next.push(opened);
-  return shareCatalog(next, selection.workspace_id, selection);
+// A host view becomes a session: unbound, unusable saved source, or bound to real inventory. No draft is restored.
+// A failed saved directory stays visible and prefilled so repairing it needs no retyping of an unseen path; a saved
+// custom archive is shown but never offered as a directory request.
+export function workspaceFromView(view:WorkspaceView, notice:Message|null = null):Workspace {
+  const saved = view.saved_package;
+  return {
+    id: view.workspace_id, revision: view.revision, internalName: view.internal_name, displayName: view.display_name,
+    bound: view.selection ? fromSelection(view.selection) : null, sourceError: view.source_error, savedPackage: saved,
+    page: 'run', error: null, notice, logFilter: {text: '', level: ''}, busy: null,
+    inspectPath: view.selection?.package_path ?? (saved !== null && saved.source.kind === 'directory' ? saved.source.path : ''), legacyImport: null,
+  };
+}
+
+// Binding publishes the host's new revision; execution configuration and navigation survive, package-bound draft
+// state does not. A previous source error is resolved by the successful inspection, which is now the saved reference.
+export function bindSelection(workspace:Workspace, selection:Selection, notice:Message|null = null):Workspace {
+  return {
+    ...workspace, revision: selection.revision, bound: fromSelection(selection, workspace.bound ?? undefined), sourceError: null,
+    savedPackage: {package_id: selection.package.package_id, source: {kind: 'directory', path: selection.package_path}},
+    error: null, notice, inspectPath: selection.package_path, legacyImport: null,
+  };
 }
 
 // The host lists the whole store or nothing: one malformed, oversized, or unsupported file fails the entire listing,
@@ -82,47 +128,45 @@ function catalogKnown(error:Fault|null):boolean {
   return error === null || error.category === 'ProfileRejected';
 }
 
-// Takes a fresh catalog without touching draft values. A selected profile that changed elsewhere leaves the local
+// Takes a fresh catalog without touching draft values. A selected profile that changed on disk leaves the local
 // values as an explained draft, so Start never carries an identity the store no longer matches; the profile name
 // follows a rename only while it was not edited locally, so a stale name cannot undo the rename on the next save.
-function reconcileProfiles(workspace:Workspace, profiles:Profile[]):Workspace {
-  const known = workspace.profiles;
-  if (known === profiles || (known.length === profiles.length && JSON.stringify(known) === JSON.stringify(profiles))) return workspace;
-  const previous = known.find(item => item.id === workspace.selectedId);
-  if (!previous) return {...workspace, profiles};
+function reconcileProfiles(bound:Bound, profiles:Profile[]):Bound {
+  const known = bound.profiles;
+  if (known === profiles || (known.length === profiles.length && JSON.stringify(known) === JSON.stringify(profiles))) return bound;
+  const previous = known.find(item => item.id === bound.selectedId);
+  if (!previous) return {...bound, profiles};
   const current = profiles.find(item => item.id === previous.id);
   if (!current) {
-    return {...workspace, profiles, selectedId: null, touched: true,
-      notice: {key:'deletedElsewhere', args:[previous.name]}};
+    return {...bound, profiles, selectedId: null, touched: true};
   }
   const renamed = previous.name !== current.name;
-  const changed = JSON.stringify(previous.values) !== JSON.stringify(current.values);
-  if (!renamed && !changed) return {...workspace, profiles};
-  return {
-    ...workspace, profiles, name: renamed && workspace.name === previous.name ? current.name : workspace.name,
-    notice: changed
-      ? {key:'updatedElsewhere', args:[current.name]}
-      : {key:'renamedElsewhere', args:[current.name]},
-  };
+  return {...bound, profiles, name: renamed && bound.name === previous.name ? current.name : bound.name};
 }
 
-// Only an authoritative listing can replace sibling catalogs or clear their old listing faults.
-// A failed read says nothing about stored profiles; keep every catalog and report it only at the origin.
-export function shareCatalog(list:Workspace[], sourceId:string, catalog:ProfileCatalog):Workspace[] {
-  const source = list.find(item => item.id === sourceId);
-  if (!source) return list;
+function catalogNotice(before:Bound, after:Bound):Message|null {
+  const previous = before.profiles.find(item => item.id === before.selectedId);
+  if (!previous || before.profiles === after.profiles) return null;
+  const current = after.profiles.find(item => item.id === previous.id);
+  if (!current) return {key: 'deletedElsewhere', args: [previous.name]};
+  if (JSON.stringify(previous.values) !== JSON.stringify(current.values)) return {key: 'updatedElsewhere', args: [current.name]};
+  if (previous.name !== current.name) return {key: 'renamedElsewhere', args: [current.name]};
+  return null;
+}
+
+// A catalog belongs to exactly one Tab/package store. Other Tabs referencing the same package keep their own files
+// and are never touched; a failed read keeps the last catalog and reports only the fault.
+export function applyCatalog(workspace:Workspace, catalog:ProfileCatalog):Workspace {
+  const bound = workspace.bound;
+  if (!bound) return workspace;
   if (!catalogKnown(catalog.profiles_error)) {
-    return updateWorkspace(list, sourceId, item => ({...item, profilesError: catalog.profiles_error}));
+    return bound.profilesError === catalog.profiles_error ? workspace : {...workspace, bound: {...bound, profilesError: catalog.profiles_error}};
   }
-  let changed = false;
-  const next = list.map(item => {
-    if (item.package.package_id !== source.package.package_id || item.package.schema_identity !== source.package.schema_identity) return item;
-    const reconciled = reconcileProfiles(item, catalog.profiles);
-    const updated = reconciled.profilesError === catalog.profiles_error ? reconciled : {...reconciled, profilesError: catalog.profiles_error};
-    if (updated !== item) changed = true;
-    return updated;
-  });
-  return changed ? next : list;
+  const reconciled = reconcileProfiles(bound, catalog.profiles);
+  const next = reconciled.profilesError === catalog.profiles_error ? reconciled : {...reconciled, profilesError: catalog.profiles_error};
+  if (next === bound) return workspace;
+  const notice = catalogNotice(bound, next);
+  return {...workspace, bound: next, notice: notice ?? workspace.notice};
 }
 
 export function closeWorkspace(list:Workspace[], id:string):Workspace[] {
@@ -139,7 +183,7 @@ export function applyIfCurrent(list:Workspace[], origin:Origin, update:(workspac
   if (index < 0) return list;
   const current = list[index];
   if (current.revision !== origin.revision) return list;
-  if (origin.draftRevision !== undefined && origin.draftRevision !== current.draftRevision) return list;
+  if (origin.draftRevision !== undefined && origin.draftRevision !== current.bound?.draftRevision) return list;
   const next = [...list];
   next[index] = update(current);
   return next;
@@ -148,7 +192,7 @@ export function applyIfCurrent(list:Workspace[], origin:Origin, update:(workspac
 // Validation and failed commands carry no fresh listing and cannot republish a stale cache.
 export function applyCommand(list:Workspace[], origin:Origin, command:WorkspaceCommand):Workspace[] {
   const next = applyIfCurrent(list, origin, command.update);
-  return next === list || !command.catalog ? next : shareCatalog(next, origin.id, command.catalog);
+  return next === list || !command.catalog ? next : updateWorkspace(next, origin.id, item => applyCatalog(item, command.catalog!));
 }
 
 export function updateWorkspace(list:Workspace[], id:string, update:(workspace:Workspace) => Workspace):Workspace[] {
@@ -159,38 +203,74 @@ export function updateWorkspace(list:Workspace[], id:string, update:(workspace:W
   return next;
 }
 
-export function editDraft(workspace:Workspace, draft:Record<string,Json>):Workspace {
-  return {...workspace, draft, draftRevision: workspace.draftRevision + 1, validation: null, notice: null, touched: true};
+// Package-bound edits apply only while the Tab is bound; an unbound Tab has no draft to edit.
+export function updateBound(workspace:Workspace, update:(bound:Bound) => Bound):Workspace {
+  return workspace.bound ? {...workspace, bound: update(workspace.bound)} : workspace;
 }
 
-export function newDraft(workspace:Workspace, presetName = ''):Workspace {
-  const preset = presetName ? workspace.package.profiles[presetName] : undefined;
-  return editDraft({...workspace, selectedId: null, name: presetName, preset: presetName},
-    preset ? structuredClone(preset.options) : defaultDraft(workspace.package.schema));
+// Facts derived from a bound draft for the Run page and for command admission.
+export interface Derived {
+  parsed:{values:Record<string,Json>; errors:Record<string,string>};
+  numericErrors:boolean; valuesDirty:boolean; dirty:boolean; bound:boolean;
+  selectedProfile:Profile|undefined; startBlock:string|null; descriptorError:string|null;
 }
 
-export function selectProfile(workspace:Workspace, id:string):Workspace {
-  if (!id) return newDraft(workspace);
-  const profile = workspace.profiles.find(item => item.id === id);
-  if (!profile) return workspace;
-  return editDraft({...workspace, selectedId: profile.id, name: profile.name, preset: ''}, structuredClone(profile.values));
+const encoder = new TextEncoder();
+
+export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en'):Derived {
+  const t = messages[locale].app;
+  const parsed = readDraft(bound.package.schema, bound.draft, locale);
+  const numericErrors = Object.keys(parsed.errors).length > 0;
+  const selectedProfile = bound.profiles.find(profile => profile.id === bound.selectedId);
+  const valuesDirty = !selectedProfile || numericErrors || JSON.stringify(parsed.values) !== JSON.stringify(selectedProfile.values);
+  const dirty = valuesDirty || bound.name !== selectedProfile?.name;
+  const profileBound = !selectedProfile || (selectedProfile.package_id === bound.package.package_id && selectedProfile.schema_identity === bound.package.schema_identity);
+  const descriptor = bound.descriptorPath.trim();
+  const startBlock = bound.lane === 'replay' && !descriptor ? t.replayDescriptor
+    : bound.lane === 'replay' && !savedEnvironment ? t.replayEnvironment : null;
+  const descriptorError = encoder.encode(descriptor).length > DESCRIPTOR_LIMIT ? t.descriptorLimit(DESCRIPTOR_LIMIT) : null;
+  return {parsed, numericErrors, valuesDirty, dirty, bound: profileBound, selectedProfile, startBlock, descriptorError};
+}
+
+// Package commands carry values only from a real inspected selection. A genuine named Tab without one is refused
+// here before any host call, exactly as the host refuses it; nothing is synthesized from names or saved references.
+export function commandValues(workspace:Workspace, facts:Derived|undefined):Record<string,Json> {
+  if (!workspace.bound || !facts) throw new LocalFault({key: 'unboundWorkspace'});
+  if (!facts.bound) throw new LocalFault({key: 'profileBinding'});
+  if (facts.numericErrors) throw new LocalFault({key: 'numericFields'});
+  return facts.parsed.values;
+}
+
+export function editDraft(bound:Bound, draft:Record<string,Json>):Bound {
+  return {...bound, draft, draftRevision: bound.draftRevision + 1, validation: null, touched: true};
+}
+
+export function newDraft(bound:Bound, presetName = ''):Bound {
+  const preset = presetName ? bound.package.profiles[presetName] : undefined;
+  return editDraft({...bound, selectedId: null, name: presetName, preset: presetName},
+    preset ? structuredClone(preset.options) : defaultDraft(bound.package.schema));
+}
+
+export function selectProfile(bound:Bound, id:string):Bound {
+  if (!id) return newDraft(bound);
+  const profile = bound.profiles.find(item => item.id === id);
+  if (!profile) return bound;
+  return editDraft({...bound, selectedId: profile.id, name: profile.name, preset: ''}, structuredClone(profile.values));
 }
 
 export function workspaceRef(workspace:Pick<Workspace,'id'|'revision'>):WorkspaceRef {
   return {workspace_id: workspace.id, revision: workspace.revision};
 }
 
-// Same package IDs from different roots stay distinguishable by their last path segment.
-export function workspaceLabel(workspace:Pick<Workspace,'id'|'packagePath'|'package'>, all:Pick<Workspace,'id'|'packagePath'|'package'>[]):string {
-  const shared = all.some(other => other.id !== workspace.id && other.package.package_id === workspace.package.package_id);
-  if (!shared) return workspace.package.package_id;
-  const segment = workspace.packagePath.split(/[\\/]+/).filter(Boolean).pop() ?? workspace.packagePath;
-  return `${workspace.package.package_id} · ${segment}`;
+// Labels are display names; equal display names stay distinguishable by the unique internal name.
+export function workspaceLabel(workspace:Pick<Workspace,'id'|'internalName'|'displayName'>, all:Pick<Workspace,'id'|'internalName'|'displayName'>[]):string {
+  const shared = all.some(other => other.id !== workspace.id && other.displayName === workspace.displayName);
+  return shared ? `${workspace.displayName} · ${workspace.internalName}` : workspace.displayName;
 }
 
 export type OriginLabel = {kind:'open'; label:string} | {kind:'closed'; label:string} | {kind:'unknown'; label:string} | {kind:'application'; label:string};
 
-// Attribution is honest about closed and unknown origins; it never assigns an event to a newer tab.
+// Attribution is honest about closed and unknown origins; it never assigns an event to a newer session.
 export function originLabel(workspaceId:string|null, open:Workspace[], closed:ClosedWorkspace[], locale:Locale = 'en'):OriginLabel {
   const t = messages[locale].app;
   if (workspaceId === null) return {kind: 'application', label: t.application};
