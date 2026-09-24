@@ -464,11 +464,11 @@
   },
   "create": {
     "heading": "New workspace",
-    "intro": "Two names only. No package, path, OCR or target is required; the workspace is saved as soon as it is created.",
+    "intro": "Choose an internal name and an optional display name. No package, path, OCR or target is required; the workspace is saved as soon as it is created.",
     "internal": "Internal name",
-    "internalHelp": "1–64 ASCII letters, _ or -; no digits or spaces. Unique across saved workspaces (case-insensitive), kept exactly as typed and immutable. Names the folder tabs/<name>.",
-    "display": "Display name",
-    "displayHelp": "1–80 characters, kept exactly as typed. Duplicates are allowed and shown with the internal name.",
+    "internalHelp": "1–64 ASCII letters, digits 0–9, _ or -; no spaces. Unique across saved workspaces (case-insensitive), kept exactly as typed and immutable. Names the folder tabs/<name>.",
+    "display": "Display name (optional)",
+    "displayHelp": "Leave empty to use the internal name. Otherwise, enter 1–80 nonblank characters, kept exactly as typed. Duplicates are allowed and shown with the internal name.",
     "count": "{count}/{limit}",
     "create": "Create",
     "creating": "Creating…",
@@ -480,8 +480,8 @@
     "errors": {
       "internalEmpty": "Enter an internal name.",
       "internalLong": "Internal names are at most 64 characters.",
-      "internalChars": "Use only ASCII letters, _ and -; digits and spaces are refused.",
-      "displayBlank": "Enter a display name that is not blank.",
+      "internalChars": "Use only ASCII letters, digits 0–9, _ and -; spaces are refused.",
+      "displayBlank": "Leave the display name empty or enter a name containing more than whitespace.",
       "displayLong": "Display names are at most 80 characters.",
       "displayControl": "Display names cannot contain control characters."
     }

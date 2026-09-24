@@ -228,11 +228,12 @@ test('labels are display names and equal display names are disambiguated by inte
 
 for (const {scenario,value,error} of [
   {scenario:'an empty internal name',value:'',error:'internalEmpty'},
-  {scenario:'digits in an internal name',value:'tab1',error:'internalChars'},
+  {scenario:'digits including the first character',value:'0tab9',error:null},
+  {scenario:'a non-ASCII digit',value:'tab１',error:'internalChars'},
   {scenario:'a space in an internal name',value:'my tab',error:'internalChars'},
   {scenario:'leading whitespace is not trimmed',value:' tab',error:'internalChars'},
   {scenario:'a 65-character internal name',value:'a'.repeat(65),error:'internalLong'},
-  {scenario:'a 64-character internal name',value:'A'.repeat(32)+'_-'.repeat(16),error:null},
+  {scenario:'a 64-character internal name',value:'0'+'Ab1'.repeat(20)+'_-9',error:null},
   {scenario:'a single letter',value:'z',error:null},
 ]) {
   test(`internal names mirror the host rule for ${scenario}`,()=>{
@@ -242,7 +243,7 @@ for (const {scenario,value,error} of [
 
 for (const {scenario,value,error} of [
   {scenario:'a blank display name',value:'   \u3000',error:'displayBlank'},
-  {scenario:'an empty display name',value:'',error:'displayBlank'},
+  {scenario:'an omitted display name',value:'',error:null},
   {scenario:'a control character',value:'Review\u0007',error:'displayControl'},
   {scenario:'a C1 control character',value:'Review\u0085',error:'displayControl'},
   {scenario:'80 supplementary-plane scalars',value:'😀'.repeat(80),error:null},

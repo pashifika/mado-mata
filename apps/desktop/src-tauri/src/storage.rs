@@ -352,7 +352,12 @@ impl Store {
         let tab = TabRecord {
             version: VERSION,
             internal_name: internal_name.to_owned(),
-            display_name: display_name.to_owned(),
+            display_name: if display_name.is_empty() {
+                internal_name
+            } else {
+                display_name
+            }
+            .to_owned(),
             open: true,
             packages: Vec::new(),
             selected_package_id: None,
@@ -915,11 +920,11 @@ pub(crate) fn validate_internal_name(name: &str) -> Result<(), Fault> {
         || name.len() > 64
         || !name
             .bytes()
-            .all(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'-'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
         return Err(Fault::new(
             "TabName",
-            "internal name must contain 1 to 64 ASCII letters, underscores or hyphens",
+            "internal name must contain 1 to 64 ASCII letters, digits, underscores or hyphens",
         ));
     }
     Ok(())
@@ -1897,7 +1902,7 @@ mod tests {
     fn name_only_tabs_restart_and_closed_state_preserve_names() {
         let directory = Directory::new();
         let store = directory.store();
-        let name = "A".repeat(64);
+        let name = format!("0{}_-9", "Ab1".repeat(20));
         let display = "界".repeat(80);
         let created = store.create_tab(&name, &display).unwrap();
         assert!(created.open);
@@ -1920,7 +1925,7 @@ mod tests {
         let before = fs::read(tab_path(&directory, "Alpha")).unwrap();
         for name in [
             "",
-            "Alpha1",
+            "Alpha１",
             " Alpha",
             "Alpha ",
             ".",
@@ -1931,13 +1936,7 @@ mod tests {
         ] {
             assert!(store.create_tab(name, "Display").is_err());
         }
-        for display in [
-            "",
-            " \u{3000} ",
-            "line\nbreak",
-            "\u{007f}",
-            &"界".repeat(81),
-        ] {
+        for display in [" \u{3000} ", "line\nbreak", "\u{007f}", &"界".repeat(81)] {
             assert!(store.create_tab("Valid", display).is_err());
         }
         assert!(store.create_tab("alpha", "Alias").is_err());

@@ -13,7 +13,7 @@ export const DESCRIPTOR_LIMIT = 4096;
 // The host's category for a saved custom-archive reference; every other source fault is an unavailable directory.
 export const UNSUPPORTED_SOURCE = 'UnsupportedPackageSource';
 const BUSY_PHASES: Record<string, true> = {preparing: true, running: true, stopping: true};
-const INTERNAL_NAME = /^[A-Za-z_-]{1,64}$/;
+const INTERNAL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const CONTROL = /\p{Cc}/u;
 
 // The three lifecycle phases during which the runner is reserved by one operation.
@@ -69,7 +69,7 @@ export function isBound(workspace:Workspace):workspace is BoundWorkspace {
 
 export type NameError = 'internalEmpty' | 'internalLong' | 'internalChars' | 'displayBlank' | 'displayLong' | 'displayControl';
 
-// Mirrors the host rule `^[A-Za-z_-]{1,64}$`: no digits, no trimming, no automatic suffix.
+// Mirrors the host rule `^[A-Za-z0-9_-]{1,64}$`: no trimming or automatic suffix.
 export function internalNameError(value:string):NameError|null {
   if (value === '') return 'internalEmpty';
   if (value.length > INTERNAL_NAME_LIMIT) return 'internalLong';
@@ -78,6 +78,7 @@ export function internalNameError(value:string):NameError|null {
 
 // Display names count Unicode scalar values, not UTF-16 units, and are stored exactly as entered.
 export function displayNameError(value:string):NameError|null {
+  if (value === '') return null;
   if (value.trim() === '') return 'displayBlank';
   if (Array.from(value).length > DISPLAY_NAME_LIMIT) return 'displayLong';
   return CONTROL.test(value) ? 'displayControl' : null;

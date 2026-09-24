@@ -183,14 +183,17 @@ restore responsibilities reside in separate modules under `src-tauri/src/`.
 ## Package workspaces and App settings
 
 A Workspace is an open session of a saved **Tab**, not a game attachment.
-**+** opens **New workspace**, asking only for two immutable names:
+**+** opens **New workspace**, asking for an internal name and an optional display name:
 
-- **Internal name:** **1–64 ASCII letters, `_`, or `-`**, with no digits, spaces,
-  trimming, or automatic suffix. It is unique across open and closed saved Tabs
-  without regard to ASCII case; its entered case is preserved.
-- **Display name:** **1–80 Unicode scalar values**, nonblank and without control
-  characters. Entered text is preserved. Duplicate display names are allowed and
-  are disambiguated with internal names.
+- **Internal name:** **1–64 ASCII letters, digits `0-9`, `_`, or `-`**, with no
+  spaces, trimming, or automatic suffix. Digits may appear anywhere. It is unique
+  across open and closed saved Tabs without regard to ASCII case; entered case
+  is preserved.
+- **Display name (optional):** leave empty to use the internal name. An explicit
+  name must contain **1–80 Unicode scalar values**, be nonblank and have no control
+  characters; entered text is preserved. The effective name is saved, so the
+  fallback survives close/reopen and restart. Duplicate display names are allowed
+  and disambiguated with internal names. Both names are immutable here.
 
 Creation immediately saves an open, unbound Tab. It requires no package path,
 OCR environment, or target. At most **eight Tabs are open** and **64 are saved**;
@@ -688,9 +691,12 @@ Japanese. Do not replace actual WebView interaction with mocked command results.
    path or target. Check its saved unbound record and main Edit guidance; there
    must be no invented schema, profile, runnable package, or functioning Edit
    button. Create another Tab with the same display name and a different internal
-   name; verify disambiguated labels. Refuse case-only internal-name collisions,
-   digits/spaces, blank/control display names, and limits beyond 64 ASCII letters
-   or 80 Unicode scalars. Include supplementary Unicode in the scalar-count check.
+   name; verify disambiguated labels. Create a digit-leading or all-digit internal
+   name with an empty display name; its internal name must appear in the workspace
+   selector, saved list and after restart. Refuse case-only internal-name
+   collisions, spaces/non-ASCII digits in internal names, whitespace-only/control
+   display names, and limits beyond 64 internal characters or 80 display-name
+   Unicode scalars. Include supplementary Unicode in the scalar-count check.
 3. Inspect the real TypeScript directory separately in two Tabs. Save different
    profile values and confirm distinct catalogs, drafts, and durable
    Tab/package files. Close one, restart, and verify only saved-open Tabs return.

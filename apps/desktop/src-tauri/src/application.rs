@@ -1609,10 +1609,9 @@ mod tests {
         let application = &fixture.application;
         for (internal, display) in [
             ("", "Name"),
-            ("name1", "Name"),
+            ("name１", "Name"),
             ("../escape", "Name"),
             (" white", "Name"),
-            ("Valid", ""),
             ("Valid", " \t"),
             ("Valid", "line\nbreak"),
         ] {
@@ -1646,6 +1645,28 @@ mod tests {
         assert_eq!(reopened.display_name, display);
         assert_ne!(reopened.workspace_id, saved.workspace_id);
         assert!(reopened.selection.is_none());
+    }
+
+    #[test]
+    fn omitted_display_name_survives_close_reopen_and_restart() {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let saved = application.create_workspace("0-copy_9", "").unwrap();
+        assert_eq!(saved.display_name, "0-copy_9");
+        application.close_workspace(&view_ref(&saved)).unwrap();
+        let catalog = application.workspace_catalog().unwrap();
+        assert_eq!(catalog.closed[0].display_name, "0-copy_9");
+        let reopened = application.reopen_workspace("0-copy_9").unwrap();
+        assert_eq!(reopened.display_name, "0-copy_9");
+        assert_ne!(reopened.workspace_id, saved.workspace_id);
+        assert_eq!(
+            Store::new(fixture.root.clone())
+                .unwrap()
+                .tab("0-copy_9")
+                .unwrap()
+                .display_name,
+            "0-copy_9"
+        );
     }
 
     #[test]
