@@ -393,7 +393,7 @@
     "recoveryHeading": "Recovery",
     "recoveryIntro": "The configuration at the selected location could not be used. The original data was preserved: nothing was replaced, repaired or reset automatically.",
     "laterFault": "Configuration became unusable after start. The existing Application, polling and Stop stay available; Retry and Restore wait until operations and commands settle.",
-    "applicationUnavailable": "Normal workspace commands are unavailable until initialization succeeds.",
+    "applicationUnavailable": "Normal workspace commands are unavailable until the application is ready.",
     "root": "Selected root",
     "rootUnresolved": "Not resolved",
     "state": {
