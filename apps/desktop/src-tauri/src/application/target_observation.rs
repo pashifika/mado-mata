@@ -101,40 +101,46 @@ impl Application {
         workspace: &WorkspaceRef,
         request_id: &str,
     ) -> Result<(), Fault> {
-        if request_id.is_empty()
-            || request_id.len() > 64
-            || !request_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return Err(Fault::new(
-                "TargetObservationRequest",
-                "Invalid application check request",
-            ));
+        let result = (|| {
+            if request_id.is_empty()
+                || request_id.len() > 64
+                || !request_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err(Fault::new(
+                    "TargetObservationRequest",
+                    "Invalid application check request",
+                ));
+            }
+            let (_command, mut state) = self.command_state()?;
+            state.resolve(workspace)?;
+            self.collect(&mut state);
+            state.idle()?;
+            if !cfg!(target_os = "macos") {
+                return Err(Fault::new(
+                    "TargetPlatform",
+                    "Running application checks require macOS",
+                ));
+            }
+            let mut slot = lock(&self.target_observation);
+            slot.available()?;
+            if let Some(previous) = slot.active.take() {
+                previous.cancel();
+            }
+            slot.active = Some(ObservationWork {
+                workspace: workspace.clone(),
+                request_id: request_id.to_owned(),
+                cancelled: Arc::new(AtomicBool::new(false)),
+                finished: Arc::new(AtomicBool::new(true)),
+                result: None,
+            });
+            Ok(())
+        })();
+        if let Err(error) = &result {
+            self.record_application_check(workspace, "admission", Err(error));
         }
-        let (_command, mut state) = self.command_state()?;
-        state.resolve(workspace)?;
-        self.collect(&mut state);
-        state.idle()?;
-        if !cfg!(target_os = "macos") {
-            return Err(Fault::new(
-                "TargetPlatform",
-                "Running application checks require macOS",
-            ));
-        }
-        let mut slot = lock(&self.target_observation);
-        slot.available()?;
-        if let Some(previous) = slot.active.take() {
-            previous.cancel();
-        }
-        slot.active = Some(ObservationWork {
-            workspace: workspace.clone(),
-            request_id: request_id.to_owned(),
-            cancelled: Arc::new(AtomicBool::new(false)),
-            finished: Arc::new(AtomicBool::new(true)),
-            result: None,
-        });
-        Ok(())
+        result
     }
 
     pub fn check_running_application(
@@ -143,10 +149,12 @@ impl Application {
         expected: &TargetExpectation,
         request_id: &str,
     ) -> Result<TargetApplicationResponse, Fault> {
-        let result = self
+        let pending = self
             .begin_running_application(workspace, expected, request_id)
-            .and_then(|pending| self.finish_running_application(pending));
-        self.outcome(Some(workspace), "check_running_application", None, result)
+            .inspect_err(|error| {
+                self.record_application_check(workspace, "admission", Err(error));
+            })?;
+        self.finish_running_application(pending)
     }
 
     fn begin_running_application(
@@ -235,68 +243,121 @@ impl Application {
         &self,
         pending: PendingObservation,
     ) -> Result<TargetApplicationResponse, Fault> {
-        let remaining = pending.deadline.saturating_duration_since(Instant::now());
-        let result = match pending.result.recv_timeout(remaining) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+        let workspace = &pending.selected.workspace;
+        let mut stage = "observation";
+        let result = (|| {
+            let remaining = pending.deadline.saturating_duration_since(Instant::now());
+            let result = match pending.result.recv_timeout(remaining) {
+                Ok(result) => result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    pending.cancelled.store(true, Ordering::Release);
+                    return Err(Fault::new(
+                        "TargetObservationTimeout",
+                        "Application check timed out; its OS read may still be returning",
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Fault::new(
+                        "TargetObservationWorker",
+                        "Application check worker stopped without a result",
+                    ));
+                }
+            };
+            if pending.cancelled.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
+                return Err(cancelled());
+            }
+            if Instant::now() >= pending.deadline {
                 pending.cancelled.store(true, Ordering::Release);
                 return Err(Fault::new(
                     "TargetObservationTimeout",
-                    "Application check timed out; its OS read may still be returning",
+                    "Application check exceeded its publication deadline",
                 ));
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let observation = result?;
+            stage = "publication";
+            // Publication holds ownership only for the final record comparison, never for OS reads.
+            let (_command, state) = self.command_state()?;
+            let selected = state.resolve(&pending.selected.workspace)?;
+            if selected.package.target_identity != pending.selected.package.target_identity {
+                return Err(cancelled());
+            }
+            let store = match self.store.try_lock() {
+                Ok(store) => store,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(Fault::new(
+                        "TargetObservationBusy",
+                        "Configuration is still in use; the observation was not published",
+                    ));
+                }
+            };
+            let record =
+                store.read_target(&selected.internal_name, &selected.inventory.package_id)?;
+            record.compare(&pending.expected)?;
+            if pending.cancelled.load(Ordering::Acquire) {
+                return Err(cancelled());
+            }
+            if Instant::now() >= pending.deadline {
                 return Err(Fault::new(
-                    "TargetObservationWorker",
-                    "Application check worker stopped without a result",
+                    "TargetObservationTimeout",
+                    "Application check exceeded its publication deadline",
                 ));
             }
+            Ok(TargetApplicationResponse {
+                context: target_context(selected),
+                revision: pending.expected.revision,
+                binding_id: pending.expected.binding_id,
+                request_id: pending.request_id,
+                observation,
+            })
+        })();
+        self.record_application_check(
+            workspace,
+            stage,
+            result.as_ref().map(|response| &response.observation),
+        );
+        result
+    }
+
+    fn record_application_check(
+        &self,
+        workspace: &WorkspaceRef,
+        stage: &'static str,
+        result: Result<&ApplicationObservation, &Fault>,
+    ) {
+        let (status, error) = match result {
+            Ok(observation) => (
+                match observation.status.as_str() {
+                    status @ ("matched" | "not_running" | "ambiguous" | "unverifiable") => status,
+                    _ => "unknown",
+                },
+                None,
+            ),
+            Err(error) => (
+                match error.category.as_str() {
+                    "TargetObservationCancelled" => "cancelled",
+                    "TargetObservationTimeout" => "timeout",
+                    _ => "refused",
+                },
+                Some(error),
+            ),
         };
-        if pending.cancelled.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
-            return Err(cancelled());
-        }
-        if Instant::now() >= pending.deadline {
-            pending.cancelled.store(true, Ordering::Release);
-            return Err(Fault::new(
-                "TargetObservationTimeout",
-                "Application check exceeded its publication deadline",
-            ));
-        }
-        let observation = result?;
-        // Publication holds ownership only for the final record comparison, never for OS reads.
-        let (_command, state) = self.command_state()?;
-        let selected = state.resolve(&pending.selected.workspace)?;
-        if selected.package.target_identity != pending.selected.package.target_identity {
-            return Err(cancelled());
-        }
-        let store = match self.store.try_lock() {
-            Ok(store) => store,
-            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => {
-                return Err(Fault::new(
-                    "TargetObservationBusy",
-                    "Configuration is still in use; the observation was not published",
-                ));
-            }
-        };
-        let record = store.read_target(&selected.internal_name, &selected.inventory.package_id)?;
-        record.compare(&pending.expected)?;
-        if pending.cancelled.load(Ordering::Acquire) {
-            return Err(cancelled());
-        }
-        if Instant::now() >= pending.deadline {
-            return Err(Fault::new(
-                "TargetObservationTimeout",
-                "Application check exceeded its publication deadline",
-            ));
-        }
-        Ok(TargetApplicationResponse {
-            context: target_context(selected),
-            revision: pending.expected.revision,
-            binding_id: pending.expected.binding_id,
-            request_id: pending.request_id,
-            observation,
-        })
+        self.logger.emit(
+            "Rust",
+            if error.is_some() { "error" } else { "info" },
+            None,
+            Some(&workspace.workspace_id),
+            if error.is_some() {
+                "command.failed"
+            } else {
+                "target.application.checked"
+            },
+            "Application check finished",
+            serde_json::json!({
+                "action": "check_running_application", "status": status, "stage": stage,
+                "category": error.map(|fault| fault.category.as_str()),
+            }),
+        );
     }
 
     pub fn cancel_running_application(&self, workspace: &WorkspaceRef, request_id: &str) -> bool {

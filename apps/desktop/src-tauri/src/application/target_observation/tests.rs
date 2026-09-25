@@ -323,3 +323,123 @@ fn reconstruction_retains_occupancy_until_the_previous_worker_returns() {
     assert!(current.cancel_running_application(&owner, "next"));
     current.shutdown().unwrap();
 }
+
+#[test]
+fn application_observation_logs_outcomes_without_private_evidence() {
+    for (status, stage, category) in [
+        ("matched", "publication", None),
+        ("refused", "observation", Some("TargetObservationEvidence")),
+        (
+            "cancelled",
+            "observation",
+            Some("TargetObservationCancelled"),
+        ),
+        ("timeout", "observation", Some("TargetObservationTimeout")),
+    ] {
+        let fixture = Fixture::new();
+        let application = &fixture.application;
+        let (owner, mut pending, _, send) = pending(application);
+        if status == "refused" {
+            send.send(Err(Fault::new(
+                "TargetObservationEvidence",
+                "/private/runtime/path",
+            )
+            .with_context(json!({"stage": "/private/runtime/path", "pid": 4321, "signature": "private-signature"}))))
+                .unwrap();
+        } else {
+            send.send(Ok(observed())).unwrap();
+        }
+        if status == "cancelled" {
+            assert!(application.cancel_running_application(&owner, "request-1"));
+        } else if status == "timeout" {
+            pending.deadline = Instant::now();
+        }
+        let result = application.finish_running_application(pending);
+        assert_eq!(
+            result.as_ref().err().map(|error| error.category.as_str()),
+            category
+        );
+        let entries = application.poll().logs.entries;
+        let record = entries
+            .iter()
+            .find(|entry| entry.fields["action"] == "check_running_application")
+            .expect("application observation must leave a routine outcome");
+        assert_eq!(
+            record.workspace_id.as_deref(),
+            Some(owner.workspace_id.as_str())
+        );
+        assert_eq!(
+            record.fields,
+            json!({
+                "action": "check_running_application",
+                "status": status,
+                "stage": stage,
+                "category": category,
+            })
+        );
+        assert!(
+            !serde_json::to_string(record)
+                .unwrap()
+                .contains("/private/runtime/path")
+        );
+        assert!(
+            !serde_json::to_string(record)
+                .unwrap()
+                .contains("private-signature")
+        );
+    }
+}
+
+#[test]
+fn application_observation_admission_refusals_are_attributed() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let selected = inspect_named(application, "Admission", &package_path()).unwrap();
+    let owner = workspace_ref(&selected);
+    assert_eq!(
+        application
+            .reserve_running_application(&owner, "invalid/request")
+            .unwrap_err()
+            .category,
+        "TargetObservationRequest",
+    );
+    assert_eq!(
+        application
+            .check_running_application(
+                &owner,
+                &TargetExpectation {
+                    revision: 0,
+                    binding_id: None
+                },
+                "unreserved",
+            )
+            .unwrap_err()
+            .category,
+        "TargetObservationCancelled",
+    );
+    let entries = application.poll().logs.entries;
+    let records: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.fields["action"] == "check_running_application")
+        .collect();
+    assert_eq!(records.len(), 2);
+    for (record, status, category) in [
+        (records[0], "refused", "TargetObservationRequest"),
+        (records[1], "cancelled", "TargetObservationCancelled"),
+    ] {
+        assert_eq!(
+            record.workspace_id.as_deref(),
+            Some(owner.workspace_id.as_str())
+        );
+        assert_eq!(
+            record.fields,
+            json!({
+                "action": "check_running_application",
+                "status": status,
+                "stage": "admission",
+                "category": category,
+            })
+        );
+    }
+    assert!(application.runner.poll().run.is_none());
+}

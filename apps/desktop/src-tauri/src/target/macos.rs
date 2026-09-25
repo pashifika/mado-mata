@@ -1,4 +1,7 @@
-use super::observation::{Candidate, MAX_CANDIDATES, SigningIdentity, correspondence, summarize};
+use super::observation::{
+    Candidate, CandidateSnapshot, Lifetime, MAX_CANDIDATES, SigningIdentity,
+    candidate_correspondence, invalidation, summarize_revalidated, unavailable,
+};
 use super::{
     ApplicationObservation, ResolvedLocation, TargetConfiguration, TargetDeclaration,
     TargetResolution, bundle_metadata, canonical, executable, metadata_fault,
@@ -316,13 +319,6 @@ fn inspect_bundle(
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Lifetime {
-    pid: i32,
-    seconds: u64,
-    microseconds: u64,
-}
-
 fn lifetime(pid: i32, guard: &Guard<'_>) -> Result<Lifetime, Fault> {
     if pid <= 0 {
         return Err(unavailable("process_lifetime"));
@@ -370,29 +366,6 @@ fn url_path(url: &NSURL) -> Result<String, Fault> {
     let path = path.to_string();
     super::absolute_path(&path, "runtime_url")?;
     path_string(&canonical(&path, "runtime_url")?, "runtime_url")
-}
-
-pub(super) fn unavailable(stage: &str) -> Fault {
-    Fault::new(
-        "TargetObservationEvidence",
-        "application correspondence could not be established",
-    )
-    .with_context(json!({"stage": stage}))
-}
-
-fn invalidation(fault: &Fault) -> bool {
-    matches!(
-        fault.category.as_str(),
-        "TargetObservationCancelled" | "TargetObservationTimeout"
-    )
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct CandidateSnapshot {
-    lifetime: Lifetime,
-    executable: String,
-    architecture: i32,
-    bundle_id: String,
 }
 
 fn candidate_snapshot(
@@ -467,20 +440,16 @@ fn verify_candidate(
     } else {
         true
     };
-    let result = if satisfies_requirement {
-        correspondence(
-            &installed.identity,
-            &running.identity,
-            before.executable == selected.resolution.executable,
-        )
-    } else {
-        Candidate::Different
-    };
     signing::revalidate(&running, guard)?;
     let after = candidate_snapshot(app, guard)?;
-    if before != after {
-        return Err(unavailable("process_changed"));
-    }
+    let result = candidate_correspondence(
+        &installed.identity,
+        &running.identity,
+        &selected.resolution.executable,
+        satisfies_requirement,
+        &before,
+        &after,
+    )?;
     Ok((result, after, running.identity))
 }
 
@@ -634,33 +603,21 @@ pub(super) fn observe(
             for app in current.iter() {
                 current_pids.push(guard.call(|| app.processIdentifier())?);
             }
-            current_pids.sort_unstable();
-            discovered_pids.sort_unstable();
-            if current_pids != discovered_pids
-                || current_pids.windows(2).any(|pair| pair[0] == pair[1])
-            {
-                return observation(
-                    "unverifiable",
-                    None,
-                    json!({"stage": "candidates_changed"}),
-                    &guard,
-                );
-            }
-            for (_, before, _) in &snapshots {
-                match lifetime(before.lifetime.pid, &guard) {
-                    Ok(after) if after == before.lifetime => {}
-                    Err(fault) if invalidation(&fault) => return Err(fault),
-                    _ => {
-                        return observation(
-                            "unverifiable",
-                            None,
-                            json!({"stage": "process_changed"}),
-                            &guard,
-                        );
-                    }
+            let lifetimes = snapshots
+                .iter()
+                .map(|(_, before, _)| (before.lifetime, lifetime(before.lifetime.pid, &guard)));
+            let (status, evidence) = match summarize_revalidated(
+                &candidates,
+                &mut discovered_pids,
+                &mut current_pids,
+                lifetimes,
+            ) {
+                Ok(summary) => summary,
+                Err(fault) if invalidation(&fault) => return Err(fault),
+                Err(fault) => {
+                    return observation("unverifiable", None, fault.context, &guard);
                 }
-            }
-            let (status, evidence) = summarize(&candidates);
+            };
             observation(
                 status,
                 evidence.map(|kind| kind.name()),
@@ -701,4 +658,53 @@ fn observation(
         evidence: evidence.map(str::to_owned),
         diagnostics,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::target::tests::MetadataFixture;
+    use std::cell::Cell;
+
+    #[test]
+    fn metadata_changes_during_inspection_refuse_stale_resolution() {
+        let fixture = MetadataFixture::new();
+        for binary in [false, true] {
+            let bundle = fixture.bundle(binary);
+            let path = bundle.to_str().unwrap();
+            let checkpoints = Cell::new(0);
+            let before = inspect_bundle(path, "game", &|| {
+                checkpoints.set(checkpoints.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(before.bundle_id.as_deref(), Some("dev.example.metadata"));
+
+            // The tail checks each identity, alternate plist absence, then the selected path.
+            let mutate_at = checkpoints.get() - before.identities.len() - FOUNDATION_INFO.len() + 1;
+            let info = bundle.join("Contents/Info.plist");
+            let mut changed = plist::Value::from_file(&info).unwrap();
+            let identifier = "dev.example.metadata.changed-during-inspection";
+            changed.as_dictionary_mut().unwrap().insert(
+                "CFBundleIdentifier".into(),
+                plist::Value::String(identifier.into()),
+            );
+            checkpoints.set(0);
+            let fault = inspect_bundle(path, "game", &|| {
+                checkpoints.set(checkpoints.get() + 1);
+                if checkpoints.get() == mutate_at {
+                    changed.to_file_xml(&info).unwrap();
+                }
+                Ok(())
+            })
+            .unwrap_err();
+            assert_eq!(fault.category, "TargetMetadata");
+            assert_eq!(fault.context["field"], "game");
+            assert_eq!(fault.context["stage"], "changed");
+
+            let after = resolve_bundle(path, "game").unwrap();
+            assert_eq!(after.bundle_id.as_deref(), Some(identifier));
+            assert_eq!(after.resolution, before.resolution);
+        }
+    }
 }

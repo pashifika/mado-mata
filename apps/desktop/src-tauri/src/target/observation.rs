@@ -1,4 +1,7 @@
-//! Pure correspondence policy; OS evidence is collected by the macOS module.
+//! Pure correspondence and revalidation policy; macOS collects the OS evidence.
+use mado_runtime_comparison::model::Fault;
+use serde_json::json;
+
 pub(super) const MAX_CANDIDATES: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +40,54 @@ pub(super) struct SignedIdentity {
 pub(super) enum SigningIdentity {
     Unsigned,
     Signed(SignedIdentity),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Lifetime {
+    pub pid: i32,
+    pub seconds: u64,
+    pub microseconds: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct CandidateSnapshot {
+    pub lifetime: Lifetime,
+    pub executable: String,
+    pub architecture: i32,
+    pub bundle_id: String,
+}
+
+pub(super) fn unavailable(stage: &str) -> Fault {
+    Fault::new(
+        "TargetObservationEvidence",
+        "application correspondence could not be established",
+    )
+    .with_context(json!({"stage": stage}))
+}
+
+pub(super) fn invalidation(fault: &Fault) -> bool {
+    matches!(
+        fault.category.as_str(),
+        "TargetObservationCancelled" | "TargetObservationTimeout"
+    )
+}
+
+pub(super) fn candidate_correspondence(
+    selected: &SigningIdentity,
+    running: &SigningIdentity,
+    selected_executable: &str,
+    satisfies_requirement: bool,
+    before: &CandidateSnapshot,
+    after: &CandidateSnapshot,
+) -> Result<Candidate, Fault> {
+    if before != after {
+        return Err(unavailable("process_changed"));
+    }
+    Ok(if satisfies_requirement {
+        correspondence(selected, running, before.executable == selected_executable)
+    } else {
+        Candidate::Different
+    })
 }
 
 pub(super) fn correspondence(
@@ -96,9 +147,185 @@ pub(super) fn summarize(candidates: &[Candidate]) -> (&'static str, Option<Evide
     }
 }
 
+/// Rechecks the entire cohort, including candidates classified as different.
+pub(super) fn summarize_revalidated(
+    candidates: &[Candidate],
+    discovered_pids: &mut [i32],
+    current_pids: &mut [i32],
+    lifetimes: impl IntoIterator<Item = (Lifetime, Result<Lifetime, Fault>)>,
+) -> Result<(&'static str, Option<Evidence>), Fault> {
+    current_pids.sort_unstable();
+    discovered_pids.sort_unstable();
+    if current_pids != discovered_pids || current_pids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(unavailable("candidates_changed"));
+    }
+    for (before, after) in lifetimes {
+        match after {
+            Ok(after) if after == before => {}
+            Err(fault) if invalidation(&fault) => return Err(fault),
+            _ => return Err(unavailable("process_changed")),
+        }
+    }
+    Ok(summarize(candidates))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot(pid: i32) -> CandidateSnapshot {
+        CandidateSnapshot {
+            lifetime: Lifetime {
+                pid,
+                seconds: 1_000,
+                microseconds: 123_456,
+            },
+            executable: "/selected/Contents/MacOS/Executable".into(),
+            architecture: 16_777_228,
+            bundle_id: "dev.example.application".into(),
+        }
+    }
+
+    #[test]
+    fn candidate_snapshot_changes_refuse_previously_matching_code() {
+        let before = snapshot(7);
+        let identity = signed(Some("publisher"), 1);
+        assert_eq!(
+            candidate_correspondence(
+                &identity,
+                &identity,
+                &before.executable,
+                true,
+                &before,
+                &snapshot(7),
+            )
+            .unwrap(),
+            Candidate::Verified(Evidence::ExactPath)
+        );
+        for change in [
+            "pid",
+            "seconds",
+            "microseconds",
+            "executable",
+            "architecture",
+            "bundle_id",
+        ] {
+            let mut after = snapshot(7);
+            match change {
+                "pid" => after.lifetime.pid += 1,
+                "seconds" => after.lifetime.seconds += 1,
+                "microseconds" => after.lifetime.microseconds += 1,
+                "executable" => after.executable = "/replacement/Executable".into(),
+                "architecture" => after.architecture += 1,
+                "bundle_id" => after.bundle_id = "dev.example.replacement".into(),
+                _ => unreachable!(),
+            }
+            let fault = candidate_correspondence(
+                &identity,
+                &identity,
+                &before.executable,
+                true,
+                &before,
+                &after,
+            )
+            .unwrap_err();
+            assert_eq!(fault.category, "TargetObservationEvidence", "{change}");
+            assert_eq!(fault.context["stage"], "process_changed", "{change}");
+        }
+    }
+
+    #[test]
+    fn lifetime_rechecks_refuse_exit_and_pid_reuse_even_for_excluded_candidates() {
+        let candidates = [
+            Candidate::Verified(Evidence::ExactPath),
+            Candidate::Different,
+        ];
+        let before = [snapshot(7).lifetime, snapshot(11).lifetime];
+        assert_eq!(
+            summarize_revalidated(
+                &candidates,
+                &mut [7, 11],
+                &mut [11, 7],
+                before.map(|lifetime| (lifetime, Ok(lifetime))),
+            )
+            .unwrap(),
+            ("matched", Some(Evidence::ExactPath))
+        );
+        for changed in 0..before.len() {
+            for after in [
+                None,
+                Some(Lifetime {
+                    seconds: before[changed].seconds + 1,
+                    ..before[changed]
+                }),
+                Some(Lifetime {
+                    microseconds: before[changed].microseconds + 1,
+                    ..before[changed]
+                }),
+            ] {
+                let rechecks = before.iter().enumerate().map(|(index, lifetime)| {
+                    let current = if index == changed {
+                        after
+                    } else {
+                        Some(*lifetime)
+                    };
+                    (
+                        *lifetime,
+                        current.ok_or_else(|| unavailable("process_lifetime")),
+                    )
+                });
+                let fault =
+                    summarize_revalidated(&candidates, &mut [7, 11], &mut [7, 11], rechecks)
+                        .unwrap_err();
+                assert_eq!(fault.category, "TargetObservationEvidence");
+                assert_eq!(
+                    fault.context["stage"], "process_changed",
+                    "{changed}: {after:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_cohort_changes_cannot_publish_the_previous_unique_match() {
+        let candidates = [
+            Candidate::Verified(Evidence::ExactPath),
+            Candidate::Different,
+        ];
+        for (mut discovered, mut current) in [
+            (vec![7, 11], vec![7, 13]),
+            (vec![7, 11], vec![7]),
+            (vec![7, 11], vec![7, 11, 13]),
+            (vec![7, 11], vec![7, 7]),
+            (vec![7, 7], vec![7, 7]),
+        ] {
+            let fault = summarize_revalidated(
+                &candidates,
+                &mut discovered,
+                &mut current,
+                [snapshot(7).lifetime, snapshot(11).lifetime]
+                    .map(|lifetime| (lifetime, Ok(lifetime))),
+            )
+            .unwrap_err();
+            assert_eq!(fault.category, "TargetObservationEvidence");
+            assert_eq!(fault.context["stage"], "candidates_changed");
+        }
+    }
+
+    #[test]
+    fn final_lifetime_invalidation_is_not_downgraded_to_missing_evidence() {
+        for category in ["TargetObservationCancelled", "TargetObservationTimeout"] {
+            let before = snapshot(7).lifetime;
+            let fault = summarize_revalidated(
+                &[Candidate::Verified(Evidence::ExactPath)],
+                &mut [7],
+                &mut [7],
+                [(before, Err(Fault::new(category, "invalidated")))],
+            )
+            .unwrap_err();
+            assert_eq!(fault.category, category);
+        }
+    }
 
     #[test]
     fn overflow_refuses_instead_of_truncating_to_one_match() {

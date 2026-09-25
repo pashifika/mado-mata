@@ -469,9 +469,12 @@ Edits, Save/Remove, owner changes, reinspection, and root/restore transitions
 invalidate applicability. Reopening never restores an observation. Failure does
 not roll back a completed binding write. Process paths, lifetime and signature
 details remain transient private diagnostics: they do not enter `target.config`,
-profiles, snapshots, or routine logs. Runtime relocation never rewrites the saved
-installation. Native Start remains refused; Windows target work is deferred,
-and initial both-OS qualification and R6 remain unresolved.
+profiles, snapshots, or routine logs. Routine check outcomes retain only workspace
+attribution, action, bounded status, host stage (`admission`, `observation`, or
+`publication`), and fault category; they do not copy private diagnostics or fault
+text. Runtime relocation never rewrites the saved installation. Native Start
+remains refused; Windows target work is deferred, and initial both-OS qualification
+and R6 remain unresolved.
 
 
 ## Inspect, edit, and save profiles
