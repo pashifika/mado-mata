@@ -195,6 +195,7 @@ impl Application {
             state.idle()?;
             let previous = state.resolve_workspace(workspace)?.clone();
             let reference = next_revision(workspace)?;
+            self.invalidate_target_observation(Some(workspace));
             drop(state);
             let selected = Self::inspect_selection(
                 &self.runner,

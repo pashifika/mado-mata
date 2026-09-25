@@ -20,6 +20,11 @@ impl Workspaces {
                 "RunActive",
                 "Previous operation has not settled and been reaped",
             ))
+        } else if self.target_picker.is_some() {
+            Err(Fault::new(
+                "TargetPickerBusy",
+                "Close application selection before starting another operation",
+            ))
         } else {
             Ok(())
         }
@@ -291,6 +296,7 @@ impl Application {
         self.shutdown_outcome
             .get_or_init(|| {
                 self.closing.store(true, Ordering::Release);
+                self.invalidate_target_observation(None);
                 let outcome = self.runner.shutdown();
                 if let Some(bridge) = lock(&self.bridge).take() {
                     let _ = bridge.join();

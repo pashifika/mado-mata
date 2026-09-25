@@ -4,7 +4,7 @@ import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyRecoveryMu
 import {LocalFault} from './i18n.ts';
 import {currentRecoveryDraft,editRecovery,issuePath,readRecoveryDraft,recoveryIssue,recoveryState,recoveryTicket,selectRecovery} from './recovery.ts';
 import {optionPath,readDraft} from './state.ts';
-import {beginTarget,checkedTarget,currentTargetDraft,discardTarget,editTarget,readTarget,readTargetDraft,removedTarget,savedTarget,targetDirty,targetExpectation,targetFailed,targetReadFailed,targetState,targetTicket} from './target.ts';
+import {beginApplicationPicker,beginRunningApplication,beginTarget,cancelRunningApplication,checkedTarget,completeApplicationPicker,completeRunningApplication,currentTargetDraft,discardTarget,editTarget,eligibleRunningApplication,failRunningApplication,invalidateApplicationPicker,invalidateRunningApplication,readTarget,readTargetDraft,removedTarget,savedTarget,targetDirty,targetExpectation,targetFailed,targetReadFailed,targetState,targetTicket} from './target.ts';
 
 const schema={type:'object',properties:{count:{type:'integer',default:1},mode:{type:'string'}}};
 function profile(id,name,values,packageId='pkg-a',schemaIdentity='schema-1'){
@@ -367,10 +367,21 @@ function loadedTarget(id='a',configuration=targetConfiguration()) {
 }
 function targetCheck(ticket,path='/metadata/game') {
   return {context:ticket.context,...ticket.expected,check:{configuration_identity:'checked-configuration',
-    resolution:{game:{path,executable:path},launcher:null,working_directory:null},previous_resolution:null,resolution_changed:false}};
+    resolution:{game:{path,executable:path},launcher:null,working_directory:null},previous_resolution:null,resolution_changed:false,
+    game_bundle_id:null}};
 }
 function withTarget(tab,state) {
   return updateBound(tab,bound=>({...bound,target:state}));
+}
+function loadedBundle(id='a') {
+  const configuration=targetConfiguration('/metadata/Game.app');
+  configuration.game.kind='bundle';
+  return loadedTarget(id,configuration);
+}
+function applicationResult(ticket,requestId,status='matched') {
+  return {context:ticket.context,...ticket.expected,request_id:requestId,observation:{
+    observed_at_ms:1730000000000,status,evidence:status === 'matched' ? 'signed_application' : null,
+    diagnostics:{stage:'correspondence'}}};
 }
 
 test('target form preserves literal argument boundaries, empty arguments and independent game/launcher locations',()=>{
@@ -388,6 +399,144 @@ test('target form preserves literal argument boundaries, empty arguments and ind
   assert.equal(saved.draft.launcherPath,'/metadata/Launcher.app');
   assert.equal(saved.observation,null);
   assert.equal(targetDirty(saved),false);
+});
+
+test('native application choice edits only the issuing game or launcher and cancellation leaves the draft untouched',()=>{
+  let state=loadedTarget();
+  const saved=state.view.record;
+  const game=beginApplicationPicker(state,'game').picker;
+  state=completeApplicationPicker(beginApplicationPicker(state,'game',game),game,'/metadata/Game.app');
+  assert.deepEqual(state.draft.gameKind,'bundle');
+  assert.deepEqual(state.draft.gamePath,'/metadata/Game.app');
+  assert.equal(state.view.record,saved);
+  state=editTarget(state,{...state.draft,separateLauncher:true,launcherKind:'executable',launcherPath:'/metadata/launcher'});
+  const launcher=beginApplicationPicker(state,'launcher').picker;
+  state=completeApplicationPicker(beginApplicationPicker(state,'launcher',launcher),launcher,'/metadata/Launcher.app');
+  assert.deepEqual([state.draft.gamePath,state.draft.launcherKind,state.draft.launcherPath],
+    ['/metadata/Game.app','bundle','/metadata/Launcher.app']);
+  const before=state.draft;
+  const revision=state.draftRevision;
+  const cancelled=beginApplicationPicker(state,'game');
+  state=completeApplicationPicker(cancelled,cancelled.picker,null);
+  assert.equal(state.draft,before);
+  assert.equal(state.draftRevision,revision);
+  assert.equal(state.view.record,saved);
+});
+
+test('late application picker cannot overwrite an edited-back draft, replaced owner, or refreshed record',()=>{
+  const initial=loadedTarget();
+  const issued=beginApplicationPicker(initial,'game');
+  const picker=issued.picker;
+  let state=editTarget(issued,{...issued.draft,gamePath:'/metadata/new'});
+  state=editTarget(state,{...state.draft,gamePath:initial.draft.gamePath});
+  assert.equal(completeApplicationPicker(state,picker,'/metadata/late.app'),state);
+  const refreshed=beginTarget(issued,'read');
+  assert.equal(completeApplicationPicker(refreshed,picker,'/metadata/late.app'),refreshed);
+  const switched=invalidateApplicationPicker(issued);
+  assert.equal(completeApplicationPicker(switched,picker,'/metadata/late.app'),switched);
+  const replaced=targetState(targetSelection('a',2));
+  assert.equal(completeApplicationPicker(replaced,picker,'/metadata/late.app'),replaced);
+  assert.equal(beginApplicationPicker(initial,'launcher').picker,null);
+});
+
+test('an incompatible saved binding, direct executable, dirty draft, refresh or review cannot begin a running check',()=>{
+  const bundle=loadedBundle();
+  assert.ok(eligibleRunningApplication(bundle));
+  assert.equal(eligibleRunningApplication(loadedTarget()),null);
+  assert.equal(eligibleRunningApplication({...bundle,view:{...bundle.view,compatible:false}}),null);
+  assert.equal(eligibleRunningApplication(editTarget(bundle,{...bundle.draft,gamePath:'/metadata/other.app'})),null);
+  assert.equal(eligibleRunningApplication({...bundle,refreshRequired:true}),null);
+  const ticket=targetTicket(bundle);
+  const review={ticket,previous:bundle.view.record.binding.resolution,resolution:bundle.view.record.binding.resolution};
+  assert.equal(eligibleRunningApplication({...bundle,review}),null);
+  const pending=beginRunningApplication(bundle,ticket,'request-a');
+  assert.equal(eligibleRunningApplication(pending),null);
+});
+
+test('running observation is historical, owner-bound and does not modify saved bytes or metadata Check',()=>{
+  const initial=loadedBundle();
+  const saved=JSON.stringify(initial.view.record);
+  const ticket=eligibleRunningApplication(initial);
+  const pending=beginRunningApplication(initial,ticket,'request-a');
+  const other=loadedBundle('b');
+  const otherTicket=eligibleRunningApplication(other);
+  const otherPending=beginRunningApplication(other,otherTicket,'request-a');
+  assert.equal(completeRunningApplication(otherPending,otherTicket,applicationResult(ticket,'request-a')),otherPending);
+  assert.equal(completeRunningApplication(pending,ticket,applicationResult(ticket,'request-b')),pending);
+  const result=completeRunningApplication(pending,ticket,applicationResult(ticket,'request-a'));
+  assert.equal(result.application.result.response.observation.evidence,'signed_application');
+  assert.equal(result.observation,null);
+  assert.equal(JSON.stringify(result.view.record),saved);
+  assert.equal(invalidateRunningApplication(result).application.result,null);
+  const edited=editTarget(result,{...result.draft,arguments:['later']});
+  assert.equal(edited.application.result,null);
+  const removed=removedTarget(result,ticket,targetView(result,{revision:2}));
+  assert.equal(removed.application.result,null);
+});
+
+test('cancel and edit-back discard late worker completions without claiming OS completion',()=>{
+  const initial=loadedBundle();
+  const ticket=eligibleRunningApplication(initial);
+  const pending=beginRunningApplication(initial,ticket,'request-a');
+  const cancelled=cancelRunningApplication(pending,'request-a');
+  assert.equal(cancelled.application.cancelled,true);
+  assert.equal(completeRunningApplication(cancelled,ticket,applicationResult(ticket,'request-a')),cancelled);
+  let edited=editTarget(pending,{...pending.draft,gamePath:'/metadata/other.app'});
+  edited=editTarget(edited,{...edited.draft,gamePath:initial.draft.gamePath});
+  assert.equal(completeRunningApplication(edited,ticket,applicationResult(ticket,'request-a')),edited);
+  const refreshed=readTarget(pending,pending.view);
+  assert.equal(completeRunningApplication(refreshed,ticket,applicationResult(ticket,'request-a')),refreshed);
+  const error={category:'TargetObservationTimeout',message:'deadline',context:null};
+  const failed=failRunningApplication(pending,ticket,'request-a',error);
+  assert.equal(failed.application.issue.fault,error);
+  assert.equal(failed.issue,null);
+  assert.equal(failed.view.record,initial.view.record);
+});
+
+test('running precheck changed resolution requires reviewed Save but retains the binding',()=>{
+  const initial=loadedBundle();
+  const ticket=eligibleRunningApplication(initial);
+  const oldResolution=initial.view.record.binding.resolution;
+  const nextResolution={...oldResolution,game:{path:'/metadata/redirected.app',executable:'/metadata/redirected'}};
+  const fault={category:'TargetResolutionChanged',message:'Review changed resolution',
+    context:{previous_resolution:oldResolution,resolution:nextResolution}};
+  const failed=failRunningApplication(beginRunningApplication(initial,ticket,'request-a'),ticket,'request-a',fault);
+  assert.deepEqual(failed.review.resolution,nextResolution);
+  assert.equal(failed.application.issue.fault,fault);
+  assert.deepEqual(failed.view.record.binding.resolution,oldResolution);
+  assert.equal(eligibleRunningApplication(failed),null);
+});
+
+test('running result is invalidated by Save before its saved-view reread even if that refresh fails',()=>{
+  let state=loadedBundle();
+  const runningTicket=eligibleRunningApplication(state);
+  state=completeRunningApplication(beginRunningApplication(state,runningTicket,'request-a'),
+    runningTicket,applicationResult(runningTicket,'request-a'));
+  const saveTicket=targetTicket(state);
+  const committed=targetView(state,{revision:2,configuration:state.view.record.binding.configuration});
+  const check=targetCheck(saveTicket).check;
+  state=savedTarget(beginTarget(state,'save'),saveTicket,{view:committed,check});
+  state=targetReadFailed(state,unreadable);
+  assert.equal(state.application.result,null);
+  assert.equal(state.persisted,'saved');
+  assert.equal(state.refreshRequired,true);
+  assert.equal(eligibleRunningApplication(state),null);
+  state=readTarget({...state,operation:null},committed);
+  assert.equal(state.persisted,'saved');
+  assert.ok(eligibleRunningApplication(state));
+});
+
+test('running check conflict requires a fresh saved view before another observation',()=>{
+  const initial=loadedBundle();
+  const ticket=eligibleRunningApplication(initial);
+  const error={category:'TargetConflict',message:'Saved binding changed',context:null};
+  const failed=failRunningApplication(beginRunningApplication(initial,ticket,'request-a'),ticket,'request-a',error);
+  assert.equal(failed.reconcile,true);
+  assert.equal(failed.application.issue.fault,error);
+  assert.equal(eligibleRunningApplication(failed),null);
+  const reloaded=readTarget(failed,initial.view);
+  assert.equal(reloaded.reconcile,false);
+  assert.ok(eligibleRunningApplication(reloaded));
 });
 
 for (const {scenario,update,field} of [

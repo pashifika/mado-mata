@@ -1,21 +1,38 @@
-//! Machine-local intent and metadata checks only; no process or native authority.
+//! Machine-local metadata and read-only observations; never native authority.
 use crate::storage::{MAX_PATH_BYTES, validate_id, validate_internal_name, validate_package_id};
 use mado_runtime_comparison::inventory::TargetDeclaration;
 use mado_runtime_comparison::model::{Fault, identity};
+#[cfg(any(target_os = "macos", test))]
 use plist::stream::{Event, Reader};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+#[cfg(any(target_os = "macos", test))]
 use std::collections::BTreeSet;
-use std::fs::{self, OpenOptions};
-use std::io::{Cursor, Read};
+use std::fs;
+#[cfg(target_os = "macos")]
+use std::fs::OpenOptions;
+#[cfg(any(target_os = "macos", test))]
+use std::io::Cursor;
+#[cfg(target_os = "macos")]
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(any(target_os = "macos", test))]
+mod observation;
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::OpenOptionsExt;
 
 pub(crate) const TARGET_VERSION: u32 = 1;
 pub(crate) const MAX_TARGET_BYTES: usize = 64 * 1024;
 pub const MAX_TARGET_REVISION: u64 = 9_007_199_254_740_991;
+#[cfg(any(target_os = "macos", test))]
 const MAX_METADATA_BYTES: usize = 64 * 1024;
 
 // Like the snapshot entry visitor, require JSON objects rather than serde's
@@ -102,8 +119,60 @@ object!(TargetCheck {
     resolution: TargetResolution,
     previous_resolution: Option<TargetResolution>,
     resolution_changed: bool,
+    game_bundle_id: Option<String>,
 });
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ApplicationObservation {
+    pub observed_at_ms: u64,
+    pub status: String,
+    pub evidence: Option<String>,
+    pub diagnostics: serde_json::Value,
+}
+
+pub fn observe_application(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    expected_resolution: &TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<ApplicationObservation, Fault> {
+    observation_checkpoint(cancelled, deadline)?;
+    #[cfg(target_os = "macos")]
+    {
+        macos::observe(
+            configuration,
+            declaration,
+            expected_resolution,
+            cancelled,
+            deadline,
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (configuration, declaration, expected_resolution);
+        Err(Fault::new(
+            "TargetPlatform",
+            "application observation requires macOS",
+        ))
+    }
+}
+
+fn observation_checkpoint(cancelled: &AtomicBool, deadline: Instant) -> Result<(), Fault> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(Fault::new(
+            "TargetObservationCancelled",
+            "application observation was cancelled",
+        ));
+    }
+    if Instant::now() >= deadline {
+        return Err(Fault::new(
+            "TargetObservationTimeout",
+            "application observation deadline expired",
+        ));
+    }
+    Ok(())
+}
 impl TargetConfiguration {
     /// Portable shape validation; deliberately does not inspect the filesystem.
     pub fn validate(&self) -> Result<(), Fault> {
@@ -162,6 +231,12 @@ impl TargetConfiguration {
     pub fn validate_declaration(&self, declaration: &TargetDeclaration) -> Result<(), Fault> {
         self.validate()?;
         declaration.validate()?;
+        if declaration.macos.is_some() && self.game.kind != "bundle" {
+            return Err(configuration_fault(
+                "game",
+                "the package requires an application bundle",
+            ));
+        }
         if declaration
             .window_title
             .as_ref()
@@ -181,6 +256,14 @@ impl TargetConfiguration {
     }
 
     pub fn resolve(&self, declaration: &TargetDeclaration) -> Result<TargetResolution, Fault> {
+        self.resolve_with_metadata(declaration)
+            .map(|(resolution, _)| resolution)
+    }
+
+    fn resolve_with_metadata(
+        &self,
+        declaration: &TargetDeclaration,
+    ) -> Result<(TargetResolution, Option<String>), Fault> {
         self.validate_declaration(declaration)?;
         if !cfg!(unix) {
             return Err(Fault::new(
@@ -188,11 +271,23 @@ impl TargetConfiguration {
                 "executable metadata checks require a Unix host",
             ));
         }
-        let game = resolve_location(&self.game, "game")?;
+        let (game, bundle_id) = resolve_location(&self.game, "game")?;
+        if declaration
+            .macos
+            .as_ref()
+            .is_some_and(|constraint| bundle_id.as_deref() != Some(constraint.bundle_id.as_str()))
+        {
+            return Err(configuration_fault(
+                "game",
+                "application identifier conflicts with the package declaration",
+            ));
+        }
         let launcher = self
             .launcher
             .as_ref()
-            .map(|location| resolve_location(location, "launcher"))
+            .map(|location| {
+                resolve_location(location, "launcher").map(|(resolution, _)| resolution)
+            })
             .transpose()?;
         let working_directory = self
             .working_directory
@@ -208,11 +303,14 @@ impl TargetConfiguration {
                 path_string(&path, "working_directory")
             })
             .transpose()?;
-        Ok(TargetResolution {
-            game,
-            launcher,
-            working_directory,
-        })
+        Ok((
+            TargetResolution {
+                game,
+                launcher,
+                working_directory,
+            },
+            bundle_id,
+        ))
     }
 }
 
@@ -229,12 +327,7 @@ impl TargetLocation {
 }
 
 impl TargetBinding {
-    pub fn compatible(
-        &self,
-        package: &str,
-        target_id: &str,
-        declaration_identity: &str,
-    ) -> bool {
+    pub fn compatible(&self, package: &str, target_id: &str, declaration_identity: &str) -> bool {
         self.package_id == package
             && self.target_id == target_id
             && self.declaration_identity == declaration_identity
@@ -307,6 +400,7 @@ impl TargetRecord {
             TargetDeclaration {
                 id: binding.target_id.clone(),
                 window_title: None,
+                macos: None,
             }
             .validate()
             .map_err(|_| configuration_fault("target_id", "invalid portable target identity"))?;
@@ -389,13 +483,14 @@ pub(crate) fn check(
     declaration: &TargetDeclaration,
     previous: Option<&TargetBinding>,
 ) -> Result<TargetCheck, Fault> {
-    let resolution = configuration.resolve(declaration)?;
+    let (resolution, game_bundle_id) = configuration.resolve_with_metadata(declaration)?;
     let resolution_changed = previous.is_some_and(|binding| binding.resolution != resolution);
     Ok(TargetCheck {
         configuration_identity: configuration.identity()?,
         resolution,
         previous_resolution: previous.map(|binding| binding.resolution.clone()),
         resolution_changed,
+        game_bundle_id,
     })
 }
 
@@ -474,51 +569,33 @@ fn executable(path: &Path, field: &str) -> Result<(), Fault> {
     Ok(())
 }
 
-fn resolve_location(location: &TargetLocation, field: &str) -> Result<ResolvedLocation, Fault> {
+fn resolve_location(
+    location: &TargetLocation,
+    field: &str,
+) -> Result<(ResolvedLocation, Option<String>), Fault> {
+    if location.kind == "bundle" {
+        #[cfg(target_os = "macos")]
+        return macos::resolve_bundle(&location.path, field)
+            .map(|bundle| (bundle.resolution, bundle.bundle_id));
+        #[cfg(not(target_os = "macos"))]
+        return Err(Fault::new(
+            "TargetPlatform",
+            "application bundle metadata requires macOS",
+        ));
+    }
     let selected = canonical(&location.path, field)?;
-    if location.kind == "executable" {
-        executable(&selected, field)?;
-        let path = path_string(&selected, field)?;
-        return Ok(ResolvedLocation {
+    executable(&selected, field)?;
+    let path = path_string(&selected, field)?;
+    Ok((
+        ResolvedLocation {
             executable: path.clone(),
             path,
-        });
-    }
-    if !selected
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
-        || !fs::metadata(&selected)
-            .map_err(|_| metadata_fault(field, "bundle"))?
-            .is_dir()
-    {
-        return Err(metadata_fault(field, "bundle"));
-    }
-    let plist_path = canonical(selected.join("Contents/Info.plist"), field)?;
-    if !plist_path.starts_with(&selected) {
-        return Err(metadata_fault(field, "plist"));
-    }
-    let name = bundle_executable(&read_metadata(&plist_path, field)?, field)?;
-    if name.is_empty()
-        || name.len() > 255
-        || matches!(name.as_str(), "." | "..")
-        || name
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
-    {
-        return Err(metadata_fault(field, "plist"));
-    }
-    let path = canonical(selected.join("Contents/MacOS").join(name), field)?;
-    if !path.starts_with(&selected) {
-        return Err(metadata_fault(field, "executable"));
-    }
-    executable(&path, field)?;
-    Ok(ResolvedLocation {
-        path: path_string(&selected, field)?,
-        executable: path_string(&path, field)?,
-    })
+        },
+        None,
+    ))
 }
 
+#[cfg(target_os = "macos")]
 fn read_metadata(path: &Path, field: &str) -> Result<Vec<u8>, Fault> {
     let failure = || metadata_fault(field, "plist");
     let before = fs::metadata(path).map_err(|_| failure())?;
@@ -561,18 +638,26 @@ fn read_metadata(path: &Path, field: &str) -> Result<Vec<u8>, Fault> {
     Ok(bytes)
 }
 
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BundleMetadata {
+    executable: Option<String>,
+    bundle_id: Option<String>,
+}
+
 // Stream instead of building a recursive Value tree: binary references can
 // expand a small source many times. Bound depth, events and decoded payload too.
-fn bundle_executable(bytes: &[u8], field: &str) -> Result<String, Fault> {
+#[cfg(any(target_os = "macos", test))]
+fn bundle_metadata(bytes: &[u8], field: &str) -> Result<BundleMetadata, Fault> {
     struct Collection {
         dictionary: bool,
         expecting_value: bool,
-        executable_key: bool,
+        identity_key: u8,
         keys: BTreeSet<String>,
     }
     let failure = || metadata_fault(field, "plist");
     let mut stack: Vec<Collection> = Vec::new();
-    let mut executable = None;
+    let mut metadata = BundleMetadata::default();
     let mut payload = 0usize;
     let mut root = false;
     for (index, event) in Reader::new(Cursor::new(bytes)).enumerate() {
@@ -600,17 +685,42 @@ fn bundle_executable(bytes: &[u8], field: &str) -> Result<String, Fault> {
             if collection.dictionary {
                 if collection.expecting_value {
                     collection.expecting_value = false;
-                    if top && collection.executable_key {
-                        let Event::String(name) = &event else {
+                    if top && collection.identity_key != 0 {
+                        let Event::String(value) = &event else {
                             return Err(failure());
                         };
-                        executable = Some(name.to_string());
+                        if collection.identity_key == 1 {
+                            if value.is_empty()
+                                || value.len() > 255
+                                || matches!(value.as_ref(), "." | "..")
+                                || value
+                                    .chars()
+                                    .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+                            {
+                                return Err(failure());
+                            }
+                            metadata.executable = Some(value.to_string());
+                        } else {
+                            // Host-derived, not a manifest selector: only bound the
+                            // literal. A declared selector must equal the game's value.
+                            if value.is_empty()
+                                || value.len() > 255
+                                || value.chars().any(char::is_control)
+                            {
+                                return Err(failure());
+                            }
+                            metadata.bundle_id = Some(value.to_string());
+                        }
                     }
                 } else {
                     let Event::String(key) = event else {
                         return Err(failure());
                     };
-                    collection.executable_key = key == "CFBundleExecutable";
+                    collection.identity_key = match key.as_ref() {
+                        "CFBundleExecutable" => 1,
+                        "CFBundleIdentifier" => 2,
+                        _ => 0,
+                    };
                     if !collection.keys.insert(key.into_owned()) {
                         return Err(failure());
                     }
@@ -631,7 +741,7 @@ fn bundle_executable(bytes: &[u8], field: &str) -> Result<String, Fault> {
                 stack.push(Collection {
                     dictionary: matches!(event, Event::StartDictionary(_)),
                     expecting_value: false,
-                    executable_key: false,
+                    identity_key: 0,
                     keys: BTreeSet::new(),
                 });
             }
@@ -648,7 +758,7 @@ fn bundle_executable(bytes: &[u8], field: &str) -> Result<String, Fault> {
     if !root || !stack.is_empty() {
         return Err(failure());
     }
-    executable.ok_or_else(failure)
+    Ok(metadata)
 }
 
 #[cfg(test)]
@@ -659,6 +769,7 @@ pub(crate) mod tests {
         TargetDeclaration {
             id: "metadata-game".into(),
             window_title: Some("Exact title".into()),
+            macos: None,
         }
     }
 
@@ -815,6 +926,7 @@ pub(crate) mod tests {
             .validate_declaration(&TargetDeclaration {
                 id: "game".into(),
                 window_title: None,
+                macos: None,
             })
             .unwrap();
         boundary.game.path.push('x');
@@ -847,9 +959,9 @@ pub(crate) mod tests {
             format!("<key>CFBundleExecutable</key><string>game</string><key>deep</key>{}<string>x</string>{}", "<array>".repeat(33), "</array>".repeat(33)),
         ] {
             let xml = format!("<plist version=\"1.0\"><dict>{body}</dict></plist>");
-            assert_eq!(bundle_executable(xml.as_bytes(), "game").unwrap_err().category, "TargetMetadata");
+            assert_eq!(bundle_metadata(xml.as_bytes(), "game").unwrap_err().category, "TargetMetadata");
         }
-        assert!(bundle_executable(b"bplist00malformed", "game").is_err());
+        assert!(bundle_metadata(b"bplist00malformed", "game").is_err());
     }
 
     #[test]
@@ -859,17 +971,14 @@ pub(crate) mod tests {
             vec![plist::Value::String("x".repeat(1024)); 128],
         ] {
             let metadata = plist::Value::Dictionary(plist::Dictionary::from_iter([
-                (
-                    "CFBundleExecutable",
-                    plist::Value::String("Game".into()),
-                ),
+                ("CFBundleExecutable", plist::Value::String("Game".into())),
                 ("Extra", plist::Value::Array(values)),
             ]));
             let mut bytes = Vec::new();
             metadata.to_writer_binary(&mut bytes).unwrap();
             assert!(bytes.len() < MAX_METADATA_BYTES);
             assert_eq!(
-                bundle_executable(&bytes, "game").unwrap_err().category,
+                bundle_metadata(&bytes, "game").unwrap_err().category,
                 "TargetMetadata"
             );
         }
@@ -895,6 +1004,7 @@ pub(crate) mod tests {
             path
         }
 
+        #[cfg(target_os = "macos")]
         pub(crate) fn bundle(&self, binary: bool) -> PathBuf {
             let bundle = self.0.join(if binary { "Binary.app" } else { "Xml.app" });
             self.executable(if binary {
@@ -903,13 +1013,14 @@ pub(crate) mod tests {
                 "Xml.app/Contents/MacOS/Game"
             });
             let metadata = plist::Value::Dictionary(plist::Dictionary::from_iter([
-                (
-                    "CFBundleExecutable",
-                    plist::Value::String("Game".into()),
-                ),
+                ("CFBundleExecutable", plist::Value::String("Game".into())),
                 (
                     "CFBundleName",
                     plist::Value::String("Metadata fixture".into()),
+                ),
+                (
+                    "CFBundleIdentifier",
+                    plist::Value::String("dev.example.metadata".into()),
                 ),
             ]));
             let file = fs::File::create(bundle.join("Contents/Info.plist")).unwrap();
@@ -973,7 +1084,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn xml_and_binary_bundles_resolve_only_contained_executables_and_bounded_metadata() {
         let fixture = MetadataFixture::new();
@@ -1015,5 +1126,275 @@ pub(crate) mod tests {
                 "executable"
             );
         }
+    }
+
+    /// A valid Info plist outside the bundle naming another executable.
+    #[cfg(target_os = "macos")]
+    fn outside_alternate(root: &Path) -> PathBuf {
+        let path = root.join("outside-alternate.plist");
+        plist::Value::Dictionary(plist::Dictionary::from_iter([(
+            "CFBundleExecutable",
+            plist::Value::String("Other".into()),
+        )]))
+        .to_file_xml(&path)
+        .unwrap();
+        path
+    }
+
+    /// Resolves in a worker so a regression that blocks opening `alternate` fails, not hangs.
+    #[cfg(target_os = "macos")]
+    fn refusal_stage(configuration: &TargetConfiguration, alternate: &Path) -> serde_json::Value {
+        let (send, receive) = std::sync::mpsc::channel();
+        let request = configuration.clone();
+        let _worker = std::thread::spawn(move || send.send(request.resolve(&declaration())));
+        let Ok(result) = receive.recv_timeout(std::time::Duration::from_secs(10)) else {
+            // Release a reader blocked in open(2) on a FIFO before failing.
+            let _ = OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(alternate);
+            panic!("metadata inspection blocked on {}", alternate.display());
+        };
+        result.unwrap_err().context["stage"].clone()
+    }
+
+    /// Places each unsupported alternate kind at `path`; returns refusal stages.
+    #[cfg(target_os = "macos")]
+    fn alternate_stages(
+        configuration: &TargetConfiguration,
+        path: &Path,
+        outside: &Path,
+    ) -> Vec<serde_json::Value> {
+        use std::os::unix::ffi::OsStrExt;
+        let mut stages = Vec::new();
+        for kind in ["valid", "malformed", "oversized", "escaping", "fifo"] {
+            match kind {
+                "valid" => {
+                    fs::copy(outside, path).unwrap();
+                }
+                "malformed" => fs::write(path, b"malformed").unwrap(),
+                "oversized" => fs::write(path, vec![b'x'; MAX_METADATA_BYTES + 1]).unwrap(),
+                "escaping" => std::os::unix::fs::symlink(outside, path).unwrap(),
+                _ => {
+                    let fifo = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+                    // SAFETY: The fixture path is NUL-terminated and not retained.
+                    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+                }
+            }
+            stages.push(refusal_stage(configuration, path));
+            fs::remove_file(path).unwrap();
+        }
+        stages
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn alternate_and_case_alias_info_plists_are_refused_before_foundation_reads() {
+        use std::io::Write;
+        let fixture = MetadataFixture::new();
+        let bundle = fixture.bundle(false);
+        let mut configuration = configuration(bundle.to_str().unwrap());
+        configuration.game.kind = "bundle".into();
+        let expected = configuration.resolve(&declaration()).unwrap();
+        // A fully valid alternate is refused by presence, not by content.
+        fixture.executable("Xml.app/Contents/MacOS/Other");
+        let outside = outside_alternate(&fixture.0);
+        let platform = bundle.join("Contents/Info-macos.plist");
+        assert_eq!(
+            alternate_stages(&configuration, &platform, &outside),
+            vec![json!("layout"); 5]
+        );
+        assert_eq!(configuration.resolve(&declaration()).unwrap(), expected);
+
+        let alias = bundle.join("Contents/INFO-MACOS.plist");
+        fs::copy(&outside, &alias).unwrap();
+        if fs::symlink_metadata(&platform).is_ok() {
+            // This volume resolves the alias to the exact name Foundation opens.
+            assert_eq!(refusal_stage(&configuration, &alias), "layout");
+        } else {
+            // Foundation's case-insensitive match still opens only the exact name.
+            assert_eq!(configuration.resolve(&declaration()).unwrap(), expected);
+        }
+        fs::remove_file(&alias).unwrap();
+
+        let duplicate = bundle.join("Contents/INFO.PLIST");
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&duplicate)
+        {
+            Ok(mut file) => {
+                // Case-sensitive volume: Foundation opens only the validated exact name.
+                file.write_all(&fs::read(&outside).unwrap()).unwrap();
+                assert_eq!(configuration.resolve(&declaration()).unwrap(), expected);
+            }
+            // A case-insensitive volume cannot hold a second Info.plist alias.
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wrapped_and_fallback_layout_info_plists_are_refused_before_foundation_reads() {
+        let fixture = MetadataFixture::new();
+        let bundle = fixture.0.join("Wrapped.app");
+        fixture.executable("Wrapped.app/Wrapper/Game.app/Game");
+        let inner = bundle.join("Wrapper/Game.app");
+        plist::Value::Dictionary(plist::Dictionary::from_iter([(
+            "CFBundleExecutable",
+            plist::Value::String("Game".into()),
+        )]))
+        .to_file_xml(inner.join("Info.plist"))
+        .unwrap();
+        let link = bundle.join("WrappedBundle");
+        std::os::unix::fs::symlink("Wrapper/Game.app", &link).unwrap();
+        let mut configuration = configuration(bundle.to_str().unwrap());
+        configuration.game.kind = "bundle".into();
+        let outside = outside_alternate(&fixture.0);
+        // Foundation's outcome for these fixtures is not asserted, only that
+        // each refusal below is caused by the alternate.
+        let stage = |configuration: &TargetConfiguration| {
+            configuration
+                .resolve(&declaration())
+                .err()
+                .map(|fault| fault.context["stage"].clone())
+        };
+        assert_ne!(stage(&configuration), Some(json!("layout")));
+        assert_eq!(
+            alternate_stages(&configuration, &inner.join("Info-macos.plist"), &outside),
+            vec![json!("layout"); 5]
+        );
+        // An absolute link passes containment here but not CoreFoundation's
+        // wrapper check, which then falls back to the flat root location.
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(fs::canonicalize(&inner).unwrap(), &link).unwrap();
+        assert_ne!(stage(&configuration), Some(json!("layout")));
+        assert_eq!(
+            alternate_stages(&configuration, &bundle.join("Info-macos.plist"), &outside),
+            vec![json!("layout"); 5]
+        );
+    }
+
+    #[test]
+    fn bundle_constraint_refuses_direct_game_without_constraining_launcher() {
+        use mado_runtime_comparison::inventory::MacosTargetDeclaration;
+        let mut declaration = declaration();
+        declaration.macos = Some(MacosTargetDeclaration {
+            bundle_id: "dev.example.metadata".into(),
+        });
+        let mut configuration = configuration("/metadata/game");
+        assert_eq!(
+            configuration
+                .validate_declaration(&declaration)
+                .unwrap_err()
+                .context["field"],
+            "game"
+        );
+        configuration.game.kind = "bundle".into();
+        configuration.game.path = "/metadata/Selected.app".into();
+        configuration.launcher = Some(TargetLocation {
+            kind: "executable".into(),
+            path: "/metadata/launcher".into(),
+        });
+        configuration.validate_declaration(&declaration).unwrap();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn bundle_check_and_application_observation_are_platform_unsupported() {
+        let mut configuration = configuration("/metadata/Selected.app");
+        configuration.game.kind = "bundle".into();
+        assert_eq!(
+            configuration.resolve(&declaration()).unwrap_err().category,
+            "TargetPlatform"
+        );
+        let expected = TargetResolution {
+            game: ResolvedLocation {
+                path: "/metadata/Selected.app".into(),
+                executable: "/metadata/Selected.app/Contents/MacOS/Game".into(),
+            },
+            launcher: None,
+            working_directory: None,
+        };
+        assert_eq!(
+            observe_application(
+                &configuration,
+                &declaration(),
+                &expected,
+                &AtomicBool::new(false),
+                Instant::now() + std::time::Duration::from_secs(5)
+            )
+            .unwrap_err()
+            .category,
+            "TargetPlatform"
+        );
+    }
+
+    #[test]
+    fn observation_invalidation_precedes_platform_reads() {
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            observation_checkpoint(&cancelled, Instant::now())
+                .unwrap_err()
+                .category,
+            "TargetObservationCancelled"
+        );
+        cancelled.store(false, Ordering::Release);
+        assert_eq!(
+            observation_checkpoint(&cancelled, Instant::now())
+                .unwrap_err()
+                .category,
+            "TargetObservationTimeout"
+        );
+    }
+
+    #[test]
+    fn host_bundle_identifiers_are_bounded_literals_without_the_manifest_charset() {
+        let identifier = |value: &str| {
+            let mut bytes = Vec::new();
+            plist::Value::Dictionary(plist::Dictionary::from_iter([(
+                "CFBundleIdentifier",
+                plist::Value::String(value.into()),
+            )]))
+            .to_writer_binary(&mut bytes)
+            .unwrap();
+            bundle_metadata(&bytes, "game").map(|metadata| metadata.bundle_id)
+        };
+        let boundary = "a".repeat(255);
+        let oversized = "a".repeat(256);
+        for value in [
+            "",
+            "dev.example\n",
+            "dev.example\u{0}",
+            "dev.\u{7f}example",
+            "dev.\u{85}example",
+            oversized.as_str(),
+        ] {
+            assert_eq!(
+                identifier(value).unwrap_err().category,
+                "TargetMetadata",
+                "{value:?}"
+            );
+        }
+        for value in [
+            "Dev.Example-1",
+            "dev.example.my_game",
+            "unity.Example Studio.Game",
+            "dev.example/*",
+            "jp.example.ゲーム",
+            boundary.as_str(),
+        ] {
+            assert_eq!(identifier(value).unwrap().as_deref(), Some(value));
+        }
+        for body in [
+            "<key>CFBundleIdentifier</key><string>dev.example</string><key>CFBundleIdentifier</key><string>other</string>",
+            "<key>CFBundleIdentifier</key><array/>",
+        ] {
+            let xml = format!("<plist version=\"1.0\"><dict>{body}</dict></plist>");
+            assert!(bundle_metadata(xml.as_bytes(), "game").is_err());
+        }
+        let metadata = bundle_metadata(b"<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>Dev.Example-1</string><key>CFBundleExecutable</key><string>Executable</string></dict></plist>", "game").unwrap();
+        assert_eq!(metadata.bundle_id.as_deref(), Some("Dev.Example-1"));
+        assert_eq!(metadata.executable.as_deref(), Some("Executable"));
     }
 }

@@ -63,6 +63,7 @@ The version and integrity sources are:
 | Desktop frontend | React 19.3.0, TypeScript 5.9.3, Vite 8.3.0, Tauri API 2.11.1 / CLI 2.11.5 | [App manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json) |
 | Desktop Rust | Tauri 2.11.6, tauri-build 2.6.3, tracing 0.1.41, tracing-subscriber 0.3.20 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| macOS application metadata and picker | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | GitHub Actions | Full commit SHAs | [Workflow](../.github/workflows/ci.yml) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
@@ -73,11 +74,15 @@ through a checked Change. A new installer host needs a verified release asset.
 
 Target metadata parsing uses `plist` in-process, with the exactly pinned
 `enable_unstable_features_that_may_break_with_minor_version_bumps` feature for
-bounded XML/binary streaming. No system plist helper is executed. Unix core
-checks exercise executable/bundle metadata with isolated fixtures; portable
-record/restore checks do not require an installed target. Actual macOS WebView
-setup acceptance remains separate from hosted checks and grants no native
-execution authority.
+bounded XML/binary streaming. No system plist helper is executed. macOS core
+checks exercise public Foundation bundle resolution with isolated filesystem
+fixtures, including same-process metadata updates and unsupported alternate
+metadata. Non-macOS bundle resolution is explicitly unsupported; portable
+declaration, record, restore, and observation-policy checks remain cross-platform.
+Apple framework dependencies are macOS-target-scoped. The native picker uses a
+host-owned AppKit sheet, not a general dialog/filesystem plugin capability.
+Actual macOS WebView selection and authorized running-application observation
+remain separate from hosted checks and grant no native execution authority.
 
 ## Local check scope
 

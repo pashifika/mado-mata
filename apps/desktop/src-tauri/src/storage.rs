@@ -898,6 +898,7 @@ mod tests {
         let changed = TargetDeclaration {
             id: "different-game".into(),
             window_title: None,
+            macos: None,
         };
         assert!(!updated.binding.as_ref().unwrap().compatible(
             &package,
@@ -908,6 +909,7 @@ mod tests {
         let changed_title = TargetDeclaration {
             id: declaration().id,
             window_title: Some("Another exact title".into()),
+            macos: None,
         };
         assert!(!updated.binding.as_ref().unwrap().compatible(
             &package,

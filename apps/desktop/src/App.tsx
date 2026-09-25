@@ -33,9 +33,9 @@ import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from '.
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyCommand, applyIfCurrent, applyInspection, applyRecoveryMutation, applyWorkspaceView, busy, closeWorkspace, commandValues, deriveBound, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
-import {beginTarget, checkedTarget, currentTargetDraft, discardTarget, editTarget, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
-import type {TargetOperation, TargetState} from './target.ts';
-import type {BootstrapStatus, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
+import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
+import type {TargetOperation, TargetPickerField, TargetPickerTicket, TargetState} from './target.ts';
+import type {BootstrapStatus, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetApplicationResponse, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
 
 const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0, workspace_id: null, workspace_revision: null};
 const EMPTY_FILTER: LogFilter = {text: '', level: ''};
@@ -101,6 +101,7 @@ export default function App() {
   const [lastCheck, setLastCheck] = useState<LastCheck | null>(null);
   const [cards, setCards] = useState<CardStack>(emptyStack);
   const [appBusy, setAppBusy] = useState<Command | null>(null);
+  const [pickerBusy, setPickerBusy] = useState(false);
   const [pendingClose, setPendingClose] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -125,6 +126,8 @@ export default function App() {
   const startInFlight = useRef(false);
   // Mirror host admission synchronously so rapid commands cannot cross workspace attribution.
   const hostCommand = useRef<Command | null>(null);
+  const applicationRequest = useRef<{workspace:WorkspaceRef; requestId:string}|null>(null);
+  const pickerRequest = useRef<{picker:TargetPickerTicket}|null>(null);
   const bootstrapBusy = useRef(false);
   // Set when a constructing action ended Ready before its catalog could be read; the next catalog decides the rebuild.
   const pendingReconstruction = useRef(false);
@@ -191,6 +194,26 @@ export default function App() {
     setLogs(old => retainLogs(old, [], saved.gui_log_limit));
   }
 
+  function cancelApplicationRequest(ownerId?:string) {
+    const pending = applicationRequest.current;
+    if (!pending || (ownerId && pending.workspace.workspace_id !== ownerId)) return;
+    applicationRequest.current = null;
+    void invoke<boolean>('cancel_running_application', {workspace:pending.workspace, requestId:pending.requestId}).catch(() => {});
+  }
+
+  function invalidateOwnerTarget(ownerId:string) {
+    cancelApplicationRequest(ownerId);
+    setWorkspaces(list => updateWorkspace(list, ownerId, item => item.bound
+      ? updateBound(item, bound => ({...bound, target:invalidateApplicationPicker(invalidateRunningApplication(bound.target))}))
+      : item));
+  }
+  function invalidateAllTargets() {
+    cancelApplicationRequest();
+    setWorkspaces(list => list.map(item => item.bound
+      ? updateBound(item, bound => ({...bound, target:invalidateApplicationPicker(invalidateRunningApplication(bound.target))}))
+      : item));
+  }
+
   // A host status is authoritative. Only a constructing action that ended Ready replaces the session: fresh IDs
   // mean a rebuilt Application, so results, the controller view and drafts of the old session are gone.
   function applyStatus(next: BootstrapStatus, constructing: boolean) {
@@ -208,6 +231,7 @@ export default function App() {
     setCatalogFaults(catalog.faults);
     setCatalogError(null);
     if (!rebuild || !reconstructed(next, openWorkspaces.current)) return;
+    cancelApplicationRequest();
     sessionGeneration.current += 1;
     epoch.current += 1;
     setWorkspaces(catalog.open.map(item => workspaceFromView(item)));
@@ -236,6 +260,7 @@ export default function App() {
   async function bootstrapAction(action: BootstrapAction, call: () => Promise<BootstrapStatus>, constructing: boolean) {
     if (bootstrapBusy.current) return;
     bootstrapBusy.current = true;
+    if (constructing) invalidateAllTargets();
     dispatch({type: 'pending', action});
     // A constructing action may replace the Application. Holding the gate before the host call keeps the poll already
     // in flight inside the old session and dispatches no new poll until the resulting status, and with it the session
@@ -354,6 +379,7 @@ export default function App() {
   }, [menuOpen]);
 
   function go(next: Nav) {
+    if (nav.kind === 'workspace' && (next.kind !== 'workspace' || next.id !== nav.id)) invalidateOwnerTarget(nav.id);
     setReveal(null);
     setPendingClose(null);
     setClosedDisclosed(false);
@@ -400,6 +426,7 @@ export default function App() {
     if (!path || commandReason !== null || closing) return;
     const current = runView(workspace);
     if (current.live && busy(current.view.state)) return;
+    invalidateOwnerTarget(workspace.id);
     const origin: Origin = {id: workspace.id, revision: workspace.revision};
     const ref = workspaceRef(workspace);
     const rebinding = workspace.bound !== null;
@@ -462,13 +489,15 @@ export default function App() {
   }
 
   async function targetCommand(workspace: BoundWorkspace, operation: TargetOperation, reviewedResolution?: TargetResolution) {
-    if (hostCommand.current !== null || closing || !normalReady || (operation !== 'read' && active)) return;
+    if (hostCommand.current !== null || closing || !normalReady || (operation !== 'read' && active)
+      || (operation !== 'read' && pickerRequest.current !== null) || workspace.bound.target.operation !== null) return;
     const target = workspace.bound.target;
     const ticket = targetTicket(target);
     const configuration = readTargetDraft(target.draft).configuration;
     if (operation !== 'read' && (!ticket || (operation !== 'remove' && (!target.declaration || !configuration)))) return;
     if (reviewedResolution && (!target.review || !currentTargetDraft(target, target.review.ticket)
       || JSON.stringify(reviewedResolution) !== JSON.stringify(target.review.resolution))) return;
+    cancelApplicationRequest(workspace.id);
     const labels = {read:'readingTarget', check:'checkingTarget', save:'savingTarget', remove:'removingTarget'} as const;
     const label = labels[operation];
     const origin = {id:workspace.id, revision:workspace.revision};
@@ -514,6 +543,69 @@ export default function App() {
       })));
     }
   }
+  async function chooseApplication(workspace:BoundWorkspace, field:TargetPickerField) {
+    const target = workspace.bound.target;
+    if (pickerRequest.current !== null || hostCommand.current !== null || !normalReady || closing || active
+      || target.operation !== null || target.application.pending !== null || !targetTicket(target)) return;
+    const started = beginApplicationPicker(target, field);
+    if (!started.picker) return;
+    const picker = started.picker;
+    const origin:Origin = {id:workspace.id, revision:workspace.revision};
+    pickerRequest.current = {picker};
+    setPickerBusy(true);
+    setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound => ({...bound, target:beginApplicationPicker(bound.target, field, picker)}))));
+    try {
+      const path = await invoke<string|null>('choose_target_application', {workspace:workspaceRef(workspace)});
+      setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound => ({...bound, target:completeApplicationPicker(bound.target, picker, path)}))));
+    } catch (cause) {
+      const error = fault(cause);
+      setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound => ({...bound, target:completeApplicationPicker(bound.target, picker, null, error)}))));
+    } finally {
+      if (pickerRequest.current?.picker === picker) {
+        pickerRequest.current = null;
+        setPickerBusy(false);
+      }
+    }
+  }
+
+  async function checkRunningApplication(workspace:BoundWorkspace) {
+    if (hostCommand.current !== null || pickerRequest.current !== null || applicationRequest.current !== null
+      || closing || !normalReady || active) return;
+    const ticket = eligibleRunningApplication(workspace.bound.target);
+    if (!ticket) return;
+    const requestId = crypto.randomUUID();
+    const origin:Origin = {id:workspace.id, revision:workspace.revision};
+    const ref = workspaceRef(workspace);
+    applicationRequest.current = {workspace:ref, requestId};
+    setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound =>
+      ({...bound, target:beginRunningApplication(bound.target, ticket, requestId)}))));
+    try {
+      await invoke<void>('reserve_running_application', {workspace:ref, requestId});
+      if (applicationRequest.current?.requestId !== requestId) {
+        await invoke<boolean>('cancel_running_application', {workspace:ref, requestId});
+        return;
+      }
+      const response = await invoke<TargetApplicationResponse>('check_running_application',
+        {workspace:ref, expected:ticket.expected, requestId});
+      setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound =>
+        ({...bound, target:completeRunningApplication(bound.target, ticket, response)}))));
+    } catch (cause) {
+      const error = fault(cause);
+      setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound =>
+        ({...bound, target:failRunningApplication(bound.target, ticket, requestId, error)}))));
+    } finally {
+      if (applicationRequest.current?.requestId === requestId) applicationRequest.current = null;
+    }
+  }
+
+  function cancelRunningCheck(workspace:BoundWorkspace) {
+    const requestId = workspace.bound.target.application.pending?.requestId;
+    if (!requestId || applicationRequest.current?.requestId !== requestId) return;
+    cancelApplicationRequest(workspace.id);
+    const origin:Origin = {id:workspace.id, revision:workspace.revision};
+    setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound =>
+      ({...bound, target:cancelRunningApplication(bound.target, requestId)}))));
+  }
 
   // Only the visible, inspected Run page reads its own owner lazily. Failed reads require an explicit retry.
   useEffect(() => {
@@ -532,12 +624,21 @@ export default function App() {
     return {
       change: edit,
       target: {
-        edit: draft => edit(current => ({...current, target:editTarget(current.target, draft)})),
+        edit: draft => {
+          cancelApplicationRequest(workspace.id);
+          edit(current => ({...current, target:editTarget(current.target, draft)}));
+        },
         reload: () => {void targetCommand(workspace, 'read');},
         check: () => {void targetCommand(workspace, 'check');},
         save: reviewed => {void targetCommand(workspace, 'save', reviewed);},
         remove: () => {void targetCommand(workspace, 'remove');},
-        discard: () => edit(current => ({...current, target:discardTarget(current.target)})),
+        discard: () => {
+          cancelApplicationRequest(workspace.id);
+          edit(current => ({...current, target:discardTarget(current.target)}));
+        },
+        chooseApplication: field => {void chooseApplication(workspace, field);},
+        checkApplication: () => {void checkRunningApplication(workspace);},
+        cancelApplication: () => cancelRunningCheck(workspace),
       },
       disclose: run => change(workspace.id, item => updateBound(item, current => ({...current, disclosedRun: run}))),
       selectProfile: id => edit(current => selectProfile(current, id)),
@@ -606,7 +707,7 @@ export default function App() {
   async function startRun(workspace: BoundWorkspace) {
     const facts = derived[workspace.id];
     const bound = workspace.bound;
-    if (hostCommand.current !== null || active || closing || facts.startBlock || facts.descriptorError) return;
+    if (hostCommand.current !== null || pickerRequest.current !== null || active || closing || facts.startBlock || facts.descriptorError) return;
     let values: Record<string, Json>;
     try {values = valuesForCommand(workspace);} catch (cause) {const error = fault(cause); change(workspace.id, item => ({...item, error})); return;}
     const profile = facts.selectedProfile;
@@ -658,7 +759,7 @@ export default function App() {
 
   // Check reads saved settings only; the association records exactly what the backend will read.
   async function checkEnvironment() {
-    if (hostCommand.current !== null || active || closing || envDirty || appBusy) return;
+    if (hostCommand.current !== null || pickerRequest.current !== null || active || closing || envDirty || appBusy) return;
     if (selected?.bound && derived[selected.id].descriptorError) {
       setDialogError({kind: 'check', value: new LocalFault({key: 'descriptorLimit', args: [DESCRIPTOR_LIMIT]})});
       return;
@@ -768,6 +869,7 @@ export default function App() {
   };
 
   async function exitApplication() {
+    invalidateAllTargets();
     setMenuOpen(false);
     setClosing(true);
     try {await getCurrentWindow().close();} catch (cause) {dispatch({type: 'actionFailed', fault: fault(cause)}); setClosing(false);}
@@ -850,6 +952,7 @@ export default function App() {
     if (hostCommand.current !== null) {const pending = hostCommand.current; change(workspace.id, item => ({...item, notice: {key: 'waitForCommand', args: [pending]}})); return;}
     if (current.live && busy(current.view.state)) {change(workspace.id, item => ({...item, notice: {key: 'ownerCannotClose'}})); return;}
     if (dirtyDraft(workspace) && !confirmed) {setPendingClose(workspace.id); return;}
+    invalidateOwnerTarget(workspace.id);
     setPendingClose(null);
     hostCommand.current = 'closingWorkspace';
     change(workspace.id, item => ({...item, busy: {key: 'closingWorkspace'}, error: null}));
@@ -1002,9 +1105,8 @@ export default function App() {
     <div className="workspace">
       <main id="workspace-panel" className="content" aria-label={selected ? t.workspaceAria(workspaceLabel(selected, workspaces)) : undefined}>
         {selected && selected.page === 'run' && (isBound(selected)
-          ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)}
-            snapshot={operation && operation.workspace?.workspace_id === selected.id ? operation.snapshot : null}
-            locked={commandReason !== null || closing} active={active} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
+          ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)} snapshot={operation?.snapshot ?? null}
+            locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
             savedEnvironment={savedEnvironment} handlers={handlers(selected)}/>
           : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
@@ -1052,7 +1154,7 @@ export default function App() {
       busyReason={appBusy === 'reopeningWorkspace' ? null : commandReason} strip={strip('saved')}/>
     <SettingsDialog open={dialogOpen} onCancel={() => setDialogOpen(false)} settings={settings} draft={settingsDraft} onDraft={next => {setSettingsDraft(next); setSaveNotice(null);}}
       parsed={parsedSettings} dirty={dialogDirty} saving={appBusy === 'savingSettings'} busyReason={commandReason} saveError={dialogError?.kind === 'save' ? dialogError.value : null} saveNotice={renderMessage(locale, saveNotice)} onSave={() => void saveSettings()}
-      envDirty={envDirty} active={active} target={checkTarget} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale} originLabel={labelOf}
+      envDirty={envDirty} active={active} pickerBusy={pickerBusy} target={checkTarget} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale} originLabel={labelOf}
       checkError={dialogError?.kind === 'check' ? dialogError.value : null}
       retained={logs.items.length} evicted={logs.evicted}
       onSnapshot={() => void snapshot(null)} snapshotPending={bootstrap.snapshotPending} snapshotOutcome={bootstrap.snapshotOutcome} strip={strip('dialog')}/>

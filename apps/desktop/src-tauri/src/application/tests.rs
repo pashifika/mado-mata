@@ -519,6 +519,7 @@ fn invalid_settings_precede_worker_creation() {
             fixture.root.clone(),
             fixture.root.join("runner"),
             fixture.root.join("engine"),
+            Arc::default(),
             |_| panic!("invalid settings must be rejected before starting workers"),
             None,
         );
@@ -540,6 +541,7 @@ fn writer_start_failure_waits_for_bridge_termination_before_retry() {
             root.clone(),
             root.join("runner"),
             root.join("engine"),
+            Arc::default(),
             |_| {
                 Err(Fault::new(
                     "LoggingInitialization",

@@ -20,7 +20,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 mod operations;
 mod profiles;
 mod recovery;
+mod target_observation;
 mod targets;
+pub(crate) use target_observation::ObservationSlot;
+pub use target_observation::{TargetApplicationResponse, TargetPickerGuard};
 mod workspaces;
 
 #[cfg(test)]
@@ -260,12 +263,14 @@ struct Workspaces {
     owner: Option<OperationOwner>,
     controller: Arc<Value>,
     last_check: Option<Arc<RetainedCheck>>,
+    target_picker: Option<WorkspaceRef>,
 }
 
 pub struct Application {
     runner: DesktopController,
     store: Arc<Mutex<Store>>,
     commands: Mutex<()>,
+    target_observation: Arc<Mutex<ObservationSlot>>,
     #[cfg(test)]
     command_admitted: AtomicBool,
     // Admission/collection share this lock; workers never acquire it.
@@ -284,13 +289,29 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl Application {
     pub fn new(root: PathBuf, controlled: PathBuf, engine: PathBuf) -> Result<Arc<Self>, Fault> {
+        Self::with_observation_slot(root, controlled, engine, Arc::default())
+    }
+
+    pub(crate) fn with_observation_slot(
+        root: PathBuf,
+        controlled: PathBuf,
+        engine: PathBuf,
+        target_observation: Arc<Mutex<ObservationSlot>>,
+    ) -> Result<Arc<Self>, Fault> {
         #[cfg(not(test))]
         {
-            Self::build(root, controlled, engine, Logger::new)
+            Self::build(root, controlled, engine, target_observation, Logger::new)
         }
         #[cfg(test)]
         {
-            Self::build(root, controlled, engine, Logger::new, None)
+            Self::build(
+                root,
+                controlled,
+                engine,
+                target_observation,
+                Logger::new,
+                None,
+            )
         }
     }
 
@@ -298,6 +319,7 @@ impl Application {
         root: PathBuf,
         controlled: PathBuf,
         engine: PathBuf,
+        target_observation: Arc<Mutex<ObservationSlot>>,
         make_logger: impl FnOnce(PathBuf) -> Result<Logger, Fault>,
         #[cfg(test)] bridge_exit: Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>,
     ) -> Result<Arc<Self>, Fault> {
@@ -323,6 +345,7 @@ impl Application {
                 "workspace_id":null,"workspace_revision":null
             })),
             last_check: None,
+            target_picker: None,
         };
         for tab in store.tabs()?.tabs.into_iter().filter(|tab| tab.open) {
             let workspace = workspaces.next_workspace()?;
@@ -370,6 +393,7 @@ impl Application {
             runner,
             store: Arc::new(Mutex::new(store)),
             commands: Mutex::new(()),
+            target_observation,
             #[cfg(test)]
             command_admitted: AtomicBool::new(false),
             workspaces: Mutex::new(workspaces),

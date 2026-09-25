@@ -98,7 +98,7 @@ export interface StartRequest {
   values:Record<string,Json>; lane:string; scenario:string; replay_descriptor_path:string|null;
 }
 
-export interface TargetDeclaration {id:string; window_title:string|null}
+export interface TargetDeclaration {id:string; window_title:string|null; macos?:{bundle_id:string}}
 export interface TargetLocation {kind:'executable'|'bundle'; path:string}
 export interface TargetInputPolicy {
   route:'process_directed'|'system'; focus:'preserve'|'require_focused';
@@ -118,8 +118,16 @@ export interface TargetRecord {version:1; internal_name:string; package_id:strin
 export interface TargetExpectation {revision:number; binding_id:string|null}
 export interface TargetCheck {
   configuration_identity:string; resolution:TargetResolution; previous_resolution:TargetResolution|null; resolution_changed:boolean;
+  game_bundle_id:string|null;
 }
 export interface TargetContext {workspace:WorkspaceRef; internal_name:string; package_id:string; declaration_identity:string|null}
 export interface TargetView {context:TargetContext; record:TargetRecord; compatible:boolean}
 export interface TargetCheckResponse {context:TargetContext; revision:number; binding_id:string|null; check:TargetCheck}
 export interface TargetSaveResponse {view:TargetView; check:TargetCheck}
+export interface ApplicationObservation {
+  observed_at_ms:number; status:'not_running'|'matched'|'ambiguous'|'unverifiable';
+  evidence:'exact_path'|'signed_application'|'unsigned_path'|null; diagnostics:Json;
+}
+export interface TargetApplicationResponse {
+  context:TargetContext; revision:number; binding_id:string|null; request_id:string; observation:ApplicationObservation;
+}

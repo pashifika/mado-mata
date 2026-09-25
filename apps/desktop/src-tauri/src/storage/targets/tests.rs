@@ -301,7 +301,7 @@ fn target_alias_changes_need_exact_review_and_save_rechecks_metadata() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn target_bundle_executable_metadata_changes_require_review_and_pending_save_preserves_it() {
     use crate::target::tests::{MetadataFixture, configuration, declaration};
@@ -402,5 +402,122 @@ fn target_bundle_executable_metadata_changes_require_review_and_pending_save_pre
     assert_eq!(
         updated.binding.as_ref().unwrap().id,
         saved.binding.as_ref().unwrap().id
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn bundle_constraint_is_game_only_and_same_path_identity_changes_preserve_saved_bytes() {
+    use crate::target::tests::{MetadataFixture, configuration, declaration};
+    use mado_runtime_comparison::inventory::MacosTargetDeclaration;
+    let metadata = MetadataFixture::new();
+    let game = metadata.bundle(true);
+    let launcher = metadata.bundle(false);
+    let write_identifier = |bundle: &Path, identifier: &str| {
+        plist::Value::Dictionary(plist::Dictionary::from_iter([
+            ("CFBundleExecutable", plist::Value::String("Game".into())),
+            (
+                "CFBundleIdentifier",
+                plist::Value::String(identifier.into()),
+            ),
+        ]))
+        .to_file_binary(bundle.join("Contents/Info.plist"))
+        .unwrap();
+    };
+    // Host identifiers need not fit the manifest selector character set.
+    write_identifier(&launcher, "com.example.Launcher Tool_2");
+    let mut configuration = configuration(game.to_str().unwrap());
+    configuration.game.kind = "bundle".into();
+    configuration.launcher = Some(crate::target::TargetLocation {
+        kind: "bundle".into(),
+        path: launcher.to_str().unwrap().into(),
+    });
+    let mut constrained = declaration();
+    constrained.macos = Some(MacosTargetDeclaration {
+        bundle_id: "dev.example.metadata".into(),
+    });
+    let directory = Directory::new();
+    directory.profiles("Owner");
+    let store = directory.store();
+    let package = inventory().package_id;
+    let empty = store.read_target("Owner", &package).unwrap();
+    let (saved, check) = store
+        .save_target(
+            "Owner",
+            &package,
+            &constrained,
+            &empty.expectation(),
+            configuration.clone(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        check.game_bundle_id.as_deref(),
+        Some("dev.example.metadata")
+    );
+    let path = target_path(&directory, "Owner");
+    let before = fs::read(&path).unwrap();
+
+    write_identifier(&game, "unity.Example Studio.my_game");
+    assert_eq!(
+        store
+            .check_target(
+                "Owner",
+                &package,
+                &constrained,
+                &saved.expectation(),
+                &configuration
+            )
+            .unwrap_err()
+            .category,
+        "TargetConfiguration"
+    );
+    assert_eq!(
+        store
+            .save_target(
+                "Owner",
+                &package,
+                &constrained,
+                &saved.expectation(),
+                configuration.clone(),
+                None
+            )
+            .unwrap_err()
+            .category,
+        "TargetConfiguration"
+    );
+    let fresh = store
+        .check_target(
+            "Owner",
+            &package,
+            &declaration(),
+            &saved.expectation(),
+            &configuration,
+        )
+        .unwrap();
+    assert_eq!(
+        fresh.game_bundle_id.as_deref(),
+        Some("unity.Example Studio.my_game")
+    );
+    assert!(!fresh.resolution_changed);
+    assert_eq!(fs::read(path).unwrap(), before);
+    assert_eq!(store.read_target("Owner", &package).unwrap(), saved);
+    let (undeclared, check) = store
+        .save_target(
+            "Owner",
+            &package,
+            &declaration(),
+            &saved.expectation(),
+            configuration,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        check.game_bundle_id.as_deref(),
+        Some("unity.Example Studio.my_game")
+    );
+    assert_eq!(
+        undeclared.binding.unwrap().resolution,
+        saved.binding.unwrap().resolution
     );
 }

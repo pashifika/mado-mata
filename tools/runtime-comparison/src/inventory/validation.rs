@@ -213,6 +213,19 @@ impl TargetDeclaration {
             )
             .with_context(json!({"path":"package.json","field":"target.window_title"})));
         }
+        if self.macos.as_ref().is_some_and(|macos| {
+            macos.bundle_id.is_empty()
+                || macos.bundle_id.len() > 255
+                || !macos
+                    .bundle_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
+        }) {
+            return Err(invalid(
+                "target macOS bundle ID must be 1 to 255 ASCII letters, digits, periods or hyphens",
+            )
+            .with_context(json!({"path":"package.json","field":"target.macos.bundle_id"})));
+        }
         Ok(())
     }
 
