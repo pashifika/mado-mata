@@ -1,13 +1,13 @@
 use mado_runtime_comparison::{
     desktop::DesktopController,
-    inventory::{Inventory, TargetDeclaration},
+    inventory::{Inventory, MacosTargetDeclaration, TargetDeclaration},
     model::{Fault, Plan, identity},
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-
 struct FixtureTree(PathBuf);
 
 impl FixtureTree {
@@ -99,6 +99,7 @@ fn target_inspection_preserves_profiles_and_does_not_evaluate_package_code() {
     let declaration = TargetDeclaration {
         id: "game.example".into(),
         window_title: Some("Exact ゲーム Title".into()),
+        macos: None,
     };
     tree.set_target(&serde_json::to_string(&declaration).unwrap());
     let inventory = tree.capture().unwrap();
@@ -206,6 +207,61 @@ fn omitted_and_null_optional_titles_have_the_same_target_identity() {
     assert_ne!(explicit.identity, omitted.identity);
     assert_eq!(explicit.target().unwrap().unwrap().window_title, None);
     assert_eq!(target_identity(&explicit), target_identity(&omitted));
+    assert_eq!(
+        serde_json::to_string(&omitted.target().unwrap().unwrap()).unwrap(),
+        r#"{"id":"game","window_title":null}"#
+    );
+    let legacy_content =
+        br#"{"contract":"mado-target-declaration-v1","declaration":{"id":"game","window_title":null}}"#;
+    assert_eq!(
+        target_identity(&omitted),
+        format!("sha256:{:x}", Sha256::digest(legacy_content))
+    );
+}
+
+#[test]
+fn macos_bundle_selector_is_inspected_and_changes_declaration_identity() {
+    let tree = FixtureTree::new();
+    tree.set_target(r#"{"id":"game","window_title":null}"#);
+    let legacy_identity = target_identity(&tree.capture().unwrap());
+    tree.set_target(r#"{"id":"game","macos":{"bundle_id":"A-9.Z"}}"#);
+    let selected = tree.capture().unwrap();
+    let declaration = TargetDeclaration {
+        id: "game".into(),
+        window_title: None,
+        macos: Some(MacosTargetDeclaration {
+            bundle_id: "A-9.Z".into(),
+        }),
+    };
+    assert_eq!(selected.target().unwrap(), Some(declaration.clone()));
+    let inspected = controller().inspect(&tree.package()).unwrap();
+    assert_eq!(inspected.target, Some(declaration.clone()));
+    assert_eq!(
+        inspected.target_identity,
+        Some(declaration.identity().unwrap())
+    );
+    assert_ne!(target_identity(&selected), legacy_identity);
+
+    tree.set_target(r#"{"macos":{"bundle_id":"A-9.Z"},"window_title":null,"id":"game"}"#);
+    assert_eq!(
+        target_identity(&tree.capture().unwrap()),
+        target_identity(&selected)
+    );
+
+    let max_selector = "Z".repeat(255);
+    for selector in ["a-9.Z", "Z", max_selector.as_str()] {
+        tree.set_target(&format!(
+            r#"{{"id":"game","macos":{{"bundle_id":"{selector}"}}}}"#
+        ));
+        let changed = tree.capture().unwrap();
+        assert_eq!(
+            changed.target().unwrap().unwrap().macos.unwrap().bundle_id,
+            selector
+        );
+        assert_ne!(target_identity(&changed), target_identity(&selected));
+    }
+    tree.set_target(r#"{"id":"game"}"#);
+    assert_eq!(target_identity(&tree.capture().unwrap()), legacy_identity);
 }
 
 #[test]
@@ -233,6 +289,58 @@ fn invalid_present_target_declarations_cannot_be_captured_or_inspected() {
             "duplicate title",
             r#"{"id":"game","window_title":null,"window_title":"Title"}"#,
         ),
+        ("null macOS object", r#"{"id":"game","macos":null}"#),
+        ("array macOS object", r#"{"id":"game","macos":["id"]}"#),
+        ("scalar macOS object", r#"{"id":"game","macos":true}"#),
+        ("missing bundle ID", r#"{"id":"game","macos":{}}"#),
+        (
+            "null bundle ID",
+            r#"{"id":"game","macos":{"bundle_id":null}}"#,
+        ),
+        (
+            "numeric bundle ID",
+            r#"{"id":"game","macos":{"bundle_id":42}}"#,
+        ),
+        (
+            "empty bundle ID",
+            r#"{"id":"game","macos":{"bundle_id":""}}"#,
+        ),
+        (
+            "path bundle ID",
+            r#"{"id":"game","macos":{"bundle_id":"a/b"}}"#,
+        ),
+        (
+            "wildcard bundle ID",
+            r#"{"id":"game","macos":{"bundle_id":"a.*"}}"#,
+        ),
+        (
+            "underscore bundle ID",
+            r#"{"id":"game","macos":{"bundle_id":"a_b"}}"#,
+        ),
+        (
+            "space bundle ID",
+            r#"{"id":"game","macos":{"bundle_id":"a b"}}"#,
+        ),
+        (
+            "non-ASCII bundle ID",
+            r#"{"id":"game","macos":{"bundle_id":"é"}}"#,
+        ),
+        (
+            "duplicate bundle ID",
+            r#"{"id":"game","macos":{"bundle_id":"a","bundle_id":"b"}}"#,
+        ),
+        (
+            "unknown macOS field",
+            r#"{"id":"game","macos":{"bundle_id":"a","team_id":"b"}}"#,
+        ),
+        (
+            "duplicate macOS object",
+            r#"{"id":"game","macos":{"bundle_id":"a"},"macos":{"bundle_id":"b"}}"#,
+        ),
+        (
+            "unsupported OS",
+            r#"{"id":"game","windows":{"app_id":"a"}}"#,
+        ),
         ("local path", r#"{"id":"game","path":"/private/game"}"#),
         ("launch recipe", r#"{"id":"game","arguments":["--launch"]}"#),
         (
@@ -253,6 +361,15 @@ fn invalid_present_target_declarations_cannot_be_captured_or_inspected() {
             "{name}"
         );
     }
+    tree.set_target(&format!(
+        r#"{{"id":"game","macos":{{"bundle_id":"{}"}}}}"#,
+        "a".repeat(256)
+    ));
+    assert_eq!(tree.capture().unwrap_err().category, "Inventory");
+    assert_eq!(
+        controller.inspect(&tree.package()).unwrap_err().category,
+        "Inventory"
+    );
     tree.set_target(r#"{"id":"game"},"target":{"id":"other"}"#);
     assert_eq!(tree.capture().unwrap_err().category, "Inventory");
 }
@@ -264,6 +381,7 @@ fn target_declaration_bounds_count_utf8_bytes_without_changing_exact_titles() {
     let declaration = TargetDeclaration {
         id: "g".repeat(128),
         window_title: Some(title),
+        macos: None,
     };
     tree.set_target(&serde_json::to_string(&declaration).unwrap());
     assert_eq!(
@@ -284,6 +402,18 @@ fn target_declaration_bounds_count_utf8_bytes_without_changing_exact_titles() {
         tree.set_target(&serde_json::to_string(&invalid).unwrap());
         assert_eq!(tree.capture().unwrap_err().category, "Inventory");
     }
+
+    let invalid_bundle = TargetDeclaration {
+        id: "game".into(),
+        window_title: None,
+        macos: Some(MacosTargetDeclaration {
+            bundle_id: "a/b".into(),
+        }),
+    };
+    let fault = invalid_bundle.identity().unwrap_err();
+    assert_eq!(fault.context["field"], "target.macos.bundle_id");
+    tree.set_target(&serde_json::to_string(&invalid_bundle).unwrap());
+    assert_eq!(tree.capture().unwrap_err().category, "Inventory");
 }
 
 #[test]
@@ -297,6 +427,9 @@ fn captured_target_validation_cannot_be_bypassed_by_refreshing_inventory_identit
         json!({"id":"../game"}),
         json!({"id":"game","window_title":"Title\n"}),
         json!({"id":"game","permission":true}),
+        json!({"id":"game","macos":null}),
+        json!({"id":"game","macos":{"bundle_id":"a/b"}}),
+        json!({"id":"game","macos":{"bundle_id":"a","path":"ignored"}}),
     ] {
         let mut changed = original.clone();
         changed.metadata["manifest"]["target"] = target;

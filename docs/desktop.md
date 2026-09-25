@@ -344,9 +344,12 @@ as described in [the manifest contract](runtime-comparison.md#optional-portable-
 A targetless package still runs existing controlled/replay workflows; a missing,
 invalid, or incompatible local target is not an execution prerequisite.
 
-1. Choose an executable file or `.app` bundle and enter its absolute path for
-   the **actual game**. Optionally select a separate launcher and its location.
-   A launcher does not identify or replace the game.
+1. For the **actual game**, choose **Application bundle (.app)** and
+   **Choose application…** to select the outer application, including a supported
+   iOS-on-Mac wrapper. Do not navigate to its internal executable. Cancel keeps
+   the draft. Manual absolute paths and direct executable configuration remain
+   available. A separate bundle launcher uses the same picker; it does not
+   identify or replace the game.
 2. Add arguments as ordered individual fields. Empty fields remain empty
    arguments; spaces and shell syntax are literal, never split or expanded.
    Optionally enter an absolute working directory. Supply an exact window title
@@ -358,14 +361,26 @@ invalid, or incompatible local target is not an execution prerequisite.
 4. **Check configuration** examines the current unsaved draft without writing.
    **Save binding** repeats validation and metadata resolution before an atomic
    write. Both inspect only filesystem metadata: executable accessibility,
-   bounded XML/binary bundle metadata, contained bundle executable, working
-   directory, and canonical paths. No executable or helper is launched.
+   bounded XML/binary bundle metadata, public Foundation resolution, contained
+   bundle executable, working directory, and canonical paths. No executable or
+   helper is launched. A declared `target.macos.bundle_id` must match the actual
+   game's derived identifier; it never constrains a separate launcher.
 5. Review changed canonical locations explicitly. A direct Save also opens this
    review without writing; its warning is not a metadata-check failure.
    **Save reviewed resolution** resolves them again and refuses a different
    result. Merely checking cannot replace saved locations. In-place executable
    updates at the same canonical location remain compatible; this is not a
    signed-binary or content check.
+
+The native picker is an asynchronous sheet, available only while Run/OCR is
+idle. While it is open, new Run/OCR and another picker are refused; state polling
+continues. A late selection cannot overwrite a changed draft, another Tab, or a
+closed/reinspected owner. Bundle metadata is reread on every Check/Save:
+same-process changes to executable names and identifiers do not reuse cached
+values. Participating plists remain bounded to **64 KiB**, **8,192 events**, and
+**32 nesting levels**. Unsupported alternate metadata locations, including
+`Info-macos.plist`, are refused before Foundation reads them. Bundle resolution
+is macOS-only; portable record/snapshot validation remains cross-platform.
 
 Required values are listed at the start of the form. Empty fields and unselected
 options are not marked as errors. Check and Save stay disabled until the required
@@ -414,6 +429,50 @@ and Stop retain their existing roles.
 Use one application instance per data root. Revision checks protect in-process
 stale requests; they are not cross-process locking or protection against
 concurrent external filesystem edits.
+
+### Check running application
+
+After saving a compatible application-bundle binding and settling its owner
+refresh, choose **Check running application**. This separate read-only action
+uses the selected installation's derived bundle ID to query AppKit, not a window
+title, basename, launcher, or temporary-directory search. It does not launch,
+activate, attach, capture, perform OCR/input, or request permissions. Direct
+executable selections and non-macOS hosts are unsupported.
+
+The timestamped result is an observation, never connected, ready, or authorized:
+
+- **Exact installed executable** requires stable process lifetime and canonical
+  executable equality. Signed code must also pass the static/dynamic signature,
+  designated-requirement, and executing-architecture code-identity checks.
+- **Signed application correspondence** permits a different runtime path only
+  with those checks and a matching nonempty Team ID. **Original-copy attribution
+  is unavailable**: an indistinguishable signed copy cannot be assigned an
+  original installation by these checks.
+- No candidate, ambiguity, unverifiable evidence, cancellation, and timeout are
+  distinct outcomes. Multiple verified candidates, or an additional candidate
+  that cannot be safely excluded, prevent unique success. Old running signed
+  code does not match a replaced installed build, even at the same path.
+
+The current public-API provider cannot independently prove that a live image is
+unsigned when its on-disk file may have been replaced. Such evidence is
+**unverifiable**, not an unsigned path-only success. Signature errors are never
+downgraded to unsigned.
+
+The operation considers at most **64 candidates**, has a **5-second monotonic
+visible deadline**, and bounds deliberate private diagnostics to **64 KiB**.
+**Cancel** invalidates publication; it does not physically interrupt synchronous
+OS calls. One worker remains occupied until the OS read returns, including
+across application reconstruction. Navigation, polling, run Stop, and shutdown
+do not wait for that worker under shared locks.
+
+Edits, Save/Remove, owner changes, reinspection, and root/restore transitions
+invalidate applicability. Reopening never restores an observation. Failure does
+not roll back a completed binding write. Process paths, lifetime and signature
+details remain transient private diagnostics: they do not enter `target.config`,
+profiles, snapshots, or routine logs. Runtime relocation never rewrites the saved
+installation. Native Start remains refused; Windows target work is deferred,
+and initial both-OS qualification and R6 remain unresolved.
+
 
 ## Inspect, edit, and save profiles
 
@@ -856,9 +915,11 @@ owns the sink and shutdown design.
 ## Local GUI acceptance
 
 This is a procedure, not a claim that the complete UI workflow has passed. Use
-the actual macOS application and an isolated private data root, with no native
-capture/input permission or game target. Record observed results and unexecuted
-scope separately from [hosted build/core checks](ci.md#local-check-scope).
+the actual macOS application and an isolated private data root, without granting
+native capture/input authority. Running-application observation additionally
+requires an explicitly authorized, already-running application; it grants no
+launch or input authority. Record observed results and unexecuted scope separately
+from [hosted build/core checks](ci.md#local-check-scope).
 
 Preserve original bytes before fault cases. Use only disposable copies and private
 roots; do not modify tracked fixtures or the operator's normal configuration.
@@ -993,6 +1054,34 @@ Keep package presets valid when changing the schema; do not edit tracked fixture
    owner-bound Stop. A changed/missing original must be refused without
    replacement/recreation. Repeat failure notices in English/Japanese. Record
    unavailable follow-up read-failure timing as unexecuted, not passed.
+
+### Application target acceptance
+
+1. Use a disposable declared package and a private root. Select an ordinary
+   outer application with the native picker, Check, Save, and reopen its saved
+   workspace. Repeat with an explicitly authorized wrapped application. Verify
+   the form keeps the outer path and derives its identifier without requiring
+   an internal executable path. Cancel a picker and confirm the draft is intact.
+2. Try a real missing/invalid manual location. Check and Save must report failure
+   without changing saved record bytes. Opt a disposable package into an exact
+   `target.macos.bundle_id`, Reinspect, and verify explicit incompatibility and
+   deliberate replacement; a different game must fail while a distinct launcher
+   remains independently valid.
+3. During a controlled run/OCR operation, verify the picker is refused and Stop
+   remains reachable. With a picker open, verify new operation admission is
+   refused while state polling responds. Do not activate a game to test this.
+4. For an authorized already-running application, use the product's separate
+   Check running application action. Record its timestamp and correspondence
+   kind privately. A relocated signed match must disclose unknown original-copy
+   attribution. Confirm Cancel, stale-result invalidation, unchanged saved bytes,
+   and no restored observation after reopening. A read-only nonmatching
+   requirement probe must be refused; do not launch, restart, terminate, change
+   protections, or use game input to manufacture the result.
+5. Repeat an existing controlled workflow and applicable recorded replay; target
+   inspection must not gate either. Native Start must remain refused. Keep
+   process paths, IDs, signing values, screenshots, and raw observations private.
+   Report missing authorization/replay prerequisites as unexecuted. These checks
+   do not satisfy native acceptance, R6, or initial both-OS qualification.
 
 ### Controlled run and UI acceptance
 

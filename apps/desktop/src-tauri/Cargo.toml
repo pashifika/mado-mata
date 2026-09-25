@@ -34,6 +34,15 @@ tracing-subscriber = { version = "=0.3.20", default-features = false, features =
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "=0.6.4", features = ["exception"] }
+block2 = "=0.6.2"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSDate", "NSDictionary", "NSEnumerator", "NSString", "NSURL"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "libc", "block2", "NSApplication", "NSRunningApplication", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow", "NSResponder", "NSView", "objc2-uniform-type-identifiers"] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFBundle", "CFData", "CFDictionary", "CFNumber", "CFString", "CFURL"] }
+objc2-security = { version = "=0.3.2", default-features = false, features = ["std", "CSCommon", "SecCode", "SecStaticCode", "SecRequirement"] }
+objc2-uniform-type-identifiers = { version = "=0.3.2", default-features = false, features = ["std", "UTType", "UTCoreTypes"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }
 

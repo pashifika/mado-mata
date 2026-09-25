@@ -34,11 +34,11 @@ export interface RunHandlers {
 
 interface Props {
   workspace: BoundWorkspace; label: string; derived: Derived; run: RunView; snapshot: RunSnapshot | null;
-  locked: boolean; active: boolean; starting: boolean; stopping: boolean; closing: boolean;
+  locked: boolean; active: boolean; pickerBusy: boolean; starting: boolean; stopping: boolean; closing: boolean;
   savedEnvironment: OcrEnvironment | null; handlers: RunHandlers;
 }
 
-export default function RunPage({workspace, label, derived, run, snapshot, locked, active, starting, stopping, closing, savedEnvironment, handlers}: Props) {
+export default function RunPage({workspace, label, derived, run, snapshot, locked, active, pickerBusy, starting, stopping, closing, savedEnvironment, handlers}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const bound = workspace.bound;
@@ -70,7 +70,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   const primary = view.error ?? (view.result?.primary ? fault(view.result.primary) : null);
   const privatePrimary = !check && (snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane)) !== 'controlled';
   const selectedDescriptor = bound.descriptorPath.trim() || null;
-  const canStart = !locked && !active && !numericErrors && profileBound && startBlock === null && descriptorError === null;
+  const canStart = !locked && !active && !pickerBusy && !numericErrors && profileBound && startBlock === null && descriptorError === null;
   const stopAvailable = run.live && view.run !== null && busy(view.state) && view.state !== 'stopping' && !stopping && !starting && !closing;
   const executionCaption = starting ? t.run.submitted : run.live && busy(view.state) ? t.run.owned(view.run) : view.state === 'terminal' ? t.run.settled(view.run) : t.run.noOperations;
   const heading = selectedProfile && !valuesDirty ? selectedProfile.name : bound.name || t.run.untitled;
@@ -207,6 +207,6 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
       </section>
     </div>
     <ProfileRecovery idPrefix="recovery" label={label} state={workspace.recovery} outcomes={workspace.recoveryOutcomes} locked={locked} handlers={handlers.recovery}/>
-    <TargetPanel state={bound.target} handlers={handlers.target} locked={locked} active={active}/>
+    <TargetPanel state={bound.target} handlers={handlers.target} locked={locked} active={active} pickerBusy={pickerBusy}/>
   </>;
 }

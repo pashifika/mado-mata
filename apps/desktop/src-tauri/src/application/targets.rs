@@ -64,6 +64,7 @@ impl Application {
             let selected = state.resolve(workspace)?.clone();
             self.collect(&mut state);
             state.idle()?;
+            self.invalidate_target_observation(Some(workspace));
             drop(state);
             let declaration = selected
                 .package
@@ -101,6 +102,7 @@ impl Application {
             let selected = state.resolve(workspace)?.clone();
             self.collect(&mut state);
             state.idle()?;
+            self.invalidate_target_observation(Some(workspace));
             drop(state);
             let record = lock(&self.store).remove_target(
                 &selected.internal_name,
@@ -118,7 +120,7 @@ impl Application {
     }
 }
 
-fn target_context(selected: &Selected) -> TargetContext {
+pub(super) fn target_context(selected: &Selected) -> TargetContext {
     TargetContext {
         workspace: selected.workspace.clone(),
         internal_name: selected.internal_name.clone(),

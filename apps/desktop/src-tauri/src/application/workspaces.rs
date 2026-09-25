@@ -301,6 +301,7 @@ impl Application {
                         "Workspace owns an unsettled operation",
                     ));
                 }
+                self.invalidate_target_observation(Some(workspace));
                 drop(state);
                 lock(&self.store).set_tab_open(&internal_name, false)?;
                 lock(&self.workspaces)

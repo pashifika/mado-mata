@@ -1,6 +1,7 @@
 use mado_mata_desktop::application::{
-    InspectionOutcome, Poll, ProfileCatalog, RecoveryMutation, RecoveryRef, TargetCheckResponse,
-    TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView,
+    InspectionOutcome, Poll, ProfileCatalog, RecoveryMutation, RecoveryRef,
+    TargetApplicationResponse, TargetCheckResponse, TargetSaveResponse, TargetView,
+    WorkspaceCatalog, WorkspaceRef, WorkspaceView,
 };
 use mado_mata_desktop::backup::SnapshotReceipt;
 use mado_mata_desktop::bootstrap::{Bootstrap, BootstrapStatus, selected_roots};
@@ -15,6 +16,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tauri::Manager;
+
+#[cfg(target_os = "macos")]
+mod picker;
 
 struct Backend {
     bootstrap: Arc<Bootstrap>,
@@ -286,6 +290,62 @@ async fn remove_target(
 }
 
 #[tauri::command]
+async fn choose_target_application(
+    workspace: WorkspaceRef,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Backend>,
+) -> Result<Option<String>, Fault> {
+    let application = state.bootstrap.application()?;
+    let guard = background(move || application.begin_target_picker(&workspace)).await?;
+    #[cfg(target_os = "macos")]
+    {
+        picker::choose(window, guard).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, guard);
+        Err(Fault::new(
+            "TargetPlatform",
+            "Application selection requires macOS",
+        ))
+    }
+}
+
+#[tauri::command]
+fn reserve_running_application(
+    workspace: WorkspaceRef,
+    request_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), Fault> {
+    state
+        .bootstrap
+        .application()?
+        .reserve_running_application(&workspace, &request_id)
+}
+
+#[tauri::command]
+async fn check_running_application(
+    workspace: WorkspaceRef,
+    expected: TargetExpectation,
+    request_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetApplicationResponse, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.check_running_application(&workspace, &expected, &request_id))
+        .await
+}
+
+#[tauri::command]
+fn cancel_running_application(
+    workspace: WorkspaceRef,
+    request_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<bool, Fault> {
+    let application = state.bootstrap.application()?;
+    Ok(application.cancel_running_application(&workspace, &request_id))
+}
+
+#[tauri::command]
 async fn import_legacy_profiles(
     workspace: WorkspaceRef,
     state: tauri::State<'_, Backend>,
@@ -447,6 +507,10 @@ fn main() {
             check_target,
             save_target,
             remove_target,
+            choose_target_application,
+            reserve_running_application,
+            check_running_application,
+            cancel_running_application,
             import_legacy_profiles,
             save_profile,
             rename_profile,

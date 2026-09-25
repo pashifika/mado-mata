@@ -1,4 +1,4 @@
-import type {Fault, Selection, TargetCheck, TargetCheckResponse, TargetConfiguration, TargetContext, TargetDeclaration, TargetExpectation, TargetInputPolicy, TargetLocation, TargetResolution, TargetSaveResponse, TargetView} from './types.ts';
+import type {Fault, Selection, TargetApplicationResponse, TargetCheck, TargetCheckResponse, TargetConfiguration, TargetContext, TargetDeclaration, TargetExpectation, TargetInputPolicy, TargetLocation, TargetResolution, TargetSaveResponse, TargetView} from './types.ts';
 
 const encoder = new TextEncoder();
 
@@ -15,12 +15,22 @@ export interface TargetTicket {
 }
 export interface TargetObservation {ticket:TargetTicket; check:TargetCheck}
 export interface TargetReview {ticket:TargetTicket; previous:TargetResolution|null; resolution:TargetResolution}
+export type TargetPickerField = 'game'|'launcher';
+export interface TargetPickerTicket {ticket:TargetTicket; field:TargetPickerField}
+export interface RunningApplicationState {
+  pending:{ticket:TargetTicket; requestId:string}|null;
+  result:{ticket:TargetTicket; response:TargetApplicationResponse}|null;
+  issue:{ticket:TargetTicket; fault:Fault}|null;
+  cancelled:boolean;
+}
 export interface TargetState {
   context:TargetContext; declaration:TargetDeclaration|null; view:TargetView|null; draft:TargetDraft; draftRevision:number;
   operation:TargetOperation|null; loaded:boolean; readError:Fault|null; refreshRequired:boolean; reconcile:boolean;
   issue:{fault:Fault; ticket:TargetTicket}|null; observation:TargetObservation|null; review:TargetReview|null;
+  application:RunningApplicationState; picker:TargetPickerTicket|null; pickerIssue:Fault|null;
   persisted:'saved'|'removed'|null;
 }
+const idleApplication:RunningApplicationState = {pending:null, result:null, issue:null, cancelled:false};
 
 function blankDraft(declaration:TargetDeclaration|null):TargetDraft {
   return {gameKind:'', gamePath:'', separateLauncher:false, launcherKind:'', launcherPath:'', arguments:[],
@@ -40,7 +50,8 @@ export function targetState(selection:Selection):TargetState {
       package_id:selection.package.package_id, declaration_identity:selection.package.target_identity},
     declaration:selection.package.target, view:null, draft:blankDraft(selection.package.target), draftRevision:0,
     operation:null, loaded:false, readError:null, refreshRequired:false, reconcile:false,
-    issue:null, observation:null, review:null, persisted:null,
+    issue:null, observation:null, review:null, application:idleApplication,
+    picker:null, pickerIssue:null, persisted:null,
   };
 }
 
@@ -79,10 +90,69 @@ function currentRecord(state:TargetState, ticket:TargetTicket):boolean {
   return sameContext(state.context, ticket.context) && state.view?.record.revision === ticket.expected.revision
     && (state.view.record.binding?.id ?? null) === ticket.expected.binding_id;
 }
+export function eligibleRunningApplication(state:TargetState):TargetTicket|null {
+  const ticket = targetTicket(state);
+  return ticket && state.operation === null && state.application.pending === null && state.picker === null
+    && state.review === null && !targetDirty(state) && state.view?.compatible
+    && state.view.record.binding?.configuration.game.kind === 'bundle' ? ticket : null;
+}
+
+export function beginRunningApplication(state:TargetState, ticket:TargetTicket, requestId:string):TargetState {
+  if (!eligibleRunningApplication(state) || !currentTargetDraft(state, ticket) || !currentRecord(state, ticket)) return state;
+  return {...state, application:{pending:{ticket, requestId}, result:null, issue:null, cancelled:false}};
+}
+
+export function completeRunningApplication(state:TargetState, ticket:TargetTicket, response:TargetApplicationResponse):TargetState {
+  if (!state.application.pending || state.application.pending.ticket !== ticket
+    || state.application.pending.requestId !== response.request_id || !currentTargetDraft(state, ticket)
+    || !currentRecord(state, ticket) || !sameContext(ticket.context, response.context)
+    || response.revision !== ticket.expected.revision || response.binding_id !== ticket.expected.binding_id) return state;
+  return {...state, application:{pending:null, result:{ticket, response}, issue:null, cancelled:false}};
+}
+
+export function failRunningApplication(state:TargetState, ticket:TargetTicket, requestId:string, error:Fault):TargetState {
+  if (!state.application.pending || state.application.pending.ticket !== ticket
+    || state.application.pending.requestId !== requestId || !currentTargetDraft(state, ticket)
+    || !currentRecord(state, ticket)) return state;
+  const failed = {...state, application:{pending:null, result:null, issue:{ticket, fault:error}, cancelled:false}};
+  return error.category === 'TargetResolutionChanged' || error.category === 'TargetConflict'
+    ? {...targetFailed(failed, ticket, error), application:failed.application} : failed;
+}
+
+export function invalidateRunningApplication(state:TargetState):TargetState {
+  return {...state, application:idleApplication};
+}
+
+export function cancelRunningApplication(state:TargetState, requestId:string):TargetState {
+  return state.application.pending?.requestId === requestId
+    ? {...state, application:{pending:null, result:null, issue:null, cancelled:true}} : state;
+}
+
+export function beginApplicationPicker(state:TargetState, field:TargetPickerField, issued?:TargetPickerTicket):TargetState {
+  const ticket = issued?.ticket ?? targetTicket(state);
+  if (!ticket || !state.declaration || state.operation !== null || state.picker !== null
+    || !currentTargetDraft(state, ticket) || !currentRecord(state, ticket)
+    || (field === 'launcher' && !state.draft.separateLauncher)) return state;
+  return {...state, picker:issued ?? {ticket, field}, pickerIssue:null};
+}
+
+export function completeApplicationPicker(state:TargetState, picker:TargetPickerTicket, path:string|null, error:Fault|null = null):TargetState {
+  if (state.picker !== picker || !currentTargetDraft(state, picker.ticket) || !currentRecord(state, picker.ticket)) return state;
+  const settled = {...state, picker:null, pickerIssue:error};
+  if (path === null || error !== null) return settled;
+  return picker.field === 'game'
+    ? editTarget(settled, {...state.draft, gameKind:'bundle', gamePath:path})
+    : editTarget(settled, {...state.draft, launcherKind:'bundle', launcherPath:path});
+}
+
+export function invalidateApplicationPicker(state:TargetState):TargetState {
+  return {...state, picker:null, pickerIssue:null};
+}
 
 // Keep a completed mutation visible while its refresh is owed; later edits retire settled notices.
 export function editTarget(state:TargetState, draft:TargetDraft):TargetState {
   return {...state, draft, draftRevision:state.draftRevision + 1, observation:null, issue:null, review:null,
+    application:idleApplication, picker:null, pickerIssue:null,
     persisted:state.refreshRequired ? state.persisted : null};
 }
 
@@ -93,15 +163,17 @@ export function discardTarget(state:TargetState):TargetState {
 // A mutation's own refresh never passes through here (App.targetCommand reads inline), so a read beginning while a refresh
 // is still owed is the recovery Reload and keeps the completed mutation's notice; any other Reload retires it.
 export function beginTarget(state:TargetState, operation:TargetOperation):TargetState {
-  return {...state, operation, ...(operation === 'read'
-    ? {readError:null, persisted:state.refreshRequired ? state.persisted : null} : {issue:null, persisted:null})};
+  return {...state, operation, application:idleApplication, picker:null, pickerIssue:null,
+    ...(operation === 'read'
+      ? {readError:null, persisted:state.refreshRequired ? state.persisted : null} : {issue:null, persisted:null})};
 }
 
 // Reads refresh only saved truth. The first read may initialize an untouched form; later reads never replace edits.
 export function readTarget(state:TargetState, view:TargetView):TargetState {
   if (!sameContext(state.context, view.context) || view.record.internal_name !== state.context.internal_name
     || view.record.package_id !== state.context.package_id) return state;
-  const next = {...state, view, loaded:true, readError:null, refreshRequired:false, reconcile:false};
+  const next = {...state, view, loaded:true, readError:null, refreshRequired:false, reconcile:false,
+    application:idleApplication, picker:null, pickerIssue:null};
   const changed = state.view !== null && (state.view.record.revision !== view.record.revision
     || state.view.record.binding?.id !== view.record.binding?.id);
   return {...next, draft:state.view === null && state.draftRevision === 0 ? savedDraft(next) : state.draft,
@@ -110,7 +182,8 @@ export function readTarget(state:TargetState, view:TargetView):TargetState {
 }
 
 export function targetReadFailed(state:TargetState, error:Fault):TargetState {
-  return {...state, loaded:true, readError:error, refreshRequired:true};
+  return {...state, loaded:true, readError:error, refreshRequired:true,
+    application:idleApplication, picker:null, pickerIssue:null};
 }
 
 export function checkedTarget(state:TargetState, ticket:TargetTicket, response:TargetCheckResponse):TargetState {
@@ -125,6 +198,7 @@ export function savedTarget(state:TargetState, ticket:TargetTicket, response:Tar
   if (!currentRecord(state, ticket) || !sameContext(ticket.context, response.view.context)
     || response.view.record.internal_name !== state.context.internal_name || response.view.record.package_id !== state.context.package_id) return state;
   return {...state, view:response.view, refreshRequired:true, persisted:'saved', issue:null, review:null,
+    application:idleApplication, picker:null, pickerIssue:null,
     observation:{ticket, check:response.check}};
 }
 
@@ -132,7 +206,8 @@ export function removedTarget(state:TargetState, ticket:TargetTicket, view:Targe
   if (!currentRecord(state, ticket) || !sameContext(ticket.context, view.context)
     || view.record.internal_name !== state.context.internal_name || view.record.package_id !== state.context.package_id) return state;
   // Removal changes saved truth only; Discard remains the explicit way to clear the local draft.
-  return {...state, view, refreshRequired:true, persisted:'removed', issue:null, review:null, observation:null};
+  return {...state, view, refreshRequired:true, persisted:'removed', issue:null, review:null, observation:null,
+    application:idleApplication, picker:null, pickerIssue:null};
 }
 
 // An attributed usable changed-resolution result is the review-needed state, not a fault; a malformed or missing

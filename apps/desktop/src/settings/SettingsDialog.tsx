@@ -29,7 +29,7 @@ interface Props {
   // Label of the package/workspace host command that keeps Save and Check unavailable; distinct from saving so
   // Cancel, Escape and editing stay available while another command is in flight.
   busyReason: string | null;
-  envDirty: boolean; active: boolean; target: CheckTarget; onCheck: () => void; checkError: Fault | null;
+  envDirty: boolean; active: boolean; pickerBusy: boolean; target: CheckTarget; onCheck: () => void; checkError: Fault | null;
   lastCheck: LastCheck | null; stale: string[]; originLabel: (workspaceId: string | null) => string;
   retained: number; evicted: number;
   // Back up now is separate from Save: it uses the saved destination and its outcome outlives the dialog.
@@ -40,7 +40,7 @@ interface Props {
 export default function SettingsDialog(props: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
-  const {open, onCancel, settings, draft, onDraft, parsed, dirty, saving, saveError, saveNotice, onSave, busyReason, envDirty, active, target, onCheck, checkError, lastCheck, stale, originLabel, retained, evicted, onSnapshot, snapshotPending, snapshotOutcome, strip} = props;
+  const {open, onCancel, settings, draft, onDraft, parsed, dirty, saving, saveError, saveNotice, onSave, busyReason, envDirty, active, pickerBusy, target, onCheck, checkError, lastCheck, stale, originLabel, retained, evicted, onSnapshot, snapshotPending, snapshotOutcome, strip} = props;
   const dialog = useRef<HTMLDialogElement>(null);
   const opener = useRef<Element | null>(null);
   const [category, setCategory] = useState<Category>('notifications');
@@ -145,7 +145,7 @@ export default function SettingsDialog(props: Props) {
           {category === 'environment' && <>
             {checkError && <FaultMessage title={t.settings.checkFailed} value={checkError}/>}
             <EnvironmentPanel draft={draft.environment} errors={errors} onDraft={(next: EnvironmentDraft) => onDraft({...draft, environment: next})}
-              saved={settings?.ocr_environment ?? null} loaded={settings !== null} dirty={envDirty} locked={saving} active={active} busyReason={busyReason}
+              saved={settings?.ocr_environment ?? null} loaded={settings !== null} dirty={envDirty} locked={saving} active={active} pickerBusy={pickerBusy} busyReason={busyReason}
               target={target} onCheck={onCheck} lastCheck={lastCheck} stale={stale} originLabel={originLabel}/>
           </>}
           {saveError && <FaultMessage title={t.settings.saveError} value={saveError}/>}

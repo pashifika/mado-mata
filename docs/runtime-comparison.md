@@ -119,7 +119,8 @@ Version-1 manifests may include a strict `target` object:
 {
   "target": {
     "id": "example-game",
-    "window_title": "Exact Game Title"
+    "window_title": "Exact Game Title",
+    "macos": { "bundle_id": "com.example.game" }
   }
 }
 ```
@@ -131,19 +132,28 @@ local setup responsible for an exact title. The declaration itself cannot be
 `null`, an array, or contain unknown/duplicate fields. Paths, launch arguments,
 process identities, credentials, and permission grants do not belong here.
 
+`macos` is optional. When present, it must contain exactly one `bundle_id`:
+1–255 ASCII letters, digits, dots, or hyphens. `null`, arrays, missing IDs,
+unknown members, and duplicate members are refused. It constrains the
+**actual game**, not a separate launcher: Check/Save require an application
+bundle whose host-derived identifier matches exactly. An unconstrained local
+bundle identifier need not use this portable selector's character set.
+
 Inspection validates the declaration without evaluating package code. Its
 captured bytes affect inventory identity; a separate host-derived target identity
-uses only normalized supported declaration fields. Script/schema changes and
-manifest formatting therefore do not require a new local binding when target
-intent is unchanged. Changing the ID or exact title retains an old binding as
-incompatible until explicitly replaced or removed.
+uses only normalized supported declaration fields. Omitting `macos` preserves
+the previous normalized identity exactly. Script/schema changes and manifest
+formatting therefore do not require a new local binding when target intent is
+unchanged. Changing the ID, exact title, or macOS constraint retains an old
+binding as incompatible until explicitly replaced or removed.
 
 The [desktop Target section](desktop.md#local-target-configuration) stores
 machine-local configuration separately for each Tab/package. Packages without
 `target` remain valid; neither absence nor an invalid local binding blocks an
 otherwise valid controlled/replay invocation. Declaring or saving a target
 grants no native authority. Older strict manifest readers can reject the new
-field rather than silently ignore it.
+field rather than silently ignore it. Rollback requires a deliberately compatible
+package revision; never silently remove its application constraint.
 
 ### Dependencies and execution
 

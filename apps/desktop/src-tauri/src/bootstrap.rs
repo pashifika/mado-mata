@@ -1,4 +1,4 @@
-use crate::application::{Application, WorkspaceCatalog};
+use crate::application::{Application, ObservationSlot, WorkspaceCatalog};
 use crate::backup::{self, SnapshotReceipt};
 use crate::configuration;
 use crate::restore;
@@ -54,11 +54,17 @@ pub struct Bootstrap {
     legacy_root: Option<PathBuf>,
     controlled: PathBuf,
     engine: PathBuf,
+    target_observation: Arc<Mutex<ObservationSlot>>,
     actions: Mutex<()>,
     state: Mutex<State>,
     closing: AtomicBool,
     #[cfg(test)]
-    make_application: fn(PathBuf, PathBuf, PathBuf) -> Result<Arc<Application>, Fault>,
+    make_application: fn(
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        Arc<Mutex<ObservationSlot>>,
+    ) -> Result<Arc<Application>, Fault>,
     #[cfg(test)]
     recover_configuration: fn(&Path, bool) -> Result<(), Fault>,
 }
@@ -101,10 +107,11 @@ impl Bootstrap {
             legacy_root,
             controlled,
             engine,
+            target_observation: Arc::default(),
             actions: Mutex::new(()),
             closing: AtomicBool::new(false),
             #[cfg(test)]
-            make_application: Application::new,
+            make_application: Application::with_observation_slot,
             #[cfg(test)]
             recover_configuration: restore::recover,
             state: Mutex::new(State {
@@ -293,10 +300,15 @@ impl Bootstrap {
             return;
         }
         #[cfg(not(test))]
-        let make_application = Application::new;
+        let make_application = Application::with_observation_slot;
         #[cfg(test)]
         let make_application = self.make_application;
-        match make_application(root.clone(), self.controlled.clone(), self.engine.clone()) {
+        match make_application(
+            root.clone(),
+            self.controlled.clone(),
+            self.engine.clone(),
+            self.target_observation.clone(),
+        ) {
             Ok(application) => {
                 if self.closing.load(Ordering::Acquire) {
                     let _ = application.shutdown();
@@ -1157,7 +1169,7 @@ mod tests {
         let installed = backup::read(archive).unwrap();
         // Log-file errors are asynchronous, so inject only the constructor result.
         // Installation, receipt admission, loading and Retry still use the real host.
-        bootstrap.make_application = |_, _, _| Err(construction_fault());
+        bootstrap.make_application = |_, _, _, _| Err(construction_fault());
         let failed = bootstrap
             .restore_snapshot(archive, Some(&preimage.generation), true, true)
             .unwrap();
@@ -1190,7 +1202,7 @@ mod tests {
         assert!(matches!(observed.state, Phase::Recovery));
         assert_eq!(json!(observed.fault), json!(failed.fault));
 
-        bootstrap.make_application = Application::new;
+        bootstrap.make_application = Application::with_observation_slot;
         let ready = bootstrap.retry(false).unwrap();
         assert!(matches!(ready.state, Phase::Ready));
         assert!(ready.application_available);
@@ -1219,7 +1231,7 @@ mod tests {
             assert!(matches!(interrupted.state, Phase::Recovery));
             assert!(interrupted.pending_restore);
 
-            bootstrap.make_application = |_, _, _| Err(construction_fault());
+            bootstrap.make_application = |_, _, _, _| Err(construction_fault());
             let failed = bootstrap.recover_restore(rollback, true, false).unwrap();
             assert!(matches!(failed.state, Phase::Recovery));
             assert_eq!(failed.stage, "application");
@@ -1256,7 +1268,7 @@ mod tests {
             assert!(matches!(observed.state, Phase::Recovery));
             assert_eq!(json!(observed.fault), json!(failed.fault));
 
-            bootstrap.make_application = Application::new;
+            bootstrap.make_application = Application::with_observation_slot;
             let ready = bootstrap.retry(false).unwrap();
             assert!(matches!(ready.state, Phase::Ready));
             assert!(ready.application_available);

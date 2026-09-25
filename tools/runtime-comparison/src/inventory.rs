@@ -29,9 +29,49 @@ pub struct Entries {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MacosTargetDeclaration {
+    pub bundle_id: String,
+}
+
+impl<'de> Deserialize<'de> for MacosTargetDeclaration {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MacosVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for MacosVisitor {
+            type Value = MacosTargetDeclaration;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a macOS target declaration object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Fields {
+                    bundle_id: String,
+                }
+
+                let fields =
+                    Fields::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(MacosTargetDeclaration {
+                    bundle_id: fields.bundle_id,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(MacosVisitor)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TargetDeclaration {
     pub id: String,
     pub window_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macos: Option<MacosTargetDeclaration>,
 }
 
 impl<'de> Deserialize<'de> for TargetDeclaration {
@@ -54,6 +94,8 @@ impl<'de> Deserialize<'de> for TargetDeclaration {
                 struct Fields {
                     id: String,
                     window_title: Option<String>,
+                    #[serde(default, deserialize_with = "present_macos")]
+                    macos: Option<MacosTargetDeclaration>,
                 }
 
                 let fields =
@@ -61,6 +103,7 @@ impl<'de> Deserialize<'de> for TargetDeclaration {
                 Ok(TargetDeclaration {
                     id: fields.id,
                     window_title: fields.window_title,
+                    macos: fields.macos,
                 })
             }
         }
@@ -73,6 +116,12 @@ fn present_target<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<TargetDeclaration>, D::Error> {
     TargetDeclaration::deserialize(deserializer).map(Some)
+}
+
+fn present_macos<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<MacosTargetDeclaration>, D::Error> {
+    MacosTargetDeclaration::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
