@@ -1,17 +1,15 @@
-import {Fragment, useLayoutEffect, useRef, useState} from 'react';
+import {useLayoutEffect, useRef, useState} from 'react';
 import type {KeyboardEvent, MouseEvent} from 'react';
 import {createPortal} from 'react-dom';
 
-// Viewport coordinates the menu opens beside: below `bottom`, or above `top` when it does not fit below.
-export interface MenuAnchor {left: number; top: number; bottom: number}
+// Viewport anchor and input origin: pointer menus focus the container, keyboard menus the first action.
+export interface MenuAnchor {left: number; top: number; bottom: number; keyboard: boolean}
 
 export interface MenuAction {
   id: string; label: string; onSelect: () => void;
   // Why the action is unavailable; a blocked item stays focusable with its reason but does nothing.
   blocked?: string | null;
   danger?: boolean;
-  // Draws a separator before the item.
-  separated?: boolean;
 }
 
 interface Props {
@@ -26,13 +24,13 @@ interface Props {
 
 const EDGE = 8;
 
-export function elementAnchor(element: Element): MenuAnchor {
+export function elementAnchor(element: Element, keyboard = true): MenuAnchor {
   const rect = element.getBoundingClientRect();
-  return {left: rect.left, top: rect.top, bottom: rect.bottom};
+  return {left: rect.left, top: rect.top, bottom: rect.bottom, keyboard};
 }
 
 export function pointAnchor(x: number, y: number): MenuAnchor {
-  return {left: x, top: y, bottom: y};
+  return {left: x, top: y, bottom: y, keyboard: false};
 }
 
 // Shift+F10 and the ContextMenu key open a row's menu from the keyboard.
@@ -59,9 +57,9 @@ export function menuEvents(open: (anchor: MenuAnchor, opener: HTMLElement) => vo
   };
 }
 
-// A fixed-position action menu kept inside the viewport. The first available action takes focus; arrow keys, Home
-// and End move between actions, and Escape or Tab closes it. A press or focus outside, scrolling, resizing and
-// leaving the window close it without taking focus back.
+// A viewport-clamped menu. Pointer opening leaves every action unselected; keyboard opening focuses the first.
+// Arrow keys, Home and End move between actions; Escape or Tab closes it. Outside interaction closes without
+// taking focus back.
 export default function ContextMenu({id, label, anchor, actions, heading, toggle, onClose}: Props) {
   const panel = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
@@ -90,9 +88,11 @@ export default function ContextMenu({id, label, anchor, actions, heading, toggle
   const placed = place !== null;
   useLayoutEffect(() => {
     if (!placed) return;
-    const items = Array.from(panel.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
-    (items.find(item => item.getAttribute('aria-disabled') !== 'true') ?? items[0])?.focus({preventScroll: true});
-  }, [placed]);
+    const element = panel.current;
+    if (!element) return;
+    const items = Array.from(element.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+    (anchor.keyboard ? items.find(item => item.getAttribute('aria-disabled') !== 'true') ?? items[0] ?? element : element).focus({preventScroll: true});
+  }, [placed, anchor.keyboard]);
 
   useLayoutEffect(() => {
     const element = panel.current;
@@ -142,20 +142,17 @@ export default function ContextMenu({id, label, anchor, actions, heading, toggle
     items[next].focus({preventScroll: true});
   }
 
-  return createPortal(<div ref={panel} id={id} className="context-menu" role="menu" aria-label={label}
+  return createPortal(<div ref={panel} id={id} className="context-menu" role="menu" aria-label={label} tabIndex={-1}
     style={place ?? {left: 0, top: 0, visibility: 'hidden'}} onKeyDown={keys} onContextMenu={event => event.preventDefault()}>
     {heading && <div className="menu-heading mono" aria-hidden="true">{heading}</div>}
-    {actions.map(action => <Fragment key={action.id}>
-      {action.separated && <div className="menu-separator" role="separator"/>}
-      <button id={action.id} type="button" role="menuitem" className={action.danger ? 'danger' : undefined} aria-disabled={action.blocked ? true : undefined}
-        onClick={() => {
-          if (action.blocked) return;
-          onClose(true);
-          action.onSelect();
-        }}>
-        <span>{action.label}</span>
-        {action.blocked && <span className="menu-reason">{action.blocked}</span>}
-      </button>
-    </Fragment>)}
+    {actions.map(action => <button key={action.id} id={action.id} type="button" role="menuitem" className={action.danger ? 'danger' : undefined}
+      aria-disabled={action.blocked ? true : undefined} onClick={() => {
+        if (action.blocked) return;
+        onClose(true);
+        action.onSelect();
+      }}>
+      <span>{action.label}</span>
+      {action.blocked && <span className="menu-reason">{action.blocked}</span>}
+    </button>)}
   </div>, document.body);
 }

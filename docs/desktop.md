@@ -247,11 +247,12 @@ Neither action inspects, binds, or runs the package.
   Save; rebuilding an invalid document requires confirmation. Saved local
   workspace profiles are not part of these forms.
 - Use **+** beside the tree's collapse button to add a source, preset, JSON asset
-  or source map. The Files/Metadata group headings have no menu buttons.
+  or source map. This is the only creation entry point. Group headings, folders
+  and blank tree space have no context menus.
   Right-click an individual file, use its menu button, or press **Shift+F10** /
-  the **Context Menu** key for its actions. Metadata rows offer Rename/Remove,
-  not repeated Add actions; the manifest has no file-action menu. Source/asset
-  and folder menus retain contextual Add, with the folder as initial destination.
+  the **Context Menu** key for Rename/Remove where available; the manifest has no
+  file-action menu. A pointer-opened menu initially highlights no action;
+  keyboard opening focuses the first action, with arrow/Home/End navigation.
   Actions target that row, not another selected file. Rename updates declarations,
   not source imports. Required entries/schema/presets cannot be removed; unsafe
   paths, links, collisions and undeclared files are refused.

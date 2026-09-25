@@ -145,7 +145,6 @@ function catalog(data: typeof enData) {
       location: (path: string, line: number, column: number) => interpolate(data.authoring.location, {path, line, column}),
       goTo: (location: string) => interpolate(data.authoring.goTo, {location}),
       renameHeading: (path: string) => interpolate(data.authoring.renameHeading, {path}),
-      addIn: (folder: string) => interpolate(data.authoring.addIn, {folder}),
       fileActions: (path: string) => interpolate(data.authoring.fileActions, {path}),
       confirmRemove: (path: string) => interpolate(data.authoring.confirmRemove, {path}),
       block: (kind: keyof typeof data.authoring.block) => data.authoring.block[kind],

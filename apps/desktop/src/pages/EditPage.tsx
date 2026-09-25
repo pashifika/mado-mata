@@ -1,12 +1,11 @@
 import {Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
-import type {MouseEvent, RefObject} from 'react';
+import type {RefObject} from 'react';
 import {flushSync} from 'react-dom';
 import CatalogDialog from '../components/CatalogDialog.tsx';
 import type {CatalogIntent} from '../components/CatalogDialog.tsx';
-import ContextMenu, {elementAnchor, menuEvents, pointAnchor} from '../components/ContextMenu.tsx';
+import ContextMenu, {elementAnchor, menuEvents} from '../components/ContextMenu.tsx';
 import type {MenuAction, MenuAnchor} from '../components/ContextMenu.tsx';
 import FileTree from '../components/FileTree.tsx';
-import type {TreeTarget} from '../components/FileTree.tsx';
 import ManifestEditor from '../components/ManifestEditor.tsx';
 import Modal from '../components/Modal.tsx';
 import {AssetView, SourceMapView} from '../components/MetadataFacts.tsx';
@@ -17,7 +16,7 @@ import {AUTHORING_RECOVERY, catalogBlock, diagnosticLocation, dirtyDrafts, draft
 import type {AuthoringSession, EditInput, FileDraft, Snapshot, TextRange, TypedText} from '../authoring.ts';
 import {parseJson, readManifest, treeKind} from '../metadata.ts';
 import {packageDestination} from '../state.ts';
-import type {AuthoringFileKind, CatalogAddKind, CatalogEdit, Fault} from '../types.ts';
+import type {AuthoringFileKind, CatalogEdit, Fault} from '../types.ts';
 import {messages, renderMessage} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
@@ -30,7 +29,7 @@ const METADATA_ORDER: Record<AuthoringFileKind, number> = {manifest: 0, schema: 
 // The tree's two file groups. Selecting a row shows that file's editor, form or facts on the right.
 type Group = 'files' | 'metadata';
 // What a menu acts on. Every target names the row it was opened from; the selected file is never implied.
-type MenuTarget = TreeTarget | {kind: 'files'} | {kind: 'metadata'; path: string} | {kind: 'metadataGroup'} | {kind: 'rail'};
+type MenuTarget = {kind: 'file' | 'metadata'; path: string};
 interface OpenMenu {serial: number; target: MenuTarget; anchor: MenuAnchor; opener: HTMLElement | null; toggle: HTMLElement | null}
 
 // Sources, assets and drafts of files no longer declared belong to Files; declared metadata belongs to Metadata.
@@ -38,13 +37,8 @@ function groupOf(draft: FileDraft): Group {
   return draft.missing || treeKind(draft.kind) ? 'files' : 'metadata';
 }
 
-// The folder part of a package path with its trailing slash, or '' for a file at the package root.
-function folderOf(path: string): string {
-  return path.slice(0, path.lastIndexOf('/') + 1);
-}
-
 function menuKeyOf(target: MenuTarget): string {
-  return 'path' in target ? `${target.kind}:${target.path}` : target.kind;
+  return `${target.kind}:${target.path}`;
 }
 
 export interface EditHandlers {
@@ -329,8 +323,6 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
   }
   const addReason = catalogReason({kind: 'add', path: '', file_kind: 'source', text: ''});
   const duplicateReason = publishReason ?? (pending !== null || validating ? a.block('pending') : null);
-  const presetFolder = folderOf(manifest?.profiles[0]?.[1] ?? '');
-  const mapFolder = folderOf(manifest?.sourceMaps[0]?.[1] ?? '');
   // The entry dialog closes before the host flow starts, so the unsaved-changes choice never stacks on top of it.
   function duplicate() {
     const id = duplicateId.trim();
@@ -355,50 +347,20 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
     if (restoreFocus && menu?.opener?.isConnected) menu.opener.focus({preventScroll: true});
     setMenu(null);
   }
-  // Right-clicking a group or the tree's blank space opens that area's menu; focus returns to `opener` afterwards.
-  function contextAt(target: MenuTarget, opener: string) {
-    return (event: MouseEvent<HTMLElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      openMenu(target, pointAnchor(event.clientX, event.clientY), document.getElementById(opener), false);
-    };
-  }
   // Rename and Remove act on the menu's own row; a row that disappeared meanwhile is refused, not substituted.
-  function changeActions(path: string, separated: boolean): MenuAction[] {
+  function changeActions(path: string): MenuAction[] {
     const draft = session.drafts.get(path);
     const blocked = !draft || draft.missing ? a.targetGone : catalogReason({kind: 'remove', path});
     return [
-      {id: 'authoring-menu-rename', label: a.renameItem, blocked, separated, onSelect: () => setIntent({kind: 'rename', path})},
+      {id: 'authoring-menu-rename', label: a.renameItem, blocked, onSelect: () => setIntent({kind: 'rename', path})},
       {id: 'authoring-menu-remove', label: a.remove, blocked, danger: true, onSelect: () => setIntent({kind: 'remove', path})},
     ];
-  }
-  function menuActions(target: MenuTarget): MenuAction[] {
-    const addAction = (id: string, label: string, fileKind: CatalogAddKind, prefix: string): MenuAction =>
-      ({id, label, blocked: addReason, onSelect: () => setIntent({kind: 'add', fileKind, prefix})});
-    if (target.kind === 'file') {
-      const folder = folderOf(target.path);
-      return [addAction('authoring-menu-add', folder ? a.addIn(folder) : a.addFile, 'source', folder), ...changeActions(target.path, true)];
-    }
-    if (target.kind === 'folder') return [addAction('authoring-menu-add', a.addIn(`${target.path}/`), 'source', `${target.path}/`)];
-    if (target.kind === 'files') return [addAction('authoring-menu-add', a.addFile, 'source', '')];
-    if (target.kind === 'metadata') return session.drafts.get(target.path)?.kind === 'manifest' ? [] : changeActions(target.path, false);
-    const metadataAdds = [addAction('authoring-menu-add-preset', a.addPreset, 'profile', presetFolder),
-      addAction('authoring-menu-add-source-map', a.addSourceMap, 'source_map', mapFolder)];
-    if (target.kind !== 'rail') return metadataAdds;
-    return [addAction('authoring-menu-add', a.addFile, 'source', ''), ...metadataAdds,
-      {id: 'authoring-menu-duplicate', label: a.duplicateOpen, separated: true, onSelect: () => setDuplicating(true)}];
-  }
-  function menuLabel(target: MenuTarget): string {
-    if (target.kind === 'files') return a.treeActions;
-    if (target.kind === 'metadataGroup') return a.metadataActions;
-    if (target.kind === 'rail') return a.railActions;
-    return a.fileActions(target.kind === 'folder' ? `${target.path}/` : target.path);
   }
   const openKey = menu === null ? null : menuKeyOf(menu.target);
   function menuTrigger(target: MenuTarget) {
     const key = menuKeyOf(target);
-    return <button type="button" className="row-menu" aria-haspopup="menu" aria-expanded={openKey === key} aria-label={menuLabel(target)} title={menuLabel(target)}
-      data-menu={key} onClick={event => openMenu(target, elementAnchor(event.currentTarget), event.currentTarget, true)}
+    return <button type="button" className="row-menu" aria-haspopup="menu" aria-expanded={openKey === key} aria-label={a.fileActions(target.path)} title={a.fileActions(target.path)}
+      data-menu={key} onClick={event => openMenu(target, elementAnchor(event.currentTarget, event.detail === 0), event.currentTarget, true)}
       {...menuEvents((anchor, opener) => openMenu(target, anchor, opener, false))}><span aria-hidden="true">⋯</span></button>;
   }
   // After a dialog whose opener row was renamed or removed, focus the selected file's row, else the tree toggle.
@@ -407,15 +369,14 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
     const row = path === null ? null : document.querySelector<HTMLElement>(`#authoring-rail [data-path="${CSS.escape(path)}"]`);
     return row && row.getClientRects().length > 0 ? row : railToggle.current;
   }
-  function groupRow(group: Group, label: string, target: MenuTarget) {
+  function groupRow(group: Group, label: string) {
     const expanded = groups[group];
     // A collapsed group still reports unsaved and changed-on-disk files inside it.
     const unsaved = !expanded && dirty.some(draft => groupOf(draft) === group);
     const stale = !expanded && drafts.some(draft => draft.diskChanged && groupOf(draft) === group);
     return <div className="tree-row group-row">
       <button id={`authoring-group-${group}`} type="button" className="tree-folder tree-group" aria-expanded={expanded} aria-controls={`authoring-group-${group}-items`}
-        aria-keyshortcuts="Shift+F10" onClick={() => setGroups(current => ({...current, [group]: !current[group]}))}
-        {...menuEvents((anchor, opener) => openMenu(target, anchor, opener, false))}>
+        onClick={() => setGroups(current => ({...current, [group]: !current[group]}))}>
         <span className="tree-twisty" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
         <span className="tree-name">{label}</span>
         {(unsaved || stale) && <span className="tree-meta">
@@ -499,18 +460,18 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
       {dirty.length > 0 && <span id="authoring-unsaved-count" className="tag unsaved">{a.unsavedFiles(dirty.length)}</span>}
     </div>
     <div className={railOpen ? 'repo' : 'repo rail-closed'}>
-      <aside id="authoring-rail" className="panel repo-rail" aria-labelledby="authoring-rail-heading" hidden={!railOpen} onContextMenu={contextAt({kind: 'rail'}, 'authoring-group-files')}>
+      <aside id="authoring-rail" className="panel repo-rail" aria-labelledby="authoring-rail-heading" hidden={!railOpen} onContextMenu={event => event.preventDefault()}>
         <div className="rail-heading"><h2 id="authoring-rail-heading">{a.railHeading}</h2>
           <button id="authoring-tree-add" type="button" className="icon-button" aria-label={a.addFile} title={addReason ?? a.addFile}
-            disabled={addReason !== null} onClick={() => setIntent({kind: 'add', fileKind: 'source', prefix: ''})}><span aria-hidden="true">+</span></button>
+            disabled={addReason !== null} onClick={() => setIntent({kind: 'add'})}><span aria-hidden="true">+</span></button>
           {railOpen && railButton}</div>
         <div id="authoring-rail-body" className="rail-body">
           <ul className="file-tree rail-groups">
-            <li onContextMenu={contextAt({kind: 'files'}, 'authoring-group-files')}>
-              {groupRow('files', a.files, {kind: 'files'})}
+            <li>
+              {groupRow('files', a.files)}
               <div id="authoring-group-files-items" className="tree-children" hidden={!groups.files}>
                 <FileTree drafts={drafts.filter(draft => !draft.missing)} selected={session.selected} reveal={revealRequest}
-                  onSelect={path => handlers.select(path, previous())} onMenu={openMenu} menuOpen={openKey}/>
+                  onSelect={path => handlers.select(path, previous())} onMenu={(path, anchor, opener, trigger) => openMenu({kind: 'file', path}, anchor, opener, trigger)} menuOpen={openKey}/>
                 {missing.length > 0 && <section className="rail-missing" aria-labelledby="authoring-missing-heading">
                   <h3 id="authoring-missing-heading">{a.missingHeading}</h3><p className="field-help">{a.missingHelp}</p>
                   <ul id="authoring-missing" className="file-tree">{missing.map(draft => <li key={draft.path}>
@@ -522,8 +483,8 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
                 </section>}
               </div>
             </li>
-            <li onContextMenu={contextAt({kind: 'metadataGroup'}, 'authoring-group-metadata')}>
-              {groupRow('metadata', a.metadataHeading, {kind: 'metadataGroup'})}
+            <li>
+              {groupRow('metadata', a.metadataHeading)}
               <ul id="authoring-group-metadata-items" className="file-tree tree-children" hidden={!groups.metadata}>
                 {metadata.map(draft => {
                   const target: MenuTarget = {kind: 'metadata', path: draft.path};
@@ -565,9 +526,8 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
         {selected && <div className="repo-body">{fileView}</div>}
       </section>
     </div>
-    {menu && <ContextMenu key={menu.serial} id="authoring-menu" label={menuLabel(menu.target)} anchor={menu.anchor} actions={menuActions(menu.target)}
-      heading={'path' in menu.target ? menu.target.kind === 'folder' ? `${menu.target.path}/` : menu.target.path : undefined}
-      toggle={menu.toggle} onClose={closeMenu}/>}
+    {menu && <ContextMenu key={menu.serial} id="authoring-menu" label={a.fileActions(menu.target.path)} anchor={menu.anchor} actions={changeActions(menu.target.path)}
+      heading={menu.target.path} toggle={menu.toggle} onClose={closeMenu}/>}
     <CatalogDialog intent={intent} session={session} reason={catalogReason} onSubmit={handlers.catalog} onClose={() => setIntent(null)} returnFocus={catalogFocus}/>
     <Modal id="authoring-duplicate-dialog" open={duplicating} onCancel={() => setDuplicating(false)} labelledBy="authoring-duplicate-heading" className="catalog-dialog"
       initialFocus="#authoring-duplicate-id" returnFocus={() => document.getElementById('authoring-duplicate-open') ?? railToggle.current}>

@@ -7,10 +7,9 @@ import type {CatalogAddKind, CatalogEdit} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
-// A catalog change chosen from a tree menu. Rename and Remove name the row the menu was opened on, never the
-// selected file; Add carries the kind and the folder prefix of the row or group it was opened from.
+// Add starts at the tree-heading +. Rename and Remove name the menu's row, never the selected file.
 export type CatalogIntent =
-  | {kind: 'add'; fileKind: CatalogAddKind; prefix: string}
+  | {kind: 'add'}
   | {kind: 'rename'; path: string}
   | {kind: 'remove'; path: string};
 
@@ -63,7 +62,7 @@ export default function CatalogDialog({intent, session, reason, onSubmit, onClos
   const modal = {onCancel: onClose, locked: busy, className: 'catalog-dialog', returnFocus};
   return <>
     <Modal id="authoring-add-dialog" open={intent?.kind === 'add'} labelledBy="authoring-add-heading" initialFocus="#authoring-add-path" {...modal}>
-      {intent?.kind === 'add' && <AddForm {...form} kind={intent.fileKind} prefix={intent.prefix}/>}
+      {intent?.kind === 'add' && <AddForm {...form}/>}
     </Modal>
     <Modal id="authoring-rename-dialog" open={intent?.kind === 'rename'} labelledBy="authoring-rename-heading" initialFocus="#authoring-rename-destination" {...modal}>
       {intent?.kind === 'rename' && <RenameForm {...form} path={intent.path}/>}
@@ -88,7 +87,7 @@ function Failure({session, failed}: {session: AuthoringSession; failed: boolean}
   return failed && session.error ? <FaultMessage title={a.actionFailed} value={session.error}/> : null;
 }
 
-// Selects the text once when the dialog focuses the field, so the prefix or file name is ready to type over.
+// Selects the file name once when the dialog focuses the field.
 function useSelectOnce(range: (value: string) => [number, number]) {
   const done = useRef(false);
   return (event: {currentTarget: HTMLInputElement}) => {
@@ -98,13 +97,12 @@ function useSelectOnce(range: (value: string) => [number, number]) {
   };
 }
 
-function AddForm({session, busy, failed, reason, submit, onClose, kind: initialKind, prefix}: FormProps & {kind: CatalogAddKind; prefix: string}) {
+function AddForm({session, busy, failed, reason, submit, onClose}: FormProps) {
   const a = messages[useLocale()].ui.authoring;
-  const [kind, setKind] = useState<CatalogAddKind>(initialKind);
-  const [path, setPath] = useState(prefix);
+  const [kind, setKind] = useState<CatalogAddKind>('source');
+  const [path, setPath] = useState('');
   const [id, setId] = useState('');
   const [module, setModule] = useState('');
-  const caretAtEnd = useSelectOnce(value => [value.length, value.length]);
   const target = path.trim();
   const ready = target !== '' && !target.endsWith('/') && ((kind !== 'profile' && kind !== 'asset') || id.trim() !== '') && (kind !== 'source_map' || module.trim() !== '');
   const blocked = reason({kind: 'add', path: target, file_kind: kind, text: ''});
@@ -123,7 +121,7 @@ function AddForm({session, busy, failed, reason, submit, onClose, kind: initialK
           options={ADD_KINDS.map(value => ({value, label: a.kind(value)}))}/></div>
       <div className="field"><label htmlFor="authoring-add-path">{a.filePath}</label>
         <input id="authoring-add-path" type="text" value={path} spellCheck={false} autoCapitalize="off" autoCorrect="off" placeholder={a.filePathPlaceholder}
-          aria-describedby="authoring-add-folders" readOnly={busy} onFocus={caretAtEnd} onChange={event => setPath(event.target.value)}/>
+          aria-describedby="authoring-add-folders" readOnly={busy} onChange={event => setPath(event.target.value)}/>
         <p id="authoring-add-folders" className="field-help">{a.foldersHelp}</p></div>
       {(kind === 'profile' || kind === 'asset') && <div className="field"><label htmlFor="authoring-add-id">{a.id}</label>
         <input id="authoring-add-id" type="text" value={id} spellCheck={false} autoCapitalize="off" autoCorrect="off" readOnly={busy} onChange={event => setId(event.target.value)}/>

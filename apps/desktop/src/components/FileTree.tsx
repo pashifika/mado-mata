@@ -8,16 +8,13 @@ import type {TreeFolder, TreeNode} from '../metadata.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
-// The row a tree menu acts on: always the row that was pressed, never the selected file.
-export type TreeTarget = {kind: 'file'; path: string} | {kind: 'folder'; path: string};
-
 interface Props {
   drafts: readonly FileDraft[]; selected: string | null; onSelect: (path: string) => void;
   // Changes when the page reveals the selected file (a diagnostic), so its folders open even when it was already selected.
   reveal: number;
   // `trigger` is true for the row's visible menu button, which toggles the menu instead of reopening it.
-  onMenu: (target: TreeTarget, anchor: MenuAnchor, opener: HTMLElement, trigger: boolean) => void;
-  // `file:<path>` or `folder:<path>` of the row whose menu is open.
+  onMenu: (path: string, anchor: MenuAnchor, opener: HTMLElement, trigger: boolean) => void;
+  // `file:<path>` of the row whose menu is open.
   menuOpen: string | null;
 }
 
@@ -25,10 +22,8 @@ function inside(folder: TreeFolder, test: (draft: FileDraft) => boolean): boolea
   return folder.children.some(child => child.kind === 'file' ? test(child.draft) : inside(child, test));
 }
 
-// Scripts and assets by folder. Rows are disclosure buttons in document order rather than an ARIA tree, so every row
-// stays an ordinary focusable button with its own menu button. Right-click, Shift+F10 or the ContextMenu key open
-// the same menu for that row. Collapsing is view state only; selecting or revealing a file (from a diagnostic or
-// after Add or Rename) opens its folders in the same render, so the page can scroll to a visible row.
+// Scripts and assets by folder. Files expose Rename/Remove; folders are disclosure controls only.
+// Collapsing is view state; selecting or revealing a file opens its ancestors before the page scrolls to it.
 export default function FileTree({drafts, selected, reveal, onSelect, onMenu, menuOpen}: Props) {
   const a = messages[useLocale()].ui.authoring;
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
@@ -42,41 +37,38 @@ export default function FileTree({drafts, selected, reveal, onSelect, onMenu, me
   const nodes = fileTree(drafts);
   if (nodes.length === 0) return <p id="authoring-tree-empty" className="muted">{a.treeEmpty}</p>;
 
-  function trigger(target: TreeTarget, label: string) {
-    const key = `${target.kind}:${target.path}`;
-    return <button type="button" className="row-menu" aria-haspopup="menu" aria-expanded={menuOpen === key} aria-label={label} title={label}
-      data-menu={key} onClick={event => onMenu(target, elementAnchor(event.currentTarget), event.currentTarget, true)}
-      {...menuEvents((anchor, opener) => onMenu(target, anchor, opener, false))}><span aria-hidden="true">⋯</span></button>;
+  function trigger(path: string) {
+    const key = `file:${path}`;
+    return <button type="button" className="row-menu" aria-haspopup="menu" aria-expanded={menuOpen === key} aria-label={a.fileActions(path)} title={a.fileActions(path)}
+      data-menu={key} onClick={event => onMenu(path, elementAnchor(event.currentTarget, event.detail === 0), event.currentTarget, true)}
+      {...menuEvents((anchor, opener) => onMenu(path, anchor, opener, false))}><span aria-hidden="true">⋯</span></button>;
   }
 
   function render(list: TreeNode[]) {
     return list.map(node => {
       if (node.kind === 'file') {
         const draft = node.draft;
-        const target: TreeTarget = {kind: 'file', path: draft.path};
         const current = draft.path === selected;
         return <li key={draft.path}><div className={current ? 'tree-row current' : 'tree-row'}>
           <button type="button" className="tree-file" data-path={draft.path} title={draft.path} aria-current={current ? 'true' : undefined}
-            aria-keyshortcuts="Shift+F10" onClick={() => onSelect(draft.path)} {...menuEvents((anchor, opener) => onMenu(target, anchor, opener, false))}>
+            aria-keyshortcuts="Shift+F10" onClick={() => onSelect(draft.path)} {...menuEvents((anchor, opener) => onMenu(draft.path, anchor, opener, false))}>
             <span className="tree-name mono">{node.name}</span>
             {(draft.kind === 'asset' || fileDirty(draft) || draft.diskChanged) && <span className="tree-meta">
               {draft.kind === 'asset' && <span className="tag">{a.kind(draft.kind)}</span>}
               {fileDirty(draft) && <span className="tag unsaved">{a.unsaved}</span>}
               {draft.diskChanged && <span className="tag stale">{a.diskChanged}</span>}</span>}
           </button>
-          {trigger(target, a.fileActions(draft.path))}
+          {trigger(draft.path)}
         </div></li>;
       }
       const expanded = !collapsed.has(node.path);
       const group = `authoring-folder-${encodeURIComponent(node.path)}`;
-      const target: TreeTarget = {kind: 'folder', path: node.path};
       // A collapsed folder still reports unsaved and changed-on-disk files inside it.
       const unsaved = !expanded && inside(node, fileDirty);
       const stale = !expanded && inside(node, draft => draft.diskChanged);
       return <li key={`${node.path}/`}>
         <div className="tree-row">
           <button type="button" className="tree-folder" data-folder={node.path} title={node.path} aria-expanded={expanded} aria-controls={group}
-            aria-keyshortcuts="Shift+F10" {...menuEvents((anchor, opener) => onMenu(target, anchor, opener, false))}
             onClick={() => setCollapsed(current => {
               const next = new Set(current);
               if (expanded) next.add(node.path); else next.delete(node.path);
@@ -88,7 +80,6 @@ export default function FileTree({drafts, selected, reveal, onSelect, onMenu, me
               {unsaved && <span className="tag unsaved">{a.unsaved}</span>}
               {stale && <span className="tag stale">{a.diskChanged}</span>}</span>}
           </button>
-          {trigger(target, a.fileActions(`${node.path}/`))}
         </div>
         <ul id={group} className="file-tree tree-children" hidden={!expanded}>{render(node.children)}</ul>
       </li>;
