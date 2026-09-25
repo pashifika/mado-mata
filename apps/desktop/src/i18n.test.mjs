@@ -89,6 +89,7 @@ const adapterArguments = {
   'ui.authoring.valid': [['rev-A']], 'ui.authoring.invalid': [['rev-A',1],['rev-A',2]], 'ui.authoring.staleValidation': [['rev-A']],
   'ui.authoring.location': [['src/main.ts',3,7]], 'ui.authoring.goTo': [['src/main.ts:3:7']],
   'ui.authoring.renameHeading': [['src/main.ts']], 'ui.authoring.confirmRemove': [['src/main.ts']],
+  'ui.authoring.addIn': [['src/lib/']], 'ui.authoring.fileActions': [['src/main.ts'],['src/lib/']],
   'ui.authoring.block': ['pending','refresh','missing','clean','binary','manifestDirty','fileDirty'].map(kind=>[kind]),
   'ui.authoring.blockedOther': [['workspace-A']], 'ui.authoring.startBlocked': [['workspace-A']], 'ui.authoring.stripKind': [['pkg-A']],
   'ui.authoring.dirtyHeading': ['exit','duplicate','close','closeTab'].map(kind=>[kind]),

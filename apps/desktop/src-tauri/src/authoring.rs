@@ -266,14 +266,20 @@ impl Publisher {
         for name in missing.into_iter().rev() {
             data.push(name);
         }
-        // Only this dedicated source subtree is outside the configuration lifecycle.
-        // The exception never depends on the configurable collection location.
-        let packages = data.join("pkgs");
-        let source_subtree = root.starts_with(&packages) && (collection || root != packages);
+        // Both package areas stay outside the configuration lifecycle, including
+        // explicitly opened sources retained under the former default pkgs root.
+        // These exceptions never depend on the configurable collection location.
+        let source_subtree = root.strip_prefix(&data).is_ok_and(|relative| {
+            let mut parts = relative.components();
+            matches!(
+                parts.next(),
+                Some(std::path::Component::Normal(name)) if name == "sources" || name == "pkgs"
+            ) && (collection || parts.next().is_some())
+        });
         if data.starts_with(root) || (root.starts_with(&data) && !source_subtree) {
             return Err(Fault::new(
                 "AuthoringPath",
-                "package source must be outside private configuration or inside its dedicated pkgs subtree",
+                "package source must be outside private configuration or inside its sources or pkgs subtree",
             ));
         }
         Ok(())

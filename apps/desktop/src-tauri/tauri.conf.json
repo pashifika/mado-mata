@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{"label": "main", "title": "MadoMata", "width": 1180, "height": 840, "minWidth": 760, "minHeight": 600}],
+    "windows": [{"label": "main", "title": "MadoMata", "width": 1180, "height": 840, "minWidth": 760, "minHeight": 600, "devtools": false}],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost",
       "capabilities": [{"identifier": "main", "windows": ["main"], "permissions": ["core:default", "core:window:allow-close"]}]

@@ -547,11 +547,18 @@ pub(crate) mod tests {
     fn packages_subtree_is_not_read_or_admitted_to_configuration_snapshots() {
         let root = Root::new();
         root.put("settings.json", b"retained settings");
-        root.put("pkgs/sample/main.ts", b"source before");
-        root.put("pkgs/sample/profiles/default.json", b"portable preset");
+        for area in ["sources", "pkgs"] {
+            root.put(&format!("{area}/sample/main.ts"), b"source before");
+            root.put(
+                &format!("{area}/sample/profiles/default.json"),
+                b"portable preset",
+            );
+        }
         let before = capture(&root.0).unwrap();
         let observed = capture_between(&root.0, || {
-            fs::write(root.0.join("pkgs/sample/main.ts"), b"source after").unwrap();
+            for area in ["sources", "pkgs"] {
+                fs::write(root.0.join(area).join("sample/main.ts"), b"source after").unwrap();
+            }
         })
         .unwrap();
         assert_eq!(observed, before);
@@ -559,21 +566,23 @@ pub(crate) mod tests {
             observed.files,
             BTreeMap::from([("settings.json".into(), b"retained settings".to_vec())])
         );
-        assert!(
-            Capture::from_files(
-                BTreeMap::from([("pkgs/sample/main.ts".into(), b"overwrite".to_vec())]),
-                true,
-            )
-            .is_err()
-        );
-        assert_eq!(
-            fs::read(root.0.join("pkgs/sample/main.ts")).unwrap(),
-            b"source after"
-        );
-        assert_eq!(
-            fs::read(root.0.join("pkgs/sample/profiles/default.json")).unwrap(),
-            b"portable preset"
-        );
+        for area in ["sources", "pkgs"] {
+            assert!(
+                Capture::from_files(
+                    BTreeMap::from([(format!("{area}/sample/main.ts"), b"overwrite".to_vec())]),
+                    true,
+                )
+                .is_err()
+            );
+            assert_eq!(
+                fs::read(root.0.join(area).join("sample/main.ts")).unwrap(),
+                b"source after"
+            );
+            assert_eq!(
+                fs::read(root.0.join(area).join("sample/profiles/default.json")).unwrap(),
+                b"portable preset"
+            );
+        }
     }
 
     #[test]

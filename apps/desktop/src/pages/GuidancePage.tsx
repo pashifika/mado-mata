@@ -99,21 +99,21 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
     {!owner && <section id="edit-form" className="panel open-form" aria-labelledby="edit-heading"><div className="panel-body">
       <h2 id="edit-heading">{a.openHeading}</h2>
       <p className="muted">{a.openHelp}</p>
-      <div className="field"><label htmlFor="authoring-package-id">{a.packageId}</label>
+      <div className="open-row"><div className="field"><label htmlFor="authoring-package-id">{a.packageId}</label>
         <input id="authoring-package-id" type="text" value={workspace.editPackageId} disabled={workspace.busy !== null} spellCheck={false}
-          onChange={event => authoring.onPackageId(event.target.value)}/>
-        <p className="field-help">{a.packageIdHelp}</p></div>
+          onChange={event => authoring.onPackageId(event.target.value)}/></div>
+        <button id="authoring-create" type="button" className="primary" disabled={authoring.block !== null || destination === null} onClick={authoring.onCreate}>{a.create}</button>
+      </div>
+      <p className="field-help">{a.packageIdHelp}</p>
       <dl className="run-identity"><dt>{a.packagesRoot}</dt><dd className="mono">{packagesRoot}</dd>
         {destination && <><dt>{a.createDestination}</dt><dd id="authoring-destination" className="mono">{destination}</dd></>}</dl>
-      <div className="button-row">
-        <button id="authoring-create" type="button" className="primary" disabled={authoring.block !== null || destination === null} onClick={authoring.onCreate}>{a.create}</button>
-        <span id="authoring-block" className="muted" role="status">{authoring.block ?? ''}</span>
-      </div>
+      <div id="authoring-block" className="muted" role="status">{authoring.block ?? ''}</div>
       <hr/>
-      <div className="field"><label htmlFor="authoring-path">{a.packageDirectory}</label>
+      <div className="open-row"><div className="field"><label htmlFor="authoring-path">{a.packageDirectory}</label>
         <input id="authoring-path" type="text" value={workspace.editPath} disabled={workspace.busy !== null} placeholder={a.packagePlaceholder} spellCheck={false}
           onChange={event => authoring.onPath(event.target.value)}/></div>
-      <button id="authoring-open" type="button" disabled={authoring.block !== null || !workspace.editPath.trim()} onClick={() => authoring.onOpen(workspace.editPath.trim())}>{a.open}</button>
+        <button id="authoring-open" type="button" disabled={authoring.block !== null || !workspace.editPath.trim()} onClick={() => authoring.onOpen(workspace.editPath.trim())}>{a.open}</button>
+      </div>
     </div></section>}
     <ProfileRecovery idPrefix="recovery" label={label} state={workspace.recovery} outcomes={workspace.recoveryOutcomes} locked={locked} handlers={recovery}/>
     <section className="panel open-form" aria-labelledby="inspect-heading">

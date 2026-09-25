@@ -97,10 +97,10 @@ apps/desktop/src-tauri/target/debug/mado-mata-desktop --data-dir "$HOME/.config/
 ```
 
 `--data-dir PATH` selects the configuration root explicitly and skips historical-root
-discovery. It also supplies the default package collection at `PATH/pkgs`; it does
-not select a runner, compiler, package to inspect, or input route. Keep the root
-outside an existing package source and public tracked files. Reuse it for restart
-checks; choose another private root to isolate work without deleting existing data.
+discovery. It also supplies the default editable collection at `PATH/sources`; it
+does not select a runner, compiler, package to inspect, or input route. Keep the
+root outside an existing package source and public tracked files. Reuse it for
+restart checks; choose another private root to isolate work without deleting data.
 An absent root is not created merely by launching the application.
 
 New application-owned directories use private Unix permissions. Existing managed
@@ -218,32 +218,42 @@ under a new package ID and updates package ownership in each packaged preset. It
 settings, named-workspace profiles, target bindings, or execution results.
 Neither action inspects, binds, or runs the package.
 
-- **Application → App settings → Packages** sets the packages root. Blank uses
-  `<data-dir>/pkgs` beside `settings.json` (normally
-  `$HOME/.config/mado-mata/pkgs`). **Create or open a package** and **Duplicate**
+- **Application → App settings → Packages** sets the sources folder. Blank uses
+  `<data-dir>/sources` beside `settings.json` (normally
+  `$HOME/.config/mado-mata/sources`). **Create or open a package** and **Duplicate**
   ask only for Package ID and show the derived destination. Settings Save creates
   nothing; valid Create/Duplicate creates missing parents. Changing the root
   neither moves existing packages nor retargets an active Edit session.
+- `authoring` remains private publication-journal storage. `pkgs` is reserved for
+  downloaded/packaged content; this does not add a download or archive feature.
+  Existing explicit roots and package references under `pkgs` remain usable.
 - Create and Duplicate require a missing destination. Existing package roots,
-  links, traversal and aliases are refused. Under the App data root, only the
-  dedicated `pkgs` subtree can contain source, never configuration or journals.
+  links, traversal and aliases are refused. Under the App data root, source is
+  allowed only within `sources` or `pkgs`, never configuration or journals.
   **Open for Edit** still accepts an existing external package directory.
+- The collapsible left tree contains **Files**, **Metadata** and **Duplicate**.
+  Selecting a file or metadata item displays its editor, form or facts on the
+  right. Collapsing the navigation leaves the current detail and drafts intact.
 - **Files** contains scripts and assets in expandable folders. Folder nodes come
   from declared paths: adding or renaming `src/lib/helper.ts` creates its parents.
   There is no independent empty-folder operation. Scripts have independent
   drafts, selection, undo/redo, literal search and line numbers. Assets are
   inventory facts, not decoded or text-edited.
-- **Package metadata** opens structured manifest, option-schema and packaged
-  preset controls; generated source maps are read-only facts. Metadata never
+- **Metadata** opens structured manifest, option-schema and packaged preset
+  controls; generated source maps are read-only facts. Metadata never
   opens in the code textarea. Manifest controls preserve package identity and
   declarations while editing supported entries and portable target intent.
   Malformed schema/preset bytes remain unchanged until deliberate repair and
   Save; rebuilding an invalid document requires confirmation. Saved local
   workspace profiles are not part of these forms.
-- **Manage files** adds sources, presets, JSON assets or source maps and
-  coordinates declarations. Rename changes declarations, not source imports.
-  Required entries/schema/presets cannot be removed. Unsafe paths, links,
-  collisions and undeclared files are refused.
+- Right-click a file, use its menu button, or press **Shift+F10** / the
+  **Context Menu** key for Add/Rename/Remove. Actions target that row, not another
+  selected file. Add supports sources, presets, JSON assets and source maps;
+  folders provide their path as the initial destination. Rename updates
+  declarations, not source imports. Required entries/schema/presets cannot be
+  removed; unsafe paths, links, collisions and undeclared files are refused.
+  The shell disables the ordinary Web Inspector, including debug builds; normal
+  text-editing clipboard menus remain available outside these owned menus.
 - **Save file** and **Save all** publish drafts without running or validating
   them. Incomplete script or invalid metadata values can be saved for later
   repair; they are not an executable inventory. A later edit stays dirty if an
@@ -281,9 +291,9 @@ inventory. A pending journal blocks package admission after restart. Use the
 displayed **Recover interrupted save** action for its recorded package: recovery
 rolls forward only matching old/new bytes and preserves conflicting external
 content. Do not delete the journal to bypass refusal. Configuration snapshots
-exclude both package source and this source-publication journal. Snapshot
-destinations inside the default or configured package collection, or an existing
-package, are refused before creating directories or archives.
+exclude package source and this source-publication journal. Snapshot destinations
+inside `sources`, `pkgs`, the configured collection, or an existing package are
+refused before creating directories or archives.
 
 Interruption regressions cover process-level failures, not physical power loss.
 Windows core checks do not qualify crash durability or an additional desktop OS;
@@ -1019,13 +1029,17 @@ Japanese. Do not replace actual WebView interaction with mocked command results.
 Use an isolated App data root and disposable package collections. Keep screenshots,
 local paths, and compiler/run records outside public commits.
 
-1. Create a TypeScript starter by ID under the default `pkgs` root. Change the
-   packages root in settings; saving must not create or move source. Restart and
-   create another package using the saved root. Open an existing external source.
+1. Create a TypeScript starter by ID under the default `sources` root. Change the
+   sources folder in settings; saving must not create or move source. Restart and
+   create another package using the saved root. Open an existing external source
+   and a previously referenced package under `pkgs`; neither should be relocated.
 2. Add `src/lib/helper.ts`, edit two scripts and check independent undo/redo,
-   selection, search, line numbers and composition. Expand/collapse folders,
-   rename the helper into another folder, Save and reopen. Files must contain only
-   scripts/assets; metadata must open as forms or facts, without a code textarea.
+   selection, search, line numbers and composition. Expand/collapse folders and
+   the entire left navigation; selection and drafts must survive. Use right-click,
+   keyboard and menu-button actions to rename the helper into another folder,
+   Save and reopen. Cancel removal, then confirm it; verify only the targeted
+   helper changes and required-reference removal is refused. Files must contain
+   only scripts/assets; Metadata opens forms or facts on the right, not code.
    Edit schema and preset fields through those forms, including a numeric draft
    across file/page navigation. Refuse occupied or nested package destinations.
    Duplicate by ID; verify original bytes and absence of App-local configuration

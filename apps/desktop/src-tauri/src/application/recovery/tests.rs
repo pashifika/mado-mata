@@ -320,43 +320,45 @@ fn incomplete_reset_returns_declared_defaults_without_writing_and_can_be_complet
 
 #[test]
 fn confirmed_reset_replaces_only_values_and_preserves_other_profile_bytes() {
-    let fixture = Fixture::new();
-    let path = fixture.package_at("pkgs/source");
-    install_schema(&path, &schema(10), json!({}));
-    let selected = inspect_named(&fixture.application, "Main", &path).unwrap();
-    let first = save(&fixture, &selected, "Reset me", json!({"count":9}));
-    let second = save(&fixture, &selected, "Leave me", json!({"count":8}));
-    let second_file = profile_path(&fixture, "Main", &second);
-    let before = fs::read(&second_file).unwrap();
-    install_schema(&path, &schema(5), json!({}));
-    let source_files = [
-        "package.json",
-        "main.js",
-        "decisions.js",
-        "schema.json",
-        "profiles/template-first.json",
-        "profiles/ocr-first.json",
-        "assets/marker.rgba",
-    ];
-    let source_bytes: Vec<_> = source_files
-        .iter()
-        .map(|name| fs::read(path.join(name)).unwrap())
-        .collect();
-    let context = recovery(&fixture, &path, &selected);
-    let reset = fixture
-        .application
-        .reset_profile(&context, &first.id, true)
-        .unwrap()
-        .saved
-        .unwrap();
-    assert_eq!(reset.values, json!({"count":1,"order":["first"]}));
-    assert_eq!(
-        (reset.id, reset.name, reset.version, reset.package_id),
-        (first.id, first.name, first.version, first.package_id)
-    );
-    assert_eq!(fs::read(second_file).unwrap(), before);
-    for (name, expected) in source_files.iter().zip(source_bytes) {
-        assert_eq!(fs::read(path.join(name)).unwrap(), expected, "{name}");
+    for area in ["sources", "pkgs"] {
+        let fixture = Fixture::new();
+        let path = fixture.package_at(&format!("{area}/source"));
+        install_schema(&path, &schema(10), json!({}));
+        let selected = inspect_named(&fixture.application, "Main", &path).unwrap();
+        let first = save(&fixture, &selected, "Reset me", json!({"count":9}));
+        let second = save(&fixture, &selected, "Leave me", json!({"count":8}));
+        let second_file = profile_path(&fixture, "Main", &second);
+        let before = fs::read(&second_file).unwrap();
+        install_schema(&path, &schema(5), json!({}));
+        let source_files = [
+            "package.json",
+            "main.js",
+            "decisions.js",
+            "schema.json",
+            "profiles/template-first.json",
+            "profiles/ocr-first.json",
+            "assets/marker.rgba",
+        ];
+        let source_bytes: Vec<_> = source_files
+            .iter()
+            .map(|name| fs::read(path.join(name)).unwrap())
+            .collect();
+        let context = recovery(&fixture, &path, &selected);
+        let reset = fixture
+            .application
+            .reset_profile(&context, &first.id, true)
+            .unwrap()
+            .saved
+            .unwrap();
+        assert_eq!(reset.values, json!({"count":1,"order":["first"]}));
+        assert_eq!(
+            (reset.id, reset.name, reset.version, reset.package_id),
+            (first.id, first.name, first.version, first.package_id)
+        );
+        assert_eq!(fs::read(second_file).unwrap(), before);
+        for (name, expected) in source_files.iter().zip(source_bytes) {
+            assert_eq!(fs::read(path.join(name)).unwrap(), expected, "{name}");
+        }
     }
 }
 

@@ -509,8 +509,25 @@ fn create_and_save_accept_incomplete_text_but_refuse_stale_revisions() {
             .root
             .canonicalize()
             .unwrap()
-            .join("pkgs/created-package")
+            .join("sources/created-package")
     );
+    assert!(!sources.fixture.root.join("pkgs").exists());
+    let original_script = Path::new(&editor.package_path).join("main.ts");
+    let before = fs::read(&original_script).unwrap();
+    let editor = app
+        .authoring_duplicate(&editor.owner, &editor.revision, "copied-package")
+        .unwrap();
+    assert_eq!(
+        Path::new(&editor.package_path),
+        sources
+            .fixture
+            .root
+            .canonicalize()
+            .unwrap()
+            .join("sources/copied-package")
+    );
+    assert_eq!(editor.package_id, "copied-package");
+    assert!(!sources.fixture.root.join("pkgs").exists());
     let saved = app
         .authoring_save(
             &editor.owner,
@@ -535,6 +552,7 @@ fn create_and_save_accept_incomplete_text_but_refuse_stale_revisions() {
             .unwrap()
             .valid
     );
+    assert_eq!(fs::read(original_script).unwrap(), before);
     app.authoring_exit(&editor.owner).unwrap();
 }
 
@@ -582,10 +600,14 @@ fn restarted_generation_cannot_reuse_an_authoring_token() {
 fn saved_packages_root_changes_only_future_destinations_and_survives_restart() {
     let sources = Sources::new();
     let app = sources.app();
-    let workspace = app.create_workspace("owner", "Owner").unwrap();
+    let old_source = sources.fixture.package_at("pkgs/original");
+    let selected = inspect_named(app, "owner", &old_source).unwrap();
     let original = app
-        .authoring_create(&view_ref(&workspace), "original")
+        .authoring_open(&workspace_ref(&selected), &old_source)
         .unwrap();
+    assert!(!sources.fixture.root.join("sources").exists());
+    let tab_file = sources.fixture.root.join("tabs/owner/tab.config");
+    let saved_binding = fs::read(&tab_file).unwrap();
     let original_root = PathBuf::from(&original.package_path);
     let before = fs::read(original_root.join("package.json")).unwrap();
     let custom = sources.root.join("collections/new");
@@ -598,6 +620,7 @@ fn saved_packages_root_changes_only_future_destinations_and_survives_restart() {
         app.authoring_refresh(&original.owner).unwrap().package_path,
         original.package_path
     );
+    assert_eq!(fs::read(&tab_file).unwrap(), saved_binding);
     let duplicate = app
         .authoring_duplicate(&original.owner, &original.revision, "copy")
         .unwrap();
@@ -621,8 +644,28 @@ fn saved_packages_root_changes_only_future_destinations_and_survives_restart() {
         restarted.settings().unwrap().packages_root.as_deref(),
         custom.to_str()
     );
-    let current = view_ref(&restarted.workspace_catalog().unwrap().open[0]);
-    let created = restarted.authoring_create(&current, "later").unwrap();
+    let catalog = restarted.workspace_catalog().unwrap();
+    let restored = &catalog.open[0];
+    assert_eq!(
+        restored.saved_package.as_ref().unwrap().source,
+        crate::storage::PackageSource::Directory {
+            path: original.package_path.clone()
+        }
+    );
+    assert_eq!(
+        restored.selection.as_ref().unwrap().package_path,
+        original.package_path
+    );
+    assert_eq!(fs::read(&tab_file).unwrap(), saved_binding);
+    let reopened = restarted
+        .authoring_open(&view_ref(restored), &old_source)
+        .unwrap();
+    assert_eq!(reopened.revision, original.revision);
+    assert_eq!(reopened.package_path, original.package_path);
+    let current = restarted.authoring_exit(&reopened.owner).unwrap();
+    let created = restarted
+        .authoring_create(&view_ref(&current), "later")
+        .unwrap();
     assert_eq!(
         Path::new(&created.package_path),
         custom.canonicalize().unwrap().join("later")
@@ -660,6 +703,7 @@ fn invalid_package_ids_do_not_create_the_missing_collection() {
             "{id}"
         );
         assert!(!sources.fixture.root.join("pkgs").exists());
+        assert!(!sources.fixture.root.join("sources").exists());
         assert!(app.authoring_owner().is_none());
     }
 }

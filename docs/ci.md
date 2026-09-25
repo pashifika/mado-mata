@@ -135,12 +135,13 @@ The full check has these responsibilities:
   Optional OCR settings, bounded replay projection, admission races, and
   pre-startup failures are checked without loading a real OCR backend.
   Directory-authoring regressions cover configured ID-only destinations, source
-  ownership, configuration-only preservation, snapshot source exclusion, revision
-  conflicts, interrupted publication, global Edit admission, non-evaluating
-  validation and bounded close/cleanup. Frontend checks cover structured metadata
-  round trips and numeric draft provenance. Actual
+  ownership, configuration-only preservation of `sources` and `pkgs`, snapshot
+  source exclusion, revision conflicts, interrupted publication, global Edit
+  admission, non-evaluating validation and bounded close/cleanup. Frontend checks
+  cover structured metadata round trips and numeric draft provenance. Actual
   [Edit WebView acceptance](desktop.md#directory-package-authoring-acceptance),
-  physical OS IME input, and storage power-loss durability are not hosted CI claims.
+  including left-tree navigation and contextual file actions, physical OS IME
+  input, and storage power-loss durability are not hosted CI claims.
 - On macOS, build the real Tauri shell with `--features custom-protocol` after
   building frontend assets. The test-only `webdriver` feature is not enabled.
   The separate engine artifact and actual

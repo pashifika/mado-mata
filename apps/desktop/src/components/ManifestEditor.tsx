@@ -24,7 +24,7 @@ function TextField({id, label, value, help, error, onChange}: {id: string; label
 }
 
 // The manifest as a form: runtime, entry exports, the approved helper and the portable target declaration are edited
-// in place; identity and file declarations are facts here, changed through Duplicate and Manage files. The host
+// in place; identity and file declarations are facts here, changed through Duplicate and the file menus. The host
 // validates every Save, so a rejected edit stays a draft with the refusal shown.
 export default function ManifestEditor({draft, disabled, onReplace, onOpen}: Props) {
   const a = messages[useLocale()].ui.authoring;

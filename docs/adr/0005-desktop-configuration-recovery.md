@@ -43,11 +43,13 @@ publication separate from configuration snapshots and profile reconciliation.
 
 Manual authoring acceptance clarified that source/configuration separation is
 an ownership boundary, not a requirement for unrelated parent directories.
-The default collection is `<data-dir>/pkgs`; a saved packages-root override
-changes only future ID-derived Create/Duplicate destinations. Managed capture,
-restore and reset never traverse or replace that subtree. Other private
+The default editable collection is `<data-dir>/sources`; a saved packages-root
+override changes only future ID-derived Create/Duplicate destinations. `pkgs`
+is reserved for downloaded/packaged content, while existing explicit references
+remain usable. Managed capture, restore and reset never traverse or replace
+either subtree. `authoring` remains private publication-journal storage. Other
 configuration/transaction paths remain forbidden source locations; existing
-packages and active leases are not moved by preference changes.
+packages, explicit roots and active leases are not moved by preference changes.
 
 Amend [ADR 0004](0004-desktop-localization-resources.md) only for presentation
 before settings are available: the temporary language and Setup's saved-language
@@ -81,8 +83,8 @@ requires supported schemas and consistent Tab/package/profile ownership.
 Publish exactly `app.config.<seconds>` from synced private staging and verify
 the published archive. A name collision is a failure, not permission to overwrite
 or choose a suffix. Destinations resolve existing ancestors and cannot enter
-managed `tabs/`, `profiles/`, `.restore*`, the default/configured package
-collection, or an existing package. Source exclusion precedes directory and
+managed `tabs/`, `profiles/`, `.restore*`, either `sources` or `pkgs`, the configured
+package collection, or an existing package. Source exclusion precedes directory and
 archive creation, including when malformed settings need a raw recovery
 snapshot. Missing-only publication uses `renamex_np(RENAME_EXCL)` on macOS,
 `renameat2(RENAME_NOREPLACE)` on Linux, and `MoveFileExW` with flags `0` on

@@ -32,7 +32,9 @@ fn legacy_settings_load_without_rewrite_and_preferences_preserve_current_hint() 
     assert_eq!(loaded.locale, Locale::English);
     assert!(loaded.backup_directory.is_none());
     assert!(loaded.packages_root.is_none());
-    assert_eq!(store.packages_root().unwrap(), directory.0.join("pkgs"));
+    assert_eq!(store.packages_root().unwrap(), directory.0.join("sources"));
+    assert!(!directory.0.join("sources").exists());
+    assert!(!directory.0.join("pkgs").exists());
     assert_eq!(fs::read(&path).unwrap(), original);
     let draft = EditableSettings {
         locale: Locale::Japanese,
@@ -138,6 +140,8 @@ fn packages_root_persists_without_creating_or_moving_source_and_can_return_to_de
     let custom = directory.0.join("sources/nested");
     let store = Store::new(root.clone()).unwrap();
     store.initialize(preferences()).unwrap();
+    assert_eq!(store.packages_root().unwrap(), root.join("sources"));
+    assert!(!root.join("sources").exists());
     assert!(!root.join("pkgs").exists());
     let mut draft = preferences();
     draft.packages_root = Some(custom.to_str().unwrap().into());
@@ -146,8 +150,17 @@ fn packages_root_persists_without_creating_or_moving_source_and_can_return_to_de
     assert_eq!(reopened.packages_root().unwrap(), custom);
     assert!(!custom.exists());
     assert!(!directory.0.join("sources").exists());
+    let mut legacy = preferences();
+    legacy.packages_root = Some(root.join("pkgs").to_str().unwrap().into());
+    reopened.save_preferences(legacy).unwrap();
+    assert_eq!(
+        Store::new(root.clone()).unwrap().packages_root().unwrap(),
+        root.join("pkgs")
+    );
+    assert!(!root.join("pkgs").exists());
     reopened.save_preferences(preferences()).unwrap();
-    assert_eq!(reopened.packages_root().unwrap(), root.join("pkgs"));
+    assert_eq!(reopened.packages_root().unwrap(), root.join("sources"));
+    assert!(!root.join("sources").exists());
     assert!(!root.join("pkgs").exists());
 }
 
@@ -176,6 +189,7 @@ fn invalid_packages_roots_preserve_settings_and_private_configuration() {
         root.join("authoring").to_str().unwrap().into(),
         root.join(".restore-journal").to_str().unwrap().into(),
         root.join("pkgs-other").to_str().unwrap().into(),
+        root.join("sources-other").to_str().unwrap().into(),
     ] {
         let mut draft = preferences();
         draft.packages_root = Some(path);
@@ -183,6 +197,7 @@ fn invalid_packages_roots_preserve_settings_and_private_configuration() {
         assert_eq!(fs::read(root.join("settings.json")).unwrap(), before);
     }
     assert!(!root.join("pkgs").exists());
+    assert!(!root.join("sources").exists());
     assert!(!root.join("tabs").exists());
     assert!(!root.join("authoring").exists());
 }

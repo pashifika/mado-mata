@@ -223,7 +223,7 @@ fn check_destination(root: &Path, directory: &Path, capture: &Capture) -> Result
     if let Ok(relative) = Path::new(&directory).strip_prefix(&root) {
         if let Some(Component::Normal(component)) = relative.components().next() {
             let component = component.to_string_lossy();
-            if matches!(component.as_ref(), "tabs" | "profiles" | "pkgs")
+            if matches!(component.as_ref(), "tabs" | "profiles" | "sources" | "pkgs")
                 || component.starts_with(".restore")
             {
                 return Err(invalid(
@@ -744,10 +744,15 @@ mod tests {
             "tabs/Backup",
             "TABS/Backup",
             "profiles/Backup",
+            "sources",
+            "sources/Backup",
+            "SOURCES/Backup",
+            "pkgs",
             "pkgs/Backup",
             "PKGS/Backup",
             ".restore-journal/Backup",
             "absent/../tabs/Backup",
+            "absent/../sources/Backup",
         ] {
             let destination = root.0.join(relative);
             assert!(write_at(&root.0, original.clone(), Some(&destination), 42).is_err());
@@ -761,8 +766,13 @@ mod tests {
     fn configuration_backup_excludes_packages_and_preserves_source_bytes() {
         let root = Root::new();
         root.put("settings.json", b"configuration");
-        root.put("pkgs/sample/main.ts", b"export const source = 42;");
-        root.put("pkgs/sample/assets/pixel.rgba", &[1, 2, 3, 255]);
+        for area in ["sources", "pkgs"] {
+            root.put(
+                &format!("{area}/sample/main.ts"),
+                b"export const source = 42;",
+            );
+            root.put(&format!("{area}/sample/assets/pixel.rgba"), &[1, 2, 3, 255]);
+        }
         let original = capture(&root.0).unwrap();
         let receipt = write_at(&root.0, original.clone(), None, 43).unwrap();
         assert_eq!(read(Path::new(&receipt.path)).unwrap(), original);
@@ -770,16 +780,19 @@ mod tests {
             original.files,
             BTreeMap::from([("settings.json".into(), b"configuration".to_vec())])
         );
-        assert_eq!(
-            fs::read(root.0.join("pkgs/sample/main.ts")).unwrap(),
-            b"export const source = 42;"
-        );
-        assert_eq!(
-            fs::read(root.0.join("pkgs/sample/assets/pixel.rgba")).unwrap(),
-            [1, 2, 3, 255]
-        );
-        assert!(write_at(&root.0, original, Some(&root.0.join("pkgs/sample")), 44).is_err());
-        assert!(!root.0.join("pkgs/sample/app.config.44").exists());
+        for area in ["sources", "pkgs"] {
+            let package = root.0.join(area).join("sample");
+            assert_eq!(
+                fs::read(package.join("main.ts")).unwrap(),
+                b"export const source = 42;"
+            );
+            assert_eq!(
+                fs::read(package.join("assets/pixel.rgba")).unwrap(),
+                [1, 2, 3, 255]
+            );
+            assert!(write_at(&root.0, original.clone(), Some(&package), 44).is_err());
+            assert!(!package.join("app.config.44").exists());
+        }
     }
 
     #[test]
@@ -883,16 +896,18 @@ mod tests {
         root.put("settings.json", b"preserve");
         std::os::unix::fs::symlink(&root.0, outside.0.join("alias")).unwrap();
         let original = capture(&root.0).unwrap();
-        assert!(
-            write_at(
-                &root.0,
-                original.clone(),
-                Some(&outside.0.join("alias/tabs/Backup")),
-                42
-            )
-            .is_err()
-        );
-        assert!(!root.0.join("tabs").exists());
+        for area in ["tabs", "sources", "pkgs"] {
+            assert!(
+                write_at(
+                    &root.0,
+                    original.clone(),
+                    Some(&outside.0.join(format!("alias/{area}/Backup"))),
+                    42
+                )
+                .is_err()
+            );
+            assert!(!root.0.join(area).exists());
+        }
         assert_eq!(capture(&root.0).unwrap(), original);
     }
 }

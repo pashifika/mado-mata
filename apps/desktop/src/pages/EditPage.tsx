@@ -1,12 +1,18 @@
-import {useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
-import type {RefObject} from 'react';
+import {Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
+import type {MouseEvent, RefObject} from 'react';
+import {flushSync} from 'react-dom';
+import CatalogDialog from '../components/CatalogDialog.tsx';
+import type {CatalogIntent} from '../components/CatalogDialog.tsx';
+import ContextMenu, {elementAnchor, menuEvents, pointAnchor} from '../components/ContextMenu.tsx';
+import type {MenuAction, MenuAnchor} from '../components/ContextMenu.tsx';
 import FileTree from '../components/FileTree.tsx';
+import type {TreeTarget} from '../components/FileTree.tsx';
 import ManifestEditor from '../components/ManifestEditor.tsx';
+import Modal from '../components/Modal.tsx';
 import {AssetView, SourceMapView} from '../components/MetadataFacts.tsx';
 import PresetEditor from '../components/PresetEditor.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
 import SchemaEditor from '../components/SchemaEditor.tsx';
-import Select from '../components/Select.tsx';
 import {AUTHORING_RECOVERY, catalogBlock, diagnosticLocation, dirtyDrafts, draftList, fileDirty, findMatch, lineColumn, lineCount, matchSummary, offsetAt, saveBlock, shortRevision, validationCurrent} from '../authoring.ts';
 import type {AuthoringSession, EditInput, FileDraft, Snapshot, TextRange, TypedText} from '../authoring.ts';
 import {parseJson, readManifest, treeKind} from '../metadata.ts';
@@ -18,8 +24,28 @@ import {useLocale} from '../locale.tsx';
 // One editor line in CSS pixels; `.code-editor` in style.css uses the same line height for text and gutter.
 const LINE_HEIGHT = 18;
 const INDENT = '  ';
-// Metadata list order below the Files tree; the tree holds sources and assets.
+// Metadata row order in the tree's Metadata group; the Files group holds sources and assets.
 const METADATA_ORDER: Record<AuthoringFileKind, number> = {manifest: 0, schema: 1, profile: 2, source_map: 3, source: 4, asset: 5};
+
+// The tree's two file groups. Selecting a row shows that file's editor, form or facts on the right.
+type Group = 'files' | 'metadata';
+// What a menu acts on. Every target names the row it was opened from; the selected file is never implied.
+type MenuTarget = TreeTarget | {kind: 'files'} | {kind: 'metadata'; path: string} | {kind: 'metadataGroup'} | {kind: 'rail'};
+interface OpenMenu {serial: number; target: MenuTarget; anchor: MenuAnchor; opener: HTMLElement | null; toggle: HTMLElement | null}
+
+// Sources, assets and drafts of files no longer declared belong to Files; declared metadata belongs to Metadata.
+function groupOf(draft: FileDraft): Group {
+  return draft.missing || treeKind(draft.kind) ? 'files' : 'metadata';
+}
+
+// The folder part of a package path with its trailing slash, or '' for a file at the package root.
+function folderOf(path: string): string {
+  return path.slice(0, path.lastIndexOf('/') + 1);
+}
+
+function menuKeyOf(target: MenuTarget): string {
+  return 'path' in target ? `${target.kind}:${target.path}` : target.kind;
+}
 
 export interface EditHandlers {
   select: (path: string, previous: TextRange | null) => void;
@@ -36,9 +62,9 @@ export interface EditHandlers {
   save: (path: string) => void; saveAll: () => void;
   validate: () => void; stopValidation: () => void;
   refresh: () => void; recover: () => void;
-  // Resolves true once the host committed the edit, so the form can be cleared.
+  // Resolves true once the host committed the edit, so the Add, Rename or Remove dialog can close.
   catalog: (edit: CatalogEdit) => Promise<boolean>;
-  // The host places the copy in the configured packages root under the new ID.
+  // The host places the copy in the configured packages root (the sources folder) under the new ID.
   duplicate: (packageId: string) => void;
   exit: () => void;
 }
@@ -59,7 +85,7 @@ export interface PageAuthoring {
 
 interface Props {
   session: AuthoringSession; label: string; handlers: EditHandlers;
-  // The effective packages root the host resolves Duplicate destinations in; shown as a preview only.
+  // The effective packages root (the sources folder) the host resolves Duplicate destinations in; shown as a preview only.
   packagesRoot: string;
   // Another host command is in flight or the application is closing; typing stays available.
   locked: boolean; lockReason: string | null;
@@ -192,12 +218,6 @@ function CodeEditor({draft, reveal, readOnly, label, help, selection, handlers, 
   </div>;
 }
 
-function starterText(kind: CatalogAddKind, packageId: string): string {
-  if (kind === 'profile') return `${JSON.stringify({package_id: packageId, schema_version: 1, options: {}}, null, 2)}\n`;
-  if (kind === 'source_map') return `${JSON.stringify({version: 3, sources: [], names: [], mappings: ''})}\n`;
-  return kind === 'asset' ? '{}\n' : '';
-}
-
 export default function EditPage({session, label, handlers, packagesRoot, locked, lockReason, leaseLost, validationActive}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
@@ -211,12 +231,6 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
   const selection = useRef<TextRange>(selected?.range ?? {start: 0, end: 0});
   const searchInput = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
-  const [addKind, setAddKind] = useState<CatalogAddKind>('source');
-  const [addPath, setAddPath] = useState('');
-  const [addId, setAddId] = useState('');
-  const [addModule, setAddModule] = useState('');
-  const [destination, setDestination] = useState(selected?.path ?? '');
-  const [confirmRemove, setConfirmRemove] = useState(false);
   const [duplicateId, setDuplicateId] = useState('');
   const manifestText = drafts.find(draft => draft.kind === 'manifest' && !draft.missing)?.text ?? null;
   // Declarations name presets, maps and assets; the manifest view never changes them, so its draft is authoritative here.
@@ -224,11 +238,45 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
     const document = manifestText === null ? null : parseJson(manifestText);
     return document?.ok ? readManifest(document.value) : null;
   }, [manifestText]);
-  useEffect(() => {
-    setDestination(selected?.path ?? '');
-    setConfirmRemove(false);
-  }, [selected?.path]);
 
+  // Tree disclosure is view state only. Selecting a file in a collapsed group (from a form, a diagnostic, Add or
+  // Rename) opens the group in the same render, so the row is visible when the page reveals it.
+  const selectedGroup = selected ? groupOf(selected) : null;
+  const [groups, setGroups] = useState<Record<Group, boolean>>({files: true, metadata: true});
+  const [revealRequest, setRevealRequest] = useState(0);
+  const revealKey = `${revealRequest}:${session.selected ?? ''}`;
+  const [revealedKey, setRevealedKey] = useState(revealKey);
+  if (revealedKey !== revealKey) {
+    setRevealedKey(revealKey);
+    if (selectedGroup !== null && !groups[selectedGroup]) setGroups({...groups, [selectedGroup]: true});
+  }
+  // A diagnostic brings the file into sight on both sides; the editor itself focuses without scrolling the page.
+  useEffect(() => {
+    if (revealRequest === 0) return;
+    const main = document.getElementById('authoring-main');
+    const top = main?.getBoundingClientRect().top ?? 0;
+    if (main && (top < 0 || top > window.innerHeight / 2)) main.scrollIntoView({block: 'start'});
+    const body = document.getElementById('authoring-rail-body');
+    const path = session.selected;
+    const row = body && path !== null ? body.querySelector<HTMLElement>(`[data-path="${CSS.escape(path)}"]`) : null;
+    if (!body || !row) return;
+    const offset = row.getBoundingClientRect().top - body.getBoundingClientRect().top;
+    if (offset < 0 || offset + row.offsetHeight > body.clientHeight) body.scrollTop += offset - body.clientHeight / 3;
+  }, [revealRequest]);
+
+  const [railOpen, setRailOpen] = useState(true);
+  const railToggle = useRef<HTMLButtonElement>(null);
+  // The toggle moves between the tree heading and the file heading; keep focus on it across the move.
+  const focusToggle = useRef(false);
+  useLayoutEffect(() => {
+    if (!focusToggle.current) return;
+    focusToggle.current = false;
+    railToggle.current?.focus();
+  }, [railOpen]);
+  const [menu, setMenu] = useState<OpenMenu | null>(null);
+  const menuSerial = useRef(0);
+  const [intent, setIntent] = useState<CatalogIntent | null>(null);
+  const [duplicating, setDuplicating] = useState(false);
   const pending = session.pending;
   const validating = pending?.kind === 'validate' || validationActive;
   // Publication needs a live lease and no other host command; typing and navigation never wait for it.
@@ -251,6 +299,7 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
     const location = diagnosticLocation(item);
     const target = location ? session.drafts.get(location.path) : undefined;
     if (!location || !target) return;
+    setRevealRequest(count => count + 1);
     if (target.kind !== 'source' || target.text === null) {
       handlers.select(location.path, previous());
       return;
@@ -267,25 +316,158 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
     if (draft.kind === 'profile') return a.presetLabel(presetIds.get(draft.path) ?? draft.path);
     return a.sourceMapLabel(mapModules.get(draft.path) ?? draft.path);
   }
+  const missing = drafts.filter(draft => draft.missing);
+
   const duplicateDestination = packageDestination(packagesRoot, duplicateId.trim());
   const formDisabled = readOnly || selected?.missing === true;
-  function addEdit(): CatalogEdit {
-    const path = addPath.trim();
-    const starter = starterText(addKind, session.packageId);
-    if (addKind === 'profile') return {kind: 'add', path, file_kind: 'profile', id: addId.trim(), text: starter};
-    if (addKind === 'source_map') return {kind: 'add', path, file_kind: 'source_map', module: addModule.trim(), text: starter};
-    if (addKind === 'asset') return {kind: 'add', path, file_kind: 'asset', id: addId.trim(), format: 'json', width: 0, height: 0, text: starter};
-    return {kind: 'add', path, file_kind: 'source', text: starter};
+  // Catalog edits and Duplicate follow the publication rules: a live lease and no other host command first.
+  const publishReason = leaseLost ? a.leaseLostShort : locked ? lockReason ?? a.block('pending') : null;
+  function catalogReason(edit: CatalogEdit): string | null {
+    if (publishReason !== null) return publishReason;
+    const block = catalogBlock(session, edit);
+    return block === null ? null : a.block(block);
   }
-  const addReady = addPath.trim() !== '' && ((addKind !== 'profile' && addKind !== 'asset') || addId.trim() !== '') && (addKind !== 'source_map' || addModule.trim() !== '');
-  const addReason = catalogBlock(session, {kind: 'add', path: addPath.trim(), file_kind: addKind, text: ''});
-  const targetReason = selected ? catalogBlock(session, {kind: 'remove', path: selected.path}) : null;
-  const renameReady = selected !== undefined && destination.trim() !== '' && destination.trim() !== selected.path;
+  const addReason = catalogReason({kind: 'add', path: '', file_kind: 'source', text: ''});
+  const duplicateReason = publishReason ?? (pending !== null || validating ? a.block('pending') : null);
+  const presetFolder = folderOf(manifest?.profiles[0]?.[1] ?? '');
+  const mapFolder = folderOf(manifest?.sourceMaps[0]?.[1] ?? '');
+  function add(fileKind: CatalogAddKind, prefix: string) {
+    setIntent({kind: 'add', fileKind, prefix});
+  }
+  // The entry dialog closes before the host flow starts, so the unsaved-changes choice never stacks on top of it.
+  function duplicate() {
+    const id = duplicateId.trim();
+    if (duplicateReason !== null || id === '') return;
+    flushSync(() => setDuplicating(false));
+    handlers.duplicate(id);
+  }
+
+  function openMenu(target: MenuTarget, anchor: MenuAnchor, opener: HTMLElement | null, trigger: boolean) {
+    if (trigger && menu !== null && menuKeyOf(menu.target) === menuKeyOf(target)) {
+      closeMenu(true);
+      return;
+    }
+    menuSerial.current += 1;
+    setMenu({serial: menuSerial.current, target, anchor, opener, toggle: trigger ? opener : null});
+  }
+  function closeMenu(restoreFocus: boolean) {
+    if (restoreFocus && menu?.opener?.isConnected) menu.opener.focus({preventScroll: true});
+    setMenu(null);
+  }
+  // Right-clicking a group or the tree's blank space opens that area's menu; focus returns to `opener` afterwards.
+  function contextAt(target: MenuTarget, opener: string) {
+    return (event: MouseEvent<HTMLElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openMenu(target, pointAnchor(event.clientX, event.clientY), document.getElementById(opener), false);
+    };
+  }
+  // Rename and Remove act on the menu's own row; a row that disappeared meanwhile is refused, not substituted.
+  function changeActions(path: string, separated: boolean): MenuAction[] {
+    const draft = session.drafts.get(path);
+    const blocked = !draft || draft.missing ? a.targetGone : catalogReason({kind: 'remove', path});
+    return [
+      {id: 'authoring-menu-rename', label: a.renameItem, blocked, separated, onSelect: () => setIntent({kind: 'rename', path})},
+      {id: 'authoring-menu-remove', label: a.remove, blocked, danger: true, onSelect: () => setIntent({kind: 'remove', path})},
+    ];
+  }
+  function menuActions(target: MenuTarget): MenuAction[] {
+    const addAction = (id: string, label: string, fileKind: CatalogAddKind, prefix: string, separated = false): MenuAction =>
+      ({id, label, blocked: addReason, separated, onSelect: () => add(fileKind, prefix)});
+    const metadataAdds = (separated: boolean) => [addAction('authoring-menu-add-preset', a.addPreset, 'profile', presetFolder, separated),
+      addAction('authoring-menu-add-source-map', a.addSourceMap, 'source_map', mapFolder)];
+    if (target.kind === 'file') {
+      const folder = folderOf(target.path);
+      return [addAction('authoring-menu-add', folder ? a.addIn(folder) : a.addFile, 'source', folder), ...changeActions(target.path, true)];
+    }
+    if (target.kind === 'folder') return [addAction('authoring-menu-add', a.addIn(`${target.path}/`), 'source', `${target.path}/`)];
+    if (target.kind === 'files') return [addAction('authoring-menu-add', a.addFile, 'source', '')];
+    if (target.kind === 'metadata' && session.drafts.get(target.path)?.kind !== 'manifest') return [...changeActions(target.path, false), ...metadataAdds(true)];
+    if (target.kind !== 'rail') return metadataAdds(false);
+    return [addAction('authoring-menu-add', a.addFile, 'source', ''), ...metadataAdds(false),
+      {id: 'authoring-menu-duplicate', label: a.duplicateOpen, separated: true, onSelect: () => setDuplicating(true)}];
+  }
+  function menuLabel(target: MenuTarget): string {
+    if (target.kind === 'files') return a.treeActions;
+    if (target.kind === 'metadataGroup') return a.metadataActions;
+    if (target.kind === 'rail') return a.railActions;
+    return a.fileActions(target.kind === 'folder' ? `${target.path}/` : target.path);
+  }
+  const openKey = menu === null ? null : menuKeyOf(menu.target);
+  function menuTrigger(target: MenuTarget) {
+    const key = menuKeyOf(target);
+    return <button type="button" className="row-menu" aria-haspopup="menu" aria-expanded={openKey === key} aria-label={menuLabel(target)} title={menuLabel(target)}
+      data-menu={key} onClick={event => openMenu(target, elementAnchor(event.currentTarget), event.currentTarget, true)}
+      {...menuEvents((anchor, opener) => openMenu(target, anchor, opener, false))}><span aria-hidden="true">⋯</span></button>;
+  }
+  // After a dialog whose opener row was renamed or removed, focus the selected file's row, else the tree toggle.
+  function catalogFocus(): HTMLElement | null {
+    const path = session.selected;
+    const row = path === null ? null : document.querySelector<HTMLElement>(`#authoring-rail [data-path="${CSS.escape(path)}"]`);
+    return row && row.getClientRects().length > 0 ? row : railToggle.current;
+  }
+  function groupRow(group: Group, label: string, target: MenuTarget) {
+    const expanded = groups[group];
+    // A collapsed group still reports unsaved and changed-on-disk files inside it.
+    const unsaved = !expanded && dirty.some(draft => groupOf(draft) === group);
+    const stale = !expanded && drafts.some(draft => draft.diskChanged && groupOf(draft) === group);
+    return <div className="tree-row group-row">
+      <button id={`authoring-group-${group}`} type="button" className="tree-folder tree-group" aria-expanded={expanded} aria-controls={`authoring-group-${group}-items`}
+        aria-keyshortcuts="Shift+F10" onClick={() => setGroups(current => ({...current, [group]: !current[group]}))}
+        {...menuEvents((anchor, opener) => openMenu(target, anchor, opener, false))}>
+        <span className="tree-twisty" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+        <span className="tree-name">{label}</span>
+        {(unsaved || stale) && <span className="tree-meta">
+          {unsaved && <span className="tag unsaved">{a.unsaved}</span>}
+          {stale && <span className="tag stale">{a.diskChanged}</span>}</span>}
+      </button>
+      {menuTrigger(target)}
+    </div>;
+  }
   const validation = session.validation;
   const current = validationCurrent(session);
   const statusText = renderMessage(locale, session.notice) || (lockReason ?? '');
   // A publication or a validation that reached disk capture can report an interrupted save that needs recovery.
   const recoveryFault = session.error?.category === AUTHORING_RECOVERY || (current && validation?.diagnostics.some(item => item.category === AUTHORING_RECOVERY) === true);
+
+  const railButton = <button ref={railToggle} id="authoring-tree-toggle" type="button" className="icon-button" aria-controls="authoring-rail" aria-expanded={railOpen}
+    aria-label={railOpen ? a.collapseTree : a.expandTree} title={railOpen ? a.collapseTree : a.expandTree}
+    onClick={() => {focusToggle.current = true; setRailOpen(current => !current);}}><span className="rail-icon" aria-hidden="true"/></button>;
+  // The selected file's editor, form or facts: always the file Save acts on.
+  const fileView = selected && <>
+    {selected.diskChanged && <p className="inline-warning">{a.diskChangedHelp}</p>}
+    {selected.missing && <p className="inline-warning">{a.missingHelp}</p>}
+    {text && (text.kind === 'manifest' || text.kind === 'schema' || text.kind === 'profile') && <div className="editor-toolbar">
+      <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(text) || readOnly} onClick={() => handlers.discard(text.path)}>{a.discardFile}</button>
+      <span className="muted">{a.structuredHelp}</span>
+    </div>}
+    {editable && <>
+      <div className="editor-toolbar">
+        <button id="authoring-undo" type="button" disabled={editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
+        <button id="authoring-redo" type="button" disabled={editable.redo.length === 0 || editable.composing !== null} onClick={() => handlers.redo(editable.path)}>{a.redo}</button>
+        <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(editable) || readOnly} onClick={() => handlers.discard(editable.path)}>{a.discardFile}</button>
+        <span className="editor-search" role="search">
+          <label className="visually-hidden" htmlFor="authoring-search">{a.search}</label>
+          <input id="authoring-search" ref={searchInput} type="search" value={query} spellCheck={false} placeholder={a.searchPlaceholder}
+            onChange={event => setQuery(event.target.value)}
+            onKeyDown={event => {if (event.key === 'Enter') {event.preventDefault(); find(event.shiftKey);}}}/>
+          <button id="authoring-search-previous" type="button" disabled={!query} onClick={() => find(true)}>{a.previous}</button>
+          <button id="authoring-search-next" type="button" disabled={!query} onClick={() => find(false)}>{a.next}</button>
+          <span id="authoring-search-count" className="muted" role="status">{summary ? a.matches(summary.count, summary.current, summary.capped) : ''}</span>
+        </span>
+      </div>
+      <CodeEditor key={editable.path} draft={editable} reveal={session.reveal} readOnly={readOnly} label={a.editorLabel(editable.path)} help={a.editorHelp}
+        selection={selection} handlers={handlers} onFind={() => {searchInput.current?.focus(); searchInput.current?.select();}} onFindNext={find}/>
+    </>}
+    {text?.kind === 'manifest' && <ManifestEditor key={text.path} draft={text} disabled={formDisabled}
+      onReplace={next => handlers.replace(text.path, next)} onOpen={path => handlers.select(path, null)}/>}
+    {text?.kind === 'schema' && <SchemaEditor key={text.path} draft={text} disabled={formDisabled} onReplace={(next, typed) => handlers.replace(text.path, next, typed)}/>}
+    {text?.kind === 'profile' && <PresetEditor key={text.path} draft={text} presetId={presetIds.get(text.path) ?? null} packageId={session.packageId}
+      schema={drafts.find(draft => draft.kind === 'schema' && !draft.missing)} disabled={formDisabled}
+      onReplace={(next, typed) => handlers.replace(text.path, next, typed)} onOpen={path => handlers.select(path, null)}/>}
+    {text?.kind === 'source_map' && <SourceMapView key={text.path} draft={text} module={mapModules.get(text.path) ?? null}/>}
+    {selected.kind === 'asset' && <AssetView key={selected.path} draft={selected} asset={manifest?.assets.find(asset => asset.path === selected.path) ?? null}/>}
+  </>;
 
   return <>
     <div className="page-heading"><div><span className="eyebrow">{a.scope(label)}</span><h1 id="authoring-heading">{session.packageId}</h1>
@@ -309,121 +491,99 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
     {session.refreshError && <div id="authoring-refresh-error"><FaultMessage title={a.refreshFailed} value={session.refreshError}/>
       {session.refreshRequired && <p className="inline-warning">{a.refreshRequired}</p>}
       <div className="button-row"><button id="authoring-refresh-retry" type="button" disabled={locked || pending !== null} onClick={handlers.refresh}>{a.refresh}</button></div></div>}
-    <div className="edit-grid">
-      <section className="panel" aria-labelledby="authoring-files-heading">
-        <div className="panel-heading"><h2 id="authoring-files-heading">{a.files}</h2>
-          {dirty.length > 0 && <span id="authoring-unsaved-count" className="tag unsaved">{a.unsavedFiles(dirty.length)}</span>}</div>
-        <div className="panel-body">
-          <p className="field-help">{a.filesHelp}</p>
-          <FileTree drafts={drafts.filter(draft => !draft.missing)} selected={session.selected} onSelect={path => handlers.select(path, previous())}/>
-          <h3 id="authoring-metadata-heading">{a.metadataHeading}</h3>
-          <p className="field-help">{a.metadataHelp}</p>
-          <ul id="authoring-metadata" className="file-tree" aria-labelledby="authoring-metadata-heading">
-            {metadata.map(draft => <li key={draft.path}>
-              <button type="button" className="tree-file" data-path={draft.path} data-kind={draft.kind} aria-current={draft.path === session.selected ? 'true' : undefined}
-                onClick={() => handlers.select(draft.path, previous())}>
-                <span className="tree-label">{metadataLabel(draft)}</span>
-                <span className="tree-path mono muted">{draft.path}</span>
-                {(fileDirty(draft) || draft.diskChanged) && <span className="tree-meta">
-                  {fileDirty(draft) && <span className="tag unsaved">{a.unsaved}</span>}
-                  {draft.diskChanged && <span className="tag stale">{a.diskChanged}</span>}</span>}
-              </button></li>)}
+    <div className="repo-facts">
+      <dl>
+        <div><dt>{a.path}</dt><dd id="authoring-package-path" className="mono">{session.packagePath}</dd></div>
+        <div><dt>{a.revision}</dt><dd id="authoring-revision" className="mono" title={session.revision}>{shortRevision(session.revision)}</dd></div>
+      </dl>
+      {dirty.length > 0 && <span id="authoring-unsaved-count" className="tag unsaved">{a.unsavedFiles(dirty.length)}</span>}
+    </div>
+    <div className={railOpen ? 'repo' : 'repo rail-closed'}>
+      <aside id="authoring-rail" className="panel repo-rail" aria-labelledby="authoring-rail-heading" hidden={!railOpen} onContextMenu={contextAt({kind: 'rail'}, 'authoring-group-files')}>
+        <div className="rail-heading"><h2 id="authoring-rail-heading">{a.railHeading}</h2>{railOpen && railButton}</div>
+        <div id="authoring-rail-body" className="rail-body">
+          <ul className="file-tree rail-groups">
+            <li onContextMenu={contextAt({kind: 'files'}, 'authoring-group-files')}>
+              {groupRow('files', a.files, {kind: 'files'})}
+              <div id="authoring-group-files-items" className="tree-children" hidden={!groups.files}>
+                <FileTree drafts={drafts.filter(draft => !draft.missing)} selected={session.selected} reveal={revealRequest}
+                  onSelect={path => handlers.select(path, previous())} onMenu={openMenu} menuOpen={openKey}/>
+                {missing.length > 0 && <section className="rail-missing" aria-labelledby="authoring-missing-heading">
+                  <h3 id="authoring-missing-heading">{a.missingHeading}</h3><p className="field-help">{a.missingHelp}</p>
+                  <ul id="authoring-missing" className="file-tree">{missing.map(draft => <li key={draft.path}>
+                    <div className={draft.path === session.selected ? 'tree-row current' : 'tree-row'}>
+                      <button type="button" className="tree-file" data-path={draft.path} title={draft.path} aria-current={draft.path === session.selected ? 'true' : undefined}
+                        onClick={() => handlers.select(draft.path, previous())}><span className="tree-name mono">{draft.path}</span>
+                        <span className="tree-meta"><span className="tag">{a.kind(draft.kind)}</span><span className="tag stale">{a.unsaved}</span></span></button>
+                    </div></li>)}</ul>
+                </section>}
+              </div>
+            </li>
+            <li onContextMenu={contextAt({kind: 'metadataGroup'}, 'authoring-group-metadata')}>
+              {groupRow('metadata', a.metadataHeading, {kind: 'metadataGroup'})}
+              <ul id="authoring-group-metadata-items" className="file-tree tree-children" hidden={!groups.metadata}>
+                {metadata.map(draft => {
+                  const target: MenuTarget = {kind: 'metadata', path: draft.path};
+                  const current = draft.path === session.selected;
+                  return <li key={draft.path}><div className={current ? 'tree-row current' : 'tree-row'}>
+                    <button type="button" className="tree-file" data-path={draft.path} data-kind={draft.kind} title={draft.path} aria-current={current ? 'true' : undefined}
+                      aria-keyshortcuts="Shift+F10" onClick={() => handlers.select(draft.path, previous())}
+                      {...menuEvents((anchor, opener) => openMenu(target, anchor, opener, false))}>
+                      <span className="tree-name">{metadataLabel(draft)}</span>
+                      {(fileDirty(draft) || draft.diskChanged) && <span className="tree-meta">
+                        {fileDirty(draft) && <span className="tag unsaved">{a.unsaved}</span>}
+                        {draft.diskChanged && <span className="tag stale">{a.diskChanged}</span>}</span>}
+                    </button>
+                    {menuTrigger(target)}
+                  </div></li>;
+                })}
+              </ul>
+            </li>
+            <li><div className="tree-row">
+              <button id="authoring-duplicate-open" type="button" className="tree-folder tree-action" aria-haspopup="dialog" onClick={() => setDuplicating(true)}>
+                <span className="copy-icon" aria-hidden="true"/><span className="tree-name">{a.duplicateOpen}</span></button>
+            </div></li>
           </ul>
-          {drafts.some(draft => draft.missing) && <>
-            <h3>{a.missingHeading}</h3><p className="field-help">{a.missingHelp}</p>
-            <ul id="authoring-missing" className="file-tree">{drafts.filter(draft => draft.missing).map(draft => <li key={draft.path}>
-              <button type="button" className="tree-file" data-path={draft.path} aria-current={draft.path === session.selected ? 'true' : undefined}
-                onClick={() => handlers.select(draft.path, previous())}><span className="tree-path mono">{draft.path}</span>
-                <span className="tree-meta"><span className="tag">{a.kind(draft.kind)}</span><span className="tag stale">{a.unsaved}</span></span></button></li>)}</ul></>}
-          <dl className="run-identity authoring-identity"><dt>{a.path}</dt><dd id="authoring-package-path" className="mono">{session.packagePath}</dd>
-            <dt>{a.revision}</dt><dd id="authoring-revision" className="mono" title={session.revision}>{shortRevision(session.revision)}</dd></dl>
-          <details id="authoring-manage" className="authoring-manage"><summary>{a.manage}</summary>
-            <h3>{a.addHeading}</h3>
-            <div className="field"><label htmlFor="authoring-add-kind">{a.kindLabel}</label>
-              <Select id="authoring-add-kind" value={addKind} onChange={value => {if (value === 'source' || value === 'profile' || value === 'asset' || value === 'source_map') setAddKind(value);}}
-                options={(['source', 'profile', 'asset', 'source_map'] as const).map(kind => ({value: kind, label: a.kind(kind)}))}/></div>
-            <div className="field"><label htmlFor="authoring-add-path">{a.filePath}</label>
-              <input id="authoring-add-path" type="text" value={addPath} spellCheck={false} placeholder={a.filePathPlaceholder} onChange={event => setAddPath(event.target.value)}/></div>
-            {(addKind === 'profile' || addKind === 'asset') && <div className="field"><label htmlFor="authoring-add-id">{a.id}</label>
-              <input id="authoring-add-id" type="text" value={addId} spellCheck={false} onChange={event => setAddId(event.target.value)}/>
-              <p className="field-help">{a.idHelp}</p></div>}
-            {addKind === 'source_map' && <div className="field"><label htmlFor="authoring-add-module">{a.module}</label>
-              <input id="authoring-add-module" type="text" value={addModule} spellCheck={false} onChange={event => setAddModule(event.target.value)}/>
-              <p className="field-help">{a.moduleHelp}</p></div>}
-            <div className="button-row"><button id="authoring-add-submit" type="button" disabled={publishLocked || !addReady || addReason !== null}
-              title={addReason ? a.block(addReason) : undefined}
-              onClick={() => void handlers.catalog(addEdit()).then(done => {if (done) {setAddPath(''); setAddId(''); setAddModule('');}})}>{a.add}</button></div>
-            <p className="field-help">{a.addHelp} {a.foldersHelp}</p>
-            {selected && !selected.missing && selected.kind !== 'manifest' && <>
-              <h3>{a.renameHeading(selected.path)}</h3>
-              <div className="field"><label htmlFor="authoring-rename-destination">{a.destination}</label>
-                <input id="authoring-rename-destination" type="text" value={destination} spellCheck={false} onChange={event => setDestination(event.target.value)}/>
-                <p className="field-help">{a.renameHelp}</p></div>
-              <div className="button-row">
-                <button id="authoring-rename-submit" type="button" disabled={publishLocked || !renameReady || targetReason !== null} title={targetReason ? a.block(targetReason) : undefined}
-                  onClick={() => void handlers.catalog({kind: 'rename', path: selected.path, destination: destination.trim()})}>{a.rename}</button>
-                {confirmRemove
-                  ? <span className="confirm-row" role="alertdialog" aria-labelledby="authoring-remove-text"><span id="authoring-remove-text">{a.confirmRemove(selected.path)}</span>
-                    <button id="authoring-remove-confirm" type="button" className="danger-text" disabled={publishLocked || targetReason !== null}
-                      onClick={() => {setConfirmRemove(false); void handlers.catalog({kind: 'remove', path: selected.path});}}>{a.removeConfirmed}</button>
-                    <button id="authoring-remove-cancel" type="button" autoFocus onClick={() => setConfirmRemove(false)}>{a.cancel}</button></span>
-                  : <button id="authoring-remove" type="button" className="danger-text" disabled={publishLocked || targetReason !== null} title={targetReason ? a.block(targetReason) : undefined}
-                    onClick={() => setConfirmRemove(true)}>{a.remove}</button>}
-              </div></>}
-          </details>
-          <details id="authoring-duplicate" className="authoring-manage"><summary>{a.duplicateHeading}</summary>
-            <p className="field-help">{a.duplicateHelp}</p>
-            <div className="field"><label htmlFor="authoring-duplicate-id">{a.newPackageId}</label>
-              <input id="authoring-duplicate-id" type="text" value={duplicateId} spellCheck={false} autoCapitalize="off" autoCorrect="off"
-                aria-describedby="authoring-duplicate-destination" onChange={event => setDuplicateId(event.target.value)}/>
-              <p id="authoring-duplicate-destination" className="field-help">{duplicateDestination === null
-                ? a.duplicateDestinationPending : <>{a.duplicateDestination} <span className="mono">{duplicateDestination}</span></>}</p></div>
-            <div className="button-row"><button id="authoring-duplicate-submit" type="button" disabled={publishLocked || pending !== null || validating || !duplicateId.trim()}
-              onClick={() => handlers.duplicate(duplicateId.trim())}>{a.duplicate}</button></div>
-          </details>
+          <p className="field-help rail-help">{a.filesHelp}</p>
         </div>
-      </section>
-      <section className="panel editor-panel" aria-labelledby="authoring-file-heading">
-        <div className="panel-heading"><div><span className="eyebrow">{selected ? a.kind(selected.kind) : a.files}</span>
-          <h2 id="authoring-file-heading" className="mono">{selected?.path ?? a.noFile}</h2></div>
-          {selected && fileDirty(selected) && <span id="authoring-file-dirty" className="tag unsaved">{a.unsaved}</span>}</div>
-        <div className="panel-body">
-          {selected?.diskChanged && <p className="inline-warning">{a.diskChangedHelp}</p>}
-          {selected?.missing && <p className="inline-warning">{a.missingHelp}</p>}
-          {text && (text.kind === 'manifest' || text.kind === 'schema' || text.kind === 'profile') && <div className="editor-toolbar">
-            <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(text) || readOnly} onClick={() => handlers.discard(text.path)}>{a.discardFile}</button>
-            <span className="muted">{a.structuredHelp}</span>
-          </div>}
-          {editable && <>
-            <div className="editor-toolbar">
-              <button id="authoring-undo" type="button" disabled={editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
-              <button id="authoring-redo" type="button" disabled={editable.redo.length === 0 || editable.composing !== null} onClick={() => handlers.redo(editable.path)}>{a.redo}</button>
-              <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(editable) || readOnly} onClick={() => handlers.discard(editable.path)}>{a.discardFile}</button>
-              <span className="editor-search" role="search">
-                <label className="visually-hidden" htmlFor="authoring-search">{a.search}</label>
-                <input id="authoring-search" ref={searchInput} type="search" value={query} spellCheck={false} placeholder={a.searchPlaceholder}
-                  onChange={event => setQuery(event.target.value)}
-                  onKeyDown={event => {if (event.key === 'Enter') {event.preventDefault(); find(event.shiftKey);}}}/>
-                <button id="authoring-search-previous" type="button" disabled={!query} onClick={() => find(true)}>{a.previous}</button>
-                <button id="authoring-search-next" type="button" disabled={!query} onClick={() => find(false)}>{a.next}</button>
-                <span id="authoring-search-count" className="muted" role="status">{summary ? a.matches(summary.count, summary.current, summary.capped) : ''}</span>
-              </span>
-            </div>
-            <CodeEditor key={editable.path} draft={editable} reveal={session.reveal} readOnly={readOnly} label={a.editorLabel(editable.path)} help={a.editorHelp}
-              selection={selection} handlers={handlers} onFind={() => {searchInput.current?.focus(); searchInput.current?.select();}} onFindNext={find}/>
-          </>}
-          {text?.kind === 'manifest' && <ManifestEditor key={text.path} draft={text} disabled={formDisabled}
-            onReplace={next => handlers.replace(text.path, next)} onOpen={path => handlers.select(path, null)}/>}
-          {text?.kind === 'schema' && <SchemaEditor key={text.path} draft={text} disabled={formDisabled} onReplace={(next, typed) => handlers.replace(text.path, next, typed)}/>}
-          {text?.kind === 'profile' && <PresetEditor key={text.path} draft={text} presetId={presetIds.get(text.path) ?? null} packageId={session.packageId}
-            schema={drafts.find(draft => draft.kind === 'schema' && !draft.missing)} disabled={formDisabled}
-            onReplace={(next, typed) => handlers.replace(text.path, next, typed)} onOpen={path => handlers.select(path, null)}/>}
-          {text?.kind === 'source_map' && <SourceMapView key={text.path} draft={text} module={mapModules.get(text.path) ?? null}/>}
-          {selected?.kind === 'asset' && <AssetView key={selected.path} draft={selected} asset={manifest?.assets.find(asset => asset.path === selected.path) ?? null}/>}
-          {!selected && <p className="muted">{a.noFile}</p>}
+      </aside>
+      <section id="authoring-main" className="panel repo-main" aria-labelledby="authoring-file-heading">
+        <div className="main-bar">
+          {!railOpen && railButton}
+          {selected
+            ? <div className="file-title"><span className="eyebrow">{`${selectedGroup === 'files' ? a.files : a.metadataHeading} · ${a.kind(selected.kind)}`}</span>
+              <h2 id="authoring-file-heading" className="file-crumbs mono">{selected.path.split('/').map((part, index, parts) => <Fragment key={index}>
+                {index > 0 && <span className="crumb-separator">/</span>}{index === parts.length - 1 ? <strong>{part}</strong> : part}</Fragment>)}</h2></div>
+            : <h2 id="authoring-file-heading" className="file-title">{a.noFile}</h2>}
+          {selected && (fileDirty(selected) || selected.diskChanged) && <span className="tree-meta">
+            {fileDirty(selected) && <span id="authoring-file-dirty" className="tag unsaved">{a.unsaved}</span>}
+            {selected.diskChanged && <span className="tag stale">{a.diskChanged}</span>}</span>}
         </div>
+        {selected && <div className="repo-body">{fileView}</div>}
       </section>
     </div>
+    {menu && <ContextMenu key={menu.serial} id="authoring-menu" label={menuLabel(menu.target)} anchor={menu.anchor} actions={menuActions(menu.target)}
+      heading={'path' in menu.target ? menu.target.kind === 'folder' ? `${menu.target.path}/` : menu.target.path : undefined}
+      toggle={menu.toggle} onClose={closeMenu}/>}
+    <CatalogDialog intent={intent} session={session} reason={catalogReason} onSubmit={handlers.catalog} onClose={() => setIntent(null)} returnFocus={catalogFocus}/>
+    <Modal id="authoring-duplicate-dialog" open={duplicating} onCancel={() => setDuplicating(false)} labelledBy="authoring-duplicate-heading" className="catalog-dialog"
+      initialFocus="#authoring-duplicate-id" returnFocus={() => document.getElementById('authoring-duplicate-open') ?? railToggle.current}>
+      <form onSubmit={event => {event.preventDefault(); duplicate();}}>
+        <div className="dialog-header"><div><h2 id="authoring-duplicate-heading">{a.duplicateHeading}</h2><p>{a.duplicateHelp}</p></div></div>
+        <div className="dialog-body">
+          <div className="field"><label htmlFor="authoring-duplicate-id">{a.newPackageId}</label>
+            <input id="authoring-duplicate-id" type="text" value={duplicateId} spellCheck={false} autoCapitalize="off" autoCorrect="off"
+              aria-describedby="authoring-duplicate-destination" onChange={event => setDuplicateId(event.target.value)}/>
+            <p id="authoring-duplicate-destination" className="field-help">{duplicateDestination === null
+              ? a.duplicateDestinationPending : <>{a.duplicateDestination} <span className="mono">{duplicateDestination}</span></>}</p></div>
+          <div className="dialog-footer">
+            <span id="authoring-duplicate-status" role="status">{duplicateReason ?? ''}</span>
+            <button id="authoring-duplicate-cancel" type="button" onClick={() => setDuplicating(false)}>{a.cancel}</button>
+            <button id="authoring-duplicate-submit" type="submit" className="primary" disabled={duplicateReason !== null || !duplicateId.trim()}>{a.duplicate}</button>
+          </div>
+        </div>
+      </form>
+    </Modal>
     <section id="authoring-validation" className="panel validation-panel" aria-labelledby="authoring-validation-heading">
       <div className="panel-heading"><h2 id="authoring-validation-heading">{a.validationHeading}</h2>
         {validation && <span id="authoring-validation-state" className={`tag ${!current ? 'stale' : validation.valid ? 'current' : 'unsaved'}`}>

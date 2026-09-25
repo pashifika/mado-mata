@@ -27,7 +27,7 @@ export interface Settings {
   notifications:NotificationPreferences; locale:Locale;
   // Absent or null means the default `<root>/backups` destination.
   backup_directory:string|null;
-  // Null keeps the default `<application data-dir>/pkgs` collection.
+  // Null keeps the default `<application data-dir>/sources` collection.
   packages_root:string|null;
 }
 // The only settings the dialog may write; version and package hint stay host-owned.

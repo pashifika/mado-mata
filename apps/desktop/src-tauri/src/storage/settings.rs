@@ -117,7 +117,7 @@ impl Store {
         let root = settings
             .packages_root
             .as_ref()
-            .map_or_else(|| self.root.join("pkgs"), PathBuf::from);
+            .map_or_else(|| self.root.join("sources"), PathBuf::from);
         std::path::absolute(root).map_err(|error| {
             Fault::new("Settings", format!("cannot resolve packages root: {error}"))
         })
