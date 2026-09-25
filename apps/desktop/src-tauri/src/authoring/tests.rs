@@ -410,12 +410,21 @@ fn unsafe_catalog_paths_and_case_collisions_never_begin_publication() {
             .create(&fixture.root.join("PACKAGE"), "other")
             .is_err()
     );
-    assert!(
+    // PathBuf::join removes `..` when the Windows root has a verbatim prefix.
+    let mut traversal = fixture.root.as_os_str().to_os_string();
+    for component in ["package", "..", "escape"] {
+        traversal.push(std::path::MAIN_SEPARATOR_STR);
+        traversal.push(component);
+    }
+    assert_eq!(
         fixture
             .publisher
-            .create(&fixture.root.join("package/../escape"), "other")
-            .is_err()
+            .create(Path::new(&traversal), "other")
+            .unwrap_err()
+            .category,
+        "AuthoringPath"
     );
+    assert!(!fixture.root.join("escape").exists());
 }
 
 #[cfg(unix)]
