@@ -743,7 +743,7 @@
     "railHeading": "Package contents",
     "railActions": "Package actions",
     "expandTree": "Expand file tree",
-    "filesHelp": "Files holds scripts and assets by folder; Metadata opens the manifest, options schema, presets and source maps as forms and facts. Right-click an item, or use its ⋯ button or Shift+F10, to add, rename or remove files.",
+    "filesHelp": "Use + to add a source, preset, asset or source map. Files holds scripts and assets; Metadata opens forms and facts. Right-click an item, or use its ⋯ button or Shift+F10, to rename or remove it.",
     "kinds": {
       "manifest": "Manifest",
       "source": "Source",

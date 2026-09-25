@@ -331,9 +331,6 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
   const duplicateReason = publishReason ?? (pending !== null || validating ? a.block('pending') : null);
   const presetFolder = folderOf(manifest?.profiles[0]?.[1] ?? '');
   const mapFolder = folderOf(manifest?.sourceMaps[0]?.[1] ?? '');
-  function add(fileKind: CatalogAddKind, prefix: string) {
-    setIntent({kind: 'add', fileKind, prefix});
-  }
   // The entry dialog closes before the host flow starts, so the unsaved-changes choice never stacks on top of it.
   function duplicate() {
     const id = duplicateId.trim();
@@ -343,6 +340,10 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
   }
 
   function openMenu(target: MenuTarget, anchor: MenuAnchor, opener: HTMLElement | null, trigger: boolean) {
+    if (target.kind === 'metadata' && session.drafts.get(target.path)?.kind === 'manifest') {
+      closeMenu(false);
+      return;
+    }
     if (trigger && menu !== null && menuKeyOf(menu.target) === menuKeyOf(target)) {
       closeMenu(true);
       return;
@@ -372,19 +373,19 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
     ];
   }
   function menuActions(target: MenuTarget): MenuAction[] {
-    const addAction = (id: string, label: string, fileKind: CatalogAddKind, prefix: string, separated = false): MenuAction =>
-      ({id, label, blocked: addReason, separated, onSelect: () => add(fileKind, prefix)});
-    const metadataAdds = (separated: boolean) => [addAction('authoring-menu-add-preset', a.addPreset, 'profile', presetFolder, separated),
-      addAction('authoring-menu-add-source-map', a.addSourceMap, 'source_map', mapFolder)];
+    const addAction = (id: string, label: string, fileKind: CatalogAddKind, prefix: string): MenuAction =>
+      ({id, label, blocked: addReason, onSelect: () => setIntent({kind: 'add', fileKind, prefix})});
     if (target.kind === 'file') {
       const folder = folderOf(target.path);
       return [addAction('authoring-menu-add', folder ? a.addIn(folder) : a.addFile, 'source', folder), ...changeActions(target.path, true)];
     }
     if (target.kind === 'folder') return [addAction('authoring-menu-add', a.addIn(`${target.path}/`), 'source', `${target.path}/`)];
     if (target.kind === 'files') return [addAction('authoring-menu-add', a.addFile, 'source', '')];
-    if (target.kind === 'metadata' && session.drafts.get(target.path)?.kind !== 'manifest') return [...changeActions(target.path, false), ...metadataAdds(true)];
-    if (target.kind !== 'rail') return metadataAdds(false);
-    return [addAction('authoring-menu-add', a.addFile, 'source', ''), ...metadataAdds(false),
+    if (target.kind === 'metadata') return session.drafts.get(target.path)?.kind === 'manifest' ? [] : changeActions(target.path, false);
+    const metadataAdds = [addAction('authoring-menu-add-preset', a.addPreset, 'profile', presetFolder),
+      addAction('authoring-menu-add-source-map', a.addSourceMap, 'source_map', mapFolder)];
+    if (target.kind !== 'rail') return metadataAdds;
+    return [addAction('authoring-menu-add', a.addFile, 'source', ''), ...metadataAdds,
       {id: 'authoring-menu-duplicate', label: a.duplicateOpen, separated: true, onSelect: () => setDuplicating(true)}];
   }
   function menuLabel(target: MenuTarget): string {
@@ -421,7 +422,6 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
           {unsaved && <span className="tag unsaved">{a.unsaved}</span>}
           {stale && <span className="tag stale">{a.diskChanged}</span>}</span>}
       </button>
-      {menuTrigger(target)}
     </div>;
   }
   const validation = session.validation;
@@ -500,7 +500,10 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
     </div>
     <div className={railOpen ? 'repo' : 'repo rail-closed'}>
       <aside id="authoring-rail" className="panel repo-rail" aria-labelledby="authoring-rail-heading" hidden={!railOpen} onContextMenu={contextAt({kind: 'rail'}, 'authoring-group-files')}>
-        <div className="rail-heading"><h2 id="authoring-rail-heading">{a.railHeading}</h2>{railOpen && railButton}</div>
+        <div className="rail-heading"><h2 id="authoring-rail-heading">{a.railHeading}</h2>
+          <button id="authoring-tree-add" type="button" className="icon-button" aria-label={a.addFile} title={addReason ?? a.addFile}
+            disabled={addReason !== null} onClick={() => setIntent({kind: 'add', fileKind: 'source', prefix: ''})}><span aria-hidden="true">+</span></button>
+          {railOpen && railButton}</div>
         <div id="authoring-rail-body" className="rail-body">
           <ul className="file-tree rail-groups">
             <li onContextMenu={contextAt({kind: 'files'}, 'authoring-group-files')}>
@@ -527,14 +530,14 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
                   const current = draft.path === session.selected;
                   return <li key={draft.path}><div className={current ? 'tree-row current' : 'tree-row'}>
                     <button type="button" className="tree-file" data-path={draft.path} data-kind={draft.kind} title={draft.path} aria-current={current ? 'true' : undefined}
-                      aria-keyshortcuts="Shift+F10" onClick={() => handlers.select(draft.path, previous())}
+                      aria-keyshortcuts={draft.kind === 'manifest' ? undefined : 'Shift+F10'} onClick={() => handlers.select(draft.path, previous())}
                       {...menuEvents((anchor, opener) => openMenu(target, anchor, opener, false))}>
                       <span className="tree-name">{metadataLabel(draft)}</span>
                       {(fileDirty(draft) || draft.diskChanged) && <span className="tree-meta">
                         {fileDirty(draft) && <span className="tag unsaved">{a.unsaved}</span>}
                         {draft.diskChanged && <span className="tag stale">{a.diskChanged}</span>}</span>}
                     </button>
-                    {menuTrigger(target)}
+                    {draft.kind !== 'manifest' && menuTrigger(target)}
                   </div></li>;
                 })}
               </ul>

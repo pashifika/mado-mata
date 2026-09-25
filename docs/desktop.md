@@ -246,12 +246,15 @@ Neither action inspects, binds, or runs the package.
   Malformed schema/preset bytes remain unchanged until deliberate repair and
   Save; rebuilding an invalid document requires confirmation. Saved local
   workspace profiles are not part of these forms.
-- Right-click a file, use its menu button, or press **Shift+F10** / the
-  **Context Menu** key for Add/Rename/Remove. Actions target that row, not another
-  selected file. Add supports sources, presets, JSON assets and source maps;
-  folders provide their path as the initial destination. Rename updates
-  declarations, not source imports. Required entries/schema/presets cannot be
-  removed; unsafe paths, links, collisions and undeclared files are refused.
+- Use **+** beside the tree's collapse button to add a source, preset, JSON asset
+  or source map. The Files/Metadata group headings have no menu buttons.
+  Right-click an individual file, use its menu button, or press **Shift+F10** /
+  the **Context Menu** key for its actions. Metadata rows offer Rename/Remove,
+  not repeated Add actions; the manifest has no file-action menu. Source/asset
+  and folder menus retain contextual Add, with the folder as initial destination.
+  Actions target that row, not another selected file. Rename updates declarations,
+  not source imports. Required entries/schema/presets cannot be removed; unsafe
+  paths, links, collisions and undeclared files are refused.
   The shell disables the ordinary Web Inspector, including debug builds; normal
   text-editing clipboard menus remain available outside these owned menus.
 - **Save file** and **Save all** publish drafts without running or validating
