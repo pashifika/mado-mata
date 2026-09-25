@@ -123,11 +123,12 @@ impl Application {
     pub fn authoring_create(
         &self,
         workspace: &WorkspaceRef,
-        package_path: &Path,
         package_id: &str,
     ) -> Result<AuthoringView, Fault> {
         self.enter_authoring(workspace, || {
-            self.publisher.create(package_path, package_id)
+            let root = lock(&self.store).packages_root()?;
+            let destination = self.publisher.prepare_destination(&root, package_id)?;
+            self.publisher.create(&destination, package_id)
         })
     }
 
@@ -163,7 +164,6 @@ impl Application {
         &self,
         owner: &AuthoringRef,
         revision: &str,
-        package_path: &Path,
         package_id: &str,
     ) -> Result<AuthoringView, Fault> {
         let (_command, mut state) = self.command_state()?;
@@ -172,9 +172,17 @@ impl Application {
         state.work_idle()?;
         let next = state.next_authoring_owner(&owner.workspace)?;
         drop(state);
+        if package_id.eq_ignore_ascii_case(candidate.package_id()) {
+            return Err(Fault::new(
+                "AuthoringIdentity",
+                "Duplicate requires a distinct package ID",
+            ));
+        }
+        let root = lock(&self.store).packages_root()?;
+        let destination = self.publisher.prepare_destination(&root, package_id)?;
         let candidate = self
             .publisher
-            .duplicate(&candidate, revision, package_path, package_id)?;
+            .duplicate(&candidate, revision, &destination, package_id)?;
         let result = view(&next, &candidate);
         let mut state = lock(&self.workspaces);
         state.next_authoring += 1;

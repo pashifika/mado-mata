@@ -96,10 +96,11 @@ application-local data directory. For isolated acceptance, select a private root
 apps/desktop/src-tauri/target/debug/mado-mata-desktop --data-dir "$HOME/.config/mado-mata-acceptance"
 ```
 
-`--data-dir PATH` selects the root explicitly and skips historical-root discovery.
-It does not select the runner, compiler, package, or an input route. Keep the root
-outside package source and public tracked files. Reuse it for restart checks;
-choose another private root to isolate work without deleting existing data.
+`--data-dir PATH` selects the configuration root explicitly and skips historical-root
+discovery. It also supplies the default package collection at `PATH/pkgs`; it does
+not select a runner, compiler, package to inspect, or input route. Keep the root
+outside an existing package source and public tracked files. Reuse it for restart
+checks; choose another private root to isolate work without deleting existing data.
 An absent root is not created merely by launching the application.
 
 New application-owned directories use private Unix permissions. Existing managed
@@ -217,22 +218,37 @@ under a new package ID and updates package ownership in each packaged preset. It
 settings, named-workspace profiles, target bindings, or execution results.
 Neither action inspects, binds, or runs the package.
 
-- Create and Duplicate require a missing destination beneath an existing parent.
-  Existing packages and the App data root cannot contain the destination.
-  Source and App data roots must not overlap in either direction.
-- The tree lists manifest-owned files. Text files have independent drafts,
-  selection, undo/redo, literal search, and line numbers. Assets are listed,
-  not decoded or edited as text. The native textarea handles composition events;
-  no editor dependency or package-supplied WebView code is loaded.
-- **Manage files** adds sources, presets, JSON assets, or source maps and
-  coordinates their manifest declarations. Rename changes declarations, not
-  source imports. Required entries/schema/presets cannot be removed. Manifest
-  JSON editing must preserve a safe, coherent declared-file catalog and package
-  identity; unsafe paths, links, collisions, and undeclared files are refused.
-- **Save file** and **Save all** write source without running or validating it.
-  Syntax-invalid source, schema, or preset text can be saved for later repair;
-  it is not an executable inventory. A later edit stays dirty if an earlier Save
-  response arrives afterward.
+- **Application → App settings → Packages** sets the packages root. Blank uses
+  `<data-dir>/pkgs` beside `settings.json` (normally
+  `$HOME/.config/mado-mata/pkgs`). **Create or open a package** and **Duplicate**
+  ask only for Package ID and show the derived destination. Settings Save creates
+  nothing; valid Create/Duplicate creates missing parents. Changing the root
+  neither moves existing packages nor retargets an active Edit session.
+- Create and Duplicate require a missing destination. Existing package roots,
+  links, traversal and aliases are refused. Under the App data root, only the
+  dedicated `pkgs` subtree can contain source, never configuration or journals.
+  **Open for Edit** still accepts an existing external package directory.
+- **Files** contains scripts and assets in expandable folders. Folder nodes come
+  from declared paths: adding or renaming `src/lib/helper.ts` creates its parents.
+  There is no independent empty-folder operation. Scripts have independent
+  drafts, selection, undo/redo, literal search and line numbers. Assets are
+  inventory facts, not decoded or text-edited.
+- **Package metadata** opens structured manifest, option-schema and packaged
+  preset controls; generated source maps are read-only facts. Metadata never
+  opens in the code textarea. Manifest controls preserve package identity and
+  declarations while editing supported entries and portable target intent.
+  Malformed schema/preset bytes remain unchanged until deliberate repair and
+  Save; rebuilding an invalid document requires confirmation. Saved local
+  workspace profiles are not part of these forms.
+- **Manage files** adds sources, presets, JSON assets or source maps and
+  coordinates declarations. Rename changes declarations, not source imports.
+  Required entries/schema/presets cannot be removed. Unsafe paths, links,
+  collisions and undeclared files are refused.
+- **Save file** and **Save all** publish drafts without running or validating
+  them. Incomplete script or invalid metadata values can be saved for later
+  repair; they are not an executable inventory. A later edit stays dirty if an
+  earlier Save response arrives afterward. The native textarea handles script
+  composition; no editor dependency or package-supplied WebView code is loaded.
 - **Validate** checks one saved revision through the existing inventory and
   trusted compiler without evaluating package code. Unsaved text is excluded.
   Diagnostics identify their revision and link to declared source locations.
@@ -265,7 +281,9 @@ inventory. A pending journal blocks package admission after restart. Use the
 displayed **Recover interrupted save** action for its recorded package: recovery
 rolls forward only matching old/new bytes and preserves conflicting external
 content. Do not delete the journal to bypass refusal. Configuration snapshots
-exclude both package source and this source-publication journal.
+exclude both package source and this source-publication journal. Snapshot
+destinations inside the default or configured package collection, or an existing
+package, are refused before creating directories or archives.
 
 Interruption regressions cover process-level failures, not physical power loss.
 Windows core checks do not qualify crash durability or an additional desktop OS;
@@ -361,8 +379,8 @@ controls and workspace command buttons are disabled. Schema options remain edita
 Stop and navigation stay available. The reason is shown in the issuing workspace,
 the workspace dropdown, and the **+** dialog.
 
-Use **Application → App settings** for Display, Notifications, OCR environment,
-Logs, and Backups.
+Use **Application → App settings** for Display, Notifications, Packages, OCR
+environment, Logs, and Backups.
 Categories share one draft and one **Save changes** action. **Cancel**, the
 dialog close button, or **Escape** discards unsaved edits; merely opening the
 dialog initializes no recognition backend. A category whose fields are invalid
@@ -998,15 +1016,20 @@ Japanese. Do not replace actual WebView interaction with mocked command results.
 
 ### Directory-package authoring acceptance
 
-Use a disposable package directory outside the isolated App data root. Keep
-screenshots, local paths, and compiler/run records outside public commits.
+Use an isolated App data root and disposable package collections. Keep screenshots,
+local paths, and compiler/run records outside public commits.
 
-1. Create a TypeScript starter, open it, and add a second source file. Edit both
-   files; check independent undo/redo, selection, search, line numbers, and
-   composition. Save, exit, and reopen; verify both saved contents.
-2. Add, rename, and remove an optional declared file. Refuse an occupied or
-   nested package destination. Duplicate under a different ID; verify original
-   bytes and the absence of App-local configuration in the copy.
+1. Create a TypeScript starter by ID under the default `pkgs` root. Change the
+   packages root in settings; saving must not create or move source. Restart and
+   create another package using the saved root. Open an existing external source.
+2. Add `src/lib/helper.ts`, edit two scripts and check independent undo/redo,
+   selection, search, line numbers and composition. Expand/collapse folders,
+   rename the helper into another folder, Save and reopen. Files must contain only
+   scripts/assets; metadata must open as forms or facts, without a code textarea.
+   Edit schema and preset fields through those forms, including a numeric draft
+   across file/page navigation. Refuse occupied or nested package destinations.
+   Duplicate by ID; verify original bytes and absence of App-local configuration
+   in the copy. Refuse Snapshot inside either package collection before any write.
 3. Save a syntax error and Validate. Follow its diagnostic to the source, repair
    it, and validate the new saved revision. Test Stop while validation owns the
    operation slot; no new work may start before it settles.
@@ -1016,8 +1039,9 @@ screenshots, local paths, and compiler/run records outside public commits.
 5. Exercise Save, Discard, and Cancel for editor/workspace/window closure.
    Repeat close/exit with a recoverable configuration fault; drafts must remain
    resolvable without admitting ordinary execution.
-6. Preserve a saved local profile while saving and repairing malformed schema
-   text. Exit, explicitly reinspect, and confirm the profile is not reset.
+6. Open malformed schema/preset content in a disposable copy. Exercise deliberate
+   structured repair/rebuild and dirty Save/Discard/Cancel, preserving original
+   disk bytes until Save. Exit and reinspect; a saved local profile must not reset.
 7. Run the changed valid package through the real controlled runner. Choose the
    expected state/log result before the run and compare it with the actual record.
    Saving or compiler success alone is not execution acceptance.

@@ -13,6 +13,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 
 pub use catalog::{CatalogEdit, CatalogFileKind};
+pub(crate) use publication::check_package_ancestors;
 
 pub const MAX_FILES: usize = 128;
 pub const MAX_BYTES: usize = 1024 * 1024;
@@ -91,6 +92,28 @@ impl Candidate {
 impl Publisher {
     pub fn new(data_root: PathBuf) -> Self {
         Self { data_root }
+    }
+
+    /// Resolves a collection location without creating it or changing an active lease.
+    pub(crate) fn packages_root(&self, root: &Path) -> Result<PathBuf, Fault> {
+        let root = publication::resolve_packages_root(root)?;
+        self.check_separation(&root, true)?;
+        Ok(root)
+    }
+
+    /// Validate and derive the destination; publication creates missing parents only after validating the draft.
+    pub(crate) fn prepare_destination(&self, root: &Path, id: &str) -> Result<PathBuf, Fault> {
+        PackageDraft::check_id(id)?;
+        self.check_admission(root)?;
+        let root = self.packages_root(root)?;
+        let destination = root.join(id);
+        if destination.as_os_str().len() > crate::storage::MAX_PATH_BYTES {
+            return Err(Fault::new(
+                "AuthoringPath",
+                "package destination exceeds its path bound",
+            ));
+        }
+        Ok(destination)
     }
 
     pub fn open(&self, root: &Path) -> Result<Candidate, Fault> {
@@ -215,6 +238,10 @@ impl Publisher {
     }
 
     fn separate_root(&self, root: &Path) -> Result<(), Fault> {
+        self.check_separation(root, false)
+    }
+
+    fn check_separation(&self, root: &Path, collection: bool) -> Result<(), Fault> {
         let mut ancestor = std::path::absolute(&self.data_root)
             .map_err(|error| io_fault("resolve private storage", error))?;
         if ancestor
@@ -239,10 +266,14 @@ impl Publisher {
         for name in missing.into_iter().rev() {
             data.push(name);
         }
-        if data.starts_with(root) || root.starts_with(&data) {
+        // Only this dedicated source subtree is outside the configuration lifecycle.
+        // The exception never depends on the configurable collection location.
+        let packages = data.join("pkgs");
+        let source_subtree = root.starts_with(&packages) && (collection || root != packages);
+        if data.starts_with(root) || (root.starts_with(&data) && !source_subtree) {
             return Err(Fault::new(
                 "AuthoringPath",
-                "package source and application configuration must be separate",
+                "package source must be outside private configuration or inside its dedicated pkgs subtree",
             ));
         }
         Ok(())

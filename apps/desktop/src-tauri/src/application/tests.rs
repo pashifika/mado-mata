@@ -1260,6 +1260,7 @@ fn successor_retains_unpolled_terminal_and_independent_check_association() {
         .save_settings(EditableSettings {
             locale: settings.locale,
             backup_directory: settings.backup_directory,
+            packages_root: settings.packages_root,
             gui_log_limit: settings.gui_log_limit,
             ocr_environment: Some(environment.clone()),
             notifications: settings.notifications,
@@ -1287,6 +1288,7 @@ fn successor_retains_unpolled_terminal_and_independent_check_association() {
         .save_settings(EditableSettings {
             locale: settings.locale,
             backup_directory: settings.backup_directory,
+            packages_root: settings.packages_root,
             gui_log_limit: settings.gui_log_limit,
             ocr_environment: None,
             notifications: settings.notifications,

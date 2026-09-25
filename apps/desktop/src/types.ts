@@ -27,9 +27,11 @@ export interface Settings {
   notifications:NotificationPreferences; locale:Locale;
   // Absent or null means the default `<root>/backups` destination.
   backup_directory:string|null;
+  // Null keeps the default `<application data-dir>/pkgs` collection.
+  packages_root:string|null;
 }
 // The only settings the dialog may write; version and package hint stay host-owned.
-export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvironment|null; notifications:NotificationPreferences; locale:Locale; backup_directory:string|null}
+export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvironment|null; notifications:NotificationPreferences; locale:Locale; backup_directory:string|null; packages_root:string|null}
 // Host-issued session identity; revisions increment on reinspect and ids are never reused.
 export interface WorkspaceRef {workspace_id:string; revision:number}
 export interface ProfileCatalog {profiles:Profile[]; profiles_error:Fault|null}
@@ -73,6 +75,7 @@ export interface LegacyImport {imported:string[]; unchanged:string[]; fault:Faul
 // Shell-owned bootstrap truth, independent of any Application. Paths are disclosed deliberately by the host.
 export interface BootstrapStatus {
   state:BootstrapState; stage:string; root:string|null; legacy_root:string|null; fault:Fault|null;
+  default_packages_root:string|null;
   settings:Settings|null; application_available:boolean; pending_restore:boolean; catalog:WorkspaceCatalog|null;
 }
 export interface SnapshotReceipt {path:string; generation:string; files:number; bytes:number}

@@ -35,7 +35,7 @@ import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readEnvironment, 
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
 import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
-import {applyCatalogMutation, applyRefresh, applySave, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, revealRange, sameAuthoringRef, saveBlock, saveTicket, selectFile, undoFile, validationTicket} from './authoring.ts';
+import {applyCatalogMutation, applyRefresh, applySave, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, saveBlock, saveTicket, selectFile, undoFile, validationTicket} from './authoring.ts';
 import type {AuthoringSession} from './authoring.ts';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, busy, closeWorkspace, commandValues, deriveBound, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
@@ -52,7 +52,7 @@ interface Operation {run: string; kind: 'run' | 'check'; workspace: WorkspaceRef
 interface Starting {workspaceId: string | null; kind: 'run' | 'check'}
 interface DialogError {kind: 'save' | 'check'; value: Fault}
 // An action that ends or replaces the Edit session; unsaved drafts are resolved by Save/Discard/Cancel first.
-type Choice = {kind: 'exit'} | {kind: 'duplicate'; path: string; packageId: string} | {kind: 'close'} | {kind: 'closeTab'; workspaceId: string};
+type Choice = {kind: 'exit'} | {kind: 'duplicate'; packageId: string} | {kind: 'close'} | {kind: 'closeTab'; workspaceId: string};
 // The host's category for a Workspace reference it no longer recognizes (closed, reinspected or invalidated by Edit).
 const STALE_IDENTITY = 'StaleIdentity';
 
@@ -183,6 +183,8 @@ export default function App() {
   const shell = surface(status);
   const pollEnabled = status?.application_available === true;
   const savedEnvironment = settings?.ocr_environment ?? null;
+  const defaultPackagesRoot = status?.default_packages_root ?? '';
+  const packagesRoot = settings?.packages_root ?? defaultPackagesRoot;
   const derived = useMemo(() => Object.fromEntries(workspaces.filter(isBound).map(workspace => [workspace.id, deriveBound(workspace.bound, savedEnvironment, locale)])) as Record<string, Derived>, [workspaces, savedEnvironment, locale]);
   const active = starting !== null || busy(view.state);
   const selected = nav.kind === 'workspace' ? workspaces.find(workspace => workspace.id === nav.id) : undefined;
@@ -862,7 +864,7 @@ export default function App() {
 
   // Open and Create never run package code or bind the Tab; the lease then excludes ordinary Start and Check.
   async function enterEdit(workspace: Workspace, path: string, packageId: string | null) {
-    if (!path || editBlock(workspace) !== null || leaseOwnerNow() !== null) return;
+    if (!(packageId === null ? path : packageId) || editBlock(workspace) !== null || leaseOwnerNow() !== null) return;
     invalidateOwnerTarget(workspace.id);
     const origin: Origin = {id: workspace.id, revision: workspace.revision};
     const ref = workspaceRef(workspace);
@@ -870,7 +872,7 @@ export default function App() {
     try {
       const view = await authoringCall(packageId === null ? 'openingPackage' : 'creatingPackage', () => packageId === null
         ? invoke<AuthoringView>('authoring_open', {workspace: ref, packagePath: path})
-        : invoke<AuthoringView>('authoring_create', {workspace: ref, packagePath: path, packageId}));
+        : invoke<AuthoringView>('authoring_create', {workspace: ref, packageId}));
       updateAuthoring(() => openSession(view, {key: packageId === null ? 'authoringOpened' : 'authoringCreated'}));
       publishHostAuthoring(view.owner);
       const owner = view.owner.workspace.workspace_id;
@@ -1023,13 +1025,13 @@ export default function App() {
   }
 
   // Duplicate reads the saved revision, so the choice dialog has already saved or deliberately left the drafts.
-  async function duplicateAuthoring(path: string, packageId: string): Promise<boolean> {
+  async function duplicateAuthoring(packageId: string): Promise<boolean> {
     const session = authoringStore.current;
     if (!session || session.pending !== null || leaseLost) return false;
     const token = session.owner.token;
     updateAuthoring(current => current && current.owner.token === token ? beginPending(current, {kind: 'duplicate'}) : current);
     try {
-      const view = await authoringCall('duplicatingPackage', () => invoke<AuthoringView>('authoring_duplicate', {owner: session.owner, revision: session.revision, packagePath: path, packageId}));
+      const view = await authoringCall('duplicatingPackage', () => invoke<AuthoringView>('authoring_duplicate', {owner: session.owner, revision: session.revision, packageId}));
       updateAuthoring(current => current && current.owner.token === token ? openSession(view, {key: 'authoringDuplicated', args: [view.package_path, view.package_id]}) : current);
       publishHostAuthoring(view.owner);
       return true;
@@ -1087,7 +1089,7 @@ export default function App() {
     try {
       if (save && !await saveAll()) return;
       if (intent.kind === 'duplicate') {
-        done = await duplicateAuthoring(intent.path, intent.packageId);
+        done = await duplicateAuthoring(intent.packageId);
         return;
       }
       if (intent.kind === 'close') {
@@ -1113,6 +1115,7 @@ export default function App() {
   const editHandlers: EditHandlers = {
     select: (path, previous) => updateAuthoring(session => session && selectFile(session, path, previous)),
     edit: (path, next, before, input) => updateAuthoring(session => session && editFile(session, path, next, before, input)),
+    replace: (path, text, typed) => updateAuthoring(session => session && replaceFile(session, path, text, typed)),
     compositionStart: (path, range) => updateAuthoring(session => session && beginComposition(session, path, range)),
     compositionEnd: path => updateAuthoring(session => session && endComposition(session, path)),
     range: (path, range) => updateAuthoring(session => session && recordRange(session, path, range)),
@@ -1127,7 +1130,7 @@ export default function App() {
     refresh: () => void refreshAuthoring(),
     recover: () => void recoverAuthoringPackage(),
     catalog: edit => changeCatalog(edit),
-    duplicate: (path, packageId) => requestChoice({kind: 'duplicate', path, packageId}),
+    duplicate: packageId => requestChoice({kind: 'duplicate', packageId}),
     exit: () => requestChoice({kind: 'exit'}),
   };
 
@@ -1136,7 +1139,7 @@ export default function App() {
       role: leaseOwnerId === null ? null : leaseOwnerId === workspace.id ? 'owner' : 'other',
       ownerLabel: leaseLabel, block: editBlock(workspace), loaded: authoring !== null,
       onOpen: path => void enterEdit(workspace, path, null),
-      onCreate: () => void enterEdit(workspace, workspace.editPath.trim(), workspace.editPackageId.trim()),
+      onCreate: () => void enterEdit(workspace, '', workspace.editPackageId.trim()),
       onReturn: returnToEdit,
       onPath: value => change(workspace.id, item => ({...item, editPath: value, error: null})),
       onPackageId: value => change(workspace.id, item => ({...item, editPackageId: value, error: null})),
@@ -1148,7 +1151,8 @@ export default function App() {
   const envDirty = Object.keys(envParsed.errors).length > 0 || !sameEnvironment(envParsed.environment, savedEnvironment);
   const parsedSettings = useMemo(() => readSettingsDraft(settingsDraft, locale), [settingsDraft, locale]);
   const dialogDirty = settings === null || settingsDraft.locale !== settings.locale || settingsDraft.logLimit.trim() !== String(settings.gui_log_limit)
-    || !sameNotifications(settingsDraft.notifications, settings.notifications) || settingsDraft.backupDirectory.trim() !== (settings.backup_directory ?? '') || envDirty;
+    || !sameNotifications(settingsDraft.notifications, settings.notifications) || settingsDraft.backupDirectory.trim() !== (settings.backup_directory ?? '')
+    || settingsDraft.packagesRoot.trim() !== (settings.packages_root ?? '') || envDirty;
   // Check binds the workspace visible when the dialog opened; an unbound Tab is never passed as a package association.
   const checkTarget: CheckTarget = selected?.bound
     ? {workspace: workspaceRef(selected), label: workspaceLabel(selected, workspaces), descriptorPath: selected.bound.descriptorPath.trim() || null, packageInventoryIdentity: selected.bound.package.inventory_identity}
@@ -1561,14 +1565,14 @@ export default function App() {
       <main id="workspace-panel" className="content" aria-label={selected ? t.workspaceAria(workspaceLabel(selected, workspaces)) : undefined}>
         {selected && selected.page === 'edit' && editVisible && authoring && <EditPage key={authoring.owner.token} session={authoring} label={workspaceLabel(selected, workspaces)}
           handlers={editHandlers} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
-          leaseLost={leaseLost} validationActive={validationActive}/>}
+          packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive}/>}
         {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (isBound(selected)
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)} snapshot={operation?.snapshot ?? null}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
             savedEnvironment={savedEnvironment} handlers={handlers(selected)} authoring={pageAuthoring(selected)}/>
           : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
-            recovery={recoveryHandlers(selected)} authoring={pageAuthoring(selected)}/>)}
+            recovery={recoveryHandlers(selected)} authoring={pageAuthoring(selected)} packagesRoot={packagesRoot}/>)}
         {selected && selected.page === 'logs' && <LogsPage eyebrow={t.activity(workspaceLabel(selected, workspaces))} heading={t.logs} description={t.workspaceLogHelp}
           items={logs.items} evicted={logs.evicted} limit={settings?.gui_log_limit ?? retention.current} scope={{kind: 'workspace', id: selected.id}}
           filter={selected.logFilter} onFilter={filter => {setReveal(null); change(selected.id, item => ({...item, logFilter: filter}));}}
@@ -1611,6 +1615,7 @@ export default function App() {
       openCount={workspaces.length} savedCount={savedCount} onRefresh={() => void refreshSaved()} onReopen={name => void reopenWorkspace(name)} reopening={reopening} reopenError={reopenError}
       busyReason={appBusy === 'reopeningWorkspace' ? null : commandReason} strip={strip('saved', () => {if (reopening === null) {setSavedOpen(false); returnToEdit();}})}/>
     <SettingsDialog open={dialogOpen} onCancel={() => setDialogOpen(false)} settings={settings} draft={settingsDraft} onDraft={next => {setSettingsDraft(next); setSaveNotice(null);}}
+      defaultPackagesRoot={defaultPackagesRoot}
       parsed={parsedSettings} dirty={dialogDirty} saving={appBusy === 'savingSettings'} busyReason={commandReason} saveError={dialogError?.kind === 'save' ? dialogError.value : null} saveNotice={renderMessage(locale, saveNotice)} onSave={() => void saveSettings()}
       envDirty={envDirty} active={active} pickerBusy={pickerBusy} target={checkTarget} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale} originLabel={labelOf}
       checkError={dialogError?.kind === 'check' ? dialogError.value : null} authoringReason={authoringReason}

@@ -383,11 +383,15 @@ pub fn publish_no_replace(from: &Path, to: &Path) -> io::Result<()> {
         use std::os::unix::ffi::OsStrExt;
         let from = CString::new(from.as_os_str().as_bytes())?;
         let to = CString::new(to.as_os_str().as_bytes())?;
-        // SAFETY: both pointers reference live NUL-terminated strings; the OS
-        // consumes them synchronously. EXCL/NOREPLACE is required, not emulated.
         #[cfg(target_os = "macos")]
+        // SAFETY: both pointers reference live NUL-terminated strings consumed
+        // synchronously. RENAME_EXCL enforces no-replace publication.
+        #[expect(unsafe_code, reason = "audited macOS atomic no-replace rename")]
         let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
         #[cfg(target_os = "linux")]
+        // SAFETY: both pointers reference live NUL-terminated strings consumed
+        // synchronously. AT_FDCWD and RENAME_NOREPLACE are valid renameat2 arguments.
+        #[expect(unsafe_code, reason = "audited Linux atomic no-replace rename")]
         let result = unsafe {
             libc::renameat2(
                 libc::AT_FDCWD,
@@ -414,8 +418,9 @@ pub fn publish_no_replace(from: &Path, to: &Path) -> io::Result<()> {
                 "path contains NUL",
             ));
         }
-        // SAFETY: live NUL-terminated UTF-16 buffers. Zero flags explicitly omit
-        // REPLACE_EXISTING and COPY_ALLOWED, including for directory publication.
+        // SAFETY: both pointers reference live NUL-terminated UTF-16 buffers consumed
+        // synchronously. Zero flags omit REPLACE_EXISTING and COPY_ALLOWED.
+        #[expect(unsafe_code, reason = "audited Windows atomic no-replace move")]
         let result = unsafe {
             windows_sys::Win32::Storage::FileSystem::MoveFileExW(from.as_ptr(), to.as_ptr(), 0)
         };
@@ -536,6 +541,39 @@ pub(crate) mod tests {
         assert_eq!(captured.files["settings.json"], b"invalid JSON\0");
         assert_eq!(captured, capture(&root.0).unwrap());
         assert!(captured.files.contains_key("tabs/Orphan/pkg/target.config"));
+    }
+
+    #[test]
+    fn packages_subtree_is_not_read_or_admitted_to_configuration_snapshots() {
+        let root = Root::new();
+        root.put("settings.json", b"retained settings");
+        root.put("pkgs/sample/main.ts", b"source before");
+        root.put("pkgs/sample/profiles/default.json", b"portable preset");
+        let before = capture(&root.0).unwrap();
+        let observed = capture_between(&root.0, || {
+            fs::write(root.0.join("pkgs/sample/main.ts"), b"source after").unwrap();
+        })
+        .unwrap();
+        assert_eq!(observed, before);
+        assert_eq!(
+            observed.files,
+            BTreeMap::from([("settings.json".into(), b"retained settings".to_vec())])
+        );
+        assert!(
+            Capture::from_files(
+                BTreeMap::from([("pkgs/sample/main.ts".into(), b"overwrite".to_vec())]),
+                true,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read(root.0.join("pkgs/sample/main.ts")).unwrap(),
+            b"source after"
+        );
+        assert_eq!(
+            fs::read(root.0.join("pkgs/sample/profiles/default.json")).unwrap(),
+            b"portable preset"
+        );
     }
 
     #[test]

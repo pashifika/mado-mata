@@ -172,6 +172,7 @@
     "timeout": "Choose 5, 8, or 12 seconds.",
     "success": "Success visibility must be on or off.",
     "locale": "Choose English or Japanese.",
+    "packagesRoot": "Enter an absolute packages root of at most 4096 UTF-8 bytes, without parent traversal or control characters; leave blank for the default.",
     "clean": "Clean",
     "cleanNoChild": "Clean · no child started",
     "incomplete": "Incomplete / not clean",

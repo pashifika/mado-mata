@@ -92,6 +92,26 @@ const adapterArguments = {
   'ui.authoring.block': ['pending','refresh','missing','clean','binary','manifestDirty','fileDirty'].map(kind=>[kind]),
   'ui.authoring.blockedOther': [['workspace-A']], 'ui.authoring.startBlocked': [['workspace-A']], 'ui.authoring.stripKind': [['pkg-A']],
   'ui.authoring.dirtyHeading': ['exit','duplicate','close','closeTab'].map(kind=>[kind]),
+  'ui.authoring.presetLabel': [['default']], 'ui.authoring.sourceMapLabel': [['main.ts']],
+  'ui.authoring.jsonLocation': ['unexpectedCharacter','unexpectedEnd','invalidString','invalidNumber','trailingContent','depth','future-problem'].map(problem=>[problem,3,7]),
+  'ui.authoring.normalizedNumbers': [['1.0, 1e3']], 'ui.authoring.normalizedDuplicates': [['$.a, $.b[0].c']],
+  'ui.authoring.runtimeLabel': [['typescript'],['javascript'],['lua']], 'ui.authoring.runtimeUnsupported': [['lua']],
+  'ui.authoring.entryName': [['readiness'],['workflow']], 'ui.authoring.entryModule': [['Readiness']], 'ui.authoring.entryFunction': [['Workflow']],
+  'ui.authoring.moduleUndeclared': [['src/main.ts']], 'ui.authoring.helper': [['@mado/helper','1.0.0']],
+  'ui.authoring.assetDimensions': [['0','0'],['640','480']], 'ui.authoring.addFieldHeading': [['$.recognition']],
+  'ui.authoring.schemaType': ['object','array','string','number','integer','boolean','future-type'].map(type=>[type]),
+  'ui.authoring.unsupportedType': [['"date"']],
+  'ui.authoring.boundLabel': ['minLength','maxLength','minimum','maximum','minItems','maxItems'].map(key=>[key]),
+  'ui.authoring.enumValue': [[1]], 'ui.authoring.enumRemove': [[2]], 'ui.authoring.nestedDefault': [['0.5']],
+  'ui.authoring.schemaProblems': [[1],[2]],
+  'ui.authoring.schemaIssue': ['node','type','version','rootType','additionalProperties','properties','required','items','reversed','enum','depth']
+    .map(code=>[{code}]).concat([[{code:'keyword',key:'format'}],[{code:'bound',key:'minimum'}]]),
+  'ui.authoring.schemaRepair': ['node','type','version','rootType','additionalProperties','properties','required','items','reversed','enum','depth']
+    .map(code=>[{code}]).concat([[{code:'keyword',key:'format'}],[{code:'bound',key:'minimum'}]]),
+  'ui.authoring.presetIssue': ['root','packageId','schemaVersion','options'].map(code=>[{code}]).concat([[{code:'member',key:'extra'}]]),
+  'ui.authoring.presetRepair': ['root','packageId','schemaVersion','options'].map(code=>[{code}]).concat([[{code:'member',key:'extra'}]]),
+  'ui.authoring.characters': [[1],[2]],
+  'ui.authoring.sourceMapIssue': ['root','version','sources','mappings','sourceRoot'].map(code=>[{code}]).concat([[{code:'source',index:0}]]),
   'ui.recovery.outcomeStatus': [['saved'],['repair_required'],['storage_failed'],['future-status']],
   'ui.recovery.confirmReset': [['profile-A','P','workspace-A','pkg-A']],
 };
@@ -164,7 +184,7 @@ for (const {scenario,input,value,invalid} of [
 }
 
 test('draft locale and validation presentation do not implicitly change each other',()=>{
-  const draft={locale:'ja',logLimit:'invalid',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(null),backupDirectory:''};
+  const draft={locale:'ja',logLimit:'invalid',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(null),backupDirectory:'',packagesRoot:''};
   const original=structuredClone(draft);
   const en=readSettingsDraft(draft,'en');
   const ja=readSettingsDraft(draft,'ja');

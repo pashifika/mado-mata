@@ -83,7 +83,7 @@ export function surface(status:BootstrapStatus|null):Surface {
 // Initialize writes exactly the operator's explicit choices plus documented defaults; nothing is inspected or probed.
 export function initialSettings(draft:SetupDraft):EditableSettings {
   const destination = draft.backupDirectory.trim();
-  return {locale: draft.locale, gui_log_limit: 1000, ocr_environment: null, notifications: {...DEFAULT_NOTIFICATIONS}, backup_directory: destination === '' ? null : destination};
+  return {locale: draft.locale, gui_log_limit: 1000, ocr_environment: null, notifications: {...DEFAULT_NOTIFICATIONS}, backup_directory: destination === '' ? null : destination, packages_root: null};
 }
 
 // Only a constructing action that ended Ready without a fault can have rebuilt the Application; its catalog then

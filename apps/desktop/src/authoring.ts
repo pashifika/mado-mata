@@ -13,6 +13,9 @@ export const MATCH_LIMIT = 10_000;
 
 export interface TextRange {start:number; end:number}
 export interface Snapshot extends TextRange {text:string}
+// Text the operator typed into a numeric field of a structured form that is not a number yet (e.g. `1.`), at a value
+// path of that form. The document holds it as a string; this marks it as editable text rather than stored data.
+export interface TypedText {path:string; text:string}
 
 // One declared file's editor state. `base` is the last known disk text (the host's latest read or this session's
 // committed Save); dirtiness is `text !== base`, so undoing back to the saved text is clean again. Binary assets have
@@ -30,6 +33,9 @@ export interface FileDraft {
   diskChanged:boolean;
   // The file is no longer declared; the unsaved text is kept for copying but cannot be saved.
   missing:boolean;
+  // Form provenance for this draft's text, so a form shown again (after another file, Logs or settings) resumes the
+  // operator's numeric text. Discard, a changed disk read and a new session (Open, Create, Duplicate) clear it.
+  typed:TypedText[];
 }
 
 export type AuthoringPending = {kind:'save'; path:string} | {kind:'catalog'} | {kind:'refresh'} | {kind:'validate'} | {kind:'exit'} | {kind:'duplicate'};
@@ -73,7 +79,7 @@ function clamp(range:TextRange, length:number):TextRange {
 
 function freshDraft(file:AuthoringFile, range:TextRange = {start: 0, end: 0}):FileDraft {
   return {path: file.path, kind: file.kind, bytes: file.bytes, base: file.text, text: file.text, revision: 0, undo: [], redo: [],
-    group: null, composing: null, range: clamp(range, file.text?.length ?? 0), diskChanged: false, missing: false};
+    group: null, composing: null, range: clamp(range, file.text?.length ?? 0), diskChanged: false, missing: false, typed: []};
 }
 
 export function fileDirty(draft:FileDraft):boolean {
@@ -177,6 +183,20 @@ export function redoFile(session:AuthoringSession, path:string):AuthoringSession
   return travel(session, path, 'redo');
 }
 
+// Structured metadata forms replace the whole document. They keep no text history: the form controls themselves are
+// the way back, and Discard restores the saved text. Dirtiness stays `text !== base`, so restoring every value is clean.
+// A form that tracks numeric text passes its provenance; other structured edits keep the recorded one, which a form
+// applies only where the document still holds exactly that text.
+export function replaceFile(session:AuthoringSession, path:string, text:string, typed?:readonly TypedText[]):AuthoringSession {
+  const draft = session.drafts.get(path);
+  if (!draft || draft.text === null || draft.composing !== null) return session;
+  const provenance = typed === undefined ? draft.typed : [...typed];
+  const sameProvenance = provenance.length === draft.typed.length
+    && provenance.every((entry, index) => entry.path === draft.typed[index].path && entry.text === draft.typed[index].text);
+  if (draft.text === text) return sameProvenance ? session : withDraft(session, {...draft, typed: provenance});
+  return withDraft(session, {...draft, text, range: {start: 0, end: 0}, revision: draft.revision + 1, group: null, typed: provenance});
+}
+
 // Discarding one file is itself undoable; a draft of an undeclared file is dropped.
 export function discardFile(session:AuthoringSession, path:string):AuthoringSession {
   const draft = session.drafts.get(path);
@@ -189,7 +209,7 @@ export function discardFile(session:AuthoringSession, path:string):AuthoringSess
   }
   const base = draft.base ?? '';
   const discarded:FileDraft = {...draft, text: base, range: clamp(draft.range, base.length), revision: draft.revision + 1, group: null,
-    undo: pushHistory(draft.undo, {text: draft.text!, ...draft.range}), redo: [], diskChanged: false};
+    undo: pushHistory(draft.undo, {text: draft.text!, ...draft.range}), redo: [], diskChanged: false, typed: []};
   return {...withDraft(session, discarded), reveal: session.reveal + 1, notice: {key: 'authoringDiscarded', args: [path]}};
 }
 

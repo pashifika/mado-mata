@@ -47,7 +47,8 @@ export function defaultDraft(schema:Schema):Record<string,Json> {
     .map(([key,node])=>[key,structuredClone(node.default!)]));
 }
 
-function exactIntegerText(text: string, number: number): boolean {
+// True when valid JSON number text denotes exactly the integer `number` (no rounding beyond double precision).
+export function exactIntegerText(text: string, number: number): boolean {
   const match = /^-?(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text.trim())!;
   const fraction = match[2] ?? '';
   const digits = (match[1] + fraction).replace(/^0+/, '');
@@ -205,7 +206,7 @@ export const TIMEOUT_SECONDS: readonly number[] = [5, 8, 12];
 export const DEFAULT_NOTIFICATIONS: NotificationPreferences = {visible_count: 2, timeout_seconds: 8, show_success: true};
 
 // `backupDirectory` is a text draft; blank means the default destination, and an unsaved edit is never used by Back up now.
-export interface SettingsDraft {locale:Locale; logLimit:string; notifications:NotificationPreferences; environment:EnvironmentDraft; backupDirectory:string}
+export interface SettingsDraft {locale:Locale; logLimit:string; notifications:NotificationPreferences; environment:EnvironmentDraft; backupDirectory:string; packagesRoot:string}
 
 export function settingsDraftFrom(settings: Settings | null): SettingsDraft {
   return {
@@ -214,6 +215,7 @@ export function settingsDraftFrom(settings: Settings | null): SettingsDraft {
     notifications: {...(settings?.notifications ?? DEFAULT_NOTIFICATIONS)},
     environment: environmentDraft(settings?.ocr_environment ?? null),
     backupDirectory: settings?.backup_directory ?? '',
+    packagesRoot: settings?.packages_root ?? '',
   };
 }
 
@@ -233,11 +235,28 @@ export function readSettingsDraft(draft:SettingsDraft, locale:Locale = 'en'):{se
   if (!TIMEOUT_SECONDS.includes(draft.notifications.timeout_seconds)) errors.timeoutSeconds = t.timeout;
   if (typeof draft.notifications.show_success !== 'boolean') errors.showSuccess = t.success;
   if (draft.locale !== 'en' && draft.locale !== 'ja') errors.locale = t.locale;
+  const packagesRoot = draft.packagesRoot.trim();
+  if (packagesRoot && (!/^(\/|[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(packagesRoot)
+    || packagesRoot.split(/[\\/]/).includes('..') || /[\u0000-\u001f\u007f-\u009f]/.test(packagesRoot)
+    || new TextEncoder().encode(packagesRoot).length > 4096)) errors.packagesRoot = t.packagesRoot;
   const environment = readEnvironment(draft.environment, locale);
   Object.assign(errors, environment.errors);
   if (Object.keys(errors).length > 0) return {settings: null, errors};
   const destination = draft.backupDirectory.trim();
-  return {settings: {locale:draft.locale, gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications}, backup_directory: destination === '' ? null : destination}, errors};
+  return {settings: {locale:draft.locale, gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications}, backup_directory: destination === '' ? null : destination, packages_root: packagesRoot === '' ? null : packagesRoot}, errors};
+}
+
+export function portableComponent(value:string):boolean {
+  return /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$/.test(value) && !value.endsWith('.')
+    && !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(value) && !/^node_modules$/i.test(value);
+}
+
+// Preview only; the host independently validates the ID, filesystem and saved root.
+export function packageDestination(root:string, id:string):string|null {
+  if (!root || !portableComponent(id)) return null;
+  const windows = /^(?:[A-Za-z]:\\|\\\\)/.test(root);
+  const separator = windows ? '\\' : '/';
+  return `${root.replace(windows ? /[\\/]+$/ : /\/+$/, '')}${separator}${id}`;
 }
 
 export function sameNotifications(left:NotificationPreferences, right:NotificationPreferences):boolean {

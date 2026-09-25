@@ -638,7 +638,7 @@ fn foreign_preset_ownership_blocks_duplicate_without_reassigning_the_original() 
     let original = fixture.package();
     let profile = json!({"package_id":"foreign","schema_version":1,"options":{}}).to_string();
     let candidate = fixture.save(&original, "profiles/default.json", &profile);
-    let destination = fixture.root.join("copy");
+    let destination = fixture.root.join("missing/copy");
     assert!(
         fixture
             .publisher
@@ -650,6 +650,7 @@ fn foreign_preset_ownership_blocks_duplicate_without_reassigning_the_original() 
         profile
     );
     assert!(!destination.exists());
+    assert!(!fixture.root.join("missing").exists());
 }
 
 #[test]
@@ -840,5 +841,103 @@ fn package_roots_cannot_contain_or_live_inside_application_configuration() {
             .unwrap()
             .identity,
         original.validate().unwrap().identity
+    );
+}
+
+#[test]
+fn dedicated_packages_subtree_keeps_publication_recovery_and_private_boundaries() {
+    let fixture = Fixture::new();
+    let data = fixture.root.join("private");
+    let root = data.join("pkgs");
+    let destination = fixture
+        .publisher
+        .prepare_destination(&root, "sample")
+        .unwrap();
+    let original = fixture.publisher.create(&destination, "sample").unwrap();
+    assert_eq!(original.root(), root.join("sample"));
+    assert!(fixture.publisher.packages_root(original.root()).is_err());
+    assert!(fixture.publisher.open(&root).is_err());
+    fixture
+        .publisher
+        .publish_with(
+            &original,
+            original.revision(),
+            add_source("helper.ts"),
+            |_| Err(Fault::new("Interrupted", "simulated interruption")),
+            || Ok(()),
+        )
+        .unwrap_err();
+    let restarted = Publisher::new(data.clone());
+    // Recovery uses the journal's retained source, not a current collection preference.
+    restarted.recover(original.root()).unwrap();
+    assert_eq!(
+        restarted
+            .open(original.root())
+            .unwrap()
+            .validate()
+            .unwrap()
+            .sources["helper.ts"],
+        "export const answer = 42;\n"
+    );
+    for private in ["tabs", "profiles", "authoring", "backups", "pkgs-other"] {
+        assert!(
+            restarted.packages_root(&data.join(private)).is_err(),
+            "{private}"
+        );
+    }
+    assert!(restarted.packages_root(&data).is_err());
+    assert!(restarted.packages_root(&fixture.root).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn collection_links_aliases_and_nested_packages_are_refused_without_changing_source_modes() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let fixture = Fixture::new();
+    let custom = fixture.root.join("custom");
+    fs::create_dir(&custom).unwrap();
+    fs::set_permissions(&custom, fs::Permissions::from_mode(0o755)).unwrap();
+    let destination = fixture
+        .publisher
+        .prepare_destination(&custom, "sample")
+        .unwrap();
+    let original = fixture.publisher.create(&destination, "sample").unwrap();
+    assert_eq!(
+        fs::metadata(&custom).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert!(
+        fixture
+            .publisher
+            .packages_root(&original.root().join("nested/missing"))
+            .is_err()
+    );
+    assert!(!original.root().join("nested").exists());
+    assert!(
+        fixture
+            .publisher
+            .packages_root(&fixture.root.join("CUSTOM"))
+            .is_err()
+    );
+    let alias = fixture.root.join("linked");
+    symlink(&custom, &alias).unwrap();
+    assert!(
+        fixture
+            .publisher
+            .prepare_destination(&alias, "other")
+            .is_err()
+    );
+    let data = fixture.root.join("private");
+    crate::storage::private_directory(&data).unwrap();
+    symlink(&custom, data.join("pkgs")).unwrap();
+    assert!(
+        fixture
+            .publisher
+            .prepare_destination(&data.join("pkgs"), "other")
+            .is_err()
+    );
+    assert_eq!(
+        fixture.publisher.open(original.root()).unwrap().revision(),
+        original.revision()
     );
 }

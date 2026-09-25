@@ -1,16 +1,25 @@
 import {useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import type {RefObject} from 'react';
+import FileTree from '../components/FileTree.tsx';
+import ManifestEditor from '../components/ManifestEditor.tsx';
+import {AssetView, SourceMapView} from '../components/MetadataFacts.tsx';
+import PresetEditor from '../components/PresetEditor.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
+import SchemaEditor from '../components/SchemaEditor.tsx';
 import Select from '../components/Select.tsx';
 import {AUTHORING_RECOVERY, catalogBlock, diagnosticLocation, dirtyDrafts, draftList, fileDirty, findMatch, lineColumn, lineCount, matchSummary, offsetAt, saveBlock, shortRevision, validationCurrent} from '../authoring.ts';
-import type {AuthoringSession, EditInput, FileDraft, Snapshot, TextRange} from '../authoring.ts';
-import type {CatalogAddKind, CatalogEdit, Fault} from '../types.ts';
+import type {AuthoringSession, EditInput, FileDraft, Snapshot, TextRange, TypedText} from '../authoring.ts';
+import {parseJson, readManifest, treeKind} from '../metadata.ts';
+import {packageDestination} from '../state.ts';
+import type {AuthoringFileKind, CatalogAddKind, CatalogEdit, Fault} from '../types.ts';
 import {messages, renderMessage} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
 // One editor line in CSS pixels; `.code-editor` in style.css uses the same line height for text and gutter.
 const LINE_HEIGHT = 18;
 const INDENT = '  ';
+// Metadata list order below the Files tree; the tree holds sources and assets.
+const METADATA_ORDER: Record<AuthoringFileKind, number> = {manifest: 0, schema: 1, profile: 2, source_map: 3, source: 4, asset: 5};
 
 export interface EditHandlers {
   select: (path: string, previous: TextRange | null) => void;
@@ -20,13 +29,17 @@ export interface EditHandlers {
   range: (path: string, range: TextRange) => void;
   undo: (path: string) => void; redo: (path: string) => void;
   reveal: (path: string, range: TextRange) => void;
+  // Structured metadata views replace a whole document; they keep no text history. A values form also passes the
+  // provenance of its typed numeric text, recorded with the draft (see FileDraft.typed).
+  replace: (path: string, text: string, typed?: TypedText[]) => void;
   discard: (path: string) => void;
   save: (path: string) => void; saveAll: () => void;
   validate: () => void; stopValidation: () => void;
   refresh: () => void; recover: () => void;
   // Resolves true once the host committed the edit, so the form can be cleared.
   catalog: (edit: CatalogEdit) => Promise<boolean>;
-  duplicate: (path: string, packageId: string) => void;
+  // The host places the copy in the configured packages root under the new ID.
+  duplicate: (packageId: string) => void;
   exit: () => void;
 }
 
@@ -46,6 +59,8 @@ export interface PageAuthoring {
 
 interface Props {
   session: AuthoringSession; label: string; handlers: EditHandlers;
+  // The effective packages root the host resolves Duplicate destinations in; shown as a preview only.
+  packagesRoot: string;
   // Another host command is in flight or the application is closing; typing stays available.
   locked: boolean; lockReason: string | null;
   // The host no longer reports this lease: text is kept for copying, publication is refused.
@@ -183,14 +198,16 @@ function starterText(kind: CatalogAddKind, packageId: string): string {
   return kind === 'asset' ? '{}\n' : '';
 }
 
-export default function EditPage({session, label, handlers, locked, lockReason, leaseLost, validationActive}: Props) {
+export default function EditPage({session, label, handlers, packagesRoot, locked, lockReason, leaseLost, validationActive}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const a = t.authoring;
   const drafts = draftList(session);
   const dirty = dirtyDrafts(session);
   const selected = session.selected === null ? undefined : session.drafts.get(session.selected);
-  const editable = selected !== undefined && selected.text !== null ? selected as FileDraft & {text: string} : undefined;
+  // Only sources get the text editor; declared metadata opens as structured views and assets as inventory facts.
+  const text = selected !== undefined && selected.text !== null ? selected as FileDraft & {text: string} : undefined;
+  const editable = text?.kind === 'source' ? text : undefined;
   const selection = useRef<TextRange>(selected?.range ?? {start: 0, end: 0});
   const searchInput = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
@@ -200,8 +217,13 @@ export default function EditPage({session, label, handlers, locked, lockReason, 
   const [addModule, setAddModule] = useState('');
   const [destination, setDestination] = useState(selected?.path ?? '');
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const [duplicatePath, setDuplicatePath] = useState('');
   const [duplicateId, setDuplicateId] = useState('');
+  const manifestText = drafts.find(draft => draft.kind === 'manifest' && !draft.missing)?.text ?? null;
+  // Declarations name presets, maps and assets; the manifest view never changes them, so its draft is authoritative here.
+  const manifest = useMemo(() => {
+    const document = manifestText === null ? null : parseJson(manifestText);
+    return document?.ok ? readManifest(document.value) : null;
+  }, [manifestText]);
   useEffect(() => {
     setDestination(selected?.path ?? '');
     setConfirmRemove(false);
@@ -223,20 +245,37 @@ export default function EditPage({session, label, handlers, locked, lockReason, 
     const match = findMatch(editable.text, query, selection.current ?? editable.range, backward);
     if (match) handlers.reveal(editable.path, match);
   }
+  // The outgoing selection matters only for the text editor, whose caret is restored when returning to the file.
+  const previous = () => editable ? selection.current : null;
   function goTo(item: Fault) {
     const location = diagnosticLocation(item);
     const target = location ? session.drafts.get(location.path) : undefined;
-    if (!location || !target || target.text === null) return;
+    if (!location || !target) return;
+    if (target.kind !== 'source' || target.text === null) {
+      handlers.select(location.path, previous());
+      return;
+    }
     const offset = offsetAt(target.text, location.line, location.column);
     handlers.reveal(location.path, {start: offset, end: offset});
   }
+  const presetIds = new Map(manifest?.profiles.map(([id, path]): [string, string] => [path, id]) ?? []);
+  const mapModules = new Map(manifest?.sourceMaps.map(([module, path]): [string, string] => [path, module]) ?? []);
+  const metadata = drafts.filter(draft => !draft.missing && !treeKind(draft.kind)).sort((left, right) => METADATA_ORDER[left.kind] - METADATA_ORDER[right.kind]);
+  function metadataLabel(draft: FileDraft): string {
+    if (draft.kind === 'manifest') return a.metadataManifest;
+    if (draft.kind === 'schema') return a.metadataSchema;
+    if (draft.kind === 'profile') return a.presetLabel(presetIds.get(draft.path) ?? draft.path);
+    return a.sourceMapLabel(mapModules.get(draft.path) ?? draft.path);
+  }
+  const duplicateDestination = packageDestination(packagesRoot, duplicateId.trim());
+  const formDisabled = readOnly || selected?.missing === true;
   function addEdit(): CatalogEdit {
     const path = addPath.trim();
-    const text = starterText(addKind, session.packageId);
-    if (addKind === 'profile') return {kind: 'add', path, file_kind: 'profile', id: addId.trim(), text};
-    if (addKind === 'source_map') return {kind: 'add', path, file_kind: 'source_map', module: addModule.trim(), text};
-    if (addKind === 'asset') return {kind: 'add', path, file_kind: 'asset', id: addId.trim(), format: 'json', width: 0, height: 0, text};
-    return {kind: 'add', path, file_kind: 'source', text};
+    const starter = starterText(addKind, session.packageId);
+    if (addKind === 'profile') return {kind: 'add', path, file_kind: 'profile', id: addId.trim(), text: starter};
+    if (addKind === 'source_map') return {kind: 'add', path, file_kind: 'source_map', module: addModule.trim(), text: starter};
+    if (addKind === 'asset') return {kind: 'add', path, file_kind: 'asset', id: addId.trim(), format: 'json', width: 0, height: 0, text: starter};
+    return {kind: 'add', path, file_kind: 'source', text: starter};
   }
   const addReady = addPath.trim() !== '' && ((addKind !== 'profile' && addKind !== 'asset') || addId.trim() !== '') && (addKind !== 'source_map' || addModule.trim() !== '');
   const addReason = catalogBlock(session, {kind: 'add', path: addPath.trim(), file_kind: addKind, text: ''});
@@ -276,22 +315,26 @@ export default function EditPage({session, label, handlers, locked, lockReason, 
           {dirty.length > 0 && <span id="authoring-unsaved-count" className="tag unsaved">{a.unsavedFiles(dirty.length)}</span>}</div>
         <div className="panel-body">
           <p className="field-help">{a.filesHelp}</p>
-          <ul id="authoring-tree" className="file-tree">
-            {drafts.filter(draft => !draft.missing).map(draft => <li key={draft.path}>
-              <button type="button" className="tree-file" data-path={draft.path} aria-current={draft.path === session.selected ? 'true' : undefined}
-                onClick={() => handlers.select(draft.path, selection.current)}>
-                <span className="tree-path mono">{draft.path}</span>
-                <span className="tree-meta"><span className="tag">{a.kind(draft.kind)}</span>
+          <FileTree drafts={drafts.filter(draft => !draft.missing)} selected={session.selected} onSelect={path => handlers.select(path, previous())}/>
+          <h3 id="authoring-metadata-heading">{a.metadataHeading}</h3>
+          <p className="field-help">{a.metadataHelp}</p>
+          <ul id="authoring-metadata" className="file-tree" aria-labelledby="authoring-metadata-heading">
+            {metadata.map(draft => <li key={draft.path}>
+              <button type="button" className="tree-file" data-path={draft.path} data-kind={draft.kind} aria-current={draft.path === session.selected ? 'true' : undefined}
+                onClick={() => handlers.select(draft.path, previous())}>
+                <span className="tree-label">{metadataLabel(draft)}</span>
+                <span className="tree-path mono muted">{draft.path}</span>
+                {(fileDirty(draft) || draft.diskChanged) && <span className="tree-meta">
                   {fileDirty(draft) && <span className="tag unsaved">{a.unsaved}</span>}
-                  {draft.diskChanged && <span className="tag stale">{a.diskChanged}</span>}</span>
+                  {draft.diskChanged && <span className="tag stale">{a.diskChanged}</span>}</span>}
               </button></li>)}
           </ul>
           {drafts.some(draft => draft.missing) && <>
             <h3>{a.missingHeading}</h3><p className="field-help">{a.missingHelp}</p>
             <ul id="authoring-missing" className="file-tree">{drafts.filter(draft => draft.missing).map(draft => <li key={draft.path}>
               <button type="button" className="tree-file" data-path={draft.path} aria-current={draft.path === session.selected ? 'true' : undefined}
-                onClick={() => handlers.select(draft.path, selection.current)}><span className="tree-path mono">{draft.path}</span>
-                <span className="tree-meta"><span className="tag stale">{a.unsaved}</span></span></button></li>)}</ul></>}
+                onClick={() => handlers.select(draft.path, previous())}><span className="tree-path mono">{draft.path}</span>
+                <span className="tree-meta"><span className="tag">{a.kind(draft.kind)}</span><span className="tag stale">{a.unsaved}</span></span></button></li>)}</ul></>}
           <dl className="run-identity authoring-identity"><dt>{a.path}</dt><dd id="authoring-package-path" className="mono">{session.packagePath}</dd>
             <dt>{a.revision}</dt><dd id="authoring-revision" className="mono" title={session.revision}>{shortRevision(session.revision)}</dd></dl>
           <details id="authoring-manage" className="authoring-manage"><summary>{a.manage}</summary>
@@ -310,8 +353,8 @@ export default function EditPage({session, label, handlers, locked, lockReason, 
             <div className="button-row"><button id="authoring-add-submit" type="button" disabled={publishLocked || !addReady || addReason !== null}
               title={addReason ? a.block(addReason) : undefined}
               onClick={() => void handlers.catalog(addEdit()).then(done => {if (done) {setAddPath(''); setAddId(''); setAddModule('');}})}>{a.add}</button></div>
-            <p className="field-help">{a.addHelp}</p>
-            {selected && !selected.missing && <>
+            <p className="field-help">{a.addHelp} {a.foldersHelp}</p>
+            {selected && !selected.missing && selected.kind !== 'manifest' && <>
               <h3>{a.renameHeading(selected.path)}</h3>
               <div className="field"><label htmlFor="authoring-rename-destination">{a.destination}</label>
                 <input id="authoring-rename-destination" type="text" value={destination} spellCheck={false} onChange={event => setDestination(event.target.value)}/>
@@ -330,12 +373,13 @@ export default function EditPage({session, label, handlers, locked, lockReason, 
           </details>
           <details id="authoring-duplicate" className="authoring-manage"><summary>{a.duplicateHeading}</summary>
             <p className="field-help">{a.duplicateHelp}</p>
-            <div className="field"><label htmlFor="authoring-duplicate-path">{a.destinationDirectory}</label>
-              <input id="authoring-duplicate-path" type="text" value={duplicatePath} spellCheck={false} placeholder={a.packagePlaceholder} onChange={event => setDuplicatePath(event.target.value)}/></div>
             <div className="field"><label htmlFor="authoring-duplicate-id">{a.newPackageId}</label>
-              <input id="authoring-duplicate-id" type="text" value={duplicateId} spellCheck={false} onChange={event => setDuplicateId(event.target.value)}/></div>
-            <div className="button-row"><button id="authoring-duplicate-submit" type="button" disabled={publishLocked || pending !== null || validating || !duplicatePath.trim() || !duplicateId.trim()}
-              onClick={() => handlers.duplicate(duplicatePath.trim(), duplicateId.trim())}>{a.duplicate}</button></div>
+              <input id="authoring-duplicate-id" type="text" value={duplicateId} spellCheck={false} autoCapitalize="off" autoCorrect="off"
+                aria-describedby="authoring-duplicate-destination" onChange={event => setDuplicateId(event.target.value)}/>
+              <p id="authoring-duplicate-destination" className="field-help">{duplicateDestination === null
+                ? a.duplicateDestinationPending : <>{a.duplicateDestination} <span className="mono">{duplicateDestination}</span></>}</p></div>
+            <div className="button-row"><button id="authoring-duplicate-submit" type="button" disabled={publishLocked || pending !== null || validating || !duplicateId.trim()}
+              onClick={() => handlers.duplicate(duplicateId.trim())}>{a.duplicate}</button></div>
           </details>
         </div>
       </section>
@@ -346,6 +390,10 @@ export default function EditPage({session, label, handlers, locked, lockReason, 
         <div className="panel-body">
           {selected?.diskChanged && <p className="inline-warning">{a.diskChangedHelp}</p>}
           {selected?.missing && <p className="inline-warning">{a.missingHelp}</p>}
+          {text && (text.kind === 'manifest' || text.kind === 'schema' || text.kind === 'profile') && <div className="editor-toolbar">
+            <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(text) || readOnly} onClick={() => handlers.discard(text.path)}>{a.discardFile}</button>
+            <span className="muted">{a.structuredHelp}</span>
+          </div>}
           {editable && <>
             <div className="editor-toolbar">
               <button id="authoring-undo" type="button" disabled={editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
@@ -364,7 +412,14 @@ export default function EditPage({session, label, handlers, locked, lockReason, 
             <CodeEditor key={editable.path} draft={editable} reveal={session.reveal} readOnly={readOnly} label={a.editorLabel(editable.path)} help={a.editorHelp}
               selection={selection} handlers={handlers} onFind={() => {searchInput.current?.focus(); searchInput.current?.select();}} onFindNext={find}/>
           </>}
-          {selected && selected.text === null && <p id="authoring-binary" className="muted">{a.binary(selected.bytes)}</p>}
+          {text?.kind === 'manifest' && <ManifestEditor key={text.path} draft={text} disabled={formDisabled}
+            onReplace={next => handlers.replace(text.path, next)} onOpen={path => handlers.select(path, null)}/>}
+          {text?.kind === 'schema' && <SchemaEditor key={text.path} draft={text} disabled={formDisabled} onReplace={(next, typed) => handlers.replace(text.path, next, typed)}/>}
+          {text?.kind === 'profile' && <PresetEditor key={text.path} draft={text} presetId={presetIds.get(text.path) ?? null} packageId={session.packageId}
+            schema={drafts.find(draft => draft.kind === 'schema' && !draft.missing)} disabled={formDisabled}
+            onReplace={(next, typed) => handlers.replace(text.path, next, typed)} onOpen={path => handlers.select(path, null)}/>}
+          {text?.kind === 'source_map' && <SourceMapView key={text.path} draft={text} module={mapModules.get(text.path) ?? null}/>}
+          {selected?.kind === 'asset' && <AssetView key={selected.path} draft={selected} asset={manifest?.assets.find(asset => asset.path === selected.path) ?? null}/>}
           {!selected && <p className="muted">{a.noFile}</p>}
         </div>
       </section>
@@ -384,7 +439,7 @@ export default function EditPage({session, label, handlers, locked, lockReason, 
             const location = diagnosticLocation(item);
             const where = location ? a.location(location.path, location.line, location.column) : null;
             return <li key={index}>
-              {where && session.drafts.get(location!.path)?.text != null
+              {where && session.drafts.has(location!.path)
                 ? <button type="button" className="link diagnostic-location" data-path={location!.path} aria-label={a.goTo(where)} onClick={() => goTo(item)}>{where}</button>
                 : <span className="muted">{where ?? a.unlocated}</span>}
               <strong> {item.category}</strong> <span>{item.message}</span></li>;

@@ -414,7 +414,8 @@ details[open] > summary { font-weight: 600; }
 .recovery-outcomes code { font-size: 10px; color: var(--text-muted); }
 .recovery-panel .confirm-row { flex-basis: 100%; }
 
-/* Edit: declared-file tree, a native textarea with a synchronized line-number gutter, and validation results. */
+/* Edit: a folder tree of scripts and assets, structured metadata views, a native textarea with a synchronized
+   line-number gutter for sources, and validation results. */
 .authoring-strip { background: var(--warn-soft); border-left-color: var(--warn); }
 .authoring-strip button { margin-left: auto; }
 .edit-grid { display: grid; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); gap: 18px; align-items: start; margin-top: 12px; }
@@ -423,6 +424,11 @@ details[open] > summary { font-weight: 600; }
 .tree-file[aria-current="true"] { background: var(--info-soft); border-color: #bfd2ea; }
 .tree-path { overflow-wrap: anywhere; font-size: 11px; }
 .tree-meta { display: flex; flex-wrap: wrap; gap: 4px; }
+.file-tree[hidden] { display: none; }
+.tree-children { margin: 2px 0 0 9px; padding-left: 8px; border-left: 1px solid var(--border); }
+.tree-folder { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 5px 8px; border-color: transparent; background: transparent; font-weight: 600; }
+.tree-twisty { width: 10px; color: var(--text-faint); font-size: 10px; }
+.tree-label { font-size: 12px; overflow-wrap: anywhere; }
 .authoring-identity { margin: 10px 0 12px; }
 .authoring-manage { margin: 10px 0 0; padding: 6px 10px 10px; border: 1px dashed var(--border-strong); border-radius: 6px; }
 .authoring-manage > summary { font-size: 12px; }
@@ -444,6 +450,33 @@ details[open] > summary { font-weight: 600; }
 .diagnostic-list { padding-left: 22px; font-size: 11px; display: grid; gap: 6px; }
 .diagnostic-list li { overflow-wrap: anywhere; }
 .diagnostic-location { font-family: var(--mono); }
+.metadata-view { display: grid; gap: 10px; min-width: 0; }
+.metadata-view h3 { margin: 12px 0 0; }
+.metadata-form { min-width: 0; margin: 0; padding: 0; border: 0; display: grid; gap: 4px; }
+.metadata-group { min-width: 0; margin: 10px 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; }
+.metadata-group > legend { font-weight: 650; font-size: 12px; padding: 0 4px; }
+.metadata-facts { margin: 0; }
+.metadata-invalid p { margin: 6px 0 0; }
+.fact-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.fact-list .link { font-size: 11px; }
+.schema-issues { list-style: none; margin: 0; padding: 0; }
+.schema-issues .inline-warning { margin: 4px 0; }
+.schema-properties { display: grid; gap: 8px; min-width: 0; }
+.schema-node { min-width: 0; padding: 10px 0 4px; border-top: 1px solid #e5eaf0; }
+.schema-properties .schema-properties, .schema-items { border-left: 2px solid #e4eaf2; padding-left: 11px; margin-top: 6px; }
+.schema-node-heading { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 4px 12px; }
+.schema-node-heading .field { margin-bottom: 6px; }
+.schema-node-heading .schema-name { flex: 1 1 160px; }
+.schema-node-heading .schema-type { flex: 0 1 150px; }
+.schema-node-heading .checkbox-label, .schema-node-heading .danger-text { margin-bottom: 10px; }
+.schema-node-label { font-size: 12px; font-weight: 600; margin-bottom: 12px; }
+.schema-add { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 4px 10px; padding: 8px; background: var(--surface-alt); border-radius: 6px; }
+.schema-add .field { margin-bottom: 0; flex: 1 1 140px; }
+.schema-enum { display: grid; gap: 6px; }
+.enum-item { display: flex; gap: 6px; align-items: center; }
+.enum-item input { flex: 1; }
+.schema-default { margin: 6px 0 0; overflow-wrap: anywhere; }
+.metadata-number small { display: block; margin-top: 4px; }
 
 @media (max-width: 1100px) {
   .content { padding: 22px 20px 36px; }

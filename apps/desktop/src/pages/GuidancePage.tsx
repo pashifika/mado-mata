@@ -4,6 +4,7 @@ import type {RecoveryHandlers} from '../components/ProfileRecovery.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
 import {AUTHORING_RECOVERY, recoveryPath} from '../authoring.ts';
 import type {PageAuthoring} from './EditPage.tsx';
+import {packageDestination} from '../state.ts';
 import {UNSUPPORTED_SOURCE, hasWorkspaceEdits} from '../workspace.ts';
 import type {Workspace} from '../workspace.ts';
 import {messages, renderMessage} from '../i18n.ts';
@@ -21,6 +22,7 @@ interface Props {
   activeOwner: ActiveOwner;
   recovery: RecoveryHandlers;
   authoring: PageAuthoring;
+  packagesRoot: string;
 }
 
 // Main content for a Tab without a usable package. Honest states: no saved package (Edit guidance), a saved custom
@@ -29,7 +31,7 @@ interface Props {
 // profiles block binding. Inspect and Edit Open/Create are separate real actions; neither runs package code or
 // invents inventory. The saved reference is shown so the operator knows which source to repair; showing it grants
 // nothing, and a recovery candidate is not a selection until an explicit binding retry succeeds.
-export default function GuidancePage({workspace, label, locked, lockReason, onPath, onInspect, activeOwner, recovery, authoring}: Props) {
+export default function GuidancePage({workspace, label, locked, lockReason, onPath, onInspect, activeOwner, recovery, authoring, packagesRoot}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const g = t.guidance;
@@ -48,6 +50,7 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
   const sourceHeading = unsupported ? g.unsupportedHeading : g.unavailableHeading;
   const path = workspace.inspectPath;
   const a = t.authoring;
+  const destination = packageDestination(packagesRoot, workspace.editPackageId.trim());
   const owner = authoring.role === 'owner';
   // The owner must leave Edit first: its inspection is the handoff back to Run.
   const inspectReason = owner ? a.inspectBlocked : lockReason;
@@ -96,20 +99,21 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
     {!owner && <section id="edit-form" className="panel open-form" aria-labelledby="edit-heading"><div className="panel-body">
       <h2 id="edit-heading">{a.openHeading}</h2>
       <p className="muted">{a.openHelp}</p>
-      <div className="two-col">
-        <div className="field"><label htmlFor="authoring-path">{a.packageDirectory}</label>
-          <input id="authoring-path" type="text" value={workspace.editPath} disabled={workspace.busy !== null} placeholder={a.packagePlaceholder} spellCheck={false}
-            onChange={event => authoring.onPath(event.target.value)}/></div>
-        <div className="field"><label htmlFor="authoring-package-id">{a.packageId}</label>
-          <input id="authoring-package-id" type="text" value={workspace.editPackageId} disabled={workspace.busy !== null} spellCheck={false}
-            onChange={event => authoring.onPackageId(event.target.value)}/>
-          <p className="field-help">{a.packageIdHelp}</p></div>
-      </div>
+      <div className="field"><label htmlFor="authoring-package-id">{a.packageId}</label>
+        <input id="authoring-package-id" type="text" value={workspace.editPackageId} disabled={workspace.busy !== null} spellCheck={false}
+          onChange={event => authoring.onPackageId(event.target.value)}/>
+        <p className="field-help">{a.packageIdHelp}</p></div>
+      <dl className="run-identity"><dt>{a.packagesRoot}</dt><dd className="mono">{packagesRoot}</dd>
+        {destination && <><dt>{a.createDestination}</dt><dd id="authoring-destination" className="mono">{destination}</dd></>}</dl>
       <div className="button-row">
-        <button id="authoring-open" type="button" className="primary" disabled={authoring.block !== null || !workspace.editPath.trim()} onClick={() => authoring.onOpen(workspace.editPath.trim())}>{a.open}</button>
-        <button id="authoring-create" type="button" disabled={authoring.block !== null || !workspace.editPath.trim() || !workspace.editPackageId.trim()} onClick={authoring.onCreate}>{a.create}</button>
+        <button id="authoring-create" type="button" className="primary" disabled={authoring.block !== null || destination === null} onClick={authoring.onCreate}>{a.create}</button>
         <span id="authoring-block" className="muted" role="status">{authoring.block ?? ''}</span>
       </div>
+      <hr/>
+      <div className="field"><label htmlFor="authoring-path">{a.packageDirectory}</label>
+        <input id="authoring-path" type="text" value={workspace.editPath} disabled={workspace.busy !== null} placeholder={a.packagePlaceholder} spellCheck={false}
+          onChange={event => authoring.onPath(event.target.value)}/></div>
+      <button id="authoring-open" type="button" disabled={authoring.block !== null || !workspace.editPath.trim()} onClick={() => authoring.onOpen(workspace.editPath.trim())}>{a.open}</button>
     </div></section>}
     <ProfileRecovery idPrefix="recovery" label={label} state={workspace.recovery} outcomes={workspace.recoveryOutcomes} locked={locked} handlers={recovery}/>
     <section className="panel open-form" aria-labelledby="inspect-heading">

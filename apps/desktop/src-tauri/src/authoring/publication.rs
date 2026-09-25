@@ -100,7 +100,7 @@ impl Publisher {
         draft: PackageDraft,
     ) -> Result<Candidate, Fault> {
         self.check_admission(root)?;
-        let destination = missing_destination(root)?;
+        let destination = missing_destination(root, Some(self))?;
         self.separate_root(&destination)?;
         let parent = destination.parent().ok_or_else(stale)?;
         let stage = temporary(parent, "mado-authoring-create");
@@ -112,7 +112,7 @@ impl Publisher {
                 sync_directory(destination.parent().ok_or_else(stale)?)?;
             }
             sync_directory(&stage)?;
-            missing_destination(&destination)?;
+            missing_destination(&destination, None)?;
             publish_no_replace(&stage, &destination)
                 .map_err(|error| io_fault("publish missing package directory", error))?;
             sync_directory(parent)?;
@@ -443,8 +443,85 @@ pub(super) fn root_identity(root: &Path) -> Result<String, Fault> {
         ))
     }
 }
+/// Resolve the existing ancestor before checking private-root separation. Missing
+/// components remain inert until an explicit authoring command creates them.
+pub(super) fn resolve_packages_root(root: &Path) -> Result<PathBuf, Fault> {
+    if !root.is_absolute()
+        || root.as_os_str().len() > crate::storage::MAX_PATH_BYTES
+        || root
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+        || root
+            .to_str()
+            .is_none_or(|path| path.chars().any(char::is_control))
+    {
+        return Err(Fault::new(
+            "AuthoringPath",
+            "packages root must be a bounded absolute path without parent traversal",
+        ));
+    }
+    let mut ancestor = root.to_path_buf();
+    let mut missing = Vec::new();
+    while !exists(&ancestor)? {
+        let name = ancestor
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(stale)?;
+        if !crate::configuration::safe_component(name) || missing.len() >= MAX_FILES {
+            return Err(Fault::new(
+                "AuthoringPath",
+                "packages root contains an unsafe or excessive path component",
+            ));
+        }
+        missing.push(name.to_owned());
+        if !ancestor.pop() {
+            return Err(stale());
+        }
+    }
+    let mut resolved = PackageDraft::canonical_root(&ancestor)?;
+    if let (Some(parent), Some(name)) = (
+        ancestor.parent(),
+        ancestor.file_name().and_then(|name| name.to_str()),
+    ) {
+        check_alias(parent, name)?;
+    }
+    check_package_ancestors(&resolved)?;
+    for name in missing.into_iter().rev() {
+        if exists(&resolved)? {
+            check_alias(&resolved, &name)?;
+        }
+        resolved.push(name);
+    }
+    Ok(resolved)
+}
 
-fn missing_destination(root: &Path) -> Result<PathBuf, Fault> {
+pub(super) fn create_packages_root(root: &Path) -> Result<(), Fault> {
+    let mut ancestor = root.to_path_buf();
+    let mut missing = Vec::new();
+    while !exists(&ancestor)? {
+        missing.push(ancestor.clone());
+        if !ancestor.pop() {
+            return Err(stale());
+        }
+    }
+    PackageDraft::canonical_root(&ancestor)?;
+    for directory in missing.into_iter().rev() {
+        let parent = directory.parent().ok_or_else(stale)?;
+        PackageDraft::canonical_root(parent)?;
+        check_alias(
+            parent,
+            directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(stale)?,
+        )?;
+        create_directory(&directory)?;
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn missing_destination(root: &Path, publisher: Option<&Publisher>) -> Result<PathBuf, Fault> {
     if root
         .components()
         .any(|part| matches!(part, Component::ParentDir))
@@ -466,7 +543,29 @@ fn missing_destination(root: &Path) -> Result<PathBuf, Fault> {
             "package destination is not a safe bounded filesystem component",
         ));
     }
-    let parent = PackageDraft::canonical_root(absolute.parent().ok_or_else(stale)?)?;
+    let parent = absolute.parent().ok_or_else(stale)?;
+    if let Some(publisher) = publisher {
+        if !exists(parent)? {
+            // The complete starter/copy is validated before create_files reaches here.
+            let resolved = publisher.packages_root(parent)?;
+            publisher.separate_root(&resolved.join(name))?;
+            create_packages_root(&resolved)?;
+        }
+    }
+    let parent = PackageDraft::canonical_root(parent)?;
+    check_package_ancestors(&parent)?;
+    check_alias(&parent, name)?;
+    let destination = parent.join(name);
+    if exists(&destination)? {
+        return Err(Fault::new(
+            "AuthoringDestination",
+            "Create and Duplicate require a missing destination",
+        ));
+    }
+    Ok(destination)
+}
+
+pub(crate) fn check_package_ancestors(parent: &Path) -> Result<(), Fault> {
     let mut manifest_bytes = 0;
     for (depth, ancestor) in parent.ancestors().enumerate() {
         if depth >= MAX_FILES {
@@ -488,20 +587,12 @@ fn missing_destination(root: &Path) -> Result<PathBuf, Fault> {
             {
                 return Err(Fault::new(
                     "AuthoringDestination",
-                    "Create and Duplicate cannot add a package inside an existing package",
+                    "destination cannot be inside an existing package",
                 ));
             }
         }
     }
-    check_alias(&parent, name)?;
-    let destination = parent.join(name);
-    if exists(&destination)? {
-        return Err(Fault::new(
-            "AuthoringDestination",
-            "Create and Duplicate require a missing destination",
-        ));
-    }
-    Ok(destination)
+    Ok(())
 }
 
 fn check_alias(parent: &Path, name: &str) -> Result<(), Fault> {

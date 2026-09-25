@@ -75,7 +75,7 @@ fn lease_excludes_all_ordinary_admission_and_invalidates_shared_source_on_exit()
         "AuthoringActive"
     );
     assert_eq!(
-        app.authoring_create(&second_ref, &sources.root.join("new"), "new-package")
+        app.authoring_create(&second_ref, "new-package")
             .unwrap_err()
             .category,
         "AuthoringActive"
@@ -144,12 +144,7 @@ fn duplicate_rotates_owner_without_rebinding_local_configuration() {
     let original = fs::read(sources.package.join("package.json")).unwrap();
     let editor = app.authoring_open(&workspace, &sources.package).unwrap();
     let duplicate = app
-        .authoring_duplicate(
-            &editor.owner,
-            &editor.revision,
-            &sources.root.join("copy"),
-            "copied-package",
-        )
+        .authoring_duplicate(&editor.owner, &editor.revision, "copied-package")
         .unwrap();
     assert_ne!(duplicate.owner.token, editor.owner.token);
     assert_eq!(duplicate.owner.workspace, editor.owner.workspace);
@@ -504,13 +499,18 @@ fn create_and_save_accept_incomplete_text_but_refuse_stale_revisions() {
     let app = sources.app();
     let workspace = app.create_workspace("owner", "Owner").unwrap();
     let editor = app
-        .authoring_create(
-            &view_ref(&workspace),
-            &sources.root.join("created"),
-            "created-package",
-        )
+        .authoring_create(&view_ref(&workspace), "created-package")
         .unwrap();
     assert_eq!(editor.package_id, "created-package");
+    assert_eq!(
+        Path::new(&editor.package_path),
+        sources
+            .fixture
+            .root
+            .canonicalize()
+            .unwrap()
+            .join("pkgs/created-package")
+    );
     let saved = app
         .authoring_save(
             &editor.owner,
@@ -576,6 +576,92 @@ fn restarted_generation_cannot_reuse_an_authoring_token() {
     assert_eq!(restarted.authoring_owner(), Some(reopened.owner.clone()));
     restarted.authoring_exit(&reopened.owner).unwrap();
     restarted.shutdown().unwrap();
+}
+
+#[test]
+fn saved_packages_root_changes_only_future_destinations_and_survives_restart() {
+    let sources = Sources::new();
+    let app = sources.app();
+    let workspace = app.create_workspace("owner", "Owner").unwrap();
+    let original = app
+        .authoring_create(&view_ref(&workspace), "original")
+        .unwrap();
+    let original_root = PathBuf::from(&original.package_path);
+    let before = fs::read(original_root.join("package.json")).unwrap();
+    let custom = sources.root.join("collections/new");
+    let mut preferences = crate::application::test_support::preferences();
+    preferences.packages_root = Some(custom.to_str().unwrap().into());
+    app.save_settings(preferences).unwrap();
+    assert!(!custom.exists());
+    assert_eq!(app.authoring_owner(), Some(original.owner.clone()));
+    assert_eq!(
+        app.authoring_refresh(&original.owner).unwrap().package_path,
+        original.package_path
+    );
+    let duplicate = app
+        .authoring_duplicate(&original.owner, &original.revision, "copy")
+        .unwrap();
+    assert_eq!(
+        Path::new(&duplicate.package_path),
+        custom.canonicalize().unwrap().join("copy")
+    );
+    assert_eq!(
+        fs::read(original_root.join("package.json")).unwrap(),
+        before
+    );
+    app.authoring_exit(&duplicate.owner).unwrap();
+    app.shutdown().unwrap();
+    let restarted = Application::new(
+        sources.fixture.root.clone(),
+        "unused-runner".into(),
+        "unused-engine".into(),
+    )
+    .unwrap();
+    assert_eq!(
+        restarted.settings().unwrap().packages_root.as_deref(),
+        custom.to_str()
+    );
+    let current = view_ref(&restarted.workspace_catalog().unwrap().open[0]);
+    let created = restarted.authoring_create(&current, "later").unwrap();
+    assert_eq!(
+        Path::new(&created.package_path),
+        custom.canonicalize().unwrap().join("later")
+    );
+    let next = restarted.authoring_exit(&created.owner).unwrap();
+    assert!(
+        restarted
+            .authoring_create(&view_ref(&next), "COPY")
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(original_root.join("package.json")).unwrap(),
+        before
+    );
+    restarted.shutdown().unwrap();
+}
+
+#[test]
+fn invalid_package_ids_do_not_create_the_missing_collection() {
+    let sources = Sources::new();
+    let app = sources.app();
+    let workspace = app.create_workspace("owner", "Owner").unwrap();
+    for id in [
+        "",
+        "../escape",
+        "a/b",
+        "a\\b",
+        ".hidden",
+        "ending.",
+        "CON",
+        "node_modules",
+    ] {
+        assert!(
+            app.authoring_create(&view_ref(&workspace), id).is_err(),
+            "{id}"
+        );
+        assert!(!sources.fixture.root.join("pkgs").exists());
+        assert!(app.authoring_owner().is_none());
+    }
 }
 
 #[test]

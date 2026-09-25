@@ -116,6 +116,7 @@ pub(super) fn preferences() -> EditableSettings {
         ocr_environment: settings.ocr_environment,
         notifications: settings.notifications,
         backup_directory: settings.backup_directory,
+        packages_root: settings.packages_root,
     }
 }
 

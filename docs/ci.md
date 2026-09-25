@@ -84,6 +84,10 @@ host-owned AppKit sheet, not a general dialog/filesystem plugin capability.
 Actual macOS WebView selection and authorized running-application observation
 remain separate from hosted checks and grant no native execution authority.
 
+The desktop crate denies `unsafe_code` and `unsafe_op_in_unsafe_fn` by default.
+Audited native FFI uses narrowly scoped `#[expect(unsafe_code)]` with a reason
+and documented safety conditions; no crate-wide warning suppression is used.
+
 ## Local check scope
 
 The complete local entrypoint is:
@@ -130,9 +134,11 @@ The full check has these responsibilities:
   the storage boundaries and Windows directory-sync qualification limitation.
   Optional OCR settings, bounded replay projection, admission races, and
   pre-startup failures are checked without loading a real OCR backend.
-  Directory-authoring regressions cover source ownership, revision conflicts,
-  interrupted changed-file publication, global Edit admission, non-evaluating
-  validation, and bounded close/cleanup. Actual
+  Directory-authoring regressions cover configured ID-only destinations, source
+  ownership, configuration-only preservation, snapshot source exclusion, revision
+  conflicts, interrupted publication, global Edit admission, non-evaluating
+  validation and bounded close/cleanup. Frontend checks cover structured metadata
+  round trips and numeric draft provenance. Actual
   [Edit WebView acceptance](desktop.md#directory-package-authoring-acceptance),
   physical OS IME input, and storage power-loss durability are not hosted CI claims.
 - On macOS, build the real Tauri shell with `--features custom-protocol` after

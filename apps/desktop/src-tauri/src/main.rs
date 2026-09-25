@@ -433,30 +433,22 @@ async fn authoring_open(
 #[tauri::command]
 async fn authoring_create(
     workspace: WorkspaceRef,
-    package_path: String,
     package_id: String,
     state: tauri::State<'_, Backend>,
 ) -> Result<AuthoringView, Fault> {
     let application = state.bootstrap.application()?;
-    background(move || {
-        application.authoring_create(&workspace, Path::new(&package_path), &package_id)
-    })
-    .await
+    background(move || application.authoring_create(&workspace, &package_id)).await
 }
 
 #[tauri::command]
 async fn authoring_duplicate(
     owner: AuthoringRef,
     revision: String,
-    package_path: String,
     package_id: String,
     state: tauri::State<'_, Backend>,
 ) -> Result<AuthoringView, Fault> {
     let application = state.bootstrap.application()?;
-    background(move || {
-        application.authoring_duplicate(&owner, &revision, Path::new(&package_path), &package_id)
-    })
-    .await
+    background(move || application.authoring_duplicate(&owner, &revision, &package_id)).await
 }
 
 #[tauri::command]

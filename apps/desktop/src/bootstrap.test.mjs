@@ -65,7 +65,7 @@ test('a dispatched snapshot keeps its result after any view change',()=>{
 
 test('Initialize writes the saved-language draft and documented defaults, not the temporary presentation',()=>{
   const ui=reduceBootstrap(reduceBootstrap(INITIAL_BOOTSTRAP,{type:'presentation',locale:'ja'}),{type:'setup',draft:{locale:'en',backupDirectory:'  ',startFresh:false}});
-  assert.deepEqual(initialSettings(ui.setup),{locale:'en',gui_log_limit:1000,ocr_environment:null,notifications:DEFAULT_NOTIFICATIONS,backup_directory:null});
+  assert.deepEqual(initialSettings(ui.setup),{locale:'en',gui_log_limit:1000,ocr_environment:null,notifications:DEFAULT_NOTIFICATIONS,backup_directory:null,packages_root:null});
   assert.equal(initialSettings({locale:'ja',backupDirectory:' /private/backups ',startFresh:true}).backup_directory,'/private/backups');
   assert.equal(initialSettings({locale:'ja',backupDirectory:'',startFresh:true}).locale,'ja');
 });
