@@ -81,6 +81,7 @@ pub(super) fn preferences() -> EditableSettings {
         ocr_environment: None,
         notifications: NotificationPreferences::default(),
         backup_directory: None,
+        packages_root: None,
     }
 }
 

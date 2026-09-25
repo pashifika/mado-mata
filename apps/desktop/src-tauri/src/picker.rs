@@ -25,7 +25,12 @@ pub async fn choose(
                 if pointer.is_null() {
                     return Err(picker_failed());
                 }
-                // SAFETY: Tauri owns this live NSWindow; access stays on its main thread.
+                // SAFETY: ns_window returned a non-null NSWindow owned by Tauri; native_window
+                // stays live through the sheet call, and this closure runs on the main thread.
+                #[expect(
+                    unsafe_code,
+                    reason = "audited Tauri NSWindow borrow on the main thread"
+                )]
                 let parent = unsafe { &*pointer.cast::<NSWindow>() };
                 let panel = NSOpenPanel::openPanel(mtm);
                 panel.setCanChooseFiles(true);
@@ -35,6 +40,7 @@ pub async fn choose(
                 panel.setCanResolveUbiquitousConflicts(false);
                 panel.setCanDownloadUbiquitousContents(false);
                 // SAFETY: The system framework exports an immutable, process-lifetime UTI.
+                #[expect(unsafe_code, reason = "audited immutable system content-type constant")]
                 let application_type = unsafe { UTTypeApplicationBundle };
                 panel.setAllowedContentTypes(&NSArray::from_slice(&[application_type]));
                 let selected_panel = panel.clone();

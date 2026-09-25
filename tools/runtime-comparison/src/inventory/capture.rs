@@ -23,128 +23,157 @@ impl Inventory {
         limits: &Limits,
         stop: Option<&AtomicBool>,
     ) -> Result<Self, Fault> {
-        if limits.snapshot_files == 0
-            || limits.snapshot_files > MAX_FILES
-            || limits.snapshot_bytes == 0
-            || limits.snapshot_bytes > MAX_BYTES
-            || limits.duration_ms == 0
-        {
-            return Err(invalid(
-                "snapshot bounds must be positive and within application ceilings",
-            ));
-        }
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(limits.duration_ms))
-            .ok_or_else(|| invalid("snapshot deadline overflows"))?;
-        let root = checked_root(root)?;
-        let mut capture = Capture {
-            files: BTreeMap::new(),
-            stamps: BTreeMap::new(),
-            bytes: 0,
-            file_limit: limits.snapshot_files,
-            byte_limit: limits.snapshot_bytes,
-            deadline,
-            stop,
-        };
-        capture.collect(&root, "", 0)?;
-        // A second bounded pass compares file identities, contents and directory membership.
-        // Execution never reopens these paths after the capture completes.
-        capture.verify(&root)?;
-        let raw_manifest = capture
-            .files
-            .get("package.json")
-            .ok_or_else(|| invalid("package.json is required"))?;
-        let manifest: Manifest = serde_json::from_slice(raw_manifest)
-            .map_err(|error| invalid(format!("invalid package.json: {error}")))?;
-        validate_manifest(&manifest)?;
-        let files: BTreeMap<_, _> = capture
-            .files
-            .iter()
-            .map(|(path, bytes)| {
-                (
-                    path.clone(),
-                    json!({"sha256": sha256(bytes), "bytes": bytes.len()}),
-                )
-            })
-            .collect();
-        let mut declared = BTreeSet::from(["package.json".to_owned()]);
-        let mut sources = BTreeMap::new();
-        for path in &manifest.sources {
-            declare(&mut declared, path)?;
-            let source = text_file(&mut capture.files, path)?;
-            validate_source(path, &source, &manifest.runtime)?;
-            sources.insert(path.clone(), source);
-        }
-        declare(&mut declared, &manifest.schema)?;
-        let schema = json_file(&mut capture.files, &manifest.schema)?;
-        let mut profiles = BTreeMap::new();
-        for (id, path) in &manifest.profiles {
-            portable_component(id)?;
-            declare(&mut declared, path)?;
-            let profile = json_file(&mut capture.files, path)?;
-            resolve_options(&schema, &profile, &manifest.package_id)?;
-            profiles.insert(id.clone(), profile);
-        }
-        let mut assets = BTreeMap::new();
-        for (id, asset) in &manifest.assets {
-            portable_component(id)?;
-            declare(&mut declared, &asset.path)?;
-            let bytes = capture
-                .files
-                .remove(&asset.path)
-                .ok_or_else(|| invalid(format!("asset {id} is missing: {}", asset.path)))?;
-            validate_asset(id, asset, &bytes)?;
-            assets.insert(id.clone(), bytes);
-        }
-        let mut source_maps = BTreeMap::new();
-        for (module, path) in &manifest.source_maps {
-            if !sources.contains_key(module) {
-                return Err(invalid(format!(
-                    "source map refers to undeclared source: {module}"
-                )));
-            }
-            declare(&mut declared, path)?;
-            let map = text_file(&mut capture.files, path)?;
-            validate_map(&map)?;
-            source_maps.insert(module.clone(), map);
-        }
-        for path in capture.files.keys() {
-            if !declared.contains(path) {
-                return Err(invalid(format!("undeclared package file: {path}")));
-            }
-        }
-        let (approved_sources, catalog) = catalog(&manifest)?;
-        for (id, source) in approved_sources {
-            capture.reserve(source.len())?;
-            sources.insert(id, source);
-        }
-        if sources.len() + declared.len() - manifest.sources.len() > limits.snapshot_files {
-            return Err(invalid(
-                "approved dependency closure exceeds snapshot file bound",
-            ));
-        }
-        let metadata = json!({
-            "manifest": manifest,
-            "runtime": manifest.runtime,
-            "files": files,
-            "catalog": catalog,
-            "capture_limits": {"files": limits.snapshot_files, "bytes": limits.snapshot_bytes}
-        });
-        let mut inventory = Self {
-            identity: String::new(),
-            package_id: manifest.package_id,
-            sources,
-            assets,
-            schema,
-            profiles,
-            entries: manifest.entries,
-            metadata,
-            source_maps,
-        };
-        inventory.refresh_identity()?;
-        capture.check()?;
-        Ok(inventory)
+        let capture = capture_files(root, limits, stop)?;
+        inventory_from_capture(capture, limits)
     }
+}
+
+pub(super) fn capture_files<'a>(
+    root: &Path,
+    limits: &Limits,
+    stop: Option<&'a AtomicBool>,
+) -> Result<Capture<'a>, Fault> {
+    if limits.snapshot_files == 0
+        || limits.snapshot_files > MAX_FILES
+        || limits.snapshot_bytes == 0
+        || limits.snapshot_bytes > MAX_BYTES
+        || limits.duration_ms == 0
+    {
+        return Err(invalid(
+            "snapshot bounds must be positive and within application ceilings",
+        ));
+    }
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(limits.duration_ms))
+        .ok_or_else(|| invalid("snapshot deadline overflows"))?;
+    let root = checked_root(root)?;
+    let mut capture = Capture {
+        files: BTreeMap::new(),
+        stamps: BTreeMap::new(),
+        bytes: 0,
+        file_limit: limits.snapshot_files,
+        byte_limit: limits.snapshot_bytes,
+        deadline,
+        stop,
+    };
+    capture.collect(&root, "", 0)?;
+    // A second bounded pass compares file identities, contents and directory membership.
+    // Execution never reopens these paths after the capture completes.
+    capture.verify(&root)?;
+    Ok(capture)
+}
+
+pub(super) fn inventory_from_files(
+    files: BTreeMap<String, Vec<u8>>,
+    limits: &Limits,
+) -> Result<Inventory, Fault> {
+    let capture = Capture {
+        bytes: files.values().map(Vec::len).sum(),
+        files,
+        stamps: BTreeMap::new(),
+        file_limit: limits.snapshot_files,
+        byte_limit: limits.snapshot_bytes,
+        deadline: Instant::now() + Duration::from_millis(limits.duration_ms),
+        stop: None,
+    };
+    inventory_from_capture(capture, limits)
+}
+
+fn inventory_from_capture(mut capture: Capture<'_>, limits: &Limits) -> Result<Inventory, Fault> {
+    let raw_manifest = capture
+        .files
+        .get("package.json")
+        .ok_or_else(|| invalid("package.json is required"))?;
+    let manifest: Manifest = serde_json::from_slice(raw_manifest)
+        .map_err(|error| invalid(format!("invalid package.json: {error}")))?;
+    validate_manifest(&manifest)?;
+    let files: BTreeMap<_, _> = capture
+        .files
+        .iter()
+        .map(|(path, bytes)| {
+            (
+                path.clone(),
+                json!({"sha256": sha256(bytes), "bytes": bytes.len()}),
+            )
+        })
+        .collect();
+    let mut declared = BTreeSet::from(["package.json".to_owned()]);
+    let mut sources = BTreeMap::new();
+    for path in &manifest.sources {
+        declare(&mut declared, path)?;
+        let source = text_file(&mut capture.files, path)?;
+        validate_source(path, &source, &manifest.runtime)?;
+        sources.insert(path.clone(), source);
+    }
+    declare(&mut declared, &manifest.schema)?;
+    let schema = json_file(&mut capture.files, &manifest.schema)?;
+    let mut profiles = BTreeMap::new();
+    for (id, path) in &manifest.profiles {
+        portable_component(id)?;
+        declare(&mut declared, path)?;
+        let profile = json_file(&mut capture.files, path)?;
+        resolve_options(&schema, &profile, &manifest.package_id)?;
+        profiles.insert(id.clone(), profile);
+    }
+    let mut assets = BTreeMap::new();
+    for (id, asset) in &manifest.assets {
+        portable_component(id)?;
+        declare(&mut declared, &asset.path)?;
+        let bytes = capture
+            .files
+            .remove(&asset.path)
+            .ok_or_else(|| invalid(format!("asset {id} is missing: {}", asset.path)))?;
+        validate_asset(id, asset, &bytes)?;
+        assets.insert(id.clone(), bytes);
+    }
+    let mut source_maps = BTreeMap::new();
+    for (module, path) in &manifest.source_maps {
+        if !sources.contains_key(module) {
+            return Err(invalid(format!(
+                "source map refers to undeclared source: {module}"
+            )));
+        }
+        declare(&mut declared, path)?;
+        let map = text_file(&mut capture.files, path)?;
+        validate_map(&map)?;
+        source_maps.insert(module.clone(), map);
+    }
+    for path in capture.files.keys() {
+        if !declared.contains(path) {
+            return Err(invalid(format!("undeclared package file: {path}")));
+        }
+    }
+    let (approved_sources, catalog) = catalog(&manifest)?;
+    for (id, source) in approved_sources {
+        capture.reserve(source.len())?;
+        sources.insert(id, source);
+    }
+    if sources.len() + declared.len() - manifest.sources.len() > limits.snapshot_files {
+        return Err(invalid(
+            "approved dependency closure exceeds snapshot file bound",
+        ));
+    }
+    let metadata = json!({
+        "manifest": manifest,
+        "runtime": manifest.runtime,
+        "files": files,
+        "catalog": catalog,
+        "capture_limits": {"files": limits.snapshot_files, "bytes": limits.snapshot_bytes}
+    });
+    let mut inventory = Inventory {
+        identity: String::new(),
+        package_id: manifest.package_id,
+        sources,
+        assets,
+        schema,
+        profiles,
+        entries: manifest.entries,
+        metadata,
+        source_maps,
+    };
+    inventory.refresh_identity()?;
+    capture.check()?;
+    Ok(inventory)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -155,8 +184,8 @@ struct Stamp {
     identity: (u64, u64, u64, u64),
 }
 
-struct Capture<'a> {
-    files: BTreeMap<String, Vec<u8>>,
+pub(super) struct Capture<'a> {
+    pub(super) files: BTreeMap<String, Vec<u8>>,
     stamps: BTreeMap<String, Stamp>,
     bytes: usize,
     file_limit: usize,
@@ -166,6 +195,13 @@ struct Capture<'a> {
 }
 
 impl Capture<'_> {
+    pub(super) fn directories(&self) -> impl Iterator<Item = &str> {
+        self.stamps
+            .iter()
+            .filter(|(path, stamp)| !path.is_empty() && stamp.directory)
+            .map(|(path, _)| path.as_str())
+    }
+
     fn check(&self) -> Result<(), Fault> {
         if self.stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
             return Err(Fault::new(
@@ -289,7 +325,7 @@ impl Capture<'_> {
     }
 }
 
-fn checked_root(root: &Path) -> Result<PathBuf, Fault> {
+pub(super) fn checked_root(root: &Path) -> Result<PathBuf, Fault> {
     let absolute = if root.is_absolute() {
         root.to_owned()
     } else {

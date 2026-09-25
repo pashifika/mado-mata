@@ -1,8 +1,9 @@
 use mado_mata_desktop::application::{
-    InspectionOutcome, Poll, ProfileCatalog, RecoveryMutation, RecoveryRef,
-    TargetApplicationResponse, TargetCheckResponse, TargetSaveResponse, TargetView,
-    WorkspaceCatalog, WorkspaceRef, WorkspaceView,
+    AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, InspectionOutcome, Poll,
+    ProfileCatalog, RecoveryMutation, RecoveryRef, TargetApplicationResponse, TargetCheckResponse,
+    TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView,
 };
+use mado_mata_desktop::authoring::CatalogEdit;
 use mado_mata_desktop::backup::SnapshotReceipt;
 use mado_mata_desktop::bootstrap::{Bootstrap, BootstrapStatus, selected_roots};
 use mado_mata_desktop::storage::{EditableSettings, LegacyImport, Profile, Settings};
@@ -15,7 +16,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg(target_os = "macos")]
 mod picker;
@@ -419,6 +420,139 @@ async fn poll(state: tauri::State<'_, Backend>) -> Result<Poll, Fault> {
     background(move || Ok(application.poll())).await
 }
 
+#[tauri::command]
+async fn authoring_open(
+    workspace: WorkspaceRef,
+    package_path: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_open(&workspace, Path::new(&package_path))).await
+}
+
+#[tauri::command]
+async fn authoring_create(
+    workspace: WorkspaceRef,
+    package_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_create(&workspace, &package_id)).await
+}
+
+#[tauri::command]
+async fn authoring_duplicate(
+    owner: AuthoringRef,
+    revision: String,
+    package_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_duplicate(&owner, &revision, &package_id)).await
+}
+
+#[tauri::command]
+async fn authoring_save(
+    owner: AuthoringRef,
+    revision: String,
+    path: String,
+    text: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringMutation, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_save(&owner, &revision, &path, text)).await
+}
+
+#[tauri::command]
+async fn authoring_catalog(
+    owner: AuthoringRef,
+    revision: String,
+    edit: CatalogEdit,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringMutation, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_catalog(&owner, &revision, edit)).await
+}
+
+#[tauri::command]
+async fn authoring_refresh(
+    owner: AuthoringRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_refresh(&owner)).await
+}
+
+#[tauri::command]
+async fn authoring_validate(
+    owner: AuthoringRef,
+    revision: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringValidation, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_validate(&owner, &revision)).await
+}
+
+#[tauri::command]
+fn authoring_stop(owner: AuthoringRef, state: tauri::State<'_, Backend>) -> Result<bool, Fault> {
+    state
+        .bootstrap
+        .running_application()?
+        .authoring_stop(&owner)
+}
+
+#[tauri::command]
+async fn authoring_exit(
+    owner: AuthoringRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<WorkspaceView, Fault> {
+    let application = state.bootstrap.running_application()?;
+    background(move || application.authoring_exit(&owner)).await
+}
+
+#[tauri::command]
+async fn authoring_recover(
+    package_path: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_recover(Path::new(&package_path))).await
+}
+
+#[tauri::command]
+async fn app_close(
+    owner: Option<AuthoringRef>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), Fault> {
+    let bootstrap = state.bootstrap.clone();
+    background(move || {
+        if let Ok(application) = bootstrap.running_application() {
+            application.prepare_close(owner.as_ref())?;
+        }
+        close(&app);
+        Ok(())
+    })
+    .await
+}
+
+fn request_close(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Ok(application) = app.state::<Backend>().bootstrap.running_application() {
+            if let Err(fault) = application.prepare_close(None) {
+                if fault.category == "AuthoringActive" {
+                    let _ = app.emit("authoring-close-requested", ());
+                } else {
+                    let _ = app.emit("application-close-refused", fault);
+                }
+                return;
+            }
+        }
+        close(&app);
+    });
+}
+
 fn close(app: &tauri::AppHandle) {
     let backend = app.state::<Backend>();
     if backend.closing.swap(true, Ordering::SeqCst) {
@@ -518,12 +652,23 @@ fn main() {
             start,
             check_environment,
             stop,
+            authoring_open,
+            authoring_create,
+            authoring_duplicate,
+            authoring_save,
+            authoring_catalog,
+            authoring_refresh,
+            authoring_validate,
+            authoring_stop,
+            authoring_exit,
+            authoring_recover,
+            app_close,
             poll
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                close(window.app_handle());
+                request_close(window.app_handle());
             }
         });
     #[cfg(all(feature = "webdriver", debug_assertions))]
@@ -535,7 +680,7 @@ fn main() {
             tauri::RunEvent::ExitRequested { api, .. } => {
                 if !app.state::<Backend>().closing.load(Ordering::SeqCst) {
                     api.prevent_exit();
-                    close(app);
+                    request_close(app);
                 }
             }
             tauri::RunEvent::Exit => {

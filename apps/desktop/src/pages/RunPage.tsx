@@ -10,6 +10,8 @@ import {faultSummary, text} from '../state.ts';
 import type {CheckAssociation} from '../state.ts';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, editDraft, hasWorkspaceEdits} from '../workspace.ts';
 import type {Bound, BoundWorkspace, Derived} from '../workspace.ts';
+import {AUTHORING_RECOVERY, recoveryPath} from '../authoring.ts';
+import type {PageAuthoring} from './EditPage.tsx';
 import type {ControllerView, Json, OcrEnvironment} from '../types.ts';
 import {messages, renderMessage} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
@@ -36,14 +38,20 @@ interface Props {
   workspace: BoundWorkspace; label: string; derived: Derived; run: RunView; snapshot: RunSnapshot | null;
   locked: boolean; active: boolean; pickerBusy: boolean; starting: boolean; stopping: boolean; closing: boolean;
   savedEnvironment: OcrEnvironment | null; handlers: RunHandlers;
+  // While any Tab owns Edit, Start is refused everywhere; the owner additionally waits to exit before reinspecting.
+  authoring: PageAuthoring;
 }
 
-export default function RunPage({workspace, label, derived, run, snapshot, locked, active, pickerBusy, starting, stopping, closing, savedEnvironment, handlers}: Props) {
+export default function RunPage({workspace, label, derived, run, snapshot, locked, active, pickerBusy, starting, stopping, closing, savedEnvironment, handlers, authoring}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const bound = workspace.bound;
   const {parsed, numericErrors, valuesDirty, dirty, bound: profileBound, selectedProfile, startBlock, descriptorError} = derived;
   const [confirmReinspect, setConfirmReinspect] = useState(false);
+  const [confirmEdit, setConfirmEdit] = useState(false);
+  const a = t.authoring;
+  const editOwner = authoring.role === 'owner';
+  const editReason = authoring.role !== null && authoring.ownerLabel !== null ? a.startBlocked(authoring.ownerLabel) : null;
   const reinspectButton = useRef<HTMLButtonElement>(null);
   const confirmRow = useRef<HTMLDivElement>(null);
   // Set only when the confirmation row closes while it owns focus. Focus returns to Reinspect; once the submitted
@@ -62,7 +70,13 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   }
   // Every Reinspect entry point, including the rejected-profile recovery route, passes the same unsaved-edits check.
   function confirmedReinspect() {
+    if (editOwner) return;
     if (hasWorkspaceEdits(workspace, derived)) setConfirmReinspect(true); else handlers.reinspect();
+  }
+  // Leaving Edit invalidates this inspection, so unsaved profile/target drafts are discarded only after confirmation.
+  function confirmedEdit() {
+    if (authoring.block !== null) return;
+    if (hasWorkspaceEdits(workspace, derived)) setConfirmEdit(true); else authoring.onOpen(bound.packagePath);
   }
   const view = run.view;
   const phase = starting ? 'preparing' : view.state;
@@ -70,7 +84,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   const primary = view.error ?? (view.result?.primary ? fault(view.result.primary) : null);
   const privatePrimary = !check && (snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane)) !== 'controlled';
   const selectedDescriptor = bound.descriptorPath.trim() || null;
-  const canStart = !locked && !active && !pickerBusy && !numericErrors && profileBound && startBlock === null && descriptorError === null;
+  const canStart = !locked && !active && !pickerBusy && authoring.role === null && !numericErrors && profileBound && startBlock === null && descriptorError === null;
   const stopAvailable = run.live && view.run !== null && busy(view.state) && view.state !== 'stopping' && !stopping && !starting && !closing;
   const executionCaption = starting ? t.run.submitted : run.live && busy(view.state) ? t.run.owned(view.run) : view.state === 'terminal' ? t.run.settled(view.run) : t.run.noOperations;
   const heading = selectedProfile && !valuesDirty ? selectedProfile.name : bound.name || t.run.untitled;
@@ -85,6 +99,9 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
     </div>
     <div id="error">
       {workspace.error && <FaultMessage title={t.run.actionFailed} value={workspace.error}/>}
+      {workspace.error?.category === AUTHORING_RECOVERY && <div className="button-row">
+        <button id="workspace-recover" type="button" disabled={locked} onClick={() => authoring.onRecover(recoveryPath(workspace.error!, bound.packagePath))}>{a.recover}</button>
+        <span className="muted">{a.recoverHelp}</span></div>}
       {workspace.sourceError && <FaultMessage title={workspace.sourceError.category === UNSUPPORTED_SOURCE ? t.guidance.unsupportedHeading : t.guidance.unavailableHeading} value={workspace.sourceError}/>}
       {primary && (privatePrimary || check
         ? <section className="fault" role="alert"><strong>{check ? t.run.checkError : t.run.runError} · {faultSummary(primary, !privatePrimary)}</strong>
@@ -92,6 +109,8 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
         : <FaultMessage title={t.run.runError} value={primary}/>)}
     </div>
     <div className="operation-status" role="status">{renderMessage(locale, workspace.busy ?? workspace.notice) || (startBlock ?? '')}</div>
+    {editReason && <p id="start-authoring-block" className="inline-warning">{editReason}
+      {editOwner && <button id="run-return-to-edit" type="button" onClick={authoring.onReturn}>{a.returnToEdit}</button>}</p>}
     <section className="panel summary-panel" aria-label={t.run.summary}>
       <div className="summary-item"><span className="eyebrow">{t.common.execution}</span>
         <div className="state-line"><span className={`dot phase-${phase}`} aria-hidden="true"/><span id="state" className={`phase phase-${phase}`}>{t.phase(phase)}</span></div>
@@ -117,8 +136,16 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                 <span id="confirm-reinspect-text">{t.run.confirmReinspect}</span>
                 <button type="button" className="danger-text" onClick={() => closeConfirm(true)}>{t.run.discardReinspect}</button>
                 <button type="button" autoFocus onClick={() => closeConfirm(false)}>{t.run.keepDraft}</button></div>
-              : <button id="reinspect" ref={reinspectButton} disabled={locked || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()} title={run.live && busy(view.state) ? t.run.reinspectBlocked : undefined}
-                onClick={confirmedReinspect}>{t.run.reinspect}</button>}
+              : <button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()}
+                title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button>}
+            {editOwner
+              ? <button id="edit-package-return" type="button" onClick={authoring.onReturn}>{a.returnToEdit}</button>
+              : confirmEdit
+                ? <div className="confirm-row" role="alertdialog" aria-labelledby="confirm-edit-text">
+                  <span id="confirm-edit-text">{a.confirmEdit}</span>
+                  <button id="edit-discard" type="button" className="danger-text" onClick={() => {setConfirmEdit(false); authoring.onOpen(bound.packagePath);}}>{a.discardEdit}</button>
+                  <button id="edit-keep" type="button" autoFocus onClick={() => setConfirmEdit(false)}>{t.run.keepDraft}</button></div>
+                : <button id="edit-package" type="button" disabled={authoring.block !== null} title={authoring.block ?? undefined} onClick={confirmedEdit}>{a.editPackage}</button>}
           </div>
           <div className="field"><label htmlFor="package-path">{t.guidance.packageDirectory}</label>
             <input id="package-path" type="text" value={workspace.inspectPath} disabled={locked} spellCheck={false} placeholder={t.guidance.packagePlaceholder}
@@ -126,7 +153,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
             <p className="field-help">{t.run.reinspectHelp}</p></div>
           {bound.profilesError && <><FaultMessage title={t.run.profilesError} value={bound.profilesError}/>
             {bound.profilesError.category === 'ProfileRejected' && workspace.recovery === null
-              ? <p className="muted">{t.run.rejectedHelp} <button id="recover-reinspect" type="button" className="link" disabled={locked || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()} onClick={confirmedReinspect}>{t.run.recoverReinspect}</button></p>
+              ? <p className="muted">{t.run.rejectedHelp} <button id="recover-reinspect" type="button" className="link" disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()} onClick={confirmedReinspect}>{t.run.recoverReinspect}</button></p>
               : <p className="muted">{t.run.profilesHelp}</p>}</>}
           <div className="two-col">
             <div className="field"><label htmlFor="profile-select">{t.run.savedProfile}</label>

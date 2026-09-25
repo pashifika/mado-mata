@@ -1160,6 +1160,10 @@ pub(crate) mod tests {
 
     /// Places each unsupported alternate kind at `path`; returns refusal stages.
     #[cfg(target_os = "macos")]
+    #[expect(
+        unsafe_code,
+        reason = "audited mkfifo call creates an isolated metadata fixture"
+    )]
     fn alternate_stages(
         configuration: &TargetConfiguration,
         path: &Path,

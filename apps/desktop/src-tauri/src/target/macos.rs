@@ -263,10 +263,15 @@ fn inspect_bundle(
     let information = CFBundle::info_dictionary_for_url(Some(&url))
         .ok_or_else(|| metadata_fault(field, "foundation"))?;
     checkpoint()?;
-    // SAFETY: The information dictionary has CFString keys and CFType values.
-    // Individual value types are checked before use.
+    // SAFETY: CFBundleCopyInfoDictionaryForURL returns retained CFString keys and CFType
+    // values. The owning dictionary stays live; each value is downcast before typed use.
+    #[expect(unsafe_code, reason = "audited CFBundle information dictionary types")]
     let information: &CFDictionary<CFString, CFType> = unsafe { information.cast_unchecked() };
     // SAFETY: CoreFoundation exports immutable process-lifetime dictionary keys.
+    #[expect(
+        unsafe_code,
+        reason = "audited immutable CoreFoundation dictionary keys"
+    )]
     let (executable_key, identifier_key) =
         unsafe { (kCFBundleExecutableKey, kCFBundleIdentifierKey) };
     let native_name = information
@@ -326,7 +331,9 @@ fn lifetime(pid: i32, guard: &Guard<'_>) -> Result<Lifetime, Fault> {
     let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = i32::try_from(size_of::<libc::proc_bsdinfo>())
         .map_err(|_| unavailable("process_lifetime"))?;
-    // SAFETY: The writable buffer matches PROC_PIDTBSDINFO's public SDK layout and size.
+    // SAFETY: info is aligned writable storage for exactly size bytes of proc_bsdinfo.
+    // PROC_PIDTBSDINFO writes this SDK type synchronously; it does not retain the pointer.
+    #[expect(unsafe_code, reason = "audited libproc output buffer and SDK layout")]
     let returned = guard.call(|| unsafe {
         libc::proc_pidinfo(
             pid,
@@ -340,6 +347,10 @@ fn lifetime(pid: i32, guard: &Guard<'_>) -> Result<Lifetime, Fault> {
         return Err(unavailable("process_lifetime"));
     }
     // SAFETY: libproc reported a complete initialized proc_bsdinfo above.
+    #[expect(
+        unsafe_code,
+        reason = "libproc returned the full initialized structure size"
+    )]
     let info = unsafe { info.assume_init() };
     if info.pbi_pid != pid as u32
         || info.pbi_start_tvsec == 0
@@ -392,6 +403,7 @@ fn candidate_snapshot(
     let executable = guard.call(|| url_path(&url))??;
     let mut process_path = [0_u8; 4096];
     // SAFETY: The buffer is writable and its full capacity is supplied to libproc.
+    #[expect(unsafe_code, reason = "audited bounded libproc path buffer")]
     let length = guard
         .call(|| unsafe { libc::proc_pidpath(pid, process_path.as_mut_ptr().cast(), 4096) })?;
     if length <= 0 {

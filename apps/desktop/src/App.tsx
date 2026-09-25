@@ -1,18 +1,22 @@
 import {useEffect, useMemo, useReducer, useRef, useState} from 'react';
 import type {KeyboardEvent, ReactNode} from 'react';
 import {invoke} from '@tauri-apps/api/core';
+import {listen} from '@tauri-apps/api/event';
 import {getCurrentWindow} from '@tauri-apps/api/window';
 import {LocalFault, messages, renderMessage} from './i18n.ts';
 import type {Command, Message} from './i18n.ts';
 import {LocaleContext, useLocale} from './locale.tsx';
 import type {CheckTarget, LastCheck} from './settings/EnvironmentPanel.tsx';
 import BootstrapPage from './pages/BootstrapPage.tsx';
+import EditPage from './pages/EditPage.tsx';
+import type {EditHandlers, PageAuthoring} from './pages/EditPage.tsx';
 import GuidancePage from './pages/GuidancePage.tsx';
 import type {ActiveOwner} from './pages/GuidancePage.tsx';
 import LogsPage from './pages/LogsPage.tsx';
 import type {Losses} from './pages/LogsPage.tsx';
 import CreateWorkspaceDialog from './components/CreateWorkspaceDialog.tsx';
 import type {CreateDraft} from './components/CreateWorkspaceDialog.tsx';
+import DirtyChoiceDialog from './components/DirtyChoiceDialog.tsx';
 import Notifications from './components/Notifications.tsx';
 import type {RecoveryHandlers} from './components/ProfileRecovery.tsx';
 import ResultPanel, {FaultMessage, fault} from './components/ResultPanel.tsx';
@@ -31,11 +35,13 @@ import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readEnvironment, 
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
 import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
-import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyCommand, applyIfCurrent, applyInspection, applyRecoveryMutation, applyWorkspaceView, busy, closeWorkspace, commandValues, deriveBound, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
+import {applyCatalogMutation, applyRefresh, applySave, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, saveBlock, saveTicket, selectFile, undoFile, validationTicket} from './authoring.ts';
+import type {AuthoringSession} from './authoring.ts';
+import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, busy, closeWorkspace, commandValues, deriveBound, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
 import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
 import type {TargetOperation, TargetPickerField, TargetPickerTicket, TargetState} from './target.ts';
-import type {BootstrapStatus, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetApplicationResponse, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, BootstrapStatus, CatalogEdit, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetApplicationResponse, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
 
 const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0, workspace_id: null, workspace_revision: null};
 const EMPTY_FILTER: LogFilter = {text: '', level: ''};
@@ -45,6 +51,10 @@ type Nav = {kind: 'none'} | {kind: 'workspace'; id: string} | {kind: 'applicatio
 interface Operation {run: string; kind: 'run' | 'check'; workspace: WorkspaceRef | null; snapshot: RunSnapshot}
 interface Starting {workspaceId: string | null; kind: 'run' | 'check'}
 interface DialogError {kind: 'save' | 'check'; value: Fault}
+// An action that ends or replaces the Edit session; unsaved drafts are resolved by Save/Discard/Cancel first.
+type Choice = {kind: 'exit'} | {kind: 'duplicate'; packageId: string} | {kind: 'close'} | {kind: 'closeTab'; workspaceId: string};
+// The host's category for a Workspace reference it no longer recognizes (closed, reinspected or invalidated by Edit).
+const STALE_IDENTITY = 'StaleIdentity';
 
 // The notice for a typed inspection result. A binding failure is the Tab's error, not a notice; a recovery-required
 // candidate and automatic per-profile outcomes are named so the operator finds the recovery panel.
@@ -71,6 +81,21 @@ function OperationStrip({idPrefix, owner, kind, phase, run, message, stopDisable
     <span className={`phase phase-${phase}`}>{ui.phase(phase)}</span>
     {message && <span className={message.error ? 'strip-error' : 'strip-note'}>{message.text}</span>}
     <button id={`${idPrefix}-stop`} type="button" className="stop-button" disabled={stopDisabled} onClick={onStop}>{t.stop}</button>
+  </div>;
+}
+
+// The application-wide Edit lease stays visible with Return to Edit wherever the editor itself is not shown.
+function AuthoringStrip({idPrefix, owner, packageId, unsaved, showReturn, onReturn}: {
+  idPrefix: string; owner: string; packageId: string | null; unsaved: number; showReturn: boolean; onReturn: () => void;
+}) {
+  const locale = useLocale();
+  const a = messages[locale].ui.authoring;
+  return <div id={`${idPrefix}-authoring-strip`} className="operation-strip authoring-strip" role="status" aria-live="polite">
+    <span className="strip-owner"><span className="eyebrow">{a.ownerEyebrow}</span><strong>{owner}</strong></span>
+    <span className="strip-kind">{packageId === null ? a.stripUnknown : a.stripKind(packageId)}</span>
+    {unsaved > 0 && <span className="tag unsaved">{a.unsavedFiles(unsaved)}</span>}
+    <span className="strip-note">{a.stripNote}</span>
+    {showReturn && <button id={`${idPrefix}-return-to-edit`} type="button" onClick={onReturn}>{a.returnToEdit}</button>}
   </div>;
 }
 
@@ -120,6 +145,19 @@ export default function App() {
   const [closedFilter, setClosedFilter] = useState<LogFilter>(EMPTY_FILTER);
   const [reveal, setReveal] = useState<{scope: string; sequence: number} | null>(null);
   const [closedDisclosed, setClosedDisclosed] = useState(false);
+  // The one Edit session's drafts live here, not in the page, so navigation and unmounting never lose them. The ref is
+  // the synchronous truth for sequential host calls (Save all) and is published to state by `updateAuthoring` only.
+  const authoringStore = useRef<AuthoringSession | null>(null);
+  const [authoring, setAuthoring] = useState<AuthoringSession | null>(null);
+  // The host's lease as last polled; undefined until the first poll of this session answers.
+  const hostAuthoringRef = useRef<AuthoringRef | null | undefined>(undefined);
+  const [hostAuthoring, setHostAuthoring] = useState<AuthoringRef | null | undefined>(undefined);
+  // Bumped around every Edit host command, so a poll answered before its reply cannot overwrite the lease it created.
+  const authoringEpoch = useRef(0);
+  const [authoringBusy, setAuthoringBusy] = useState<Command | null>(null);
+  const [choice, setChoice] = useState<Choice | null>(null);
+  const [choiceBusy, setChoiceBusy] = useState(false);
+  const choiceRunning = useRef(false);
   const expectedRun = useRef<string | null>(null);
   const epoch = useRef(0);
   const sessionGeneration = useRef(0);
@@ -145,6 +183,8 @@ export default function App() {
   const shell = surface(status);
   const pollEnabled = status?.application_available === true;
   const savedEnvironment = settings?.ocr_environment ?? null;
+  const defaultPackagesRoot = status?.default_packages_root ?? '';
+  const packagesRoot = settings?.packages_root ?? defaultPackagesRoot;
   const derived = useMemo(() => Object.fromEntries(workspaces.filter(isBound).map(workspace => [workspace.id, deriveBound(workspace.bound, savedEnvironment, locale)])) as Record<string, Derived>, [workspaces, savedEnvironment, locale]);
   const active = starting !== null || busy(view.state);
   const selected = nav.kind === 'workspace' ? workspaces.find(workspace => workspace.id === nav.id) : undefined;
@@ -156,14 +196,24 @@ export default function App() {
   // Settings Save has a separate gate; other pending commands expose their shared refusal reason.
   const busyWorkspace = workspaces.find(workspace => workspace.busy !== null);
   const pendingCommandReason = appBusy !== null && appBusy !== 'savingSettings' ? t[appBusy]
+    : authoringBusy !== null ? t[authoringBusy]
     : bootstrap.pending !== null ? t[bootstrap.pending]
     : busyWorkspace ? `${renderMessage(locale, busyWorkspace.busy)} · ${workspaceLabel(busyWorkspace, workspaces)}`
     : starting ? `${starting.kind === 'check' ? t.admittingCheck : t.admittingRun} · ${labelOf(starting.workspaceId)}`
     : null;
   const normalReady = status?.state === 'ready' && !pendingReconstruction.current;
   const commandReason = pendingCommandReason ?? (normalReady ? null : ui.bootstrap.applicationUnavailable);
+  // Edit owner: the local session's, otherwise the host's lease (for example after the view was reloaded).
+  const leaseOwnerId = authoring?.owner.workspace.workspace_id ?? hostAuthoring?.workspace.workspace_id ?? null;
+  const leaseLabel = leaseOwnerId === null ? null : labelOf(leaseOwnerId);
+  const authoringReason = leaseLabel === null ? null : ui.authoring.startBlocked(leaseLabel);
+  // The host stopped reporting this view's lease while no Edit command could explain the difference.
+  const leaseLost = authoring !== null && hostAuthoring !== undefined && authoring.pending === null && authoringBusy === null
+    && hostAuthoring?.token !== authoring.owner.token;
+  const unsavedCount = authoring ? dirtyDrafts(authoring).length : 0;
+  const validationActive = busy(view.state) && view.operation === 'authoring_validate';
   // The bootstrap action in flight disables its own buttons; it is not a foreign command for admission text.
-  const admission: Admission = {active, command: (pendingCommandReason !== null && bootstrap.pending === null) || closing, anyDirty: workspaces.some(dirtyDraft)};
+  const admission: Admission = {active, authoring: leaseOwnerId !== null, command: (pendingCommandReason !== null && bootstrap.pending === null) || closing, anyDirty: workspaces.some(dirtyDraft) || unsavedCount > 0};
   const savedCount = workspaces.length + (savedClosed?.length ?? 0);
   const logCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -175,13 +225,33 @@ export default function App() {
   }, [logs.items]);
 
   // The live controller belongs to whichever workspace the host attributed it to; others show retained outcomes.
+  // Package validation is reported by the Edit view and the strip, never as the Tab's run result.
   function runView(workspace: Workspace): RunView {
-    if (view.workspace_id === workspace.id && view.run !== null) {
+    if (view.workspace_id === workspace.id && view.run !== null && view.operation !== 'authoring_validate') {
       return {view, live: true, olderRevision: view.workspace_revision !== null && view.workspace_revision !== workspace.revision ? view.workspace_revision : null};
     }
     const retained = results[workspace.id];
-    if (retained) return {view: retained.view, live: false, olderRevision: retained.ref.revision !== workspace.revision ? retained.ref.revision : null};
+    if (retained && retained.view.operation !== 'authoring_validate') return {view: retained.view, live: false, olderRevision: retained.ref.revision !== workspace.revision ? retained.ref.revision : null};
     return {view: idle, live: false, olderRevision: null};
+  }
+
+  function updateAuthoring(update: (session: AuthoringSession | null) => AuthoringSession | null) {
+    const next = update(authoringStore.current);
+    if (next === authoringStore.current) return;
+    authoringStore.current = next;
+    setAuthoring(next);
+  }
+
+  function publishHostAuthoring(next: AuthoringRef | null | undefined) {
+    const current = hostAuthoringRef.current;
+    if (next === current || (next && current && sameAuthoringRef(next, current))) return;
+    hostAuthoringRef.current = next;
+    setHostAuthoring(next);
+  }
+
+  // Read from refs so an action that awaited the host sees the lease as it is now, not as it was when it was rendered.
+  function leaseOwnerNow(): string | null {
+    return authoringStore.current?.owner.workspace.workspace_id ?? hostAuthoringRef.current?.workspace.workspace_id ?? null;
   }
 
   useEffect(() => {document.documentElement.lang = locale;}, [locale]);
@@ -234,6 +304,11 @@ export default function App() {
     cancelApplicationRequest();
     sessionGeneration.current += 1;
     epoch.current += 1;
+    // A rebuilt Application issues fresh leases; the old session's Edit view and its lease are gone with it.
+    authoringEpoch.current += 1;
+    updateAuthoring(() => null);
+    publishHostAuthoring(undefined);
+    setChoice(null);
     setWorkspaces(catalog.open.map(item => workspaceFromView(item)));
     setResults({});
     setClosed([]);
@@ -315,6 +390,7 @@ export default function App() {
       }
       const pollEpoch = epoch.current;
       const pollSession = sessionGeneration.current;
+      const pollAuthoring = authoringEpoch.current;
       try {
         const incoming = await invoke<Poll>('poll');
         if (!alive || pollSession !== sessionGeneration.current) return;
@@ -332,6 +408,8 @@ export default function App() {
         const check = incoming.last_check;
         setLastCheck(old => check ? old && old.view.run === check.controller.run && old.view.state === check.controller.state ? old : retainedCheck(check) : null);
         setPollError(null);
+        // An Edit command settled during this poll decides the lease itself; this answer may predate it.
+        if (pollAuthoring === authoringEpoch.current) publishHostAuthoring(incoming.authoring ?? null);
         if (pollEpoch === epoch.current && !startInFlight.current) {
           const next = {...idle, ...incoming.controller};
           setView(current => {
@@ -423,7 +501,7 @@ export default function App() {
   // recovery-required candidate never passes through binding and a failed binding keeps the saved reference.
   function inspectFor(workspace: Workspace) {
     const path = workspace.inspectPath.trim();
-    if (!path || commandReason !== null || closing) return;
+    if (!path || commandReason !== null || closing || leaseOwnerNow() === workspace.id) return;
     const current = runView(workspace);
     if (current.live && busy(current.view.state)) return;
     invalidateOwnerTarget(workspace.id);
@@ -707,7 +785,7 @@ export default function App() {
   async function startRun(workspace: BoundWorkspace) {
     const facts = derived[workspace.id];
     const bound = workspace.bound;
-    if (hostCommand.current !== null || pickerRequest.current !== null || active || closing || facts.startBlock || facts.descriptorError) return;
+    if (hostCommand.current !== null || pickerRequest.current !== null || active || closing || leaseOwnerNow() !== null || facts.startBlock || facts.descriptorError) return;
     let values: Record<string, Json>;
     try {values = valuesForCommand(workspace);} catch (cause) {const error = fault(cause); change(workspace.id, item => ({...item, error})); return;}
     const profile = facts.selectedProfile;
@@ -733,9 +811,11 @@ export default function App() {
       setOperation({run, kind: 'run', workspace: ref, snapshot: {kind: 'run', run, lane: bound.lane, packageId: request.package_id, profileName, profileId, scenario: request.scenario, descriptorPath: request.replay_descriptor_path, values}});
       setView({...idle, run, state: 'preparing', workspace_id: ref.workspace_id, workspace_revision: ref.revision});
     } catch (cause) {
-      // A refused Start releases only its own preparation state; nothing else changes.
+      // A refused Start releases only its own preparation state; nothing else changes. A stale identity means the host
+      // invalidated this selection (for example after Edit): re-read the listing so the Tab shows Reinspect, not Ready.
       const error = fault(cause);
       setWorkspaces(list => applyIfCurrent(list, {id: workspace.id, revision: workspace.revision}, item => ({...item, error})));
+      if (error.category === STALE_IDENTITY) void refreshOpenViews();
     } finally {
       epoch.current += 1;
       startInFlight.current = false;
@@ -744,11 +824,335 @@ export default function App() {
     }
   }
 
+  // Edit host commands share the application's serialized command admission; typing never waits for them.
+  async function authoringCall<T>(label: Command, call: () => Promise<T>): Promise<T> {
+    const pendingCommand = hostCommand.current;
+    if (pendingCommand !== null) throw new LocalFault({key: 'authoringWait', args: [pendingCommand]});
+    hostCommand.current = label;
+    authoringEpoch.current += 1;
+    setAuthoringBusy(label);
+    try {
+      return await call();
+    } finally {
+      hostCommand.current = null;
+      authoringEpoch.current += 1;
+      setAuthoringBusy(null);
+    }
+  }
+
+  // A fresh host listing: Tabs whose selection the host invalidated (another Tab bound to an edited source, or a stale
+  // Start) move to their new revision and ask for Reinspect; untouched Tabs keep their drafts.
+  async function refreshOpenViews() {
+    try {
+      const catalog = await invoke<WorkspaceCatalog>('workspace_catalog');
+      setSavedClosed(catalog.closed);
+      setCatalogFaults(catalog.faults);
+      setCatalogError(null);
+      setWorkspaces(list => applyInvalidatedViews(list, catalog.open));
+    } catch (cause) {
+      setCatalogError(fault(cause));
+    }
+  }
+
+  // Why this Tab cannot enter Edit now. One lease exists per application and entering requires settled work.
+  function editBlock(workspace: Workspace): string | null {
+    if (closing) return t.applicationClosing;
+    if (leaseOwnerId !== null) return ui.authoring.blockedOther(labelOf(leaseOwnerId));
+    if (active) return ui.authoring.blockedActive;
+    return workspace.busy !== null ? renderMessage(locale, workspace.busy) : commandReason;
+  }
+
+  // Open and Create never run package code or bind the Tab; the lease then excludes ordinary Start and Check.
+  async function enterEdit(workspace: Workspace, path: string, packageId: string | null) {
+    if (!(packageId === null ? path : packageId) || editBlock(workspace) !== null || leaseOwnerNow() !== null) return;
+    invalidateOwnerTarget(workspace.id);
+    const origin: Origin = {id: workspace.id, revision: workspace.revision};
+    const ref = workspaceRef(workspace);
+    change(workspace.id, item => ({...item, error: null, notice: null}));
+    try {
+      const view = await authoringCall(packageId === null ? 'openingPackage' : 'creatingPackage', () => packageId === null
+        ? invoke<AuthoringView>('authoring_open', {workspace: ref, packagePath: path})
+        : invoke<AuthoringView>('authoring_create', {workspace: ref, packageId}));
+      updateAuthoring(() => openSession(view, {key: packageId === null ? 'authoringOpened' : 'authoringCreated'}));
+      publishHostAuthoring(view.owner);
+      const owner = view.owner.workspace.workspace_id;
+      change(owner, item => ({...item, page: 'edit'}));
+      go({kind: 'workspace', id: owner});
+    } catch (cause) {
+      const error = fault(cause);
+      setWorkspaces(list => applyIfCurrent(list, origin, item => ({...item, error})));
+    }
+  }
+
+  // Without a local view (for example after the WebView reloaded) the host's lease is rebuilt from disk.
+  async function resumeAuthoring(owner: AuthoringRef) {
+    const id = owner.workspace.workspace_id;
+    try {
+      const view = await authoringCall('refreshingPackage', () => invoke<AuthoringView>('authoring_refresh', {owner}));
+      if (authoringStore.current === null) updateAuthoring(() => openSession(view, {key: 'authoringResumed'}));
+      publishHostAuthoring(view.owner);
+      change(id, item => ({...item, page: 'edit'}));
+    } catch (cause) {
+      const error = fault(cause);
+      change(id, item => ({...item, error}));
+    }
+    go({kind: 'workspace', id});
+  }
+
+  function returnToEdit() {
+    const session = authoringStore.current;
+    const owner = session?.owner ?? hostAuthoringRef.current ?? null;
+    if (!owner) return;
+    if (!session) {
+      void resumeAuthoring(owner);
+      return;
+    }
+    const id = owner.workspace.workspace_id;
+    change(id, item => ({...item, page: 'edit'}));
+    go({kind: 'workspace', id});
+  }
+
+  // Resolves true when the file is saved or has nothing left to save; a refusal keeps the draft and reports why.
+  async function saveFile(path: string): Promise<boolean> {
+    const session = authoringStore.current;
+    if (!session || leaseLost) return false;
+    if (saveBlock(session, path) === 'clean') return true;
+    const ticket = saveTicket(session, path);
+    if (!ticket) return false;
+    updateAuthoring(current => current && current.owner.token === ticket.token ? beginPending(current, {kind: 'save', path}) : current);
+    try {
+      const mutation = await authoringCall('savingFile', () => invoke<AuthoringMutation>('authoring_save', {owner: session.owner, revision: ticket.expected, path, text: ticket.text}));
+      updateAuthoring(current => applySave(current, ticket, mutation));
+      return true;
+    } catch (cause) {
+      updateAuthoring(current => failCommand(current, ticket.token, fault(cause)));
+      return false;
+    }
+  }
+
+  // Saves every savable dirty file in order and stops at the first failure; each ticket reads the latest revision.
+  async function saveAll(): Promise<boolean> {
+    const paths = authoringStore.current ? dirtyDrafts(authoringStore.current).filter(draft => !draft.missing).map(draft => draft.path) : [];
+    for (const path of paths) {
+      if (!await saveFile(path)) return false;
+    }
+    return authoringStore.current === null || dirtyDrafts(authoringStore.current).length === 0;
+  }
+
+  async function changeCatalog(edit: CatalogEdit): Promise<boolean> {
+    const session = authoringStore.current;
+    const ticket = session && !leaseLost ? catalogTicket(session, edit) : null;
+    if (!session || !ticket) return false;
+    updateAuthoring(current => current && current.owner.token === ticket.token ? beginPending(current, {kind: 'catalog'}) : current);
+    try {
+      const mutation = await authoringCall('changingCatalog', () => invoke<AuthoringMutation>('authoring_catalog', {owner: session.owner, revision: ticket.expected, edit}));
+      updateAuthoring(current => applyCatalogMutation(current, ticket, mutation));
+      return true;
+    } catch (cause) {
+      updateAuthoring(current => failCommand(current, ticket.token, fault(cause)));
+      return false;
+    }
+  }
+
+  async function refreshAuthoring() {
+    const session = authoringStore.current;
+    if (!session || session.pending !== null) return;
+    const token = session.owner.token;
+    updateAuthoring(current => current && current.owner.token === token ? beginPending(current, {kind: 'refresh'}) : current);
+    try {
+      const view = await authoringCall('refreshingPackage', () => invoke<AuthoringView>('authoring_refresh', {owner: session.owner}));
+      updateAuthoring(current => applyRefresh(current, view));
+    } catch (cause) {
+      updateAuthoring(current => failCommand(current, token, fault(cause)));
+    }
+  }
+
+  // Validation reserves the shared work slot under the lease; its child shows in the strip with an owner-bound Stop.
+  async function validateAuthoring() {
+    const session = authoringStore.current;
+    if (!session || leaseLost || hostCommand.current !== null || active || closing) return;
+    const ticket = validationTicket(session);
+    if (!ticket) return;
+    updateAuthoring(current => current && current.owner.token === ticket.token ? beginPending(current, {kind: 'validate'}) : current);
+    // The child replaces any earlier run in the shared controller view; accept its host-issued ID when polled.
+    expectedRun.current = null;
+    epoch.current += 1;
+    setStripMessage(null);
+    try {
+      const result = await invoke<AuthoringValidation>('authoring_validate', {owner: session.owner, revision: ticket.revision});
+      updateAuthoring(current => applyValidation(current, ticket, result));
+    } catch (cause) {
+      updateAuthoring(current => failCommand(current, ticket.token, fault(cause)));
+    }
+  }
+
+  // Cancellation stays independent of command admission, like Stop; the reply only acknowledges the request.
+  async function stopValidation() {
+    const session = authoringStore.current;
+    if (!session) return;
+    const token = session.owner.token;
+    try {
+      await invoke<boolean>('authoring_stop', {owner: session.owner});
+      updateAuthoring(current => current && current.owner.token === token ? {...current, notice: {key: 'authoringStopRequested'}} : current);
+    } catch (cause) {
+      const error = fault(cause);
+      updateAuthoring(current => current && current.owner.token === token ? {...current, error} : current);
+    }
+  }
+
+  async function recoverAuthoringPackage() {
+    const session = authoringStore.current;
+    if (!session || session.pending !== null) return;
+    const token = session.owner.token;
+    try {
+      await authoringCall('recoveringPackage', () => invoke<void>('authoring_recover', {packagePath: session.packagePath}));
+      updateAuthoring(current => current && current.owner.token === token ? {...current, error: null} : current);
+      await refreshAuthoring();
+    } catch (cause) {
+      updateAuthoring(current => failCommand(current, token, fault(cause)));
+    }
+  }
+
+  async function recoverWorkspacePackage(workspace: Workspace, packagePath: string) {
+    const origin: Origin = {id: workspace.id, revision: workspace.revision};
+    try {
+      await authoringCall('recoveringPackage', () => invoke<void>('authoring_recover', {packagePath}));
+      setWorkspaces(list => applyIfCurrent(list, origin, item => ({...item, error: null, notice: {key: 'authoringRecovered'}})));
+    } catch (cause) {
+      const error = fault(cause);
+      setWorkspaces(list => applyIfCurrent(list, origin, item => ({...item, error})));
+    }
+  }
+
+  // Duplicate reads the saved revision, so the choice dialog has already saved or deliberately left the drafts.
+  async function duplicateAuthoring(packageId: string): Promise<boolean> {
+    const session = authoringStore.current;
+    if (!session || session.pending !== null || leaseLost) return false;
+    const token = session.owner.token;
+    updateAuthoring(current => current && current.owner.token === token ? beginPending(current, {kind: 'duplicate'}) : current);
+    try {
+      const view = await authoringCall('duplicatingPackage', () => invoke<AuthoringView>('authoring_duplicate', {owner: session.owner, revision: session.revision, packageId}));
+      updateAuthoring(current => current && current.owner.token === token ? openSession(view, {key: 'authoringDuplicated', args: [view.package_path, view.package_id]}) : current);
+      publishHostAuthoring(view.owner);
+      return true;
+    } catch (cause) {
+      updateAuthoring(current => failCommand(current, token, fault(cause)));
+      return false;
+    }
+  }
+
+  // Ends the lease and applies the owner's invalidated view; the Tab then needs an explicit Inspect/Reinspect. Returns
+  // 'released' when the host no longer held this view's lease, and null when the host refused (the view stays).
+  async function exitAuthoring(): Promise<WorkspaceView | 'released' | null> {
+    const session = authoringStore.current;
+    const owner = session?.owner ?? hostAuthoringRef.current ?? null;
+    if (!owner) return null;
+    const ownerId = owner.workspace.workspace_id;
+    if (session && hostAuthoringRef.current === null && session.pending === null && authoringBusy === null) {
+      updateAuthoring(() => null);
+      change(ownerId, item => ({...item, page: 'run'}));
+      return 'released';
+    }
+    const token = owner.token;
+    updateAuthoring(current => current && current.owner.token === token ? beginPending(current, {kind: 'exit'}) : current);
+    try {
+      return await authoringCall('exitingEdit', async () => {
+        const view = await invoke<WorkspaceView>('authoring_exit', {owner});
+        updateAuthoring(current => current && current.owner.token === token ? null : current);
+        publishHostAuthoring(null);
+        const packagePath = session?.packagePath ?? null;
+        setWorkspaces(list => updateWorkspace(list, view.workspace_id, item => applyAuthoringExit(item, view, packagePath)));
+        await refreshOpenViews();
+        return view;
+      });
+    } catch (cause) {
+      const error = fault(cause);
+      if (session) updateAuthoring(current => failCommand(current, token, error));
+      else change(ownerId, item => ({...item, error}));
+      return null;
+    }
+  }
+
+  function requestChoice(next: Choice) {
+    if (choiceRunning.current) return;
+    const session = authoringStore.current;
+    if (session && dirtyDrafts(session).length > 0) setChoice(next);
+    else void resolveChoice(next, false);
+  }
+
+  // Save stops at the first failed file; any refusal keeps the lease, drafts and selection and shows the editor.
+  async function resolveChoice(intent: Choice, save: boolean) {
+    if (choiceRunning.current) return;
+    choiceRunning.current = true;
+    setChoiceBusy(true);
+    let done = false;
+    try {
+      if (save && !await saveAll()) return;
+      if (intent.kind === 'duplicate') {
+        done = await duplicateAuthoring(intent.packageId);
+        return;
+      }
+      if (intent.kind === 'close') {
+        done = await closeApplication(authoringStore.current?.owner ?? hostAuthoringRef.current ?? null);
+        return;
+      }
+      const packagePath = authoringStore.current?.packagePath ?? null;
+      const exited = await exitAuthoring();
+      if (exited === null) return;
+      done = true;
+      if (intent.kind === 'closeTab') {
+        const current = openWorkspaces.current.find(item => item.id === intent.workspaceId);
+        if (current) void closeTab(exited === 'released' ? current : applyAuthoringExit(current, exited, packagePath), false);
+      }
+    } finally {
+      choiceRunning.current = false;
+      setChoiceBusy(false);
+      setChoice(null);
+      if (!done && authoringStore.current) returnToEdit();
+    }
+  }
+
+  const editHandlers: EditHandlers = {
+    select: (path, previous) => updateAuthoring(session => session && selectFile(session, path, previous)),
+    edit: (path, next, before, input) => updateAuthoring(session => session && editFile(session, path, next, before, input)),
+    replace: (path, text, typed) => updateAuthoring(session => session && replaceFile(session, path, text, typed)),
+    compositionStart: (path, range) => updateAuthoring(session => session && beginComposition(session, path, range)),
+    compositionEnd: path => updateAuthoring(session => session && endComposition(session, path)),
+    range: (path, range) => updateAuthoring(session => session && recordRange(session, path, range)),
+    undo: path => updateAuthoring(session => session && undoFile(session, path)),
+    redo: path => updateAuthoring(session => session && redoFile(session, path)),
+    reveal: (path, range) => updateAuthoring(session => session && revealRange(session, path, range)),
+    discard: path => updateAuthoring(session => session && discardFile(session, path)),
+    save: path => void saveFile(path),
+    saveAll: () => void saveAll(),
+    validate: () => void validateAuthoring(),
+    stopValidation: () => void stopValidation(),
+    refresh: () => void refreshAuthoring(),
+    recover: () => void recoverAuthoringPackage(),
+    catalog: edit => changeCatalog(edit),
+    duplicate: packageId => requestChoice({kind: 'duplicate', packageId}),
+    exit: () => requestChoice({kind: 'exit'}),
+  };
+
+  function pageAuthoring(workspace: Workspace): PageAuthoring {
+    return {
+      role: leaseOwnerId === null ? null : leaseOwnerId === workspace.id ? 'owner' : 'other',
+      ownerLabel: leaseLabel, block: editBlock(workspace), loaded: authoring !== null,
+      onOpen: path => void enterEdit(workspace, path, null),
+      onCreate: () => void enterEdit(workspace, '', workspace.editPackageId.trim()),
+      onReturn: returnToEdit,
+      onPath: value => change(workspace.id, item => ({...item, editPath: value, error: null})),
+      onPackageId: value => change(workspace.id, item => ({...item, editPackageId: value, error: null})),
+      onRecover: path => void recoverWorkspacePackage(workspace, path),
+    };
+  }
+
   const envParsed = useMemo(() => readEnvironment(settingsDraft.environment, locale), [settingsDraft.environment, locale]);
   const envDirty = Object.keys(envParsed.errors).length > 0 || !sameEnvironment(envParsed.environment, savedEnvironment);
   const parsedSettings = useMemo(() => readSettingsDraft(settingsDraft, locale), [settingsDraft, locale]);
   const dialogDirty = settings === null || settingsDraft.locale !== settings.locale || settingsDraft.logLimit.trim() !== String(settings.gui_log_limit)
-    || !sameNotifications(settingsDraft.notifications, settings.notifications) || settingsDraft.backupDirectory.trim() !== (settings.backup_directory ?? '') || envDirty;
+    || !sameNotifications(settingsDraft.notifications, settings.notifications) || settingsDraft.backupDirectory.trim() !== (settings.backup_directory ?? '')
+    || settingsDraft.packagesRoot.trim() !== (settings.packages_root ?? '') || envDirty;
   // Check binds the workspace visible when the dialog opened; an unbound Tab is never passed as a package association.
   const checkTarget: CheckTarget = selected?.bound
     ? {workspace: workspaceRef(selected), label: workspaceLabel(selected, workspaces), descriptorPath: selected.bound.descriptorPath.trim() || null, packageInventoryIdentity: selected.bound.package.inventory_identity}
@@ -759,7 +1163,7 @@ export default function App() {
 
   // Check reads saved settings only; the association records exactly what the backend will read.
   async function checkEnvironment() {
-    if (hostCommand.current !== null || pickerRequest.current !== null || active || closing || envDirty || appBusy) return;
+    if (hostCommand.current !== null || pickerRequest.current !== null || active || closing || envDirty || appBusy || leaseOwnerNow() !== null) return;
     if (selected?.bound && derived[selected.id].descriptorError) {
       setDialogError({kind: 'check', value: new LocalFault({key: 'descriptorLimit', args: [DESCRIPTOR_LIMIT]})});
       return;
@@ -868,12 +1272,56 @@ export default function App() {
     onDismiss: () => {setConfigurationOpen(false); menuButton.current?.focus();},
   };
 
+  // Closing resolves drafts first; shutdown retains the lease until owned work settles.
   async function exitApplication() {
-    invalidateAllTargets();
     setMenuOpen(false);
+    if (leaseOwnerNow() !== null) {
+      requestChoice({kind: 'close'});
+      return;
+    }
+    invalidateAllTargets();
     setClosing(true);
     try {await getCurrentWindow().close();} catch (cause) {dispatch({type: 'actionFailed', fault: fault(cause)}); setClosing(false);}
   }
+
+  // Explicit draft resolution also permits shutdown from Recovery or a contained validation failure.
+  async function closeApplication(owner: AuthoringRef | null = null): Promise<boolean> {
+    invalidateAllTargets();
+    setClosing(true);
+    try {
+      await invoke<void>('app_close', {owner});
+      return true;
+    } catch (cause) {
+      dispatch({type: 'actionFailed', fault: fault(cause)});
+      setClosing(false);
+      return false;
+    }
+  }
+
+  // The host prevents native window close and OS exit while a lease exists and asks here instead.
+  const closeRequested = useRef(() => {});
+  closeRequested.current = () => {
+    if (closing || choiceRunning.current) return;
+    if (leaseOwnerNow() !== null) requestChoice({kind: 'close'});
+    else void closeApplication();
+  };
+  useEffect(() => {
+    let alive = true;
+    let stop: (() => void) | null = null;
+    void listen('authoring-close-requested', () => closeRequested.current()).then(unlisten => {
+      if (alive) stop = unlisten; else unlisten();
+    }).catch(() => {});
+    return () => {alive = false; stop?.();};
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    let stop: (() => void) | null = null;
+    void listen<Fault>('application-close-refused', event => {
+      dispatch({type: 'actionFailed', fault: event.payload});
+      setClosing(false);
+    }).then(unlisten => {if (alive) stop = unlisten; else unlisten();}).catch(() => {});
+    return () => {alive = false; stop?.();};
+  }, []);
 
   async function refreshSaved() {
     try {
@@ -951,6 +1399,8 @@ export default function App() {
     const current = runView(workspace);
     if (hostCommand.current !== null) {const pending = hostCommand.current; change(workspace.id, item => ({...item, notice: {key: 'waitForCommand', args: [pending]}})); return;}
     if (current.live && busy(current.view.state)) {change(workspace.id, item => ({...item, notice: {key: 'ownerCannotClose'}})); return;}
+    // The Edit owner closes only after its drafts are resolved and the lease has ended.
+    if (leaseOwnerNow() === workspace.id) {requestChoice({kind: 'closeTab', workspaceId: workspace.id}); return;}
     if (dirtyDraft(workspace) && !confirmed) {setPendingClose(workspace.id); return;}
     invalidateOwnerTarget(workspace.id);
     setPendingClose(null);
@@ -1008,9 +1458,15 @@ export default function App() {
 
   const owner = starting ? starting.workspaceId : view.workspace_id;
   const phase = starting ? 'preparing' : view.state;
-  const stripKind = ui.operation((starting?.kind ?? operation?.kind ?? (view.operation === 'environment_check' ? 'check' : 'run')) === 'check' ? 'environment_check' : 'run');
-  const strip = (idPrefix: string): ReactNode => active ? <OperationStrip idPrefix={idPrefix} owner={owner === null ? t.applicationOwner : labelOf(owner)} kind={stripKind} phase={phase} run={starting ? null : view.run}
-    message={stripMessage && {text: renderMessage(locale, stripMessage.text), error: stripMessage.error}} stopDisabled={!view.run || !busy(view.state) || view.state === 'stopping' || stopping || starting !== null || closing} onStop={() => void stopRun()}/> : null;
+  const stripKind = starting ? ui.operation(starting.kind === 'check' ? 'environment_check' : 'run') : ui.operation(view.operation);
+  const editVisible = selected !== undefined && selected.id === leaseOwnerId && selected.page === 'edit' && authoring !== null;
+  // Every surface, dialogs included, keeps the operation's Stop and the Edit owner's Return to Edit reachable.
+  const strip = (idPrefix: string, onReturn: () => void = returnToEdit): ReactNode => <>
+    {active && <OperationStrip idPrefix={idPrefix} owner={owner === null ? t.applicationOwner : labelOf(owner)} kind={stripKind} phase={phase} run={starting ? null : view.run}
+      message={stripMessage && {text: renderMessage(locale, stripMessage.text), error: stripMessage.error}} stopDisabled={!view.run || !busy(view.state) || view.state === 'stopping' || stopping || starting !== null || closing} onStop={() => void stopRun()}/>}
+    {leaseOwnerId !== null && <AuthoringStrip idPrefix={idPrefix} owner={labelOf(leaseOwnerId)} packageId={authoring?.packageId ?? null} unsaved={unsavedCount}
+      showReturn={!(idPrefix === 'app' && editVisible)} onReturn={onReturn}/>}
+  </>;
 
   if (shell !== 'shell') {
     // Before the first resolved status the shell is already real: presentation choice and Exit work, nothing is assumed.
@@ -1046,6 +1502,7 @@ export default function App() {
     const optionStatus: WorkspaceOption['status'] = owns ? {kind: 'busy', text: `${ui.phase(starting?.workspaceId === workspace.id ? 'preparing' : current.view.state)} · ${ui.operation(starting?.workspaceId === workspace.id ? starting.kind === 'check' ? 'environment_check' : 'run' : current.view.operation)}`}
       : workspace.busy ? {kind: 'busy', text: renderMessage(locale, workspace.busy)}
       : attention ? {kind: 'attention', text: t.attention(issue ?? current.view.error?.category ?? text(current.view.result?.status) ?? t.unresolved)}
+      : leaseOwnerId === workspace.id ? unsavedCount > 0 ? {kind: 'dirty', text: t.editingUnsaved} : {kind: 'ready', text: t.editing}
       : dirtyDraft(workspace) ? {kind: 'dirty', text: t.unsavedDraft}
       : facts ? {kind: 'ready', text: t.ready(facts.selectedProfile ? facts.selectedProfile.name : t.draft)}
       : {kind: 'ready', text: t.noPackage};
@@ -1086,6 +1543,8 @@ export default function App() {
         {selected && <>
           <button id="page-run" type="button" className="nav-item" aria-current={selected.page === 'run' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'run'}));}}>{isBound(selected) ? t.runControl : t.guidance}</button>
           <button id="page-logs" type="button" className="nav-item" aria-current={selected.page === 'logs' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'logs'}));}}>{t.logs}<span className="count">{logCounts[selected.id] ?? 0}</span></button>
+          {selected.id === leaseOwnerId && <button id="page-edit" type="button" className="nav-item" aria-current={selected.page === 'edit' && authoring !== null ? 'page' : undefined}
+            onClick={() => {setReveal(null); returnToEdit();}}>{t.edit}{unsavedCount > 0 && <span className="count">{unsavedCount}</span>}</button>}
         </>}
         {nav.kind === 'application' && <span className="scope-label">{t.applicationLogs}</span>}
         {nav.kind === 'closed' && <span className="scope-label">{t.closedDiagnostics}</span>}
@@ -1104,13 +1563,16 @@ export default function App() {
         <span className="muted">{ui.bootstrap.actionFailedHelp}</span></div></div>}
     <div className="workspace">
       <main id="workspace-panel" className="content" aria-label={selected ? t.workspaceAria(workspaceLabel(selected, workspaces)) : undefined}>
-        {selected && selected.page === 'run' && (isBound(selected)
+        {selected && selected.page === 'edit' && editVisible && authoring && <EditPage key={authoring.owner.token} session={authoring} label={workspaceLabel(selected, workspaces)}
+          handlers={editHandlers} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
+          packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive}/>}
+        {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (isBound(selected)
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)} snapshot={operation?.snapshot ?? null}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
-            savedEnvironment={savedEnvironment} handlers={handlers(selected)}/>
+            savedEnvironment={savedEnvironment} handlers={handlers(selected)} authoring={pageAuthoring(selected)}/>
           : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
-            recovery={recoveryHandlers(selected)}/>)}
+            recovery={recoveryHandlers(selected)} authoring={pageAuthoring(selected)} packagesRoot={packagesRoot}/>)}
         {selected && selected.page === 'logs' && <LogsPage eyebrow={t.activity(workspaceLabel(selected, workspaces))} heading={t.logs} description={t.workspaceLogHelp}
           items={logs.items} evicted={logs.evicted} limit={settings?.gui_log_limit ?? retention.current} scope={{kind: 'workspace', id: selected.id}}
           filter={selected.logFilter} onFilter={filter => {setReveal(null); change(selected.id, item => ({...item, logFilter: filter}));}}
@@ -1148,15 +1610,19 @@ export default function App() {
       onInteract={(id, interaction) => setCards(old => interactCard(old, id, interaction))}/>
     <CreateWorkspaceDialog open={createOpen} draft={createDraft} onDraft={next => {setCreateDraft(next); setCreateError(null);}} onCancel={() => {if (appBusy !== 'creatingWorkspace') setCreateOpen(false);}}
       onCreate={() => void createWorkspace()} creating={appBusy === 'creatingWorkspace'} error={createError} openCount={workspaces.length} savedCount={savedCount}
-      busyReason={appBusy === 'creatingWorkspace' ? null : commandReason} strip={strip('create')}/>
+      busyReason={appBusy === 'creatingWorkspace' ? null : commandReason} strip={strip('create', () => {if (appBusy !== 'creatingWorkspace') {setCreateOpen(false); returnToEdit();}})}/>
     <SavedWorkspacesDialog open={savedOpen} onCancel={() => {if (reopening === null) setSavedOpen(false);}} closed={savedClosed} faults={catalogFaults} listError={catalogError}
       openCount={workspaces.length} savedCount={savedCount} onRefresh={() => void refreshSaved()} onReopen={name => void reopenWorkspace(name)} reopening={reopening} reopenError={reopenError}
-      busyReason={appBusy === 'reopeningWorkspace' ? null : commandReason} strip={strip('saved')}/>
+      busyReason={appBusy === 'reopeningWorkspace' ? null : commandReason} strip={strip('saved', () => {if (reopening === null) {setSavedOpen(false); returnToEdit();}})}/>
     <SettingsDialog open={dialogOpen} onCancel={() => setDialogOpen(false)} settings={settings} draft={settingsDraft} onDraft={next => {setSettingsDraft(next); setSaveNotice(null);}}
+      defaultPackagesRoot={defaultPackagesRoot}
       parsed={parsedSettings} dirty={dialogDirty} saving={appBusy === 'savingSettings'} busyReason={commandReason} saveError={dialogError?.kind === 'save' ? dialogError.value : null} saveNotice={renderMessage(locale, saveNotice)} onSave={() => void saveSettings()}
       envDirty={envDirty} active={active} pickerBusy={pickerBusy} target={checkTarget} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale} originLabel={labelOf}
-      checkError={dialogError?.kind === 'check' ? dialogError.value : null}
+      checkError={dialogError?.kind === 'check' ? dialogError.value : null} authoringReason={authoringReason}
       retained={logs.items.length} evicted={logs.evicted}
-      onSnapshot={() => void snapshot(null)} snapshotPending={bootstrap.snapshotPending} snapshotOutcome={bootstrap.snapshotOutcome} strip={strip('dialog')}/>
+      onSnapshot={() => void snapshot(null)} snapshotPending={bootstrap.snapshotPending} snapshotOutcome={bootstrap.snapshotOutcome} strip={strip('dialog', () => {if (appBusy !== 'savingSettings') {setDialogOpen(false); returnToEdit();}})}/>
+    <DirtyChoiceDialog intent={choice?.kind ?? null} drafts={authoring ? dirtyDrafts(authoring) : []} busy={choiceBusy} saveBlock={leaseLost ? ui.authoring.leaseLost : null}
+      onSave={() => {if (choice) void resolveChoice(choice, true);}} onDiscard={() => {if (choice) void resolveChoice(choice, false);}}
+      onCancel={() => {if (!choiceBusy) setChoice(null);}}/>
   </div></LocaleContext>;
 }

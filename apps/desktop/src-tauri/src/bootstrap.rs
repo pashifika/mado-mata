@@ -32,6 +32,7 @@ pub struct BootstrapStatus {
     pub stage: String,
     pub root: Option<String>,
     pub legacy_root: Option<String>,
+    pub default_packages_root: Option<String>,
     pub fault: Option<Fault>,
     pub settings: Option<Settings>,
     pub application_available: bool,
@@ -150,6 +151,12 @@ impl Bootstrap {
             fault: state.fault.clone(),
             settings: state.settings.clone(),
             application_available: application.is_some(),
+            default_packages_root: self
+                .root
+                .as_ref()
+                .ok()
+                .and_then(|path| std::path::absolute(path.join("sources")).ok())
+                .map(|path| path.to_string_lossy().into_owned()),
             root: self
                 .root
                 .as_ref()
@@ -802,6 +809,7 @@ mod tests {
             ocr_environment: None,
             notifications: NotificationPreferences::default(),
             backup_directory: None,
+            packages_root: None,
         }
     }
 
@@ -867,6 +875,8 @@ mod tests {
         assert_eq!(ready.settings.unwrap().locale, Locale::Japanese);
         assert!(ready.catalog.unwrap().open.is_empty());
         assert!(!root.join("profiles").exists());
+        assert!(!root.join("sources").exists());
+        assert!(!root.join("pkgs").exists());
         let before = fs::read(root.join("settings.json")).unwrap();
         assert!(
             bootstrap

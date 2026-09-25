@@ -4,8 +4,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 mod capture;
+mod draft;
 mod validation;
 
+pub use draft::{DraftFileKind, PackageDraft};
 use validation::portable_component;
 
 const VERSION: &str = "1.0.0";

@@ -28,7 +28,14 @@ fn status_error(stage: &str, status: i32) -> Fault {
     unavailable(stage).with_context(json!({"stage": stage, "os_status": status}))
 }
 
-// SAFETY: Callers pass only initialized Create/Copy outputs with +1 ownership on success.
+/// # Safety
+/// `status` and `pointer` must be outputs of the same Security Create/Copy call.
+/// On success, a non-null pointer must reference a valid `T` whose +1 retain count
+/// is transferred to this function exactly once.
+#[expect(
+    unsafe_code,
+    reason = "audited Security Create/Copy ownership transfer"
+)]
 unsafe fn copied<T: Type>(
     status: i32,
     pointer: *const T,
@@ -42,6 +49,10 @@ unsafe fn copied<T: Type>(
     Ok(unsafe { CFRetained::from_raw(pointer) })
 }
 
+#[expect(
+    unsafe_code,
+    reason = "audited Security signing-information output and ownership"
+)]
 fn information(code: &SecStaticCode, guard: &Guard<'_>) -> Result<CFRetained<CFDictionary>, Fault> {
     guard.call(|| {
         let mut pointer = ptr::null();
@@ -59,7 +70,9 @@ fn information(code: &SecStaticCode, guard: &Guard<'_>) -> Result<CFRetained<CFD
 }
 
 fn value(dictionary: &CFDictionary, key: &CFString) -> Option<CFRetained<CFType>> {
-    // SAFETY: Security signing dictionaries have CFString keys and CFType values.
+    // SAFETY: Only Security signing dictionaries or typed test fixtures reach this helper.
+    // Both have retained CFString keys and CFType values; the owner outlives this borrow.
+    #[expect(unsafe_code, reason = "audited Security signing dictionary types")]
     let dictionary: &CFDictionary<CFString, CFType> = unsafe { dictionary.cast_unchecked() };
     dictionary.get(key)
 }
@@ -80,6 +93,10 @@ fn bounded_string(value: &CFType) -> Result<String, Fault> {
 
 fn identity(information: &CFDictionary, validity: i32) -> Result<SigningIdentity, Fault> {
     // SAFETY: These framework-exported immutable keys are valid CFStrings.
+    #[expect(
+        unsafe_code,
+        reason = "audited immutable Security signing-information keys"
+    )]
     let (identifier, unique, team) = unsafe {
         (
             value(information, kSecCodeInfoIdentifier),
@@ -138,6 +155,7 @@ fn confirm_executable(
     guard: &Guard<'_>,
 ) -> Result<(), Fault> {
     // SAFETY: Security exports a process-lifetime immutable CFString key.
+    #[expect(unsafe_code, reason = "audited immutable Security executable key")]
     let executable = value(information, unsafe { kSecCodeInfoMainExecutable })
         .ok_or_else(|| unavailable("signed_executable"))?;
     let url = executable
@@ -155,6 +173,10 @@ fn confirm_executable(
     Ok(())
 }
 
+#[expect(
+    unsafe_code,
+    reason = "audited Security static-code creation and validation boundary"
+)]
 pub(super) fn selected(
     path: &str,
     architecture: i32,
@@ -171,7 +193,8 @@ pub(super) fn selected(
     );
     let code = guard.call(|| {
         let mut pointer = ptr::null();
-        // SAFETY: The attributes contain the documented CFNumber architecture; output is writable.
+        // SAFETY: The file URL and CFString-to-CFNumber architecture dictionary stay live;
+        // the initialized output slot is aligned and writable for this synchronous call.
         let status = unsafe {
             SecStaticCode::create_with_path_and_attributes(
                 &url,
@@ -192,6 +215,10 @@ pub(super) fn selected(
     Ok(SelectedCode { code, identity })
 }
 
+#[expect(
+    unsafe_code,
+    reason = "audited Security dynamic-code identity and ownership boundary"
+)]
 pub(super) fn running(pid: i32, path: &str, guard: &Guard<'_>) -> Result<RunningCode, Fault> {
     let pid = CFNumber::new_i32(pid);
     // SAFETY: Security's PID key is an immutable CFString.
@@ -212,7 +239,8 @@ pub(super) fn running(pid: i32, path: &str, guard: &Guard<'_>) -> Result<Running
     })??;
     let static_code = guard.call(|| {
         let mut pointer = ptr::null();
-        // SAFETY: Dynamic code is retained; default flags select its executing architecture only.
+        // SAFETY: Dynamic code stays retained; the initialized output slot is writable.
+        // Default flags select its executing architecture only.
         let status =
             unsafe { code.copy_static_code(SecCSFlags::empty(), NonNull::from(&mut pointer)) };
         // SAFETY: The Copy API transfers one retained static code reference on success.
@@ -220,14 +248,19 @@ pub(super) fn running(pid: i32, path: &str, guard: &Guard<'_>) -> Result<Running
     })??;
     let information = information(&static_code, guard)?;
     confirm_executable(&information, path, guard)?;
-    // SAFETY: Dynamic validation checks the live host identity against this static image, including
-    // filesystem replacement. Comparing two static file hashes without this check is insufficient.
+    // SAFETY: Dynamic code stays retained for validation; no requirement is passed.
+    // Dynamic validation checks live host identity, including filesystem replacement;
+    // comparing two static file hashes without this check is insufficient.
     let validity =
         guard.call(|| unsafe { code.check_validity(SecCSFlags::NoNetworkAccess, None) })?;
     let identity = running_identity(&information, validity)?;
     Ok(RunningCode { code, identity })
 }
 
+#[expect(
+    unsafe_code,
+    reason = "audited Security designated-requirement ownership and validation"
+)]
 pub(super) fn requirement(
     selected: &SelectedCode,
     running: &RunningCode,
@@ -235,7 +268,7 @@ pub(super) fn requirement(
 ) -> Result<bool, Fault> {
     let requirement: CFRetained<SecRequirement> = guard.call(|| {
         let mut pointer = ptr::null_mut();
-        // SAFETY: Selected signed code was validated; output is initialized and writable.
+        // SAFETY: Selected code stays retained; the initialized output slot is writable.
         let status = unsafe {
             SecCode::copy_designated_requirement(
                 &selected.code,
@@ -261,6 +294,10 @@ pub(super) fn requirement(
 
 pub(super) fn revalidate(running: &RunningCode, guard: &Guard<'_>) -> Result<(), Fault> {
     // SAFETY: The running code reference is retained through this dynamic validation call.
+    #[expect(
+        unsafe_code,
+        reason = "audited retained Security dynamic-code validation"
+    )]
     let status = guard.call(|| unsafe {
         running
             .code
@@ -289,12 +326,14 @@ mod tests {
         }
         let identifier = CFString::from_str("dev.example.application");
         // SAFETY: The exported key is immutable and the test value is a retained CFString.
+        #[expect(unsafe_code, reason = "audited immutable Security fixture key")]
         let incomplete =
             CFDictionary::from_slices(&[unsafe { kSecCodeInfoIdentifier }], &[&*identifier]);
         assert!(identity(incomplete.as_opaque(), errSecCSUnsigned).is_err());
         assert!(identity(incomplete.as_opaque(), 0).is_err());
         let wrong_type = CFNumber::new_i32(1);
         // SAFETY: The exported key is immutable; arbitrary CFType values are rejected by the reader.
+        #[expect(unsafe_code, reason = "audited immutable Security fixture key")]
         let malformed =
             CFDictionary::from_slices(&[unsafe { kSecCodeInfoIdentifier }], &[&*wrong_type]);
         assert!(identity(malformed.as_opaque(), 0).is_err());
@@ -317,6 +356,7 @@ mod tests {
         let identifier = CFString::from_str("dev.example.application");
         let unique = CFData::from_bytes(&[1; 20]);
         // SAFETY: Security's immutable keys and retained CFType values form a signing dictionary.
+        #[expect(unsafe_code, reason = "audited immutable Security fixture keys")]
         let information = CFDictionary::<CFString, CFType>::from_slices(
             &[unsafe { kSecCodeInfoIdentifier }, unsafe {
                 kSecCodeInfoUnique
@@ -348,7 +388,9 @@ mod tests {
 
         let absent = CFDictionary::<CFString, CFType>::empty();
         assert!(running_identity(absent.as_opaque(), 0).is_err());
-        // SAFETY: A retained CFString is intentionally not a valid code-directory hash.
+        // SAFETY: Security's keys are immutable; both values are retained CFStrings.
+        // The second value intentionally has the wrong type for a code-directory hash.
+        #[expect(unsafe_code, reason = "audited immutable Security fixture keys")]
         let malformed = CFDictionary::from_slices(
             &[unsafe { kSecCodeInfoIdentifier }, unsafe {
                 kSecCodeInfoUnique

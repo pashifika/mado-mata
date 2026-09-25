@@ -320,26 +320,46 @@ fn incomplete_reset_returns_declared_defaults_without_writing_and_can_be_complet
 
 #[test]
 fn confirmed_reset_replaces_only_values_and_preserves_other_profile_bytes() {
-    let fixture = Fixture::new();
-    let (path, selected) = initial(&fixture);
-    let first = save(&fixture, &selected, "Reset me", json!({"count":9}));
-    let second = save(&fixture, &selected, "Leave me", json!({"count":8}));
-    let second_file = profile_path(&fixture, "Main", &second);
-    let before = fs::read(&second_file).unwrap();
-    install_schema(&path, &schema(5), json!({}));
-    let context = recovery(&fixture, &path, &selected);
-    let reset = fixture
-        .application
-        .reset_profile(&context, &first.id, true)
-        .unwrap()
-        .saved
-        .unwrap();
-    assert_eq!(reset.values, json!({"count":1,"order":["first"]}));
-    assert_eq!(
-        (reset.id, reset.name, reset.version, reset.package_id),
-        (first.id, first.name, first.version, first.package_id)
-    );
-    assert_eq!(fs::read(second_file).unwrap(), before);
+    for area in ["sources", "pkgs"] {
+        let fixture = Fixture::new();
+        let path = fixture.package_at(&format!("{area}/source"));
+        install_schema(&path, &schema(10), json!({}));
+        let selected = inspect_named(&fixture.application, "Main", &path).unwrap();
+        let first = save(&fixture, &selected, "Reset me", json!({"count":9}));
+        let second = save(&fixture, &selected, "Leave me", json!({"count":8}));
+        let second_file = profile_path(&fixture, "Main", &second);
+        let before = fs::read(&second_file).unwrap();
+        install_schema(&path, &schema(5), json!({}));
+        let source_files = [
+            "package.json",
+            "main.js",
+            "decisions.js",
+            "schema.json",
+            "profiles/template-first.json",
+            "profiles/ocr-first.json",
+            "assets/marker.rgba",
+        ];
+        let source_bytes: Vec<_> = source_files
+            .iter()
+            .map(|name| fs::read(path.join(name)).unwrap())
+            .collect();
+        let context = recovery(&fixture, &path, &selected);
+        let reset = fixture
+            .application
+            .reset_profile(&context, &first.id, true)
+            .unwrap()
+            .saved
+            .unwrap();
+        assert_eq!(reset.values, json!({"count":1,"order":["first"]}));
+        assert_eq!(
+            (reset.id, reset.name, reset.version, reset.package_id),
+            (first.id, first.name, first.version, first.package_id)
+        );
+        assert_eq!(fs::read(second_file).unwrap(), before);
+        for (name, expected) in source_files.iter().zip(source_bytes) {
+            assert_eq!(fs::read(path.join(name)).unwrap(), expected, "{name}");
+        }
+    }
 }
 
 #[test]
@@ -732,7 +752,9 @@ fn failed_candidate_and_discard_preserve_the_saved_source_fault() {
     let fixture = Fixture::new();
     let application = &fixture.application;
     let (path, selected) = initial(&fixture);
-    application.close_workspace(&workspace_ref(&selected)).unwrap();
+    application
+        .close_workspace(&workspace_ref(&selected))
+        .unwrap();
     let candidate = fixture.root.join("moved");
     fs::rename(path, &candidate).unwrap();
     let reopened = application.reopen_workspace("Main").unwrap();
@@ -743,7 +765,9 @@ fn failed_candidate_and_discard_preserve_the_saved_source_fault() {
     let pending = tab_file.with_extension("pending");
     fs::write(&pending, b"interrupted Tab write").unwrap();
 
-    let failed = application.inspect(&candidate, &view_ref(&reopened)).unwrap();
+    let failed = application
+        .inspect(&candidate, &view_ref(&reopened))
+        .unwrap();
     assert_eq!(failed.kind, InspectionKind::BindingFailed);
     assert!(failed.binding_error.is_some());
     assert!(failed.workspace.selection.is_none());
@@ -768,7 +792,9 @@ fn failed_candidate_and_discard_preserve_the_saved_source_fault() {
     assert_eq!(fs::read(&tab_file).unwrap(), before);
 
     fs::remove_file(pending).unwrap();
-    let bound = application.inspect(&candidate, &view_ref(&discarded)).unwrap();
+    let bound = application
+        .inspect(&candidate, &view_ref(&discarded))
+        .unwrap();
     assert_eq!(bound.kind, InspectionKind::Bound);
     assert!(bound.workspace.selection.is_some());
     assert!(bound.workspace.source_error.is_none());
@@ -1393,7 +1419,9 @@ fn different_package_candidate_never_touches_the_original_packages_profiles() {
     assert!(inspected.workspace.source_error.is_none());
     // This value is valid for retained A, but invalid for candidate B.
     assert_eq!(
-        application.validate(&failed_ref, json!({"count":2})).unwrap()["count"],
+        application
+            .validate(&failed_ref, json!({"count":2}))
+            .unwrap()["count"],
         2
     );
     let recovery = inspected.workspace.recovery.unwrap();
@@ -1456,7 +1484,13 @@ fn different_package_candidate_never_touches_the_original_packages_profiles() {
     let returned = application.inspect(&path, &rebound_ref).unwrap();
     assert_eq!(returned.kind, InspectionKind::Bound);
     assert_eq!(
-        returned.workspace.selection.as_ref().unwrap().package.package_id,
+        returned
+            .workspace
+            .selection
+            .as_ref()
+            .unwrap()
+            .package
+            .package_id,
         saved.package_id
     );
     let recovery = returned.workspace.recovery.unwrap();
@@ -1592,7 +1626,11 @@ fn in_place_binding_retry_keeps_unrepaired_profiles_editable() {
     assert_eq!(
         command_records(application, &selected.workspace_id),
         [
-            ("command.failed".to_owned(), json!("inspect"), json!(category)),
+            (
+                "command.failed".to_owned(),
+                json!("inspect"),
+                json!(category)
+            ),
             (
                 "workspace.reinspected".to_owned(),
                 json!("retry_binding"),
@@ -1603,8 +1641,16 @@ fn in_place_binding_retry_keeps_unrepaired_profiles_editable() {
                 json!("repair_profile"),
                 json!("StaleIdentity")
             ),
-            ("profile.saved".to_owned(), json!("repair_profile"), Value::Null),
-            ("profile.saved".to_owned(), json!("reset_profile"), Value::Null),
+            (
+                "profile.saved".to_owned(),
+                json!("repair_profile"),
+                Value::Null
+            ),
+            (
+                "profile.saved".to_owned(),
+                json!("reset_profile"),
+                Value::Null
+            ),
         ]
     );
 }
@@ -1656,6 +1702,10 @@ fn committed_recovery_survives_catalog_read_failure() {
 
         // Existing records stay readable; only the newly published file loses read access.
         // SAFETY: scalar POSIX call, confined to this single-test subprocess.
+        #[expect(
+            unsafe_code,
+            reason = "audited umask change in the single-test subprocess"
+        )]
         let previous = unsafe { libc::umask(0o400) };
         let result = if reset {
             application.reset_profile(&context, &original.id, true)
@@ -1663,7 +1713,13 @@ fn committed_recovery_survives_catalog_read_failure() {
             application.repair_profile(&context, &original.id, expected.clone())
         };
         // SAFETY: restore this subprocess's original mask before assertions or new fixtures.
-        unsafe { libc::umask(previous) };
+        #[expect(
+            unsafe_code,
+            reason = "restore the isolated subprocess's original umask"
+        )]
+        unsafe {
+            libc::umask(previous)
+        };
 
         assert_eq!(
             fs::metadata(&file).unwrap().permissions().mode() & 0o777,

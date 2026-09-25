@@ -382,9 +382,24 @@ fn inspect_javascript(
 
 /// Compile only the immutable inventory, before creating the JavaScript VM.
 pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Fault> {
+    limits.validate()?;
+    compile_with_control(inventory, limits, &Control::new(limits))
+}
+
+/// Compile within an already reserved operation's cancellation and deadline.
+pub(crate) fn compile_with_control(
+    inventory: &Inventory,
+    limits: &Limits,
+    control: &Control,
+) -> Result<Inventory, Fault> {
+    control.check()?;
     inventory.validate()?;
     limits.validate()?;
-    let deadline = Instant::now() + Duration::from_millis(limits.duration_ms);
+    let remaining = limits
+        .duration_ms
+        .saturating_mul(1000)
+        .saturating_sub(control.elapsed_us());
+    let deadline = Instant::now() + Duration::from_micros(remaining);
     let limit = limits
         .snapshot_bytes
         .saturating_mul(8)
@@ -403,11 +418,13 @@ pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Faul
         fault.context["stage"] = json!("compilation");
         fault
     };
-    let inspection: Inspection =
-        serde_json::from_value(transport(&request, limit, deadline, None).map_err(&attribute)?)
-            .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
+    let inspection: Inspection = serde_json::from_value(
+        transport(&request, limit, deadline, Some(control)).map_err(&attribute)?,
+    )
+    .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     let mut resolutions: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for import in inspection.imports {
+        control.check()?;
         let destination =
             inventory
                 .resolve(&import.from, &import.specifier)
@@ -428,9 +445,10 @@ pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Faul
     request["resolutions"] = serde_json::to_value(resolutions)
         .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     request["compiler_identity"] = inspection.identity;
-    let compilation: Compilation =
-        serde_json::from_value(transport(&request, limit, deadline, None).map_err(&attribute)?)
-            .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
+    let compilation: Compilation = serde_json::from_value(
+        transport(&request, limit, deadline, Some(control)).map_err(&attribute)?,
+    )
+    .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     let mut compiled = inventory.clone();
     compiled.metadata["original_sources"] = serde_json::to_value(&inventory.sources)
         .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
@@ -458,6 +476,7 @@ pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Faul
             entry.module = format!("{stem}.js");
         }
     }
+    control.check()?;
     compiled.refresh_identity()?;
     Ok(compiled)
 }

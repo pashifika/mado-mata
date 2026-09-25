@@ -710,6 +710,13 @@ pub(crate) mod tests {
         root.put("logs/run.log", b"keep logs");
         root.put("payload/model.bin", b"keep payload");
         root.put("backups/app.config.1", b"keep operator snapshot");
+        for area in ["sources", "pkgs"] {
+            root.put(
+                &format!("{area}/sample/main.ts"),
+                b"export const retained = true;",
+            );
+            root.put(&format!("{area}/sample/assets/pixel.rgba"), &[1, 2, 3, 255]);
+        }
         let old = capture(&root.0).unwrap();
         (root, old)
     }
@@ -723,6 +730,16 @@ pub(crate) mod tests {
             fs::read(root.0.join("backups/app.config.1")).unwrap(),
             b"keep operator snapshot"
         );
+        for area in ["sources", "pkgs"] {
+            assert_eq!(
+                fs::read(root.0.join(area).join("sample/main.ts")).unwrap(),
+                b"export const retained = true;"
+            );
+            assert_eq!(
+                fs::read(root.0.join(area).join("sample/assets/pixel.rgba")).unwrap(),
+                [1, 2, 3, 255]
+            );
+        }
     }
     fn profile_id() -> String {
         format!("p-{}-{}-{}", "0".repeat(32), "0".repeat(8), "0".repeat(16))

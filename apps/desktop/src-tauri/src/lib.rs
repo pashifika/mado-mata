@@ -1,4 +1,5 @@
 pub mod application;
+pub mod authoring;
 pub mod backup;
 pub mod bootstrap;
 pub mod configuration;

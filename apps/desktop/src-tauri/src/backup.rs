@@ -216,20 +216,59 @@ fn resolved_destination(path: &Path) -> Result<PathBuf, Fault> {
     Err(invalid("backup destination has no existing ancestor"))
 }
 
-fn check_destination(root: &Path, directory: &Path) -> Result<(), Fault> {
+fn check_destination(root: &Path, directory: &Path, capture: &Capture) -> Result<(), Fault> {
     let root = filesystem_key(&resolved_destination(root)?.to_string_lossy());
-    let directory = filesystem_key(&resolved_destination(directory)?.to_string_lossy());
+    let resolved = resolved_destination(directory)?;
+    let directory = filesystem_key(&resolved.to_string_lossy());
     if let Ok(relative) = Path::new(&directory).strip_prefix(&root) {
         if let Some(Component::Normal(component)) = relative.components().next() {
             let component = component.to_string_lossy();
-            if component == "tabs" || component == "profiles" || component.starts_with(".restore") {
+            if matches!(component.as_ref(), "tabs" | "profiles" | "sources" | "pkgs")
+                || component.starts_with(".restore")
+            {
                 return Err(invalid(
-                    "backup destination overlaps managed configuration or restore storage",
+                    "backup destination overlaps managed configuration, package source or restore storage",
                 ));
             }
         }
     }
-    Ok(())
+    // This is an exclusion hint, never permission to read or overwrite source.
+    // Unrelated invalid settings must remain eligible for raw recovery snapshots.
+    #[derive(Deserialize)]
+    struct SourceLocation {
+        #[serde(default)]
+        packages_root: Option<String>,
+    }
+    let packages = capture
+        .files
+        .get("settings.json")
+        .and_then(|bytes| decode::<SourceLocation>(bytes).ok())
+        .and_then(|settings| settings.packages_root)
+        .filter(|path| {
+            Path::new(path).is_absolute()
+                && path.len() <= MAX_PATH_BYTES
+                && !path.chars().any(char::is_control)
+                && !Path::new(path)
+                    .components()
+                    .any(|part| matches!(part, Component::ParentDir))
+        });
+    if let Some(packages) = packages {
+        let packages =
+            filesystem_key(&resolved_destination(Path::new(&packages))?.to_string_lossy());
+        if Path::new(&directory).starts_with(&packages) {
+            return Err(invalid(
+                "backup destination overlaps the configured packages root",
+            ));
+        }
+    }
+    // Covers existing external packages after root changes and when settings are
+    // malformed JSON. The shared guard bounds ancestry/bytes and refuses links.
+    crate::authoring::check_package_ancestors(&resolved).map_err(|cause| {
+        invalid(
+            "backup destination is inside package source or its ancestry cannot be safely checked",
+        )
+        .with_context(json!({"cause": cause}))
+    })
 }
 
 pub fn write(
@@ -272,8 +311,8 @@ fn write_at_with(
                 "backup destination must be an absolute path of at most 4096 bytes",
             ));
         }
-        check_destination(root, directory)?;
     }
+    check_destination(root, directory, &capture)?;
     private_directory(directory)?;
     let final_path = directory.join(format!("app.config.{seconds}"));
     let temporary = configuration::temporary(directory, "snapshot");
@@ -705,8 +744,15 @@ mod tests {
             "tabs/Backup",
             "TABS/Backup",
             "profiles/Backup",
+            "sources",
+            "sources/Backup",
+            "SOURCES/Backup",
+            "pkgs",
+            "pkgs/Backup",
+            "PKGS/Backup",
             ".restore-journal/Backup",
             "absent/../tabs/Backup",
+            "absent/../sources/Backup",
         ] {
             let destination = root.0.join(relative);
             assert!(write_at(&root.0, original.clone(), Some(&destination), 42).is_err());
@@ -714,6 +760,132 @@ mod tests {
         }
         assert!(!root.0.join("absent").exists());
         assert_eq!(capture(&root.0).unwrap(), original);
+    }
+
+    #[test]
+    fn configuration_backup_excludes_packages_and_preserves_source_bytes() {
+        let root = Root::new();
+        root.put("settings.json", b"configuration");
+        for area in ["sources", "pkgs"] {
+            root.put(
+                &format!("{area}/sample/main.ts"),
+                b"export const source = 42;",
+            );
+            root.put(&format!("{area}/sample/assets/pixel.rgba"), &[1, 2, 3, 255]);
+        }
+        let original = capture(&root.0).unwrap();
+        let receipt = write_at(&root.0, original.clone(), None, 43).unwrap();
+        assert_eq!(read(Path::new(&receipt.path)).unwrap(), original);
+        assert_eq!(
+            original.files,
+            BTreeMap::from([("settings.json".into(), b"configuration".to_vec())])
+        );
+        for area in ["sources", "pkgs"] {
+            let package = root.0.join(area).join("sample");
+            assert_eq!(
+                fs::read(package.join("main.ts")).unwrap(),
+                b"export const source = 42;"
+            );
+            assert_eq!(
+                fs::read(package.join("assets/pixel.rgba")).unwrap(),
+                [1, 2, 3, 255]
+            );
+            assert!(write_at(&root.0, original.clone(), Some(&package), 44).is_err());
+            assert!(!package.join("app.config.44").exists());
+        }
+    }
+
+    #[test]
+    fn configured_external_collection_refuses_snapshots_before_creating_directories_or_files() {
+        let root = Root::new();
+        let outside = Root::new();
+        let collection = outside.0.join("collection");
+        let publisher = crate::authoring::Publisher::new(root.0.clone());
+        let destination = publisher
+            .prepare_destination(&collection, "sample")
+            .unwrap();
+        let package = publisher.create(&destination, "sample").unwrap();
+        // These settings cannot load normally, but their source exclusion is still
+        // usable and the original bytes must remain eligible for Recovery backup.
+        let settings = serde_json::to_vec(&json!({
+            "version": 999, "gui_log_limit": "invalid",
+            "packages_root": collection, "backup_directory": package.root(),
+        }))
+        .unwrap();
+        root.put("settings.json", &settings);
+        let original = capture(&root.0).unwrap();
+        for destination in [
+            collection.clone(),
+            collection.join("new/backups"),
+            package.root().to_path_buf(),
+            package.root().join("profiles/new"),
+        ] {
+            assert_eq!(
+                write_at(&root.0, original.clone(), Some(&destination), 45)
+                    .unwrap_err()
+                    .category,
+                "Snapshot",
+            );
+            assert!(!destination.join("app.config.45").exists());
+        }
+        assert!(!collection.join("new").exists());
+        assert!(!package.root().join("profiles/new").exists());
+        assert_eq!(
+            publisher.open(package.root()).unwrap().revision(),
+            package.revision()
+        );
+        assert_eq!(fs::read(root.0.join("settings.json")).unwrap(), settings);
+        let receipt = write_at(&root.0, original.clone(), None, 46).unwrap();
+        assert_eq!(read(Path::new(&receipt.path)).unwrap(), original);
+    }
+
+    #[test]
+    fn malformed_settings_still_protect_existing_external_packages_and_allow_safe_backup() {
+        let root = Root::new();
+        let outside = Root::new();
+        let publisher = crate::authoring::Publisher::new(root.0.clone());
+        let package = publisher
+            .create(&outside.0.join("sample"), "sample")
+            .unwrap();
+        root.put("settings.json", b"malformed original settings\0");
+        let original = capture(&root.0).unwrap();
+        for destination in [
+            package.root().to_path_buf(),
+            package.root().join("new/backups"),
+        ] {
+            assert_eq!(
+                write_at(&root.0, original.clone(), Some(&destination), 47)
+                    .unwrap_err()
+                    .category,
+                "Snapshot",
+            );
+            assert!(!destination.join("app.config.47").exists());
+        }
+        assert!(!package.root().join("new").exists());
+        assert_eq!(
+            publisher.open(package.root()).unwrap().revision(),
+            package.revision()
+        );
+        let receipt = write_at(&root.0, original.clone(), None, 48).unwrap();
+        assert_eq!(read(Path::new(&receipt.path)).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collection_ancestor_alias_does_not_bypass_snapshot_source_exclusion() {
+        let root = Root::new();
+        let outside = Root::new();
+        let collection = outside.0.join("collection");
+        crate::storage::private_directory(&collection).unwrap();
+        let alias = outside.0.join("alias");
+        std::os::unix::fs::symlink(&collection, &alias).unwrap();
+        root.put(
+            "settings.json",
+            &serde_json::to_vec(&json!({"packages_root": collection})).unwrap(),
+        );
+        let original = capture(&root.0).unwrap();
+        assert!(write_at(&root.0, original, Some(&alias.join("new/backups")), 49).is_err());
+        assert!(!collection.join("new").exists());
     }
 
     #[cfg(unix)]
@@ -724,16 +896,18 @@ mod tests {
         root.put("settings.json", b"preserve");
         std::os::unix::fs::symlink(&root.0, outside.0.join("alias")).unwrap();
         let original = capture(&root.0).unwrap();
-        assert!(
-            write_at(
-                &root.0,
-                original.clone(),
-                Some(&outside.0.join("alias/tabs/Backup")),
-                42
-            )
-            .is_err()
-        );
-        assert!(!root.0.join("tabs").exists());
+        for area in ["tabs", "sources", "pkgs"] {
+            assert!(
+                write_at(
+                    &root.0,
+                    original.clone(),
+                    Some(&outside.0.join(format!("alias/{area}/Backup"))),
+                    42
+                )
+                .is_err()
+            );
+            assert!(!root.0.join(area).exists());
+        }
         assert_eq!(capture(&root.0).unwrap(), original);
     }
 }

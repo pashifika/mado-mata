@@ -31,6 +31,10 @@ fn legacy_settings_load_without_rewrite_and_preferences_preserve_current_hint() 
     let loaded = store.settings().unwrap();
     assert_eq!(loaded.locale, Locale::English);
     assert!(loaded.backup_directory.is_none());
+    assert!(loaded.packages_root.is_none());
+    assert_eq!(store.packages_root().unwrap(), directory.0.join("sources"));
+    assert!(!directory.0.join("sources").exists());
+    assert!(!directory.0.join("pkgs").exists());
     assert_eq!(fs::read(&path).unwrap(), original);
     let draft = EditableSettings {
         locale: Locale::Japanese,
@@ -127,4 +131,73 @@ fn invalid_locale_notifications_and_backup_paths_preserve_settings() {
         assert!(store.save_preferences(invalid).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
     }
+}
+
+#[test]
+fn packages_root_persists_without_creating_or_moving_source_and_can_return_to_default() {
+    let directory = Directory::new();
+    let root = directory.0.join("app");
+    let custom = directory.0.join("sources/nested");
+    let store = Store::new(root.clone()).unwrap();
+    store.initialize(preferences()).unwrap();
+    assert_eq!(store.packages_root().unwrap(), root.join("sources"));
+    assert!(!root.join("sources").exists());
+    assert!(!root.join("pkgs").exists());
+    let mut draft = preferences();
+    draft.packages_root = Some(custom.to_str().unwrap().into());
+    store.save_preferences(draft).unwrap();
+    let reopened = Store::new(root.clone()).unwrap();
+    assert_eq!(reopened.packages_root().unwrap(), custom);
+    assert!(!custom.exists());
+    assert!(!directory.0.join("sources").exists());
+    let mut legacy = preferences();
+    legacy.packages_root = Some(root.join("pkgs").to_str().unwrap().into());
+    reopened.save_preferences(legacy).unwrap();
+    assert_eq!(
+        Store::new(root.clone()).unwrap().packages_root().unwrap(),
+        root.join("pkgs")
+    );
+    assert!(!root.join("pkgs").exists());
+    reopened.save_preferences(preferences()).unwrap();
+    assert_eq!(reopened.packages_root().unwrap(), root.join("sources"));
+    assert!(!root.join("sources").exists());
+    assert!(!root.join("pkgs").exists());
+}
+
+#[test]
+fn invalid_packages_roots_preserve_settings_and_private_configuration() {
+    let directory = Directory::new();
+    let root = directory.0.join("app");
+    let store = Store::new(root.clone()).unwrap();
+    store.initialize(preferences()).unwrap();
+    let before = fs::read(root.join("settings.json")).unwrap();
+    let mut traversal = root.as_os_str().to_os_string();
+    traversal.push(std::path::MAIN_SEPARATOR_STR);
+    traversal.push("..");
+    traversal.push(std::path::MAIN_SEPARATOR_STR);
+    traversal.push("outside");
+    for path in [
+        "relative".into(),
+        "".into(),
+        "/bad\nroot".into(),
+        format!("/{}", "x".repeat(MAX_PATH_BYTES)),
+        traversal.to_str().unwrap().into(),
+        root.to_str().unwrap().into(),
+        directory.0.to_str().unwrap().into(),
+        root.join("tabs").to_str().unwrap().into(),
+        root.join("profiles").to_str().unwrap().into(),
+        root.join("authoring").to_str().unwrap().into(),
+        root.join(".restore-journal").to_str().unwrap().into(),
+        root.join("pkgs-other").to_str().unwrap().into(),
+        root.join("sources-other").to_str().unwrap().into(),
+    ] {
+        let mut draft = preferences();
+        draft.packages_root = Some(path);
+        assert!(store.save_preferences(draft).is_err());
+        assert_eq!(fs::read(root.join("settings.json")).unwrap(), before);
+    }
+    assert!(!root.join("pkgs").exists());
+    assert!(!root.join("sources").exists());
+    assert!(!root.join("tabs").exists());
+    assert!(!root.join("authoring").exists());
 }

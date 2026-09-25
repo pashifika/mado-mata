@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
+import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,packageDestination,portableComponent,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
 import {messages} from './i18n.ts';
 
 test('late predecessor result cannot replace the successor or its preparing state',()=>{
@@ -184,11 +184,11 @@ test('a completed settings Save preserves later locale and invalid input edits',
   assert.ok(parsed.errors.logLimit);
 });
 
-const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(checkedEnvironment),backupDirectory:''};
+const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(checkedEnvironment),backupDirectory:'',packagesRoot:''};
 test('a complete settings draft becomes one editable settings object without version or package hint',()=>{
   const parsed=readSettingsDraft(validSettingsDraft);
   assert.deepEqual(parsed.errors,{});
-  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true},backup_directory:null});
+  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true},backup_directory:null,packages_root:null});
   assert.equal(readSettingsDraft({...validSettingsDraft,environment:environmentDraft(null)}).settings.ocr_environment,null);
 });
 
@@ -197,6 +197,27 @@ test('the backup directory draft is blank for the default destination and otherw
   assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,notifications:DEFAULT_NOTIFICATIONS,locale:'en',backup_directory:'/private/backups'}).backupDirectory,'/private/backups');
   assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:'   '}).settings.backup_directory,null);
   assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:' /private/backups '}).settings.backup_directory,'/private/backups');
+});
+
+test('packages root defaults, persisted drafts and edits made during Save remain distinct',()=>{
+  const submitted={...validSettingsDraft,packagesRoot:' /private/packages '};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  assert.equal(saved.packages_root,'/private/packages');
+  assert.equal(settingsDraftAfterSave(submitted,submitted,saved).packagesRoot,'/private/packages');
+  const changed={...submitted,packagesRoot:'/private/later'};
+  assert.equal(settingsDraftAfterSave(changed,submitted,saved).packagesRoot,'/private/later');
+  assert.equal(readSettingsDraft({...submitted,packagesRoot:'  '}).settings.packages_root,null);
+  assert.equal(settingsDraftFrom(null).packagesRoot,'');
+});
+
+test('package destination preview joins only portable IDs beneath the saved root',()=>{
+  assert.equal(packageDestination('/private/pkgs','example.starter'),'/private/pkgs/example.starter');
+  assert.equal(packageDestination('C:\\Packages\\','demo'),'C:\\Packages\\demo');
+  assert.equal(packageDestination('','demo'),null);
+  for (const id of ['../escape','a/b','a\\b','.hidden','last.','CON.txt','com9','NODE_MODULES','a'.repeat(129)]) {
+    assert.equal(portableComponent(id),false,id);
+    assert.equal(packageDestination('/private/pkgs',id),null,id);
+  }
 });
 
 for (const {scenario,draft,field} of [
@@ -208,6 +229,10 @@ for (const {scenario,draft,field} of [
   {scenario:'a partial environment',draft:{...validSettingsDraft,environment:{...environmentDraft(checkedEnvironment),model_root:''}},field:'model_root'},
   {scenario:'an unsupported language',draft:{...validSettingsDraft,locale:'fr'},field:'locale'},
   {scenario:'a null language',draft:{...validSettingsDraft,locale:null},field:'locale'},
+  {scenario:'a relative packages root',draft:{...validSettingsDraft,packagesRoot:'packages'},field:'packagesRoot'},
+  {scenario:'packages root traversal',draft:{...validSettingsDraft,packagesRoot:'/private/../config'},field:'packagesRoot'},
+  {scenario:'packages root controls',draft:{...validSettingsDraft,packagesRoot:'/private/new\nline'},field:'packagesRoot'},
+  {scenario:'an oversized packages root',draft:{...validSettingsDraft,packagesRoot:`/${'あ'.repeat(1400)}`},field:'packagesRoot'},
 ]) {
   test(`settings draft refuses ${scenario} without producing a save payload`,()=>{
     const parsed=readSettingsDraft(draft);

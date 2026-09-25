@@ -1,6 +1,7 @@
 import enData from './locales/ui.en.json' with {type: 'json'};
 import jaData from './locales/ui.ja.json' with {type: 'json'};
 import {interpolate} from './i18n-format.ts';
+import type {PresetIssue, SchemaIssue, SourceMapIssue} from './metadata.ts';
 
 function known(labels: Record<string, string>, value: string, key = value): string {
   return Object.hasOwn(labels, key) ? labels[key] : value;
@@ -127,6 +128,57 @@ function catalog(data: typeof enData) {
     guidance: {
       ...data.guidance,
       scope: (label: string) => interpolate(data.guidance.scope, {label}),
+    },
+    authoring: {
+      ...data.authoring,
+      scope: (label: string) => interpolate(data.authoring.scope, {label}),
+      kind: (value: string) => known(data.authoring.kinds, value),
+      unsavedFiles: (count: number) => interpolate(data.authoring.unsavedFiles[count === 1 ? 'one' : 'other'], {count}),
+      binary: (bytes: number) => interpolate(data.authoring.binary, {bytes}),
+      editorLabel: (path: string) => interpolate(data.authoring.editorLabel, {path}),
+      position: (line: number, column: number) => interpolate(data.authoring.position, {line, column}),
+      lines: (count: number) => interpolate(data.authoring.lines[count === 1 ? 'one' : 'other'], {count}),
+      matches: (count: number, current: number | null, capped: boolean) => interpolate(data.authoring.matches[count === 0 ? 'none' : capped ? 'capped' : current === null ? 'count' : 'position'], {count, current: current ?? ''}),
+      valid: (revision: string) => interpolate(data.authoring.valid, {revision}),
+      invalid: (revision: string, count: number) => interpolate(data.authoring.invalid[count === 1 ? 'one' : 'other'], {revision, count}),
+      staleValidation: (revision: string) => interpolate(data.authoring.staleValidation, {revision}),
+      location: (path: string, line: number, column: number) => interpolate(data.authoring.location, {path, line, column}),
+      goTo: (location: string) => interpolate(data.authoring.goTo, {location}),
+      renameHeading: (path: string) => interpolate(data.authoring.renameHeading, {path}),
+      fileActions: (path: string) => interpolate(data.authoring.fileActions, {path}),
+      confirmRemove: (path: string) => interpolate(data.authoring.confirmRemove, {path}),
+      block: (kind: keyof typeof data.authoring.block) => data.authoring.block[kind],
+      blockedOther: (owner: string) => interpolate(data.authoring.blockedOther, {owner}),
+      startBlocked: (owner: string) => interpolate(data.authoring.startBlocked, {owner}),
+      stripKind: (packageId: string) => interpolate(data.authoring.stripKind, {package: packageId}),
+      dirtyHeading: (intent: keyof typeof data.authoring.dirtyHeading) => data.authoring.dirtyHeading[intent],
+      presetLabel: (id: string) => interpolate(data.authoring.presetLabel, {id}),
+      sourceMapLabel: (module: string) => interpolate(data.authoring.sourceMapLabel, {module}),
+      jsonLocation: (problem: string, line: number, column: number) => interpolate(data.authoring.jsonLocation, {problem: known(data.authoring.jsonProblems, problem), line, column}),
+      normalizedNumbers: (numbers: string) => interpolate(data.authoring.normalizedNumbers, {numbers}),
+      normalizedDuplicates: (paths: string) => interpolate(data.authoring.normalizedDuplicates, {paths}),
+      runtimeLabel: (runtime: string) => known(data.authoring.runtimes, runtime),
+      runtimeUnsupported: (runtime: string) => interpolate(data.authoring.runtimeUnsupported, {runtime}),
+      entryName: (name: string) => known(data.authoring.entryNames, name),
+      entryModule: (entry: string) => interpolate(data.authoring.entryModule, {entry}),
+      entryFunction: (entry: string) => interpolate(data.authoring.entryFunction, {entry}),
+      moduleUndeclared: (path: string) => interpolate(data.authoring.moduleUndeclared, {path}),
+      helper: (name: string, version: string) => interpolate(data.authoring.helper, {name, version}),
+      assetDimensions: (width: string, height: string) => interpolate(data.authoring.assetDimensions, {width, height}),
+      addFieldHeading: (path: string) => interpolate(data.authoring.addFieldHeading, {path}),
+      schemaType: (type: string) => known(data.authoring.schemaTypes, type),
+      unsupportedType: (type: string) => interpolate(data.authoring.unsupportedType, {type}),
+      boundLabel: (key: string) => known(data.authoring.bounds, key),
+      enumValue: (index: number) => interpolate(data.authoring.enumValue, {index}),
+      enumRemove: (index: number) => interpolate(data.authoring.enumRemove, {index}),
+      nestedDefault: (value: string) => interpolate(data.authoring.nestedDefault, {value}),
+      schemaProblems: (count: number) => interpolate(data.authoring.schemaProblems[count === 1 ? 'one' : 'other'], {count}),
+      schemaIssue: (issue: SchemaIssue) => interpolate(data.authoring.schemaIssue[issue.code], {key: 'key' in issue ? issue.key : ''}),
+      schemaRepair: (issue: SchemaIssue) => interpolate(data.authoring.schemaRepair[issue.code], {key: 'key' in issue ? issue.key : ''}),
+      presetIssue: (issue: PresetIssue) => interpolate(data.authoring.presetIssue[issue.code], {key: 'key' in issue ? issue.key : ''}),
+      presetRepair: (issue: PresetIssue) => interpolate(data.authoring.presetRepair[issue.code], {key: 'key' in issue ? issue.key : ''}),
+      characters: (count: number) => interpolate(data.authoring.characters[count === 1 ? 'one' : 'other'], {count}),
+      sourceMapIssue: (issue: SourceMapIssue) => interpolate(data.authoring.sourceMapIssue[issue.code], {index: 'index' in issue ? issue.index + 1 : ''}),
     },
   };
 }

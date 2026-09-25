@@ -77,7 +77,7 @@ export function storedText(schema:Schema, values:Json):StoredText[] {
 
 // A field edit retires only its own stored mismatches. Array actions carry their indices explicitly: comparing values
 // would confuse equal strings in different items, and cannot distinguish a move from an edit to an equal value.
-function retainStoredText(previous:StoredText[], draft:Record<string,Json>, edit:RecoveryEdit):StoredText[] {
+export function retainStoredText(previous:StoredText[], draft:Record<string,Json>, edit:RecoveryEdit):StoredText[] {
   const retained:StoredText[] = [];
   for (const entry of previous) {
     if (edit.kind === 'replace' && (entry.path === edit.path || entry.path.startsWith(`${edit.path}.`) || entry.path.startsWith(`${edit.path}[`))) continue;
