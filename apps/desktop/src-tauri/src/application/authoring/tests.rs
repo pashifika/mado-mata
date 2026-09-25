@@ -111,6 +111,10 @@ fn lease_excludes_all_ordinary_admission_and_invalidates_shared_source_on_exit()
     let exited = app.authoring_exit(&editor.owner).unwrap();
     assert_eq!(exited.revision, first_ref.revision + 1);
     assert!(exited.selection.is_none());
+    assert!(
+        exited.source_error.is_none(),
+        "normal Edit exit leaves an uninspected reference, not an inspection failure"
+    );
     assert_eq!(
         exited.saved_package.as_ref().unwrap().package_id,
         first.package.package_id
@@ -123,6 +127,20 @@ fn lease_excludes_all_ordinary_admission_and_invalidates_shared_source_on_exit()
         .unwrap();
     assert!(other.selection.is_none());
     assert_eq!(other.revision, second_ref.revision + 1);
+    assert!(other.source_error.is_none());
+    assert!(other.saved_package.is_some());
+    assert_eq!(
+        app.start(&view_ref(&exited), request(&first))
+            .unwrap_err()
+            .category,
+        "WorkspaceUnbound"
+    );
+    assert_eq!(
+        app.start(&view_ref(other), request(&second))
+            .unwrap_err()
+            .category,
+        "WorkspaceUnbound"
+    );
     assert_eq!(
         app.start(&second_ref, request(&second))
             .unwrap_err()

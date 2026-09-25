@@ -276,8 +276,9 @@ Neither action inspects, binds, or runs the package.
   Confirmed application close uses bounded shutdown and preserves incomplete
   containment outcomes; closing is not proof of successful cleanup.
 - **Exit Edit**, then explicitly **Inspect/Reinspect** before Start. Selections
-  for every workspace sharing an edited source are invalidated. Saved local
-  profiles remain untouched; inspection uses the existing
+  for every workspace sharing an edited source are invalidated. A normal exit
+  returns to unbound guidance, not an inspection-failure error. Saved references
+  and local profiles remain untouched; inspection uses the existing
   [profile reconciliation and repair flow](#recover-profiles-after-a-schema-change).
 
 ### Source conflicts and interrupted saves

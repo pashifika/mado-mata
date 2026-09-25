@@ -430,10 +430,7 @@ impl Application {
             workspace.workspace.revision += 1;
             workspace.selected = None;
             workspace.recovery = None;
-            workspace.source_error = Some(Fault::new(
-                "AuthoringReinspectRequired",
-                "Inspect the saved package explicitly before running",
-            ));
+            workspace.source_error = None;
         }
         state.authoring = None;
         *lock(&self.authoring_stop) = None;
