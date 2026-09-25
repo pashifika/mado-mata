@@ -47,6 +47,63 @@ The close worker posts its final exit on the event thread only if termination
 has not begun. Forced/incomplete outcomes are not rewritten as success.
 Unexpected application loss retains the runner's parent-loss contract.
 
+## Application selection and read-only correspondence
+
+Keep machine-local Target records at version 1. The optional portable
+`target.macos.bundle_id` constrains only the actual game; omission retains the
+previous normalized declaration identity. Derived bundle/signing/process
+identity is transient, not a record migration, profile value, snapshot member,
+or authority grant. Older strict readers may reject an opted-in package.
+
+Use macOS-scoped public Foundation/AppKit/Security bindings and a host-owned
+asynchronous `NSOpenPanel` sheet. Select the outer application without launching
+or loading its code. Atomic picker admission excludes preparing/running/stopping
+Run/OCR operations; the sheet cannot hide an active run's Stop control.
+Completion is attributed to the issuing owner, field, and draft revision.
+
+The ordinary `CFBundle` executable/identifier getters failed the same-process
+update regressions: a newly read plist named the replacement while the bundle
+object retained the old executable. A short-lived wrapper does not defeat the
+OS cache. Use fresh
+[`CFBundleCopyInfoDictionaryForURL`](https://developer.apple.com/documentation/corefoundation/cfbundlecopyinfodictionaryforurl(_:))
+and the named auxiliary-executable lookup, cross-checked against bounded metadata.
+Validate containment, regular executable eligibility, and before/after file
+identity. Refuse unsupported alternate metadata locations before Foundation,
+including platform-specific `Info-macos.plist`; do not read unbounded alternative
+plists or assume they are ignored. These checks do not make concurrent external
+filesystem replacement atomic.
+
+Running-application checks use AppKit bundle-ID candidates, precise process-start
+identity, and architecture-specific signed-code evidence. Path equality alone
+cannot accept an old signed process after an in-place update. A relocated match
+additionally requires a matching nonempty Team ID and explicitly cannot identify
+the original physical copy. Never reverse temporary paths or use private
+translocation APIs.
+
+Do not interpret dynamic `errSecCSUnsigned` as proof of an unsigned live image.
+Apple's
+[`SecCode::checkValidity`](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_codesigning/lib/Code.cpp)
+checks static code before live validity/code identity, so a replaced unsigned
+file can produce that error for a previously signed process. The public validity
+status also does not distinguish unsigned from signed-invalid code.
+[`CSCommon.h`](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_codesigning/lib/CSCommon.h)
+forbids depending on undocumented status bits. The current provider therefore
+reports this case as unverifiable; the conditional unsigned-path policy is not
+an available success route. Do not add private status APIs to manufacture one.
+
+Reserve the request synchronously before asynchronous activation so Cancel or
+owner invalidation cannot arrive before registration and then start a stale
+worker. Bootstrap owns the physical worker slot across Application reconstruction.
+A 5-second monotonic deadline/Cancel invalidates publication, not the synchronous
+OS call. Keep the slot until actual return, release shared locks before OS reads,
+and bound discovery to 64 candidates and private projection to 64 KiB. Publication
+rechecks ownership, saved binding, installation, lifetime, and cancellation.
+
+These observations do not enable native Start, establish a window/input route,
+or replace M0/R6 qualification. Windows target implementation remains deferred;
+portable declaration/storage/restore and existing Windows core CI remain in scope.
+Actual WebView and authorized OS observations are separate from hosted checks.
+
 ## Shell evidence
 
 Before extending the shell, the actual macOS WKWebView selected and statically

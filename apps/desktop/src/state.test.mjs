@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,SUPPORTED_PROFILES} from './state.ts';
+import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
+import {messages} from './i18n.ts';
 
 test('late predecessor result cannot replace the successor or its preparing state',()=>{
   const current={run:'next',state:'preparing',result:null};
@@ -80,12 +81,15 @@ test('verified cleanup requires independent successful exit without forced conta
   assert.equal(verifiedCleanup({...result,cleanup:{clean:false}}),false);
 });
 
-test('a preparation fault is clean only when the backend settled before any child',()=>{
-  assert.equal(cleanupLabel(null,{cleanup:{clean:true,child_started:false}}),'Clean · no child started');
-  assert.equal(cleanupLabel(null,{cleanup:{clean:true}}),'Unverified');
-  assert.equal(cleanupLabel(null,{cleanup:{clean:false,child_started:true}}),'Incomplete / not clean');
-  assert.equal(cleanupLabel({status:'FAIL',cleanup:{clean:true},forced:true,exit_code:0},{}),'Incomplete / not clean');
-});
+for (const locale of ['en','ja']) {
+  test(`preparation cleanup remains distinct from unverified or forced cleanup in ${locale}`,()=>{
+    const labels=messages[locale].validation;
+    assert.equal(cleanupLabel(null,{cleanup:{clean:true,child_started:false}},locale),labels.cleanNoChild);
+    assert.equal(cleanupLabel(null,{cleanup:{clean:true}},locale),labels.unverified);
+    assert.equal(cleanupLabel(null,{cleanup:{clean:false,child_started:true}},locale),labels.incomplete);
+    assert.equal(cleanupLabel({status:'FAIL',cleanup:{clean:true},forced:true,exit_code:0},{},locale),labels.incomplete);
+  });
+}
 
 for (const {scenario,draft} of [
   {scenario:'an empty environment draft is unconfigured',draft:environmentDraft(null)},
@@ -149,19 +153,66 @@ test('environment draft round-trips through the fixed supported tuple with trimm
 });
 
 const checkedEnvironment=readEnvironment({profile:SUPPORTED_PROFILES[0].profile,model_root:'/models',runtime_path:'/rt.dylib',library_paths:'/lib/a.dylib'}).environment;
-const association={operation:'desktop-1',environment:checkedEnvironment,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
-const unchanged={saved:checkedEnvironment,draftDirty:false,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
+const workspace={workspace_id:'ws-1',revision:1};
+const association={operation:'desktop-1',workspace,environment:checkedEnvironment,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
+const unchanged={saved:checkedEnvironment,draftDirty:false,workspace,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
 for (const {scenario,current,reasons} of [
   {scenario:'nothing changed since the check',current:unchanged,reasons:0},
   {scenario:'the environment was saved again with another path',current:{...unchanged,saved:{...checkedEnvironment,model_root:'/models-2'}},reasons:1},
   {scenario:'the draft has unsaved edits even though saved settings match',current:{...unchanged,draftDirty:true},reasons:1},
   {scenario:'another descriptor is selected',current:{...unchanged,descriptorPath:null},reasons:1},
-  {scenario:'another package is inspected',current:{...unchanged,packageInventoryIdentity:'inv-2'},reasons:1},
-  {scenario:'the inspected package was forgotten',current:{...unchanged,packageInventoryIdentity:null},reasons:1},
+  {scenario:'another package is inspected',current:{...unchanged,packageInventoryIdentity:'inv-2',workspace:{workspace_id:'ws-2',revision:1}},reasons:1},
+  {scenario:'the inspected package was forgotten',current:{...unchanged,packageInventoryIdentity:null,workspace:null},reasons:1},
+  {scenario:'the same package inventory is selected through another workspace',current:{...unchanged,workspace:{workspace_id:'ws-2',revision:1}},reasons:1},
+  {scenario:'the workspace was reinspected to a newer revision',current:{...unchanged,workspace:{workspace_id:'ws-1',revision:2}},reasons:1},
   {scenario:'the environment was cleared after the check',current:{...unchanged,saved:null,draftDirty:true},reasons:2},
 ]) {
   test(`check association: ${scenario}`,()=>{
     assert.equal(staleReasons(association,current).length,reasons);
+  });
+}
+
+test('a completed settings Save preserves later locale and invalid input edits',()=>{
+  const submitted={...settingsDraftFrom(null),locale:'ja'};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  const current={...submitted,locale:'en',logLimit:'not a number'};
+  const settled=settingsDraftAfterSave(current,submitted,saved);
+  assert.equal(settled.locale,'en');
+  assert.equal(settled.logLimit,'not a number');
+  const parsed=readSettingsDraft(settled);
+  assert.equal(parsed.settings,null);
+  assert.ok(parsed.errors.logLimit);
+});
+
+const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(checkedEnvironment),backupDirectory:''};
+test('a complete settings draft becomes one editable settings object without version or package hint',()=>{
+  const parsed=readSettingsDraft(validSettingsDraft);
+  assert.deepEqual(parsed.errors,{});
+  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true},backup_directory:null});
+  assert.equal(readSettingsDraft({...validSettingsDraft,environment:environmentDraft(null)}).settings.ocr_environment,null);
+});
+
+test('the backup directory draft is blank for the default destination and otherwise saved as typed without padding',()=>{
+  assert.equal(settingsDraftFrom(null).backupDirectory,'');
+  assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,notifications:DEFAULT_NOTIFICATIONS,locale:'en',backup_directory:'/private/backups'}).backupDirectory,'/private/backups');
+  assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:'   '}).settings.backup_directory,null);
+  assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:' /private/backups '}).settings.backup_directory,'/private/backups');
+});
+
+for (const {scenario,draft,field} of [
+  {scenario:'a zero log limit',draft:{...validSettingsDraft,logLimit:'0'},field:'logLimit'},
+  {scenario:'a log limit above 10000',draft:{...validSettingsDraft,logLimit:'10001'},field:'logLimit'},
+  {scenario:'a non-integer log limit',draft:{...validSettingsDraft,logLimit:'1e3'},field:'logLimit'},
+  {scenario:'three visible cards',draft:{...validSettingsDraft,notifications:{...DEFAULT_NOTIFICATIONS,visible_count:3}},field:'visibleCount'},
+  {scenario:'a ten second timeout',draft:{...validSettingsDraft,notifications:{...DEFAULT_NOTIFICATIONS,timeout_seconds:10}},field:'timeoutSeconds'},
+  {scenario:'a partial environment',draft:{...validSettingsDraft,environment:{...environmentDraft(checkedEnvironment),model_root:''}},field:'model_root'},
+  {scenario:'an unsupported language',draft:{...validSettingsDraft,locale:'fr'},field:'locale'},
+  {scenario:'a null language',draft:{...validSettingsDraft,locale:null},field:'locale'},
+]) {
+  test(`settings draft refuses ${scenario} without producing a save payload`,()=>{
+    const parsed=readSettingsDraft(draft);
+    assert.equal(parsed.settings,null);
+    assert.ok(parsed.errors[field]);
   });
 }
 

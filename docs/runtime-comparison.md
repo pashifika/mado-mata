@@ -95,8 +95,10 @@ application success. Raw result files can contain private execution details.
 For the package/profile GUI, use the [desktop build and run guide](desktop.md).
 It retains app-local named profiles separately from package source and captures
 one immutable run at Start. Draft edits and later profile saves affect only a
-subsequent run. Package/schema mismatches are refused without migrating stored
-data, and Stop/cleanup remain independent of the bounded GUI and file logs.
+subsequent run. Start refuses package/schema mismatches; only an explicit desktop
+Inspect/Reinspect can reconcile safe owned profiles through the
+[profile recovery flow](desktop.md#recover-profiles-after-a-schema-change).
+Stop/cleanup remain independent of the bounded GUI and file logs.
 The shell uses fixed checkout-owned runner/compiler paths, not a release bundle.
 
 ## Package and host contracts
@@ -108,6 +110,52 @@ links inside the package, unsupported runtime/SDK contracts, and finite-limit
 violations. The selected root may lie below an OS path alias; capture anchors its
 canonical location. Captured content, not later edits or ambient `node_modules`,
 is used for compilation, preflight, module loading, and assets.
+
+### Optional portable target declaration
+
+Version-1 manifests may include a strict `target` object:
+
+```json
+{
+  "target": {
+    "id": "example-game",
+    "window_title": "Exact Game Title",
+    "macos": { "bundle_id": "com.example.game" }
+  }
+}
+```
+
+`id` uses the existing portable-component rules and is limited to 128 UTF-8
+bytes. `window_title` is an optional exact, nonempty title, limited to 512 UTF-8
+bytes without control characters. Omitting it or setting it to `null` leaves the
+local setup responsible for an exact title. The declaration itself cannot be
+`null`, an array, or contain unknown/duplicate fields. Paths, launch arguments,
+process identities, credentials, and permission grants do not belong here.
+
+`macos` is optional. When present, it must contain exactly one `bundle_id`:
+1–255 ASCII letters, digits, dots, or hyphens. `null`, arrays, missing IDs,
+unknown members, and duplicate members are refused. It constrains the
+**actual game**, not a separate launcher: Check/Save require an application
+bundle whose host-derived identifier matches exactly. An unconstrained local
+bundle identifier need not use this portable selector's character set.
+
+Inspection validates the declaration without evaluating package code. Its
+captured bytes affect inventory identity; a separate host-derived target identity
+uses only normalized supported declaration fields. Omitting `macos` preserves
+the previous normalized identity exactly. Script/schema changes and manifest
+formatting therefore do not require a new local binding when target intent is
+unchanged. Changing the ID, exact title, or macOS constraint retains an old
+binding as incompatible until explicitly replaced or removed.
+
+The [desktop Target section](desktop.md#local-target-configuration) stores
+machine-local configuration separately for each Tab/package. Packages without
+`target` remain valid; neither absence nor an invalid local binding blocks an
+otherwise valid controlled/replay invocation. Declaring or saving a target
+grants no native authority. Older strict manifest readers can reject the new
+field rather than silently ignore it. Rollback requires a deliberately compatible
+package revision; never silently remove its application constraint.
+
+### Dependencies and execution
 
 The application approves `@mado/helper` 1.0.0 and its private transitive helper
 `@mado/order` 1.0.0. Packages request a catalog entry; they cannot approve code,
@@ -146,6 +194,23 @@ capture-pixel `x`, `y`, and `left`/`right`/`middle` button. Native sequences bal
 their keys, charge expanded events against finite authority, and preserve actual
 SDK receipt/cleanup outcomes. The TypeScript SDK describes these action variants
 and optional native receipt facts. See the [native contract](runtime-native.md#native-target-selection-and-finite-authority).
+
+## Rust source ownership
+
+Public entry points stay in their existing root namespaces; child modules are
+private implementation boundaries:
+
+| Root | Child ownership |
+| --- | --- |
+| `host.rs` | `options` validates schemas and values; `admission` owns permits and admission; `sequence` owns input dispatch and release |
+| `desktop.rs` | `packages` inspects inventory and profile selection; `operation` owns reservation, workers, polling, and shutdown |
+| `inventory.rs` | `capture` performs bounded filesystem capture and verification; `validation` validates manifest content and identities |
+| `runner.rs` | `protocol` owns framing; `child` executes captured inputs; `supervision` contains and reaps processes; `evidence` owns bounded lifecycle/log transport |
+
+Host and controller state retain their original lock ownership. Evidence channels
+and statics have one owner. Execution consumes the captured inventory rather than
+reopening package source. Owner-local unit tests follow the implementation;
+`check/lifecycle.rs` and `check/loading.rs` remain executable check scenarios.
 
 ## Containment and measurements
 

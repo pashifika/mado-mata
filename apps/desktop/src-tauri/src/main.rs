@@ -1,5 +1,12 @@
-use mado_mata_desktop::application::{Application, Poll, Selection};
-use mado_mata_desktop::storage::{Profile, Settings};
+use mado_mata_desktop::application::{
+    InspectionOutcome, Poll, ProfileCatalog, RecoveryMutation, RecoveryRef,
+    TargetApplicationResponse, TargetCheckResponse, TargetSaveResponse, TargetView,
+    WorkspaceCatalog, WorkspaceRef, WorkspaceView,
+};
+use mado_mata_desktop::backup::SnapshotReceipt;
+use mado_mata_desktop::bootstrap::{Bootstrap, BootstrapStatus, selected_roots};
+use mado_mata_desktop::storage::{EditableSettings, LegacyImport, Profile, Settings};
+use mado_mata_desktop::target::{TargetConfiguration, TargetExpectation, TargetResolution};
 use mado_runtime_comparison::desktop::StartRequest;
 use mado_runtime_comparison::model::Fault;
 use serde_json::Value;
@@ -10,8 +17,11 @@ use std::sync::{
 };
 use tauri::Manager;
 
+#[cfg(target_os = "macos")]
+mod picker;
+
 struct Backend {
-    application: Arc<Application>,
+    bootstrap: Arc<Bootstrap>,
     closing: AtomicBool,
     exiting: AtomicBool,
 }
@@ -25,95 +35,388 @@ async fn background<T: Send + 'static>(
 }
 
 #[tauri::command]
-async fn inspect(
-    package_path: String,
+async fn bootstrap_status(state: tauri::State<'_, Backend>) -> Result<BootstrapStatus, Fault> {
+    let bootstrap = state.bootstrap.clone();
+    background(move || bootstrap.ensure_started()).await
+}
+
+#[tauri::command]
+async fn initialize(
+    settings: EditableSettings,
+    confirm_fresh: bool,
     state: tauri::State<'_, Backend>,
-) -> Result<Selection, Fault> {
-    let application = state.application.clone();
-    background(move || application.select(Path::new(&package_path))).await
+) -> Result<BootstrapStatus, Fault> {
+    let bootstrap = state.bootstrap.clone();
+    background(move || bootstrap.initialize(settings, confirm_fresh)).await
 }
 
 #[tauri::command]
-async fn settings(state: tauri::State<'_, Backend>) -> Result<Settings, Fault> {
-    let application = state.application.clone();
-    background(move || application.settings()).await
-}
-
-#[tauri::command]
-async fn save_settings(
-    settings: Settings,
+async fn retry_bootstrap(
+    discard: bool,
     state: tauri::State<'_, Backend>,
-) -> Result<Settings, Fault> {
-    let application = state.application.clone();
-    background(move || application.save_settings(settings)).await
+) -> Result<BootstrapStatus, Fault> {
+    let bootstrap = state.bootstrap.clone();
+    background(move || bootstrap.retry(discard)).await
 }
 
 #[tauri::command]
-async fn validate(values: Value, state: tauri::State<'_, Backend>) -> Result<Value, Fault> {
-    let application = state.application.clone();
-    background(move || application.validate(values)).await
+async fn import_legacy_root(state: tauri::State<'_, Backend>) -> Result<BootstrapStatus, Fault> {
+    let bootstrap = state.bootstrap.clone();
+    background(move || bootstrap.import_legacy_root()).await
 }
 
 #[tauri::command]
-async fn profiles(state: tauri::State<'_, Backend>) -> Result<Vec<Profile>, Fault> {
-    let application = state.application.clone();
-    background(move || application.profiles()).await
-}
-
-#[tauri::command]
-async fn save_profile(
-    id: Option<String>,
-    name: String,
-    values: Value,
+async fn snapshot(
+    destination: Option<String>,
     state: tauri::State<'_, Backend>,
-) -> Result<Profile, Fault> {
-    let application = state.application.clone();
-    background(move || application.save_profile(id.as_deref(), &name, values)).await
+) -> Result<SnapshotReceipt, Fault> {
+    let bootstrap = state.bootstrap.clone();
+    background(move || bootstrap.snapshot(destination.as_deref().map(Path::new))).await
 }
 
 #[tauri::command]
-async fn rename_profile(
-    id: String,
-    name: String,
+async fn restore_snapshot(
+    archive_path: String,
+    receipt_generation: Option<String>,
+    confirm: bool,
+    discard: bool,
     state: tauri::State<'_, Backend>,
-) -> Result<Profile, Fault> {
-    let application = state.application.clone();
-    background(move || application.rename_profile(&id, &name)).await
-}
-
-#[tauri::command]
-async fn delete_profile(id: String, state: tauri::State<'_, Backend>) -> Result<(), Fault> {
-    let application = state.application.clone();
-    background(move || application.delete_profile(&id)).await
-}
-
-#[tauri::command]
-async fn start(request: StartRequest, state: tauri::State<'_, Backend>) -> Result<String, Fault> {
-    let application = state.application.clone();
-    background(move || application.start(request)).await
-}
-
-#[tauri::command]
-async fn check_environment(
-    replay_descriptor_path: Option<String>,
-    package_inventory_identity: Option<String>,
-    state: tauri::State<'_, Backend>,
-) -> Result<String, Fault> {
-    let application = state.application.clone();
+) -> Result<BootstrapStatus, Fault> {
+    let bootstrap = state.bootstrap.clone();
     background(move || {
-        application.check_environment(replay_descriptor_path, package_inventory_identity)
+        bootstrap.restore_snapshot(
+            Path::new(&archive_path),
+            receipt_generation.as_deref(),
+            confirm,
+            discard,
+        )
     })
     .await
 }
 
 #[tauri::command]
-fn stop(run: String, state: tauri::State<'_, Backend>) -> Result<(), Fault> {
-    state.application.stop(&run)
+async fn recover_restore(
+    rollback: bool,
+    confirm: bool,
+    discard: bool,
+    state: tauri::State<'_, Backend>,
+) -> Result<BootstrapStatus, Fault> {
+    let bootstrap = state.bootstrap.clone();
+    background(move || bootstrap.recover_restore(rollback, confirm, discard)).await
 }
 
 #[tauri::command]
-fn poll(state: tauri::State<'_, Backend>) -> Poll {
-    state.application.poll()
+async fn create_workspace(
+    internal_name: String,
+    display_name: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<WorkspaceView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.create_workspace(&internal_name, &display_name)).await
+}
+
+#[tauri::command]
+async fn reopen_workspace(
+    internal_name: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<WorkspaceView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.reopen_workspace(&internal_name)).await
+}
+
+#[tauri::command]
+async fn workspace_catalog(state: tauri::State<'_, Backend>) -> Result<WorkspaceCatalog, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.workspace_catalog()).await
+}
+
+#[tauri::command]
+async fn inspect(
+    package_path: String,
+    workspace: WorkspaceRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<InspectionOutcome, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.inspect(Path::new(&package_path), &workspace)).await
+}
+
+#[tauri::command]
+async fn repair_profile(
+    context: RecoveryRef,
+    id: String,
+    values: Value,
+    state: tauri::State<'_, Backend>,
+) -> Result<RecoveryMutation, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.repair_profile(&context, &id, values)).await
+}
+
+#[tauri::command]
+async fn reset_profile(
+    context: RecoveryRef,
+    id: String,
+    confirm: bool,
+    state: tauri::State<'_, Backend>,
+) -> Result<RecoveryMutation, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.reset_profile(&context, &id, confirm)).await
+}
+
+#[tauri::command]
+async fn retry_binding(
+    context: RecoveryRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<InspectionOutcome, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.retry_binding(&context)).await
+}
+
+#[tauri::command]
+async fn discard_recovery(
+    context: RecoveryRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<WorkspaceView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.discard_recovery(&context)).await
+}
+
+#[tauri::command]
+async fn close_workspace(
+    workspace: WorkspaceRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.close_workspace(&workspace)).await
+}
+
+#[tauri::command]
+async fn settings(state: tauri::State<'_, Backend>) -> Result<Settings, Fault> {
+    let bootstrap = state.bootstrap.clone();
+    let application = bootstrap.application()?;
+    background(move || {
+        let result = application.settings();
+        bootstrap.note_settings_result(&application, &result);
+        result
+    })
+    .await
+}
+
+#[tauri::command]
+async fn save_settings(
+    settings: EditableSettings,
+    state: tauri::State<'_, Backend>,
+) -> Result<Settings, Fault> {
+    let bootstrap = state.bootstrap.clone();
+    let application = bootstrap.application()?;
+    background(move || {
+        let result = application.save_settings(settings);
+        if result.is_ok() {
+            bootstrap.note_settings_result(&application, &result);
+        } else {
+            bootstrap.note_settings_result(&application, &application.settings());
+        }
+        result
+    })
+    .await
+}
+
+#[tauri::command]
+async fn validate(
+    workspace: WorkspaceRef,
+    values: Value,
+    state: tauri::State<'_, Backend>,
+) -> Result<Value, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.validate(&workspace, values)).await
+}
+
+#[tauri::command]
+async fn profiles(
+    workspace: WorkspaceRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<ProfileCatalog, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.profiles(&workspace)).await
+}
+
+#[tauri::command]
+async fn read_target(
+    workspace: WorkspaceRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.read_target(&workspace)).await
+}
+
+#[tauri::command]
+async fn check_target(
+    workspace: WorkspaceRef,
+    expected: TargetExpectation,
+    configuration: TargetConfiguration,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetCheckResponse, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.check_target(&workspace, &expected, &configuration)).await
+}
+
+#[tauri::command]
+async fn save_target(
+    workspace: WorkspaceRef,
+    expected: TargetExpectation,
+    configuration: TargetConfiguration,
+    reviewed_resolution: Option<TargetResolution>,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetSaveResponse, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || {
+        application.save_target(
+            &workspace,
+            &expected,
+            configuration,
+            reviewed_resolution.as_ref(),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn remove_target(
+    workspace: WorkspaceRef,
+    expected: TargetExpectation,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.remove_target(&workspace, &expected)).await
+}
+
+#[tauri::command]
+async fn choose_target_application(
+    workspace: WorkspaceRef,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Backend>,
+) -> Result<Option<String>, Fault> {
+    let application = state.bootstrap.application()?;
+    let guard = background(move || application.begin_target_picker(&workspace)).await?;
+    #[cfg(target_os = "macos")]
+    {
+        picker::choose(window, guard).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, guard);
+        Err(Fault::new(
+            "TargetPlatform",
+            "Application selection requires macOS",
+        ))
+    }
+}
+
+#[tauri::command]
+fn reserve_running_application(
+    workspace: WorkspaceRef,
+    request_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), Fault> {
+    state
+        .bootstrap
+        .application()?
+        .reserve_running_application(&workspace, &request_id)
+}
+
+#[tauri::command]
+async fn check_running_application(
+    workspace: WorkspaceRef,
+    expected: TargetExpectation,
+    request_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetApplicationResponse, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.check_running_application(&workspace, &expected, &request_id))
+        .await
+}
+
+#[tauri::command]
+fn cancel_running_application(
+    workspace: WorkspaceRef,
+    request_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<bool, Fault> {
+    let application = state.bootstrap.application()?;
+    Ok(application.cancel_running_application(&workspace, &request_id))
+}
+
+#[tauri::command]
+async fn import_legacy_profiles(
+    workspace: WorkspaceRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<LegacyImport, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.import_legacy_profiles(&workspace)).await
+}
+
+#[tauri::command]
+async fn save_profile(
+    workspace: WorkspaceRef,
+    id: Option<String>,
+    name: String,
+    values: Value,
+    state: tauri::State<'_, Backend>,
+) -> Result<Profile, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.save_profile(&workspace, id.as_deref(), &name, values)).await
+}
+
+#[tauri::command]
+async fn rename_profile(
+    workspace: WorkspaceRef,
+    id: String,
+    name: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<Profile, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.rename_profile(&workspace, &id, &name)).await
+}
+
+#[tauri::command]
+async fn delete_profile(
+    workspace: WorkspaceRef,
+    id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.delete_profile(&workspace, &id)).await
+}
+
+#[tauri::command]
+async fn start(
+    workspace: WorkspaceRef,
+    request: StartRequest,
+    state: tauri::State<'_, Backend>,
+) -> Result<String, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.start(&workspace, request)).await
+}
+
+#[tauri::command]
+async fn check_environment(
+    workspace: Option<WorkspaceRef>,
+    replay_descriptor_path: Option<String>,
+    state: tauri::State<'_, Backend>,
+) -> Result<String, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.check_environment(workspace.as_ref(), replay_descriptor_path))
+        .await
+}
+
+#[tauri::command]
+fn stop(run: String, state: tauri::State<'_, Backend>) -> Result<(), Fault> {
+    state.bootstrap.running_application()?.stop(&run)
+}
+
+#[tauri::command]
+async fn poll(state: tauri::State<'_, Backend>) -> Result<Poll, Fault> {
+    let application = state.bootstrap.running_application()?;
+    background(move || Ok(application.poll())).await
 }
 
 fn close(app: &tauri::AppHandle) {
@@ -121,15 +424,13 @@ fn close(app: &tauri::AppHandle) {
     if backend.closing.swap(true, Ordering::SeqCst) {
         return;
     }
-    let application = backend.application.clone();
+    let bootstrap = backend.bootstrap.clone();
     let app = app.clone();
     std::thread::spawn(move || {
-        let outcome = application.shutdown();
+        let outcome = bootstrap.shutdown();
         if let Err(error) = &outcome {
             eprintln!("Shutdown: {}", error.category);
         }
-        // Serialize the exit request with native termination on the event thread.
-        // A late worker must not call app.exit() after native Quit destroyed it.
         let exit_app = app.clone();
         if app
             .run_on_main_thread(move || {
@@ -161,23 +462,56 @@ fn main() {
     );
     let builder = tauri::Builder::default()
         .setup(move |app| {
-            let root = match &data_root {
-                Some(root) => root.clone(),
-                None => app.path().app_data_dir()?,
+            let home = if data_root.is_some() {
+                Ok(PathBuf::new())
+            } else {
+                app.path()
+                    .home_dir()
+                    .map_err(|error| Fault::new("HomeDirectory", error.to_string()))
             };
+            let (root, legacy) = selected_roots(home, data_root.clone());
             app.manage(Backend {
-                application: Application::new(root, executable.clone(), engine_executable.clone())?,
+                bootstrap: Arc::new(Bootstrap::new(
+                    root,
+                    legacy,
+                    executable.clone(),
+                    engine_executable.clone(),
+                )),
                 closing: AtomicBool::new(false),
                 exiting: AtomicBool::new(false),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            bootstrap_status,
+            initialize,
+            retry_bootstrap,
+            import_legacy_root,
+            snapshot,
+            restore_snapshot,
+            recover_restore,
+            create_workspace,
+            reopen_workspace,
+            workspace_catalog,
             inspect,
+            repair_profile,
+            reset_profile,
+            retry_binding,
+            discard_recovery,
+            close_workspace,
             settings,
             save_settings,
             validate,
             profiles,
+            read_target,
+            check_target,
+            save_target,
+            remove_target,
+            choose_target_application,
+            reserve_running_application,
+            check_running_application,
+            cancel_running_application,
+            import_legacy_profiles,
             save_profile,
             rename_profile,
             delete_profile,
@@ -197,25 +531,21 @@ fn main() {
     builder
         .build(tauri::generate_context!())
         .expect("desktop initialization")
-        .run(|app, event| {
-            match event {
-                tauri::RunEvent::ExitRequested { api, .. } => {
-                    if !app.state::<Backend>().closing.load(Ordering::SeqCst) {
-                        api.prevent_exit();
-                        close(app);
-                    }
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                if !app.state::<Backend>().closing.load(Ordering::SeqCst) {
+                    api.prevent_exit();
+                    close(app);
                 }
-                tauri::RunEvent::Exit => {
-                    let backend = app.state::<Backend>();
-                    backend.exiting.store(true, Ordering::SeqCst);
-                    backend.closing.store(true, Ordering::SeqCst);
-                    // macOS terminate: skips ExitRequested. This last callback must
-                    // wait for bounded containment/flush, including an in-flight close.
-                    if let Err(error) = backend.application.shutdown() {
-                        eprintln!("Shutdown: {}", error.category);
-                    }
-                }
-                _ => {}
             }
+            tauri::RunEvent::Exit => {
+                let backend = app.state::<Backend>();
+                backend.exiting.store(true, Ordering::SeqCst);
+                backend.closing.store(true, Ordering::SeqCst);
+                if let Err(error) = backend.bootstrap.shutdown() {
+                    eprintln!("Shutdown: {}", error.category);
+                }
+            }
+            _ => {}
         });
 }

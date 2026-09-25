@@ -1,66 +1,54 @@
-use mado_runtime_comparison::environment::OcrEnvironment;
-use mado_runtime_comparison::host::resolve_options;
-use mado_runtime_comparison::inventory::Inventory;
-use mado_runtime_comparison::model::{Fault, identity};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+mod fs;
+mod profiles;
+mod settings;
+mod tabs;
+mod targets;
+
+pub use profiles::{LegacyImport, Profile, ProfileListing};
+pub use settings::{EditableSettings, Locale, NotificationPreferences, Settings};
+pub use tabs::{PackageReference, PackageSource, TabListing, TabRecord};
+
+pub(crate) use fs::{
+    check_directory, checked_file, decode, encode, exists, filesystem_key, private_directory,
+    read_bytes, write_atomic,
+};
+pub(crate) use profiles::{RecoveryRecord, portable_values, validate_profile};
+pub(crate) use settings::validate_settings;
+pub(crate) use tabs::{validate_internal_name, validate_tab};
+
+use self::fs::{limit, storage};
+use crate::configuration::{MAX_BYTES, MAX_ENUMERATED, MAX_FILES};
+use mado_runtime_comparison::model::Fault;
+use serde_json::json;
+use std::fs as std_fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+#[cfg(test)]
+mod fixtures;
 
 const VERSION: u32 = 1;
-const MAX_PROFILES: usize = 64;
-const MAX_PROFILE_BYTES: usize = 64 * 1024;
-const MAX_TOTAL_BYTES: usize = 1024 * 1024;
-const MAX_DIRECTORY_ENTRIES: usize = 128;
-const MAX_SETTINGS_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_PROFILES: usize = 64;
+pub(crate) const MAX_PROFILE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_TOTAL_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_DIRECTORY_ENTRIES: usize = 128;
+pub(crate) const MAX_SETTINGS_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_TAB_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_TABS: usize = 64;
+pub(crate) const MAX_OPEN_TABS: usize = 8;
+const MAX_PACKAGES: usize = 16;
 const MAX_NAME_BYTES: usize = 128;
-const MAX_PATH_BYTES: usize = 4096;
+pub(crate) const MAX_PATH_BYTES: usize = 4096;
 const MAX_VALUE_NODES: usize = 8192;
 const MAX_VALUE_DEPTH: usize = 32;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Profile {
-    pub version: u32,
-    pub id: String,
-    pub name: String,
-    pub package_id: String,
-    pub schema_identity: String,
-    pub values: Value,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Settings {
-    pub version: u32,
-    pub gui_log_limit: usize,
-    pub package_path: Option<String>,
-    #[serde(default)]
-    pub ocr_environment: Option<OcrEnvironment>,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            version: VERSION,
-            gui_log_limit: 1000,
-            package_path: None,
-            ocr_environment: None,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct ProfileListing {
-    pub profiles: Vec<Profile>,
-    pub rejected: Vec<Fault>,
+/// A package owner, not a global catalog. Callers serialize it with the Store mutex.
+pub struct ProfileStore {
+    root: PathBuf,
+    tab_name: String,
+    package_id: String,
 }
 
 pub struct Store {
@@ -69,211 +57,272 @@ pub struct Store {
 
 impl Store {
     pub fn new(root: PathBuf) -> Result<Self, Fault> {
-        private_directory(&root)?;
-        private_directory(&root.join("profiles"))?;
+        if exists(&root)? {
+            check_directory(&root)?;
+        }
         Ok(Self { root })
     }
 
-    pub fn list(&self, package_id: &str, schema_identity: &str) -> Result<ProfileListing, Fault> {
-        validate_identity(package_id, schema_identity)?;
-        let mut result = Vec::new();
-        let mut rejected = Vec::new();
-        for (profile, _) in self.profiles()? {
-            if profile.package_id == package_id {
-                match check_binding(&profile, package_id, schema_identity) {
-                    Ok(()) => result.push(profile),
-                    Err(error) => rejected.push(error),
-                }
-            }
-        }
-        result.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
-        Ok(ProfileListing {
-            profiles: result,
-            rejected,
-        })
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
-    pub fn save(
-        &self,
-        inventory: &Inventory,
-        id: Option<&str>,
-        name: &str,
-        values: Value,
-    ) -> Result<Profile, Fault> {
-        validate_name(name)?;
-        let schema_identity = identity(&inventory.schema)?;
-        validate_identity(&inventory.package_id, &schema_identity)?;
-        let mut profiles = self.profiles()?;
-        let id = match id {
-            Some(id) => {
-                validate_id(id)?;
-                let index = profiles
-                    .iter()
-                    .position(|(profile, _)| profile.id == id)
-                    .ok_or_else(|| {
-                        Fault::new("ProfileNotFound", "saved profile no longer exists")
-                    })?;
-                let (old, _) = profiles.swap_remove(index);
-                check_binding(&old, &inventory.package_id, &schema_identity)?;
-                validate_values(inventory, old.values).map_err(|fault| profile_fault(fault, id))?;
-                id.to_owned()
-            }
-            None => {
-                if profiles.len() >= MAX_PROFILES {
-                    return Err(limit("profile count exceeds 64"));
-                }
-                self.next_id()?
-            }
+    pub fn profile_store(&self, tab_name: &str, package_id: &str) -> Result<ProfileStore, Fault> {
+        let store = ProfileStore {
+            root: self.root.clone(),
+            tab_name: tab_name.to_owned(),
+            package_id: package_id.to_owned(),
         };
-        let values = validate_values(inventory, values)?;
-        let profile = Profile {
-            version: VERSION,
-            id,
-            name: name.to_owned(),
-            package_id: inventory.package_id.clone(),
-            schema_identity,
-            values,
-        };
-        let bytes = encode(&profile, MAX_PROFILE_BYTES)?;
-        let retained_bytes: usize = profiles.iter().map(|(_, size)| size).sum();
-        if retained_bytes + bytes.len() > MAX_TOTAL_BYTES {
-            return Err(limit("stored profiles exceed the 1 MiB aggregate limit"));
-        }
-        write_atomic(&self.profile_path(&profile.id), &bytes, |from, to| {
-            fs::rename(from, to)
-        })?;
-        Ok(profile)
-    }
-
-    pub fn rename(&self, inventory: &Inventory, id: &str, name: &str) -> Result<Profile, Fault> {
-        validate_id(id)?;
-        let profile = self.read_profile(id)?.0;
-        self.save(inventory, Some(id), name, profile.values)
-    }
-
-    pub fn delete(&self, id: &str) -> Result<(), Fault> {
-        validate_id(id)?;
-        self.read_profile(id)?;
-        fs::remove_file(self.profile_path(id)).map_err(|error| storage("delete profile", error))
-    }
-
-    pub fn settings(&self) -> Result<Settings, Fault> {
-        check_directory(&self.root)?;
-        let path = self.root.join("settings.json");
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Settings::default()),
-            Err(error) => Err(storage("inspect settings", error)),
-            Ok(_) => {
-                let (settings, _) = read_json(&path, MAX_SETTINGS_BYTES)?;
-                validate_settings(&settings)?;
-                Ok(settings)
-            }
-        }
-    }
-
-    pub fn save_settings(&self, settings: Settings) -> Result<Settings, Fault> {
-        validate_settings(&settings)?;
-        // Do not overwrite an incompatible or malformed previous version.
-        self.settings()?;
-        let bytes = encode(&settings, MAX_SETTINGS_BYTES)?;
-        write_atomic(&self.root.join("settings.json"), &bytes, |from, to| {
-            fs::rename(from, to)
-        })?;
-        Ok(settings)
-    }
-
-    fn profile_path(&self, id: &str) -> PathBuf {
-        self.root.join("profiles").join(format!("{id}.json"))
-    }
-
-    fn next_id(&self) -> Result<String, Fault> {
-        for _ in 0..16 {
-            let id = new_id()?;
-            let path = self.profile_path(&id);
-            if !exists(&path)? && !exists(&path.with_extension("pending"))? {
-                return Ok(id);
-            }
-        }
-        Err(Fault::new(
-            "Storage",
-            "could not allocate a unique profile ID",
-        ))
-    }
-
-    fn read_profile(&self, id: &str) -> Result<(Profile, usize), Fault> {
-        let result = (|| {
-            check_directory(&self.root)?;
-            check_directory(&self.root.join("profiles"))?;
-            let (profile, size): (Profile, _) =
-                read_json(&self.profile_path(id), MAX_PROFILE_BYTES)?;
-            validate_profile(&profile)?;
-            if profile.id != id {
-                return Err(Fault::new(
-                    "ProfileIdentity",
-                    "profile ID does not match its filename",
-                ));
-            }
-            Ok((profile, size))
-        })();
-        result.map_err(|fault| profile_fault(fault, id))
-    }
-
-    fn profiles(&self) -> Result<Vec<(Profile, usize)>, Fault> {
-        let directory = self.root.join("profiles");
-        check_directory(&self.root)?;
-        check_directory(&directory)?;
-        let entries = fs::read_dir(&directory).map_err(|error| storage("list profiles", error))?;
-        let mut result = Vec::new();
-        let mut bytes = 0;
-        for (index, entry) in entries.enumerate() {
-            if index >= MAX_DIRECTORY_ENTRIES - 1 {
-                return Err(limit(
-                    "profile directory has too many files; retain space for an atomic write",
-                ));
-            }
-            let entry = entry.map_err(|error| storage("read profile entry", error))?;
-            let filename = entry.file_name();
-            let name_bytes = filename.as_encoded_bytes();
-            // Other entries are not stored profiles, but still consume directory capacity.
-            if !name_bytes.ends_with(b".json") && !name_bytes.ends_with(b".pending") {
-                continue;
-            }
-            let with_filename = |mut fault: Fault| {
-                // Escape only the basename; never expose the private storage path.
-                fault.context["file"] = json!(name_bytes.escape_ascii().to_string());
-                fault
-            };
-            let name = filename.to_str().ok_or_else(|| {
-                with_filename(Fault::new(
-                    "Storage",
-                    "profile directory contains a non-UTF-8 filename",
-                ))
-            })?;
-            if let Some(id) = name.strip_suffix(".pending") {
-                validate_id(id).map_err(with_filename)?;
-                checked_file(&entry.path(), MAX_PROFILE_BYTES).map_err(with_filename)?;
-                continue;
-            }
-            let Some(id) = name.strip_suffix(".json") else {
-                continue;
-            };
-            validate_id(id).map_err(with_filename)?;
-            if result.len() >= MAX_PROFILES {
-                return Err(limit("profile count exceeds 64"));
-            }
-            let (profile, size) = self.read_profile(id)?;
-            bytes += size;
-            if bytes > MAX_TOTAL_BYTES {
-                return Err(limit("stored profiles exceed the 1 MiB aggregate limit"));
-            }
-            result.push((profile, size));
-        }
-        Ok(result)
+        store.check_owner()?;
+        Ok(store)
     }
 }
 
-fn profile_fault(mut fault: Fault, id: &str) -> Fault {
-    fault.context["profile_id"] = json!(id);
+impl ProfileStore {
+    fn directory(&self) -> PathBuf {
+        self.root
+            .join("tabs")
+            .join(&self.tab_name)
+            .join(&self.package_id)
+    }
+
+    fn check_package(&self, package_id: &str) -> Result<(), Fault> {
+        if self.package_id != package_id {
+            return Err(self.owner_fault(Fault::new(
+                "ProfileIdentity",
+                "package does not belong to this profile store",
+            )));
+        }
+        Ok(())
+    }
+
+    fn check_owner(&self) -> Result<(), Fault> {
+        let result = (|| {
+            validate_package_id(&self.package_id)?;
+            let tab = Store {
+                root: self.root.clone(),
+            }
+            .tab(&self.tab_name)?;
+            if !tab.open {
+                return Err(Fault::new(
+                    "TabClosed",
+                    "reopen the Tab before using its profiles",
+                ));
+            }
+            if !tab
+                .packages
+                .iter()
+                .any(|reference| reference.package_id == self.package_id)
+            {
+                return Err(Fault::new(
+                    "ProfileIdentity",
+                    "package is not bound to this Tab",
+                ));
+            }
+            if exists(&self.directory())? {
+                check_directory(&self.directory())?;
+            }
+            Ok(())
+        })();
+        result.map_err(|fault| self.owner_fault(fault))
+    }
+
+    fn owner_fault(&self, mut fault: Fault) -> Fault {
+        fault.context["internal_name"] = json!(self.tab_name);
+        fault.context["package_id"] = json!(self.package_id);
+        fault
+    }
+}
+
+pub(crate) fn validate_package_id(id: &str) -> Result<(), Fault> {
+    let stem = id
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    if id.is_empty()
+        || id.len() > 240
+        || id.trim() != id
+        || id.ends_with('.')
+        || id == "."
+        || id == ".."
+        || reserved
+        || id.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
+        || matches!(filesystem_key(id).as_str(), "tab.config" | "tab.pending")
+    {
+        return Err(Fault::new(
+            "ProfileIdentity",
+            "invalid contained package identity",
+        ));
+    }
+    Ok(())
+}
+
+/// Admits one write against the 4096-file/16 MiB managed bound from metadata alone: no
+/// content is read or hashed, no link is followed and no owner's mode is judged, so one
+/// owner's unresolved or unsafe entry never blocks another owner's write. Only a tree that
+/// cannot be measured or the aggregate itself refuses, each naming the managed path it
+/// concerns relative to the root. Snapshot capture stays strict and separate.
+fn check_budget(root: &Path, relative: &str, size: usize) -> Result<(), Fault> {
+    let mut budget = Budget {
+        replacing: relative,
+        files: 0,
+        bytes: 0,
+        enumerated: 0,
+    };
+    budget.measure(root)?;
+    let files = budget.files + 1;
+    let bytes = budget.bytes.saturating_add(size as u64);
+    if files > MAX_FILES || bytes > MAX_BYTES as u64 {
+        return Err(limit("managed configuration exceeds 4096 files or 16 MiB")
+            .with_context(json!({"path": relative, "files": files, "bytes": bytes})));
+    }
+    Ok(())
+}
+
+struct Budget<'a> {
+    replacing: &'a str,
+    files: usize,
+    bytes: u64,
+    enumerated: usize,
+}
+
+impl Budget<'_> {
+    fn measure(&mut self, root: &Path) -> Result<(), Fault> {
+        if !exists(root)? {
+            return Ok(());
+        }
+        for (path, name, metadata) in self.entries(root, ".")? {
+            let key = filesystem_key(&name);
+            match key.as_str() {
+                "settings.json" | "settings.pending" => {
+                    self.account(&name, &key, &metadata, MAX_SETTINGS_BYTES);
+                }
+                "profiles" => {
+                    if self.container(&name, &metadata)? {
+                        for (_, child, metadata) in self.entries(&path, &name)? {
+                            let key = filesystem_key(&child);
+                            if key.ends_with(".json") || key.ends_with(".pending") {
+                                let relative = format!("{name}/{child}");
+                                self.account(&relative, &key, &metadata, MAX_PROFILE_BYTES);
+                            }
+                        }
+                    }
+                }
+                "tabs" => {
+                    if self.container(&name, &metadata)? {
+                        self.measure_tabs(&path, &name)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn measure_tabs(&mut self, tabs: &Path, relative: &str) -> Result<(), Fault> {
+        for (tab_path, tab, tab_metadata) in self.entries(tabs, relative)? {
+            let tab_relative = format!("{relative}/{tab}");
+            if !self.container(&tab_relative, &tab_metadata)? {
+                continue;
+            }
+            for (child_path, child, child_metadata) in self.entries(&tab_path, &tab_relative)? {
+                let key = filesystem_key(&child);
+                let child_relative = format!("{tab_relative}/{child}");
+                if key == "tab.config" || key == "tab.pending" {
+                    self.account(&child_relative, &key, &child_metadata, MAX_TAB_BYTES);
+                } else if self.container(&child_relative, &child_metadata)? {
+                    for (_, file, metadata) in self.entries(&child_path, &child_relative)? {
+                        let key = filesystem_key(&file);
+                        if key.ends_with(".config") || key.ends_with(".pending") {
+                            let relative = format!("{child_relative}/{file}");
+                            self.account(&relative, &key, &metadata, MAX_PROFILE_BYTES);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Lists one real directory without following a link or judging its mode; a directory
+    /// that cannot be listed is unmeasurable and refuses with its managed path.
+    fn entries(
+        &mut self,
+        directory: &Path,
+        relative: &str,
+    ) -> Result<Vec<(PathBuf, String, std_fs::Metadata)>, Fault> {
+        let listing = std_fs::read_dir(directory).map_err(|error| {
+            measure_fault(storage("measure managed configuration", error), relative)
+        })?;
+        let mut entries = Vec::new();
+        for entry in listing {
+            self.enumerated += 1;
+            if self.enumerated > MAX_ENUMERATED {
+                return Err(measure_fault(
+                    limit("managed configuration enumeration exceeds its bound"),
+                    relative,
+                ));
+            }
+            let entry = entry
+                .map_err(|error| measure_fault(storage("read managed entry", error), relative))?;
+            let path = entry.path();
+            let metadata = std_fs::symlink_metadata(&path).map_err(|error| {
+                measure_fault(storage("inspect managed entry", error), relative)
+            })?;
+            entries.push((
+                path,
+                entry.file_name().to_string_lossy().into_owned(),
+                metadata,
+            ));
+        }
+        Ok(entries)
+    }
+
+    /// A container is descended only as a real directory. A plain file there holds nothing;
+    /// a link or other entry hides unknown capacity and refuses rather than being skipped.
+    fn container(&self, relative: &str, metadata: &std_fs::Metadata) -> Result<bool, Fault> {
+        let kind = metadata.file_type();
+        if kind.is_dir() {
+            return Ok(true);
+        }
+        if kind.is_file() {
+            return Ok(false);
+        }
+        Err(measure_fault(
+            Fault::new(
+                "Storage",
+                "managed configuration container is not a real directory and cannot be measured",
+            ),
+            relative,
+        ))
+    }
+
+    /// A committed regular file counts at its length. A pending, linked or otherwise
+    /// non-regular entry counts at its kind maximum without being read or followed. The
+    /// file this write replaces is excluded.
+    fn account(&mut self, relative: &str, key: &str, metadata: &std_fs::Metadata, maximum: usize) {
+        if relative == self.replacing {
+            return;
+        }
+        self.files += 1;
+        let bytes = if key.ends_with(".pending") || !metadata.file_type().is_file() {
+            maximum as u64
+        } else {
+            metadata.len()
+        };
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
+}
+
+fn measure_fault(mut fault: Fault, relative: &str) -> Fault {
+    fault.context["path"] = json!(relative);
     fault
 }
 
@@ -289,7 +338,7 @@ fn new_id() -> Result<String, Fault> {
     ))
 }
 
-fn validate_id(id: &str) -> Result<(), Fault> {
+pub(crate) fn validate_id(id: &str) -> Result<(), Fault> {
     if id.len() != 60
         || !id.starts_with("p-")
         || id.as_bytes()[34] != b'-'
@@ -303,1091 +352,654 @@ fn validate_id(id: &str) -> Result<(), Fault> {
     Ok(())
 }
 
-fn validate_name(name: &str) -> Result<(), Fault> {
-    if name.trim().is_empty()
-        || name.len() > MAX_NAME_BYTES
-        || name.chars().any(char::is_control)
-        || machine_path(name)
-    {
-        return Err(Fault::new(
-            "Profile",
-            "profile name must be nonempty portable text of at most 128 bytes",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_identity(package_id: &str, schema_identity: &str) -> Result<(), Fault> {
-    if package_id.is_empty()
-        || package_id.len() > 240
-        || package_id == "."
-        || package_id == ".."
-        || package_id
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
-        || schema_identity.len() != 64
-        || !schema_identity
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(Fault::new(
-            "ProfileIdentity",
-            "invalid package or schema identity",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_profile(profile: &Profile) -> Result<(), Fault> {
-    if profile.version != VERSION {
-        return Err(Fault::new(
-            "ProfileVersion",
-            "unsupported saved profile version; original data was preserved",
-        ));
-    }
-    validate_id(&profile.id)?;
-    validate_name(&profile.name)?;
-    validate_identity(&profile.package_id, &profile.schema_identity)?;
-    portable_values(&profile.values)
-}
-
-fn check_binding(profile: &Profile, package_id: &str, schema_identity: &str) -> Result<(), Fault> {
-    if profile.package_id != package_id || profile.schema_identity != schema_identity {
-        return Err(Fault::new(
-            "ProfileIdentity",
-            "saved profile belongs to a different package or schema; select a compatible package or save a new profile",
-        )
-        .with_context(json!({"profile_id": profile.id})));
-    }
-    Ok(())
-}
-
-fn validate_values(inventory: &Inventory, values: Value) -> Result<Value, Fault> {
-    portable_values(&values)?;
-    encode(&values, MAX_PROFILE_BYTES)?;
-    let mut wrapper = json!({
-        "package_id": inventory.package_id,
-        "schema_version": inventory.schema.get("version"),
-    });
-    wrapper["options"] = values;
-    let resolved = resolve_options(&inventory.schema, &wrapper, &inventory.package_id)?;
-    portable_values(&resolved)?;
-    encode(&resolved, MAX_PROFILE_BYTES)?;
-    Ok(wrapper["options"].take())
-}
-
-fn portable_values(values: &Value) -> Result<(), Fault> {
-    if !values.is_object() {
-        return Err(Fault::new("Profile", "profile values must be an object"));
-    }
-    visit_values(values, "$", 0, &mut 0)
-}
-
-fn visit_values(value: &Value, path: &str, depth: usize, nodes: &mut usize) -> Result<(), Fault> {
-    *nodes += 1;
-    if depth > MAX_VALUE_DEPTH || *nodes > MAX_VALUE_NODES {
-        return Err(limit("profile values exceed their nesting or item bound"));
-    }
-    match value {
-        Value::Object(map) => {
-            for (key, value) in map {
-                if key.len() > MAX_NAME_BYTES || key.chars().any(char::is_control) {
-                    return Err(Fault::new(
-                        "Profile",
-                        "profile option name exceeds its portable text bound",
-                    ));
-                }
-                if authority_field(key) {
-                    return Err(Fault::new(
-                        "ProfileAuthority",
-                        "machine authority and credentials are not portable profile options",
-                    )
-                    .with_context(json!({"field": format!("{path}.{key}")})));
-                }
-                visit_values(value, &format!("{path}.{key}"), depth + 1, nodes)?;
-            }
-        }
-        Value::Array(items) => {
-            for (index, value) in items.iter().enumerate() {
-                visit_values(value, &format!("{path}[{index}]"), depth + 1, nodes)?;
-            }
-        }
-        Value::String(text) if text.len() > MAX_PROFILE_BYTES => {
-            return Err(limit("profile string exceeds its byte bound"));
-        }
-        Value::String(text) if text.contains('\0') || machine_path(text) => {
-            return Err(Fault::new(
-                "ProfileAuthority",
-                "machine-local paths are not portable profile values",
-            )
-            .with_context(json!({"field": path})));
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn authority_field(field: &str) -> bool {
-    let normalized: String = field
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    matches!(
-        normalized.as_str(),
-        "password"
-            | "passwd"
-            | "credential"
-            | "credentials"
-            | "secret"
-            | "secrets"
-            | "apikey"
-            | "apitoken"
-            | "accesstoken"
-            | "refreshtoken"
-            | "authtoken"
-            | "authorization"
-            | "clientsecret"
-            | "privatekey"
-            | "bearertoken"
-            | "token"
-            | "auth"
-            | "authentication"
-            | "sessiontoken"
-            | "sessioncookie"
-            | "accesskey"
-            | "secretkey"
-            | "executable"
-            | "executablepath"
-            | "targetexecutable"
-            | "targetexecutablepath"
-            | "targetpath"
-            | "gameexecutable"
-            | "gameexecutablepath"
-            | "gamepath"
-            | "gamedirectory"
-            | "ocrmodel"
-            | "ocrmodelpath"
-            | "ocrpath"
-            | "modelpath"
-            | "modeldirectory"
-            | "ocrmodelfile"
-            | "runtimepath"
-            | "runtimedirectory"
-            | "ocrruntime"
-            | "ocrruntimepath"
-            | "packagepath"
-            | "packageroot"
-            | "permission"
-            | "permissions"
-            | "permissiongrant"
-            | "permissiongrants"
-            | "ospermission"
-            | "ospermissions"
-            | "inputauthority"
-            | "nativeauthority"
-            | "inputbackend"
-            | "targetbinding"
-            | "processid"
-            | "windowhandle"
-            | "nativeconfig"
-            | "nativeconfiguration"
-            | "machineconfig"
-            | "machineconfiguration"
-            | "targetconfig"
-            | "ocrconfig"
-            | "inputconfig"
-            | "inputpermission"
-            | "inputpermissions"
-            | "ospermissiongrants"
-            | "runtimeexecutable"
-            | "runtimeexecutablepath"
-            | "enginepath"
-            | "engineroot"
-            | "engineexecutable"
-            | "engineexecutablepath"
-            | "targetwindow"
-            | "windowid"
-            | "targetprocess"
-            | "targetprocessid"
-            | "processhandle"
-    )
-}
-
-fn machine_path(text: &str) -> bool {
-    let text = text.trim();
-    let bytes = text.as_bytes();
-    text.starts_with('/')
-        || text.starts_with('\\')
-        || text.starts_with("~/")
-        || text.starts_with("~\\")
-        || text == ".."
-        || text.starts_with("../")
-        || text.starts_with("..\\")
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\'))
-        || text
-            .get(..7)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
-        || text.starts_with("$HOME/")
-        || text.starts_with("${HOME}/")
-        || text
-            .get(..14)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("%USERPROFILE%\\"))
-}
-
-fn validate_settings(settings: &Settings) -> Result<(), Fault> {
-    if settings.version != VERSION {
-        return Err(Fault::new(
-            "SettingsVersion",
-            "unsupported application settings version; original data was preserved",
-        ));
-    }
-    if !(1..=10_000).contains(&settings.gui_log_limit) {
-        return Err(Fault::new(
-            "Settings",
-            "GUI log limit must be an integer from 1 to 10000",
-        ));
-    }
-    if settings.package_path.as_ref().is_some_and(|path| {
-        path.trim().is_empty() || path.len() > MAX_PATH_BYTES || path.chars().any(char::is_control)
-    }) {
-        return Err(Fault::new(
-            "Settings",
-            "remembered package path must be nonempty text of at most 4096 bytes",
-        ));
-    }
-    if let Some(environment) = &settings.ocr_environment {
-        environment.validate()?;
-    }
-    // This is a location hint, not a captured inventory or permission grant.
-    Ok(())
-}
-
-fn private_directory(path: &Path) -> Result<(), Fault> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.file_type().is_dir() => {
-            return Err(Fault::new(
-                "Storage",
-                "application storage must be a real directory",
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            builder.mode(0o700);
-            builder
-                .create(path)
-                .map_err(|error| storage("create storage directory", error))?;
-        }
-        Err(error) => return Err(storage("inspect storage directory", error)),
-    }
-    check_directory(path)
-}
-
-fn check_directory(path: &Path) -> Result<(), Fault> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| storage("inspect storage directory", error))?;
-    if !metadata.file_type().is_dir() {
-        return Err(Fault::new(
-            "Storage",
-            "application storage must be a real directory",
-        ));
-    }
-    #[cfg(unix)]
-    if metadata.mode() & 0o077 != 0 {
-        return Err(Fault::new(
-            "Storage",
-            "application storage directory is not private",
-        ));
-    }
-    Ok(())
-}
-
-fn checked_file(path: &Path, maximum: usize) -> Result<fs::Metadata, Fault> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| storage("inspect stored file", error))?;
-    if !metadata.file_type().is_file() {
-        return Err(Fault::new(
-            "Storage",
-            "stored data must be a regular file, not a link or directory",
-        ));
-    }
-    #[cfg(unix)]
-    if metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
-        return Err(Fault::new(
-            "Storage",
-            "stored data must be private and have no hard links",
-        ));
-    }
-    if metadata.len() > maximum as u64 {
-        return Err(limit("stored file exceeds its byte bound"));
-    }
-    Ok(metadata)
-}
-
-fn read_json<T: DeserializeOwned>(path: &Path, maximum: usize) -> Result<(T, usize), Fault> {
-    let before = checked_file(path, maximum)?;
-    let file = File::open(path).map_err(|error| storage("open stored file", error))?;
-    let opened = file
-        .metadata()
-        .map_err(|error| storage("inspect opened file", error))?;
-    #[cfg(unix)]
-    if before.dev() != opened.dev() || before.ino() != opened.ino() || opened.nlink() != 1 {
-        return Err(Fault::new(
-            "Storage",
-            "stored file changed while being opened",
-        ));
-    }
-    if !opened.is_file() || opened.len() != before.len() {
-        return Err(Fault::new(
-            "Storage",
-            "stored file changed while being opened",
-        ));
-    }
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    file.take(maximum as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| storage("read stored file", error))?;
-    if bytes.len() > maximum {
-        return Err(limit("stored file exceeds its byte bound"));
-    }
-    let value = serde_json::from_slice(&bytes).map_err(|_| {
-        Fault::new(
-            "StorageFormat",
-            "stored JSON is malformed or incompatible; original data was preserved",
-        )
-    })?;
-    Ok((value, bytes.len()))
-}
-
-fn exists(path: &Path) -> Result<bool, Fault> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(storage("inspect storage destination", error)),
-    }
-}
-
-fn encode<T: Serialize>(value: &T, maximum: usize) -> Result<Vec<u8>, Fault> {
-    struct Bounded {
-        bytes: Vec<u8>,
-        maximum: usize,
-    }
-    impl Write for Bounded {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if bytes.len() > self.maximum.saturating_sub(self.bytes.len()) {
-                return Err(io::Error::other("stored JSON exceeds its byte bound"));
-            }
-            self.bytes.extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut output = Bounded {
-        bytes: Vec::new(),
-        maximum,
-    };
-    serde_json::to_writer(&mut output, value)
-        .map_err(|_| limit("stored JSON cannot be encoded within its byte bound"))?;
-    Ok(output.bytes)
-}
-
-fn write_atomic(
-    destination: &Path,
-    bytes: &[u8],
-    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
-) -> Result<(), Fault> {
-    let directory = destination
-        .parent()
-        .ok_or_else(|| Fault::new("Storage", "storage destination has no parent"))?;
-    check_directory(directory)?;
-    if exists(destination)? {
-        checked_file(destination, MAX_PROFILE_BYTES)?;
-    }
-    let temporary = destination.with_extension("pending");
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options
-        .open(&temporary)
-        .map_err(|error| storage("create atomic write", error))?;
-    let result = (|| {
-        file.write_all(bytes)
-            .map_err(|error| storage("write atomic data", error))?;
-        file.flush()
-            .map_err(|error| storage("flush atomic data", error))?;
-        file.sync_all()
-            .map_err(|error| storage("sync atomic data", error))?;
-        drop(file);
-        replace(&temporary, destination).map_err(|error| storage("replace stored file", error))
-    })();
-    match result {
-        Ok(()) => Ok(()),
-        Err(mut fault) => {
-            // Only remove the temporary file created by this call, never the original.
-            if fs::remove_file(&temporary).is_err() {
-                fault.context["temporary_cleanup"] = json!("failed");
-            }
-            Err(fault)
-        }
-    }
-}
-
-fn limit(message: &str) -> Fault {
-    Fault::new("StorageLimit", message)
-}
-
-fn storage(operation: &str, error: io::Error) -> Fault {
-    Fault::new("Storage", format!("could not {operation}"))
-        .with_context(json!({"operation": operation, "kind": format!("{:?}", error.kind()), "os_code": error.raw_os_error()}))
-}
-
 #[cfg(test)]
 mod tests {
+    use super::fixtures::*;
     use super::*;
-    use mado_runtime_comparison::inventory::{Entries, Entry};
-    use std::collections::BTreeMap;
+    use crate::target::{MAX_TARGET_BYTES, TargetExpectation};
+    use mado_runtime_comparison::environment::OcrEnvironment;
     #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
-    struct Directory(PathBuf);
-
-    impl Directory {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("mado-storage-{}", new_id().unwrap()));
-            private_directory(&path).unwrap();
-            Self(path)
-        }
-
-        fn store(&self) -> Store {
-            Store::new(self.0.clone()).unwrap()
-        }
-    }
-
-    impl Drop for Directory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn inventory() -> Inventory {
-        Inventory {
-            identity: "fixture".into(),
-            package_id: "portable-options".into(),
-            sources: BTreeMap::new(),
-            assets: BTreeMap::new(),
-            schema: json!({
-                "version": 1, "type": "object", "additionalProperties": false,
-                "properties": {
-                    "priorities": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": ["left", "right"]}},
-                    "window": {"type": "object", "additionalProperties": false,
-                        "properties": {"width": {"type": "integer"}, "height": {"type": "integer"}},
-                        "required": ["width", "height"], "default": {"width": 10, "height": 20}},
-                    "label": {"type": "string", "default": "secret token"}
-                }, "required": ["priorities", "window"]
-            }),
-            profiles: BTreeMap::new(),
-            entries: Entries {
-                readiness: Entry {
-                    module: "main.js".into(),
-                    function: "ready".into(),
-                },
-                workflow: Entry {
-                    module: "main.js".into(),
-                    function: "run".into(),
-                },
-            },
-            metadata: json!({}),
-            source_maps: BTreeMap::new(),
-        }
-    }
-
-    fn options() -> Value {
-        json!({"priorities": ["right", "left"], "label": "assets/token.png"})
-    }
+    use mado_runtime_comparison::inventory::TargetDeclaration;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     #[test]
-    fn restart_and_rename_preserve_ids_values_and_order() {
-        let directory = Directory::new();
-        let inventory = inventory();
-        let store = directory.store();
-        let first = store.save(&inventory, None, "First", options()).unwrap();
-        let second_values = json!({"priorities": ["left", "right"]});
-        let second = store
-            .save(&inventory, None, "Second", second_values.clone())
-            .unwrap();
-        drop(store);
-        let reopened = directory.store();
-        let renamed = reopened.rename(&inventory, &first.id, "Renamed").unwrap();
-        assert_eq!(renamed.id, first.id);
-        assert_eq!(renamed.values, options());
-        let profiles = reopened
-            .list(&inventory.package_id, &identity(&inventory.schema).unwrap())
-            .unwrap()
-            .profiles;
-        assert_eq!(
-            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-            [first.id.as_str(), second.id.as_str()]
-        );
-        assert_eq!(profiles[1].values, second_values);
-        reopened.delete(&first.id).unwrap();
-        assert_eq!(
-            reopened
-                .list(&inventory.package_id, &identity(&inventory.schema).unwrap())
-                .unwrap()
-                .profiles[0]
-                .id,
-            second.id
-        );
-    }
-
-    #[test]
-    fn foreign_entries_do_not_block_profile_operations() {
+    fn missing_settings_require_explicit_missing_only_initialization() {
         let directory = Directory::new();
         let store = directory.store();
-        let inventory = inventory();
-        let profiles = directory.0.join("profiles");
-        fs::write(profiles.join(".DS_Store"), b"Finder metadata").unwrap();
-        fs::write(profiles.join("notes.txt"), b"Operator notes").unwrap();
-        fs::create_dir(profiles.join("archive")).unwrap();
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            fs::write(
-                profiles.join(std::ffi::OsStr::from_bytes(b"\xff-metadata")),
-                b"Foreign metadata",
-            )
-            .unwrap();
-        }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink("missing-target", profiles.join("foreign-link")).unwrap();
-        let saved = store.save(&inventory, None, "Original", options()).unwrap();
-        let renamed = store.rename(&inventory, &saved.id, "Renamed").unwrap();
-        assert_eq!(renamed.id, saved.id);
-        let listed = store
-            .list(&inventory.package_id, &saved.schema_identity)
-            .unwrap();
-        assert_eq!(listed.profiles.len(), 1);
-        assert_eq!(listed.profiles[0].id, saved.id);
-        assert_eq!(listed.profiles[0].name, "Renamed");
-        assert_eq!(listed.profiles[0].values, options());
-        store.delete(&saved.id).unwrap();
-        assert!(
-            store
-                .list(&inventory.package_id, &saved.schema_identity)
-                .unwrap()
-                .profiles
-                .is_empty()
-        );
+        assert_eq!(store.settings().unwrap_err().category, "SettingsMissing");
         assert_eq!(
-            fs::read(profiles.join(".DS_Store")).unwrap(),
-            b"Finder metadata"
+            store.save_preferences(preferences()).unwrap_err().category,
+            "SettingsMissing"
         );
-        assert_eq!(
-            fs::read(profiles.join("notes.txt")).unwrap(),
-            b"Operator notes"
-        );
-    }
-
-    #[test]
-    fn foreign_entries_still_consume_directory_capacity() {
-        let directory = Directory::new();
-        let store = directory.store();
-        let inventory = inventory();
-        let profiles = directory.0.join("profiles");
-        for index in 0..MAX_DIRECTORY_ENTRIES - 2 {
-            fs::write(profiles.join(format!("note-{index}.txt")), b"").unwrap();
-        }
-        let saved = store
-            .save(&inventory, None, "Last slot", options())
-            .unwrap();
-        store.rename(&inventory, &saved.id, "At capacity").unwrap();
-        let path = store.profile_path(&saved.id);
-        let before = fs::read(&path).unwrap();
-        fs::write(profiles.join("one-too-many.txt"), b"").unwrap();
-        assert_eq!(
-            store
-                .list(&inventory.package_id, &saved.schema_identity)
-                .unwrap_err()
-                .category,
-            "StorageLimit"
-        );
-        assert_eq!(
-            store
-                .save(&inventory, None, "Overflow", options())
-                .unwrap_err()
-                .category,
-            "StorageLimit"
-        );
-        assert_eq!(fs::read(&path).unwrap(), before);
-    }
-
-    #[test]
-    fn owned_entry_names_and_pending_files_remain_checked() {
-        let directory = Directory::new();
-        let store = directory.store();
-        let inventory = inventory();
-        let schema_identity = identity(&inventory.schema).unwrap();
-        let profiles = directory.0.join("profiles");
-        fs::write(profiles.join(".DS_Store"), b"Finder metadata").unwrap();
-        for name in [".json", ".pending"] {
-            let path = profiles.join(name);
-            fs::write(&path, b"Evidence").unwrap();
-            let fault = store
-                .list(&inventory.package_id, &schema_identity)
-                .unwrap_err();
-            assert_eq!(fault.category, "ProfileIdentity");
-            assert_eq!(fault.context["file"], name);
-            assert_eq!(fs::read(&path).unwrap(), b"Evidence");
-            fs::remove_file(path).unwrap();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            let path = profiles.join(std::ffi::OsStr::from_bytes(b"\xff.json"));
-            fs::write(&path, b"Evidence").unwrap();
-            let fault = store
-                .list(&inventory.package_id, &schema_identity)
-                .unwrap_err();
-            assert_eq!(fault.category, "Storage");
-            assert_eq!(fault.context["file"], r"\xff.json");
-            assert_eq!(fs::read(&path).unwrap(), b"Evidence");
-            fs::remove_file(path).unwrap();
-        }
-        let pending_name = format!("{}.pending", new_id().unwrap());
-        let pending = profiles.join(&pending_name);
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        options
-            .open(&pending)
-            .unwrap()
-            .set_len(MAX_PROFILE_BYTES as u64 + 1)
-            .unwrap();
-        let fault = store
-            .list(&inventory.package_id, &schema_identity)
-            .unwrap_err();
-        assert_eq!(fault.category, "StorageLimit");
-        assert_eq!(fault.context["file"], pending_name);
-        assert_eq!(
-            fs::metadata(pending).unwrap().len(),
-            MAX_PROFILE_BYTES as u64 + 1
-        );
-    }
-
-    #[test]
-    fn profile_read_failure_preserves_io_context_and_safe_identity() {
-        let directory = Directory::new();
-        let store = directory.store();
-        let id = new_id().unwrap();
-        let fault = store.delete(&id).unwrap_err();
-        assert_eq!(fault.category, "Storage");
-        assert_eq!(fault.context["profile_id"], id);
-        assert_eq!(fault.context["operation"], "inspect stored file");
-        assert_eq!(fault.context["kind"], "NotFound");
-        assert!(fault.context.get("os_code").is_some());
-    }
-
-    #[test]
-    fn schema_mismatch_and_invalid_replacement_preserve_original_bytes() {
-        let directory = Directory::new();
-        let store = directory.store();
-        let mut inventory = inventory();
-        let saved = store.save(&inventory, None, "Original", options()).unwrap();
-        let path = store.profile_path(&saved.id);
-        let before = fs::read(&path).unwrap();
-        let partial = json!({"priorities": ["left"], "window": {"width": 3}});
-        assert_eq!(
-            store
-                .save(&inventory, Some(&saved.id), "Invalid", partial)
-                .unwrap_err()
-                .category,
-            "Profile"
-        );
-        assert_eq!(fs::read(&path).unwrap(), before);
-        inventory.schema["properties"]["label"]["maxLength"] = json!(80);
-        let changed_identity = identity(&inventory.schema).unwrap();
-        let rejected = store
-            .list(&inventory.package_id, &changed_identity)
-            .unwrap();
-        assert!(rejected.profiles.is_empty());
-        assert_eq!(rejected.rejected[0].category, "ProfileIdentity");
-        assert_eq!(
-            store
-                .rename(&inventory, &saved.id, "Changed")
-                .unwrap_err()
-                .category,
-            "ProfileIdentity"
-        );
-        assert_eq!(
-            store
-                .save(&inventory, Some(&saved.id), "Changed", options())
-                .unwrap_err()
-                .category,
-            "ProfileIdentity"
-        );
-        assert_eq!(fs::read(&path).unwrap(), before);
-        let compatible = store
-            .save(&inventory, None, "Compatible", options())
-            .unwrap();
-        let listed = store
-            .list(&inventory.package_id, &changed_identity)
-            .unwrap();
-        assert_eq!(listed.profiles[0].id, compatible.id);
-        assert_eq!(listed.rejected[0].context["profile_id"], saved.id);
-        assert_eq!(fs::read(&path).unwrap(), before);
-    }
-
-    #[test]
-    fn failed_rename_syscall_keeps_the_previous_profile_readable() {
-        let directory = Directory::new();
-        let store = directory.store();
-        let inventory = inventory();
-        let mut profile = store.save(&inventory, None, "Original", options()).unwrap();
-        let path = store.profile_path(&profile.id);
-        let before = fs::read(&path).unwrap();
-        profile.name = "Unsaved".into();
-        let bytes = encode(&profile, MAX_PROFILE_BYTES).unwrap();
-        let fault = write_atomic(&path, &bytes, |temporary, destination| {
-            assert_eq!(fs::read(temporary)?, bytes);
-            // A real replacement failure, after writing and syncing the new data.
-            fs::rename(temporary, destination.join("not-a-directory"))
-        })
-        .unwrap_err();
-        assert_eq!(fault.context["operation"], "replace stored file");
-        assert_eq!(fs::read(&path).unwrap(), before);
-        assert!(!path.with_extension("pending").exists());
-        assert_eq!(
-            directory
-                .store()
-                .list(&inventory.package_id, &identity(&inventory.schema).unwrap())
-                .unwrap()
-                .profiles[0]
-                .name,
-            "Original"
-        );
-    }
-
-    #[test]
-    fn invalid_settings_and_incompatible_files_are_never_reset() {
-        let directory = Directory::new();
-        let store = directory.store();
-        store
-            .save_settings(Settings {
-                gui_log_limit: 12,
-                package_path: Some("/private/local/package".into()),
-                ..Settings::default()
-            })
-            .unwrap();
+        assert!(!directory.0.join("settings.json").exists());
+        assert!(!directory.0.join("profiles").exists());
+        let tab = store.create_tab("BeforeSetup", "Retained").unwrap();
+        let mut invalid = preferences();
+        invalid.gui_log_limit = 0;
+        assert!(store.initialize(invalid).is_err());
+        assert!(!directory.0.join("settings.json").exists());
+        store.initialize(preferences()).unwrap();
+        assert_eq!(store.tab("BeforeSetup").unwrap(), tab);
         let path = directory.0.join("settings.json");
-        let before = fs::read(&path).unwrap();
-        for invalid in [
-            Settings {
-                gui_log_limit: 0,
-                ..Settings::default()
-            },
-            Settings {
-                gui_log_limit: 10001,
-                ..Settings::default()
-            },
-            Settings {
-                version: 2,
-                ..Settings::default()
-            },
-            Settings {
-                package_path: Some(String::new()),
-                ..Settings::default()
-            },
-        ] {
-            assert!(store.save_settings(invalid).is_err());
-            assert_eq!(fs::read(&path).unwrap(), before);
-        }
-        assert_eq!(directory.store().settings().unwrap().gui_log_limit, 12);
-        for malformed in [
-            br#"{"version":1,"gui_log_limit":-1,"package_path":null}"#.as_slice(),
-            br#"{"version":1,"gui_log_limit":1.5,"package_path":null}"#.as_slice(),
-            br#"{"version":2,"gui_log_limit":12,"package_path":null}"#.as_slice(),
-            b"not JSON".as_slice(),
-        ] {
-            fs::write(&path, malformed).unwrap();
-            assert!(store.settings().is_err());
-            assert!(store.save_settings(Settings::default()).is_err());
-            assert_eq!(fs::read(&path).unwrap(), malformed);
+        for bytes in [fs::read(&path).unwrap(), b"malformed evidence".to_vec()] {
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                store.initialize(preferences()).unwrap_err().category,
+                "SettingsPresent"
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes);
         }
     }
 
     #[test]
-    fn environment_settings_are_structural_and_preserve_existing_data() {
+    fn settings_and_profile_mutations_preserve_other_owners() {
         use mado_runtime_comparison::environment::{
             G004_PROFILE, LANGUAGE, PROVIDER, RUNTIME_PROFILE,
         };
-
         let directory = Directory::new();
         let store = directory.store();
-        store.save_settings(Settings::default()).unwrap();
-        let profile = store
+        store.initialize(preferences()).unwrap();
+        let profiles = directory.profiles("Owned");
+        let profile = profiles
             .save(&inventory(), None, "Portable", options())
             .unwrap();
-        let profile_path = store.profile_path(&profile.id);
-        let profile_before = fs::read(&profile_path).unwrap();
-        let path = directory.0.join("settings.json");
-        let original =
-            br#"{ "version":1, "gui_log_limit":12, "package_path":"remembered-package" }"#;
-        fs::write(&path, original).unwrap();
-        let mut settings = store.settings().unwrap();
-        assert!(settings.ocr_environment.is_none());
-        assert_eq!(fs::read(&path).unwrap(), original);
+        let path = profiles.profile_path(&profile.id);
+        let before = fs::read(&path).unwrap();
+        let tab_before = fs::read(tab_path(&directory, "Owned")).unwrap();
         let environment = OcrEnvironment {
             model: G004_PROFILE.into(),
             profile: G004_PROFILE.into(),
             language: LANGUAGE.into(),
             provider: PROVIDER.into(),
             runtime_profile: RUNTIME_PROFILE.into(),
-            model_root: directory
-                .0
-                .join("missing-models")
-                .to_string_lossy()
-                .into_owned(),
-            runtime_path: directory
-                .0
-                .join("missing-runtime")
-                .to_string_lossy()
-                .into_owned(),
+            model_root: directory.0.join("missing-models").to_str().unwrap().into(),
+            runtime_path: directory.0.join("missing-runtime").to_str().unwrap().into(),
             native_library_paths: vec![
-                directory
-                    .0
-                    .join("missing-library")
-                    .to_string_lossy()
-                    .into_owned(),
+                directory.0.join("missing-library").to_str().unwrap().into(),
             ],
         };
-        settings.ocr_environment = Some(environment.clone());
-        store.save_settings(settings).unwrap();
-        let reopened = directory.store().settings().unwrap();
-        assert_eq!(reopened.ocr_environment, Some(environment));
-        assert_eq!(reopened.gui_log_limit, 12);
-        assert_eq!(reopened.package_path.as_deref(), Some("remembered-package"));
-        assert_eq!(fs::read(profile_path).unwrap(), profile_before);
-        let saved = fs::read(&path).unwrap();
-        let mut invalid = reopened.clone();
-        invalid.ocr_environment.as_mut().unwrap().provider = "cuda".into();
-        assert!(store.save_settings(invalid).is_err());
-        assert_eq!(fs::read(&path).unwrap(), saved);
-        for field in ["provider", "target"] {
-            let mut corrupted = serde_json::to_value(&reopened).unwrap();
-            corrupted["ocr_environment"][field] = json!("unauthorized");
-            let bytes = serde_json::to_vec(&corrupted).unwrap();
-            fs::write(&path, &bytes).unwrap();
-            assert!(store.settings().is_err());
-            assert!(store.save_settings(reopened.clone()).is_err());
-            assert_eq!(fs::read(&path).unwrap(), bytes);
-        }
+        store
+            .save_preferences(EditableSettings {
+                ocr_environment: Some(environment.clone()),
+                ..preferences()
+            })
+            .unwrap();
+        assert_eq!(
+            directory.store().settings().unwrap().ocr_environment,
+            Some(environment.clone())
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(tab_path(&directory, "Owned")).unwrap(), tab_before);
+        let settings_before = fs::read(directory.0.join("settings.json")).unwrap();
+        profiles
+            .rename(&inventory(), &profile.id, "Renamed")
+            .unwrap();
+        assert_eq!(
+            fs::read(directory.0.join("settings.json")).unwrap(),
+            settings_before
+        );
+        assert_eq!(fs::read(tab_path(&directory, "Owned")).unwrap(), tab_before);
+        let mut invalid = environment;
+        invalid.provider = "cuda".into();
+        assert!(
+            store
+                .save_preferences(EditableSettings {
+                    ocr_environment: Some(invalid),
+                    ..preferences()
+                })
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(directory.0.join("settings.json")).unwrap(),
+            settings_before
+        );
     }
 
     #[test]
-    fn portability_checks_fields_and_paths_not_arbitrary_string_secrets() {
-        for portable in [
-            json!({"label": "secret token password"}),
-            json!({"asset": "assets/right.png"}),
-            json!({"key": "Enter", "item": "game token", "label": "A: strategy"}),
-        ] {
-            portable_values(&portable).unwrap();
-        }
-        for forbidden in [
-            json!({"nested": {"api_key": "value"}}),
-            json!({"token": "value"}),
-            json!({"inputAuthority": false}),
-            json!({"target_executable_path": "relative-game"}),
-            json!({"asset": "/private/model"}),
-            json!({"asset": "C:\\models\\ocr"}),
-            json!({"asset": "../outside"}),
-        ] {
-            assert_eq!(
-                portable_values(&forbidden).unwrap_err().category,
-                "ProfileAuthority"
-            );
-        }
+    fn pending_and_failed_publication_preserve_tabs_and_settings() {
         let directory = Directory::new();
-        let mut inventory = inventory();
-        inventory.schema["properties"]["label"]["default"] = json!("/private/default-model");
+        let store = directory.store();
+        store.initialize(preferences()).unwrap();
+        let tab = store.create_tab("Owner", "Owner").unwrap();
+        let path = tab_path(&directory, "Owner");
+        let before = fs::read(&path).unwrap();
+        let pending = path.with_extension("pending");
+        put(&pending, b"unfinished");
+        assert!(store.set_tab_open("Owner", false).is_err());
+        assert!(
+            store
+                .bind_package("Owner", "package", &directory.0)
+                .is_err()
+        );
+        assert_eq!(store.tab("Owner").unwrap(), tab);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(&pending).unwrap(), b"unfinished");
+        fs::remove_file(&pending).unwrap();
+        let mut changed = tab;
+        changed.open = false;
+        let bytes = encode(&changed, MAX_TAB_BYTES).unwrap();
+        assert!(
+            write_atomic(&path, &bytes, |from, to| fs::rename(
+                from,
+                to.join("not-a-directory")
+            ))
+            .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!pending.exists());
+        let settings = directory.0.join("settings.json");
+        let settings_before = fs::read(&settings).unwrap();
+        put(&settings.with_extension("pending"), b"settings unfinished");
+        assert!(store.save_preferences(preferences()).is_err());
+        assert_eq!(fs::read(&settings).unwrap(), settings_before);
         assert_eq!(
-            directory
-                .store()
-                .save(
-                    &inventory,
-                    None,
-                    "No authority",
-                    json!({"priorities": ["left"]})
+            fs::read(settings.with_extension("pending")).unwrap(),
+            b"settings unfinished"
+        );
+    }
+
+    #[test]
+    fn same_source_tabs_isolate_profiles_and_reject_cross_owner_references() {
+        let directory = Directory::new();
+        let first = directory.profiles("First");
+        let second = directory.profiles("Second");
+        assert!(!first.directory().exists());
+        let inv = inventory();
+        let profile = first.save(&inv, None, "First value", options()).unwrap();
+        assert!(
+            second
+                .list(&inv.package_id, &profile.schema_identity)
+                .unwrap()
+                .profiles
+                .is_empty()
+        );
+        assert!(
+            second
+                .save(&inv, Some(&profile.id), "Stolen", options())
+                .is_err()
+        );
+        assert!(second.rename(&inv, &profile.id, "Stolen").is_err());
+        assert!(second.delete(&profile.id).is_err());
+        let values = json!({"priorities":["left"]});
+        let other = second
+            .save(&inv, None, "Second value", values.clone())
+            .unwrap();
+        first.rename(&inv, &profile.id, "Renamed").unwrap();
+        assert_eq!(second.read_profile(&other.id).unwrap().0.values, values);
+        let before = fs::read(first.profile_path(&profile.id)).unwrap();
+        assert!(!directory.0.join("profiles").exists());
+        let store = directory.store();
+        store.set_tab_open("First", false).unwrap();
+        assert!(first.save(&inv, None, "Closed", options()).is_err());
+        store.set_tab_open("First", true).unwrap();
+        store
+            .bind_package("First", &inv.package_id, &directory.0.join("relocated"))
+            .unwrap();
+        let reopened = store.profile_store("First", &inv.package_id).unwrap();
+        assert_eq!(
+            fs::read(reopened.profile_path(&profile.id)).unwrap(),
+            before
+        );
+        reopened.delete(&profile.id).unwrap();
+        assert_eq!(second.read_profile(&other.id).unwrap().0.values, values);
+    }
+
+    #[test]
+    fn managed_budget_counts_preserved_orphan_configuration() {
+        let directory = Directory::new();
+        let store = directory.store();
+        store.initialize(preferences()).unwrap();
+        let profiles = directory.profiles("Recovery");
+        let saved = profiles
+            .save(&inventory(), None, "Original", options())
+            .unwrap();
+        let expected = profiles.recovery_records().unwrap().pop().unwrap();
+        let profile_path = profiles.profile_path(&saved.id);
+        let profile_before = fs::read(&profile_path).unwrap();
+        for package in 0..5 {
+            for profile in 0..64 {
+                put(
+                    &directory
+                        .0
+                        .join(format!("tabs/Orphan/package-{package}/{profile}.config")),
+                    &vec![b'x'; 52 * 1024],
+                );
+            }
+        }
+        let path = directory.0.join("settings.json");
+        let before = fs::read(&path).unwrap();
+        assert!(store.save_preferences(preferences()).is_err());
+        assert!(store.create_tab("Blocked", "Budget").is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!tab_path(&directory, "Blocked").exists());
+        let fault = profiles
+            .replace_recovery(&inventory(), &expected, options())
+            .unwrap_err();
+        assert_eq!(fault.category, "StorageLimit");
+        assert_eq!(fault.context["profile_id"], saved.id);
+        assert_eq!(fs::read(&profile_path).unwrap(), profile_before);
+        assert!(!profile_path.with_extension("pending").exists());
+    }
+
+    #[test]
+    fn foreign_owner_pending_and_unsafe_entries_do_not_block_other_owners() {
+        let directory = Directory::new();
+        let store = directory.store();
+        store.initialize(preferences()).unwrap();
+        let blocked = directory.profiles("Blocked");
+        let healthy = directory.profiles("Healthy");
+        let inv = inventory();
+        let saved = blocked.save(&inv, None, "Original", options()).unwrap();
+        let profile_before = fs::read(blocked.profile_path(&saved.id)).unwrap();
+        let pending = blocked.profile_path(&saved.id).with_extension("pending");
+        put(&pending, b"unfinished");
+        let tab_pending = tab_path(&directory, "Blocked").with_extension("pending");
+        put(&tab_pending, b"interrupted");
+        // A Tab copied back without private modes is unsafe for capture, yet measurable.
+        let copied = tab_path(&directory, "Copied");
+        put(&copied, b"{}");
+        #[cfg(unix)]
+        {
+            fs::set_permissions(copied.parent().unwrap(), fs::Permissions::from_mode(0o755))
+                .unwrap();
+            fs::set_permissions(&copied, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert!(
+            blocked
+                .save(&inv, Some(&saved.id), "Unsaved", options())
+                .is_err()
+        );
+        assert!(blocked.delete(&saved.id).is_err());
+        assert!(store.set_tab_open("Blocked", false).is_err());
+        let independent = healthy.save(&inv, None, "Independent", options()).unwrap();
+        assert_eq!(
+            healthy.read_profile(&independent.id).unwrap().0.name,
+            "Independent"
+        );
+        store.save_preferences(preferences()).unwrap();
+        store.create_tab("Fresh", "Fresh").unwrap();
+        assert!(!store.set_tab_open("Healthy", false).unwrap().open);
+        assert!(store.set_tab_open("Healthy", true).unwrap().open);
+        assert_eq!(
+            fs::read(blocked.profile_path(&saved.id)).unwrap(),
+            profile_before
+        );
+        assert_eq!(fs::read(&pending).unwrap(), b"unfinished");
+        assert_eq!(fs::read(&tab_pending).unwrap(), b"interrupted");
+        assert_eq!(fs::read(&copied).unwrap(), b"{}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unmeasurable_foreign_container_refuses_writes_with_its_managed_path() {
+        let directory = Directory::new();
+        let store = directory.store();
+        store.initialize(preferences()).unwrap();
+        let healthy = directory.profiles("Healthy");
+        store.create_tab("Linked", "Linked").unwrap();
+        store.set_tab_open("Linked", false).unwrap();
+        let outside = directory.0.join("outside");
+        private_directory(&outside).unwrap();
+        let link = directory.0.join("tabs/Linked/package");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let settings = directory.0.join("settings.json");
+        let before = fs::read(&settings).unwrap();
+        let refusal = store.save_preferences(preferences()).unwrap_err();
+        assert_eq!(refusal.context["path"], "tabs/Linked/package");
+        assert_eq!(
+            healthy
+                .save(&inventory(), None, "Blocked", options())
+                .unwrap_err()
+                .context["path"],
+            "tabs/Linked/package"
+        );
+        assert_eq!(fs::read(&settings).unwrap(), before);
+        assert!(!healthy.directory().exists());
+        fs::remove_file(&link).unwrap();
+        store.save_preferences(preferences()).unwrap();
+        healthy
+            .save(&inventory(), None, "Unblocked", options())
+            .unwrap();
+    }
+
+    #[test]
+    fn target_pending_and_malformed_data_do_not_poison_profiles_but_snapshot_refuses_pending() {
+        let directory = Directory::new();
+        let store = directory.store();
+        store.initialize(preferences()).unwrap();
+        let profiles = directory.profiles("Owner");
+        let inv = inventory();
+        let profile = profiles.save(&inv, None, "Original", options()).unwrap();
+        let path = target_path(&directory, "Owner");
+        put(&path, b"malformed target");
+        let pending = path.with_extension("pending");
+        put(&pending, b"retain interrupted target");
+        assert_eq!(
+            profiles
+                .list(&inv.package_id, &profile.schema_identity)
+                .unwrap()
+                .profiles[0]
+                .id,
+            profile.id
+        );
+        profiles.rename(&inv, &profile.id, "Still usable").unwrap();
+        assert_eq!(
+            store
+                .read_target("Owner", &inv.package_id)
+                .unwrap_err()
+                .category,
+            "StoragePending"
+        );
+        assert!(
+            store
+                .remove_target(
+                    "Owner",
+                    &inv.package_id,
+                    &TargetExpectation {
+                        revision: 0,
+                        binding_id: None
+                    }
+                )
+                .is_err()
+        );
+        assert!(crate::configuration::capture(&directory.0).is_err());
+        assert_eq!(fs::read(&pending).unwrap(), b"retain interrupted target");
+        assert_eq!(fs::read(&path).unwrap(), b"malformed target");
+        fs::remove_file(&pending).unwrap();
+        let snapshot = crate::configuration::capture(&directory.0).unwrap();
+        assert_eq!(
+            snapshot.files[&format!("tabs/Owner/{}/target.config", inv.package_id)],
+            b"malformed target"
+        );
+        assert!(crate::restore::validate(&snapshot).is_err());
+        let repaired = stored_target("Owner");
+        fs::write(&path, serde_json::to_vec(&repaired).unwrap()).unwrap();
+        assert_eq!(
+            store.read_target("Owner", &inv.package_id).unwrap(),
+            repaired
+        );
+        fs::write(&path, vec![b'x'; MAX_TARGET_BYTES + 1]).unwrap();
+        assert_eq!(
+            profiles
+                .list(&inv.package_id, &profile.schema_identity)
+                .unwrap()
+                .profiles[0]
+                .name,
+            "Still usable"
+        );
+        profiles
+            .rename(&inv, &profile.id, "Still independent")
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_links_and_public_modes_are_refused_without_poisoning_profile_admission() {
+        let directory = Directory::new();
+        let profiles = directory.profiles("Owner");
+        let inv = inventory();
+        let profile = profiles.save(&inv, None, "Profile", options()).unwrap();
+        let store = directory.store();
+        let path = target_path(&directory, "Owner");
+        let record = stored_target("Owner");
+        put(&path, &serde_json::to_vec(&record).unwrap());
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        let outside = directory.0.join("retained-target.json");
+        fs::rename(&path, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(store.read_target("Owner", &inv.package_id).is_err());
+        assert_eq!(
+            profiles
+                .list(&inv.package_id, &profile.schema_identity)
+                .unwrap()
+                .profiles[0]
+                .id,
+            profile.id
+        );
+        fs::remove_file(&path).unwrap();
+        fs::hard_link(&outside, &path).unwrap();
+        assert!(
+            store
+                .remove_target("Owner", &inv.package_id, &record.expectation())
+                .is_err()
+        );
+        fs::remove_file(&path).unwrap();
+        fs::rename(&outside, &path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(store.read_target("Owner", &inv.package_id).is_err());
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o644);
+        assert_eq!(
+            profiles
+                .list(&inv.package_id, &profile.schema_identity)
+                .unwrap()
+                .profiles[0]
+                .id,
+            profile.id
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(store.read_target("Owner", &inv.package_id).unwrap(), record);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_save_restart_owner_isolation_relocation_and_declaration_replacement() {
+        use crate::target::tests::{MetadataFixture, configuration, declaration};
+        let metadata = MetadataFixture::new();
+        let game = metadata.executable("game");
+        let launcher = metadata.executable("launcher");
+        let mut configuration = configuration(game.to_str().unwrap());
+        configuration.launcher = Some(crate::target::TargetLocation {
+            kind: "executable".into(),
+            path: launcher.to_str().unwrap().into(),
+        });
+        let directory = Directory::new();
+        let profiles = directory.profiles("First");
+        directory.profiles("Second");
+        let store = directory.store();
+        let package = inventory().package_id;
+        let empty = store.read_target("First", &package).unwrap();
+        let checked = store
+            .check_target(
+                "First",
+                &package,
+                &declaration(),
+                &empty.expectation(),
+                &configuration,
+            )
+            .unwrap();
+        assert!(!profiles.directory().exists());
+        let (saved, saved_check) = store
+            .save_target(
+                "First",
+                &package,
+                &declaration(),
+                &empty.expectation(),
+                configuration.clone(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(checked, saved_check);
+        assert_eq!(
+            directory.store().read_target("First", &package).unwrap(),
+            saved
+        );
+        assert_eq!(
+            saved.binding.as_ref().unwrap().configuration.arguments,
+            ["", "two words", "$(literal)", "\"quoted\""]
+        );
+        assert_eq!(store.read_target("Second", &package).unwrap().revision, 0);
+        let (other, _) = store
+            .save_target(
+                "Second",
+                &package,
+                &declaration(),
+                &empty.expectation(),
+                configuration.clone(),
+                None,
+            )
+            .unwrap();
+        assert_ne!(
+            saved.binding.as_ref().unwrap().id,
+            other.binding.as_ref().unwrap().id
+        );
+        store
+            .bind_package("First", &package, &directory.0.join("relocated-package"))
+            .unwrap();
+        assert_eq!(store.read_target("First", &package).unwrap(), saved);
+        let mut edited = configuration.clone();
+        edited.arguments.push("literal next".into());
+        let (updated, _) = store
+            .save_target(
+                "First",
+                &package,
+                &declaration(),
+                &saved.expectation(),
+                edited.clone(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            updated.binding.as_ref().unwrap().id,
+            saved.binding.as_ref().unwrap().id
+        );
+        assert_eq!(updated.revision, saved.revision + 1);
+        assert_eq!(
+            store
+                .save_target(
+                    "First",
+                    &package,
+                    &declaration(),
+                    &saved.expectation(),
+                    configuration,
+                    None
                 )
                 .unwrap_err()
                 .category,
-            "ProfileAuthority"
+            "TargetConflict"
         );
-    }
-
-    #[test]
-    fn malformed_profile_and_unsafe_filename_preserve_stored_data() {
-        let directory = Directory::new();
-        let store = directory.store();
-        let inventory = inventory();
-        let profile = store.save(&inventory, None, "Original", options()).unwrap();
-        let path = store.profile_path(&profile.id);
-        let profiles = directory.0.join("profiles");
-        fs::write(profiles.join(".DS_Store"), b"Finder metadata").unwrap();
-        fs::write(profiles.join("notes.txt"), b"Operator notes").unwrap();
-        let mut incompatible = serde_json::to_value(&profile).unwrap();
-        incompatible["version"] = json!(2);
-        let mut mismatched = serde_json::to_value(&profile).unwrap();
-        mismatched["id"] = json!(new_id().unwrap());
-        let mut authority = serde_json::to_value(&profile).unwrap();
-        authority["values"] = json!({"nested": {"api_key": "credential"}});
-        for (bytes, category, field) in [
-            (b"not JSON".to_vec(), "StorageFormat", None),
-            (
-                serde_json::to_vec(&incompatible).unwrap(),
-                "ProfileVersion",
-                None,
-            ),
-            (
-                serde_json::to_vec(&mismatched).unwrap(),
-                "ProfileIdentity",
-                None,
-            ),
-            (
-                serde_json::to_vec(&authority).unwrap(),
-                "ProfileAuthority",
-                Some("$.nested.api_key"),
-            ),
-        ] {
-            fs::write(&path, &bytes).unwrap();
-            let fault = store
-                .list(&inventory.package_id, &profile.schema_identity)
-                .unwrap_err();
-            assert_eq!(fault.category, category);
-            assert_eq!(fault.context["profile_id"], profile.id);
-            if let Some(field) = field {
-                assert_eq!(fault.context["field"], field);
-            }
-            for id in [None, Some(profile.id.as_str())] {
-                let fault = store
-                    .save(&inventory, id, "Replacement", options())
-                    .unwrap_err();
-                assert_eq!(fault.category, category);
-                assert_eq!(fault.context["profile_id"], profile.id);
-            }
-            let fault = store
-                .rename(&inventory, &profile.id, "Renamed")
-                .unwrap_err();
-            assert_eq!(fault.category, category);
-            assert_eq!(fault.context["profile_id"], profile.id);
-            let fault = store.delete(&profile.id).unwrap_err();
-            assert_eq!(fault.category, category);
-            assert_eq!(fault.context["profile_id"], profile.id);
-            assert_eq!(fs::read(&path).unwrap(), bytes);
-        }
-        assert!(store.delete("../settings").is_err());
-    }
-
-    #[test]
-    fn profile_size_and_count_bounds_preserve_saved_profiles() {
-        let directory = Directory::new();
-        let store = directory.store();
-        let inventory = inventory();
-        let profile = store.save(&inventory, None, "Original", options()).unwrap();
-        let path = store.profile_path(&profile.id);
-        let before = fs::read(&path).unwrap();
-        let oversized = json!({"priorities": ["left"], "label": "a".repeat(MAX_PROFILE_BYTES)});
         assert_eq!(
             store
-                .save(&inventory, Some(&profile.id), "Too large", oversized)
+                .remove_target("First", &package, &saved.expectation())
                 .unwrap_err()
                 .category,
-            "StorageLimit"
+            "TargetConflict"
         );
-        assert_eq!(fs::read(&path).unwrap(), before);
-        for index in 1..MAX_PROFILES {
-            store
-                .save(&inventory, None, &format!("Profile {index}"), options())
-                .unwrap();
-        }
+        let mut wrong_id = updated.expectation();
+        wrong_id.binding_id = other.expectation().binding_id;
         assert_eq!(
             store
-                .save(&inventory, None, "Overflow", options())
+                .check_target("First", &package, &declaration(), &wrong_id, &edited)
                 .unwrap_err()
                 .category,
-            "StorageLimit"
+            "TargetConflict"
         );
-        let renamed = store
-            .rename(&inventory, &profile.id, "Renamed at capacity")
+        let changed = TargetDeclaration {
+            id: "different-game".into(),
+            window_title: None,
+            macos: None,
+        };
+        assert!(!updated.binding.as_ref().unwrap().compatible(
+            &package,
+            &changed.id,
+            &changed.identity().unwrap()
+        ));
+        assert_eq!(store.read_target("First", &package).unwrap(), updated);
+        let changed_title = TargetDeclaration {
+            id: declaration().id,
+            window_title: Some("Another exact title".into()),
+            macos: None,
+        };
+        assert!(!updated.binding.as_ref().unwrap().compatible(
+            &package,
+            &changed_title.id,
+            &changed_title.identity().unwrap(),
+        ));
+        let (replaced, _) = store
+            .save_target(
+                "First",
+                &package,
+                &changed,
+                &updated.expectation(),
+                edited,
+                None,
+            )
             .unwrap();
-        assert_eq!(renamed.id, profile.id);
+        assert_ne!(
+            replaced.binding.as_ref().unwrap().id,
+            updated.binding.as_ref().unwrap().id
+        );
+        assert_eq!(store.read_target("Second", &package).unwrap(), other);
+        let removed = store
+            .remove_target("First", &package, &replaced.expectation())
+            .unwrap();
+        assert_eq!(removed.binding, None);
+        assert_eq!(removed.revision, replaced.revision + 1);
+        let stale_configuration = replaced.binding.as_ref().unwrap().configuration.clone();
         assert_eq!(
             store
-                .list(&inventory.package_id, &profile.schema_identity)
-                .unwrap()
-                .profiles
-                .len(),
-            MAX_PROFILES
+                .save_target(
+                    "First",
+                    &package,
+                    &changed,
+                    &empty.expectation(),
+                    stale_configuration.clone(),
+                    None
+                )
+                .unwrap_err()
+                .category,
+            "TargetConflict"
         );
+        assert_eq!(
+            store
+                .save_target(
+                    "First",
+                    &package,
+                    &changed,
+                    &replaced.expectation(),
+                    stale_configuration,
+                    None
+                )
+                .unwrap_err()
+                .category,
+            "TargetConflict"
+        );
+        assert!(game.exists());
+        assert!(launcher.exists());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn existing_insecure_directories_are_refused_without_chmod() {
-        for relative in ["", "profiles"] {
-            let directory = Directory::new();
-            let path = directory.0.join(relative);
-            if !relative.is_empty() {
-                fs::create_dir(&path).unwrap();
-            }
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-            let fault = Store::new(directory.0.clone())
-                .err()
-                .expect("existing shared storage must be refused");
-            assert_eq!(fault.category, "Storage");
-            assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o755);
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn private_storage_refuses_symlink_profile_authority() {
+    fn target_mutations_share_the_global_budget_with_retained_target_files() {
         let directory = Directory::new();
+        directory.profiles("Owner");
         let store = directory.store();
-        let inventory = inventory();
-        let profile = store.save(&inventory, None, "Original", options()).unwrap();
-        let path = store.profile_path(&profile.id);
-        assert_eq!(fs::metadata(&directory.0).unwrap().mode() & 0o777, 0o700);
+        let package = inventory().package_id;
+        let empty = store.read_target("Owner", &package).unwrap();
+        let padding = vec![b' '; MAX_TARGET_BYTES];
+        for tab in 0..16 {
+            for package in 0..16 {
+                put(
+                    &directory
+                        .0
+                        .join(format!("tabs/Retained{tab}/pkg{package}/target.config")),
+                    &padding,
+                );
+            }
+        }
         assert_eq!(
-            fs::metadata(directory.0.join("profiles")).unwrap().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
-        let outside = directory.0.join("original.json");
-        fs::rename(&path, &outside).unwrap();
-        let before = fs::read(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, &path).unwrap();
-        assert!(
             store
-                .list(&inventory.package_id, &profile.schema_identity)
-                .is_err()
+                .remove_target("Owner", &package, &empty.expectation())
+                .unwrap_err()
+                .category,
+            "StorageLimit"
         );
-        assert!(
-            store
-                .save(&inventory, Some(&profile.id), "Replacement", options())
-                .is_err()
-        );
-        assert!(store.delete(&profile.id).is_err());
-        assert_eq!(fs::read(&outside).unwrap(), before);
+        assert!(!target_path(&directory, "Owner").exists());
+        fs::remove_file(directory.0.join("tabs/Retained0/pkg0/target.config")).unwrap();
+        let removed = store
+            .remove_target("Owner", &package, &empty.expectation())
+            .unwrap();
+        assert_eq!(removed.revision, 1);
+        assert_eq!(removed.binding, None);
     }
 }

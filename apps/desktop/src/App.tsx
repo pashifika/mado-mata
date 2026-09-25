@@ -1,224 +1,336 @@
-import {useEffect, useMemo, useRef, useState} from 'react';
+import {useEffect, useMemo, useReducer, useRef, useState} from 'react';
+import type {KeyboardEvent, ReactNode} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {getCurrentWindow} from '@tauri-apps/api/window';
-import SchemaForm from './SchemaForm.tsx';
-import EnvironmentPanel from './EnvironmentPanel.tsx';
-import type {LastCheck} from './EnvironmentPanel.tsx';
-import {DISCLOSURE_LIMIT, acceptController, boundedText, cleanupLabel, defaultDraft, environmentDraft, faultSummary, initializationLabel, readDraft, readEnvironment, record, retainLogs, sameEnvironment, staleReasons, text} from './state.ts';
-import type {CheckAssociation, EnvironmentDraft, LogStore} from './state.ts';
-import type {ControllerView, Fault, Json, LogBatch, PackageInfo, Poll, Profile, Selection, Settings} from './types.ts';
+import {LocalFault, messages, renderMessage} from './i18n.ts';
+import type {Command, Message} from './i18n.ts';
+import {LocaleContext, useLocale} from './locale.tsx';
+import type {CheckTarget, LastCheck} from './settings/EnvironmentPanel.tsx';
+import BootstrapPage from './pages/BootstrapPage.tsx';
+import GuidancePage from './pages/GuidancePage.tsx';
+import type {ActiveOwner} from './pages/GuidancePage.tsx';
+import LogsPage from './pages/LogsPage.tsx';
+import type {Losses} from './pages/LogsPage.tsx';
+import CreateWorkspaceDialog from './components/CreateWorkspaceDialog.tsx';
+import type {CreateDraft} from './components/CreateWorkspaceDialog.tsx';
+import Notifications from './components/Notifications.tsx';
+import type {RecoveryHandlers} from './components/ProfileRecovery.tsx';
+import ResultPanel, {FaultMessage, fault} from './components/ResultPanel.tsx';
+import RunPage from './pages/RunPage.tsx';
+import type {RunHandlers, RunSnapshot, RunView} from './pages/RunPage.tsx';
+import SavedWorkspacesDialog from './components/SavedWorkspacesDialog.tsx';
+import Select from './components/Select.tsx';
+import SettingsDialog from './settings/SettingsDialog.tsx';
+import WorkspaceSwitcher from './components/WorkspaceSwitcher.tsx';
+import type {WorkspaceOption} from './components/WorkspaceSwitcher.tsx';
+import {INITIAL_BOOTSTRAP, PollGate, initialSettings, reconstructed, reduceBootstrap, surface} from './bootstrap.ts';
+import type {Admission, BootstrapAction} from './bootstrap.ts';
+import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards} from './notifications.ts';
+import type {Card, CardStack} from './notifications.ts';
+import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, settingsDraftAfterSave, settingsDraftFrom, staleReasons, text} from './state.ts';
+import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
+import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from './recovery.ts';
+import type {RecoveryState, RecoveryTicket} from './recovery.ts';
+import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyCommand, applyIfCurrent, applyInspection, applyRecoveryMutation, applyWorkspaceView, busy, closeWorkspace, commandValues, deriveBound, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
+import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
+import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
+import type {TargetOperation, TargetPickerField, TargetPickerTicket, TargetState} from './target.ts';
+import type {BootstrapStatus, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetApplicationResponse, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
 
-const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0};
-const busyPhases = new Set(['preparing', 'running', 'stopping']);
-type Losses = Omit<LogBatch, 'entries'>;
-type RunSnapshot =
-  | {kind: 'run'; run: string; lane: string; packageId: string; profileName: string; profileId: string; scenario: string; descriptorPath: string | null; values: Record<string, Json>}
-  | {kind: 'check'; run: string; association: CheckAssociation};
+const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0, workspace_id: null, workspace_revision: null};
+const EMPTY_FILTER: LogFilter = {text: '', level: ''};
+const EMPTY_CREATE: CreateDraft = {internalName: '', displayName: ''};
 
-function fault(error: unknown): Fault {
-  if (error !== null && typeof error === 'object' && 'message' in error) {
-    const value = error as Partial<Fault>;
-    return {category: value.category ?? 'Application', message: String(value.message), context: value.context ?? null};
+type Nav = {kind: 'none'} | {kind: 'workspace'; id: string} | {kind: 'application'} | {kind: 'closed'; id: string};
+interface Operation {run: string; kind: 'run' | 'check'; workspace: WorkspaceRef | null; snapshot: RunSnapshot}
+interface Starting {workspaceId: string | null; kind: 'run' | 'check'}
+interface DialogError {kind: 'save' | 'check'; value: Fault}
+
+// The notice for a typed inspection result. A binding failure is the Tab's error, not a notice; a recovery-required
+// candidate and automatic per-profile outcomes are named so the operator finds the recovery panel.
+function inspectionNotice(outcome: InspectionOutcome, rebinding: boolean, retry: boolean): Message | null {
+  if (outcome.kind === 'binding_failed') return null;
+  if (outcome.kind === 'recovery_required') return {key: 'recoveryRequired'};
+  if (retry) return {key: 'recoveryBound'};
+  if (outcome.outcomes.length > 0) {
+    const saved = outcome.outcomes.filter(item => item.status === 'saved').length;
+    return {key: 'inspectionOutcomes', args: [saved, outcome.outcomes.length - saved]};
   }
-  return {category: 'Application', message: String(error), context: null};
+  return {key: rebinding ? 'reinspected' : 'bound'};
 }
 
-function FaultMessage({value, title}: {value: Fault; title: string}) {
-  return <section className="fault" role="alert"><strong>{title} · {value.category}</strong><p>{value.message}</p>
-    {value.context !== null && <pre className="diagnostic">{JSON.stringify(value.context, null, 2)}</pre>}
-  </section>;
-}
-
-function BoundedRecord({value}: {value: Json}) {
-  const bounded = boundedText(JSON.stringify(value, null, 2), DISCLOSURE_LIMIT);
-  return <>
-    <pre>{bounded.text}</pre>
-    {bounded.truncated > 0 && <p className="inline-warning">Display truncated: {bounded.truncated} more characters are retained by the backend record but not rendered.</p>}
-  </>;
-}
-
-function ResultPanel({view, disclosed, onDisclose}: {view: ControllerView; disclosed: boolean; onDisclose: (next: boolean) => void}) {
-  const result = view.result;
-  // Preparation faults carry the same operation facts in their context as a settled result.
-  const source = result ?? record(view.error?.context);
-  const observations = record(result?.observations);
-  const build = record(result?.build);
-  const check = view.operation === 'environment_check';
-  const lane = text(result?.lane) ?? text(source.lane);
-  // Replay observations and script decisions can carry recognized text: private until disclosed.
-  const privateDetail = !check && lane !== null && lane !== 'controlled';
-  const completed = Array.isArray(source.completed_stages) ? source.completed_stages.map(String) : [];
-  return <>
-    <div className="result-facts">
-      <div><span>Result status</span><strong>{String(result?.status ?? (view.state === 'terminal' && view.error ? view.error.category : 'Not settled'))}</strong></div>
-      <div><span>Entry outcome</span><strong>{String(result?.entry_outcome ?? 'Unobserved')}</strong></div>
-      <div><span>Cleanup</span><strong>{cleanupLabel(result, source)}</strong></div>
-      <div><span>Forced containment</span><strong>{result?.forced === true ? 'Yes' : result?.forced === false ? 'No' : 'Unobserved'}</strong></div>
-    </div>
-    <dl className="run-identity identity-facts" id="identity-facts">
-      <dt>Stage</dt><dd>{text(source.stage) ?? (view.state === 'idle' ? 'No operation yet' : 'Unobserved')}</dd>
-      <dt>Completed</dt><dd>{completed.length ? completed.join(' → ') : 'None recorded'}</dd>
-      <dt>Environment</dt><dd><code>{text(source.environment_identity) ?? 'Not derived'}</code></dd>
-      <dt>Corpus</dt><dd><code>{text(source.corpus_identity) ?? 'Not derived'}</code></dd>
-      {check && <><dt>Selection</dt><dd><code>{text(source.selection_identity) ?? 'Unobserved'}</code></dd><dt>Initialization</dt><dd id="initialization">{initializationLabel(view.progress)}</dd></>}
-      <dt>Child build</dt><dd>{build.engine_enabled === undefined ? 'No startup identity observed' : <>engine {build.engine_enabled === true ? 'enabled' : 'absent'} · <code>{text(build.executable_sha256) ?? 'unhashed'}</code></>}</dd>
-    </dl>
-    {result && check && <div className="outcome-details">
-      <p className="muted">No package module, readiness, or workflow code was evaluated. Engine facts are the child's own report.</p>
-      <details><summary>Engine facts</summary><BoundedRecord value={observations.engine ?? null}/></details>
-      <details><summary>Cleanup evidence</summary><pre>{JSON.stringify(result.cleanup ?? null, null, 2)}</pre></details>
-    </div>}
-    {result && !check && <div className="outcome-details">
-      {privateDetail && !disclosed
-        ? <p className="muted">Script decisions and observation records stay hidden until disclosed below. Full records are not automatically copied to ordinary logs; scripts can explicitly emit bounded messages.</p>
-        : <>
-          <h3>Script decisions</h3>
-          {Array.isArray(observations.logs) && observations.logs.length > 0
-            ? <ul className="decision-list">{observations.logs.map((item, index) => <li key={index}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>)}</ul>
-            : <p className="muted">No decision was recorded.</p>}
-          <div className="evidence-grid">{['dispatches', 'receipts', 'accepted', 'effects', 'postconditions', 'sink', ...(privateDetail ? ['engine'] : [])].map(key => <details key={key}>
-            <summary>{key}{Array.isArray(observations[key]) ? ` · ${observations[key].length}` : ''}</summary>
-            <BoundedRecord value={observations[key] ?? null}/>
-          </details>)}</div>
-        </>}
-      <details><summary>Cleanup evidence</summary><pre>{JSON.stringify(result.cleanup ?? null, null, 2)}</pre></details>
-    </div>}
-    <div id="result" className="private-disclosure">
-      <button id="disclose-result" disabled={!result && !view.error} onClick={() => onDisclose(!disclosed)}>{disclosed ? 'Hide full record' : 'Disclose full record · private'}</button>
-      <span className="muted">Build metadata, diagnostics{privateDetail ? ', and recognition detail' : ''}. Rendered here only, bounded to {DISCLOSURE_LIMIT / 1024} KiB.</span>
-      {disclosed && <BoundedRecord value={result ?? (view.error ? {category: view.error.category, message: view.error.message, context: view.error.context} : null)}/>}
-    </div>
-  </>;
+function OperationStrip({idPrefix, owner, kind, phase, run, message, stopDisabled, onStop}: {
+  idPrefix: string; owner: string; kind: string; phase: string; run: string | null; message: {text: string; error: boolean} | null; stopDisabled: boolean; onStop: () => void;
+}) {
+  const locale = useLocale();
+  const t = messages[locale].app;
+  const ui = messages[locale].ui;
+  return <div id={`${idPrefix}-operation-strip`} className="operation-strip" role="status" aria-live="polite">
+    <span className="strip-owner"><span className="eyebrow">{t.activeOperation}</span><strong>{owner}</strong></span>
+    <span className="strip-kind">{kind} · <code>{run ?? t.admitting}</code></span>
+    <span className={`phase phase-${phase}`}>{ui.phase(phase)}</span>
+    {message && <span className={message.error ? 'strip-error' : 'strip-note'}>{message.text}</span>}
+    <button id={`${idPrefix}-stop`} type="button" className="stop-button" disabled={stopDisabled} onClick={onStop}>{t.stop}</button>
+  </div>;
 }
 
 export default function App() {
-  const [packagePath, setPackagePath] = useState('');
-  const [selection, setSelection] = useState<PackageInfo | null>(null);
-  const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [profilesError, setProfilesError] = useState<Fault | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [name, setName] = useState('');
-  const [preset, setPreset] = useState('');
-  const [draft, setDraft] = useState<Record<string, Json>>({});
-  const [validation, setValidation] = useState<Record<string, Json> | null>(null);
-  const [scenario, setScenario] = useState('workflow');
-  const [lane, setLane] = useState('controlled');
-  const [descriptorPath, setDescriptorPath] = useState('');
-  const [envDraft, setEnvDraft] = useState<EnvironmentDraft>(environmentDraft(null));
-  const [lastCheck, setLastCheck] = useState<LastCheck | null>(null);
-  const [disclosed, setDisclosed] = useState(false);
+  const [bootstrap, dispatch] = useReducer(reduceBootstrap, INITIAL_BOOTSTRAP);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [closed, setClosed] = useState<ClosedWorkspace[]>([]);
+  // Host listing of saved closed Tabs and malformed Tab records; null until the first successful read.
+  const [savedClosed, setSavedClosed] = useState<TabRecord[] | null>(null);
+  const [catalogFaults, setCatalogFaults] = useState<Fault[]>([]);
+  const [catalogError, setCatalogError] = useState<Fault | null>(null);
+  const [results, setResults] = useState<Record<string, RetainedResult>>({});
+  const [nav, setNav] = useState<Nav>({kind: 'none'});
   const [view, setView] = useState<ControllerView>(idle);
-  const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null);
-  const [starting, setStarting] = useState(false);
+  const [operation, setOperation] = useState<Operation | null>(null);
+  const [starting, setStarting] = useState<Starting | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [stripMessage, setStripMessage] = useState<{text: Message; error: boolean} | null>(null);
   const [closing, setClosing] = useState(false);
-  const [operation, setOperation] = useState('Loading settings');
-  const [error, setError] = useState<Fault | null>(null);
-  const [pollError, setPollError] = useState<Fault | null>(null);
-  const [notice, setNotice] = useState('');
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [logLimit, setLogLimit] = useState('1000');
+  // Saved settings win once loaded; before that the temporary bootstrap presentation applies and persists nothing.
+  const locale = settings?.locale ?? bootstrap.presentation;
+  const t = messages[locale].app;
+  const ui = messages[locale].ui;
   const [logs, setLogs] = useState<LogStore>({items: [], evicted: 0});
   const [losses, setLosses] = useState<Losses>({gui_dropped: 0, file_dropped: 0, file_errors: 0, last_file_error: null});
+  const [pollError, setPollError] = useState<Fault | null>(null);
+  const [lastCheck, setLastCheck] = useState<LastCheck | null>(null);
+  const [cards, setCards] = useState<CardStack>(emptyStack);
+  const [appBusy, setAppBusy] = useState<Command | null>(null);
+  const [pickerBusy, setPickerBusy] = useState(false);
+  const [pendingClose, setPendingClose] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [settingsDraft, setSettingsDraft] = useState<SettingsDraft>(() => settingsDraftFrom(null));
+  const [dialogError, setDialogError] = useState<DialogError | null>(null);
+  const [saveNotice, setSaveNotice] = useState<Message | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createDraft, setCreateDraft] = useState<CreateDraft>(EMPTY_CREATE);
+  const [createError, setCreateError] = useState<Fault | null>(null);
+  const [savedOpen, setSavedOpen] = useState(false);
+  const [configurationOpen, setConfigurationOpen] = useState(false);
+  const [reopening, setReopening] = useState<string | null>(null);
+  const [reopenError, setReopenError] = useState<Fault | null>(null);
+  const [appFilter, setAppFilter] = useState<LogFilter>(EMPTY_FILTER);
+  const [appScope, setAppScope] = useState<LogScope>({kind: 'application'});
+  const [closedFilter, setClosedFilter] = useState<LogFilter>(EMPTY_FILTER);
+  const [reveal, setReveal] = useState<{scope: string; sequence: number} | null>(null);
+  const [closedDisclosed, setClosedDisclosed] = useState(false);
   const expectedRun = useRef<string | null>(null);
   const epoch = useRef(0);
+  const sessionGeneration = useRef(0);
   const startInFlight = useRef(false);
-  const commandInFlight = useRef(true);
-  const revision = useRef(0);
+  // Mirror host admission synchronously so rapid commands cannot cross workspace attribution.
+  const hostCommand = useRef<Command | null>(null);
+  const applicationRequest = useRef<{workspace:WorkspaceRef; requestId:string}|null>(null);
+  const pickerRequest = useRef<{picker:TargetPickerTicket}|null>(null);
+  const bootstrapBusy = useRef(false);
+  // Set when a constructing action ended Ready before its catalog could be read; the next catalog decides the rebuild.
+  const pendingReconstruction = useRef(false);
+  // Serializes polls against reconstruction: a constructing action holds it before its host call (see PollGate).
+  const [pollGate] = useState(() => new PollGate());
+  const snapshotBusy = useRef(false);
   const retention = useRef(1000);
-  const envRevision = useRef(0);
-  const selectedProfile = profiles.find(profile => profile.id === selectedId);
-  const parsed = useMemo(() => selection ? readDraft(selection.schema, draft) : {values: draft, errors: {}}, [selection, draft]);
-  const numericErrors = Object.keys(parsed.errors).length > 0;
-  const valuesDirty = !selectedProfile || numericErrors || JSON.stringify(parsed.values) !== JSON.stringify(selectedProfile.values);
-  const dirty = valuesDirty || name !== selectedProfile?.name;
-  const bound = !selectedProfile || (selectedProfile.package_id === selection?.package_id && selectedProfile.schema_identity === selection?.schema_identity);
-  const active = starting || busyPhases.has(view.state);
-  const locked = Boolean(operation) || starting || closing;
-  const primary = view.error ?? (view.result?.primary ? fault(view.result.primary) : null);
-  const privatePrimary = view.operation !== 'environment_check' &&
-    (snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane)) !== 'controlled';
-  const envParsed = useMemo(() => readEnvironment(envDraft), [envDraft]);
-  const envErrors = Object.keys(envParsed.errors).length > 0;
+  const preferences = useRef(DEFAULT_NOTIFICATIONS);
+  const openWorkspaces = useRef(workspaces);
+  openWorkspaces.current = workspaces;
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+
+  const status = bootstrap.status;
+  const shell = surface(status);
+  const pollEnabled = status?.application_available === true;
   const savedEnvironment = settings?.ocr_environment ?? null;
-  const envDirty = envErrors || !sameEnvironment(envParsed.environment, savedEnvironment);
-  const selectedDescriptor = descriptorPath.trim() || null;
-  const checkStale = lastCheck ? staleReasons(lastCheck.association, {
-    saved: savedEnvironment, draftDirty: envDirty, descriptorPath: selectedDescriptor, packageInventoryIdentity: selection?.inventory_identity ?? null,
-  }) : [];
-  const startBlock = lane === 'replay' && !selectedDescriptor ? 'Replay needs a recorded corpus descriptor path.'
-    : lane === 'replay' && !savedEnvironment ? 'Replay needs a saved OCR environment.' : null;
-
-  // A terminal check is retained independently of later runs, keyed to what it observed.
-  useEffect(() => {
-    if (snapshot?.kind === 'check' && view.run === snapshot.run && view.state === 'terminal') {
-      setLastCheck({association: snapshot.association, view});
+  const derived = useMemo(() => Object.fromEntries(workspaces.filter(isBound).map(workspace => [workspace.id, deriveBound(workspace.bound, savedEnvironment, locale)])) as Record<string, Derived>, [workspaces, savedEnvironment, locale]);
+  const active = starting !== null || busy(view.state);
+  const selected = nav.kind === 'workspace' ? workspaces.find(workspace => workspace.id === nav.id) : undefined;
+  const closedSelected = nav.kind === 'closed' ? closed.find(item => item.id === nav.id) : undefined;
+  const noSelection = nav.kind === 'none' || (nav.kind === 'workspace' && !selected);
+  const labelOf = (workspaceId: string | null) => originLabel(workspaceId, workspaces, closed, locale).label;
+  // Profile and machine-local target edits share the same explicit discard boundary.
+  const dirtyDraft = (workspace: Workspace) => hasWorkspaceEdits(workspace, derived[workspace.id]);
+  // Settings Save has a separate gate; other pending commands expose their shared refusal reason.
+  const busyWorkspace = workspaces.find(workspace => workspace.busy !== null);
+  const pendingCommandReason = appBusy !== null && appBusy !== 'savingSettings' ? t[appBusy]
+    : bootstrap.pending !== null ? t[bootstrap.pending]
+    : busyWorkspace ? `${renderMessage(locale, busyWorkspace.busy)} · ${workspaceLabel(busyWorkspace, workspaces)}`
+    : starting ? `${starting.kind === 'check' ? t.admittingCheck : t.admittingRun} · ${labelOf(starting.workspaceId)}`
+    : null;
+  const normalReady = status?.state === 'ready' && !pendingReconstruction.current;
+  const commandReason = pendingCommandReason ?? (normalReady ? null : ui.bootstrap.applicationUnavailable);
+  // The bootstrap action in flight disables its own buttons; it is not a foreign command for admission text.
+  const admission: Admission = {active, command: (pendingCommandReason !== null && bootstrap.pending === null) || closing, anyDirty: workspaces.some(dirtyDraft)};
+  const savedCount = workspaces.length + (savedClosed?.length ?? 0);
+  const logCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const entry of logs.items) {
+      const key = entry.workspace_id ?? '';
+      counts[key] = (counts[key] ?? 0) + 1;
     }
-  }, [view, snapshot]);
+    return counts;
+  }, [logs.items]);
 
-  function editEnvironment(next: EnvironmentDraft) {
-    envRevision.current += 1;
-    setEnvDraft(next);
-    setNotice('');
+  // The live controller belongs to whichever workspace the host attributed it to; others show retained outcomes.
+  function runView(workspace: Workspace): RunView {
+    if (view.workspace_id === workspace.id && view.run !== null) {
+      return {view, live: true, olderRevision: view.workspace_revision !== null && view.workspace_revision !== workspace.revision ? view.workspace_revision : null};
+    }
+    const retained = results[workspace.id];
+    if (retained) return {view: retained.view, live: false, olderRevision: retained.ref.revision !== workspace.revision ? retained.ref.revision : null};
+    return {view: idle, live: false, olderRevision: null};
   }
 
-  function editDraft(next: Record<string, Json>) {
-    revision.current += 1;
-    setDraft(next);
-    setValidation(null);
-    setNotice('');
+  useEffect(() => {document.documentElement.lang = locale;}, [locale]);
+
+  function adoptSettings(saved: Settings) {
+    setSettings(saved);
+    dispatch({type:'presentation', locale:saved.locale});
+    retention.current = saved.gui_log_limit;
+    preferences.current = saved.notifications;
+    setLogs(old => retainLogs(old, [], saved.gui_log_limit));
   }
 
-  function newDraft(info: PackageInfo, presetName = '') {
-    setSelectedId(null);
-    setName(presetName);
-    setPreset(presetName);
-    editDraft(presetName ? structuredClone(info.profiles[presetName].options) : defaultDraft(info.schema));
+  function cancelApplicationRequest(ownerId?:string) {
+    const pending = applicationRequest.current;
+    if (!pending || (ownerId && pending.workspace.workspace_id !== ownerId)) return;
+    applicationRequest.current = null;
+    void invoke<boolean>('cancel_running_application', {workspace:pending.workspace, requestId:pending.requestId}).catch(() => {});
   }
 
-  function forgetSelection() {
-    setSelection(null);
-    setProfiles([]);
-    setProfilesError(null);
-    setSelectedId(null);
-    setName('');
-    setPreset('');
-    editDraft({});
+  function invalidateOwnerTarget(ownerId:string) {
+    cancelApplicationRequest(ownerId);
+    setWorkspaces(list => updateWorkspace(list, ownerId, item => item.bound
+      ? updateBound(item, bound => ({...bound, target:invalidateApplicationPicker(invalidateRunningApplication(bound.target))}))
+      : item));
+  }
+  function invalidateAllTargets() {
+    cancelApplicationRequest();
+    setWorkspaces(list => list.map(item => item.bound
+      ? updateBound(item, bound => ({...bound, target:invalidateApplicationPicker(invalidateRunningApplication(bound.target))}))
+      : item));
   }
 
-  async function inspectPath(path: string) {
-    forgetSelection();
-    setError(null);
-    setNotice('');
+  // A host status is authoritative. Only a constructing action that ended Ready replaces the session: fresh IDs
+  // mean a rebuilt Application, so results, the controller view and drafts of the old session are gone.
+  function applyStatus(next: BootstrapStatus, constructing: boolean) {
+    dispatch({type: 'status', status: next});
+    if (next.settings) adoptSettings(next.settings); else setSettings(null);
+    const catalog = next.catalog;
+    // A constructing action that ended Ready without a readable catalog is confirmed by the next catalog read.
+    const rebuild = constructing || pendingReconstruction.current;
+    if (catalog === null) {
+      pendingReconstruction.current = rebuild && next.state === 'ready';
+      return;
+    }
+    pendingReconstruction.current = false;
+    setSavedClosed(catalog.closed);
+    setCatalogFaults(catalog.faults);
+    setCatalogError(null);
+    if (!rebuild || !reconstructed(next, openWorkspaces.current)) return;
+    cancelApplicationRequest();
+    sessionGeneration.current += 1;
+    epoch.current += 1;
+    setWorkspaces(catalog.open.map(item => workspaceFromView(item)));
+    setResults({});
+    setClosed([]);
+    setLastCheck(null);
+    setPollError(null);
+    setLogs({items:[], evicted:0});
+    setCards(emptyStack);
+    setLosses({gui_dropped:0, file_dropped:0, file_errors:0, last_file_error:null});
+    setSettingsDraft(settingsDraftFrom(next.settings));
+    setDialogOpen(false);
+    setCreateOpen(false);
+    setSavedOpen(false);
+    setConfigurationOpen(false);
+    setCreateDraft(EMPTY_CREATE);
+    setReveal(null);
+    setOperation(null);
+    expectedRun.current = null;
+    setView(idle);
+    setStripMessage(null);
+    setPendingClose(null);
+    setNav({kind: 'none'});
+  }
+
+  async function bootstrapAction(action: BootstrapAction, call: () => Promise<BootstrapStatus>, constructing: boolean) {
+    if (bootstrapBusy.current) return;
+    bootstrapBusy.current = true;
+    if (constructing) invalidateAllTargets();
+    dispatch({type: 'pending', action});
+    // A constructing action may replace the Application. Holding the gate before the host call keeps the poll already
+    // in flight inside the old session and dispatches no new poll until the resulting status, and with it the session
+    // reset, has been applied; a refusal simply resumes polling on the retained session. Nothing drained is discarded.
+    const held = constructing ? pollGate.hold() : null;
     try {
-      const selected = await invoke<Selection>('inspect', {packagePath: path});
-      setSelection(selected.package);
-      setProfiles(selected.profiles);
-      setProfilesError(selected.profiles_error);
-      setSettings(old => old ? {...old, package_path: path} : old);
-      newDraft(selected.package);
-      setNotice('Package inspected. Start will revalidate its identity and capture current values.');
+      if (held) await held;
+      const next = await call();
+      const context = next.fault?.context;
+      // A rollback awaiting cleanup needs a Recovery notice but has not consumed the original generation's receipt.
+      const installed = next.state === 'ready' || (context !== null && typeof context === 'object' && !Array.isArray(context) && context.configuration_installed === true);
+      if ((action === 'restoring' || action === 'recovering') && installed) dispatch({type:'receiptConsumed'});
+      applyStatus(next, constructing);
+      if (constructing && next.state === 'ready' && next.catalog === null) {
+        applyStatus(await invoke<BootstrapStatus>('bootstrap_status'), false);
+      }
     } catch (cause) {
-      setError(fault(cause));
-      setNotice('No package is authorized for Start. Correct the directory or package, then Inspect again.');
+      // A refused action throws; the status below stays authoritative and is re-read so Recovery is never hidden.
+      dispatch({type: 'actionFailed', fault: fault(cause)});
+      try {applyStatus(await invoke<BootstrapStatus>('bootstrap_status'), false);} catch {/* last known status retained */}
+    } finally {
+      if (held) pollGate.resume();
+      bootstrapBusy.current = false;
+      dispatch({type: 'pending', action: null});
     }
   }
 
   useEffect(() => {
+    void bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), true);
+  }, []);
+
+  // While the host is still loading its root, re-read the status with one timer at a time; `bootstrapBusy` keeps
+  // overlapping reads (StrictMode double mount, a slow first load) from racing. The first non-loading status ends it.
+  const loading = status?.state === 'loading';
+  useEffect(() => {
+    if (!loading) return;
+    const timer = window.setTimeout(() => void bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), true), 300);
+    return () => window.clearTimeout(timer);
+  }, [loading, status]);
+
+  // Polling starts only once an Application exists and keeps running through a later Recovery so Stop stays reachable.
+  // A held gate or a reconstruction awaiting its catalog defers the tick instead of polling; the rebuilt Application's
+  // first events are then drained only after the session reset has been applied.
+  useEffect(() => {
+    if (!pollEnabled) return;
     let alive = true;
     let timer: number | undefined;
     async function tick() {
+      if (pendingReconstruction.current || !pollGate.claim()) {
+        if (alive) timer = window.setTimeout(tick, 150);
+        return;
+      }
       const pollEpoch = epoch.current;
+      const pollSession = sessionGeneration.current;
       try {
         const incoming = await invoke<Poll>('poll');
-        if (!alive) return;
-        // Drained logs belong to the application stream, even if the controller snapshot is stale.
-        if (incoming.logs.entries.length) setLogs(old => retainLogs(old, incoming.logs.entries, retention.current));
+        if (!alive || pollSession !== sessionGeneration.current) return;
+        // Drained logs belong to the one shared store, even if the controller snapshot is stale.
+        if (incoming.logs.entries.length) {
+          setLogs(old => retainLogs(old, incoming.logs.entries, retention.current));
+          setCards(old => ingestCards(old, incoming.logs.entries, preferences.current));
+        }
         setLosses(old => old.gui_dropped === incoming.logs.gui_dropped && old.file_dropped === incoming.logs.file_dropped
           && old.file_errors === incoming.logs.file_errors && old.last_file_error === incoming.logs.last_file_error ? old : {
             gui_dropped: incoming.logs.gui_dropped, file_dropped: incoming.logs.file_dropped,
             file_errors: incoming.logs.file_errors, last_file_error: incoming.logs.last_file_error,
           });
+        setResults(old => ingestResults(old, incoming.workspace_results, openWorkspaces.current));
+        const check = incoming.last_check;
+        setLastCheck(old => check ? old && old.view.run === check.controller.run && old.view.state === check.controller.state ? old : retainedCheck(check) : null);
         setPollError(null);
         if (pollEpoch === epoch.current && !startInFlight.current) {
           const next = {...idle, ...incoming.controller};
@@ -232,310 +344,819 @@ export default function App() {
           });
         }
       } catch (cause) {
-        if (alive) setPollError(fault(cause));
+        if (alive && pollSession === sessionGeneration.current) setPollError(fault(cause));
       } finally {
+        pollGate.release();
         if (alive) timer = window.setTimeout(tick, 150);
       }
     }
-    async function restore() {
-      try {
-        const saved = await invoke<Settings>('settings');
-        if (!alive) return;
-        setSettings(saved);
-        setEnvDraft(environmentDraft(saved.ocr_environment));
-        setLogLimit(String(saved.gui_log_limit));
-        retention.current = saved.gui_log_limit;
-        setLogs(old => retainLogs(old, [], saved.gui_log_limit));
-        if (saved.package_path) {
-          setPackagePath(saved.package_path);
-          setOperation('Revalidating remembered package');
-          await inspectPath(saved.package_path);
-        }
-      } catch (cause) {
-        if (alive) setError(fault(cause));
-      } finally {
-        commandInFlight.current = false;
-        if (alive) setOperation('');
-      }
-    }
-    void restore();
     void tick();
     return () => {alive = false; window.clearTimeout(timer);};
-  }, []);
+  }, [pollEnabled]);
 
-  async function command(label: string, action: () => Promise<void>) {
-    if (commandInFlight.current || closing) return;
-    commandInFlight.current = true;
-    setOperation(label);
-    setError(null);
-    setNotice('');
-    try {await action();}
-    catch (cause) {setError(fault(cause));}
-    finally {commandInFlight.current = false; setOperation('');}
-  }
+  // One countdown for the whole stack; paused cards are skipped inside tickCards.
+  const hasCards = cards.cards.length > 0;
+  useEffect(() => {
+    if (!hasCards) return;
+    let last = performance.now();
+    const timer = window.setInterval(() => {
+      const now = performance.now();
+      const elapsed = now - last;
+      last = now;
+      setCards(old => tickCards(old, elapsed));
+    }, 200);
+    return () => window.clearInterval(timer);
+  }, [hasCards]);
 
-  function valuesForCommand() {
-    if (!selection) throw new Error('Inspect a package before using its options.');
-    if (!bound) throw new Error('This saved profile belongs to a different package or schema. Inspect again; it cannot be rebound.');
-    if (numericErrors) throw {category: 'Draft', message: 'Correct the numeric fields before saving, validating, or starting.', context: parsed.errors};
-    return parsed.values;
-  }
-
-  function selectProfile(id: string) {
-    if (!selection) return;
-    if (!id) {newDraft(selection); return;}
-    const profile = profiles.find(item => item.id === id);
-    if (!profile) return;
-    setSelectedId(profile.id);
-    setName(profile.name);
-    setPreset('');
-    editDraft(structuredClone(profile.values));
-  }
-
-  async function saveProfile() {
-    const values = valuesForCommand();
-    const savedRevision = revision.current;
-    const savedName = name;
-    const profile = await invoke<Profile>('save_profile', {id: selectedId, name: savedName, values});
-    setProfiles(old => [...old.filter(item => item.id !== profile.id), profile].sort((a, b) => a.name.localeCompare(b.name)));
-    setSelectedId(profile.id);
-    setPreset('');
-    if (savedRevision === revision.current) {
-      setDraft(structuredClone(profile.values));
-      setValidation(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    menu.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    function outside(event: MouseEvent) {
+      if (!menu.current?.contains(event.target as Node) && !menuButton.current?.contains(event.target as Node)) setMenuOpen(false);
     }
-    setNotice(`Saved “${profile.name}” · ${profile.id}. Active runs are unchanged.`);
+    document.addEventListener('mousedown', outside);
+    return () => document.removeEventListener('mousedown', outside);
+  }, [menuOpen]);
+
+  function go(next: Nav) {
+    if (nav.kind === 'workspace' && (next.kind !== 'workspace' || next.id !== nav.id)) invalidateOwnerTarget(nav.id);
+    setReveal(null);
+    setPendingClose(null);
+    setClosedDisclosed(false);
+    setNav(next);
   }
 
-  async function startRun() {
-    if (startInFlight.current || active || commandInFlight.current || closing || startBlock) return;
-    let values: Record<string, Json>;
-    try {values = valuesForCommand();} catch (cause) {setError(fault(cause)); return;}
-    if (!selection) return;
-    const profileId = selectedProfile && !valuesDirty ? selectedProfile.id : 'draft';
-    const replay = lane === 'replay';
-    const request = {
-      package_path: packagePath, inventory_identity: selection.inventory_identity,
-      package_id: selectedProfile?.package_id ?? selection.package_id,
-      schema_identity: selectedProfile?.schema_identity ?? selection.schema_identity,
-      profile_id: profileId, values, lane, scenario: replay ? 'workflow' : scenario,
-      replay_descriptor_path: replay ? selectedDescriptor : null,
+  function change(id: string, update: (workspace: Workspace) => Workspace) {
+    setWorkspaces(list => updateWorkspace(list, id, update));
+  }
+
+  // Keep command admission through the follow-up listing; a fresh catalog reaches only the originating Tab.
+  async function runCommand(origin: Origin, label: Command, action: () => Promise<WorkspaceCommand>) {
+    if (hostCommand.current !== null) return;
+    hostCommand.current = label;
+    change(origin.id, workspace => ({...workspace, busy: {key: label}, error: null, notice: null}));
+    let command: WorkspaceCommand;
+    try {
+      command = await action();
+    } catch (cause) {
+      const error = fault(cause);
+      command = {update: workspace => ({...workspace, error})};
+    } finally {
+      hostCommand.current = null;
+    }
+    setWorkspaces(list => updateWorkspace(applyCommand(list, origin, command), origin.id, workspace => ({...workspace, busy: null})));
+  }
+
+  async function readProfiles(workspace: WorkspaceRef): Promise<ProfileCatalog> {
+    try {
+      return await invoke<ProfileCatalog>('profiles', {workspace});
+    } catch (cause) {
+      // The mutation already succeeded. Preserve that result without treating a failed read as an empty catalog.
+      return {profiles: [], profiles_error: fault(cause)};
+    }
+  }
+
+  // Package commands need a real inspected selection; an unbound Tab is refused here and again by the host.
+  const valuesForCommand = (workspace: Workspace) => commandValues(workspace, workspace.bound ? derived[workspace.id] : undefined);
+
+  // Inspection is scoped to the initiating Tab. A bound outcome publishes only after the host's durable bind; a
+  // recovery-required candidate never passes through binding and a failed binding keeps the saved reference.
+  function inspectFor(workspace: Workspace) {
+    const path = workspace.inspectPath.trim();
+    if (!path || commandReason !== null || closing) return;
+    const current = runView(workspace);
+    if (current.live && busy(current.view.state)) return;
+    invalidateOwnerTarget(workspace.id);
+    const origin: Origin = {id: workspace.id, revision: workspace.revision};
+    const ref = workspaceRef(workspace);
+    const rebinding = workspace.bound !== null;
+    void runCommand(origin, rebinding ? 'reinspectingPackage' : 'inspectingPackage', async () => {
+      const outcome = await invoke<InspectionOutcome>('inspect', {packagePath: path, workspace: ref});
+      return {update: item => applyInspection(item, outcome, inspectionNotice(outcome, rebinding, false), false)};
+    });
+  }
+
+  // Recovery commands carry only the host context reference, profile ID and values; replies are guarded by
+  // Workspace/revision (runCommand) and by the ticket's token, profile and draft revision. Only Save reads the draft:
+  // Reset discards it, so a draft that cannot parse never blocks the Reset meant to replace it.
+  function recoveryHandlers(workspace: Workspace): RecoveryHandlers {
+    const origin: Origin = {id: workspace.id, revision: workspace.revision};
+    const locked = commandReason !== null || closing;
+    const state = workspace.recovery;
+    const edit = (update: (state: RecoveryState) => RecoveryState) =>
+      change(workspace.id, item => item.recovery ? {...item, recovery: update(item.recovery), notice: null} : item);
+    function mutate(label: Command, call: (ticket: RecoveryTicket) => Promise<RecoveryMutation>) {
+      if (locked || !state) return;
+      const ticket = recoveryTicket(state);
+      if (!ticket) return;
+      void runCommand(origin, label, async () => {
+        const mutation = await call(ticket);
+        return {update: item => applyRecoveryMutation(item, ticket, mutation)};
+      });
+    }
+    return {
+      select: id => edit(current => selectRecovery(current, id)),
+      edit: (values, change) => edit(current => editRecovery(current, values, change)),
+      save: () => {
+        if (!state) return;
+        const parsed = readRecoveryDraft(state, locale);
+        if (Object.keys(parsed.errors).length > 0) {
+          const error = new LocalFault({key: 'numericFields'});
+          change(workspace.id, item => ({...item, error}));
+          return;
+        }
+        mutate('repairingProfile', ticket => invoke<RecoveryMutation>('repair_profile', {context: ticket.context, id: ticket.profileId, values: parsed.values}));
+      },
+      // Reset reaches the host only through the confirmed button; Cancel in the panel never gets here.
+      reset: () => mutate('resettingProfile', ticket => invoke<RecoveryMutation>('reset_profile', {context: ticket.context, id: ticket.profileId, confirm: true})),
+      retry: () => {
+        if (locked || !state) return;
+        const context = state.view.context;
+        void runCommand(origin, 'retryingBinding', async () => {
+          const outcome = await invoke<InspectionOutcome>('retry_binding', {context});
+          return {update: item => applyInspection(item, outcome, inspectionNotice(outcome, true, true), true)};
+        });
+      },
+      discard: () => {
+        if (locked || !state) return;
+        const context = state.view.context;
+        void runCommand(origin, 'discardingRecovery', async () => {
+          const view = await invoke<WorkspaceView>('discard_recovery', {context});
+          return {update: item => applyWorkspaceView(item, view, {key: 'recoveryDiscarded'})};
+        });
+      },
     };
-    const profileName = selectedProfile && !valuesDirty ? selectedProfile.name : name || 'Untitled draft';
+  }
+
+  async function targetCommand(workspace: BoundWorkspace, operation: TargetOperation, reviewedResolution?: TargetResolution) {
+    if (hostCommand.current !== null || closing || !normalReady || (operation !== 'read' && active)
+      || (operation !== 'read' && pickerRequest.current !== null) || workspace.bound.target.operation !== null) return;
+    const target = workspace.bound.target;
+    const ticket = targetTicket(target);
+    const configuration = readTargetDraft(target.draft).configuration;
+    if (operation !== 'read' && (!ticket || (operation !== 'remove' && (!target.declaration || !configuration)))) return;
+    if (reviewedResolution && (!target.review || !currentTargetDraft(target, target.review.ticket)
+      || JSON.stringify(reviewedResolution) !== JSON.stringify(target.review.resolution))) return;
+    cancelApplicationRequest(workspace.id);
+    const labels = {read:'readingTarget', check:'checkingTarget', save:'savingTarget', remove:'removingTarget'} as const;
+    const label = labels[operation];
+    const origin = {id:workspace.id, revision:workspace.revision};
+    const ref = workspaceRef(workspace);
+    const publish = (update:(state:TargetState) => TargetState) =>
+      setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound => ({...bound, target:update(bound.target)}))));
+    hostCommand.current = label;
+    setWorkspaces(list => applyIfCurrent(list, origin, item => ({
+      ...updateBound(item, bound => ({...bound, target:beginTarget(bound.target, operation)})), busy:{key:label},
+    })));
+    async function refresh() {
+      try {
+        const view = await invoke<TargetView>('read_target', {workspace:ref});
+        publish(state => readTarget(state, view));
+      } catch (cause) {
+        const error = fault(cause);
+        publish(state => targetReadFailed(state, error));
+      }
+    }
+    try {
+      if (operation === 'read') await refresh();
+      else if (ticket) {
+        if (operation === 'check') {
+          const response = await invoke<TargetCheckResponse>('check_target', {workspace:ref, expected:ticket.expected, configuration});
+          publish(state => checkedTarget(state, ticket, response));
+        } else if (operation === 'save') {
+          const response = await invoke<TargetSaveResponse>('save_target', {workspace:ref, expected:ticket.expected, configuration, reviewedResolution:reviewedResolution ?? null});
+          publish(state => savedTarget(state, ticket, response));
+          await refresh();
+        } else {
+          const response = await invoke<TargetView>('remove_target', {workspace:ref, expected:ticket.expected});
+          publish(state => removedTarget(state, ticket, response));
+          await refresh();
+        }
+      }
+    } catch (cause) {
+      const error = fault(cause);
+      if (ticket) publish(state => targetFailed(state, ticket, error));
+    } finally {
+      hostCommand.current = null;
+      setWorkspaces(list => applyIfCurrent(list, origin, item => ({
+        ...updateBound(item, bound => ({...bound, target:{...bound.target, operation:null}})), busy:null,
+      })));
+    }
+  }
+  async function chooseApplication(workspace:BoundWorkspace, field:TargetPickerField) {
+    const target = workspace.bound.target;
+    if (pickerRequest.current !== null || hostCommand.current !== null || !normalReady || closing || active
+      || target.operation !== null || target.application.pending !== null || !targetTicket(target)) return;
+    const started = beginApplicationPicker(target, field);
+    if (!started.picker) return;
+    const picker = started.picker;
+    const origin:Origin = {id:workspace.id, revision:workspace.revision};
+    pickerRequest.current = {picker};
+    setPickerBusy(true);
+    setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound => ({...bound, target:beginApplicationPicker(bound.target, field, picker)}))));
+    try {
+      const path = await invoke<string|null>('choose_target_application', {workspace:workspaceRef(workspace)});
+      setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound => ({...bound, target:completeApplicationPicker(bound.target, picker, path)}))));
+    } catch (cause) {
+      const error = fault(cause);
+      setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound => ({...bound, target:completeApplicationPicker(bound.target, picker, null, error)}))));
+    } finally {
+      if (pickerRequest.current?.picker === picker) {
+        pickerRequest.current = null;
+        setPickerBusy(false);
+      }
+    }
+  }
+
+  async function checkRunningApplication(workspace:BoundWorkspace) {
+    if (hostCommand.current !== null || pickerRequest.current !== null || applicationRequest.current !== null
+      || closing || !normalReady || active) return;
+    const ticket = eligibleRunningApplication(workspace.bound.target);
+    if (!ticket) return;
+    const requestId = crypto.randomUUID();
+    const origin:Origin = {id:workspace.id, revision:workspace.revision};
+    const ref = workspaceRef(workspace);
+    applicationRequest.current = {workspace:ref, requestId};
+    setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound =>
+      ({...bound, target:beginRunningApplication(bound.target, ticket, requestId)}))));
+    try {
+      await invoke<void>('reserve_running_application', {workspace:ref, requestId});
+      if (applicationRequest.current?.requestId !== requestId) {
+        await invoke<boolean>('cancel_running_application', {workspace:ref, requestId});
+        return;
+      }
+      const response = await invoke<TargetApplicationResponse>('check_running_application',
+        {workspace:ref, expected:ticket.expected, requestId});
+      setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound =>
+        ({...bound, target:completeRunningApplication(bound.target, ticket, response)}))));
+    } catch (cause) {
+      const error = fault(cause);
+      setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound =>
+        ({...bound, target:failRunningApplication(bound.target, ticket, requestId, error)}))));
+    } finally {
+      if (applicationRequest.current?.requestId === requestId) applicationRequest.current = null;
+    }
+  }
+
+  function cancelRunningCheck(workspace:BoundWorkspace) {
+    const requestId = workspace.bound.target.application.pending?.requestId;
+    if (!requestId || applicationRequest.current?.requestId !== requestId) return;
+    cancelApplicationRequest(workspace.id);
+    const origin:Origin = {id:workspace.id, revision:workspace.revision};
+    setWorkspaces(list => applyIfCurrent(list, origin, item => updateBound(item, bound =>
+      ({...bound, target:cancelRunningApplication(bound.target, requestId)}))));
+  }
+
+  // Only the visible, inspected Run page reads its own owner lazily. Failed reads require an explicit retry.
+  useEffect(() => {
+    if (selected && isBound(selected) && selected.page === 'run' && !selected.bound.target.loaded
+      && selected.bound.target.operation === null && commandReason === null && !closing) {
+      void targetCommand(selected, 'read');
+    }
+  }, [selected?.id, selected?.revision, selected?.page, selected?.bound?.target.loaded, commandReason, closing]);
+
+  function handlers(workspace: BoundWorkspace): RunHandlers {
+    const ref = workspaceRef(workspace);
+    const origin: Origin = {id: workspace.id, revision: workspace.revision};
+    const locked = commandReason !== null || closing;
+    const bound = workspace.bound;
+    const edit = (update: (bound: Bound) => Bound) => change(workspace.id, item => ({...updateBound(item, update), notice: null}));
+    return {
+      change: edit,
+      target: {
+        edit: draft => {
+          cancelApplicationRequest(workspace.id);
+          edit(current => ({...current, target:editTarget(current.target, draft)}));
+        },
+        reload: () => {void targetCommand(workspace, 'read');},
+        check: () => {void targetCommand(workspace, 'check');},
+        save: reviewed => {void targetCommand(workspace, 'save', reviewed);},
+        remove: () => {void targetCommand(workspace, 'remove');},
+        discard: () => {
+          cancelApplicationRequest(workspace.id);
+          edit(current => ({...current, target:discardTarget(current.target)}));
+        },
+        chooseApplication: field => {void chooseApplication(workspace, field);},
+        checkApplication: () => {void checkRunningApplication(workspace);},
+        cancelApplication: () => cancelRunningCheck(workspace),
+      },
+      disclose: run => change(workspace.id, item => updateBound(item, current => ({...current, disclosedRun: run}))),
+      selectProfile: id => edit(current => selectProfile(current, id)),
+      newDraft: preset => edit(current => newDraft(current, preset)),
+      inspectPath: value => change(workspace.id, item => ({...item, inspectPath: value, error: null})),
+      validate: () => {
+        if (locked) return;
+        const checked = bound.draftRevision;
+        void runCommand(origin, 'validatingDraft', async () => {
+          const values = valuesForCommand(workspace);
+          const effective = await invoke<Record<string, Json>>('validate', {workspace: ref, values});
+          return {update: item => item.bound?.draftRevision === checked
+            ? {...updateBound(item, current => ({...current, validation: effective})), notice: {key: 'validated'}}
+            : {...item, notice: {key: 'earlierValidated'}}};
+        });
+      },
+      saveProfile: () => {
+        if (locked) return;
+        const checked = bound.draftRevision;
+        void runCommand(origin, 'savingProfile', async () => {
+          const values = valuesForCommand(workspace);
+          const profile = await invoke<Profile>('save_profile', {workspace: ref, id: bound.selectedId, name: bound.name, values});
+          const catalog = await readProfiles(ref);
+          return {catalog, update: item => ({...updateBound(item, current => ({
+            ...current, profiles: [...current.profiles.filter(entry => entry.id !== profile.id), profile].sort((a, b) => a.name.localeCompare(b.name)),
+            selectedId: profile.id, preset: '',
+            ...(current.draftRevision === checked ? {draft: structuredClone(profile.values), validation: null, touched: false} : {}),
+          })), notice: {key: 'profileSaved', args: [profile.name, profile.id]}})};
+        });
+      },
+      renameProfile: () => {
+        if (locked || !bound.selectedId) return;
+        const id = bound.selectedId;
+        void runCommand(origin, 'renamingProfile', async () => {
+          const profile = await invoke<Profile>('rename_profile', {workspace: ref, id, name: bound.name});
+          const catalog = await readProfiles(ref);
+          return {catalog, update: item => ({...updateBound(item, current => ({...current, profiles: current.profiles.map(entry => entry.id === profile.id ? profile : entry)})), notice: {key: 'profileRenamed', args: [profile.name]}})};
+        });
+      },
+      deleteProfile: () => {
+        if (locked || !bound.selectedId) return;
+        const id = bound.selectedId;
+        void runCommand(origin, 'deletingProfile', async () => {
+          await invoke('delete_profile', {workspace: ref, id});
+          const catalog = await readProfiles(ref);
+          return {catalog, update: item => ({...updateBound(item, current => ({...current, profiles: current.profiles.filter(entry => entry.id !== id), selectedId: current.selectedId === id ? null : current.selectedId, touched: true})),
+            notice: {key: 'profileDeleted'}})};
+        });
+      },
+      importLegacy: () => {
+        if (locked) return;
+        void runCommand(origin, 'importingProfiles', async () => {
+          const result = await invoke<LegacyImport>('import_legacy_profiles', {workspace: ref});
+          const catalog = await readProfiles(ref);
+          return {catalog, update: item => ({...item, legacyImport: result,
+            notice: {key: result.fault ? 'profilesImportPartial' : 'profilesImported', args: [result.imported.length, result.unchanged.length]}})};
+        });
+      },
+      reinspect: () => inspectFor(workspace),
+      recovery: recoveryHandlers(workspace),
+      start: () => void startRun(workspace),
+      stop: () => void stopRun(),
+    };
+  }
+
+  async function startRun(workspace: BoundWorkspace) {
+    const facts = derived[workspace.id];
+    const bound = workspace.bound;
+    if (hostCommand.current !== null || pickerRequest.current !== null || active || closing || facts.startBlock || facts.descriptorError) return;
+    let values: Record<string, Json>;
+    try {values = valuesForCommand(workspace);} catch (cause) {const error = fault(cause); change(workspace.id, item => ({...item, error})); return;}
+    const profile = facts.selectedProfile;
+    const profileId = profile && !facts.valuesDirty ? profile.id : 'draft';
+    const replay = bound.lane === 'replay';
+    const request: StartRequest = {
+      package_path: bound.packagePath, inventory_identity: bound.package.inventory_identity,
+      package_id: profile?.package_id ?? bound.package.package_id, schema_identity: profile?.schema_identity ?? bound.package.schema_identity,
+      profile_id: profileId, values, lane: bound.lane, scenario: replay ? 'workflow' : bound.scenario,
+      replay_descriptor_path: replay ? bound.descriptorPath.trim() || null : null,
+    };
+    const profileName = profile && !facts.valuesDirty ? profile.name : bound.name;
+    const ref = workspaceRef(workspace);
+    hostCommand.current = 'admittingRun';
     startInFlight.current = true;
     epoch.current += 1;
-    setStarting(true);
-    setError(null);
-    setNotice('');
-    setDisclosed(false);
+    setStarting({workspaceId: workspace.id, kind: 'run'});
+    setStripMessage(null);
+    change(workspace.id, item => ({...updateBound(item, current => ({...current, disclosedRun: null})), error: null, notice: null}));
     try {
-      const run = await invoke<string>('start', {request});
+      const run = await invoke<string>('start', {workspace: ref, request});
       expectedRun.current = run;
-      setSnapshot({kind: 'run', run, lane, packageId: request.package_id, profileName, profileId, scenario: request.scenario, descriptorPath: request.replay_descriptor_path, values});
-      setView({...idle, run, state: 'preparing'});
+      setOperation({run, kind: 'run', workspace: ref, snapshot: {kind: 'run', run, lane: bound.lane, packageId: request.package_id, profileName, profileId, scenario: request.scenario, descriptorPath: request.replay_descriptor_path, values}});
+      setView({...idle, run, state: 'preparing', workspace_id: ref.workspace_id, workspace_revision: ref.revision});
     } catch (cause) {
-      setError(fault(cause));
+      // A refused Start releases only its own preparation state; nothing else changes.
+      const error = fault(cause);
+      setWorkspaces(list => applyIfCurrent(list, {id: workspace.id, revision: workspace.revision}, item => ({...item, error})));
     } finally {
       epoch.current += 1;
       startInFlight.current = false;
-      setStarting(false);
+      hostCommand.current = null;
+      setStarting(null);
     }
   }
+
+  const envParsed = useMemo(() => readEnvironment(settingsDraft.environment, locale), [settingsDraft.environment, locale]);
+  const envDirty = Object.keys(envParsed.errors).length > 0 || !sameEnvironment(envParsed.environment, savedEnvironment);
+  const parsedSettings = useMemo(() => readSettingsDraft(settingsDraft, locale), [settingsDraft, locale]);
+  const dialogDirty = settings === null || settingsDraft.locale !== settings.locale || settingsDraft.logLimit.trim() !== String(settings.gui_log_limit)
+    || !sameNotifications(settingsDraft.notifications, settings.notifications) || settingsDraft.backupDirectory.trim() !== (settings.backup_directory ?? '') || envDirty;
+  // Check binds the workspace visible when the dialog opened; an unbound Tab is never passed as a package association.
+  const checkTarget: CheckTarget = selected?.bound
+    ? {workspace: workspaceRef(selected), label: workspaceLabel(selected, workspaces), descriptorPath: selected.bound.descriptorPath.trim() || null, packageInventoryIdentity: selected.bound.package.inventory_identity}
+    : {workspace: null, label: t.none, descriptorPath: null, packageInventoryIdentity: null};
+  const checkStale = lastCheck ? staleReasons(lastCheck.association, {
+    saved: savedEnvironment, draftDirty: envDirty, workspace: checkTarget.workspace, descriptorPath: checkTarget.descriptorPath, packageInventoryIdentity: checkTarget.packageInventoryIdentity,
+  }, locale) : [];
 
   // Check reads saved settings only; the association records exactly what the backend will read.
   async function checkEnvironment() {
-    if (startInFlight.current || active || commandInFlight.current || closing || envDirty) return;
+    if (hostCommand.current !== null || pickerRequest.current !== null || active || closing || envDirty || appBusy) return;
+    if (selected?.bound && derived[selected.id].descriptorError) {
+      setDialogError({kind: 'check', value: new LocalFault({key: 'descriptorLimit', args: [DESCRIPTOR_LIMIT]})});
+      return;
+    }
+    const target = checkTarget;
+    hostCommand.current = 'admittingCheck';
     startInFlight.current = true;
     epoch.current += 1;
-    setStarting(true);
-    setError(null);
-    setNotice('');
-    setDisclosed(false);
+    setStarting({workspaceId: target.workspace?.workspace_id ?? null, kind: 'check'});
+    setStripMessage(null);
+    setDialogError(null);
     try {
       const current = settings;
       if (!current?.ocr_environment || !sameEnvironment(current.ocr_environment, envParsed.environment)) {
-        throw {category: 'Draft', message: 'Saved settings no longer match this environment. Save the environment, then Check again.', context: null};
+        throw new LocalFault({key: 'environmentChanged'});
       }
-      const operation = await invoke<string>('check_environment', {replayDescriptorPath: selectedDescriptor, packageInventoryIdentity: selection?.inventory_identity ?? null});
-      expectedRun.current = operation;
-      const association: CheckAssociation = {
-        operation, environment: current.ocr_environment, descriptorPath: selectedDescriptor, packageInventoryIdentity: selection?.inventory_identity ?? null,
-      };
-      setSnapshot({kind: 'check', run: operation, association});
-      setView({...idle, run: operation, state: 'preparing', operation: 'environment_check'});
+      const run = await invoke<string>('check_environment', {workspace: target.workspace, replayDescriptorPath: target.descriptorPath});
+      expectedRun.current = run;
+      const association: CheckAssociation = {operation: run, workspace: target.workspace, environment: current.ocr_environment, descriptorPath: target.descriptorPath, packageInventoryIdentity: target.packageInventoryIdentity};
+      setOperation({run, kind: 'check', workspace: target.workspace, snapshot: {kind: 'check', run, association}});
+      setView({...idle, run, state: 'preparing', operation: 'environment_check', workspace_id: target.workspace?.workspace_id ?? null, workspace_revision: target.workspace?.revision ?? null});
     } catch (cause) {
-      setError(fault(cause));
+      setDialogError({kind: 'check', value: fault(cause)});
     } finally {
       epoch.current += 1;
       startInFlight.current = false;
-      setStarting(false);
+      hostCommand.current = null;
+      setStarting(null);
     }
   }
 
+  // Stop addresses the retained operation ID, never the visible workspace, and never waits on workspace state.
   async function stopRun() {
-    if (!view.run || stopping || !busyPhases.has(view.state)) return;
+    if (!view.run || stopping || !busy(view.state)) return;
     const run = view.run;
     setStopping(true);
-    setError(null);
     try {
       await invoke('stop', {run});
       epoch.current += 1;
-      setView(current => current.run === run && busyPhases.has(current.state) ? {...current, state: 'stopping'} : current);
-      setNotice('Stop requested. Waiting for independent cleanup and terminal evidence.');
-    } catch (cause) {setError(fault(cause));}
-    finally {setStopping(false);}
+      setView(current => current.run === run && busy(current.state) ? {...current, state: 'stopping'} : current);
+      setStripMessage({text: {key: 'stopRequested'}, error: false});
+    } catch (cause) {
+      setStripMessage({text: {key: 'stopFailed', args: [faultSummary(fault(cause), true)]}, error: true});
+    } finally {
+      setStopping(false);
+    }
+  }
+
+  function openSettings() {
+    if (settings === null || !normalReady) return;
+    menuButton.current?.focus();
+    setMenuOpen(false);
+    setSettingsDraft(settingsDraftFrom(settings));
+    setDialogError(null);
+    setSaveNotice(null);
+    setDialogOpen(true);
   }
 
   async function saveSettings() {
-    if (!/^\d+$/.test(logLimit) || !Number.isSafeInteger(Number(logLimit))) {
-      throw new Error('GUI log limit must be an integer from 1 to 10000. The saved setting is unchanged.');
+    const editable = parsedSettings.settings;
+    if (settings === null || !normalReady || !editable || appBusy || commandReason !== null) return;
+    const submitted = settingsDraft;
+    setAppBusy('savingSettings');
+    setDialogError(null);
+    try {
+      const saved = await invoke<Settings>('save_settings', {settings: editable});
+      adoptSettings(saved);
+      setCards(old => trimCards(old, saved.notifications.visible_count));
+      setSettingsDraft(current => settingsDraftAfterSave(current, submitted, saved));
+      setSaveNotice(saved.ocr_environment ? {key: 'settingsSaved', args: [saved.ocr_environment.profile]} : {key: 'settingsSavedEmpty'});
+    } catch (cause) {
+      setDialogError({kind: 'save', value: fault(cause)});
+      // A settings fault after Ready is recorded by the shell; re-reading it exposes Recovery without dropping the Application.
+      void bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false);
+    } finally {
+      setAppBusy(null);
     }
-    const previous = await invoke<Settings>('settings');
-    const saved = await invoke<Settings>('save_settings', {settings: {...previous, gui_log_limit: Number(logLimit)}});
-    setSettings(saved);
-    setLogLimit(String(saved.gui_log_limit));
-    retention.current = saved.gui_log_limit;
-    setLogs(old => retainLogs(old, [], saved.gui_log_limit));
-    setNotice(`Saved GUI log limit: ${saved.gui_log_limit}. Run results and file logs are unchanged.`);
   }
 
-  async function saveEnvironment() {
-    if (envErrors) throw {category: 'Draft', message: 'Correct the environment fields before saving. The saved environment is unchanged.', context: envParsed.errors};
-    const savedRevision = envRevision.current;
-    const environment = envParsed.environment;
-    const previous = await invoke<Settings>('settings');
-    const saved = await invoke<Settings>('save_settings', {settings: {...previous, ocr_environment: environment}});
-    setSettings(saved);
-    if (savedRevision === envRevision.current) setEnvDraft(environmentDraft(saved.ocr_environment));
-    setNotice(saved.ocr_environment
-      ? `Saved OCR environment · ${saved.ocr_environment.profile}. Nothing was initialized; run Check. Active operations keep their captured environment.`
-      : 'Saved settings with no OCR environment. Controlled runs are unaffected; replay and Check need a saved environment.');
+  // The dispatched archive keeps its owner and result; dismissing a dialog neither cancels nor rolls it back.
+  async function snapshot(destination: string | null) {
+    if (snapshotBusy.current) return;
+    snapshotBusy.current = true;
+    dispatch({type: 'snapshotPending'});
+    try {
+      const receipt = await invoke<SnapshotReceipt>('snapshot', {destination});
+      dispatch({type: 'snapshotSettled', outcome: {kind: 'receipt', receipt}});
+    } catch (cause) {
+      dispatch({type: 'snapshotSettled', outcome: {kind: 'fault', fault: fault(cause)}});
+    } finally {
+      snapshotBusy.current = false;
+    }
   }
 
-  return <div className="app-shell">
-    <header className="app-header"><div><span className="eyebrow">CONTROLLED DESKTOP RUNNER</span><h1>MadoMata</h1></div>
-      <div className="header-actions"><span className="lane-badge">QuickJS · recorded replay only · no live authority</span>
-        <button id="close" disabled={closing} onClick={async () => {
-          setClosing(true);
-          try {await getCurrentWindow().close();} catch (cause) {setError(fault(cause)); setClosing(false);}
-        }}>{closing ? 'Closing…' : 'Close'}</button>
+  const receiptGeneration = bootstrap.receiptGeneration;
+  const bootstrapHandlers = {
+    onInitialize: () => void bootstrapAction('initializing', () => invoke<BootstrapStatus>('initialize', {settings: initialSettings(bootstrap.setup), confirmFresh: status?.legacy_root !== null && bootstrap.setup.startFresh}), true),
+    onRetry: () => void bootstrapAction('retrying', () => invoke<BootstrapStatus>('retry_bootstrap', {discard: bootstrap.restore.retryDiscard}), true),
+    onImportRoot: () => void bootstrapAction('importingRoot', () => invoke<BootstrapStatus>('import_legacy_root'), true),
+    onSnapshot: () => void snapshot(bootstrap.snapshotDestination.trim() || null),
+    onRestore: () => void bootstrapAction('restoring', () => invoke<BootstrapStatus>('restore_snapshot', {
+      archivePath: bootstrap.restore.archivePath.trim(), receiptGeneration, confirm: bootstrap.restore.confirm, discard: bootstrap.restore.discard,
+    }), true),
+    onRecover: (rollback: boolean) => void bootstrapAction('recovering', () => invoke<BootstrapStatus>('recover_restore', {rollback, confirm: bootstrap.restore.recoverConfirm, discard: bootstrap.restore.recoverDiscard}), true),
+    onExit: () => void exitApplication(),
+    onDismiss: () => {setConfigurationOpen(false); menuButton.current?.focus();},
+  };
+
+  async function exitApplication() {
+    invalidateAllTargets();
+    setMenuOpen(false);
+    setClosing(true);
+    try {await getCurrentWindow().close();} catch (cause) {dispatch({type: 'actionFailed', fault: fault(cause)}); setClosing(false);}
+  }
+
+  async function refreshSaved() {
+    try {
+      const catalog = await invoke<WorkspaceCatalog>('workspace_catalog');
+      setSavedClosed(catalog.closed);
+      setCatalogFaults(catalog.faults);
+      setCatalogError(null);
+    } catch (cause) {
+      setCatalogError(fault(cause));
+    }
+  }
+
+  function openCreate() {
+    if (appBusy !== null || closing || !normalReady) return;
+    setCreateError(null);
+    setCreateOpen(true);
+  }
+
+  function openSaved() {
+    if (closing || !normalReady) return;
+    setReopenError(null);
+    setSavedOpen(true);
+    void refreshSaved();
+  }
+
+  // Creation persists a genuinely unbound Tab; success navigates to its Edit guidance, failure keeps the draft.
+  async function createWorkspace() {
+    if (hostCommand.current !== null || appBusy !== null || closing || !normalReady) return;
+    hostCommand.current = 'creatingWorkspace';
+    setAppBusy('creatingWorkspace');
+    setCreateError(null);
+    try {
+      const created = await invoke<WorkspaceView>('create_workspace', {internalName: createDraft.internalName, displayName: createDraft.displayName});
+      setWorkspaces(list => [...list, workspaceFromView(created, {key: 'created'})]);
+      go({kind: 'workspace', id: created.workspace_id});
+      setCreateOpen(false);
+      setCreateDraft(EMPTY_CREATE);
+      void refreshSaved();
+    } catch (cause) {
+      setCreateError(fault(cause));
+    } finally {
+      hostCommand.current = null;
+      setAppBusy(null);
+    }
+  }
+
+  async function reopenWorkspace(internalName: string) {
+    if (hostCommand.current !== null || appBusy !== null || closing || !normalReady) return;
+    hostCommand.current = 'reopeningWorkspace';
+    setAppBusy('reopeningWorkspace');
+    setReopening(internalName);
+    setReopenError(null);
+    try {
+      const reopened = await invoke<WorkspaceView>('reopen_workspace', {internalName});
+      setWorkspaces(list => [...list, workspaceFromView(reopened, {key: 'reopened'})]);
+      go({kind: 'workspace', id: reopened.workspace_id});
+      setSavedOpen(false);
+      void refreshSaved();
+    } catch (cause) {
+      setReopenError(fault(cause));
+    } finally {
+      hostCommand.current = null;
+      setAppBusy(null);
+      setReopening(null);
+    }
+  }
+
+  function focusWorkspaceSelection(remaining: number) {
+    requestAnimationFrame(() => {
+      (remaining > 0 ? document.getElementById('workspace-select') : document.getElementById('new-workspace'))?.focus();
+    });
+  }
+
+  async function closeTab(workspace: Workspace, confirmed: boolean) {
+    const current = runView(workspace);
+    if (hostCommand.current !== null) {const pending = hostCommand.current; change(workspace.id, item => ({...item, notice: {key: 'waitForCommand', args: [pending]}})); return;}
+    if (current.live && busy(current.view.state)) {change(workspace.id, item => ({...item, notice: {key: 'ownerCannotClose'}})); return;}
+    if (dirtyDraft(workspace) && !confirmed) {setPendingClose(workspace.id); return;}
+    invalidateOwnerTarget(workspace.id);
+    setPendingClose(null);
+    hostCommand.current = 'closingWorkspace';
+    change(workspace.id, item => ({...item, busy: {key: 'closingWorkspace'}, error: null}));
+    let remaining = workspaces.length;
+    try {
+      await invoke('close_workspace', {workspace: workspaceRef(workspace)});
+      const index = workspaces.findIndex(item => item.id === workspace.id);
+      const neighbor = workspaces[index + 1] ?? workspaces[index - 1];
+      remaining = workspaces.length - 1;
+      setClosed(old => retainClosed(old, {id: workspace.id, revision: workspace.revision, label: workspaceLabel(workspace, workspaces), result: current.view.run ? current.view : null}));
+      setWorkspaces(list => closeWorkspace(list, workspace.id));
+      setResults(old => {
+        if (!(workspace.id in old)) return old;
+        const next = {...old};
+        delete next[workspace.id];
+        return next;
+      });
+      if (nav.kind === 'workspace' && nav.id === workspace.id) go(neighbor ? {kind: 'workspace', id: neighbor.id} : {kind: 'none'});
+      void refreshSaved();
+    } catch (cause) {
+      const error = fault(cause);
+      change(workspace.id, item => ({...item, busy: null, error}));
+    } finally {
+      hostCommand.current = null;
+      focusWorkspaceSelection(remaining);
+    }
+  }
+
+  function openDiagnostics(card: Card) {
+    setCards(old => dismissCard(old, card.id));
+    if (card.workspaceId === null) {
+      setAppFilter(EMPTY_FILTER);
+      go({kind: 'application'});
+    } else if (workspaces.some(workspace => workspace.id === card.workspaceId)) {
+      const id = card.workspaceId;
+      change(id, item => ({...item, page: 'logs', logFilter: EMPTY_FILTER}));
+      go({kind: 'workspace', id});
+    } else {
+      setClosedFilter(EMPTY_FILTER);
+      go({kind: 'closed', id: card.workspaceId});
+    }
+    setReveal({scope: card.workspaceId ?? 'application', sequence: card.id});
+  }
+
+  function menuKeys(event: KeyboardEvent<HTMLDivElement>) {
+    const items = Array.from(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    if (event.key === 'Escape') {event.preventDefault(); setMenuOpen(false); menuButton.current?.focus();}
+    else if (event.key === 'ArrowDown') {event.preventDefault(); items[(index + 1) % items.length]?.focus();}
+    else if (event.key === 'ArrowUp') {event.preventDefault(); items[(index - 1 + items.length) % items.length]?.focus();}
+    else if (event.key === 'Tab') setMenuOpen(false);
+  }
+
+  const owner = starting ? starting.workspaceId : view.workspace_id;
+  const phase = starting ? 'preparing' : view.state;
+  const stripKind = ui.operation((starting?.kind ?? operation?.kind ?? (view.operation === 'environment_check' ? 'check' : 'run')) === 'check' ? 'environment_check' : 'run');
+  const strip = (idPrefix: string): ReactNode => active ? <OperationStrip idPrefix={idPrefix} owner={owner === null ? t.applicationOwner : labelOf(owner)} kind={stripKind} phase={phase} run={starting ? null : view.run}
+    message={stripMessage && {text: renderMessage(locale, stripMessage.text), error: stripMessage.error}} stopDisabled={!view.run || !busy(view.state) || view.state === 'stopping' || stopping || starting !== null || closing} onStop={() => void stopRun()}/> : null;
+
+  if (shell !== 'shell') {
+    // Before the first resolved status the shell is already real: presentation choice and Exit work, nothing is assumed.
+    return <LocaleContext value={locale}>
+      {shell === 'loading' || status === null
+        ? <div className="bootstrap-page">
+          <header className="topbar">
+            <div className="brand"><span className="brandmark" aria-hidden="true">M</span><span>MadoMata</span></div>
+            <div className="topbar-actions"><div className="inline-label"><label htmlFor="presentation-locale">{ui.bootstrap.presentation}</label>
+              <Select id="presentation-locale" value={bootstrap.presentation} options={[{value: 'en', label: ui.settings.languageNames.en}, {value: 'ja', label: ui.settings.languageNames.ja}]}
+                onChange={value => {if (value === 'en' || value === 'ja') dispatch({type: 'presentation', locale: value});}}/></div>
+              <button id="bootstrap-exit" type="button" disabled={closing} onClick={() => void exitApplication()}>{closing ? ui.bootstrap.exiting : ui.bootstrap.exit}</button></div>
+          </header>
+          <main className="content bootstrap-content" aria-busy="true">
+            <p className="muted" role="status">{ui.bootstrap.loading}</p>
+            {bootstrap.actionError && <FaultMessage title={ui.bootstrap.actionFailed} value={bootstrap.actionError}/>}
+          </main>
+        </div>
+        : <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={false}/>}
+    </LocaleContext>;
+  }
+
+  const workspaceItems: WorkspaceOption[] = workspaces.map(workspace => {
+    const current = runView(workspace);
+    const facts = derived[workspace.id];
+    const owns = starting?.workspaceId === workspace.id || (current.live && busy(current.view.state));
+    const sourceIssue = workspace.sourceError ? workspace.sourceError.category === UNSUPPORTED_SOURCE ? t.unsupportedSource : t.unavailableSource : null;
+    const issue = workspace.error?.category ?? (workspace.recovery?.view.binding_required ? t.bindingRequired : null)
+      ?? workspace.bound?.profilesError?.category ?? workspace.bound?.target.readError?.category ?? workspace.bound?.target.issue?.fault.category
+      ?? sourceIssue ?? (workspace.recovery !== null && workspace.recovery.view.profiles.length > 0 ? t.repairRequired : null)
+      ?? (facts ? facts.numericErrors ? t.invalidFields : !facts.bound ? t.staleProfile : facts.descriptorError ? t.invalidDescriptor : null : null);
+    const attention = issue !== null || needsAttention(current.view);
+    const optionStatus: WorkspaceOption['status'] = owns ? {kind: 'busy', text: `${ui.phase(starting?.workspaceId === workspace.id ? 'preparing' : current.view.state)} · ${ui.operation(starting?.workspaceId === workspace.id ? starting.kind === 'check' ? 'environment_check' : 'run' : current.view.operation)}`}
+      : workspace.busy ? {kind: 'busy', text: renderMessage(locale, workspace.busy)}
+      : attention ? {kind: 'attention', text: t.attention(issue ?? current.view.error?.category ?? text(current.view.result?.status) ?? t.unresolved)}
+      : dirtyDraft(workspace) ? {kind: 'dirty', text: t.unsavedDraft}
+      : facts ? {kind: 'ready', text: t.ready(facts.selectedProfile ? facts.selectedProfile.name : t.draft)}
+      : {kind: 'ready', text: t.noPackage};
+    return {id: workspace.id, title: workspace.bound?.packagePath ?? workspace.internalName, label: workspaceLabel(workspace, workspaces), status: optionStatus, running: owns, attention};
+  });
+  const inShellRecovery = status !== null && status.state === 'recovery';
+  // Guidance names the owner's scope truthfully: an Application-scoped check has no owning workspace.
+  const activeOwner = (workspace: Workspace): ActiveOwner => !active || owner === workspace.id ? null : owner === null ? 'application' : 'other';
+
+  return <LocaleContext value={locale}><div className="app">
+    <header className="topbar">
+      <div className="brand"><span className="brandmark" aria-hidden="true">M</span><span>MadoMata</span><span className="divider" aria-hidden="true"/><span className="eyebrow">{t.workspace}</span></div>
+      <div className="topbar-actions">
+        <span className="lane-badge">{t.controlledScope}</span>
+        <div className="menu-anchor">
+          <button id="application-menu" ref={menuButton} type="button" aria-haspopup="menu" aria-expanded={menuOpen} aria-controls="application-menu-items" onClick={() => setMenuOpen(open => !open)}>{t.application} ▾</button>
+          {menuOpen && <div id="application-menu-items" ref={menu} className="dropdown" role="menu" aria-labelledby="application-menu" onKeyDown={menuKeys}>
+            <button type="button" role="menuitem" id="menu-settings" disabled={settings === null || !normalReady} onClick={openSettings}>{t.appSettings}</button>
+            <button type="button" role="menuitem" id="menu-restore" onClick={() => {menuButton.current?.focus(); setMenuOpen(false); setConfigurationOpen(true);}}>{ui.bootstrap.restoreHeading}</button>
+            <button type="button" role="menuitem" id="menu-application-logs" aria-current={nav.kind === 'application' ? 'page' : undefined} onClick={() => {setMenuOpen(false); go({kind: 'application'});}}>{t.applicationLogs}<span className="count">{logCounts[''] ?? 0}</span></button>
+            <button type="button" role="menuitem" id="close" disabled={closing} onClick={() => void exitApplication()}>{closing ? t.closing : t.closeWindow}</button>
+            <p className="menu-description">{t.menuDescription}</p>
+          </div>}
+        </div>
       </div>
     </header>
-    <section className="package-bar" aria-labelledby="package-heading">
-      <div className="package-input"><label id="package-heading" htmlFor="package-path">Package directory</label>
-        <input id="package-path" type="text" value={packagePath} disabled={locked} placeholder="Absolute path to a package directory" spellCheck={false}
-          onChange={event => {setPackagePath(event.target.value); forgetSelection(); setError(null);}}/>
+    <div className="workspace-bar">
+      <div className="workspace-switcher">
+        <WorkspaceSwitcher items={workspaceItems} selectedId={selected?.id ?? null} onSelect={id => go({kind: 'workspace', id})}
+          onClose={selected ? () => void closeTab(selected, false) : null}
+          closeReason={active && owner === selected?.id ? t.ownsOperation : commandReason ?? (closing ? t.applicationClosing : null)}
+          onSaved={openSaved} savedDisabled={closing || !normalReady}/>
+        <button id="new-workspace" type="button" className="workspace-action" aria-label={t.newWorkspace} aria-haspopup="dialog" disabled={appBusy !== null || closing || !normalReady}
+          title={workspaces.length >= WORKSPACE_LIMIT ? t.workspaceLimit(WORKSPACE_LIMIT) : t.newWorkspace} onClick={openCreate}>+</button>
+        <span id="workspace-summary" className="visually-hidden">{t.workspaceSummary}</span>
       </div>
-      <button id="inspect" disabled={locked || !packagePath.trim()} onClick={() => void command('Inspecting package', () => inspectPath(packagePath))}>Inspect</button>
-      <div className="package-identity">{selection ? <><strong>{selection.package_id}</strong><span>{selection.runtime} · inspected</span></> : <span>No inspected package</span>}</div>
-    </section>
+      <nav className="workspace-pages" aria-label={selected ? t.selectedPages : t.currentScope}>
+        {selected && <>
+          <button id="page-run" type="button" className="nav-item" aria-current={selected.page === 'run' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'run'}));}}>{isBound(selected) ? t.runControl : t.guidance}</button>
+          <button id="page-logs" type="button" className="nav-item" aria-current={selected.page === 'logs' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'logs'}));}}>{t.logs}<span className="count">{logCounts[selected.id] ?? 0}</span></button>
+        </>}
+        {nav.kind === 'application' && <span className="scope-label">{t.applicationLogs}</span>}
+        {nav.kind === 'closed' && <span className="scope-label">{t.closedDiagnostics}</span>}
+      </nav>
+    </div>
+    {pendingClose && workspaces.some(workspace => workspace.id === pendingClose) && <div className="confirm-bar" role="alertdialog" aria-labelledby="confirm-close-text">
+      <span id="confirm-close-text">{t.closeConfirm(labelOf(pendingClose))}</span>
+      <button type="button" className="danger-text" onClick={() => {const workspace = workspaces.find(item => item.id === pendingClose); if (workspace) void closeTab(workspace, true);}}>{t.discardClose}</button>
+      <button type="button" autoFocus onClick={() => {setPendingClose(null); focusWorkspaceSelection(workspaces.length);}}>{t.keepOpen}</button>
+    </div>}
+    {strip('app')}
+    {pollError && <div className="content-wide"><FaultMessage title={t.connectionFailed} value={pollError}/></div>}
+    {(inShellRecovery || configurationOpen) && status && <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={true}/>}
+    {status?.state === 'ready' && status.fault && <div className="content-wide"><FaultMessage title={`${ui.bootstrap.stage} · ${status.stage}`} value={status.fault}/>
+      <div className="button-row"><button id="refresh-status" type="button" disabled={bootstrap.pending !== null} onClick={() => void bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false)}>{ui.reopen.refresh}</button>
+        <span className="muted">{ui.bootstrap.actionFailedHelp}</span></div></div>}
     <div className="workspace">
-      <aside className="sidebar">
-        <section aria-labelledby="profiles-heading"><h2 id="profiles-heading">Profiles</h2><p className="muted">Saved locally, outside the package.</p>
-          <label htmlFor="profile-select">Saved profile</label>
-          <select id="profile-select" value={selectedId ?? ''} disabled={!selection || locked} onChange={event => selectProfile(event.target.value)}>
-            <option value="">Unsaved draft</option>{profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
-          </select>
-          <p className={`save-status ${dirty ? 'unsaved' : ''}`}>{selectedProfile ? dirty ? 'Saved profile · draft has changes' : 'Saved · no changes' : 'Draft · not saved'}</p>
-          {selectedProfile && <p className="identity-text">{selectedProfile.id}</p>}
-          {!bound && <p className="inline-warning">Stale schema identity. This profile cannot be rebound or run.</p>}
-          <label htmlFor="profile-name">Profile name</label><input id="profile-name" value={name} disabled={!selection || locked} onChange={event => {setName(event.target.value); setNotice('');}}/>
-          <button id="save-profile" className="primary full-width" disabled={!selection || locked || !name.trim() || numericErrors || !bound}
-            onClick={() => void command('Saving profile', saveProfile)}>{selectedId ? 'Update profile' : 'Save new profile'}</button>
-          <div className="button-row"><button id="new-profile" disabled={!selection || locked} onClick={() => selection && newDraft(selection)}>New draft</button>
-            <button id="rename-profile" disabled={!selectedId || locked || !name.trim() || !bound} onClick={() => void command('Renaming profile', async () => {
-              const profile = await invoke<Profile>('rename_profile', {id: selectedId, name});
-              setProfiles(old => old.map(item => item.id === profile.id ? profile : item));
-              setNotice(`Renamed saved profile to “${profile.name}”. Draft values are unchanged.`);
-            })}>Rename</button></div>
-          <button id="delete-profile" className="danger-text full-width" disabled={!selectedId || locked} onClick={() => void command('Deleting profile', async () => {
-            const id = selectedId;
-            await invoke('delete_profile', {id});
-            setProfiles(old => old.filter(item => item.id !== id));
-            setSelectedId(null);
-            setNotice('Saved profile deleted. Its values remain in this unsaved draft; active runs are unchanged.');
-          })}>Delete profile</button>
-          {profilesError && <><FaultMessage title="Some saved profiles could not be loaded" value={profilesError}/><p className="muted">Compatible profiles and new drafts remain available. Stored files were not modified. Restore compatible data, then Inspect again.</p></>}
-          <div className="sidebar-divider"/><label htmlFor="preset-select">Package preset</label>
-          <select id="preset-select" value={preset} disabled={!selection || locked} onChange={event => selection && newDraft(selection, event.target.value)}>
-            <option value="">Top-level defaults</option>{Object.keys(selection?.profiles ?? {}).map(key => <option key={key} value={key}>{key}</option>)}
-          </select><p className="muted">Choosing a preset creates a new draft. Save it with a name to keep it.</p>
-        </section>
-        <section className="settings-panel" aria-labelledby="settings-heading"><h2 id="settings-heading">Display settings</h2>
-          <label htmlFor="gui-log-limit">GUI log item limit</label><input id="gui-log-limit" type="text" inputMode="numeric" value={logLimit}
-            disabled={locked} onChange={event => setLogLimit(event.target.value)}/>
-          <p className="muted">1–10000 · default 1000<br/>Saved limit: {settings?.gui_log_limit ?? 'not loaded'}</p>
-          <button id="save-settings" disabled={locked} onClick={() => void command('Saving settings', saveSettings)}>Save settings</button>
-        </section>
-      </aside>
-      <main className="main-content">
-        <div className="operation-status" role="status">{operation || notice || 'Edits affect the next operation, never the active snapshot.'}</div>
-        <div id="error">{error && <FaultMessage title="Action failed" value={error}/>}
-          {primary && (privatePrimary || view.operation === 'environment_check'
-            ? <section className="fault" role="alert"><strong>{view.operation === 'environment_check' ? 'Primary check error' : 'Primary run error'} · {faultSummary(primary, !privatePrimary)}</strong>
-                <p>Full diagnostics are available through explicit private disclosure below.</p></section>
-            : <FaultMessage title="Primary run error" value={primary}/>)}
-        </div>
-        {pollError && <FaultMessage title="Controller connection failed · last known state retained" value={pollError}/>}
-        <div className="editor-run-grid">
-          <section className="panel editor-panel" aria-labelledby="draft-heading">
-            <div className="panel-heading"><div><span className="eyebrow">NEXT RUN</span><h2 id="draft-heading">{name || 'Untitled draft'}</h2></div><span className="tag">{dirty ? 'Unsaved changes' : 'Saved values'}</span></div>
-            <p className="muted">Missing top-level fields use schema defaults. Explicit objects are never recursively filled.</p>
-            {selection ? <SchemaForm schema={selection.schema} value={draft} onChange={editDraft} errors={parsed.errors}/>
-              : <div className="empty-state"><h3>Inspect a package to begin</h3><p>Choose its directory above. Inspection loads the schema and compatible saved profiles without executing the script.</p></div>}
-            <div className="editor-footer"><button id="validate" disabled={!selection || locked || numericErrors || !bound} onClick={() => void command('Validating draft', async () => {
-              const checkedRevision = revision.current;
-              const effective = await invoke<Record<string, Json>>('validate', {values: valuesForCommand()});
-              if (checkedRevision === revision.current) setValidation(effective);
-              setNotice(checkedRevision === revision.current ? 'Draft validated by the backend. Start will validate again.' : 'An earlier draft was validated. Current edits still need validation.');
-            })}>Validate</button><span className="muted">Backend validation reports exact field paths.</span></div>
-            {validation && <details className="validated"><summary>Valid · effective values</summary><pre>{JSON.stringify(validation, null, 2)}</pre></details>}
-          </section>
-          <section className="panel run-panel" aria-labelledby="run-heading">
-            <div className="panel-heading"><div><span className="eyebrow">IMMUTABLE OPERATION</span><h2 id="run-heading">{view.operation === 'environment_check' ? 'Environment check' : 'Execution'}</h2></div>
-              <span id="state" className={`phase phase-${starting ? 'preparing' : view.state}`}>{starting ? 'preparing' : view.state}</span></div>
-            <label htmlFor="lane">Execution lane</label><select id="lane" value={lane} onChange={event => {setLane(event.target.value); setNotice('');}}>
-              <option value="controlled">Controlled · fixture observations, no recognition</option>
-              <option value="replay">Replay · recorded corpus, real recognition, controlled sink</option>
-              <option value="native" disabled>Native · refused, no live capture or input</option>
-            </select>
-            <label htmlFor="scenario">Controlled scenario</label><select id="scenario" value={lane === 'replay' ? 'workflow' : scenario} disabled={lane === 'replay'} onChange={event => setScenario(event.target.value)}>
-              <option value="workflow">Workflow</option><option value="held-work">Held work · exercise Stop</option><option value="no-match">No match</option>
-            </select><p className="muted">Start uses {selectedProfile && !valuesDirty ? `saved profile “${selectedProfile.name}”` : 'the explicit draft shown here'}{lane === 'replay' ? `, the saved OCR environment, and descriptor ${selectedDescriptor ?? '(none)'}` : ''}. Every Start revalidates files; no check or inspection is reused.</p>
-            <div className="run-buttons"><button id="start" className="primary" disabled={!selection || active || locked || numericErrors || !bound || startBlock !== null} onClick={() => void startRun()}>Start</button>
-              <button id="stop" className="stop-button" disabled={!view.run || !busyPhases.has(view.state) || view.state === 'stopping' || stopping || starting || closing} onClick={() => void stopRun()}>{stopping ? 'Requesting Stop…' : 'Stop'}</button></div>
-            {startBlock && <p className="muted" id="start-block">{startBlock}</p>}
-            <p className="authority-note">Submitted does not prove effect; Stop does not prove cleanup. Stop covers checks and runs alike.</p>
-            <dl className="run-identity"><dt>Operation ID</dt><dd id="run-id">{view.run ?? 'No operation yet'}</dd>
-              <dt>Kind</dt><dd id="operation-kind">{view.run ? view.operation === 'environment_check' ? 'Environment check · no package code' : `Run · ${snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane) ?? 'unknown'} lane` : 'Idle'}</dd>
-              {snapshot?.kind === 'run' && <><dt>Captured profile</dt><dd>{snapshot.profileName} · {snapshot.profileId}</dd><dt>Package / scenario</dt><dd>{snapshot.packageId} / {snapshot.scenario}</dd>
-                {snapshot.lane === 'replay' && <><dt>Descriptor</dt><dd>{snapshot.descriptorPath}</dd></>}</>}
-              {snapshot?.kind === 'check' && <><dt>Checked profile</dt><dd>{snapshot.association.environment?.profile ?? 'unconfigured'}</dd>
-                <dt>Descriptor</dt><dd>{snapshot.association.descriptorPath ?? 'none · initialization not attempted'}</dd></>}
-            </dl>
-            {snapshot?.kind === 'run' && <details><summary>Captured options · unchanged by draft edits</summary><pre>{JSON.stringify(snapshot.values, null, 2)}</pre></details>}
-            {snapshot?.kind === 'check' && <details><summary>Captured saved environment · unchanged by later edits</summary><pre>{JSON.stringify(snapshot.association.environment, null, 2)}</pre></details>}
-            <h3>Progress milestones</h3><ol className="progress-list">{view.progress.map((event, index) => <li key={`${view.run}-${index}`}>
-              <details><summary>{String(event.event ?? 'Milestone')}{text(event.stage) ? ` · ${event.stage}` : ''}{typeof event.at_us === 'number' ? ` · ${(event.at_us / 1000).toFixed(1)} ms` : ''}</summary><pre>{JSON.stringify(event, null, 2)}</pre></details>
-            </li>)}</ol>{view.progress.length === 0 && <p className="muted">No milestones recorded.</p>}
-            <ResultPanel view={view} disclosed={disclosed} onDisclose={setDisclosed}/>
-          </section>
-        </div>
-        <EnvironmentPanel draft={envDraft} errors={envParsed.errors} onDraft={editEnvironment} saved={savedEnvironment} loaded={settings !== null}
-          dirty={envDirty} locked={locked} active={active} descriptorPath={descriptorPath} onDescriptorPath={path => {setDescriptorPath(path); setNotice('');}}
-          onSave={() => void command('Saving environment', saveEnvironment)} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale}/>
-        <section className="panel logs-panel" aria-labelledby="logs-heading">
-          <div className="panel-heading"><div><span className="eyebrow">STRUCTURED EVENT STREAM</span><h2 id="logs-heading">Logs</h2></div><span className="tag">{logs.items.length} / {settings?.gui_log_limit ?? 1000} retained</span></div>
-          <dl className="loss-counters"><div><dt>Display evicted</dt><dd>{logs.evicted}</dd></div><div><dt>Source / controller dropped · current run</dt><dd>{view.dropped_logs}</dd></div>
-            <div><dt>GUI transport dropped</dt><dd>{losses.gui_dropped}</dd></div><div><dt>File queue dropped</dt><dd>{losses.file_dropped}</dd></div><div><dt>File I/O errors</dt><dd>{losses.file_errors}</dd></div></dl>
-          {losses.last_file_error && <p className="inline-warning">Last file error: {losses.last_file_error}</p>}
-          <p className="muted">Newest first. Display eviction does not delete file records or change retained results.</p>
-          <ol id="log-list" className="log-list">{[...logs.items].reverse().map(entry => <li className={`log-entry level-${entry.level.toLowerCase()}`} key={entry.sequence}>
-            <div className="log-meta"><span className="log-level">{entry.level}</span><time dateTime={new Date(entry.time_ms).toISOString()}>{new Date(entry.time_ms).toLocaleTimeString()}</time><span>#{entry.sequence}</span><span>{entry.source}</span><code>{entry.run ?? 'application'}</code></div>
-            <p><code>{entry.code}</code> {entry.message}</p><details><summary>Diagnostic fields</summary><pre>{JSON.stringify(entry.fields, null, 2)}</pre></details>
-          </li>)}</ol>{logs.items.length === 0 && <p className="muted">Waiting for structured application and script events.</p>}
-        </section>
+      <main id="workspace-panel" className="content" aria-label={selected ? t.workspaceAria(workspaceLabel(selected, workspaces)) : undefined}>
+        {selected && selected.page === 'run' && (isBound(selected)
+          ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)} snapshot={operation?.snapshot ?? null}
+            locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
+            savedEnvironment={savedEnvironment} handlers={handlers(selected)}/>
+          : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
+            onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
+            recovery={recoveryHandlers(selected)}/>)}
+        {selected && selected.page === 'logs' && <LogsPage eyebrow={t.activity(workspaceLabel(selected, workspaces))} heading={t.logs} description={t.workspaceLogHelp}
+          items={logs.items} evicted={logs.evicted} limit={settings?.gui_log_limit ?? retention.current} scope={{kind: 'workspace', id: selected.id}}
+          filter={selected.logFilter} onFilter={filter => {setReveal(null); change(selected.id, item => ({...item, logFilter: filter}));}}
+          losses={losses} sourceDropped={runView(selected).live ? runView(selected).view.dropped_logs : null}
+          reveal={reveal?.scope === selected.id ? reveal.sequence : null} originLabel={labelOf} showOrigin={false}/>}
+        {nav.kind === 'application' && <LogsPage eyebrow={t.appActivity} heading={t.applicationLogs} description={t.appLogHelp}
+          items={logs.items} evicted={logs.evicted} limit={settings?.gui_log_limit ?? retention.current} scope={appScope} onScope={scope => {setReveal(null); setAppScope(scope);}}
+          filter={appFilter} onFilter={filter => {setReveal(null); setAppFilter(filter);}} losses={losses} sourceDropped={view.run ? view.dropped_logs : null}
+          reveal={reveal?.scope === 'application' ? reveal.sequence : null} originLabel={labelOf} showOrigin={appScope.kind === 'all'}/>}
+        {nav.kind === 'closed' && <>
+          <section className="panel closed-notice"><div className="panel-body">
+            <span className="eyebrow">{t.closedWorkspace}</span>
+            <h2>{t.closedLabel(closedSelected ? closedSelected.label : nav.id)}</h2>
+            <p className="muted">{t.closedHelp}{!closedSelected && <> {t.closedEvicted}</>}</p>
+            {closedSelected?.result && <><h3>{t.retainedOutcome(closedSelected.revision)}</h3><ResultPanel view={closedSelected.result} disclosed={closedDisclosed} onDisclose={setClosedDisclosed}/></>}
+          </div></section>
+          <LogsPage eyebrow={t.closedActivity} heading={t.retainedEvents} description={t.closedLogHelp}
+            items={logs.items} evicted={logs.evicted} limit={settings?.gui_log_limit ?? retention.current} scope={{kind: 'workspace', id: nav.id}}
+            filter={closedFilter} onFilter={filter => {setReveal(null); setClosedFilter(filter);}} losses={losses} sourceDropped={null}
+            reveal={reveal?.scope === nav.id ? reveal.sequence : null} originLabel={labelOf} showOrigin={false}/>
+        </>}
+        {noSelection && <>
+          <div className="page-heading"><div><span className="eyebrow">{t.workspace}</span><h1>{workspaces.length === 0 ? t.noWorkspaces : t.chooseWorkspace}</h1>
+            <p>{workspaces.length === 0 ? t.firstWorkspace : t.chooseHelp}</p></div>
+            <div className="actions">
+              <button id="create-first" type="button" className="primary" disabled={appBusy !== null || closing || !normalReady} onClick={openCreate}>{ui.workspaces.new}</button>
+              <button id="saved-first" type="button" disabled={closing || !normalReady} onClick={openSaved}>{ui.workspaces.saved}</button>
+            </div></div>
+          {catalogFaults.length > 0 && <section className="panel catalog-faults"><div className="panel-body"><h2>{ui.bootstrap.catalogFaults}</h2><p className="muted">{ui.bootstrap.catalogFaultsHelp}</p>
+            {catalogFaults.map((item, index) => <FaultMessage key={index} title={ui.bootstrap.catalogFaults} value={item}/>)}</div></section>}
+        </>}
       </main>
     </div>
-  </div>;
+    <Notifications cards={cards.cards} scopeLabel={labelOf} onDismiss={id => setCards(old => dismissCard(old, id))} onOpen={openDiagnostics}
+      onInteract={(id, interaction) => setCards(old => interactCard(old, id, interaction))}/>
+    <CreateWorkspaceDialog open={createOpen} draft={createDraft} onDraft={next => {setCreateDraft(next); setCreateError(null);}} onCancel={() => {if (appBusy !== 'creatingWorkspace') setCreateOpen(false);}}
+      onCreate={() => void createWorkspace()} creating={appBusy === 'creatingWorkspace'} error={createError} openCount={workspaces.length} savedCount={savedCount}
+      busyReason={appBusy === 'creatingWorkspace' ? null : commandReason} strip={strip('create')}/>
+    <SavedWorkspacesDialog open={savedOpen} onCancel={() => {if (reopening === null) setSavedOpen(false);}} closed={savedClosed} faults={catalogFaults} listError={catalogError}
+      openCount={workspaces.length} savedCount={savedCount} onRefresh={() => void refreshSaved()} onReopen={name => void reopenWorkspace(name)} reopening={reopening} reopenError={reopenError}
+      busyReason={appBusy === 'reopeningWorkspace' ? null : commandReason} strip={strip('saved')}/>
+    <SettingsDialog open={dialogOpen} onCancel={() => setDialogOpen(false)} settings={settings} draft={settingsDraft} onDraft={next => {setSettingsDraft(next); setSaveNotice(null);}}
+      parsed={parsedSettings} dirty={dialogDirty} saving={appBusy === 'savingSettings'} busyReason={commandReason} saveError={dialogError?.kind === 'save' ? dialogError.value : null} saveNotice={renderMessage(locale, saveNotice)} onSave={() => void saveSettings()}
+      envDirty={envDirty} active={active} pickerBusy={pickerBusy} target={checkTarget} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale} originLabel={labelOf}
+      checkError={dialogError?.kind === 'check' ? dialogError.value : null}
+      retained={logs.items.length} evicted={logs.evicted}
+      onSnapshot={() => void snapshot(null)} snapshotPending={bootstrap.snapshotPending} snapshotOutcome={bootstrap.snapshotOutcome} strip={strip('dialog')}/>
+  </div></LocaleContext>;
 }
