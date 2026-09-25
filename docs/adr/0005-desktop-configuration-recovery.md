@@ -36,8 +36,10 @@ before publishing the in-memory selection. It never writes the App
 `package_path` hint; old hints remain inert and are preserved by preference
 saves. Reject a global recent-package writer or registry: either would couple
 independent Tabs and introduce a second authority beside their saved records.
-Custom package archives remain unsupported, and Edit remains guidance rather
-than a package editor.
+Custom package archives remain unsupported. Edit was guidance when this
+configuration change shipped; subsequent
+[directory-package authoring](../desktop.md#edit-directory-packages) keeps source
+publication separate from configuration snapshots and profile reconciliation.
 
 Amend [ADR 0004](0004-desktop-localization-resources.md) only for presentation
 before settings are available: the temporary language and Setup's saved-language

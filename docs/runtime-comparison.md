@@ -111,6 +111,11 @@ violations. The selected root may lie below an OS path alias; capture anchors it
 canonical location. Captured content, not later edits or ambient `node_modules`,
 is used for compilation, preflight, module loading, and assets.
 
+The desktop can [create and edit directory packages](desktop.md#edit-directory-packages).
+Its editable candidate accepts repairable text errors but does not weaken this
+CLI's executable inventory: Save, Validate, and explicit Inspect/Start remain
+separate operations.
+
 ### Optional portable target declaration
 
 Version-1 manifests may include a strict `target` object:

@@ -25,7 +25,8 @@ export function busy(state:string):boolean {
   return BUSY_PHASES[state] === true;
 }
 
-export type Page = 'run' | 'logs';
+// `edit` is shown only for the Tab owning the Edit lease; otherwise it renders as `run`.
+export type Page = 'run' | 'logs' | 'edit';
 
 // Package-bound session state. Present only after real inspection in this session or host revalidation at bootstrap.
 export interface Bound {
@@ -54,6 +55,8 @@ export interface Workspace {
   busy:Message|null;
   // Inspect form draft for this Tab; a path is only a request, never a binding.
   inspectPath:string;
+  // Edit form drafts: a directory to open or create and the portable package ID a new package gets.
+  editPath:string; editPackageId:string;
   legacyImport:LegacyImport|null;
   // Host-issued profile recovery context with the operator's repair draft; null while this Tab has no current context.
   recovery:RecoveryState|null;
@@ -111,11 +114,12 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
 // custom archive is shown but never offered as a directory request.
 export function workspaceFromView(view:WorkspaceView, notice:Message|null = null):Workspace {
   const saved = view.saved_package;
+  const path = view.selection?.package_path ?? (saved !== null && saved.source.kind === 'directory' ? saved.source.path : '');
   return {
     id: view.workspace_id, revision: view.revision, internalName: view.internal_name, displayName: view.display_name,
     bound: view.selection ? fromSelection(view.selection) : null, sourceError: view.source_error, savedPackage: saved,
     page: 'run', error: null, notice, logFilter: {text: '', level: ''}, busy: null,
-    inspectPath: view.selection?.package_path ?? (saved !== null && saved.source.kind === 'directory' ? saved.source.path : ''), legacyImport: null,
+    inspectPath: path, editPath: path, editPackageId: '', legacyImport: null,
     recovery: view.recovery ? recoveryState(view.recovery, null) : null, recoveryOutcomes: [],
   };
 }
@@ -220,6 +224,26 @@ export function applyInspection(workspace:Workspace, outcome:InspectionOutcome, 
   const next = applyWorkspaceView(previous, outcome.workspace, notice, outcome.kind === 'binding_failed');
   return {...next, error: outcome.binding_error,
     recoveryOutcomes: retry ? upsertOutcomes(workspace.recoveryOutcomes, outcome.outcomes) : outcome.outcomes};
+}
+
+// Leaving Edit returns the owner's host view: its previous selection is invalidated, so the edited directory is
+// prefilled for the explicit Inspect/Reinspect that is the only way back into the Run flow.
+export function applyAuthoringExit(workspace:Workspace, view:WorkspaceView, packagePath:string|null):Workspace {
+  const next = applyWorkspaceView(workspace, view, {key: 'authoringExited'});
+  return {...next, page: 'run', inspectPath: packagePath ?? next.inspectPath, editPath: packagePath ?? next.editPath};
+}
+
+// A fresh host listing after the host invalidated selections (for example other Tabs bound to an edited source).
+// Only a changed revision is applied, so Tabs the host did not touch keep their profile and target drafts.
+export function applyInvalidatedViews(list:Workspace[], views:WorkspaceView[]):Workspace[] {
+  let changed = false;
+  const next = list.map(item => {
+    const view = views.find(entry => entry.workspace_id === item.id);
+    if (!view || view.revision === item.revision) return item;
+    changed = true;
+    return applyWorkspaceView(item, view, view.selection === null && item.bound !== null ? {key: 'selectionInvalidated'} : item.notice);
+  });
+  return changed ? next : list;
 }
 
 // A recovery context's store is the bound catalog only when it names the same package and schema; a relocation or

@@ -169,13 +169,15 @@ export class PollGate {
   }
 }
 
-export interface Admission {active:boolean; command:boolean; anyDirty:boolean}
-export type RestoreBlock = 'pendingRestore' | 'active' | 'command' | 'archivePath' | 'confirm' | 'discard';
+// `authoring` is the application-wide Edit lease: reconstruction cannot retire its owner, so it must be exited first.
+export interface Admission {active:boolean; authoring:boolean; command:boolean; anyDirty:boolean}
+export type RestoreBlock = 'pendingRestore' | 'active' | 'authoring' | 'command' | 'archivePath' | 'confirm' | 'discard';
 
 // Restore needs an idle, settled Application and explicit scope/discard confirmation before the host is asked.
 export function restoreBlock(status:BootstrapStatus, draft:RestoreDraft, admission:Admission):RestoreBlock|null {
   if (status.pending_restore) return 'pendingRestore';
   if (admission.active) return 'active';
+  if (admission.authoring) return 'authoring';
   if (admission.command) return 'command';
   if (draft.archivePath.trim() === '') return 'archivePath';
   if (!draft.confirm) return 'confirm';
@@ -183,11 +185,12 @@ export function restoreBlock(status:BootstrapStatus, draft:RestoreDraft, admissi
   return null;
 }
 
-export type ReconstructionBlock = 'active' | 'command' | 'discard';
+export type ReconstructionBlock = 'active' | 'authoring' | 'command' | 'discard';
 
 // Every retained Application requires explicit session disposal, even with no dirty profile.
 export function reconstructionBlock(status:BootstrapStatus, admission:Admission, discard:boolean):ReconstructionBlock|null {
   if (admission.active) return 'active';
+  if (admission.authoring) return 'authoring';
   if (admission.command) return 'command';
   if ((status.application_available || admission.anyDirty) && !discard) return 'discard';
   return null;

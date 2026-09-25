@@ -414,9 +414,41 @@ details[open] > summary { font-weight: 600; }
 .recovery-outcomes code { font-size: 10px; color: var(--text-muted); }
 .recovery-panel .confirm-row { flex-basis: 100%; }
 
+/* Edit: declared-file tree, a native textarea with a synchronized line-number gutter, and validation results. */
+.authoring-strip { background: var(--warn-soft); border-left-color: var(--warn); }
+.authoring-strip button { margin-left: auto; }
+.edit-grid { display: grid; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); gap: 18px; align-items: start; margin-top: 12px; }
+.file-tree { list-style: none; margin: 8px 0 12px; padding: 0; display: grid; gap: 3px; }
+.tree-file { display: grid; gap: 4px; width: 100%; text-align: left; padding: 6px 8px; border-color: transparent; background: transparent; font-weight: 500; }
+.tree-file[aria-current="true"] { background: var(--info-soft); border-color: #bfd2ea; }
+.tree-path { overflow-wrap: anywhere; font-size: 11px; }
+.tree-meta { display: flex; flex-wrap: wrap; gap: 4px; }
+.authoring-identity { margin: 10px 0 12px; }
+.authoring-manage { margin: 10px 0 0; padding: 6px 10px 10px; border: 1px dashed var(--border-strong); border-radius: 6px; }
+.authoring-manage > summary { font-size: 12px; }
+.authoring-manage h3 { margin-top: 10px; }
+.editor-panel .panel-heading h2 { font-size: 13px; }
+.editor-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.editor-toolbar button { padding: 5px 10px; font-size: 11px; }
+.editor-search { display: flex; align-items: center; gap: 6px; margin-left: auto; min-width: 0; flex: 0 1 380px; }
+.editor-search input { min-height: 28px; padding: 4px 8px; font-size: 11px; }
+.editor-search .muted { white-space: nowrap; }
+.code-editor { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: minmax(320px, 62vh) auto; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
+.editor-gutter, .editor-text { font-family: var(--mono); font-size: 12px; line-height: 18px; tab-size: 2; }
+.editor-gutter { margin: 0; max-height: none; padding: 8px 8px 48px 10px; border-radius: 0; overflow: hidden; white-space: pre; overflow-wrap: normal; text-align: right; color: var(--text-faint); background: var(--surface-alt); border-right: 1px solid var(--border); user-select: none; }
+.editor-text { height: 100%; min-height: 0; resize: none; border: 0; border-radius: 0; padding: 8px 10px; white-space: pre; overflow: auto; overflow-wrap: normal; }
+.editor-text:focus-visible { outline-offset: -3px; }
+.editor-status { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 14px; padding: 5px 10px; border-top: 1px solid var(--border); background: var(--surface-alt); color: var(--text-muted); font-size: 10px; }
+.editor-status #authoring-editor-help { flex: 1; min-width: 200px; }
+.validation-panel { margin-top: 18px; }
+.diagnostic-list { padding-left: 22px; font-size: 11px; display: grid; gap: 6px; }
+.diagnostic-list li { overflow-wrap: anywhere; }
+.diagnostic-location { font-family: var(--mono); }
+
 @media (max-width: 1100px) {
   .content { padding: 22px 20px 36px; }
   .run-grid { grid-template-columns: minmax(0, 1fr); }
+  .edit-grid { grid-template-columns: minmax(0, 1fr); }
   .summary-panel { gap: 16px; padding: 18px 20px; }
   .summary-item + .summary-item { padding-left: 16px; }
   .lane-badge { display: none; }

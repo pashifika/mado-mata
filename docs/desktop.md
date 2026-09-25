@@ -1,9 +1,9 @@
 # macOS desktop: controlled runs and recorded replay
 
-MadoMata's trusted Tauri/React WebView provides package inspection, profile
-editing, run control, App-local OCR configuration, and structured logs. Package
-code runs in the supervised QuickJS runner, never in the WebView. Controlled
-runs need no OCR installation. Optional recorded replay uses real engine
+MadoMata's trusted Tauri/React WebView provides directory-package authoring,
+inspection, profile editing, run control, App-local OCR configuration, and
+structured logs. Package code runs in the supervised QuickJS runner, never in
+the WebView. Controlled runs need no OCR installation. Optional recorded replay uses real engine
 OCR/template recognition over explicitly selected, previously authorized frames.
 Both desktop lanes retain the **controlled, non-native input sink**. Neither
 grants live capture, game launch, focus changes, permission prompts, or OS input.
@@ -181,10 +181,11 @@ TSX files under `apps/desktop/src/` are grouped by responsibility:
 | --- | --- |
 | `main.tsx`, `App.tsx` | Bootstrap and application composition |
 | `components/` | Shared selection, schema forms, results, notifications, and named-workspace dialogs/navigation |
-| `pages/` | Setup/Recovery, unbound-package guidance, Run, and Logs views |
+| `pages/` | Setup/Recovery, unbound-package guidance, Edit, Run, and Logs views |
 | `settings/` | App settings dialog and OCR environment view |
 | `locales/` | Bundled English/Japanese JSON text resources |
 | `i18n.ts`, `ui-messages.ts`, `locale.tsx` | Typed formatting and saved-locale presentation |
+| `authoring.ts` | Per-file drafts/history, revision-bound save responses, search, and diagnostic navigation |
 
 Imports point directly to the owning file. Non-visual TypeScript modules and
 their tests remain at the source root.
@@ -195,8 +196,9 @@ The shell-independent core retains its public root namespaces:
 
 | Root | Private children |
 | --- | --- |
-| `application.rs` | `workspaces` owns Tab/session transitions; `profiles` owns ordinary profile commands and desktop value checks; `recovery` owns schema reconciliation, repair/reset authority, and explicit binding retry; `targets` owns target commands; `operations` owns execution, collection, and shutdown |
+| `application.rs` | `workspaces` owns Tab/session transitions; `authoring` owns the global Edit lease and validation/close lifecycle; `profiles` owns ordinary profile commands and desktop value checks; `recovery` owns schema reconciliation, repair/reset authority, and explicit binding retry; `targets` owns target commands; `operations` owns execution, collection, and shutdown |
 | `storage.rs` | `settings`, `tabs`, `profiles`, and `targets` own their records and persistence; `fs` owns bounded reads, safe paths, and atomic file publication |
+| `authoring.rs` | `catalog` owns prospective declarations; `publication` owns source revisions, changed-file staging, and interrupted-publication recovery |
 
 `Application` retains command admission and authoritative workspace/Store locks.
 `Store` and `ProfileStore` retain owner and shared-budget coordination.
@@ -204,6 +206,72 @@ Bootstrap, snapshots, restore, configuration primitives, logging, and target
 metadata validation keep their existing separate modules. Tests follow their
 behavior owner; cross-owner tests stay at the root. Module extraction does not
 change persisted formats, filesystem protections, or runtime authority.
+
+## Edit directory packages
+
+Create or open a package from an unbound workspace, or choose **Edit package**
+on Run control. Supported sources are ordinary **TypeScript or JavaScript
+directories**, with at most **128 declared files and 1 MiB total content**.
+Create writes a runnable TypeScript starter. Duplicate copies the saved source
+under a new package ID and updates package ownership in each packaged preset. It does not copy App
+settings, named-workspace profiles, target bindings, or execution results.
+Neither action inspects, binds, or runs the package.
+
+- Create and Duplicate require a missing destination beneath an existing parent.
+  Existing packages and the App data root cannot contain the destination.
+  Source and App data roots must not overlap in either direction.
+- The tree lists manifest-owned files. Text files have independent drafts,
+  selection, undo/redo, literal search, and line numbers. Assets are listed,
+  not decoded or edited as text. The native textarea handles composition events;
+  no editor dependency or package-supplied WebView code is loaded.
+- **Manage files** adds sources, presets, JSON assets, or source maps and
+  coordinates their manifest declarations. Rename changes declarations, not
+  source imports. Required entries/schema/presets cannot be removed. Manifest
+  JSON editing must preserve a safe, coherent declared-file catalog and package
+  identity; unsafe paths, links, collisions, and undeclared files are refused.
+- **Save file** and **Save all** write source without running or validating it.
+  Syntax-invalid source, schema, or preset text can be saved for later repair;
+  it is not an executable inventory. A later edit stays dirty if an earlier Save
+  response arrives afterward.
+- **Validate** checks one saved revision through the existing inventory and
+  trusted compiler without evaluating package code. Unsaved text is excluded.
+  Diagnostics identify their revision and link to declared source locations.
+  The finite validation child occupies the existing operation slot; **Stop**
+  requests cancellation and retains ownership until the worker settles.
+- One Edit session owns the application. Ordinary **Start**, independent OCR
+  **Check**, a second editor, and configuration reconstruction are refused.
+  Idle Edit has no timed runner. Navigation remains available; the owner strip
+  and **Return to Edit** preserve the session across workspaces and dialogs.
+- Exit, Duplicate, closing the workspace, and closing the application resolve
+  dirty files with **Save / Discard / Cancel**. Cancel keeps the lease and drafts.
+  Confirmed application close uses bounded shutdown and preserves incomplete
+  containment outcomes; closing is not proof of successful cleanup.
+- **Exit Edit**, then explicitly **Inspect/Reinspect** before Start. Selections
+  for every workspace sharing an edited source are invalidated. Saved local
+  profiles remain untouched; inspection uses the existing
+  [profile reconciliation and repair flow](#recover-profiles-after-a-schema-change).
+
+### Source conflicts and interrupted saves
+
+Every publication checks the owner, source revision, and current disk bytes.
+An external edit is refused rather than overwritten. **Refresh** deliberately
+reads the new revision while keeping dirty text; compare it before saving, or
+discard that file's draft to adopt the disk version. A committed Save whose
+follow-up refresh failed remains committed; refresh before writing again.
+
+Publication stages only changed files beside their destinations. A private,
+bounded journal under `data_root/authoring/` records old/new bytes outside package
+inventory. A pending journal blocks package admission after restart. Use the
+displayed **Recover interrupted save** action for its recorded package: recovery
+rolls forward only matching old/new bytes and preserves conflicting external
+content. Do not delete the journal to bypass refusal. Configuration snapshots
+exclude both package source and this source-publication journal.
+
+Interruption regressions cover process-level failures, not physical power loss.
+Windows core checks do not qualify crash durability or an additional desktop OS;
+directory sync retains the [existing platform limitation](adr/0005-desktop-configuration-recovery.md).
+Custom archives, remote download, image/OCR authoring, native capture/input, and
+the broader practical Edit readiness gate remain separate work.
 
 ## Package workspaces and App settings
 
@@ -232,11 +300,10 @@ the Workspace dropdown and **Reopen** to create a fresh session. Names, package
 references, and saved profiles persist; unsaved drafts, execution choices,
 navigation, results, and runs do not.
 
-An unbound Tab shows **Edit guidance** and a separate real **Inspect a local
-package directory** action. Package authoring (**Edit**), custom-package archive
-loading/execution, remote download, and a package-catalog UI are not implemented.
-Author packages outside the desktop, then inspect their directories. A missing
-or changed saved source shows **Saved source unavailable** with the saved
+An unbound Tab provides real directory-package **Create/Open for Edit** actions
+and a separate **Inspect a local package directory** action. Custom-package
+archive loading/execution, remote download, and a package-catalog UI remain
+unsupported. A missing or changed saved source shows **Saved source unavailable** with the saved
 directory reference displayed and prefilled in the Inspect field; a custom archive
 reference shows **Unsupported saved source** with its path displayed but never
 prefilled. Both preserve the reference rather than inventing inventory,
@@ -929,6 +996,36 @@ roots; do not modify tracked fixtures or the operator's normal configuration.
 Run the Setup, Recovery, naming, snapshot, and restore checks in both English and
 Japanese. Do not replace actual WebView interaction with mocked command results.
 
+### Directory-package authoring acceptance
+
+Use a disposable package directory outside the isolated App data root. Keep
+screenshots, local paths, and compiler/run records outside public commits.
+
+1. Create a TypeScript starter, open it, and add a second source file. Edit both
+   files; check independent undo/redo, selection, search, line numbers, and
+   composition. Save, exit, and reopen; verify both saved contents.
+2. Add, rename, and remove an optional declared file. Refuse an occupied or
+   nested package destination. Duplicate under a different ID; verify original
+   bytes and the absence of App-local configuration in the copy.
+3. Save a syntax error and Validate. Follow its diagnostic to the source, repair
+   it, and validate the new saved revision. Test Stop while validation owns the
+   operation slot; no new work may start before it settles.
+4. Keep another workspace bound to the same source. While Edit owns the first,
+   verify disabled Start/Check controls and host-side refusal of a stale client
+   request. Navigate through Logs/settings and return to the unchanged drafts.
+5. Exercise Save, Discard, and Cancel for editor/workspace/window closure.
+   Repeat close/exit with a recoverable configuration fault; drafts must remain
+   resolvable without admitting ordinary execution.
+6. Preserve a saved local profile while saving and repairing malformed schema
+   text. Exit, explicitly reinspect, and confirm the profile is not reset.
+7. Run the changed valid package through the real controlled runner. Choose the
+   expected state/log result before the run and compare it with the actual record.
+   Saving or compiler success alone is not execution acceptance.
+8. Check English/Japanese presentation and a narrow supported window. Record
+   whether composition was driven by WebView events or physical OS IME input;
+   the former does not qualify the latter. This procedure grants no game input
+   or live-capture authority.
+
 ### Setup, Recovery, and named workspaces
 
 1. Launch with an absent explicit root. Observe Loading followed by Setup and
@@ -937,9 +1034,9 @@ Japanese. Do not replace actual WebView interaction with mocked command results.
    Confirm saved English, valid settings, no package/run/OCR work, and no Tab.
    Confirm that an existing settings file cannot be overwritten by Initialize.
 2. Create a Tab using internal name `Alpha` and display name `共有`, without a
-   path or target. Check its saved unbound record and main Edit guidance; there
-   must be no invented schema, profile, runnable package, or functioning Edit
-   button. Create another Tab with the same display name and a different internal
+   path or target. Check its saved unbound record and Create/Open guidance; there
+   must be no invented schema, profile, or runnable package before an explicit
+   package action. Create another Tab with the same display name and a different internal
    name; verify disambiguated labels. Create a digit-leading or all-digit internal
    name with an empty display name; its internal name must appear in the workspace
    selector, saved list and after restart. Refuse case-only internal-name

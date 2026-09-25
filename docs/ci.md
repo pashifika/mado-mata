@@ -118,7 +118,8 @@ The full check has these responsibilities:
   controlled `check` suite for direct Rust, JavaScript, TypeScript, and Lua.
   These commands do not enable the optional `engine` feature.
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
-  run its state tests, and type-check/build its trusted UI.
+  run its state tests (including per-file history, stale saves, and source-diagnostic
+  projection), and type-check/build its trusted UI.
 - Test the Rust application core with `--no-default-features --lib`: explicit
   setup/recovery, named Tab ownership, scoped profiles, byte-preserving legacy
   imports, bounded snapshots, archive refusals, and journaled restore/rollback
@@ -129,6 +130,11 @@ The full check has these responsibilities:
   the storage boundaries and Windows directory-sync qualification limitation.
   Optional OCR settings, bounded replay projection, admission races, and
   pre-startup failures are checked without loading a real OCR backend.
+  Directory-authoring regressions cover source ownership, revision conflicts,
+  interrupted changed-file publication, global Edit admission, non-evaluating
+  validation, and bounded close/cleanup. Actual
+  [Edit WebView acceptance](desktop.md#directory-package-authoring-acceptance),
+  physical OS IME input, and storage power-loss durability are not hosted CI claims.
 - On macOS, build the real Tauri shell with `--features custom-protocol` after
   building frontend assets. The test-only `webdriver` feature is not enabled.
   The separate engine artifact and actual

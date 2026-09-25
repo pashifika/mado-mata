@@ -11,7 +11,7 @@ function catalog(...ids){
   return {open:ids.map(id=>({workspace_id:id,revision:0,internal_name:id,display_name:id,selection:null,source_error:null,saved_package:null})),closed:[],faults:[]};
 }
 const recovery=status({state:'recovery',stage:'settings',fault,application_available:false});
-const idle={active:false,command:false,anyDirty:false};
+const idle={active:false,authoring:false,command:false,anyDirty:false};
 
 test('only a usable Application admits the shell; missing settings enter Setup and invalid ones enter Recovery',()=>{
   assert.equal(surface(null),'loading');
@@ -87,6 +87,7 @@ test('only a successful constructing result with fresh session IDs replaces the 
 for (const {scenario,current,draft,admission,block} of [
   {scenario:'a pending restore journal',current:status({pending_restore:true}),draft:{archivePath:'/a',confirm:true,discard:false},admission:idle,block:'pendingRestore'},
   {scenario:'an active operation',current:status(),draft:{archivePath:'/a',confirm:true,discard:false},admission:{...idle,active:true},block:'active'},
+  {scenario:'an Edit lease even with discard confirmed',current:status(),draft:{archivePath:'/a',confirm:true,discard:true},admission:{...idle,authoring:true},block:'authoring'},
   {scenario:'a pending command',current:status(),draft:{archivePath:'/a',confirm:true,discard:false},admission:{...idle,command:true},block:'command'},
   {scenario:'a blank archive path',current:status(),draft:{archivePath:'  ',confirm:true,discard:false},admission:idle,block:'archivePath'},
   {scenario:'a missing scope confirmation',current:status(),draft:{archivePath:'/a',confirm:false,discard:false},admission:idle,block:'confirm'},
@@ -104,6 +105,7 @@ for (const {scenario,current,draft,admission,block} of [
 test('retry and recovery require settled operations and explicit retained-session disposal',()=>{
   assert.equal(reconstructionBlock(status(),{...idle,active:true},true),'active');
   assert.equal(reconstructionBlock(status(),{...idle,command:true},true),'command');
+  assert.equal(reconstructionBlock(recovery,{...idle,authoring:true},true),'authoring');
   assert.equal(reconstructionBlock(recovery,{...idle,anyDirty:true},false),'discard');
   assert.equal(reconstructionBlock(recovery,{...idle,anyDirty:true},true),null);
   assert.equal(reconstructionBlock(status(),idle,false),'discard');

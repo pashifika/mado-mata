@@ -3,6 +3,7 @@ use super::{
     Application, MAX_SESSION_COUNTER, Selected, Selection, Workspace, WorkspaceCatalog,
     WorkspaceRef, WorkspaceView, Workspaces, lock,
 };
+use crate::authoring::Publisher;
 use crate::storage::{MAX_OPEN_TABS, PackageSource, TabRecord};
 use mado_runtime_comparison::desktop::DesktopController;
 use mado_runtime_comparison::inventory::Inventory;
@@ -61,7 +62,7 @@ impl Application {
             let reference = state.next_workspace()?;
             drop(state);
             let tab = lock(&self.store).create_tab(internal_name, display_name)?;
-            let workspace = Self::restore_workspace(&self.runner, tab, reference);
+            let workspace = Self::restore_workspace(&self.runner, &self.publisher, tab, reference);
             let view = self.workspace_view(&workspace);
             let mut state = lock(&self.workspaces);
             state.next_id += 1;
@@ -102,7 +103,7 @@ impl Application {
                     "Saved open state changed; reload configuration",
                 ));
             }
-            let workspace = Self::restore_workspace(&self.runner, tab, reference);
+            let workspace = Self::restore_workspace(&self.runner, &self.publisher, tab, reference);
             lock(&self.store).set_tab_open(internal_name, true)?;
             let view = self.workspace_view(&workspace);
             let mut state = lock(&self.workspaces);
@@ -139,6 +140,7 @@ impl Application {
 
     pub(super) fn restore_workspace(
         runner: &DesktopController,
+        publisher: &Publisher,
         tab: TabRecord,
         mut workspace: WorkspaceRef,
     ) -> Workspace {
@@ -168,6 +170,7 @@ impl Application {
                         reference.revision = 1;
                         let selected = Self::inspect_selection(
                             runner,
+                            publisher,
                             Path::new(path),
                             reference,
                             &tab.internal_name,
@@ -213,11 +216,13 @@ impl Application {
 
     pub(super) fn inspect_selection(
         runner: &DesktopController,
+        publisher: &Publisher,
         path: &Path,
         workspace: WorkspaceRef,
         internal_name: &str,
         display_name: &str,
     ) -> Result<Selected, Fault> {
+        publisher.check_admission(path)?;
         let path = path
             .canonicalize()
             .map_err(|_| Fault::new("Package", "Package location cannot be resolved"))?;
@@ -234,6 +239,7 @@ impl Application {
         ))
         .map_err(|error| Fault::new("Application", error.to_string()))?;
         let inventory = Inventory::capture(&path, &plan.limits)?;
+        publisher.check_admission(&path)?;
         if inventory.identity != package.inventory_identity {
             return Err(Fault::new(
                 "InventoryChanged",
@@ -293,6 +299,16 @@ impl Application {
                 let (_command, mut state) = self.command_state()?;
                 let internal_name = state.resolve_workspace(workspace)?.internal_name.clone();
                 self.collect(&mut state);
+                if state
+                    .authoring
+                    .as_ref()
+                    .is_some_and(|lease| lease.owner.workspace == *workspace)
+                {
+                    return Err(Fault::new(
+                        "AuthoringActive",
+                        "Exit the authoring session before closing its workspace",
+                    ));
+                }
                 if state.owner.as_ref().is_some_and(|owner| {
                     !owner.terminal && owner.workspace.as_ref() == Some(workspace)
                 }) {

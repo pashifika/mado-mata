@@ -15,6 +15,24 @@ use std::time::Duration;
 
 impl Workspaces {
     pub(super) fn idle(&self) -> Result<(), Fault> {
+        if let Some(lease) = &self.authoring {
+            return Err(Fault::new(
+                "AuthoringActive",
+                "Exit the authoring session before ordinary work",
+            )
+            .with_context(json!({"owner":lease.owner})));
+        }
+        self.work_idle()
+    }
+
+    pub(super) fn work_idle(&self) -> Result<(), Fault> {
+        if let Some(fault) = self
+            .authoring
+            .as_ref()
+            .and_then(|lease| lease.containment.as_ref())
+        {
+            return Err(fault.clone());
+        }
         if self.owner.as_ref().is_some_and(|owner| !owner.terminal) {
             Err(Fault::new(
                 "RunActive",
@@ -70,18 +88,22 @@ impl Application {
         let terminal = value["state"] == "terminal";
         let controller = Arc::new(value);
         if terminal {
-            let outcome = TerminalOutcome::from_view(&controller);
-            let (level, message) = outcome.notice();
-            self.logger.emit(
-                "Rust",
-                level,
-                Some(&owner.run),
-                workspace_id,
-                "run.terminal",
-                message,
-                outcome.fields(&controller["operation"]),
-            );
-            if let Some(workspace) = workspace {
+            if controller["operation"] != "authoring_validate" {
+                let outcome = TerminalOutcome::from_view(&controller);
+                let (level, message) = outcome.notice();
+                self.logger.emit(
+                    "Rust",
+                    level,
+                    Some(&owner.run),
+                    workspace_id,
+                    "run.terminal",
+                    message,
+                    outcome.fields(&controller["operation"]),
+                );
+            }
+            if let Some(workspace) =
+                workspace.filter(|_| controller["operation"] != "authoring_validate")
+            {
                 if let Some(selected) = state
                     .open
                     .iter_mut()
@@ -118,6 +140,7 @@ impl Application {
             })?;
             self.collect(&mut state);
             state.idle()?;
+            self.publisher.recover_pending()?;
             self.closing.store(true, Ordering::Release);
         }
         self.shutdown().map_err(retired_fault)?;
@@ -138,6 +161,8 @@ impl Application {
     ) -> Result<String, Fault> {
         let result = (|| {
             let (_command, mut state) = self.command_state()?;
+            self.collect(&mut state);
+            state.idle()?;
             let selected = state.resolve(workspace)?;
             if request.inventory_identity != selected.inventory.identity
                 || request.package_id != selected.inventory.package_id
@@ -149,13 +174,11 @@ impl Application {
                 ));
             }
             // The caller's location is never an execution authority.
+            self.publisher.check_admission(&selected.path)?;
             request.package_path = selected.path.to_string_lossy().into_owned();
             normalize_editor_numbers(&selected.inventory.schema, &mut request.values);
             desktop_options(&selected.inventory, request.values.clone())?;
             let internal_name = selected.internal_name.clone();
-            self.collect(&mut state);
-            // Never let reserve refresh away an uncollected terminal outcome.
-            state.idle()?;
             let store = self.store.clone();
             let (acquired, ready) = mpsc::sync_channel(1);
             let run = self
@@ -220,6 +243,8 @@ impl Application {
                 ));
             }
             let (_command, mut state) = self.command_state()?;
+            self.collect(&mut state);
+            state.idle()?;
             let selected = workspace
                 .map(|workspace| state.resolve(workspace))
                 .transpose()?;
@@ -231,8 +256,7 @@ impl Application {
                     selected.inventory.package_id.clone(),
                 )
             });
-            self.collect(&mut state);
-            state.idle()?;
+            self.publisher.recover_pending()?;
             let environment = Arc::new(OnceLock::new());
             let captured = environment.clone();
             let check = CheckInputs {
@@ -281,6 +305,7 @@ impl Application {
         let mut state = lock(&self.workspaces);
         self.collect(&mut state);
         Poll {
+            authoring: state.authoring.as_ref().map(|lease| lease.owner.clone()),
             controller: state.controller.clone(),
             logs: self.logger.drain(),
             workspace_results: state
@@ -295,9 +320,38 @@ impl Application {
     pub fn shutdown(&self) -> Result<(), Fault> {
         self.shutdown_outcome
             .get_or_init(|| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(14);
                 self.closing.store(true, Ordering::Release);
                 self.invalidate_target_observation(None);
-                let outcome = self.runner.shutdown();
+                let mut outcome = self.runner.shutdown();
+                // Publication holds command admission, not the Stop/runner lock.
+                // A forced shutdown retains its lease/journal if storage cannot settle.
+                loop {
+                    match self.commands.try_lock() {
+                        Ok(_command) => {
+                            let mut state = lock(&self.workspaces);
+                            if let Some(fault) = state.authoring.as_ref().and_then(|lease| lease.containment.as_ref()) {
+                                outcome = Err(fault.clone());
+                            }
+                            if outcome.is_ok() {
+                                state.authoring = None;
+                                *lock(&self.authoring_stop) = None;
+                            }
+                            break;
+                        }
+                        Err(std::sync::TryLockError::Poisoned(error)) => {
+                            let _command = error.into_inner();
+                            break;
+                        }
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            if std::time::Instant::now() >= deadline {
+                                outcome = Err(Fault::new("Containment", "Shutdown command/publication has not settled; ownership and recovery evidence retained"));
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                }
                 if let Some(bridge) = lock(&self.bridge).take() {
                     let _ = bridge.join();
                 }

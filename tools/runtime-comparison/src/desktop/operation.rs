@@ -230,11 +230,49 @@ impl DesktopController {
         )
     }
 
+    /// Validate one immutable authoring candidate without evaluating package code.
+    /// The compiler child uses the same finite reservation and Stop latch as runs.
+    pub fn validate_authoring(
+        &self,
+        capture: impl FnOnce(&Control) -> Result<Inventory, Fault> + Send + 'static,
+    ) -> Result<String, Fault> {
+        self.reserve("authoring_validate", false, move |_, control, _, _, _| {
+            let outcome = (|| {
+                control.check()?;
+                let inventory = capture(control)?;
+                control.check()?;
+                let limits = manual_plan()?.limits;
+                match runtime(&inventory)?.as_str() {
+                    "typescript" => {
+                        crate::typescript::compile_with_control(&inventory, &limits, control)?;
+                    }
+                    "javascript" => {
+                        crate::typescript::validate_javascript_modules(
+                            &Arc::new(inventory),
+                            &limits,
+                            control,
+                        )?;
+                    }
+                    _ => unreachable!("runtime admits only supported source languages"),
+                }
+                control.check()
+            })();
+            let diagnostics = outcome.err().map(|mut error| {
+                error.bound_diagnostics();
+                error
+            });
+            Ok(json!({
+                "valid":diagnostics.is_none(),
+                "diagnostics":diagnostics.into_iter().collect::<Vec<_>>(),
+            }))
+        })
+    }
+
     fn reserve(
         &self,
         operation: &'static str,
         replay: bool,
-        work: impl FnOnce(&str, &Control, &Observer, &Path, &Path) -> Result<Value, Fault>
+        work: impl FnOnce(&str, &Arc<Control>, &Observer, &Path, &Path) -> Result<Value, Fault>
         + Send
         + 'static,
     ) -> Result<String, Fault> {
