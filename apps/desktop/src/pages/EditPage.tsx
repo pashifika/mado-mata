@@ -351,10 +351,13 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
   function changeActions(path: string): MenuAction[] {
     const draft = session.drafts.get(path);
     const blocked = !draft || draft.missing ? a.targetGone : catalogReason({kind: 'remove', path});
-    return [
+    const actions: MenuAction[] = [
       {id: 'authoring-menu-rename', label: a.renameItem, blocked, onSelect: () => setIntent({kind: 'rename', path})},
-      {id: 'authoring-menu-remove', label: a.remove, blocked, danger: true, onSelect: () => setIntent({kind: 'remove', path})},
     ];
+    if (draft?.kind !== 'schema') {
+      actions.push({id: 'authoring-menu-remove', label: a.remove, blocked, danger: true, onSelect: () => setIntent({kind: 'remove', path})});
+    }
+    return actions;
   }
   const openKey = menu === null ? null : menuKeyOf(menu.target);
   function menuTrigger(target: MenuTarget) {

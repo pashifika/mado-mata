@@ -241,7 +241,9 @@ export function applyInvalidatedViews(list:Workspace[], views:WorkspaceView[]):W
     const view = views.find(entry => entry.workspace_id === item.id);
     if (!view || view.revision === item.revision) return item;
     changed = true;
-    return applyWorkspaceView(item, view, view.selection === null && item.bound !== null ? {key: 'selectionInvalidated'} : item.notice);
+    const notice = item.recovery !== null && view.recovery === null ? {key: 'recoveryInvalidated'} as const
+      : view.selection === null && item.bound !== null ? {key: 'selectionInvalidated'} as const : item.notice;
+    return applyWorkspaceView(item, view, notice);
   });
   return changed ? next : list;
 }
@@ -342,7 +344,7 @@ export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, l
 
 export function hasWorkspaceEdits(workspace:Workspace, facts:Derived|undefined):boolean {
   return (workspace.bound !== null && ((workspace.bound.touched && facts?.dirty === true) || targetDirty(workspace.bound.target)))
-    || workspace.recovery?.touched === true;
+    || workspace.recovery?.touched === true || workspace.recovery?.resetDraft === true;
 }
 
 // Package commands carry values only from a real inspected selection. A genuine named Tab without one is refused

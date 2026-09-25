@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyRecoveryMutation,applyWorkspaceView,bindSelection,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
+import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyInvalidatedViews,applyRecoveryMutation,applyWorkspaceView,bindSelection,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
 import {LocalFault} from './i18n.ts';
 import {currentRecoveryDraft,editRecovery,issuePath,readRecoveryDraft,recoveryIssue,recoveryState,recoveryTicket,selectRecovery} from './recovery.ts';
 import {optionPath,readDraft} from './state.ts';
@@ -918,6 +918,22 @@ test('a recovery-required relocation candidate is never a selection: no bound st
   assert.throws(()=>commandValues(tab,undefined),error=>error instanceof LocalFault&&error.presentation.key==='unboundWorkspace');
 });
 
+test('another Tab ending Edit discloses invalidation of an unbound recovery draft without changing saved facts or unaffected Tabs',()=>{
+  const initial=candidateTab();
+  const tab={...initial,recovery:editRecovery(initial.recovery,{count:7},{kind:'replace',path:'$.count'})};
+  const unaffected=workspaceFromView(view('b'));
+  const next=applyInvalidatedViews([tab,unaffected],[view('a',{revision:2,savedPackage:savedReference})]);
+  assert.equal(next[0].recovery,null);
+  assert.equal(next[0].bound,null);
+  assert.equal(next[0].revision,2);
+  assert.deepEqual(next[0].notice,{key:'recoveryInvalidated'});
+  assert.equal(next[0].savedPackage,savedReference);
+  assert.equal(next[0].recoveryOutcomes,tab.recoveryOutcomes);
+  assert.deepEqual(tab.recovery.view.profiles[0].profile.values,{count:5,legacy:true});
+  assert.equal(next[1],unaffected);
+  assert.equal(applyInvalidatedViews(next,[view('a',{revision:2,savedPackage:savedReference})]),next);
+});
+
 test('a binding failure over a saved source retains its earlier source fault and leaves a retry context',()=>{
   const bindingError={category:'Storage',message:'tab write failed',context:null};
   const prior={category:'Package',message:'saved directory missing',context:null};
@@ -1119,6 +1135,7 @@ test('a Reset whose defaults are incomplete installs the unsaved default-based d
   assert.deepEqual(after.recovery.view.profiles[0].profile.values,{count:5,legacy:true});
   assert.deepEqual(after.notice,{key:'recoveryResetIncomplete'});
   assert.deepEqual(after.recoveryOutcomes,[outcome('Q','Quick','saved')]);
+  assert.equal(hasWorkspaceEdits(after,undefined),true);
   // Completing the draft retires the attributed failure; reloading the stored values drops the reset marker.
   const completed=editRecovery(after.recovery,{count:1,mode:'fast'},{kind:'replace',path:'$.mode'});
   assert.equal(completed.issue,null);
@@ -1127,6 +1144,7 @@ test('a Reset whose defaults are incomplete installs the unsaved default-based d
   const reloaded=selectRecovery(completed,'P');
   assert.equal(reloaded.resetDraft,false);
   assert.deepEqual(reloaded.draft,{count:5,legacy:true});
+  assert.equal(hasWorkspaceEdits({...after,recovery:reloaded},undefined),false);
 });
 
 for (const {scenario,retarget} of [

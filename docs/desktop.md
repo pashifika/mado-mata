@@ -251,8 +251,9 @@ Neither action inspects, binds, or runs the package.
   and blank tree space have no context menus.
   Right-click an individual file, use its menu button, or press **Shift+F10** /
   the **Context Menu** key for Rename/Remove where available; the manifest has no
-  file-action menu. A pointer-opened menu initially highlights no action;
-  keyboard opening focuses the first action, with arrow/Home/End navigation.
+  file-action menu and the required schema offers Rename only. A pointer-opened
+  menu initially highlights no action; keyboard opening focuses the first action,
+  with arrow/Home/End navigation.
   Actions target that row, not another selected file. Rename updates declarations,
   not source imports. Required entries/schema/presets cannot be removed; unsafe
   paths, links, collisions and undeclared files are refused.
@@ -272,15 +273,22 @@ Neither action inspects, binds, or runs the package.
   **Check**, a second editor, and configuration reconstruction are refused.
   Idle Edit has no timed runner. Navigation remains available; the owner strip
   and **Return to Edit** preserve the session across workspaces and dialogs.
+- Guidance **Open/Create**, like Run-page Edit, asks before leaving unsaved
+  profile/recovery drafts, including an incomplete Reset's default-based draft.
+  **Keep draft** cancels entry. Closing the choice restores focus to its entry
+  button, or the page tab while that button is locked; a refused Open/Create
+  does not strand keyboard focus. **Discard and edit** explicitly proceeds.
+  Saved profiles remain untouched.
 - Exit, Duplicate, closing the workspace, and closing the application resolve
   dirty files with **Save / Discard / Cancel**. Cancel keeps the lease and drafts.
   Confirmed application close uses bounded shutdown and preserves incomplete
   containment outcomes; closing is not proof of successful cleanup.
 - **Exit Edit**, then explicitly **Inspect/Reinspect** before Start. Selections
   for every workspace sharing an edited source are invalidated. A normal exit
-  returns to unbound guidance, not an inspection-failure error. Saved references
-  and local profiles remain untouched; inspection uses the existing
-  [profile reconciliation and repair flow](#recover-profiles-after-a-schema-change).
+  returns to unbound guidance, not an inspection-failure error. Affected recovery
+  contexts also expire; other Tabs disclose that any unsaved repair draft was
+  cleared. Saved references and local profiles remain untouched; inspection
+  uses the existing [profile reconciliation and repair flow](#recover-profiles-after-a-schema-change).
 
 ### Source conflicts and interrupted saves
 
@@ -290,15 +298,19 @@ reads the new revision while keeping dirty text; compare it before saving, or
 discard that file's draft to adopt the disk version. A committed Save whose
 follow-up refresh failed remains committed; refresh before writing again.
 
-Publication stages only changed files beside their destinations. A private,
+Publication stages only changed files beside the package directory. A private,
 bounded journal under `data_root/authoring/` records old/new bytes outside package
-inventory. A pending journal blocks package admission after restart. Use the
-displayed **Recover interrupted save** action for its recorded package: recovery
-rolls forward only matching old/new bytes and preserves conflicting external
-content. Do not delete the journal to bypass refusal. Configuration snapshots
-exclude package source and this source-publication journal. Snapshot destinations
-inside `sources`, `pkgs`, the configured collection, or an existing package are
-refused before creating directories or archives.
+inventory. The journal is written and synced in one bounded unpublished slot,
+then atomically published as `pending.json` before any package file changes.
+An interrupted unpublished write does not block admission; the next Save replaces
+only that unpublished slot. A published pending journal blocks package admission
+after restart. Use the displayed **Recover interrupted save** action for its
+recorded package: recovery rolls forward matching old/new source bytes and
+rebuilds partial private stages from the durable journal. Unexpected source or
+staging bytes are preserved for repair. Do not delete the published journal to
+bypass refusal. Configuration snapshots exclude package source and this journal.
+Snapshot destinations inside `sources`, `pkgs`, the configured collection, or an
+existing package are refused before creating directories or archives.
 
 Interruption regressions cover process-level failures, not physical power loss.
 Windows core checks do not qualify crash durability or an additional desktop OS;

@@ -495,6 +495,127 @@ fn interrupted_file_and_manifest_publication_is_refused_until_restart_recovery()
 }
 
 #[test]
+fn publication_recovery_rebuilds_a_partially_written_private_stage() {
+    let fixture = Fixture::new();
+    let original = fixture.package();
+    fixture
+        .publisher
+        .publish_with(
+            &original,
+            original.revision(),
+            add_source("helper.ts"),
+            |_| {
+                Err(Fault::new(
+                    "Interrupted",
+                    "interruption before manifest staging",
+                ))
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+    let journal: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.root.join("private/authoring/pending.json")).unwrap(),
+    )
+    .unwrap();
+    let stage = fixture
+        .root
+        .join(journal["scratch"].as_str().unwrap())
+        .join("next-1");
+    let manifest: Vec<u8> = serde_json::from_value(journal["changes"][1]["after"].clone()).unwrap();
+    crate::configuration::write_private(&stage, b"externally changed stage").unwrap();
+    let restarted = Publisher::new(fixture.root.join("private"));
+    assert_eq!(
+        restarted.recover(original.root()).unwrap_err().category,
+        "AuthoringRecoveryRequired"
+    );
+    assert_eq!(fs::read(&stage).unwrap(), b"externally changed stage");
+    fs::write(&stage, &manifest[..manifest.len() / 2]).unwrap();
+    restarted.recover(original.root()).unwrap();
+    let recovered = restarted.open(original.root()).unwrap();
+    assert_eq!(
+        fs::read(original.root().join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        recovered.validate().unwrap().sources["helper.ts"],
+        "export const answer = 42;\n"
+    );
+    restarted.recover_pending().unwrap();
+}
+
+#[test]
+fn publication_discards_an_unpublished_journal_before_the_next_save() {
+    let fixture = Fixture::new();
+    let original = fixture.package();
+    let directory = fixture.root.join("private/authoring");
+    crate::storage::private_directory(&directory).unwrap();
+    crate::configuration::write_private(&directory.join("pending.tmp"), b"{partial").unwrap();
+    let restarted = Publisher::new(fixture.root.join("private"));
+    restarted.recover_pending().unwrap();
+    let saved = fixture.save(&original, "main.ts", "export const saved = 17;\n");
+    assert_eq!(
+        saved.validate().unwrap().sources["main.ts"],
+        "export const saved = 17;\n"
+    );
+    restarted.recover_pending().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn publication_journal_write_failure_keeps_source_available() {
+    const CHILD: &str = "MADO_AUTHORING_JOURNAL_FILE_LIMIT";
+    if std::env::var_os(CHILD).is_none() {
+        // Limit only the child process: exercise a real partial write without
+        // filling the disk or changing the test runner's resource limits.
+        let output = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "trap '' XFSZ; ulimit -f 128 || exit; exec \"$@\"",
+                "sh",
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "authoring::tests::publication_journal_write_failure_keeps_source_available",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let fixture = Fixture::new();
+    let original = fixture.package();
+    let before = fs::read(original.root().join("main.ts")).unwrap();
+    let failure = fixture
+        .publisher
+        .publish(
+            &original,
+            original.revision(),
+            Edit::Text {
+                path: "main.ts".into(),
+                text: format!("//{}", "x".repeat(50_000)),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(failure.context["kind"], "FileTooLarge");
+    assert_eq!(fs::read(original.root().join("main.ts")).unwrap(), before);
+    let restarted = Publisher::new(fixture.root.join("private"));
+    restarted.recover_pending().unwrap();
+    assert_eq!(
+        restarted.open(original.root()).unwrap().revision(),
+        original.revision()
+    );
+}
+
+#[test]
 fn conflicting_external_bytes_and_durable_preimages_survive_failed_recovery() {
     let fixture = Fixture::new();
     let original = fixture.package();

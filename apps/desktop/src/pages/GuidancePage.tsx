@@ -55,6 +55,16 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
   // The owner must leave Edit first: its inspection is the handoff back to Run.
   const inspectReason = owner ? a.inspectBlocked : lockReason;
   const [confirmInspect, setConfirmInspect] = useState(false);
+  const [confirmEdit, setConfirmEdit] = useState<'open' | 'create' | null>(null);
+  const editButton = useRef<HTMLButtonElement | null>(null);
+  const editConfirmRow = useRef<HTMLDivElement>(null);
+  const refocusEdit = useRef(false);
+  useEffect(() => {
+    if (confirmEdit !== null || !refocusEdit.current) return;
+    refocusEdit.current = false;
+    const button = editButton.current;
+    (button && !button.disabled ? button : document.getElementById('page-run'))?.focus();
+  }, [confirmEdit]);
   const inspectButton = useRef<HTMLButtonElement>(null);
   const confirmRow = useRef<HTMLDivElement>(null);
   // Set only when the confirmation closes while it owns focus; Inspect takes it back, or the stable page tab once the
@@ -74,7 +84,27 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
   // A new inspection replaces the recovery context and its draft; the button and Enter share the unsaved-edits check.
   function confirmedInspect() {
     if (locked || owner || !path.trim()) return;
+    refocusEdit.current = false;
+    setConfirmEdit(null);
     if (hasWorkspaceEdits(workspace, undefined)) setConfirmInspect(true); else onInspect();
+  }
+  function enterEdit(intent: 'open' | 'create') {
+    if (authoring.block !== null) return;
+    if (intent === 'create') authoring.onCreate();
+    else authoring.onOpen(workspace.editPath.trim());
+  }
+  function confirmedEdit(intent: 'open' | 'create', button: HTMLButtonElement) {
+    if (authoring.block !== null) return;
+    setConfirmInspect(false);
+    editButton.current = button;
+    if (hasWorkspaceEdits(workspace, undefined)) setConfirmEdit(intent);
+    else enterEdit(intent);
+  }
+  function closeEditConfirm(discard: boolean) {
+    refocusEdit.current = editConfirmRow.current?.contains(document.activeElement) ?? false;
+    const intent = confirmEdit;
+    setConfirmEdit(null);
+    if (discard && intent !== null) enterEdit(intent);
   }
   return <>
     <div className="page-heading"><div><span className="eyebrow">{g.scope(label)}</span><h1>{heading}</h1>
@@ -100,9 +130,9 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
       <h2 id="edit-heading">{a.openHeading}</h2>
       <p className="muted">{a.openHelp}</p>
       <div className="open-row"><div className="field"><label htmlFor="authoring-package-id">{a.packageId}</label>
-        <input id="authoring-package-id" type="text" value={workspace.editPackageId} disabled={workspace.busy !== null} spellCheck={false}
+        <input id="authoring-package-id" type="text" value={workspace.editPackageId} disabled={workspace.busy !== null || confirmEdit !== null} spellCheck={false}
           onChange={event => authoring.onPackageId(event.target.value)}/></div>
-        <button id="authoring-create" type="button" className="primary" disabled={authoring.block !== null || destination === null} onClick={authoring.onCreate}>{a.create}</button>
+        <button id="authoring-create" type="button" className="primary" disabled={authoring.block !== null || destination === null} onClick={event => confirmedEdit('create', event.currentTarget)}>{a.create}</button>
       </div>
       <p className="field-help">{a.packageIdHelp}</p>
       <dl className="run-identity"><dt>{a.packagesRoot}</dt><dd className="mono">{packagesRoot}</dd>
@@ -110,10 +140,14 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
       <div id="authoring-block" className="muted" role="status">{authoring.block ?? ''}</div>
       <hr/>
       <div className="open-row"><div className="field"><label htmlFor="authoring-path">{a.packageDirectory}</label>
-        <input id="authoring-path" type="text" value={workspace.editPath} disabled={workspace.busy !== null} placeholder={a.packagePlaceholder} spellCheck={false}
+        <input id="authoring-path" type="text" value={workspace.editPath} disabled={workspace.busy !== null || confirmEdit !== null} placeholder={a.packagePlaceholder} spellCheck={false}
           onChange={event => authoring.onPath(event.target.value)}/></div>
-        <button id="authoring-open" type="button" disabled={authoring.block !== null || !workspace.editPath.trim()} onClick={() => authoring.onOpen(workspace.editPath.trim())}>{a.open}</button>
+        <button id="authoring-open" type="button" disabled={authoring.block !== null || !workspace.editPath.trim()} onClick={event => confirmedEdit('open', event.currentTarget)}>{a.open}</button>
       </div>
+      {confirmEdit !== null && <div ref={editConfirmRow} className="confirm-row" role="alertdialog" aria-labelledby="confirm-edit-text">
+        <span id="confirm-edit-text">{a.confirmEdit}</span>
+        <button id="edit-discard" type="button" className="danger-text" disabled={authoring.block !== null} onClick={() => closeEditConfirm(true)}>{a.discardEdit}</button>
+        <button id="edit-keep" type="button" autoFocus onClick={() => closeEditConfirm(false)}>{t.run.keepDraft}</button></div>}
     </div></section>}
     <ProfileRecovery idPrefix="recovery" label={label} state={workspace.recovery} outcomes={workspace.recoveryOutcomes} locked={locked} handlers={recovery}/>
     <section className="panel open-form" aria-labelledby="inspect-heading">

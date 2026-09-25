@@ -153,6 +153,7 @@
     "authoringDiscarded": "Discarded unsaved changes to {path}. Undo restores them.",
     "authoringExited": "Edit ended. Nothing was bound automatically: Inspect or Reinspect this package before running it.",
     "selectionInvalidated": "This workspace's inspected selection is no longer current (for example, its package was edited). Inspect or Reinspect the package before running.",
+    "recoveryInvalidated": "This workspace's recovery context is no longer current; any unsaved repair draft was cleared. Saved profiles are unchanged. Inspect the package again before running.",
     "authoringRecovered": "The interrupted package save was resolved. Inspect the package or open it for Edit again to continue.",
     "authoringStopRequested": "Validation Stop requested. Waiting for its child to be cleaned up."
   },

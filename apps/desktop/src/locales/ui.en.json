@@ -867,7 +867,7 @@
     "resumeHelp": "The host holds this workspace's Edit session, but its view is not loaded. Return to Edit reloads the saved files; drafts from before the reload are not available.",
     "blockedOther": "{owner} owns Edit. One Edit session exists per application.",
     "blockedActive": "Wait until the active operation has settled and been cleaned up before entering Edit.",
-    "confirmEdit": "Leaving Edit requires reinspecting this package. Discard unsaved profile and target edits and open it for Edit?",
+    "confirmEdit": "Editing requires a fresh package inspection before Run. Discard unsaved profile, target, or recovery drafts and enter Edit?",
     "discardEdit": "Discard and edit",
     "startBlocked": "Start and OCR Check are refused while {owner} owns Edit.",
     "inspectBlocked": "Exit Edit before inspecting.",

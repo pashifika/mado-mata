@@ -1,7 +1,7 @@
 use super::{Candidate, MAX_BYTES, MAX_FILES, Publisher, io_fault, limits, stale};
 use crate::configuration::{
-    create_private_directory as create_directory, digest, publish_no_replace, sync_directory,
-    temporary, write_private as write_new,
+    create_private_directory as create_directory, create_private_file, digest, publish_no_replace,
+    sync_directory, temporary, write_private as write_new,
 };
 use crate::storage::{
     check_directory, encode, exists, filesystem_key, private_directory, read_bytes,
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -190,14 +191,49 @@ impl Publisher {
         if let Some(parent) = self.data_root.parent() {
             sync_directory(parent)?;
         }
-        // Complete preimages and intended bytes become durable before any source
-        // path is replaced. A torn journal refuses admission rather than guessing.
-        write_new(&self.journal_path(), &encode(&journal, JOURNAL_BYTES)?)?;
-        sync_directory(&self.directory())?;
+        // Only a complete durable journal may become the admission barrier.
+        self.publish_journal(&journal)?;
         self.finish(&journal, after_change)?;
         // Persistence is already complete. Failure to retire is a refresh/recovery
         // problem, not a request to repeat the mutation; open reports the journal.
         Ok(self.retire(&journal).err())
+    }
+
+    fn publish_journal(&self, journal: &Journal) -> Result<(), Fault> {
+        let bytes = encode(journal, JOURNAL_BYTES)?;
+        let directory = self.directory();
+        // A single unpublished slot bounds crash leftovers. Source writes begin
+        // only after this file has moved to pending.json.
+        let stage = directory.join("pending.tmp");
+        if exists(&stage)? {
+            crate::storage::checked_file(&stage, JOURNAL_BYTES)?;
+            fs::remove_file(&stage)
+                .map_err(|error| io_fault("discard unpublished journal stage", error))?;
+        }
+        let mut file = create_private_file(&stage)?;
+        let staged = file
+            .write_all(&bytes)
+            .map_err(|error| crate::configuration::io_fault("write authoring journal", error))
+            .and_then(|()| {
+                file.sync_all()
+                    .map_err(|error| crate::configuration::io_fault("sync authoring journal", error))
+            });
+        drop(file);
+        let result = staged.and_then(|()| {
+            publish_no_replace(&stage, &self.journal_path())
+                .map_err(|error| io_fault("publish authoring journal", error))?;
+            sync_directory(&directory)
+        });
+        if let Err(mut fault) = result {
+            if let Err(error) = fs::remove_file(&stage)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                fault.context["temporary_cleanup"] =
+                    json!({"path": stage, "kind": format!("{:?}", error.kind())});
+            }
+            return Err(fault);
+        }
+        Ok(())
     }
 
     fn read_journal(&self) -> Result<Journal, Fault> {
@@ -265,11 +301,33 @@ impl Publisher {
                 if let Some(bytes) = &change.after {
                     let destination = checked_destination(&journal.root, &change.path, true)?;
                     let stage = scratch.join(format!("next-{index}"));
-                    if exists(&stage)? {
-                        if read_bytes(&stage, MAX_BYTES)? != *bytes {
+                    let staged = if exists(&stage)? {
+                        let written = read_bytes(&stage, MAX_BYTES)?;
+                        if written == *bytes {
+                            // A prior write may have completed before sync failed.
+                            OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .open(&stage)
+                                .and_then(|file| file.sync_all())
+                                .map_err(|error| {
+                                    io_fault("sync recovered publication stage", error)
+                                })?;
+                            true
+                        } else if bytes.starts_with(&written) {
+                            // A partial private write is rebuildable from the
+                            // journal; unrelated bytes still require repair.
+                            fs::remove_file(&stage).map_err(|error| {
+                                io_fault("discard partial publication stage", error)
+                            })?;
+                            false
+                        } else {
                             return Err(stale());
                         }
                     } else {
+                        false
+                    };
+                    if !staged {
                         write_new(&stage, bytes)?;
                         sync_directory(&scratch)?;
                     }
