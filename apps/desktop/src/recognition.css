@@ -31,14 +31,22 @@
 /* Detached preview window. */
 .preview-app { height: 100vh; display: flex; flex-direction: column; background: var(--canvas); }
 .preview-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
-.preview-toolbar button, .preview-toolbar select { font-size: 12px; padding: 4px 10px; }
+.preview-toolbar button { font-size: 12px; padding: 4px 10px; }
+.preview-toolbar > .button-row { margin: 0; }
+/* The zoom Select matches the toolbar buttons; recognition.css precedes the base Select rules, hence the scoping. */
+.preview-toolbar .select-trigger { min-height: 0; gap: 8px; border-color: #c9d2dd; }
+.preview-toolbar .select-trigger:disabled { background: var(--surface); color: inherit; }
+.preview-toolbar .preview-zoom-select { min-width: 96px; }
 .preview-help { margin: 6px 12px 0; }
 .preview-app > .inline-warning, .preview-app > .fault { margin: 6px 12px 0; }
 .preview-message { margin: 24px; }
+/* Lift the focused segment so its outline paints over its neighbours. */
 .segmented { display: inline-flex; align-items: center; gap: 0; }
-.segmented > button, .segmented > select { border-radius: 0; margin-left: -1px; }
-.segmented > :first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.segmented > button, .segmented > .select { border-radius: 0; }
+.segmented > :first-child { border-radius: 6px 0 0 6px; }
 .segmented > :last-child { border-radius: 0 6px 6px 0; }
+.segmented > .select > .select-trigger { border-radius: inherit; }
+.segmented > :focus-within { z-index: 1; }
 .segmented > button[aria-pressed="true"] { background: var(--info-soft); border-color: var(--accent); color: var(--accent); }
 .recognition-stage { flex: 1; min-height: 0; overflow: auto; margin: 8px 12px 12px; background: #1c2230; border-radius: var(--radius-sm); }
 .recognition-stage.fit { display: flex; align-items: center; justify-content: center; overflow: hidden; }

@@ -262,8 +262,9 @@ Neither action inspects, binds, or runs the package.
   Actions target that row, not another selected file. Rename updates declarations,
   not source imports. Required entries/schema/presets cannot be removed; unsafe
   paths, links, collisions and undeclared files are refused.
-  The shell disables the ordinary Web Inspector, including debug builds; normal
-  text-editing clipboard menus remain available outside these owned menus.
+  Both the main and Recognition preview windows disable the ordinary Web
+  Inspector, including debug builds; normal text-editing clipboard menus remain
+  available outside these owned menus.
 - **Save file** and **Save all** publish drafts without running or validating
   them. Incomplete script or invalid metadata values can be saved for later
   repair; they are not an executable inventory. A later edit stays dirty if an
@@ -327,8 +328,10 @@ Edit readiness gate remain separate work.
 
 ## Author saved-image Recognition
 
-Open **Recognition** in an Edit session. Use **Load PNG…** to select an existing,
-authorized local image; this is not a capture command or permission grant.
+Open the viewfinder-icon **Recognition** action in the Edit session's left
+**Package contents** tree, above **Duplicate package…**. Use **Load PNG…** to
+select an existing, authorized local image; this is not a capture command or
+permission grant.
 Loading, editing, saving, and Copy do not initialize OCR. Trials require the
 fixed engine runner and [saved OCR environment](#save-and-check-an-ocr-environment),
 but no replay descriptor, workload profile, or executable package source.
@@ -342,6 +345,9 @@ substitute backend enables a trial.
 Selection, metadata, and bounded Undo are shared; closing and reopening the
 preview keeps the draft and Edit lease. The preview receives a bounded display
 raster, not a second editable original. Its scale does not change stored geometry.
+The percentage picker uses the same keyboard-accessible dropdown as the main
+window. Tool and zoom controls retain separate focus outlines; **Fit** and the
+minus/plus buttons do not change the stored geometry.
 
 Use this workflow:
 

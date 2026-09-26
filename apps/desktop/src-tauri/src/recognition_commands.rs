@@ -287,6 +287,7 @@ pub async fn recognition_open_preview(
             PREVIEW_WINDOW,
             tauri::WebviewUrl::App("index.html?surface=recognition-preview".into()),
         )
+        .devtools(false)
         .title("MadoMata — Recognition preview")
         .inner_size(1100.0, 760.0)
         .min_inner_size(480.0, 320.0)

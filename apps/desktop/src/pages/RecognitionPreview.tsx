@@ -3,6 +3,7 @@ import type {KeyboardEvent} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {emitTo, listen} from '@tauri-apps/api/event';
 import RecognitionCanvas from '../components/RecognitionCanvas.tsx';
+import Select from '../components/Select.tsx';
 import {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import {messages} from '../i18n.ts';
 import {LocaleContext} from '../locale.tsx';
@@ -106,7 +107,7 @@ export default function RecognitionPreview() {
   function keyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (!snapshot || !editable) return;
     const target = event.target as HTMLElement;
-    if (target.closest('input, select, textarea')) return;
+    if (target.closest('input, textarea, [role="combobox"]')) return;
     if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
       event.preventDefault();
       if (snapshot.canUndo) send({kind: 'undo', localRevision: snapshot.localRevision});
@@ -142,12 +143,10 @@ export default function RecognitionPreview() {
             onClick={() => changeDisplay({...display, zoom: 'fit'})}>{r.fit}</button>
           <button id="preview-zoom-out" type="button" aria-label={r.zoomOut} title={r.zoomOut} disabled={!frame || percent <= ZOOM_LEVELS[0]}
             onClick={() => changeDisplay({...display, zoom: stepZoom(scale, -1)})}>−</button>
-          <label className="visually-hidden" htmlFor="preview-zoom">{r.zoomLabel}</label>
-          <select id="preview-zoom" value={display.zoom === 'fit' ? 'fit' : String(display.zoom)} disabled={!frame}
-            onChange={event => changeDisplay({...display, zoom: event.target.value === 'fit' ? 'fit' : Number(event.target.value)})}>
-            <option value="fit">{display.zoom === 'fit' ? `${r.fit} · ${r.percent(percent)}` : r.fit}</option>
-            {ZOOM_LEVELS.map(level => <option key={level} value={String(level)}>{r.percent(level)}</option>)}
-          </select>
+          <Select id="preview-zoom" className="preview-zoom-select" aria-label={r.zoomLabel} value={display.zoom === 'fit' ? 'fit' : String(display.zoom)} disabled={!frame}
+            onChange={value => changeDisplay({...display, zoom: value === 'fit' ? 'fit' : Number(value)})}
+            options={[{value: 'fit', label: display.zoom === 'fit' ? `${r.fit} · ${r.percent(percent)}` : r.fit},
+              ...ZOOM_LEVELS.map(level => ({value: String(level), label: r.percent(level)}))]}/>
           <button id="preview-zoom-in" type="button" aria-label={r.zoomIn} title={r.zoomIn} disabled={!frame || percent >= ZOOM_LEVELS[ZOOM_LEVELS.length - 1]}
             onClick={() => changeDisplay({...display, zoom: stepZoom(scale, 1)})}>+</button>
         </div>

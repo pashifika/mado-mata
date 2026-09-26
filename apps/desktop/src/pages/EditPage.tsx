@@ -512,8 +512,10 @@ export default function EditPage({session, label, handlers, recognition, recogni
               </ul>
             </li>
             <li><div className={recognitionSelected ? 'tree-row current' : 'tree-row'}>
-              <button id="authoring-recognition" type="button" className="tree-file" aria-current={recognitionSelected ? 'true' : undefined}
-                onClick={() => handlers.recognition(previous())}><span className="tree-name">{a.recognition}</span>
+              <button id="authoring-recognition" type="button" className="tree-folder tree-action" aria-current={recognitionSelected ? 'true' : undefined}
+                onClick={() => handlers.recognition(previous())}>
+                <svg className="recognition-icon" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 4V1h3M8 1h3v3M11 8v3H8M4 11H1V8M4.5 4.5h3v3h-3z"/></svg>
+                <span className="tree-name">{a.recognition}</span>
                 {recognitionDirty && <span className="tree-meta"><span className="tag unsaved">{a.unsaved}</span></span>}</button>
             </div></li>
             <li><div className="tree-row">
