@@ -1,10 +1,10 @@
 use super::{Edit, MAX_BYTES, limits};
+use mado_runtime_comparison::images::{PACKAGE_IMAGE_BYTES, PayloadBytes};
 use mado_runtime_comparison::inventory::{DraftFileKind, PackageDraft};
 use mado_runtime_comparison::model::Fault;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,14 +42,16 @@ fn refusal(message: &str) -> Fault {
     Fault::new("AuthoringCatalog", message)
 }
 
-fn encode(value: &Value) -> Result<Arc<[u8]>, Fault> {
-    crate::storage::encode(value, MAX_BYTES).map(Arc::from)
+pub(super) fn encode(value: &Value) -> Result<PayloadBytes, Fault> {
+    PayloadBytes::new(crate::storage::encode(value, MAX_BYTES)?)
 }
 
 pub(super) fn apply(draft: &PackageDraft, edit: Edit) -> Result<PackageDraft, Fault> {
+    let validate_recognition = matches!(&edit, Edit::Catalog(_));
     // Cloning this catalog shares immutable bytes; only edited files allocate new content.
     let mut files = draft.files().clone();
     match edit {
+        Edit::Recognition(save) => return super::recognition::apply(draft, save),
         Edit::Text { path, text } => {
             PackageDraft::check_path(&path)?;
             let kind = draft
@@ -62,7 +64,7 @@ pub(super) fn apply(draft: &PackageDraft, edit: Edit) -> Result<PackageDraft, Fa
             if text.len() > MAX_BYTES {
                 return Err(refusal("text exceeds the snapshot byte limit"));
             }
-            files.insert(path, Arc::from(text.into_bytes()));
+            files.insert(path, PayloadBytes::new(text.into_bytes())?);
         }
         Edit::Catalog(edit) => {
             let mut manifest = draft.manifest()?;
@@ -82,12 +84,19 @@ pub(super) fn apply(draft: &PackageDraft, edit: Edit) -> Result<PackageDraft, Fa
                     if files.contains_key(&path) {
                         return Err(refusal("add destination is already declared"));
                     }
-                    let content: Arc<[u8]> = match (text, bytes, file_kind) {
+                    let content = match (text, bytes, file_kind) {
                         (Some(text), None, _) if text.len() <= MAX_BYTES => {
-                            Arc::from(text.into_bytes())
+                            PayloadBytes::new(text.into_bytes())?
                         }
-                        (None, Some(bytes), CatalogFileKind::Asset) if bytes.len() <= MAX_BYTES => {
-                            Arc::from(bytes)
+                        (None, Some(bytes), CatalogFileKind::Asset)
+                            if bytes.len()
+                                <= if matches!(format.as_deref(), Some("png" | "raw-rgba8")) {
+                                    PACKAGE_IMAGE_BYTES
+                                } else {
+                                    MAX_BYTES
+                                } =>
+                        {
+                            PayloadBytes::new(bytes)?
                         }
                         _ => {
                             return Err(refusal(
@@ -143,6 +152,7 @@ pub(super) fn apply(draft: &PackageDraft, edit: Edit) -> Result<PackageDraft, Fa
                     files.insert(destination, bytes);
                 }
                 CatalogEdit::Remove { path } => {
+                    super::recognition::check_remove(draft, &path)?;
                     if path == "package.json"
                         || draft.kinds().get(&path) == Some(&DraftFileKind::Schema)
                     {
@@ -171,6 +181,9 @@ pub(super) fn apply(draft: &PackageDraft, edit: Edit) -> Result<PackageDraft, Fa
         }
     }
     let next = PackageDraft::from_files(files, &limits()?)?;
+    if validate_recognition {
+        super::recognition::load(&next)?;
+    }
     if next.package_id() != draft.package_id() {
         return Err(refusal("package ID changes require Duplicate"));
     }
@@ -244,6 +257,9 @@ pub(super) fn duplicate(draft: &PackageDraft, id: &str) -> Result<PackageDraft, 
         profile["package_id"] = json!(id);
         files.insert(path.clone(), encode(&profile)?);
     }
+    if let Some(document) = super::recognition::load(draft)? {
+        super::recognition::synchronize(&document, &mut manifest, &mut files, true)?;
+    }
     files.insert("package.json".into(), encode(&manifest)?);
     PackageDraft::from_files(files, &limits()?)
 }
@@ -261,7 +277,10 @@ pub(super) fn starter(id: &str) -> Result<PackageDraft, Fault> {
         ("package.json".to_owned(), encode(&manifest)?),
         ("schema.json".to_owned(), encode(&schema)?),
         ("profiles/default.json".to_owned(), encode(&profile)?),
-        ("main.ts".to_owned(), Arc::from(source.as_bytes())),
+        (
+            "main.ts".to_owned(),
+            PayloadBytes::new(source.as_bytes().to_vec())?,
+        ),
     ]);
     let draft = PackageDraft::from_files(files, &limits()?)?;
     draft.validate()?;

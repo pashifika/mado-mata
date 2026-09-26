@@ -11,6 +11,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+mod recognition;
+pub use recognition::{
+    RecognitionCopy, RecognitionFrame, RecognitionPickerGuard, RecognitionSaved, RecognitionTrial,
+    RecognitionView,
+};
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AuthoringRef {
@@ -48,6 +54,7 @@ pub(super) struct Lease {
     candidate: Arc<Candidate>,
     revision: String,
     pub containment: Option<Fault>,
+    recognition: recognition::RecognitionState,
     // Duplicate changes the lease source; every previously edited source still
     // needs explicit reinspection when the session exits.
     roots: BTreeSet<PathBuf>,
@@ -154,6 +161,7 @@ impl Application {
             revision: candidate.revision().to_owned(),
             candidate: Arc::new(candidate),
             containment: None,
+            recognition: recognition::RecognitionState::default(),
             roots,
         });
         *lock(&self.authoring_stop) = Some(StopOwner { owner, run: None });
@@ -194,6 +202,7 @@ impl Application {
         lease.owner = next.clone();
         lease.revision = candidate.revision().to_owned();
         lease.candidate = Arc::new(candidate);
+        lease.recognition = recognition::RecognitionState::default();
         *lock(&self.authoring_stop) = Some(StopOwner {
             owner: next,
             run: None,

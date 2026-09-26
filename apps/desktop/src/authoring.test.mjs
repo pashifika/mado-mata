@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {AUTHORING_CONFLICT,applyCatalogMutation,applyRefresh,applySave,applyValidation,beginComposition,beginPending,catalogBlock,catalogTicket,diagnosticLocation,discardFile,editFile,endComposition,failCommand,fileDirty,findMatch,matchSummary,offsetAt,openSession,recoveryPath,redoFile,saveBlock,saveTicket,selectFile,undoFile,validationCurrent,validationTicket} from './authoring.ts';
+import {AUTHORING_CONFLICT,applyCatalogMutation,applyRecognitionMutation,applyRefresh,applySave,applyValidation,beginComposition,beginPending,catalogBlock,catalogTicket,diagnosticLocation,discardFile,editFile,endComposition,failCommand,fileDirty,findMatch,matchSummary,offsetAt,openSession,recoveryPath,redoFile,saveBlock,saveTicket,selectFile,selectRecognition,undoFile,validationCurrent,validationTicket} from './authoring.ts';
 import {applyAuthoringExit,applyInvalidatedViews,editDraft,updateBound,workspaceFromView} from './workspace.ts';
 
 const owner={workspace:{workspace_id:'a',revision:1},token:'lease-1'};
@@ -47,6 +47,43 @@ test('each file keeps its own text, dirty state, caret and undo history across f
   assert.equal(text(state,'main.ts'),'A'+MAIN);
   assert.deepEqual(state.drafts.get('main.ts').range,{start:1,end:1});
   assert.equal(undoFile(openSession(packageView('rev-1',files)),'main.ts').drafts.get('main.ts').text,MAIN);
+});
+
+test('returning from recognition to the same file restores its unsaved text and caret',()=>{
+  let state=type(openSession(packageView('rev-1',files)),'main.ts','draft');
+  state=selectRecognition(state,{start:2,end:4});
+  assert.equal(state.destination,'recognition');
+  state=selectFile(state,'main.ts',null);
+  assert.equal(state.destination,'file');
+  assert.equal(text(state,'main.ts'),'draft'+MAIN);
+  assert.deepEqual(state.drafts.get('main.ts').range,{start:2,end:4});
+  assert.equal(fileDirty(state.drafts.get('main.ts')),true);
+});
+
+test('recognition publication preserves concurrent source and manifest drafts against the committed view',()=>{
+  let state=type(type(openSession(packageView('rev-1',files)),'main.ts','source edit'),'package.json','manifest edit');
+  state=selectRecognition(state,null);
+  const saved=packageView('rev-2',[...withText('package.json','{"recognition":true}\n'),file('recognition/authoring.json','asset',null)]);
+  state=applyRecognitionMutation(state,mutation('rev-2',saved));
+  assert.equal(state.revision,'rev-2');
+  assert.equal(state.destination,'recognition');
+  assert.equal(text(state,'main.ts'),'source edit'+MAIN);
+  assert.equal(text(state,'package.json'),'manifest edit{}\n');
+  assert.equal(state.drafts.get('package.json').base,'{"recognition":true}\n');
+  assert.equal(state.drafts.get('package.json').diskChanged,true);
+  assert.equal(saveTicket(state,'main.ts').expected,'rev-2');
+});
+
+test('recognition commit remains authoritative after read failure and rejects a stale owner reply',()=>{
+  const original=type(openSession(packageView('rev-1',files)),'main.ts','draft');
+  const failedRead={category:'Io',message:'read failed',context:null};
+  const state=applyRecognitionMutation(original,mutation('rev-2',null,failedRead));
+  assert.equal(state.revision,'rev-2');
+  assert.equal(state.refreshRequired,true);
+  assert.equal(saveTicket(state,'main.ts'),null);
+  assert.equal(text(state,'main.ts'),'draft'+MAIN);
+  const successor=openSession(packageView('rev-next',files,'lease-next'));
+  assert.equal(applyRecognitionMutation(successor,mutation('rev-2',null,failedRead)),successor);
 });
 
 test('typing forms word-sized undo steps; whitespace and a moved caret start new steps',()=>{
@@ -214,6 +251,11 @@ test('catalog edits wait for dirty manifest or target drafts and a rename keeps 
   assert.equal(state.drafts.get('src/main.ts').undo.length,1);
   assert.deepEqual(state.order,renamed.map(item=>item.path));
   assert.equal(state.notice.key,'authoringCatalogSaved');
+  state=selectRecognition(state,null);
+  const add={kind:'add',path:'new.ts',file_kind:'source',text:''};
+  state=applyCatalogMutation(state,catalogTicket(state,add),mutation('rev-4',packageView('rev-4',[...renamed,file('new.ts','source','')])));
+  assert.equal(state.destination,'file');
+  assert.equal(state.selected,'new.ts');
 });
 
 test('search is literal, case-insensitive and wraps; diagnostics map to file offsets',()=>{

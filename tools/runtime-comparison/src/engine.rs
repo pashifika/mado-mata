@@ -296,7 +296,7 @@ mod enabled {
     impl Engine {
         pub(crate) fn new(
             plan: &Plan,
-            assets: &BTreeMap<String, Vec<u8>>,
+            assets: &BTreeMap<String, crate::images::PayloadBytes>,
             control: Arc<Control>,
             attempt_id: &str,
             attempt: u64,
@@ -352,7 +352,7 @@ mod enabled {
                 digest.update((name.len() as u64).to_le_bytes());
                 digest.update(name.as_bytes());
                 digest.update((bytes.len() as u64).to_le_bytes());
-                digest.update(bytes);
+                digest.update(bytes.digest());
             }
             let identity = format!("{:x}", digest.finalize());
             let mut cache = RESOURCES
@@ -2124,7 +2124,7 @@ mod enabled {
 
     fn replay_source(
         config: &ReplayConfig,
-        assets: &BTreeMap<String, Vec<u8>>,
+        assets: &BTreeMap<String, crate::images::PayloadBytes>,
         limits: &Limits,
         control: &Control,
     ) -> Result<mp::replay::ReplaySource, Fault> {
@@ -2164,7 +2164,7 @@ mod enabled {
                 mp::MonotonicInstant::from_origin(Duration::from_nanos(record.captured_ns)),
                 continuity,
                 placement,
-                pixels.clone().into_boxed_slice(),
+                pixels.as_slice().to_vec().into_boxed_slice(),
             )
             .map_err(|error| prerequisite_error("replay_frame", error.into()))?;
             frames.push(frame);

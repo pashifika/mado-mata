@@ -1,12 +1,14 @@
 # macOS desktop: controlled runs and recorded replay
 
 MadoMata's trusted Tauri/React WebView provides directory-package authoring,
-inspection, profile editing, run control, App-local OCR configuration, and
-structured logs. Package code runs in the supervised QuickJS runner, never in
-the WebView. Controlled runs need no OCR installation. Optional recorded replay uses real engine
-OCR/template recognition over explicitly selected, previously authorized frames.
-Both desktop lanes retain the **controlled, non-native input sink**. Neither
-grants live capture, game launch, focus changes, permission prompts, or OS input.
+saved-image Recognition, inspection, profile editing, run control, App-local OCR
+configuration, and structured logs. Package code runs in the supervised
+QuickJS runner, never in the WebView. Controlled runs need no OCR installation.
+Optional recorded replay uses real engine OCR/template recognition over
+explicitly selected, previously authorized frames. Both desktop execution lanes
+retain the **controlled, non-native input sink**. Saved-image trials execute no
+package code or input. None grants live capture, game launch, focus changes to
+another application, permission prompts, or OS input.
 
 Only macOS desktop development is supported. Linux and Windows CI check the
 frontend and shell-independent Rust core, not additional desktop platforms.
@@ -212,7 +214,8 @@ change persisted formats, filesystem protections, or runtime authority.
 
 Create or open a package from an unbound workspace, or choose **Edit package**
 on Run control. Supported sources are ordinary **TypeScript or JavaScript
-directories**, with at most **128 declared files and 1 MiB total content**.
+directories**, with at most **128 declared files** under the
+[shared image and non-image limits](adr/0006-saved-image-recognition-observations.md#image-policy).
 Create writes a runnable TypeScript starter. Duplicate copies the saved source
 under a new package ID and updates package ownership in each packaged preset. It does not copy App
 settings, named-workspace profiles, target bindings, or execution results.
@@ -231,14 +234,16 @@ Neither action inspects, binds, or runs the package.
   links, traversal and aliases are refused. Under the App data root, source is
   allowed only within `sources` or `pkgs`, never configuration or journals.
   **Open for Edit** still accepts an existing external package directory.
-- The collapsible left tree contains **Files**, **Metadata** and **Duplicate**.
-  Selecting a file or metadata item displays its editor, form or facts on the
-  right. Collapsing the navigation leaves the current detail and drafts intact.
+- The collapsible left tree contains **Files**, **Metadata**, **Recognition**
+  and **Duplicate**. Selecting a file or metadata item displays its editor,
+  form or facts on the right. Collapsing the navigation leaves the current
+  detail and drafts intact.
 - **Files** contains scripts and assets in expandable folders. Folder nodes come
   from declared paths: adding or renaming `src/lib/helper.ts` creates its parents.
   There is no independent empty-folder operation. Scripts have independent
-  drafts, selection, undo/redo, literal search and line numbers. Assets are
-  inventory facts, not decoded or text-edited.
+  drafts, selection, undo/redo, literal search and line numbers. File-tree assets
+  are inventory facts, not decoded or text-edited; image authoring belongs to
+  **Recognition**.
 - **Metadata** opens structured manifest, option-schema and packaged preset
   controls; generated source maps are read-only facts. Metadata never
   opens in the code textarea. Manifest controls preserve package identity and
@@ -246,9 +251,9 @@ Neither action inspects, binds, or runs the package.
   Malformed schema/preset bytes remain unchanged until deliberate repair and
   Save; rebuilding an invalid document requires confirmation. Saved local
   workspace profiles are not part of these forms.
-- Use **+** beside the tree's collapse button to add a source, preset, JSON asset
-  or source map. This is the only creation entry point. Group headings, folders
-  and blank tree space have no context menus.
+- **+** beside the tree's collapse button adds a source, preset, JSON asset or
+  source map. Image crops are saved separately through **Recognition**.
+  Group headings, folders and blank tree space have no context menus.
   Right-click an individual file, use its menu button, or press **Shift+F10** /
   the **Context Menu** key for Rename/Remove where available; the manifest has no
   file-action menu and the required schema offers Rename only. A pointer-opened
@@ -280,9 +285,11 @@ Neither action inspects, binds, or runs the package.
   does not strand keyboard focus. **Discard and edit** explicitly proceeds.
   Saved profiles remain untouched.
 - Exit, Duplicate, closing the workspace, and closing the application resolve
-  dirty files with **Save / Discard / Cancel**. Cancel keeps the lease and drafts.
-  Confirmed application close uses bounded shutdown and preserves incomplete
-  containment outcomes; closing is not proof of successful cleanup.
+  dirty files and Recognition metadata/crop selections with
+  **Save / Discard / Cancel**. Cancel keeps the lease and drafts. Save processes
+  dirty files before Recognition and stops at the first failure. Confirmed
+  application close uses bounded shutdown and preserves incomplete containment
+  outcomes; closing is not proof of successful cleanup.
 - **Exit Edit**, then explicitly **Inspect/Reinspect** before Start. Selections
   for every workspace sharing an edited source are invalidated. A normal exit
   returns to unbound guidance, not an inspection-failure error. Affected recovery
@@ -315,8 +322,123 @@ existing package are refused before creating directories or archives.
 Interruption regressions cover process-level failures, not physical power loss.
 Windows core checks do not qualify crash durability or an additional desktop OS;
 directory sync retains the [existing platform limitation](adr/0005-desktop-configuration-recovery.md).
-Custom archives, remote download, image/OCR authoring, native capture/input, and
-the broader practical Edit readiness gate remain separate work.
+Custom archives, remote download, native capture/input, and the broader practical
+Edit readiness gate remain separate work.
+
+## Author saved-image Recognition
+
+Open **Recognition** in an Edit session. Use **Load PNG…** to select an existing,
+authorized local image; this is not a capture command or permission grant.
+Loading, editing, saving, and Copy do not initialize OCR. Trials require the
+fixed engine runner and [saved OCR environment](#save-and-check-an-ocr-environment),
+but no replay descriptor, workload profile, or executable package source.
+Opening Recognition probes the engine's grouped OCR capability without loading
+models; **Check engine** retries a missing capability. No guessed limit or
+substitute backend enables a trial.
+
+**Open preview** opens one separate native window for the image, **Fit**/zoom,
+**Game content**, and on-image region editing. Definitions, results,
+**Save recognition**, and **Copy snippet** remain in the main Edit window.
+Selection, metadata, and bounded Undo are shared; closing and reopening the
+preview keeps the draft and Edit lease. The preview receives a bounded display
+raster, not a second editable original. Its scale does not change stored geometry.
+
+Use this workflow:
+
+1. In the preview, select **Game content** and exclude black bars or other
+   non-content borders. Select **Regions**, then drag empty content to add an OCR
+   definition; select, move, resize, delete, or Undo through the same shared state.
+   Region coordinates are normalized to the content rectangle, then mapped to
+   original capture pixels with floor for left/top and ceil for right/bottom.
+   Empty, non-finite, or out-of-bounds rectangles are refused. Zoom, scrolling,
+   and Retina display scale never resize the recognition input or saved crop.
+2. Review **Geometry** in the main window. The first new document starts with
+   the whole image confirmed. Replacing an image or changing its content basis
+   requires **Confirm geometry**, even when the replacement has identical
+   dimensions. Equal dimensions do not establish equal content placement.
+   Definitions survive replacement, but earlier observations and Copy records
+   do not become current for the replacement.
+3. Name definitions and choose **OCR** or **Template** explicitly; there is no
+   automatic fallback. Up to **256 definitions** fit within **256 KiB** of
+   metadata. Nine or more definitions are valid even though the pinned engine
+   accepts only **8 OCR zones per grouped request**. Select any subset within
+   the reported capability and choose **Try OCR**. The UI sends list order;
+   the host preserves any distinct caller-supplied selection order in one
+   grouped request. Excess selection is refused, never split or truncated.
+4. Read all returned OCR regions under their originating definition: public
+   text, confidence, and capture-pixel bounds in engine order. The upstream text
+   is already NFC-normalized and Unicode-trimmed; the editor adds no
+   normalization, concatenation, exact-match judge, or correctness verdict.
+   **Recognized** means observations exist, not that the text is correct.
+   Results exceeding **256 regions or 256 KiB** fail rather than become a
+   truncated success. [ADR 0006](adr/0006-saved-image-recognition-observations.md)
+   owns this observation contract.
+5. For a template, edit its pattern crop and separate search area in the preview.
+   The search must fit the pattern. Enter and review **Template rights** before
+   trialing or saving template pixels. **Try template** tests one template and
+   reports the effective threshold, actual scores, and boxes; no-match invents
+   no score. Threshold and maximum-result defaults are displayed, not editable
+   tuning controls. Fine matching criteria belong to Script authors.
+6. Check **Save crop** only for definitions whose current pixels should be
+   persisted, then choose **Save recognition**. Metadata-only Save needs no
+   loaded image; new or replacement crops require confirmed geometry. The
+   transaction writes metadata JSON, selected original-resolution PNG crops,
+   and required template manifest/maps. It never persists the loaded original,
+   trial text, or trial results. Template pixels require a license, creator,
+   optional purpose, and explicit rights review; the application invents none.
+7. Choose **Copy OCR recognize**, **Copy query_wait**, or **Copy template
+   recognize** for the selected definition. **Script wait text** is optional
+   metadata, limited to **4 KiB UTF-8**, and required only for `query_wait` Copy.
+   It is never a trial filter. Copy publishes generated `mado-host-v1` source
+   through the native macOS clipboard, only after the explicit Copy action;
+   no browser clipboard permission or general clipboard plugin is required.
+   It never edits package source. Review and paste deliberately; later edits
+   mark the Copy obsolete and never rewrite pasted code.
+
+Copy always requires a loaded, confirmed frame. OCR Copy can be unverified when
+no current trial exists; a current trial still does not prove text correctness.
+Template Copy additionally requires current saved metadata, pattern pixels,
+rights, and mappings. Generated source checks frame dimensions, uses the current
+capture-pixel ROI, and releases managed observations/results; `query_wait` Copy
+uses a finite **1,000 ms** wait. It supplies no input or automatic text logging.
+The dimension guard cannot detect changed content placement.
+
+After reopening a package without its original image, definitions remain editable
+and **Recheck saved crop** recognizes the complete saved OCR sample. Sample bounds
+are crop-local; the result proves neither original-frame placement nor a current
+frame trial and cannot authorize Copy. Load and confirm a frame for Copy, new
+crops, or frame trials.
+
+Recognition Save shares the existing source-revision transaction. Save or discard
+a dirty manifest first; unrelated script drafts remain independent.
+**Save all** also saves dirty Recognition state after files. A committed Save
+whose refresh fails stays committed; refresh to adopt authoritative saved crop
+references before writing again. **Discard recognition draft** restores saved
+metadata and clears crop selections. If its saved basis has different dimensions
+from the loaded replacement, the host releases that incompatible frame and preview
+instead of remapping saved coordinates. A retained compatible frame still needs
+geometry confirmation.
+
+Deleting a definition does not immediately delete saved pixels. Save reconciles
+owned crop references and generated template assets, preserving shared crops and
+unrelated JSON consumers. Pasted Script references are never refactored. Saved
+template maps merge into desktop replay only when explicit mappings agree;
+conflicting aliases or engine-manifest mappings are refused. Saving a crop does
+not create a replay corpus or native authority.
+
+Trials reserve the shared operation slot and run only captured pixels through
+the supervised engine child, never package modules. **Stop** remains available
+in the main and preview windows. The **30 s** deadline, **1 s** cleanup, and
+**2 s** containment bounds are separate: Stop or deadline expiry is not proof
+that the backend returned, its session closed, or its child was reaped.
+No subsequent operation is admitted while the owned worker is unsettled.
+Read primary outcome and cleanup independently; forced or incomplete cleanup
+does not become a successful trial.
+
+The [image policy](adr/0006-saved-image-recognition-observations.md#image-policy)
+bounds encoded input, original pixels, crop size, package content, decoded
+frames, and accounted application-owned payloads. It is not a total-RSS limit.
+Keep images, recognized text, clipboard contents, and local resource paths private.
 
 ## Package workspaces and App settings
 
@@ -906,10 +1028,11 @@ unconfirmed although no transaction remains pending. Recovery then offers
    initialization are different outcomes.
 
 The descriptor is a session location hint, not persisted native authority.
-It is bounded to **256 KiB**. Package capture remains **1 MiB** across inspection,
-Check, and both Start lanes; expanded replay frames are bounded separately to
-**2 MiB**. Geometry, strictly increasing timestamps, package declarations,
-template maps, and relative paths are validated before replay admission.
+It is bounded to **256 KiB**. Inspection, Check, and both Start lanes use the
+[shared image policy](adr/0006-saved-image-recognition-observations.md#image-policy),
+including separate package-content and decoded replay-frame bounds. Geometry,
+strictly increasing timestamps, package declarations, template maps, and relative
+paths are validated before replay admission.
 
 **Last check** retains its operation, stages, identities, failure summary, and
 cleanup. Draft/settings/package/descriptor changes detach that association.
@@ -954,12 +1077,13 @@ Run build metadata comes from the actual owned runtime child, not the desktop
 executable. If startup identity is unavailable, it remains unknown (`null`) rather
 than being substituted with supervisor metadata.
 
-Controlled execution has a **10 s** operation deadline; replay and Check use
-**30 s**, including input capture. Repeated parent/child resource verification
-is not skipped to fit the controlled-only deadline. Cleanup remains **1 s** and
-containment **2 s**. Controller shutdown waits at most **14 s** for its owned
-worker. Ordinary window closure requests shutdown off the UI thread. Native macOS
-Quit can bypass that request callback, so the final exit callback waits for the
+Controlled execution has a **10 s** operation deadline; replay, Check, and
+saved-image trials use **30 s**, including input preparation. Repeated parent/child
+resource verification is not skipped to fit the controlled-only deadline.
+Cleanup remains **1 s** and containment **2 s**. Controller shutdown waits at most
+**14 s** for its owned worker. Ordinary window closure requests shutdown off the
+UI thread. Native macOS Quit can bypass that request callback, so the final exit
+callback waits for the
 same bounded shutdown, without starting a second sequence. This fallback is
 source-verified against the pinned dependencies; the native Quit gesture has not
 been exercised. Unexpected app loss retains the runner's parent-loss contract.
@@ -1080,6 +1204,54 @@ local paths, and compiler/run records outside public commits.
    whether composition was driven by WebView events or physical OS IME input;
    the former does not qualify the latter. This procedure grants no game input
    or live-capture authority.
+
+### Saved-image Recognition acceptance
+
+Use the actual WKWebView, an isolated root, disposable package source, and
+explicitly authorized saved PNGs. Real trials additionally require the fixed
+engine artifact and accepted local OCR resources. This procedure does not claim
+completed acceptance or authorize new captures. Keep image/text/path evidence
+private; record source checks, controlled fixtures, and actual GUI observations
+separately.
+
+1. Load a large saved PNG within the image policy. Open the separate preview,
+   compare Fit and zoomed/scrolling geometry, exclude black bars, and create,
+   move, resize, select, delete, and Undo regions. Check exact original-pixel
+   coordinates, shared main-window selection, narrow-window overflow, and both
+   languages. Close/reopen the preview and verify the draft survives. Record
+   whether pointer actions were WebView events or physical OS input; one does
+   not qualify the other.
+2. Keep at least nine definitions. Confirm the actual child reports its grouped
+   limit; trial a non-contiguous selection within it and verify attribution/order.
+   Over-limit selection must refuse without hidden batching or omitted zones.
+   Observe real OCR text/confidence/bounds, including no-match, without adding an
+   expected-text pass/fail check. Use disposable source whose module body throws
+   if evaluated; trials must not execute it.
+3. Trial one template with explicit rights, a distinct pattern/search region, and
+   a declared comparison image. Observe scores, threshold, and no-match separately
+   from OCR. Save selected OCR/template crops and reopen without the original;
+   check original-resolution crop bytes, manifest/maps, unchanged Script source,
+   and saved-sample rechecking. Copy must remain unavailable without a confirmed
+   loaded frame.
+4. Replace with same-size and different-size images; require confirmation and
+   stale prior results. Discard a different-size replacement and verify the
+   incompatible frame is released while saved coordinates remain unchanged.
+   Exercise invalid PNG refusal and late responses without reviving old pixels.
+5. Exercise native Copy for all three purposes, including optional wait text with
+   quotes and Unicode. Inspect clipboard source privately and paste into a
+   disposable Script; validate against the actual SDK. Check finite wait,
+   geometry guard, managed release, unchanged source before paste, and obsolete
+   Copy after edits. Clipboard failure must remain visible, not claim success.
+6. Resolve dirty Script, manifest, and Recognition state through Save/Discard/
+   Cancel, including application close and source conflicts. Where a real
+   post-commit refresh failure can be observed, confirm the completed Save is not
+   repeated and the next refresh adopts saved crop references. Record unavailable
+   fault timing as unexecuted.
+7. Stop during actual initialization/recognition and close during owned work.
+   Observe primary outcome, session cleanup, and child reaping separately before
+   another operation. Preserve forced/incomplete outcomes. Missing engine/models,
+   native picker interaction, total RSS, or other unexercised scenarios remain
+   explicit gaps; CI and source inspection cannot supply them.
 
 ### Setup, Recovery, and named workspaces
 

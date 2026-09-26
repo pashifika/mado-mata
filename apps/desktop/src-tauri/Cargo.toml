@@ -38,7 +38,7 @@ libc = "=0.2.189"
 objc2 = { version = "=0.6.4", features = ["exception"] }
 block2 = "=0.6.2"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSDate", "NSDictionary", "NSEnumerator", "NSString", "NSURL"] }
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "libc", "block2", "NSApplication", "NSRunningApplication", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow", "NSResponder", "NSView", "objc2-uniform-type-identifiers"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "libc", "block2", "NSApplication", "NSRunningApplication", "NSOpenPanel", "NSPasteboard", "NSSavePanel", "NSPanel", "NSWindow", "NSResponder", "NSView", "objc2-uniform-type-identifiers"] }
 objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFBundle", "CFData", "CFDictionary", "CFNumber", "CFString", "CFURL"] }
 objc2-security = { version = "=0.3.2", default-features = false, features = ["std", "CSCommon", "SecCode", "SecStaticCode", "SecRequirement"] }
 objc2-uniform-type-identifiers = { version = "=0.3.2", default-features = false, features = ["std", "UTType", "UTCoreTypes"] }

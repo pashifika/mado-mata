@@ -799,7 +799,10 @@ fn binary_assets_and_source_maps_use_the_existing_manifest_contract() {
         .unwrap();
     assert_eq!(view.kind, DraftFileKind::Asset);
     assert_eq!(view.text, None);
-    assert_eq!(asset.validate().unwrap().assets["pixel"], [1, 2, 3, 255]);
+    assert_eq!(
+        asset.validate().unwrap().assets["pixel"].as_slice(),
+        [1, 2, 3, 255]
+    );
     let mapped = fixture.catalog(
         &asset,
         CatalogEdit::Add {
@@ -1082,3 +1085,5 @@ fn collection_links_aliases_and_nested_packages_are_refused_without_changing_sou
         original.revision()
     );
 }
+
+mod recognition;

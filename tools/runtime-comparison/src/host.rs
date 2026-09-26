@@ -8,6 +8,7 @@ pub use options::{option_path, resolve_options};
 #[cfg(test)]
 mod test_support;
 
+use crate::images::PayloadBytes;
 use crate::model::{Control, Fault, Limits, Plan, RuntimeMetrics};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -260,7 +261,7 @@ struct OperationMetrics {
 struct Inner {
     plan: Plan,
     options: Value,
-    assets: BTreeMap<String, Vec<u8>>,
+    assets: BTreeMap<String, PayloadBytes>,
     control: Arc<Control>,
     attempt: u64,
     lifetime: String,
@@ -293,7 +294,7 @@ impl Host {
     pub fn new(
         plan: Plan,
         options: Value,
-        assets: BTreeMap<String, Vec<u8>>,
+        assets: BTreeMap<String, PayloadBytes>,
         control: Arc<Control>,
     ) -> Result<Self, Fault> {
         plan.limits.validate()?;

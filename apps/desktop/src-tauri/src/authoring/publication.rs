@@ -3,8 +3,9 @@ use crate::configuration::{
     create_private_directory as create_directory, create_private_file, digest, publish_no_replace,
     sync_directory, temporary, write_private as write_new,
 };
-use crate::storage::{
-    check_directory, encode, exists, filesystem_key, private_directory, read_bytes,
+use crate::storage::{check_directory, exists, filesystem_key, private_directory};
+use mado_runtime_comparison::images::{
+    PACKAGE_BYTES, PayloadBytes, PayloadReservation, reserve_payload,
 };
 use mado_runtime_comparison::inventory::PackageDraft;
 use mado_runtime_comparison::model::Fault;
@@ -12,19 +13,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 
-const JOURNAL_BYTES: usize = 9 * MAX_BYTES;
+const JOURNAL_BYTES: usize = 9 * PACKAGE_BYTES;
 const PARENT_ENTRIES: usize = 4096;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Change {
     path: String,
-    before: Option<Vec<u8>>,
-    after: Option<Vec<u8>>,
+    before: Option<PayloadBytes>,
+    after: Option<PayloadBytes>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -36,10 +36,11 @@ struct Journal {
     scratch: String,
     before: BTreeMap<String, String>,
     after: BTreeMap<String, String>,
+    #[serde(deserialize_with = "bounded_changes")]
     changes: Vec<Change>,
 }
 
-fn hashes(files: &BTreeMap<String, Arc<[u8]>>) -> BTreeMap<String, String> {
+fn hashes(files: &BTreeMap<String, PayloadBytes>) -> BTreeMap<String, String> {
     files
         .iter()
         .map(|(path, bytes)| (path.clone(), digest(bytes)))
@@ -155,13 +156,15 @@ impl Publisher {
                 continue;
             }
             let destination = checked_destination(&candidate.root, &path, false)?;
-            if read_package_file(&destination)?.as_deref() != before.map(AsRef::as_ref) {
+            if read_package_file(&destination, PACKAGE_BYTES)?.as_deref()
+                != before.map(AsRef::as_ref)
+            {
                 return Err(stale());
             }
             changes.push(Change {
                 path,
-                before: before.map(|bytes| bytes.to_vec()),
-                after: after.map(|bytes| bytes.to_vec()),
+                before: before.cloned(),
+                after: after.cloned(),
             });
         }
         let parent = candidate.root.parent().ok_or_else(stale)?;
@@ -200,7 +203,6 @@ impl Publisher {
     }
 
     fn publish_journal(&self, journal: &Journal) -> Result<(), Fault> {
-        let bytes = encode(journal, JOURNAL_BYTES)?;
         let directory = self.directory();
         // A single unpublished slot bounds crash leftovers. Source writes begin
         // only after this file has moved to pending.json.
@@ -211,13 +213,21 @@ impl Publisher {
                 .map_err(|error| io_fault("discard unpublished journal stage", error))?;
         }
         let mut file = create_private_file(&stage)?;
-        let staged = file
-            .write_all(&bytes)
-            .map_err(|error| crate::configuration::io_fault("write authoring journal", error))
-            .and_then(|()| {
-                file.sync_all()
-                    .map_err(|error| crate::configuration::io_fault("sync authoring journal", error))
-            });
+        let staged = (|| {
+            let mut output = BoundedWriter {
+                writer: BufWriter::new(&mut file),
+                written: 0,
+            };
+            serde_json::to_writer(&mut output, journal).map_err(|error| {
+                crate::configuration::io_fault("write authoring journal", error.into())
+            })?;
+            output.flush().map_err(|error| {
+                crate::configuration::io_fault("flush authoring journal", error)
+            })?;
+            drop(output);
+            file.sync_all()
+                .map_err(|error| crate::configuration::io_fault("sync authoring journal", error))
+        })();
         drop(file);
         let result = staged.and_then(|()| {
             publish_no_replace(&stage, &self.journal_path())
@@ -239,11 +249,35 @@ impl Publisher {
     fn read_journal(&self) -> Result<Journal, Fault> {
         check_directory(&self.data_root)?;
         check_directory(&self.directory())?;
-        let bytes = read_bytes(&self.journal_path(), JOURNAL_BYTES)?;
-        let journal: Journal = serde_json::from_slice(&bytes).map_err(|error| {
-            Fault::new("AuthoringRecoveryRequired", "invalid publication journal")
-                .with_context(json!({"cause":error.to_string()}))
+        let path = self.journal_path();
+        let before = crate::storage::checked_file(&path, JOURNAL_BYTES)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options
+            .open(&path)
+            .map_err(|error| io_fault("open publication journal", error))?;
+        let opened = file
+            .metadata()
+            .map_err(|error| io_fault("inspect publication journal", error))?;
+        same_file(&before, &opened)?;
+        let journal: Journal = serde_json::from_reader(BufReader::new(
+            file.take(JOURNAL_BYTES as u64 + 1),
+        ))
+        .map_err(|_| {
+            Fault::new(
+                "AuthoringRecoveryRequired",
+                "invalid or over-budget publication journal",
+            )
         })?;
+        same_file(
+            &before,
+            &crate::storage::checked_file(&path, JOURNAL_BYTES)?,
+        )?;
         journal.validate()?;
         Ok(journal)
     }
@@ -261,16 +295,13 @@ impl Publisher {
                 return Err(stale());
             }
             self.separate_root(&journal.root)?;
-            let mut recovery_limits = limits()?;
-            recovery_limits.snapshot_files = MAX_FILES * 2;
-            recovery_limits.snapshot_bytes = MAX_BYTES * 2;
-            let current = PackageDraft::capture_bytes(&journal.root, &recovery_limits)?;
+            let current = PackageDraft::capture_recovery_bytes(&journal.root, &limits()?)?;
             journal.check_current(&current)?;
             // Validate the whole prospective declaration before any recovery write.
             let mut prospective = current;
             for change in &journal.changes {
                 if let Some(bytes) = &change.after {
-                    prospective.insert(change.path.clone(), Arc::from(bytes.as_slice()));
+                    prospective.insert(change.path.clone(), bytes.clone());
                 } else {
                     prospective.remove(&change.path);
                 }
@@ -291,7 +322,7 @@ impl Publisher {
                     return Err(stale());
                 }
                 let destination = checked_destination(&journal.root, &change.path, false)?;
-                let now = read_package_file(&destination)?;
+                let now = read_package_file(&destination, PACKAGE_BYTES)?;
                 if now.as_deref() == change.after.as_deref() {
                     continue;
                 }
@@ -302,8 +333,10 @@ impl Publisher {
                     let destination = checked_destination(&journal.root, &change.path, true)?;
                     let stage = scratch.join(format!("next-{index}"));
                     let staged = if exists(&stage)? {
-                        let written = read_bytes(&stage, MAX_BYTES)?;
-                        if written == *bytes {
+                        crate::storage::checked_file(&stage, PACKAGE_BYTES)?;
+                        let written =
+                            read_package_file(&stage, PACKAGE_BYTES)?.ok_or_else(stale)?;
+                        if &*written == &**bytes {
                             // A prior write may have completed before sync failed.
                             OpenOptions::new()
                                 .read(true)
@@ -332,7 +365,9 @@ impl Publisher {
                         sync_directory(&scratch)?;
                     }
                     // Recheck the affected source immediately before replacement.
-                    if read_package_file(&destination)?.as_deref() != change.before.as_deref() {
+                    if read_package_file(&destination, PACKAGE_BYTES)?.as_deref()
+                        != change.before.as_deref()
+                    {
                         return Err(stale());
                     }
                     if change.before.is_none() {
@@ -368,7 +403,8 @@ impl Publisher {
                 let path = scratch.join(format!("next-{index}"));
                 if exists(&path)? {
                     let expected = journal.changes[index].after.as_deref().ok_or_else(stale)?;
-                    if read_bytes(&path, MAX_BYTES)? != expected {
+                    crate::storage::checked_file(&path, PACKAGE_BYTES)?;
+                    if read_package_file(&path, PACKAGE_BYTES)?.as_deref() != Some(expected) {
                         return Err(recovery(
                             &journal.root,
                             "staging bytes changed externally; preserve them for repair",
@@ -426,10 +462,10 @@ impl Journal {
             if !changed.insert(&change.path) || change.before == change.after {
                 return Err(stale());
             }
-            preimage_bytes += change.before.as_ref().map_or(0, Vec::len);
-            postimage_bytes += change.after.as_ref().map_or(0, Vec::len);
-            if preimage_bytes > MAX_BYTES
-                || postimage_bytes > MAX_BYTES
+            preimage_bytes += change.before.as_ref().map_or(0, |bytes| bytes.len());
+            postimage_bytes += change.after.as_ref().map_or(0, |bytes| bytes.len());
+            if preimage_bytes > PACKAGE_BYTES
+                || postimage_bytes > PACKAGE_BYTES
                 || change.before.as_ref().map(|bytes| digest(bytes)).as_ref()
                     != self.before.get(&change.path)
                 || change.after.as_ref().map(|bytes| digest(bytes)).as_ref()
@@ -450,7 +486,7 @@ impl Journal {
         Ok(self.root.parent().ok_or_else(stale)?.join(&self.scratch))
     }
 
-    fn check_current(&self, current: &BTreeMap<String, Arc<[u8]>>) -> Result<(), Fault> {
+    fn check_current(&self, current: &BTreeMap<String, PayloadBytes>) -> Result<(), Fault> {
         let actual = hashes(current);
         for path in self
             .before
@@ -632,7 +668,7 @@ pub(crate) fn check_package_ancestors(parent: &Path) -> Result<(), Fault> {
                 "destination ancestry exceeds the inspection bound",
             ));
         }
-        if let Some(bytes) = read_package_file(&ancestor.join("package.json"))? {
+        if let Some(bytes) = read_package_file(&ancestor.join("package.json"), MAX_BYTES)? {
             manifest_bytes += bytes.len();
             if manifest_bytes > MAX_BYTES {
                 return Err(Fault::new(
@@ -712,13 +748,13 @@ fn checked_destination(root: &Path, path: &str, create: bool) -> Result<PathBuf,
     Ok(current)
 }
 
-fn read_package_file(path: &Path) -> Result<Option<Vec<u8>>, Fault> {
+fn read_package_file(path: &Path, maximum: usize) -> Result<Option<ReservedRead>, Fault> {
     if !exists(path)? {
         return Ok(None);
     }
     let before =
         fs::symlink_metadata(path).map_err(|error| io_fault("inspect publication file", error))?;
-    if !before.is_file() || before.file_type().is_symlink() || before.len() > MAX_BYTES as u64 {
+    if !before.is_file() || before.file_type().is_symlink() || before.len() > maximum as u64 {
         return Err(stale());
     }
     #[cfg(unix)]
@@ -758,15 +794,30 @@ fn read_package_file(path: &Path) -> Result<Option<Vec<u8>>, Fault> {
     if !opened.is_file() {
         return Err(stale());
     }
-    use std::io::Read;
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    file.take(MAX_BYTES as u64 + 1)
+    let reservation = reserve_payload(before.len() as usize + 1)?;
+    let mut bytes = Vec::with_capacity(before.len() as usize + 1);
+    (&file)
+        .take(before.len() + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| io_fault("read publication file", error))?;
     if bytes.len() != before.len() as usize {
         return Err(stale());
     }
-    Ok(Some(bytes))
+    same_file(
+        &before,
+        &file
+            .metadata()
+            .map_err(|error| io_fault("inspect read publication file", error))?,
+    )?;
+    same_file(
+        &before,
+        &fs::symlink_metadata(path)
+            .map_err(|error| io_fault("inspect publication path after read", error))?,
+    )?;
+    Ok(Some(ReservedRead {
+        bytes,
+        _reservation: reservation,
+    }))
 }
 
 fn check_scratch(path: &Path, count: usize) -> Result<(), Fault> {
@@ -789,7 +840,93 @@ fn check_scratch(path: &Path, count: usize) -> Result<(), Fault> {
         if name != format!("next-{number}").as_str() {
             return Err(stale());
         }
-        crate::storage::checked_file(&entry.path(), MAX_BYTES)?;
+        crate::storage::checked_file(&entry.path(), PACKAGE_BYTES)?;
     }
     Ok(())
+}
+
+struct ReservedRead {
+    bytes: Vec<u8>,
+    _reservation: PayloadReservation,
+}
+
+impl std::ops::Deref for ReservedRead {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+struct BoundedWriter<W> {
+    writer: W,
+    written: usize,
+}
+
+impl<W: Write> Write for BoundedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > JOURNAL_BYTES.saturating_sub(self.written) {
+            return Err(std::io::Error::other(
+                "publication journal exceeds its byte bound",
+            ));
+        }
+        self.writer.write_all(bytes)?;
+        self.written += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+fn same_file(before: &fs::Metadata, after: &fs::Metadata) -> Result<(), Fault> {
+    if !after.is_file()
+        || before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+    {
+        return Err(stale());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.ctime() != after.ctime()
+            || before.ctime_nsec() != after.ctime_nsec()
+            || after.nlink() != 1
+        {
+            return Err(stale());
+        }
+    }
+    Ok(())
+}
+
+fn bounded_changes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Change>, D::Error> {
+    use serde::de::{Error, SeqAccess, Visitor};
+    struct Changes;
+    impl<'de> Visitor<'de> for Changes {
+        type Value = Vec<Change>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("bounded changes for two package revisions")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
+            let mut changes = Vec::new();
+            let mut before = 0usize;
+            let mut after = 0usize;
+            while let Some(change) = sequence.next_element::<Change>()? {
+                before += change.before.as_ref().map_or(0, |bytes| bytes.len());
+                after += change.after.as_ref().map_or(0, |bytes| bytes.len());
+                if changes.len() == 2 * MAX_FILES || before > PACKAGE_BYTES || after > PACKAGE_BYTES
+                {
+                    return Err(A::Error::custom(
+                        "publication revisions exceed their bounds",
+                    ));
+                }
+                changes.push(change);
+            }
+            Ok(changes)
+        }
+    }
+    deserializer.deserialize_seq(Changes)
 }

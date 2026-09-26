@@ -1,7 +1,7 @@
 import {useEffect, useMemo, useReducer, useRef, useState} from 'react';
 import type {KeyboardEvent, ReactNode} from 'react';
 import {invoke} from '@tauri-apps/api/core';
-import {listen} from '@tauri-apps/api/event';
+import {emitTo, listen} from '@tauri-apps/api/event';
 import {getCurrentWindow} from '@tauri-apps/api/window';
 import {LocalFault, messages, renderMessage} from './i18n.ts';
 import type {Command, Message} from './i18n.ts';
@@ -10,6 +10,8 @@ import type {CheckTarget, LastCheck} from './settings/EnvironmentPanel.tsx';
 import BootstrapPage from './pages/BootstrapPage.tsx';
 import EditPage from './pages/EditPage.tsx';
 import type {EditHandlers, PageAuthoring} from './pages/EditPage.tsx';
+import RecognitionPage from './pages/RecognitionPage.tsx';
+import * as recognition from './recognition.ts';
 import GuidancePage from './pages/GuidancePage.tsx';
 import type {ActiveOwner} from './pages/GuidancePage.tsx';
 import LogsPage from './pages/LogsPage.tsx';
@@ -35,7 +37,7 @@ import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readEnvironment, 
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
 import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
-import {applyCatalogMutation, applyRefresh, applySave, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, saveBlock, saveTicket, selectFile, undoFile, validationTicket} from './authoring.ts';
+import {applyCatalogMutation, applyRecognitionMutation, applyRefresh, applySave, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, saveBlock, saveTicket, selectFile, selectRecognition, undoFile, validationTicket} from './authoring.ts';
 import type {AuthoringSession} from './authoring.ts';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, busy, closeWorkspace, commandValues, deriveBound, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
@@ -158,6 +160,12 @@ export default function App() {
   const [choice, setChoice] = useState<Choice | null>(null);
   const [choiceBusy, setChoiceBusy] = useState(false);
   const choiceRunning = useRef(false);
+  const authoringWorker = useRef<Promise<unknown> | null>(null);
+  const capabilityOwner = useRef<string | null>(null);
+  const previewConnected = useRef(false);
+  const previewBridge = useRef({ready: () => {}, edit: (_message: recognition.PreviewEditMessage) => {}});
+  const knownOcrEnvironment = useRef<Settings['ocr_environment']>(null);
+  const recognitionConfigurationDirty = useRef(false);
   const expectedRun = useRef<string | null>(null);
   const epoch = useRef(0);
   const sessionGeneration = useRef(0);
@@ -186,7 +194,8 @@ export default function App() {
   const defaultPackagesRoot = status?.default_packages_root ?? '';
   const packagesRoot = settings?.packages_root ?? defaultPackagesRoot;
   const derived = useMemo(() => Object.fromEntries(workspaces.filter(isBound).map(workspace => [workspace.id, deriveBound(workspace.bound, savedEnvironment, locale)])) as Record<string, Derived>, [workspaces, savedEnvironment, locale]);
-  const active = starting !== null || busy(view.state);
+  const authoringWorkerPending = authoring?.pending?.kind === 'recognition_trial' || authoring?.pending?.kind === 'validate';
+  const active = starting !== null || busy(view.state) || authoringWorkerPending;
   const selected = nav.kind === 'workspace' ? workspaces.find(workspace => workspace.id === nav.id) : undefined;
   const closedSelected = nav.kind === 'closed' ? closed.find(item => item.id === nav.id) : undefined;
   const noSelection = nav.kind === 'none' || (nav.kind === 'workspace' && !selected);
@@ -210,8 +219,10 @@ export default function App() {
   // The host stopped reporting this view's lease while no Edit command could explain the difference.
   const leaseLost = authoring !== null && hostAuthoring !== undefined && authoring.pending === null && authoringBusy === null
     && hostAuthoring?.token !== authoring.owner.token;
-  const unsavedCount = authoring ? dirtyDrafts(authoring).length : 0;
+  const recognitionDirty = authoring?.recognition ? recognition.recognitionDirty(authoring.recognition) : false;
+  const unsavedCount = (authoring ? dirtyDrafts(authoring).length : 0) + Number(recognitionDirty);
   const validationActive = busy(view.state) && view.operation === 'authoring_validate';
+  const recognitionActive = authoring?.pending?.kind === 'recognition_trial' || (busy(view.state) && view.operation.startsWith('recognition_'));
   // The bootstrap action in flight disables its own buttons; it is not a foreign command for admission text.
   const admission: Admission = {active, authoring: leaseOwnerId !== null, command: (pendingCommandReason !== null && bootstrap.pending === null) || closing, anyDirty: workspaces.some(dirtyDraft) || unsavedCount > 0};
   const savedCount = workspaces.length + (savedClosed?.length ?? 0);
@@ -225,13 +236,13 @@ export default function App() {
   }, [logs.items]);
 
   // The live controller belongs to whichever workspace the host attributed it to; others show retained outcomes.
-  // Package validation is reported by the Edit view and the strip, never as the Tab's run result.
+  // Authoring workers are reported by Edit and the global strip, never as the Tab's run result.
   function runView(workspace: Workspace): RunView {
-    if (view.workspace_id === workspace.id && view.run !== null && view.operation !== 'authoring_validate') {
+    if (view.workspace_id === workspace.id && view.run !== null && view.operation !== 'authoring_validate' && !view.operation.startsWith('recognition_')) {
       return {view, live: true, olderRevision: view.workspace_revision !== null && view.workspace_revision !== workspace.revision ? view.workspace_revision : null};
     }
     const retained = results[workspace.id];
-    if (retained && retained.view.operation !== 'authoring_validate') return {view: retained.view, live: false, olderRevision: retained.ref.revision !== workspace.revision ? retained.ref.revision : null};
+    if (retained && retained.view.operation !== 'authoring_validate' && !retained.view.operation.startsWith('recognition_')) return {view: retained.view, live: false, olderRevision: retained.ref.revision !== workspace.revision ? retained.ref.revision : null};
     return {view: idle, live: false, olderRevision: null};
   }
 
@@ -257,6 +268,12 @@ export default function App() {
   useEffect(() => {document.documentElement.lang = locale;}, [locale]);
 
   function adoptSettings(saved: Settings) {
+    if (!sameEnvironment(knownOcrEnvironment.current, saved.ocr_environment)) {
+      recognitionConfigurationDirty.current = true;
+      updateAuthoring(session => session?.recognition
+        ? {...session, recognition: recognition.invalidateConfiguration(session.recognition)} : session);
+    }
+    knownOcrEnvironment.current = saved.ocr_environment;
     setSettings(saved);
     dispatch({type:'presentation', locale:saved.locale});
     retention.current = saved.gui_log_limit;
@@ -840,6 +857,15 @@ export default function App() {
     }
   }
 
+  function ownAuthoringWorker(action: () => Promise<void>): Promise<void> {
+    if (authoringWorker.current !== null) return Promise.resolve();
+    const settled = action().finally(() => {
+      if (authoringWorker.current === settled) authoringWorker.current = null;
+    });
+    authoringWorker.current = settled;
+    return settled;
+  }
+
   // A fresh host listing: Tabs whose selection the host invalidated (another Tab bound to an edited source, or a stale
   // Start) move to their new revision and ask for Reinspect; untouched Tabs keep their drafts.
   async function refreshOpenViews() {
@@ -878,6 +904,7 @@ export default function App() {
       const owner = view.owner.workspace.workspace_id;
       change(owner, item => ({...item, page: 'edit'}));
       go({kind: 'workspace', id: owner});
+      await readRecognition();
     } catch (cause) {
       const error = fault(cause);
       setWorkspaces(list => applyIfCurrent(list, origin, item => ({...item, error})));
@@ -892,6 +919,7 @@ export default function App() {
       if (authoringStore.current === null) updateAuthoring(() => openSession(view, {key: 'authoringResumed'}));
       publishHostAuthoring(view.owner);
       change(id, item => ({...item, page: 'edit'}));
+      await readRecognition();
     } catch (cause) {
       const error = fault(cause);
       change(id, item => ({...item, error}));
@@ -923,6 +951,7 @@ export default function App() {
     try {
       const mutation = await authoringCall('savingFile', () => invoke<AuthoringMutation>('authoring_save', {owner: session.owner, revision: ticket.expected, path, text: ticket.text}));
       updateAuthoring(current => applySave(current, ticket, mutation));
+      if (session.recognition && mutation.view !== null && !await readRecognition()) return false;
       return true;
     } catch (cause) {
       updateAuthoring(current => failCommand(current, ticket.token, fault(cause)));
@@ -936,7 +965,10 @@ export default function App() {
     for (const path of paths) {
       if (!await saveFile(path)) return false;
     }
-    return authoringStore.current === null || dirtyDrafts(authoringStore.current).length === 0;
+    const session = authoringStore.current;
+    if (session?.recognition && recognition.recognitionDirty(session.recognition) && !await saveRecognition()) return false;
+    const latest = authoringStore.current;
+    return latest === null || (dirtyDrafts(latest).length === 0 && (!latest.recognition || !recognition.recognitionDirty(latest.recognition)));
   }
 
   async function changeCatalog(edit: CatalogEdit): Promise<boolean> {
@@ -947,12 +979,297 @@ export default function App() {
     try {
       const mutation = await authoringCall('changingCatalog', () => invoke<AuthoringMutation>('authoring_catalog', {owner: session.owner, revision: ticket.expected, edit}));
       updateAuthoring(current => applyCatalogMutation(current, ticket, mutation));
+      if (session.recognition && mutation.view !== null) await readRecognition();
       return true;
     } catch (cause) {
       updateAuthoring(current => failCommand(current, ticket.token, fault(cause)));
       return false;
     }
   }
+
+  function updateRecognition(token: string, update: (state: recognition.RecognitionState) => recognition.RecognitionState) {
+    updateAuthoring(session => session?.owner.token === token && session.recognition
+      ? {...session, recognition: update(session.recognition)} : session);
+  }
+
+  function acceptRecognitionView(owner: AuthoringRef, next: recognition.RecognitionView) {
+    updateAuthoring(session => session && sameAuthoringRef(session.owner, owner) && sameAuthoringRef(next.owner, owner) && session.revision === next.revision
+      ? {...session, recognition: session.recognition ? recognition.applyView(session.recognition, next) : recognition.openRecognition(next)}
+      : session);
+  }
+
+  function recognitionFailed(token: string, cause: unknown) {
+    const error = fault(cause);
+    updateAuthoring(session => {
+      const next = failCommand(session, token, error);
+      return next?.owner.token === token && next.recognition
+        ? {...next, recognition: recognition.failRecognition(next.recognition, token, error)} : next;
+    });
+  }
+
+  // Local edits remain possible while a command awaits IPC; only the captured host draft is authorized.
+  async function recognitionCommand(label: Command, action: (session: AuthoringSession) => Promise<void>): Promise<boolean> {
+    const session = authoringStore.current;
+    if (!session || session.pending !== null || leaseLost || closing) return false;
+    const token = session.owner.token;
+    updateAuthoring(current => current?.owner.token === token
+      ? {...beginPending(current, {kind: 'recognition'}), recognition: current.recognition && recognition.clearRecognitionMessages(current.recognition)} : current);
+    try {
+      await authoringCall(label, () => action(session));
+      return true;
+    } catch (cause) {
+      recognitionFailed(token, cause);
+      return false;
+    } finally {
+      updateAuthoring(current => current?.owner.token === token && current.pending?.kind === 'recognition' ? {...current, pending: null} : current);
+    }
+  }
+
+  async function readRecognition(): Promise<boolean> {
+    return recognitionCommand('readingRecognition', async session => {
+      const next = await invoke<recognition.RecognitionView>('recognition_view', {owner: session.owner, revision: session.revision});
+      acceptRecognitionView(session.owner, next);
+    });
+  }
+
+  async function checkRecognitionCapabilities() {
+    const session = authoringStore.current;
+    if (!session || session.pending !== null || leaseLost || closing || hostCommand.current !== null) return;
+    const token = session.owner.token;
+    capabilityOwner.current = token;
+    updateAuthoring(current => current?.owner.token === token
+      ? {...beginPending(current, {kind: 'recognition_trial'}), recognition: current.recognition && recognition.clearRecognitionMessages(current.recognition)} : current);
+    expectedRun.current = null;
+    epoch.current += 1;
+    setStripMessage(null);
+    try {
+      const next = await invoke<recognition.RecognitionView>('recognition_capabilities', {owner: session.owner, revision: session.revision});
+      acceptRecognitionView(session.owner, next);
+    } catch (cause) {
+      recognitionFailed(token, cause);
+    } finally {
+      updateAuthoring(current => current?.owner.token === token && current.pending?.kind === 'recognition_trial' ? {...current, pending: null} : current);
+    }
+  }
+
+  async function openRecognition() {
+    if (!authoringStore.current?.recognition && !await readRecognition()) return;
+    const session = authoringStore.current;
+    if (session && capabilityOwner.current !== session.owner.token) {
+      await ownAuthoringWorker(checkRecognitionCapabilities);
+    }
+  }
+  useEffect(() => {
+    if (authoring?.destination === 'recognition' && authoring.recognition && authoring.pending === null
+      && capabilityOwner.current !== authoring.owner.token) void ownAuthoringWorker(checkRecognitionCapabilities);
+  }, [authoring?.destination, authoring?.owner.token, authoring?.recognition !== null, authoring?.pending]);
+
+  async function synchronizeRecognition(owner: AuthoringRef): Promise<{session: AuthoringSession; state: recognition.RecognitionState}> {
+    let session = authoringStore.current;
+    if (!session || !sameAuthoringRef(session.owner, owner) || !session.recognition) throw new LocalFault({key: 'recognitionUnavailable'});
+    if (recognitionConfigurationDirty.current || session.recognition.view.revision !== session.revision) {
+      const next = await invoke<recognition.RecognitionView>('recognition_view', {owner, revision: session.revision});
+      acceptRecognitionView(owner, next);
+      recognitionConfigurationDirty.current = false;
+      session = authoringStore.current;
+      if (!session || !sameAuthoringRef(session.owner, owner) || !session.recognition) throw new LocalFault({key: 'recognitionUnavailable'});
+    }
+    const ticket = recognition.syncTicket(session.recognition);
+    if (ticket) {
+      const next = await invoke<recognition.RecognitionView>('recognition_update', {
+        owner, revision: session.revision, document: ticket.document, frameId: ticket.frame_id, documentRevision: ticket.document_revision,
+      });
+      updateRecognition(owner.token, state => recognition.applySync(state, ticket, next));
+    }
+    session = authoringStore.current;
+    if (!session || !sameAuthoringRef(session.owner, owner) || !session.recognition) throw new LocalFault({key: 'recognitionUnavailable'});
+    if (!recognition.hostCurrent(session.recognition)) throw new LocalFault({key: 'recognitionDraftChanged'});
+    return {session, state: session.recognition};
+  }
+
+  async function loadRecognition() {
+    await recognitionCommand('loadingRecognition', async session => {
+      const path = await invoke<string | null>('recognition_pick', {owner: session.owner, revision: session.revision});
+      if (path === null) return;
+      if (session.recognition) await synchronizeRecognition(session.owner);
+      // Never leave the predecessor raster visible while replacement is pending or after its failure.
+      updateRecognition(session.owner.token, state => recognition.applyView(state, {...state.view, frame: null}));
+      await publishRecognitionPreview();
+      try {
+        const next = await invoke<recognition.RecognitionView>('recognition_load', {owner: session.owner, revision: session.revision, path});
+        acceptRecognitionView(session.owner, next);
+      } catch (cause) {
+        // Replacement may have advanced the host revision before decoding failed. Reconcile only an explicit
+        // no-frame view; a refused admission must not silently restore the predecessor preview.
+        try {
+          const next = await invoke<recognition.RecognitionView>('recognition_view', {owner: session.owner, revision: session.revision});
+          if (next.frame === null) acceptRecognitionView(session.owner, next);
+        } catch {/* The original load failure remains the visible outcome; Reload can reconcile later. */}
+        throw cause;
+      }
+    });
+  }
+
+  async function confirmRecognition() {
+    await recognitionCommand('updatingRecognition', async initial => {
+      const {session, state} = await synchronizeRecognition(initial.owner);
+      const ticket = recognition.confirmTicket(state);
+      if (!ticket) throw new LocalFault({key: 'recognitionDraftChanged'});
+      const next = await invoke<recognition.RecognitionView>('recognition_confirm', {
+        owner: session.owner, revision: session.revision, frameId: ticket.frame_id, documentRevision: ticket.document_revision,
+      });
+      updateRecognition(ticket.token, current => recognition.applyConfirm(current, ticket, next));
+    });
+  }
+
+  async function trialRecognition(kind: 'frame' | 'sample', ids: string[]) {
+    const initial = authoringStore.current;
+    if (!initial || initial.pending !== null || leaseLost || closing || hostCommand.current !== null) return;
+    const token = initial.owner.token;
+    let ticket: recognition.TrialTicket | null = null;
+    updateAuthoring(current => current?.owner.token === token
+      ? {...beginPending(current, {kind: 'recognition'}), recognition: current.recognition && recognition.clearRecognitionMessages(current.recognition)} : current);
+    try {
+      const {session, state} = await authoringCall('updatingRecognition', () => synchronizeRecognition(initial.owner));
+      ticket = recognition.trialTicket(state, kind, ids);
+      if (!ticket) throw new LocalFault({key: 'recognitionDraftChanged'});
+      const captured = ticket;
+      updateAuthoring(current => current?.owner.token === token && current.recognition
+        ? {...current, pending: {kind: 'recognition_trial'}, recognition: recognition.beginTrial(current.recognition, captured)} : current);
+      expectedRun.current = null;
+      epoch.current += 1;
+      setStripMessage(null);
+      const result = await invoke<recognition.RecognitionTrial>('recognition_trial', {
+        owner: session.owner, revision: session.revision, frameId: ticket.frame_id, documentRevision: ticket.document_revision,
+        selectedIds: ticket.selected_ids, sampleId: ticket.sample_id,
+      });
+      const retained = recognitionConfigurationDirty.current ? {...result, stale: true} : result;
+      updateRecognition(token, current => recognition.applyTrial(current, captured, retained));
+    } catch (cause) {
+      if (ticket) {
+        const captured = ticket;
+        updateRecognition(token, current => recognition.applyTrial(current, captured, null, fault(cause)));
+      }
+      recognitionFailed(token, cause);
+    } finally {
+      updateAuthoring(current => current?.owner.token === token ? {...current, pending: null} : current);
+    }
+  }
+
+  async function saveRecognition(): Promise<boolean> {
+    const initial = authoringStore.current;
+    if (!initial?.recognition || !recognition.recognitionDirty(initial.recognition)) return true;
+    if (initial.refreshRequired || initial.conflict) return false;
+    if (dirtyDrafts(initial).some(draft => draft.kind === 'manifest')) {
+      recognitionFailed(initial.owner.token, new LocalFault({key: 'recognitionManifestDirty'}));
+      return false;
+    }
+    return recognitionCommand('savingRecognition', async current => {
+      const {session, state} = await synchronizeRecognition(current.owner);
+      const ticket = recognition.saveTicket(state);
+      if (!ticket) throw new LocalFault({key: 'recognitionDraftChanged'});
+      const result = await invoke<{mutation: AuthoringMutation; recognition: recognition.RecognitionView | null}>('recognition_save', {
+        owner: session.owner, revision: session.revision, documentRevision: ticket.document_revision, cropIds: ticket.crop_ids,
+      });
+      updateAuthoring(latest => {
+        const next = applyRecognitionMutation(latest, result.mutation);
+        return next?.owner.token === ticket.token && next.recognition
+          ? {...next, recognition: recognition.applySave(next.recognition, ticket, result.recognition)} : next;
+      });
+    });
+  }
+
+  async function discardRecognition() {
+    await recognitionCommand('updatingRecognition', async session => {
+      const sent = session.recognition;
+      const next = await invoke<recognition.RecognitionView>('recognition_discard', {owner: session.owner, revision: session.revision});
+      updateRecognition(session.owner.token, state => {
+        const unchanged = sent && state.localRevision === sent.localRevision
+          && state.cropIds.length === sent.cropIds.length && state.cropIds.every(id => state.cropMarks[id] === sent.cropMarks[id]);
+        return unchanged ? recognition.applyDiscard(state, next) : recognition.applyView(state, next, null);
+      });
+    });
+  }
+
+  async function copyRecognition(id: string, mode: recognition.SnippetKind) {
+    await recognitionCommand('copyingRecognition', async initial => {
+      const {session, state} = await synchronizeRecognition(initial.owner);
+      const ticket = recognition.copyTicket(state, id, mode);
+      if (!ticket) throw new LocalFault({key: 'recognitionDraftChanged'});
+      const captured = ticket;
+      let result: recognition.CopyResult | null = null;
+      try {
+        result = await invoke<recognition.CopyResult>('recognition_copy', {
+          owner: session.owner, revision: session.revision, documentRevision: ticket.document_revision, definitionId: id, mode,
+        });
+        updateRecognition(captured.token, current => recognition.applyCopy(current, captured, result, null));
+        updateAuthoring(current => current?.owner.token === captured.token ? {...current, notice: {key: 'recognitionCopied'}} : current);
+      } catch (cause) {
+        updateRecognition(captured.token, current => recognition.applyCopy(current, captured, result, fault(cause)));
+        throw cause;
+      }
+    });
+  }
+
+  async function openRecognitionPreview() {
+    const session = authoringStore.current;
+    if (!session || leaseLost || closing || choice !== null || choiceRunning.current) return;
+    try {
+      await invoke<void>('recognition_open_preview', {owner: session.owner, revision: session.revision});
+      await publishRecognitionPreview();
+    } catch (cause) {
+      const error = fault(cause);
+      updateAuthoring(current => current?.owner.token === session.owner.token
+        ? {...current, error, recognition: current.recognition ? recognition.failRecognition(current.recognition, session.owner.token, error) : null}
+        : current);
+    }
+  }
+
+  async function publishRecognitionPreview() {
+    if (!previewConnected.current) return;
+    const session = authoringStore.current;
+    const editable = !closing && choice === null && !choiceRunning.current && !leaseLost && session?.pending?.kind !== 'exit' && session?.pending?.kind !== 'duplicate';
+    const running = session?.pending?.kind === 'recognition_trial' || session?.pending?.kind === 'validate'
+      || (busy(view.state) && (view.operation === 'authoring_validate' || view.operation?.startsWith('recognition_') === true));
+    const snapshot = session?.recognition ? recognition.previewSnapshot(session.recognition, locale, editable, editable ? null : ui.authoring.block('pending'), running) : null;
+    try {await emitTo(recognition.PREVIEW_LABEL, recognition.PREVIEW_STATE, snapshot);}
+    catch {
+      previewConnected.current = false;
+      if (session) updateAuthoring(current => current?.owner.token === session.owner.token
+        ? {...current, error: new LocalFault({key: 'recognitionPreviewFailed'})} : current);
+    }
+  }
+
+  previewBridge.current = {
+    ready: () => {previewConnected.current = true; void publishRecognitionPreview();},
+    edit: message => {
+      const session = authoringStore.current;
+      if (!session || leaseLost || closing || choice !== null || choiceRunning.current || session.pending?.kind === 'exit' || session.pending?.kind === 'duplicate') return;
+      updateRecognition(session.owner.token, state => recognition.applyPreviewEdit(state, message, ui.recognition.defaultName));
+      void publishRecognitionPreview();
+    },
+  };
+  useEffect(() => {
+    let alive = true;
+    const stops: (() => void)[] = [];
+    const register = (promise: Promise<() => void>) => {
+      void promise.then(stop => {if (alive) stops.push(stop); else stop();}).catch(cause => {
+        const token = authoringStore.current?.owner.token;
+        if (alive && token) recognitionFailed(token, cause);
+      });
+    };
+    register(listen(recognition.PREVIEW_READY, () => previewBridge.current.ready()));
+    register(listen<recognition.PreviewEditMessage>(recognition.PREVIEW_EDIT, event => previewBridge.current.edit(event.payload)));
+    register(listen('recognition-preview-closed', () => {previewConnected.current = false;}));
+    return () => {alive = false; for (const stop of stops) stop();};
+  }, []);
+  useEffect(() => {void publishRecognitionPreview();}, [authoring?.recognition, authoring?.pending?.kind, view.state, view.operation, locale, closing, leaseLost, choice, choiceBusy]);
+  useEffect(() => {
+    const owner = authoring?.owner;
+    return () => {
+      if (owner) void invoke<void>('recognition_close_preview', {owner}).catch(() => {});
+    };
+  }, [authoring?.owner.token]);
 
   async function refreshAuthoring() {
     const session = authoringStore.current;
@@ -962,6 +1279,7 @@ export default function App() {
     try {
       const view = await authoringCall('refreshingPackage', () => invoke<AuthoringView>('authoring_refresh', {owner: session.owner}));
       updateAuthoring(current => applyRefresh(current, view));
+      await readRecognition();
     } catch (cause) {
       updateAuthoring(current => failCommand(current, token, fault(cause)));
     }
@@ -988,15 +1306,20 @@ export default function App() {
 
   // Cancellation stays independent of command admission, like Stop; the reply only acknowledges the request.
   async function stopValidation() {
-    const session = authoringStore.current;
-    if (!session) return;
-    const token = session.owner.token;
+    const owner = authoringStore.current?.owner ?? hostAuthoringRef.current;
+    if (!owner) return;
+    const token = owner.token;
+    setStopping(true);
     try {
-      await invoke<boolean>('authoring_stop', {owner: session.owner});
+      await invoke<boolean>('authoring_stop', {owner});
       updateAuthoring(current => current && current.owner.token === token ? {...current, notice: {key: 'authoringStopRequested'}} : current);
+      setStripMessage({text: {key: 'authoringStopRequested'}, error: false});
     } catch (cause) {
       const error = fault(cause);
       updateAuthoring(current => current && current.owner.token === token ? {...current, error} : current);
+      setStripMessage({text: {key: 'stopFailed', args: [faultSummary(error, true)]}, error: true});
+    } finally {
+      setStopping(false);
     }
   }
 
@@ -1034,6 +1357,7 @@ export default function App() {
       const view = await authoringCall('duplicatingPackage', () => invoke<AuthoringView>('authoring_duplicate', {owner: session.owner, revision: session.revision, packageId}));
       updateAuthoring(current => current && current.owner.token === token ? openSession(view, {key: 'authoringDuplicated', args: [view.package_path, view.package_id]}) : current);
       publishHostAuthoring(view.owner);
+      await readRecognition();
       return true;
     } catch (cause) {
       updateAuthoring(current => failCommand(current, token, fault(cause)));
@@ -1076,7 +1400,7 @@ export default function App() {
   function requestChoice(next: Choice) {
     if (choiceRunning.current) return;
     const session = authoringStore.current;
-    if (session && dirtyDrafts(session).length > 0) setChoice(next);
+    if (session && (dirtyDrafts(session).length > 0 || (session.recognition && recognition.recognitionDirty(session.recognition)))) setChoice(next);
     else void resolveChoice(next, false);
   }
 
@@ -1087,6 +1411,12 @@ export default function App() {
     setChoiceBusy(true);
     let done = false;
     try {
+      const worker = authoringWorker.current;
+      if (worker) {
+        await stopValidation();
+        // The operation handler retains its primary/cleanup outcome before this promise settles.
+        await worker.catch(() => {});
+      }
       if (save && !await saveAll()) return;
       if (intent.kind === 'duplicate') {
         done = await duplicateAuthoring(intent.packageId);
@@ -1114,6 +1444,10 @@ export default function App() {
 
   const editHandlers: EditHandlers = {
     select: (path, previous) => updateAuthoring(session => session && selectFile(session, path, previous)),
+    recognition: previous => {
+      updateAuthoring(session => session && selectRecognition(session, previous));
+      void openRecognition();
+    },
     edit: (path, next, before, input) => updateAuthoring(session => session && editFile(session, path, next, before, input)),
     replace: (path, text, typed) => updateAuthoring(session => session && replaceFile(session, path, text, typed)),
     compositionStart: (path, range) => updateAuthoring(session => session && beginComposition(session, path, range)),
@@ -1125,7 +1459,7 @@ export default function App() {
     discard: path => updateAuthoring(session => session && discardFile(session, path)),
     save: path => void saveFile(path),
     saveAll: () => void saveAll(),
-    validate: () => void validateAuthoring(),
+    validate: () => void ownAuthoringWorker(validateAuthoring),
     stopValidation: () => void stopValidation(),
     refresh: () => void refreshAuthoring(),
     recover: () => void recoverAuthoringPackage(),
@@ -1456,14 +1790,19 @@ export default function App() {
     else if (event.key === 'Tab') setMenuOpen(false);
   }
 
-  const owner = starting ? starting.workspaceId : view.workspace_id;
-  const phase = starting ? 'preparing' : view.state;
-  const stripKind = starting ? ui.operation(starting.kind === 'check' ? 'environment_check' : 'run') : ui.operation(view.operation);
+  const awaitingAuthoringWorker = authoringWorkerPending && !busy(view.state);
+  const owner = authoringWorkerPending ? leaseOwnerId : starting ? starting.workspaceId : view.workspace_id;
+  const phase = starting || awaitingAuthoringWorker ? 'preparing' : view.state;
+  const stripKind = awaitingAuthoringWorker ? ui.operation(authoring?.pending?.kind === 'validate' ? 'authoring_validate'
+    : authoring?.recognition?.running ? 'recognition_trial' : 'recognition_capabilities')
+    : starting ? ui.operation(starting.kind === 'check' ? 'environment_check' : 'run') : ui.operation(view.operation);
   const editVisible = selected !== undefined && selected.id === leaseOwnerId && selected.page === 'edit' && authoring !== null;
   // Every surface, dialogs included, keeps the operation's Stop and the Edit owner's Return to Edit reachable.
   const strip = (idPrefix: string, onReturn: () => void = returnToEdit): ReactNode => <>
-    {active && <OperationStrip idPrefix={idPrefix} owner={owner === null ? t.applicationOwner : labelOf(owner)} kind={stripKind} phase={phase} run={starting ? null : view.run}
-      message={stripMessage && {text: renderMessage(locale, stripMessage.text), error: stripMessage.error}} stopDisabled={!view.run || !busy(view.state) || view.state === 'stopping' || stopping || starting !== null || closing} onStop={() => void stopRun()}/>}
+    {active && <OperationStrip idPrefix={idPrefix} owner={owner === null ? t.applicationOwner : labelOf(owner)} kind={stripKind} phase={phase} run={starting || awaitingAuthoringWorker ? null : view.run}
+      message={stripMessage && {text: renderMessage(locale, stripMessage.text), error: stripMessage.error}}
+      stopDisabled={stopping || closing || (!authoringWorkerPending && (!view.run || !busy(view.state) || view.state === 'stopping' || starting !== null))}
+      onStop={() => void (authoringWorkerPending || validationActive || recognitionActive ? stopValidation() : stopRun())}/>}
     {leaseOwnerId !== null && <AuthoringStrip idPrefix={idPrefix} owner={labelOf(leaseOwnerId)} packageId={authoring?.packageId ?? null} unsaved={unsavedCount}
       showReturn={!(idPrefix === 'app' && editVisible)} onReturn={onReturn}/>}
   </>;
@@ -1565,7 +1904,24 @@ export default function App() {
       <main id="workspace-panel" className="content" aria-label={selected ? t.workspaceAria(workspaceLabel(selected, workspaces)) : undefined}>
         {selected && selected.page === 'edit' && editVisible && authoring && <EditPage key={authoring.owner.token} session={authoring} label={workspaceLabel(selected, workspaces)}
           handlers={editHandlers} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
-          packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive}/>}
+          packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive} recognitionDirty={recognitionDirty}
+          recognition={authoring.recognition
+            ? <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null}
+              lockReason={commandReason ?? (closing ? t.applicationClosing : authoring.pending !== null ? ui.authoring.block('pending') : null)}
+              leaseLost={leaseLost} trialActive={recognitionActive}
+              onState={update => {
+                if (!closing && choice === null && !choiceRunning.current && !leaseLost) updateRecognition(authoring.owner.token, update);
+              }}
+              handlers={{
+                load: () => void loadRecognition(), confirm: () => void confirmRecognition(),
+                trial: (kind, ids) => void ownAuthoringWorker(() => trialRecognition(kind, ids)), stop: () => void stopValidation(),
+                save: () => void saveRecognition(), copy: (id, mode) => void copyRecognition(id, mode),
+                discard: () => void discardRecognition(), capabilities: () => void ownAuthoringWorker(checkRecognitionCapabilities),
+                openPreview: () => void openRecognitionPreview(), reload: () => void readRecognition(),
+              }}/>
+            : <div className="button-row"><span role="status">{t.recognitionUnavailable}</span>
+              <button id="recognition-reload" type="button" disabled={authoring.pending !== null || leaseLost || closing}
+                onClick={() => void readRecognition()}>{ui.authoring.refresh}</button></div>}/>}
         {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (isBound(selected)
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)} snapshot={operation?.snapshot ?? null}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
@@ -1621,7 +1977,7 @@ export default function App() {
       checkError={dialogError?.kind === 'check' ? dialogError.value : null} authoringReason={authoringReason}
       retained={logs.items.length} evicted={logs.evicted}
       onSnapshot={() => void snapshot(null)} snapshotPending={bootstrap.snapshotPending} snapshotOutcome={bootstrap.snapshotOutcome} strip={strip('dialog', () => {if (appBusy !== 'savingSettings') {setDialogOpen(false); returnToEdit();}})}/>
-    <DirtyChoiceDialog intent={choice?.kind ?? null} drafts={authoring ? dirtyDrafts(authoring) : []} busy={choiceBusy} saveBlock={leaseLost ? ui.authoring.leaseLost : null}
+    <DirtyChoiceDialog intent={choice?.kind ?? null} drafts={authoring ? dirtyDrafts(authoring) : []} recognitionDirty={recognitionDirty} busy={choiceBusy} saveBlock={leaseLost ? ui.authoring.leaseLost : null}
       onSave={() => {if (choice) void resolveChoice(choice, true);}} onDiscard={() => {if (choice) void resolveChoice(choice, false);}}
       onCancel={() => {if (!choiceBusy) setChoice(null);}}/>
   </div></LocaleContext>;

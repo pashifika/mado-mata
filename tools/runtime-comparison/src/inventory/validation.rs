@@ -3,6 +3,7 @@ use super::{
     TargetDeclaration, VERSION, invalid,
 };
 use crate::host::resolve_options;
+use crate::images::{self, ImageKind, PayloadBytes};
 use crate::model::Fault;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -35,6 +36,30 @@ impl Inventory {
         self.validate_contents()?;
         self.identity = self.content_identity()?;
         Ok(())
+    }
+
+    /// Host-side reservation for the child's sequential full-PNG validation.
+    /// This does not validate the inventory or include its retained asset bytes.
+    pub fn png_validation_scratch_bytes(&self) -> Result<usize, Fault> {
+        let declarations = self
+            .metadata
+            .pointer("/manifest/assets")
+            .and_then(Value::as_object)
+            .ok_or_else(|| invalid("inventory asset declarations are missing"))?;
+        let mut maximum = 0;
+        for (id, asset) in declarations {
+            if asset.get("format").and_then(Value::as_str) != Some("png") {
+                continue;
+            }
+            let bytes = self
+                .assets
+                .get(id)
+                .ok_or_else(|| invalid(format!("asset is missing: {id}")))?;
+            let scratch = images::png_scratch_bytes(bytes, ImageKind::Input)
+                .map_err(|error| invalid(format!("asset {id}: {}", error.message)))?;
+            maximum = maximum.max(scratch);
+        }
+        Ok(maximum)
     }
 
     fn validate_contents(&self) -> Result<(), Fault> {
@@ -118,6 +143,15 @@ impl Inventory {
                 .ok_or_else(|| invalid(format!("profile is missing: {id}")))?;
             resolve_options(&self.schema, profile, &self.package_id)?;
         }
+        let mut image_budget = ImageBudget::default();
+        // Account the complete decoded set before any asset is decompressed.
+        for (id, asset) in &manifest.assets {
+            let bytes = self
+                .assets
+                .get(id)
+                .ok_or_else(|| invalid(format!("asset is missing: {id}")))?;
+            image_budget.add(id, asset, bytes.len())?;
+        }
         for (id, asset) in &manifest.assets {
             let bytes = self
                 .assets
@@ -151,20 +185,25 @@ impl Inventory {
                 .ok_or_else(|| invalid("inventory byte bound is invalid"))? as usize;
         let mut metadata_bytes = BoundedWriter {
             count: 0,
-            limit: byte_limit.saturating_sub(total),
+            limit: byte_limit.saturating_sub(total).min(
+                images::PACKAGE_NON_IMAGE_BYTES
+                    .saturating_sub(total.saturating_sub(image_budget.image_bytes)),
+            ),
         };
         for value in [&self.schema, &self.metadata] {
             serde_json::to_writer(&mut metadata_bytes, value)
-                .map_err(|_| invalid("inventory metadata exceeds captured byte bound"))?;
+                .map_err(|_| invalid("inventory non-image metadata exceeds byte bound"))?;
         }
         serde_json::to_writer(&mut metadata_bytes, &self.profiles)
-            .map_err(|_| invalid("inventory profiles exceed captured byte bound"))?;
+            .map_err(|_| invalid("inventory non-image profiles exceed byte bound"))?;
         if self.sources.len() + self.source_maps.len() + self.assets.len() + self.profiles.len() + 2
             > file_limit
             || total > byte_limit
         {
             return Err(invalid("inventory exceeds captured bounds"));
         }
+        image_budget.check_total(total + metadata_bytes.count)?;
+        crate::recognition::validate_inventory(self)?;
         Ok(())
     }
 
@@ -174,7 +213,6 @@ impl Inventory {
             contract: &'static str,
             package_id: &'a str,
             sources: &'a BTreeMap<String, String>,
-            assets: &'a BTreeMap<String, Vec<u8>>,
             schema: &'a Value,
             profiles: &'a BTreeMap<String, Value>,
             entries: &'a Entries,
@@ -182,10 +220,9 @@ impl Inventory {
             source_maps: &'a BTreeMap<String, String>,
         }
         let content = Content {
-            contract: "mado-inventory-v1",
+            contract: "mado-inventory-v2",
             package_id: &self.package_id,
             sources: &self.sources,
-            assets: &self.assets,
             schema: &self.schema,
             profiles: &self.profiles,
             entries: &self.entries,
@@ -195,6 +232,13 @@ impl Inventory {
         let mut writer = HashWriter(Sha256::new());
         serde_json::to_writer(&mut writer, &content)
             .map_err(|error| invalid(format!("cannot identify inventory: {error}")))?;
+        // Immutable payload fingerprints avoid decimal expansion and repeated image hashing.
+        for (name, bytes) in &self.assets {
+            writer.0.update((name.len() as u64).to_le_bytes());
+            writer.0.update(name.as_bytes());
+            writer.0.update((bytes.len() as u64).to_le_bytes());
+            writer.0.update(bytes.digest());
+        }
         Ok(format!("sha256:{:x}", writer.0.finalize()))
     }
 }
@@ -363,48 +407,82 @@ pub(super) fn validate_asset(id: &str, asset: &Asset, bytes: &[u8]) -> Result<()
             .map_err(|error| invalid(format!("JSON asset {id} is invalid: {error}")))?;
         return Ok(());
     }
-    if asset.width == 0 || asset.height == 0 || asset.width > 16_384 || asset.height > 16_384 {
-        return Err(invalid(format!("asset {id} has invalid pixel dimensions")));
+    let width = u32::try_from(asset.width)
+        .map_err(|_| invalid(format!("asset {id} has invalid pixel dimensions")))?;
+    let height = u32::try_from(asset.height)
+        .map_err(|_| invalid(format!("asset {id} has invalid pixel dimensions")))?;
+    let decoded = images::checked_rgba_bytes(width, height, ImageKind::Input)
+        .map_err(|error| asset_fault(id, asset, error))?;
+    if asset.format == "raw-rgba8" && decoded != bytes.len() {
+        return Err(invalid(format!(
+            "asset {id} has invalid raw-rgba8 content length"
+        )));
     }
     match asset.format.as_str() {
-        "raw-rgba8" => {
-            let length = asset
-                .width
-                .checked_mul(asset.height)
-                .and_then(|pixels| pixels.checked_mul(4));
-            if length != Some(bytes.len()) {
-                return Err(invalid(format!(
-                    "asset {id} has invalid raw-rgba8 content length"
-                )));
-            }
-        }
+        "raw-rgba8" => {}
         "png" => {
-            // The facade performs full decoding; capture validates the declared pixel contract.
-            if bytes.len() < 45
-                || &bytes[..8] != b"\x89PNG\r\n\x1a\n"
-                || &bytes[8..16] != b"\0\0\0\rIHDR"
-            {
-                return Err(invalid(format!("asset {id} has no valid PNG header")));
-            }
-            let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize;
-            let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]) as usize;
-            let supported = matches!(
-                (bytes[25], bytes[24]),
-                (0, 1 | 2 | 4 | 8 | 16) | (2, 8 | 16) | (3, 1 | 2 | 4 | 8) | (4 | 6, 8 | 16)
-            );
-            if width != asset.width
-                || height != asset.height
-                || !supported
-                || bytes[26] != 0
-                || bytes[27] != 0
-                || bytes[28] > 1
-            {
-                return Err(invalid(format!("asset {id} has incompatible PNG metadata")));
+            let info = images::validate_png(bytes, ImageKind::Input)
+                .map_err(|error| asset_fault(id, asset, error))?;
+            if info.width != width || info.height != height {
+                return Err(invalid(format!(
+                    "asset {id} has incompatible PNG dimensions"
+                )));
             }
         }
         _ => return Err(invalid(format!("asset {id} has an unsupported format"))),
     }
     Ok(())
+}
+
+fn asset_fault(id: &str, asset: &Asset, error: Fault) -> Fault {
+    invalid(format!("asset {id}: {}", error.message)).with_context(
+        json!({"asset":id,"path":asset.path,"cause":error.category,"image":error.context}),
+    )
+}
+
+#[derive(Default)]
+pub(super) struct ImageBudget {
+    image_bytes: usize,
+    decoded_bytes: usize,
+}
+
+impl ImageBudget {
+    pub(super) fn add(&mut self, id: &str, asset: &Asset, bytes: usize) -> Result<(), Fault> {
+        if !matches!(asset.format.as_str(), "png" | "raw-rgba8") {
+            return Ok(());
+        }
+        let width = u32::try_from(asset.width)
+            .map_err(|_| invalid(format!("asset {id} width overflows")))?;
+        let height = u32::try_from(asset.height)
+            .map_err(|_| invalid(format!("asset {id} height overflows")))?;
+        let decoded = images::checked_rgba_bytes(width, height, ImageKind::Input)
+            .map_err(|error| asset_fault(id, asset, error))?;
+        self.image_bytes = self
+            .image_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| invalid("package image bytes overflow"))?;
+        self.decoded_bytes = self
+            .decoded_bytes
+            .checked_add(decoded)
+            .ok_or_else(|| invalid("package decoded image bytes overflow"))?;
+        if self.image_bytes > images::PACKAGE_IMAGE_BYTES {
+            return Err(invalid("package image byte limit exceeded"));
+        }
+        if self.decoded_bytes > images::PACKAGE_DECODED_BYTES {
+            return Err(invalid("package decoded image byte limit exceeded"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_total(&self, total: usize) -> Result<(), Fault> {
+        if total > images::PACKAGE_BYTES {
+            return Err(invalid("package total byte limit exceeded"));
+        }
+        if total.saturating_sub(self.image_bytes) > images::PACKAGE_NON_IMAGE_BYTES {
+            return Err(invalid("package non-image byte limit exceeded"));
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn validate_map(map: &str) -> Result<(), Fault> {
@@ -526,16 +604,21 @@ pub(super) fn declare(declared: &mut BTreeSet<String>, path: &str) -> Result<(),
 }
 
 pub(super) fn text_file(
-    files: &mut BTreeMap<String, Vec<u8>>,
+    files: &mut BTreeMap<String, PayloadBytes>,
     path: &str,
 ) -> Result<String, Fault> {
     let bytes = files
         .remove(path)
         .ok_or_else(|| invalid(format!("declared file is missing: {path}")))?;
-    String::from_utf8(bytes).map_err(|error| invalid(format!("file is not UTF-8: {path}: {error}")))
+    bytes
+        .into_text()
+        .map_err(|error| invalid(format!("file is not UTF-8: {path}: {error}")))
 }
 
-pub(super) fn json_file(files: &mut BTreeMap<String, Vec<u8>>, path: &str) -> Result<Value, Fault> {
+pub(super) fn json_file(
+    files: &mut BTreeMap<String, PayloadBytes>,
+    path: &str,
+) -> Result<Value, Fault> {
     serde_json::from_str(&text_file(files, path)?)
         .map_err(|error| invalid(format!("invalid JSON: {path}: {error}")))
 }

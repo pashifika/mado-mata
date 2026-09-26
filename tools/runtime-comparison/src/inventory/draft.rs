@@ -1,15 +1,15 @@
-use super::capture::{capture_files, checked_root, inventory_from_files};
+use super::capture::{capture_files, capture_recovery_files, checked_root, inventory_from_files};
 use super::validation::{
-    catalog, declare, portable_component, portable_path, sha256, validate_asset, validate_manifest,
-    validate_source,
+    ImageBudget, catalog, declare, portable_component, portable_path, sha256, validate_asset,
+    validate_manifest, validate_source,
 };
 use super::{Inventory, Manifest, invalid};
+use crate::images::PayloadBytes;
 use crate::model::{Fault, Limits};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,7 +26,7 @@ pub enum DraftFileKind {
 /// and incomplete programs remain available for repair without relaxing Inventory.
 #[derive(Clone, Debug)]
 pub struct PackageDraft {
-    files: BTreeMap<String, Arc<[u8]>>,
+    files: BTreeMap<String, PayloadBytes>,
     kinds: BTreeMap<String, DraftFileKind>,
     directories: BTreeSet<String>,
     manifest: Manifest,
@@ -37,28 +37,16 @@ pub struct PackageDraft {
 impl PackageDraft {
     /// Safe filesystem capture for journal recovery while declarations are between revisions.
     /// This never creates an executable inventory or relaxes capture's filesystem checks.
-    pub fn capture_bytes(
+    pub fn capture_recovery_bytes(
         root: &Path,
         limits: &Limits,
-    ) -> Result<BTreeMap<String, Arc<[u8]>>, Fault> {
-        let capture = capture_files(root, limits, None)?;
-        Ok(capture
-            .files
-            .into_iter()
-            .map(|(path, bytes)| (path, Arc::from(bytes)))
-            .collect())
+    ) -> Result<BTreeMap<String, PayloadBytes>, Fault> {
+        Ok(capture_recovery_files(root, limits)?.files)
     }
     pub fn capture(root: &Path, limits: &Limits) -> Result<Self, Fault> {
         let capture = capture_files(root, limits, None)?;
         let directories = capture.directories().map(str::to_owned).collect();
-        let mut draft = Self::from_files(
-            capture
-                .files
-                .into_iter()
-                .map(|(path, bytes)| (path, Arc::from(bytes)))
-                .collect(),
-            limits,
-        )?;
+        let mut draft = Self::from_files(capture.files, limits)?;
         draft.directories = directories;
         Ok(draft)
     }
@@ -75,7 +63,10 @@ impl PackageDraft {
         portable_component(id)
     }
 
-    pub fn from_files(files: BTreeMap<String, Arc<[u8]>>, limits: &Limits) -> Result<Self, Fault> {
+    pub fn from_files(
+        files: BTreeMap<String, PayloadBytes>,
+        limits: &Limits,
+    ) -> Result<Self, Fault> {
         limits.validate()?;
         if files.len() > limits.snapshot_files {
             return Err(invalid("snapshot file limit exceeded"));
@@ -116,10 +107,21 @@ impl PackageDraft {
         let raw = files
             .get("package.json")
             .ok_or_else(|| invalid("package.json is required"))?;
+        if raw.len() > crate::images::PACKAGE_NON_IMAGE_BYTES {
+            return Err(invalid("package non-image byte limit exceeded"));
+        }
         let manifest: Manifest = serde_json::from_slice(raw).map_err(|error| {
             invalid("invalid package.json").with_context(json!({"path":"package.json","line":error.line(),"column":error.column(),"cause":error.to_string()}))
         })?;
         validate_manifest(&manifest)?;
+        let mut image_budget = ImageBudget::default();
+        for (id, asset) in &manifest.assets {
+            let bytes = files.get(&asset.path).ok_or_else(|| {
+                invalid("declared file is missing").with_context(json!({"path":asset.path}))
+            })?;
+            image_budget.add(id, asset, bytes.len())?;
+        }
+        image_budget.check_total(total)?;
         let mut declared = BTreeSet::from(["package.json".to_owned()]);
         let mut kinds = BTreeMap::from([("package.json".to_owned(), DraftFileKind::Manifest)]);
         let mut add = |path: &str, kind| -> Result<(), Fault> {
@@ -181,6 +183,7 @@ impl PackageDraft {
                 "approved dependency closure exceeds snapshot bounds",
             ));
         }
+        image_budget.check_total(total + approved.values().map(String::len).sum::<usize>())?;
         if paths.len() > limits.snapshot_files.saturating_mul(2) {
             return Err(invalid("snapshot directory bound exceeded"));
         }
@@ -215,7 +218,7 @@ impl PackageDraft {
         Ok(())
     }
 
-    pub fn files(&self) -> &BTreeMap<String, Arc<[u8]>> {
+    pub fn files(&self) -> &BTreeMap<String, PayloadBytes> {
         &self.files
     }
     pub fn kinds(&self) -> &BTreeMap<String, DraftFileKind> {
@@ -231,12 +234,6 @@ impl PackageDraft {
         serde_json::to_value(&self.manifest).map_err(|error| invalid(error.to_string()))
     }
     pub fn validate(&self) -> Result<Inventory, Fault> {
-        inventory_from_files(
-            self.files
-                .iter()
-                .map(|(path, bytes)| (path.clone(), bytes.to_vec()))
-                .collect(),
-            &self.limits,
-        )
+        inventory_from_files(self.files.clone(), &self.limits)
     }
 }

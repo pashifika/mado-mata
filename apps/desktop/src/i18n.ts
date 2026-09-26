@@ -10,7 +10,8 @@ export type Command = "initializing" | "retrying" | "importingRoot" | "restoring
   | "readingTarget" | "checkingTarget" | "savingTarget" | "removingTarget"
   | "repairingProfile" | "resettingProfile" | "retryingBinding" | "discardingRecovery"
   | "openingPackage" | "creatingPackage" | "duplicatingPackage" | "savingFile" | "changingCatalog" | "refreshingPackage"
-  | "exitingEdit" | "recoveringPackage";
+  | "exitingEdit" | "recoveringPackage" | "readingRecognition" | "loadingRecognition" | "updatingRecognition"
+  | "savingRecognition" | "copyingRecognition";
 
 function appMessages(copy: typeof en) {
   return {...copy.app,
