@@ -25,7 +25,7 @@ REQUIRED_FILES = {
     "tools/runtime-comparison/compiler/compile.mjs",
 }
 CONCURRENCY_GROUP = "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}"
-PR_TYPES = {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
+PR_TYPES = {"opened", "synchronize", "reopened", "ready_for_review"}
 PUSH_NAME_SUFFIX = "${{ github.event_name == 'push' && ' (push)' || '' }}"
 HOSTED_RUNNERS = {
     SELECTOR_JOB: "ubuntu-24.04",
@@ -242,7 +242,7 @@ def check_ci_workflow(workflow, pins):
             "ci.yml: PR trigger requires branches and types, with no path filters")
     require(pr["branches"] == ["main", "dev/**"], "ci.yml: incorrect PR target branches")
     require(isinstance(pr["types"], list) and all(isinstance(item, str) for item in pr["types"])
-            and set(pr["types"]) == PR_TYPES, "ci.yml: PR triggers must include base edits")
+            and set(pr["types"]) == PR_TYPES, "ci.yml: PR triggers must use only validation activities, not metadata edits")
     require(triggers["push"] == {"branches": ["main", "dev/**"]}, "ci.yml: incorrect push trigger or path filter")
     require(triggers["workflow_dispatch"] in (None, {}), "ci.yml: manual dispatch must not require inputs")
     require(workflow.get("concurrency") == {"group": CONCURRENCY_GROUP, "cancel-in-progress": True},

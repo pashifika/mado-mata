@@ -102,6 +102,41 @@ class BranchFlowTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         validate_event("pull_request", event, REPO)
 
+    def test_fresh_pr_events_revalidate_the_current_route(self):
+        for action in ("opened", "synchronize", "reopened", "ready_for_review"):
+            for base, head, accepted in (
+                ("dev/runtime", "change/capture", True),
+                ("main", "change/capture", False),
+                ("main", "dev/runtime", True),
+                ("dev/other", "sync/runtime", False),
+            ):
+                with self.subTest(action=action, base=base, head=head):
+                    event = pull_request(base, head)
+                    event["action"] = action
+                    if accepted:
+                        self.assertIn(f"{head} -> {base}", validate_event("pull_request", event, REPO))
+                    else:
+                        with self.assertRaises(ValueError):
+                            validate_event("pull_request", event, REPO)
+
+    def test_edited_payloads_are_not_validation_events(self):
+        # Checkbox check/uncheck, free-text, title, and base edits all have the
+        # same activity type. No changes-payload classifier is needed anymore.
+        for changes, body in (
+            ({"body": {"from": "- [ ] Verified"}}, "- [x] Verified"),
+            ({"body": {"from": "- [x] Verified"}}, "- [ ] Verified"),
+            ({"body": {"from": "Previous description"}}, "Updated description"),
+            ({"title": {"from": "Previous title"}}, "Description"),
+            ({"base": {"ref": {"from": "dev/previous"}, "sha": {"from": "b2" * 20}}}, "Description"),
+            ({}, "Description"),
+        ):
+            with self.subTest(changes=changes, body=body):
+                event = pull_request()
+                event.update(action="edited", changes=changes)
+                event["pull_request"]["body"] = body
+                with self.assertRaises(ValueError):
+                    validate_event("pull_request", event, REPO)
+
     def test_malformed_or_inconsistent_event_metadata(self):
         cases = []
         for field in ("repository", "pull_request"):
@@ -688,7 +723,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         workflow["on"]["pull_request"]["paths"] = ["src/**"]
         cases.append(workflow)
         workflow = deepcopy(self.workflow)
-        workflow["on"]["pull_request"]["types"].remove("edited")
+        workflow["on"]["pull_request"]["types"].append("edited")
         cases.append(workflow)
         workflow = deepcopy(self.workflow)
         workflow["on"]["pull_request_target"] = workflow["on"].pop("pull_request")
@@ -716,6 +751,26 @@ class RepositoryPolicyTests(unittest.TestCase):
         for workflow in cases:
             with self.subTest(workflow=workflow), self.assertRaises(ValueError):
                 check_ci_workflow(workflow, self.manifest["actions"])
+
+    def test_pr_trigger_excludes_edits_and_retains_validation_events(self):
+        check_ci_workflow(self.workflow, self.manifest["actions"])
+        required = {"opened", "synchronize", "reopened", "ready_for_review"}
+        configured = self.workflow["on"]["pull_request"]["types"]
+        self.assertEqual(set(configured), required)
+        # Reject reintroducing edited (including checkbox changes) at the
+        # subscription boundary, not merely skipping jobs after a run exists.
+        for activity in ("edited", "labeled", "unlabeled", "closed"):
+            with self.subTest(unwanted_activity=activity):
+                workflow = deepcopy(self.workflow)
+                workflow["on"]["pull_request"]["types"].append(activity)
+                with self.assertRaises(ValueError):
+                    check_ci_workflow(workflow, self.manifest["actions"])
+        for activity in sorted(required):
+            with self.subTest(missing_activity=activity):
+                workflow = deepcopy(self.workflow)
+                workflow["on"]["pull_request"]["types"].remove(activity)
+                with self.assertRaises(ValueError):
+                    check_ci_workflow(workflow, self.manifest["actions"])
 
     def test_selector_permissions_cannot_spread_to_other_jobs_or_workflows(self):
         permissions = {"contents": "read", "pull-requests": "read"}

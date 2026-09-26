@@ -283,10 +283,26 @@ scope and remaining qualification blockers.
 ## Hosted workflow and required gate
 
 The [workflow](../.github/workflows/ci.yml) runs on PRs targeting `main` and
-`dev/**`, protected-branch pushes, and manual dispatch. PR events include
-`opened`, `synchronize`, `reopened`, `ready_for_review`, and `edited` so a base
-change is rechecked. There are no workflow path filters. Manual dispatch becomes
-available when the workflow is on the default branch.
+`dev/**`, protected-branch pushes, and manual dispatch. PR events are limited to
+`opened`, `synchronize`, `reopened`, and `ready_for_review`. The workflow does
+not subscribe to `edited`: changing a PR title, description, or task-list
+checkbox creates no new CI workflow run or skipped checks. A job-level `if`
+would only skip jobs after a workflow run already exists, so it is not a
+substitute for removing the event subscription. There are no workflow path
+filters. Manual dispatch becomes available when the workflow is on the default
+branch. GitHub documents activity-type filtering in
+[Events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request).
+
+A base-branch retarget is also an `edited` activity and no longer automatically
+revalidates the PR. After changing the base, the maintainer must close and reopen
+the PR, or push a new commit to its head branch, and confirm that the resulting
+PR run validates the new route and passes `CI Gate` before merging. Resolve any
+merge conflict first. Do not use an earlier run's success as evidence for the new
+base: rerunning an old workflow uses the original event's SHA/ref, and manual
+dispatch produces `CI Gate (manual)`, not the required PR check. See
+[Re-running workflows and jobs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
+This is an explicit maintainer step, not automatic server-side retarget
+protection; branch rulesets and the required `CI Gate` context remain unchanged.
 
 The lightweight `dev-push-policy` job runs only on pushes. It suppresses duplicate
 `dev/<topic>` push checks only when an open promotion PR to `main` has both its
@@ -341,6 +357,8 @@ owned by [CONTRIBUTING.md](../CONTRIBUTING.md#select-the-route-before-implementa
 
 The workflow uses read-only repository authority, credential-free checkout,
 pinned actions/tools, bounded jobs, and event-scoped concurrency cancellation.
+PR metadata edits create no run and therefore cannot cancel or supersede running
+or pending validation. New commits still supersede older runs for the same PR.
 It does not use secrets, administration tokens, `pull_request_target`, private
 Rasen access, or self-hosted interactive desktops. Superseding one PR run must
 not cancel another PR's run or turn a cancellation into success.
