@@ -88,7 +88,10 @@ impl Application {
         let terminal = value["state"] == "terminal";
         let controller = Arc::new(value);
         if terminal {
-            if controller["operation"] != "authoring_validate" {
+            let authoring_operation = controller["operation"].as_str().is_some_and(|operation| {
+                operation == "authoring_validate" || operation.starts_with("recognition_")
+            });
+            if !authoring_operation {
                 let outcome = TerminalOutcome::from_view(&controller);
                 let (level, message) = outcome.notice();
                 self.logger.emit(
@@ -101,9 +104,7 @@ impl Application {
                     outcome.fields(&controller["operation"]),
                 );
             }
-            if let Some(workspace) =
-                workspace.filter(|_| controller["operation"] != "authoring_validate")
-            {
+            if let Some(workspace) = workspace.filter(|_| !authoring_operation) {
                 if let Some(selected) = state
                     .open
                     .iter_mut()

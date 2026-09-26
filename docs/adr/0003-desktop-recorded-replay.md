@@ -46,6 +46,11 @@ invented build/startup identity.
 
 ## Bounds corrected by consuming evidence
 
+The package and decoded-frame bounds below record the earlier consuming evidence.
+[ADR 0006](0006-saved-image-recognition-observations.md#image-policy) supersedes
+them for saved-image authoring and shared package/replay capture. This historical
+evidence does not establish acceptance at the new ceilings.
+
 Package capture stays at the existing **1 MiB** for inspection, Check, and both
 Start lanes. Its bound participates in inventory identity: using 2 MiB only for
 inspection caused an unchanged controlled package to fail `StaleIdentity`.

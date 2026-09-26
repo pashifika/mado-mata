@@ -1,8 +1,7 @@
 use super::packages::{runtime, select_profile};
 use super::{
     Active, ControllerView, DesktopController, LOG_CAPACITY, NEXT_RUN, PROGRESS_CAPACITY,
-    REPLAY_DURATION_MS, REPLAY_SNAPSHOT_BYTES, REQUEST_BYTES, SHUTDOWN_MS, StartRequest, State,
-    manual_plan,
+    REPLAY_DURATION_MS, REQUEST_BYTES, SHUTDOWN_MS, StartRequest, State, manual_plan,
 };
 use crate::environment::{OcrEnvironment, capture_environment, capture_replay};
 use crate::inventory::Inventory;
@@ -268,7 +267,7 @@ impl DesktopController {
         })
     }
 
-    fn reserve(
+    pub(super) fn reserve(
         &self,
         operation: &'static str,
         replay: bool,
@@ -435,7 +434,6 @@ fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
     plan.id = "desktop".into();
     plan.lane = request.lane.clone();
     if plan.lane == "replay" {
-        plan.limits.snapshot_bytes = REPLAY_SNAPSHOT_BYTES;
         plan.limits.duration_ms = REPLAY_DURATION_MS;
     }
     plan.native_config = None;
@@ -648,7 +646,6 @@ fn execute_check(
         let mut plan = manual_plan()?;
         plan.id = "desktop-environment-check".into();
         plan.lane = "replay".into();
-        plan.limits.snapshot_bytes = REPLAY_SNAPSHOT_BYTES;
         plan.limits.duration_ms = REPLAY_DURATION_MS;
         plan.samples = 1;
         plan.warmups = 0;

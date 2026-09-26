@@ -62,8 +62,9 @@ impl FixtureTree {
     }
 
     fn capture(&self) -> Result<Inventory, Fault> {
-        let plan: Plan =
+        let mut plan: Plan =
             serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+        plan.limits.snapshot_bytes = mado_runtime_comparison::images::PACKAGE_BYTES;
         Inventory::capture(&self.package(), &plan.limits)
     }
 }

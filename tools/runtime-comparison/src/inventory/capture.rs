@@ -1,9 +1,10 @@
 use super::validation::{
-    catalog, declare, json_file, portable_component, portable_path, sha256, text_file,
-    validate_asset, validate_manifest, validate_map, validate_source,
+    ImageBudget, catalog, declare, json_file, portable_component, portable_path, text_file,
+    validate_manifest, validate_map, validate_source,
 };
 use super::{Inventory, MAX_BYTES, MAX_DEPTH, MAX_FILES, Manifest, invalid};
 use crate::host::resolve_options;
+use crate::images::{PayloadBytes, reserve_payload};
 use crate::model::{Fault, Limits};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,6 +34,24 @@ pub(super) fn capture_files<'a>(
     limits: &Limits,
     stop: Option<&'a AtomicBool>,
 ) -> Result<Capture<'a>, Fault> {
+    capture_files_bounded(root, limits, stop, 1)
+}
+
+pub(super) fn capture_recovery_files<'a>(
+    root: &Path,
+    limits: &Limits,
+) -> Result<Capture<'a>, Fault> {
+    // A recovery read can contain the union of two otherwise valid revisions.
+    // This does not change ordinary Inventory, Plan or draft admission ceilings.
+    capture_files_bounded(root, limits, None, 2)
+}
+
+fn capture_files_bounded<'a>(
+    root: &Path,
+    limits: &Limits,
+    stop: Option<&'a AtomicBool>,
+    revisions: usize,
+) -> Result<Capture<'a>, Fault> {
     if limits.snapshot_files == 0
         || limits.snapshot_files > MAX_FILES
         || limits.snapshot_bytes == 0
@@ -51,8 +70,8 @@ pub(super) fn capture_files<'a>(
         files: BTreeMap::new(),
         stamps: BTreeMap::new(),
         bytes: 0,
-        file_limit: limits.snapshot_files,
-        byte_limit: limits.snapshot_bytes,
+        file_limit: limits.snapshot_files * revisions,
+        byte_limit: limits.snapshot_bytes * revisions,
         deadline,
         stop,
     };
@@ -64,11 +83,11 @@ pub(super) fn capture_files<'a>(
 }
 
 pub(super) fn inventory_from_files(
-    files: BTreeMap<String, Vec<u8>>,
+    files: BTreeMap<String, PayloadBytes>,
     limits: &Limits,
 ) -> Result<Inventory, Fault> {
     let capture = Capture {
-        bytes: files.values().map(Vec::len).sum(),
+        bytes: files.values().map(|bytes| bytes.len()).sum(),
         files,
         stamps: BTreeMap::new(),
         file_limit: limits.snapshot_files,
@@ -84,16 +103,28 @@ fn inventory_from_capture(mut capture: Capture<'_>, limits: &Limits) -> Result<I
         .files
         .get("package.json")
         .ok_or_else(|| invalid("package.json is required"))?;
+    if raw_manifest.len() > crate::images::PACKAGE_NON_IMAGE_BYTES {
+        return Err(invalid("package non-image byte limit exceeded"));
+    }
     let manifest: Manifest = serde_json::from_slice(raw_manifest)
         .map_err(|error| invalid(format!("invalid package.json: {error}")))?;
     validate_manifest(&manifest)?;
+    let mut image_budget = ImageBudget::default();
+    for (id, asset) in &manifest.assets {
+        let bytes = capture
+            .files
+            .get(&asset.path)
+            .ok_or_else(|| invalid(format!("asset {id} is missing: {}", asset.path)))?;
+        image_budget.add(id, asset, bytes.len())?;
+    }
+    image_budget.check_total(capture.bytes)?;
     let files: BTreeMap<_, _> = capture
         .files
         .iter()
         .map(|(path, bytes)| {
             (
                 path.clone(),
-                json!({"sha256": sha256(bytes), "bytes": bytes.len()}),
+                json!({"sha256": format!("{:x}", bytes.digest()), "bytes": bytes.len()}),
             )
         })
         .collect();
@@ -123,7 +154,6 @@ fn inventory_from_capture(mut capture: Capture<'_>, limits: &Limits) -> Result<I
             .files
             .remove(&asset.path)
             .ok_or_else(|| invalid(format!("asset {id} is missing: {}", asset.path)))?;
-        validate_asset(id, asset, &bytes)?;
         assets.insert(id.clone(), bytes);
     }
     let mut source_maps = BTreeMap::new();
@@ -148,6 +178,7 @@ fn inventory_from_capture(mut capture: Capture<'_>, limits: &Limits) -> Result<I
         capture.reserve(source.len())?;
         sources.insert(id, source);
     }
+    image_budget.check_total(capture.bytes)?;
     if sources.len() + declared.len() - manifest.sources.len() > limits.snapshot_files {
         return Err(invalid(
             "approved dependency closure exceeds snapshot file bound",
@@ -185,7 +216,7 @@ struct Stamp {
 }
 
 pub(super) struct Capture<'a> {
-    pub(super) files: BTreeMap<String, Vec<u8>>,
+    pub(super) files: BTreeMap<String, PayloadBytes>,
     stamps: BTreeMap<String, Stamp>,
     bytes: usize,
     file_limit: usize,
@@ -427,7 +458,7 @@ fn read_stable(
     original: &Stamp,
     size: usize,
     deadline: Instant,
-) -> Result<Vec<u8>, Fault> {
+) -> Result<PayloadBytes, Fault> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(target_os = "macos")]
@@ -452,6 +483,8 @@ fn read_stable(
     }
     #[cfg(windows)]
     let windows_identity = windows_file_identity(&file)?;
+    let reservation = reserve_payload(size)?;
+    let _scratch = reserve_payload(16 * 1024)?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(size)
@@ -485,7 +518,7 @@ fn read_stable(
     if windows_file_identity(&file)? != windows_identity {
         return Err(changed(id));
     }
-    Ok(bytes)
+    PayloadBytes::from_reserved(bytes, reservation)
 }
 
 #[cfg(windows)]

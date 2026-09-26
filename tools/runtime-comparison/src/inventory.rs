@@ -1,3 +1,4 @@
+use crate::images::PayloadBytes;
 use crate::model::Fault;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -7,6 +8,9 @@ mod capture;
 mod draft;
 mod validation;
 
+#[cfg(test)]
+mod image_tests;
+
 pub use draft::{DraftFileKind, PackageDraft};
 use validation::portable_component;
 
@@ -14,7 +18,7 @@ const VERSION: &str = "1.0.0";
 const MAX_DEPTH: usize = 32;
 const MAX_PATH_BYTES: usize = 240;
 const MAX_FILES: usize = 65_536;
-const MAX_BYTES: usize = 256 * 1024 * 1024;
+const MAX_BYTES: usize = crate::images::PACKAGE_BYTES;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,7 +136,7 @@ pub struct Inventory {
     pub identity: String,
     pub package_id: String,
     pub sources: BTreeMap<String, String>,
-    pub assets: BTreeMap<String, Vec<u8>>,
+    pub assets: BTreeMap<String, PayloadBytes>,
     pub schema: Value,
     pub profiles: BTreeMap<String, Value>,
     pub entries: Entries,

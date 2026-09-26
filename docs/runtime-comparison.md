@@ -55,9 +55,11 @@ The example budgets are controlled-run ceilings, not native qualification budget
 Only the predeclared controlled scenarios are accepted; misspellings cannot
 silently become successful samples.
 
-`child`, `parent-probe`, `parent-stop-probe`, and `target-probe` are harness-internal
-modes. The last is an inert owned process used to prove that containment and
-intentional supervisor exit do not terminate the separate target.
+`child`, `parent-probe`, `parent-stop-probe`, `target-probe`, and
+`recognition-child` are harness-internal modes. `target-probe` is an inert owned
+process used to prove that containment and intentional supervisor exit do not
+terminate the separate target. Recognition capability/trial requests are
+supervised desktop operations, not standalone user commands.
 
 ## Manual script testing
 
@@ -115,6 +117,23 @@ The desktop can [create and edit directory packages](desktop.md#edit-directory-p
 Its editable candidate accepts repairable text errors but does not weaken this
 CLI's executable inventory: Save, Validate, and explicit Inspect/Start remain
 separate operations.
+
+Directory capture separates declared PNG/raw image payloads from non-image
+source, profile, schema, and JSON content under the
+[shared image policy](adr/0006-saved-image-recognition-observations.md#image-policy).
+An explicit lower `limits.snapshot_bytes` still applies; the larger image ceiling
+does not enlarge source or metadata allowances. Inventory checks validate complete
+PNG content and declared dimensions, not just its header.
+
+Desktop [saved-image Recognition](desktop.md#author-saved-image-recognition)
+persists versioned metadata and explicitly selected crops as declared assets.
+Template assets include reviewed rights, content identities, match defaults, and
+runtime mappings; malformed or stale references are refused. Saved-image trials
+are script-free observations, separate from this CLI's exact-text query and
+postcondition semantics. Optional expected text belongs only to explicit
+`query`/`query_wait` source Copy, not an authoring trial verdict. Copy changes
+the native clipboard, never package source; paste and subsequent edits remain
+the Script author's responsibility.
 
 ### Optional portable target declaration
 

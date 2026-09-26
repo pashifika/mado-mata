@@ -1,5 +1,5 @@
 import {Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
-import type {RefObject} from 'react';
+import type {ReactNode, RefObject} from 'react';
 import {flushSync} from 'react-dom';
 import CatalogDialog from '../components/CatalogDialog.tsx';
 import type {CatalogIntent} from '../components/CatalogDialog.tsx';
@@ -43,6 +43,7 @@ function menuKeyOf(target: MenuTarget): string {
 
 export interface EditHandlers {
   select: (path: string, previous: TextRange | null) => void;
+  recognition: (previous: TextRange | null) => void;
   edit: (path: string, next: Snapshot, before: TextRange, input: EditInput) => void;
   compositionStart: (path: string, range: TextRange) => void;
   compositionEnd: (path: string) => void;
@@ -79,6 +80,7 @@ export interface PageAuthoring {
 
 interface Props {
   session: AuthoringSession; label: string; handlers: EditHandlers;
+  recognition: ReactNode; recognitionDirty: boolean;
   // The effective packages root (the sources folder) the host resolves Duplicate destinations in; shown as a preview only.
   packagesRoot: string;
   // Another host command is in flight or the application is closing; typing stays available.
@@ -212,13 +214,15 @@ function CodeEditor({draft, reveal, readOnly, label, help, selection, handlers, 
   </div>;
 }
 
-export default function EditPage({session, label, handlers, packagesRoot, locked, lockReason, leaseLost, validationActive}: Props) {
+export default function EditPage({session, label, handlers, recognition, recognitionDirty, packagesRoot, locked, lockReason, leaseLost, validationActive}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const a = t.authoring;
   const drafts = draftList(session);
   const dirty = dirtyDrafts(session);
-  const selected = session.selected === null ? undefined : session.drafts.get(session.selected);
+  const unsaved = dirty.length + Number(recognitionDirty);
+  const recognitionSelected = session.destination === 'recognition';
+  const selected = recognitionSelected || session.selected === null ? undefined : session.drafts.get(session.selected);
   // Only sources get the text editor; declared metadata opens as structured views and assets as inventory facts.
   const text = selected !== undefined && selected.text !== null ? selected as FileDraft & {text: string} : undefined;
   const editable = text?.kind === 'source' ? text : undefined;
@@ -439,9 +443,10 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
       <div className="actions">
         <button id="authoring-save" type="button" className="primary" disabled={publishLocked || !selected || saveReason !== null}
           title={saveReason ? a.block(saveReason) : undefined} onClick={() => selected && handlers.save(selected.path)}>{pending?.kind === 'save' ? a.working : a.save}</button>
-        <button id="authoring-save-all" type="button" disabled={publishLocked || savable.length === 0 || saveAllReason !== null} title={saveAllReason ?? undefined} onClick={handlers.saveAll}>{a.saveAll}</button>
+        <button id="authoring-save-all" type="button" disabled={publishLocked || (savable.length === 0 && !recognitionDirty) || saveAllReason !== null} title={saveAllReason ?? undefined} onClick={handlers.saveAll}>{a.saveAll}</button>
         <button id="authoring-validate" type="button" disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button>
-        <button id="authoring-exit" type="button" disabled={locked || pending !== null || validating} title={a.exitHelp} onClick={handlers.exit}>{pending?.kind === 'exit' ? a.working : a.exit}</button>
+        <button id="authoring-exit" type="button" disabled={locked || (pending !== null && pending.kind !== 'recognition_trial' && pending.kind !== 'validate')}
+          title={a.exitHelp} onClick={handlers.exit}>{pending?.kind === 'exit' ? a.working : a.exit}</button>
       </div>
     </div>
     <div id="authoring-status" className="operation-status" role="status">{statusText}</div>
@@ -460,7 +465,7 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
         <div><dt>{a.path}</dt><dd id="authoring-package-path" className="mono">{session.packagePath}</dd></div>
         <div><dt>{a.revision}</dt><dd id="authoring-revision" className="mono" title={session.revision}>{shortRevision(session.revision)}</dd></div>
       </dl>
-      {dirty.length > 0 && <span id="authoring-unsaved-count" className="tag unsaved">{a.unsavedFiles(dirty.length)}</span>}
+      {unsaved > 0 && <span id="authoring-unsaved-count" className="tag unsaved">{a.unsavedFiles(unsaved)}</span>}
     </div>
     <div className={railOpen ? 'repo' : 'repo rail-closed'}>
       <aside id="authoring-rail" className="panel repo-rail" aria-labelledby="authoring-rail-heading" hidden={!railOpen} onContextMenu={event => event.preventDefault()}>
@@ -473,13 +478,13 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
             <li>
               {groupRow('files', a.files)}
               <div id="authoring-group-files-items" className="tree-children" hidden={!groups.files}>
-                <FileTree drafts={drafts.filter(draft => !draft.missing)} selected={session.selected} reveal={revealRequest}
+                <FileTree drafts={drafts.filter(draft => !draft.missing)} selected={recognitionSelected ? null : session.selected} reveal={revealRequest}
                   onSelect={path => handlers.select(path, previous())} onMenu={(path, anchor, opener, trigger) => openMenu({kind: 'file', path}, anchor, opener, trigger)} menuOpen={openKey}/>
                 {missing.length > 0 && <section className="rail-missing" aria-labelledby="authoring-missing-heading">
                   <h3 id="authoring-missing-heading">{a.missingHeading}</h3><p className="field-help">{a.missingHelp}</p>
                   <ul id="authoring-missing" className="file-tree">{missing.map(draft => <li key={draft.path}>
-                    <div className={draft.path === session.selected ? 'tree-row current' : 'tree-row'}>
-                      <button type="button" className="tree-file" data-path={draft.path} title={draft.path} aria-current={draft.path === session.selected ? 'true' : undefined}
+                    <div className={!recognitionSelected && draft.path === session.selected ? 'tree-row current' : 'tree-row'}>
+                      <button type="button" className="tree-file" data-path={draft.path} title={draft.path} aria-current={!recognitionSelected && draft.path === session.selected ? 'true' : undefined}
                         onClick={() => handlers.select(draft.path, previous())}><span className="tree-name mono">{draft.path}</span>
                         <span className="tree-meta"><span className="tag">{a.kind(draft.kind)}</span><span className="tag stale">{a.unsaved}</span></span></button>
                     </div></li>)}</ul>
@@ -491,7 +496,7 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
               <ul id="authoring-group-metadata-items" className="file-tree tree-children" hidden={!groups.metadata}>
                 {metadata.map(draft => {
                   const target: MenuTarget = {kind: 'metadata', path: draft.path};
-                  const current = draft.path === session.selected;
+                  const current = !recognitionSelected && draft.path === session.selected;
                   return <li key={draft.path}><div className={current ? 'tree-row current' : 'tree-row'}>
                     <button type="button" className="tree-file" data-path={draft.path} data-kind={draft.kind} title={draft.path} aria-current={current ? 'true' : undefined}
                       aria-keyshortcuts={draft.kind === 'manifest' ? undefined : 'Shift+F10'} onClick={() => handlers.select(draft.path, previous())}
@@ -506,6 +511,13 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
                 })}
               </ul>
             </li>
+            <li><div className={recognitionSelected ? 'tree-row current' : 'tree-row'}>
+              <button id="authoring-recognition" type="button" className="tree-folder tree-action" aria-current={recognitionSelected ? 'true' : undefined}
+                onClick={() => handlers.recognition(previous())}>
+                <svg className="recognition-icon" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 4V1h3M8 1h3v3M11 8v3H8M4 11H1V8M4.5 4.5h3v3h-3z"/></svg>
+                <span className="tree-name">{a.recognition}</span>
+                {recognitionDirty && <span className="tree-meta"><span className="tag unsaved">{a.unsaved}</span></span>}</button>
+            </div></li>
             <li><div className="tree-row">
               <button id="authoring-duplicate-open" type="button" className="tree-folder tree-action" aria-haspopup="dialog" onClick={() => setDuplicating(true)}>
                 <span className="copy-icon" aria-hidden="true"/><span className="tree-name">{a.duplicateOpen}</span></button>
@@ -521,12 +533,13 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
             ? <div className="file-title"><span className="eyebrow">{`${selectedGroup === 'files' ? a.files : a.metadataHeading} · ${a.kind(selected.kind)}`}</span>
               <h2 id="authoring-file-heading" className="file-crumbs mono">{selected.path.split('/').map((part, index, parts) => <Fragment key={index}>
                 {index > 0 && <span className="crumb-separator">/</span>}{index === parts.length - 1 ? <strong>{part}</strong> : part}</Fragment>)}</h2></div>
-            : <h2 id="authoring-file-heading" className="file-title">{a.noFile}</h2>}
+            : <h2 id="authoring-file-heading" className="file-title">{recognitionSelected ? a.recognition : a.noFile}</h2>}
           {selected && (fileDirty(selected) || selected.diskChanged) && <span className="tree-meta">
             {fileDirty(selected) && <span id="authoring-file-dirty" className="tag unsaved">{a.unsaved}</span>}
             {selected.diskChanged && <span className="tag stale">{a.diskChanged}</span>}</span>}
         </div>
         {selected && <div className="repo-body">{fileView}</div>}
+        {recognitionSelected && <div className="repo-body">{recognition}</div>}
       </section>
     </div>
     {menu && <ContextMenu key={menu.serial} id="authoring-menu" label={a.fileActions(menu.target.path)} anchor={menu.anchor} actions={changeActions(menu.target.path)}
@@ -559,7 +572,7 @@ export default function EditPage({session, label, handlers, packagesRoot, locked
           <button id="authoring-validate-stop" type="button" className="stop-button" onClick={handlers.stopValidation}>{a.stopValidation}</button></div>}
         {!validation && !validating && <p className="muted">{a.validationNone}</p>}
         {validation && !current && <p className="inline-warning">{a.staleValidation(shortRevision(validation.revision))}</p>}
-        {dirty.length > 0 && <p className="field-help">{a.unsavedNotValidated}</p>}
+        {unsaved > 0 && <p className="field-help">{a.unsavedNotValidated}</p>}
         {validation && validation.diagnostics.length > 0 && <ol id="authoring-diagnostics" className="diagnostic-list">
           {validation.diagnostics.map((item, index) => {
             const location = diagnosticLocation(item);

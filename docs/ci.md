@@ -62,8 +62,9 @@ The version and integrity sources are:
 | TypeScript | 5.9.3 | [Compiler manifest](../tools/runtime-comparison/compiler/package.json) and [lockfile](../tools/runtime-comparison/compiler/package-lock.json) |
 | Desktop frontend | React 19.3.0, TypeScript 5.9.3, Vite 8.3.0, Tauri API 2.11.1 / CLI 2.11.5 | [App manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json) |
 | Desktop Rust | Tauri 2.11.6, tauri-build 2.6.3, tracing 0.1.41, tracing-subscriber 0.3.20 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Saved-image payloads | png 0.18.1; flate2 1.1.9 (default features disabled; `rust_backend`) | [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock) |
 | Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
-| macOS application metadata and picker | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| macOS application metadata, picker, and clipboard | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | GitHub Actions | Full commit SHAs | [Workflow](../.github/workflows/ci.yml) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
@@ -79,10 +80,12 @@ checks exercise public Foundation bundle resolution with isolated filesystem
 fixtures, including same-process metadata updates and unsupported alternate
 metadata. Non-macOS bundle resolution is explicitly unsupported; portable
 declaration, record, restore, and observation-policy checks remain cross-platform.
-Apple framework dependencies are macOS-target-scoped. The native picker uses a
-host-owned AppKit sheet, not a general dialog/filesystem plugin capability.
-Actual macOS WebView selection and authorized running-application observation
-remain separate from hosted checks and grant no native execution authority.
+Apple framework dependencies are macOS-target-scoped. Native selection uses
+host-owned AppKit sheets for application bundles or saved PNGs, not a general
+dialog/filesystem plugin capability. Recognition Copy uses `NSPasteboard` only
+on explicit request. Actual macOS WebView selection, clipboard publication, and
+authorized running-application observation remain separate from hosted checks
+and grant no native execution authority.
 
 The desktop crate denies `unsafe_code` and `unsafe_op_in_unsafe_fn` by default.
 Audited native FFI uses narrowly scoped `#[expect(unsafe_code)]` with a reason
@@ -120,10 +123,14 @@ The full check has these responsibilities:
 - Install and check the trusted TypeScript compiler with package scripts disabled.
 - Build and test the locked Rust comparison executable, then execute its
   controlled `check` suite for direct Rust, JavaScript, TypeScript, and Lua.
-  These commands do not enable the optional `engine` feature.
+  Image regressions cover full PNG validation, original-pixel crops, split
+  package quotas, decoded/payload bounds, recognition metadata/maps, and generated
+  SDK snippets. These commands do not enable the optional `engine` feature or
+  execute real OCR.
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
-  run its state tests (including per-file history, stale saves, and source-diagnostic
-  projection), and type-check/build its trusted UI.
+  run its state tests (including per-file history, stale saves, source-diagnostic
+  projection, Recognition geometry/Undo, grouped selection, and stale trial/Copy
+  state), and type-check/build its trusted UI.
 - Test the Rust application core with `--no-default-features --lib`: explicit
   setup/recovery, named Tab ownership, scoped profiles, byte-preserving legacy
   imports, bounded snapshots, archive refusals, and journaled restore/rollback
@@ -137,18 +144,23 @@ The full check has these responsibilities:
   Directory-authoring regressions cover configured ID-only destinations, source
   ownership, configuration-only preservation of `sources` and `pkgs`, snapshot
   source exclusion, revision conflicts, interrupted publication, global Edit
-  admission, non-evaluating validation and bounded close/cleanup. Frontend checks
-  cover structured metadata round trips and numeric draft provenance. Actual
+  admission, non-evaluating validation and bounded close/cleanup. Recognition
+  regressions cover crop-only publication, retained asset references, source
+  conflicts, frame replacement, and confirmation. Frontend checks cover
+  structured metadata round trips and numeric draft provenance. Actual
   [Edit WebView acceptance](desktop.md#directory-package-authoring-acceptance),
   including left-tree navigation and contextual file actions, physical OS IME
   input, and storage power-loss durability are not hosted CI claims.
 - On macOS, build the real Tauri shell with `--features custom-protocol` after
   building frontend assets. The test-only `webdriver` feature is not enabled.
-  The separate engine artifact and actual
-  [recorded-replay WebView acceptance](desktop.md#recorded-replay-acceptance)
+  The separate engine artifact, actual
+  [recorded-replay WebView acceptance](desktop.md#recorded-replay-acceptance), and
+  [saved-image Recognition acceptance](desktop.md#saved-image-recognition-acceptance)
   remain explicit local checks; no private corpus, model, or native permission
-  is added to default CI. Linux and Windows explicitly report the shell build as
-  unexecuted.
+  is added to default CI. Source tests do not prove native picker/clipboard
+  interaction, recognition quality, physical pointer input, session cleanup under
+  a real backend, or total RSS. Linux and Windows explicitly report the shell
+  build as unexecuted.
 
 For governance policy and its behavioral tests only, after Python dependency
 setup:
@@ -271,10 +283,26 @@ scope and remaining qualification blockers.
 ## Hosted workflow and required gate
 
 The [workflow](../.github/workflows/ci.yml) runs on PRs targeting `main` and
-`dev/**`, protected-branch pushes, and manual dispatch. PR events include
-`opened`, `synchronize`, `reopened`, `ready_for_review`, and `edited` so a base
-change is rechecked. There are no workflow path filters. Manual dispatch becomes
-available when the workflow is on the default branch.
+`dev/**`, protected-branch pushes, and manual dispatch. PR events are limited to
+`opened`, `synchronize`, `reopened`, and `ready_for_review`. The workflow does
+not subscribe to `edited`: changing a PR title, description, or task-list
+checkbox creates no new CI workflow run or skipped checks. A job-level `if`
+would only skip jobs after a workflow run already exists, so it is not a
+substitute for removing the event subscription. There are no workflow path
+filters. Manual dispatch becomes available when the workflow is on the default
+branch. GitHub documents activity-type filtering in
+[Events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request).
+
+A base-branch retarget is also an `edited` activity and no longer automatically
+revalidates the PR. After changing the base, the maintainer must close and reopen
+the PR, or push a new commit to its head branch, and confirm that the resulting
+PR run validates the new route and passes `CI Gate` before merging. Resolve any
+merge conflict first. Do not use an earlier run's success as evidence for the new
+base: rerunning an old workflow uses the original event's SHA/ref, and manual
+dispatch produces `CI Gate (manual)`, not the required PR check. See
+[Re-running workflows and jobs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
+This is an explicit maintainer step, not automatic server-side retarget
+protection; branch rulesets and the required `CI Gate` context remain unchanged.
 
 The lightweight `dev-push-policy` job runs only on pushes. It suppresses duplicate
 `dev/<topic>` push checks only when an open promotion PR to `main` has both its
@@ -329,6 +357,8 @@ owned by [CONTRIBUTING.md](../CONTRIBUTING.md#select-the-route-before-implementa
 
 The workflow uses read-only repository authority, credential-free checkout,
 pinned actions/tools, bounded jobs, and event-scoped concurrency cancellation.
+PR metadata edits create no run and therefore cannot cancel or supersede running
+or pending validation. New commits still supersede older runs for the same PR.
 It does not use secrets, administration tokens, `pull_request_target`, private
 Rasen access, or self-hosted interactive desktops. Superseding one PR run must
 not cancel another PR's run or turn a cancellation into success.

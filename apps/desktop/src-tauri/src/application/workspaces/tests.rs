@@ -105,7 +105,11 @@ fn failed_durable_bind_close_and_reopen_preserve_host_and_saved_authority() {
         .inspect(&fixture.numeric_package(), &bound_ref)
         .unwrap();
     assert_eq!(failed.kind, InspectionKind::BindingFailed);
-    let selected = failed.workspace.selection.as_ref().expect("failed binding retains prior authority");
+    let selected = failed
+        .workspace
+        .selection
+        .as_ref()
+        .expect("failed binding retains prior authority");
     assert_eq!(selected.package_path, bound.package_path);
     assert_eq!(selected.package.package_id, bound.package.package_id);
     assert_eq!(fs::read(&path).unwrap(), bound_bytes);

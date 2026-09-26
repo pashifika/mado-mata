@@ -1,0 +1,71 @@
+/* Recognition authoring: main-window panel and detached preview window. */
+
+.recognition-page { display: grid; gap: 12px; min-width: 0; }
+.recognition-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.recognition-header h3 { margin: 0; }
+.recognition-facts dd .tag { margin-right: 6px; }
+.recognition-facts dd button { font-size: 11px; padding: 3px 9px; }
+.recognition-panel .panel-heading { padding: 14px 16px 8px; }
+.recognition-panel .panel-heading h4 { margin: 0; margin-right: auto; }
+.recognition-panel .panel-body { padding: 0 16px 16px; }
+.recognition-list { width: 100%; border-collapse: collapse; font-size: 12px; }
+.recognition-list th { text-align: left; font-size: 10px; font-weight: 600; color: var(--text-muted); padding: 4px 6px; border-bottom: 1px solid var(--border); }
+.recognition-list td { padding: 5px 6px; border-bottom: 1px solid #edf1f6; vertical-align: middle; overflow-wrap: anywhere; }
+.recognition-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.recognition-name { font-size: 12px; text-align: left; }
+.recognition-geometry { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0 0 8px; font-size: 12px; }
+.recognition-geometry > div { display: contents; }
+.recognition-geometry dt { color: var(--text-muted); }
+.recognition-geometry dd { margin: 0; overflow-wrap: anywhere; }
+.recognition-results { display: grid; gap: 10px; margin-top: 10px; }
+.recognition-result { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; min-width: 0; }
+.recognition-result header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.recognition-regions { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 6px; }
+.recognition-regions li { display: grid; gap: 2px; min-width: 0; }
+/* Observed text is shown exactly as returned, including line breaks and surrounding spaces. */
+.recognition-text { margin: 0; padding: 4px 6px; background: var(--surface-alt); border: 1px solid var(--border); border-radius: 4px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 1.5em; }
+.recognition-cleanup summary { font-size: 11px; color: var(--text-muted); }
+.recognition-rights { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px 10px; margin: 0 0 10px; min-width: 0; }
+.recognition-rights legend { font-size: 11px; font-weight: 600; padding: 0 4px; }
+
+/* Detached preview window. */
+.preview-app { height: 100vh; display: flex; flex-direction: column; background: var(--canvas); }
+.preview-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.preview-toolbar button { font-size: 12px; padding: 4px 10px; }
+.preview-toolbar > .button-row { margin: 0; }
+/* The zoom Select matches the toolbar buttons; recognition.css precedes the base Select rules, hence the scoping. */
+.preview-toolbar .select-trigger { min-height: 0; gap: 8px; border-color: #c9d2dd; }
+.preview-toolbar .select-trigger:disabled { background: var(--surface); color: inherit; }
+.preview-toolbar .preview-zoom-select { min-width: 96px; }
+.preview-help { margin: 6px 12px 0; }
+.preview-app > .inline-warning, .preview-app > .fault { margin: 6px 12px 0; }
+.preview-message { margin: 24px; }
+/* Lift the focused segment so its outline paints over its neighbours. */
+.segmented { display: inline-flex; align-items: center; gap: 0; }
+.segmented > button, .segmented > .select { border-radius: 0; }
+.segmented > :first-child { border-radius: 6px 0 0 6px; }
+.segmented > :last-child { border-radius: 0 6px 6px 0; }
+.segmented > .select > .select-trigger { border-radius: inherit; }
+.segmented > :focus-within { z-index: 1; }
+.segmented > button[aria-pressed="true"] { background: var(--info-soft); border-color: var(--accent); color: var(--accent); }
+.recognition-stage { flex: 1; min-height: 0; overflow: auto; margin: 8px 12px 12px; background: #1c2230; border-radius: var(--radius-sm); }
+.recognition-stage.fit { display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.recognition-surface { position: relative; flex: none; touch-action: none; user-select: none; }
+.recognition-surface:focus-visible { outline: 3px solid var(--focus); outline-offset: -3px; }
+.recognition-surface img { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.recognition-surface img.pixelated { image-rendering: pixelated; }
+.recognition-overlay { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.recognition-bars { fill: #000; fill-opacity: .45; pointer-events: none; }
+.recognition-content { fill: none; stroke: #f6c343; stroke-width: 1; stroke-dasharray: 6 4; }
+.recognition-content.active { stroke-width: 2; }
+.recognition-region { fill: #4c9aff; fill-opacity: .12; stroke: #4c9aff; stroke-width: 1.5; }
+.recognition-zone.template .recognition-region { fill: #b37feb; stroke: #b37feb; }
+.recognition-search { fill: none; stroke: #b37feb; stroke-width: 1; stroke-dasharray: 3 3; stroke-opacity: .6; }
+.recognition-zone.selected .recognition-region { stroke-width: 2.5; fill-opacity: .2; }
+.recognition-zone.selected .recognition-search { stroke-opacity: 1; stroke-width: 1.5; }
+.recognition-observation { fill: none; stroke: #52c41a; stroke-width: 1.5; }
+.recognition-observation.stale { stroke: #faad14; stroke-dasharray: 4 3; }
+.recognition-draft { fill: #fff; fill-opacity: .1; stroke: #fff; stroke-width: 1.5; stroke-dasharray: 4 3; }
+.recognition-handle { fill: #fff; stroke: #4c9aff; stroke-width: 1.5; }
+.recognition-handle.search { stroke: #b37feb; }
+.recognition-handle.content { stroke: #f6c343; }

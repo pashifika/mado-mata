@@ -2,6 +2,7 @@
 
 mod operation;
 mod packages;
+mod recognition;
 
 #[cfg(test)]
 mod test_support;
@@ -20,7 +21,6 @@ const LOG_CAPACITY: usize = 64;
 const PROGRESS_CAPACITY: usize = 32;
 const REQUEST_BYTES: usize = 65_536;
 const SHUTDOWN_MS: u64 = 14_000;
-const REPLAY_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
 const REPLAY_DURATION_MS: u64 = 30_000;
 static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
 
@@ -137,8 +137,10 @@ impl Drop for DesktopController {
 }
 
 fn manual_plan() -> Result<Plan, Fault> {
-    serde_json::from_str(include_str!("../fixtures/manual-plan.json"))
-        .map_err(|error| Fault::new("InvalidPlan", error.to_string()))
+    let mut plan: Plan = serde_json::from_str(include_str!("../fixtures/manual-plan.json"))
+        .map_err(|error| Fault::new("InvalidPlan", error.to_string()))?;
+    plan.limits.snapshot_bytes = crate::images::PACKAGE_BYTES;
+    Ok(plan)
 }
 
 #[cfg(test)]

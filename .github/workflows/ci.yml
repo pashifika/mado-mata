@@ -3,7 +3,9 @@ name: CI
 'on':
   pull_request:
     branches: [main, 'dev/**']
-    types: [opened, synchronize, reopened, ready_for_review, edited]
+    # Exclude edited: title/body/checkbox changes must not create workflow runs.
+    # After a base retarget, reopen the PR or push a new commit to revalidate.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main, 'dev/**']
   workflow_dispatch:
