@@ -46,6 +46,17 @@ impl Editor {
     }
 }
 
+/// Stands in for the fixed engine child's reported grouped-request bound; these
+/// portable tests never start the engine.
+fn grant_capability(app: &Application, maximum: usize) {
+    lock(&app.workspaces)
+        .authoring
+        .as_mut()
+        .unwrap()
+        .recognition
+        .max_ocr_zones = Some(maximum);
+}
+
 fn zone(id: &str) -> RecognitionDefinition {
     RecognitionDefinition {
         id: id.into(),
@@ -98,16 +109,23 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
         .unwrap();
     let source_path = Path::new(&editor.view.package_path).join("main.ts");
     let source_before = fs::read(&source_path).unwrap();
-    let copied = app
-        .recognition_copy(
-            &editor.view.owner,
-            &editor.view.revision,
-            confirmed.document_revision,
-            "zone0",
-            SnippetKind::OcrRecognize,
-        )
-        .unwrap();
-    assert!(!copied.verified);
+    grant_capability(app, 8);
+    let checked: Vec<String> = (0..8).map(|index| format!("zone{index}")).collect();
+    for (ids, mode) in [
+        (Vec::new(), SnippetKind::GameContent),
+        (checked, SnippetKind::OcrRecognize),
+    ] {
+        let copied = app
+            .recognition_copy(
+                &editor.view.owner,
+                &editor.view.revision,
+                confirmed.document_revision,
+                &ids,
+                mode,
+            )
+            .unwrap();
+        assert!(!copied.verified);
+    }
     assert_eq!(fs::read(&source_path).unwrap(), source_before);
     let saved = app
         .recognition_save(
@@ -139,6 +157,53 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
         2,
         "only metadata and the explicitly selected crop are declared"
     );
+    for (requested_frame, requested_revision, sample) in [
+        (
+            Some(frame_id.as_str()),
+            saved_view.document_revision,
+            Some("zone0"),
+        ),
+        (None, saved_view.document_revision + 1, Some("zone0")),
+        (None, saved_view.document_revision, None),
+        (Some("stale-frame"), saved_view.document_revision, None),
+    ] {
+        let refusal = app
+            .recognition_trial(
+                &editor.view.owner,
+                &new_revision,
+                requested_frame,
+                requested_revision,
+                &["zone0".into()],
+                sample,
+            )
+            .err()
+            .unwrap();
+        assert_eq!(refusal.category, "StaleRecognition");
+    }
+    let recheck_sample = |owner: &AuthoringRef, revision: &str, view: &RecognitionView| {
+        let trial = app
+            .recognition_trial(
+                owner,
+                revision,
+                None,
+                view.document_revision,
+                &["zone0".into()],
+                Some("zone0"),
+            )
+            .unwrap();
+        assert!(
+            !trial.stale,
+            "an unrelated loaded frame must not stale a sample"
+        );
+        assert_eq!(trial.controller["error"]["category"], "EnvironmentUnset");
+        assert_eq!(
+            trial.controller["error"]["context"]["cleanup"],
+            json!({"clean": true, "child_started": false})
+        );
+        // This portable regression reaches the actual OCR prerequisite boundary,
+        // not inference: it must not launch a child without a configured environment.
+    };
+    recheck_sample(&editor.view.owner, &new_revision, &saved_view);
     app.recognition_preview(&editor.view.owner, &frame_id)
         .unwrap();
     app.recognition_release_preview(&editor.view.owner);
@@ -158,13 +223,17 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
         .unwrap();
     assert!(restored.frame.is_none());
     assert_eq!(restored.document, saved_view.document);
-    for mode in [SnippetKind::OcrRecognize, SnippetKind::OcrWait] {
+    recheck_sample(&reopened.owner, &reopened.revision, &restored);
+    for (ids, mode) in [
+        (Vec::new(), SnippetKind::GameContent),
+        (vec!["zone0".to_owned()], SnippetKind::OcrRecognize),
+    ] {
         let refusal = app
             .recognition_copy(
                 &reopened.owner,
                 &reopened.revision,
                 restored.document_revision,
-                "zone0",
+                &ids,
                 mode,
             )
             .err()
@@ -227,31 +296,198 @@ fn failed_replacement_has_no_frame_and_stale_metadata_cannot_overwrite_newer_edi
                 &editor.view.owner,
                 &editor.view.revision,
                 failed.document_revision,
-                "retained",
+                &["retained".into()],
                 SnippetKind::OcrRecognize
             )
             .is_err()
     );
+    assert!(
+        editor
+            .app()
+            .recognition_save(
+                &editor.view.owner,
+                &editor.view.revision,
+                failed.document_revision,
+                &["retained".into()],
+            )
+            .is_err(),
+        "a confirmed basis cannot substitute for crop pixels"
+    );
+    let saved = editor
+        .app()
+        .recognition_save(
+            &editor.view.owner,
+            &editor.view.revision,
+            failed.document_revision,
+            &[],
+        )
+        .unwrap()
+        .recognition
+        .unwrap();
+    assert_eq!(saved.saved_document, current.document);
+    assert!(saved.frame.is_none());
+    assert!(saved.basis_confirmed);
 }
 
 #[test]
-fn reloaded_geometry_requires_confirmation_even_when_dimensions_match() {
+fn scene_images_reuse_confirmed_setup_and_definitions_across_save_and_reopen() {
     let editor = Editor::new();
-    let first = editor.load();
-    assert!(first.frame.unwrap().confirmed);
-    let replacement = editor.load();
-    let frame = replacement.frame.unwrap();
-    assert!(!frame.confirmed);
-    let confirmed = editor
-        .app()
+    let app = editor.app();
+    let loaded = editor.load();
+    let mut document = loaded.document.unwrap();
+    document.basis.content = PixelRect {
+        x: 2,
+        y: 3,
+        width: 20,
+        height: 16,
+    };
+    document.definitions.push(zone("saved"));
+    let updated = app
+        .recognition_update(
+            &editor.view.owner,
+            &editor.view.revision,
+            document,
+            loaded.frame.as_ref().map(|frame| frame.id.as_str()),
+            loaded.document_revision,
+        )
+        .unwrap();
+    let confirmed = app
         .recognition_confirm(
             &editor.view.owner,
             &editor.view.revision,
-            &frame.id,
-            replacement.document_revision,
+            &updated.frame.as_ref().unwrap().id,
+            updated.document_revision,
         )
         .unwrap();
-    assert!(confirmed.frame.unwrap().confirmed);
+    let saved = app
+        .recognition_save(
+            &editor.view.owner,
+            &editor.view.revision,
+            confirmed.document_revision,
+            &[],
+        )
+        .unwrap();
+    let revision = saved.mutation.committed_revision;
+    let saved_view = saved.recognition.unwrap();
+    let saved_document = saved_view.document.clone().unwrap();
+    let mut draft = saved_document.clone();
+    draft.definitions.push(zone("unsaved"));
+    app.recognition_update(
+        &editor.view.owner,
+        &revision,
+        draft.clone(),
+        saved_view.frame.as_ref().map(|frame| frame.id.as_str()),
+        saved_view.document_revision,
+    )
+    .unwrap();
+    let replacement = app
+        .recognition_load(&editor.view.owner, &revision, &editor.source)
+        .unwrap();
+    assert!(replacement.frame.as_ref().unwrap().confirmed);
+    assert_ne!(
+        replacement.frame.as_ref().unwrap().id,
+        loaded.frame.as_ref().unwrap().id
+    );
+    assert_eq!(replacement.document, Some(draft));
+    assert_eq!(replacement.saved_document.as_ref(), Some(&saved_document));
+    // Reopening restores saved setup, without retaining the previous frame or the
+    // unsaved definition that the explicit Edit exit discards.
+    let workspace = app.authoring_exit(&editor.view.owner).unwrap();
+    let reopened = app
+        .authoring_open(&view_ref(&workspace), Path::new(&editor.view.package_path))
+        .unwrap();
+    let next = app
+        .recognition_load(&reopened.owner, &reopened.revision, &editor.source)
+        .unwrap();
+    assert!(next.frame.as_ref().unwrap().confirmed);
+    assert_eq!(next.document, Some(saved_document.clone()));
+    let setup = app
+        .recognition_copy(
+            &reopened.owner,
+            &reopened.revision,
+            next.document_revision,
+            &[],
+            SnippetKind::GameContent,
+        )
+        .unwrap();
+    assert_eq!(setup.basis, saved_document.basis);
+    assert!(
+        !setup.verified,
+        "setup geometry is never recognition evidence"
+    );
+
+    // Even when the old content rectangle fits, different dimensions are only
+    // an editable proposal. Repeated loading and Save cannot silently confirm it.
+    let resized = DecodedImage::from_rgba(40, 24, vec![255; 40 * 24 * 4]).unwrap();
+    let png = images::encode_crop(&resized, [0, 0, 40, 24]).unwrap();
+    fs::write(&editor.source, png.as_bytes()).unwrap();
+    for _ in 0..2 {
+        let next = app
+            .recognition_load(&reopened.owner, &reopened.revision, &editor.source)
+            .unwrap();
+        assert!(!next.frame.as_ref().unwrap().confirmed);
+        assert_eq!(
+            next.document.as_ref().unwrap().basis.content,
+            saved_document.basis.content
+        );
+        assert_eq!(
+            next.document.as_ref().unwrap().definitions,
+            saved_document.definitions
+        );
+        assert!(
+            app.recognition_copy(
+                &reopened.owner,
+                &reopened.revision,
+                next.document_revision,
+                &[],
+                SnippetKind::GameContent,
+            )
+            .is_err(),
+            "unconfirmed geometry is never published as setup"
+        );
+        assert!(
+            app.recognition_save(
+                &reopened.owner,
+                &reopened.revision,
+                next.document_revision,
+                &[],
+            )
+            .is_err()
+        );
+    }
+    fs::write(&editor.source, b"not a PNG").unwrap();
+    assert!(
+        app.recognition_load(&reopened.owner, &reopened.revision, &editor.source)
+            .is_err()
+    );
+    assert!(
+        app.recognition_view(&reopened.owner, &reopened.revision)
+            .unwrap()
+            .frame
+            .is_none()
+    );
+    fs::write(&editor.source, png.as_bytes()).unwrap();
+    let restored = app
+        .recognition_load(&reopened.owner, &reopened.revision, &editor.source)
+        .unwrap();
+    assert!(
+        !restored.frame.as_ref().unwrap().confirmed,
+        "failed loads do not grant geometry authority"
+    );
+    let current = app
+        .recognition_view(&reopened.owner, &reopened.revision)
+        .unwrap();
+    app.recognition_confirm(
+        &reopened.owner,
+        &reopened.revision,
+        &current.frame.as_ref().unwrap().id,
+        current.document_revision,
+    )
+    .unwrap();
+    let next = app
+        .recognition_load(&reopened.owner, &reopened.revision, &editor.source)
+        .unwrap();
+    assert!(next.frame.as_ref().unwrap().confirmed);
 }
 
 #[test]
@@ -351,7 +587,7 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
             &editor.view.owner,
             &revision,
             discarded.document_revision,
-            "saved",
+            &["saved".into()],
             SnippetKind::OcrRecognize,
         )
         .err()
@@ -402,12 +638,13 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
     assert_eq!(edited.document.as_ref(), Some(&edited_document));
     assert_eq!(edited.saved_document.as_ref(), Some(&saved_document));
     assert!(edited.frame.as_ref().unwrap().confirmed);
+    grant_capability(app, 8);
     let copied = app
         .recognition_copy(
             &editor.view.owner,
             &revision,
             edited.document_revision,
-            "new",
+            &["new".into()],
             SnippetKind::OcrRecognize,
         )
         .unwrap();
@@ -452,4 +689,117 @@ fn preview_keeps_frame_pixels_after_source_save_while_command_admission_is_busy(
     );
     assert_eq!(decoded.rgba, expected.rgba);
     app.recognition_release_preview(&editor.view.owner);
+}
+
+#[test]
+fn grouped_copy_uses_the_cached_engine_limit_and_verifies_every_checked_zone() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let loaded = editor.load();
+    let mut document = loaded.document.unwrap();
+    document.definitions = vec![zone("first"), zone("second"), zone("no-text")];
+    document.definitions[2].expected = None;
+    let current = app
+        .recognition_update(
+            &editor.view.owner,
+            &editor.view.revision,
+            document,
+            loaded.frame.as_ref().map(|frame| frame.id.as_str()),
+            loaded.document_revision,
+        )
+        .unwrap();
+    let copy = |ids: &[String], mode| {
+        app.recognition_copy(
+            &editor.view.owner,
+            &editor.view.revision,
+            current.document_revision,
+            ids,
+            mode,
+        )
+    };
+    let ids: Vec<String> = vec!["first".into(), "second".into()];
+    // Setup needs no checked zones and no engine report; grouped OCR has no fallback bound.
+    assert!(!copy(&[], SnippetKind::GameContent).unwrap().verified);
+    assert!(copy(&ids[..1], SnippetKind::GameContent).is_err());
+    assert!(copy(&ids, SnippetKind::OcrRecognize).is_err());
+    grant_capability(app, 2);
+    for selection in [
+        vec![],
+        vec!["first".into(), "first".into()],
+        vec!["first".into(), "missing".into()],
+        vec!["first".into(), "second".into(), "no-text".into()],
+    ] {
+        assert!(copy(&selection, SnippetKind::OcrRecognize).is_err());
+    }
+    grant_capability(app, 1);
+    assert!(
+        copy(&ids, SnippetKind::OcrRecognize).is_err(),
+        "the cached engine report bounds the one request; nothing is split"
+    );
+    grant_capability(app, 2);
+    assert!(!copy(&ids, SnippetKind::OcrRecognize).unwrap().verified);
+    // Reference text is optional Script context, not a Copy prerequisite.
+    assert_eq!(
+        copy(
+            &["no-text".into(), "first".into()],
+            SnippetKind::OcrRecognize
+        )
+        .unwrap()
+        .definition_ids,
+        vec!["no-text".to_owned(), "first".to_owned()]
+    );
+
+    // A settled trial is evidence only for the definitions actually observed.
+    // Inject diagnostics here rather than granting native OCR authority to tests.
+    let frame = current.frame.as_ref().unwrap();
+    for observed in [vec!["first"], vec!["first", "second"]] {
+        let result = json!({
+            "error": null,
+            "result": {"primary": null, "cleanup": {"clean": true},
+                "result": {"kind": "ocr", "zones": observed.iter().map(|id| {
+                    json!({"id": id, "regions": [{"text": "trial observation"}]})
+                }).collect::<Vec<_>>()}}
+        });
+        lock(&app.workspaces)
+            .authoring
+            .as_mut()
+            .unwrap()
+            .recognition
+            .trial = Some(RecognitionTrial {
+            owner: editor.view.owner.clone(),
+            revision: editor.view.revision.clone(),
+            document_revision: current.document_revision,
+            frame_id: Some(frame.id.clone()),
+            frame_revision: frame.revision,
+            configuration_revision: current.configuration_revision.clone(),
+            sample_id: None,
+            stale: false,
+            controller: Arc::new(result),
+        });
+        let copied = copy(&ids, SnippetKind::OcrRecognize).unwrap();
+        assert_eq!(copied.definition_ids, ids);
+        assert_eq!(copied.verified, observed.len() == 2);
+        assert!(
+            !copy(&[], SnippetKind::GameContent).unwrap().verified,
+            "a successful OCR trial never verifies setup geometry"
+        );
+    }
+    let next = editor.load();
+    assert!(next.frame.as_ref().unwrap().confirmed);
+    assert!(next.trial.as_ref().unwrap().stale);
+    assert!(
+        !app.recognition_copy(
+            &editor.view.owner,
+            &editor.view.revision,
+            next.document_revision,
+            &ids,
+            SnippetKind::OcrRecognize,
+        )
+        .unwrap()
+        .verified
+    );
+    assert!(
+        copy(&ids, SnippetKind::OcrRecognize).is_err(),
+        "the previous document revision cannot publish"
+    );
 }

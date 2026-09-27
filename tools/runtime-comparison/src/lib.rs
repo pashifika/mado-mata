@@ -10,6 +10,7 @@ pub mod inventory;
 pub mod javascript;
 pub mod lua;
 pub mod model;
+mod ocr_scan;
 pub mod recognition;
 pub mod recognition_trial;
 pub mod report;

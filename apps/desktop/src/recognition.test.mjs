@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {
   MAX_DEFINITIONS, UNDO_BYTES, UNDO_ENTRIES, applyConfirm, applyCopy, applyDiscard, applyPreviewEdit, applySave, applySync, applyTrial, applyView,
   clientToFrame, confirmTicket, copyBlock, copyFreshness, copyTicket, createDefinition, deleteDefinition, displayScale, dragEdges, geometryConfirmed,
-  hitHandle, mapRegion, openRecognition, previewSnapshot, regionFromEdges, renameDefinition, saveBlock, saveTicket, setContent, setExpected, setRegion,
-  spanEdges, syncTicket, toggleCrop, toggleTrial, trialBlock, trialFreshness, trialTicket, undoRecognition,
+  hitHandle, mapRegion, openRecognition, previewSnapshot, regionFromEdges, renameDefinition, saveBlock, saveTicket, selectDefinition, setContent,
+  setDisplay, setExpected, setKind, setRegion, spanEdges, syncTicket, toggleCrop, toggleTrial, trialBlock, trialFreshness, trialTicket, undoRecognition,
 } from './recognition.ts';
 
 const MIB=1_048_576;
@@ -13,7 +13,7 @@ const policy={input_bytes:32*MIB,input_pixels:16_777_216,crop_bytes:16*MIB,crop_
   package_bytes:65*MIB,package_decoded_bytes:128*MIB,replay_decoded_bytes:128*MIB,payload_bytes:512*MIB,preview_pixels:4_194_304};
 const FRAME={id:'f1',width:1920,height:1080,revision:1,confirmed:true};
 function hostView(overrides={}){
-  return {owner,revision:'rev-1',document:null,saved_document:null,document_revision:1,frame:null,
+  return {owner,revision:'rev-1',document:null,saved_document:null,document_revision:1,basis_confirmed:false,frame:null,
     capabilities:{max_ocr_zones:8,diagnostic_regions:256,diagnostic_bytes:262144,expected_bytes:4096,image_policy:policy},
     configuration_revision:'cfg-1',trial:null,...overrides};
 }
@@ -24,12 +24,13 @@ function sync(state){
   if (!ticket) return state;
   const basisChanged=JSON.stringify(ticket.document.basis)!==JSON.stringify(state.view.document?.basis);
   const frame=state.view.frame&&{...state.view.frame,confirmed:state.view.frame.confirmed&&!basisChanged};
-  return applySync(state,ticket,{...state.view,document:ticket.document,document_revision:state.view.document_revision+1,frame});
+  return applySync(state,ticket,{...state.view,document:ticket.document,document_revision:state.view.document_revision+1,
+    basis_confirmed:state.view.basis_confirmed&&!basisChanged,frame});
 }
 function confirm(state){
   const ticket=confirmTicket(state);
   assert.ok(ticket,'geometry should be confirmable');
-  return applyConfirm(state,ticket,{...state.view,frame:{...state.view.frame,confirmed:true}});
+  return applyConfirm(state,ticket,{...state.view,basis_confirmed:true,frame:{...state.view.frame,confirmed:true}});
 }
 // A confirmed frame whose default full-image document the host already holds.
 function loaded(frame=FRAME){
@@ -170,31 +171,47 @@ test('nine saved definitions stay valid while a grouped trial is bounded by the 
   assert.equal(state.trialIds.length,9);
   assert.equal(trialBlock(state,'frame',state.trialIds),'overLimit');
   assert.equal(trialTicket(state,'frame',state.trialIds),null);
+  assert.equal(copyBlock(state,state.trialIds,'ocr_recognize'),'overLimit','grouped Copy is one request under the same engine bound');
   state=toggleTrial(state,'r9');
   const ticket=trialTicket(state,'frame',state.trialIds);
   assert.deepEqual(ticket.selected_ids,['r1','r2','r3','r4','r5','r6','r7','r8']);
+  assert.deepEqual(copyTicket(state,state.trialIds,'ocr_recognize').definition_ids,ticket.selected_ids);
   // Without the engine's reported bound there is no fallback number.
   const unknown={...state,view:{...state.view,capabilities:{...state.view.capabilities,max_ocr_zones:null}}};
   assert.equal(trialBlock(unknown,'frame',['r1']),'noCapability');
 });
 
-test('a replacement frame keeps normalized definitions but requires confirmation and drops chosen crops',()=>{
+test('same-size scenes reuse content and setup Copy but stale trials and crops; resized scenes require confirmation',()=>{
   let state=create(loaded(),edges(100,100,200,200));
   state=setContent(state,{x:0,y:60,width:1920,height:960});
   state=confirm(sync(state));
+  state=applyView(state,{...state.view,saved_document:state.document});
+  state=sync(create(state,edges(400,200,500,300),'unsaved region'));
+  state=selectDefinition(state,'r1');
+  const ticket=trialTicket(state,'frame',['r1']);
+  state=applyTrial(state,ticket,trialResult(ticket,[zone('r1','scene A')]));
+  const copied=copyTicket(state,[],'game_content');
+  state=applyCopy(state,copied,{source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:[]},null);
+  const definitions=state.document.definitions;
   state=toggleCrop(state,'r1');
   const region=state.document.definitions[0].region;
   assert.equal(geometryConfirmed(state),true);
-  state=applyView(state,{...state.view,frame:{id:'f2',width:1920,height:1080,revision:2,confirmed:false}});
+  state=applyView(state,{...state.view,frame:{id:'f2',width:1920,height:1080,revision:2,confirmed:true}});
   assert.deepEqual(state.document.definitions[0].region,region);
   assert.deepEqual(state.document.basis.content,{x:0,y:60,width:1920,height:960});
-  assert.equal(geometryConfirmed(state),false);
+  assert.equal(geometryConfirmed(state),true);
+  assert.deepEqual(state.document.definitions,definitions,'saved and unsaved definitions survive scene replacement');
   assert.deepEqual(state.cropIds,[]);
-  assert.equal(trialBlock(state,'frame',['r1']),'unconfirmed');
-  assert.equal(copyBlock(state,'r1','ocr_recognize'),'unconfirmed');
+  assert.equal(trialFreshness(state,'r1'),'stale');
+  assert.equal(copyFreshness(state,'game_content'),'current','reused content setup keeps the same recognitionBasis');
+  assert.equal(trialBlock(state,'frame',['r1']),null);
+  assert.equal(copyBlock(state,[],'game_content'),null);
   // Content that does not fit a smaller replacement restarts at the full image.
   state=applyView(state,{...state.view,frame:{id:'f3',width:1280,height:720,revision:3,confirmed:false}});
   assert.deepEqual(state.document.basis,{frame_width:1280,frame_height:720,content:{x:0,y:0,width:1280,height:720}});
+  assert.equal(trialBlock(state,'frame',['r1']),'unconfirmed');
+  assert.equal(copyBlock(state,[],'game_content'),'unconfirmed');
+  assert.equal(copyFreshness(state,'game_content'),'obsolete');
   // A failed replacement leaves no frame while geometry metadata stays.
   state=applyView(state,{...state.view,frame:null});
   assert.equal(state.view.frame,null);
@@ -283,51 +300,153 @@ test('Discard restores exact saved metadata after a differently sized image, the
   assert.deepEqual(discarded.document,saved);
   assert.equal(discarded.view.frame,null);
   assert.equal(syncTicket(discarded),null,'Discard must not create another draft from the discarded image dimensions');
-  assert.equal(copyBlock(discarded,'r1','ocr_recognize'),'noFrame');
-  assert.equal(copyTicket(discarded,'r1','ocr_recognize'),null);
+  assert.equal(copyBlock(discarded, ['r1'], 'ocr_recognize'),'noFrame');
+  assert.equal(copyTicket(discarded, ['r1'], 'ocr_recognize'),null);
 
   state=applyView(discarded,{...discarded.view,document:replacement,document_revision:discarded.view.document_revision+1,
     frame:{id:'f3',width:1280,height:720,revision:3,confirmed:false}});
-  assert.equal(copyBlock(state,'r1','ocr_recognize'),'unconfirmed');
+  assert.equal(copyBlock(state, ['r1'], 'ocr_recognize'),'unconfirmed');
   state=confirm(sync(state));
   state=sync(create(state,edges(20,30,80,90),'after discard'));
   assert.equal(geometryConfirmed(state),true);
   assert.deepEqual(state.document.definitions.map(item=>item.name),['saved zone','after discard']);
   assert.deepEqual(mapRegion(state.document.definitions.find(item=>item.id===state.selected).region,state.document.basis),edges(20,30,80,90));
-  assert.equal(copyTicket(state,state.selected,'ocr_recognize').definition_id,state.selected);
+  assert.deepEqual(copyTicket(toggleTrial(state,state.selected),[state.selected],'ocr_recognize').definition_ids,[state.selected]);
   assert.deepEqual(state.view.saved_document,saved);
 });
 
-test('reopened saved metadata cannot issue Copy until a loaded frame is confirmed',()=>{
-  const saved=sync(setExpected(create(loaded(),edges(100,100,200,200)),'r1','Script query text')).document;
+test('reopened metadata requires a frame, then reuses saved content on a compatible image',()=>{
+  const saved=sync(setExpected(create(loaded(),edges(100,100,200,200)),'r1','Script reference text')).document;
   let state=openRecognition(hostView({document:saved,saved_document:saved}));
   assert.deepEqual(state.document,saved);
-  assert.equal(copyBlock(state,'r1','ocr_recognize'),'noFrame');
-  assert.equal(copyTicket(state,'r1','ocr_recognize'),null);
-  assert.equal(copyBlock(state,'r1','ocr_wait'),'noFrame');
-  assert.equal(copyTicket(state,'r1','ocr_wait'),null);
+  state=toggleTrial(state,'r1');
+  assert.equal(copyBlock(state, ['r1'], 'ocr_recognize'),'noFrame');
+  assert.equal(copyTicket(state, ['r1'], 'ocr_recognize'),null);
+  assert.equal(copyBlock(state, [], 'game_content'),'noFrame');
+  assert.equal(copyTicket(state, [], 'game_content'),null);
 
-  state=applyView(state,{...state.view,frame:{...FRAME,id:'reopened-frame',confirmed:false}});
-  assert.equal(copyBlock(state,'r1','ocr_recognize'),'unconfirmed');
-  assert.equal(copyTicket(state,'r1','ocr_recognize'),null);
-  state=confirm(state);
-  assert.equal(copyBlock(state,'r1','ocr_recognize'),null);
-  assert.equal(copyTicket(state,'r1','ocr_recognize').kind,'ocr_recognize');
-  assert.equal(copyBlock(state,'r1','ocr_wait'),null);
-  assert.equal(copyTicket(state,'r1','ocr_wait').kind,'ocr_wait');
+  state=applyView(state,{...state.view,frame:{...FRAME,id:'reopened-frame',confirmed:true}});
+  assert.equal(geometryConfirmed(state),true);
+  assert.equal(state.document.definitions[0].expected,'Script reference text','saved reference text survives unchanged');
+  assert.equal(copyBlock(state, ['r1'], 'ocr_recognize'),null);
+  assert.equal(copyTicket(state, ['r1'], 'ocr_recognize').kind,'ocr_recognize');
+  assert.equal(copyBlock(state, [], 'game_content'),null);
+  assert.equal(copyTicket(state, [], 'game_content').kind,'game_content');
 });
 
-test('Copy is recorded against its basis and becomes obsolete after a geometry edit, even when undone',()=>{
-  let state=sync(create(loaded(),edges(10,10,50,50)));
-  const ticket=copyTicket(state,'r1','ocr_recognize');
-  state=applyCopy(state,ticket,{source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision},null);
-  assert.equal(copyFreshness(state,'r1'),'current');
+test('grouped OCR Copy becomes obsolete after a zone edit, even when undone',()=>{
+  let state=toggleTrial(sync(create(loaded(),edges(10,10,50,50))),'r1');
+  const ticket=copyTicket(state, ['r1'], 'ocr_recognize');
+  state=applyCopy(state,ticket,{source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1']},null);
+  assert.equal(copyFreshness(state, 'ocr_recognize'),'current');
   const moved=setRegion(state,'r1','region',regionFromEdges(edges(11,10,51,50),state.document.basis));
-  assert.equal(copyFreshness(moved,'r1'),'obsolete');
-  assert.equal(copyFreshness(undoRecognition(moved),'r1'),'obsolete');
-  const late=applyCopy(moved,ticket,{source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision},null);
-  assert.equal(copyFreshness(late,'r1'),'obsolete','a completed native Copy remains published, not failed, after a concurrent edit');
-  assert.equal(copyBlock(state,'r1','ocr_wait'),'waitText');
+  assert.equal(copyFreshness(moved, 'ocr_recognize'),'obsolete');
+  assert.equal(copyFreshness(undoRecognition(moved), 'ocr_recognize'),'obsolete');
+  const late=applyCopy(moved,ticket,{source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1']},null);
+  assert.equal(copyFreshness(late, 'ocr_recognize'),'obsolete','a completed native Copy remains published, not failed, after a concurrent edit');
   const failed=applyCopy(state,ticket,null,{category:'Clipboard',message:'denied',context:null});
-  assert.equal(copyFreshness(failed,'r1'),'failed');
+  assert.equal(copyFreshness(failed, 'ocr_recognize'),'failed');
+});
+
+test('grouped OCR Copy captures every checked region independently of Selected definition; setup follows Game content',()=>{
+  let state=loaded();
+  for (let index=0; index<3; index++) {
+    state=create(state,edges(index*100,0,index*100+50,50));
+    state=setExpected(state,state.selected,`reference ${index}`);
+  }
+  state=sync(toggleTrial(toggleTrial(state,'r2'),'r1'));
+  assert.equal(state.selected,'r3','the selected region is not checked');
+  const ticket=copyTicket(state,state.trialIds,'ocr_recognize');
+  assert.deepEqual(ticket.definition_ids,['r1','r2']);
+  assert.equal(copyTicket(state,['r3'],'ocr_recognize'),null,'the editor row is not the checked set');
+  const result={source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1','r2']};
+  state=applyCopy(state,ticket,result,null);
+  const setup=copyTicket(state,[],'game_content');
+  state=applyCopy(state,setup,{...result,definition_ids:[]},null);
+  assert.equal(copyFreshness(state,'ocr_recognize'),'current');
+  assert.equal(copyFreshness(selectDefinition(state,null),'ocr_recognize'),'current');
+  assert.equal(copyFreshness(setExpected(state,'r3','unchecked edit'),'ocr_recognize'),'current');
+  assert.equal(copyFreshness(setExpected(state,'r2','new reference'),'ocr_recognize'),'obsolete','reference text is part of the copied comments');
+  // Grouped source reads the pasted recognitionBasis, so only the setup must be copied again.
+  const recropped=setContent(state,{x:0,y:60,width:1920,height:960});
+  assert.equal(copyFreshness(recropped,'game_content'),'obsolete');
+  assert.equal(copyFreshness(recropped,'ocr_recognize'),'current');
+  assert.equal(copyFreshness(undoRecognition(recropped),'game_content'),'current','setup source is the basis value itself');
+  const changed=toggleTrial(state,'r2');
+  assert.equal(copyFreshness(changed,'ocr_recognize'),'obsolete');
+  assert.equal(copyFreshness(toggleTrial(changed,'r2'),'ocr_recognize'),'obsolete');
+  assert.equal(copyFreshness(applyCopy(changed,ticket,result,null),'ocr_recognize'),'obsolete','late clipboard success keeps the captured set');
+  assert.equal(copyTicket(changed,ticket.definition_ids,'ocr_recognize'),null,'selection changed while synchronizing');
+  assert.equal(copyFreshness(deleteDefinition(state,'r2'),'ocr_recognize'),'obsolete');
+  assert.equal(copyFreshness(changed,'game_content'),'current','checking rows never changes the setup');
+});
+
+test('Copy refuses invalid whole requests and unknown or exceeded engine limits, and never needs reference text',()=>{
+  let state=sync(setExpected(create(create(loaded(),edges(0,0,50,50)),edges(100,0,150,50)),'r1','first'));
+  state=toggleTrial(toggleTrial(state,'r1'),'r2');
+  assert.equal(copyBlock(state,[],'ocr_recognize'),'empty');
+  assert.equal(copyBlock(state,['r1','r1'],'ocr_recognize'),'invalid');
+  assert.equal(copyBlock(state,['r1','missing'],'ocr_recognize'),'invalid');
+  assert.equal(copyBlock(state,['r1'],'game_content'),'invalid','setup names no definitions');
+  assert.equal(copyBlock(state,['r1','r2'],'template_recognize'),'invalid');
+  assert.equal(copyBlock(state,['r1','r2'],'ocr_recognize'),null,'r2 has no reference text');
+  assert.equal(copyBlock(state,[],'game_content'),null);
+  const limit=max_ocr_zones=>({...state,view:{...state.view,capabilities:{...state.view.capabilities,max_ocr_zones}}});
+  assert.equal(copyBlock(limit(null),['r1','r2'],'ocr_recognize'),'noCapability');
+  assert.equal(copyTicket(limit(null),state.trialIds,'ocr_recognize'),null);
+  assert.equal(copyBlock(limit(null),[],'game_content'),null,'setup does not need the engine report');
+  assert.equal(copyBlock(limit(1),['r1','r2'],'ocr_recognize'),'overLimit');
+  assert.equal(copyTicket(limit(1),state.trialIds,'ocr_recognize'),null);
+  state=sync(setExpected(state,'r2','second'));
+  const template=setKind(state,'r2','template');
+  assert.equal(copyBlock(template,['r1','r2'],'ocr_recognize'),'kind');
+  assert.deepEqual(template.trialIds,['r1']);
+  assert.equal(template.document.definitions[1].expected,'second','changing kind preserves author reference text');
+  assert.equal(setKind(template,'r2','ocr').document.definitions[1].expected,'second','switching back restores the same reference');
+  assert.equal(copyBlock(template,['r2'],'template_recognize'),'templateUnsaved');
+  assert.equal(undoRecognition(template).document.definitions[1].expected,'second');
+  const invalid={...state,document:{...state.document,definitions:state.document.definitions.map(item=>item.id==='r2'?{...item,region:{u0:0,v0:0,u1:2,v1:1}}:item)}};
+  assert.equal(copyBlock(invalid,['r1'],'ocr_recognize'),'invalid','the host validates the whole document');
+  assert.equal(copyBlock(invalid,[],'game_content'),'invalid');
+  const changed=setContent(state,{x:0,y:10,width:1920,height:1000});
+  assert.equal(copyBlock(changed,['r1','r2'],'ocr_recognize'),'unconfirmed');
+  assert.equal(copyBlock(changed,[],'game_content'),'unconfirmed','unconfirmed geometry is never copied as setup');
+  assert.equal(saveBlock(changed),'unconfirmed','Save cannot persist unconfirmed geometry for later implicit reuse');
+  const saved=applyView(state,{...state.view,saved_document:state.document,frame:null});
+  assert.equal(saveBlock(renameDefinition(saved,'r1','metadata edit')),null,'saved geometry remains editable without a frame');
+});
+
+for (const savedSetup of [false,true]) test(`confirmed ${savedSetup?'changed saved':'first'} setup remains saveable after a failed image load`,()=>{
+  let state=sync(create(loaded(),edges(100,100,200,200)));
+  if (savedSetup) {
+    state=applyView(state,{...state.view,saved_document:state.document});
+    state=confirm(sync(setContent(state,{x:0,y:60,width:1920,height:960})));
+  }
+  const changed=sync(setContent(state,{x:0,y:80,width:1920,height:900}));
+  assert.equal(saveBlock(applyView(changed,{...changed.view,frame:null})),'unconfirmed','failed loading must not approve an unconfirmed edit');
+  const document=state.document;
+  state=applyView(state,{...state.view,frame:null});
+  assert.equal(geometryConfirmed(state),false,'frame-dependent operations still need pixels');
+  assert.equal(copyBlock(state,['r1'],'ocr_recognize'),'noFrame');
+  assert.equal(saveBlock(toggleCrop(state,'r1')),'cropFrame');
+  assert.equal(saveBlock(state),null);
+  assert.deepEqual(saveTicket(state).document,document,'Save retains every confirmed region without reloading pixels');
+});
+
+test('content setup returns to repeat region drawing only after a valid commit',()=>{
+  let state=setDisplay(loaded(),{zoom:200,tool:'content'});
+  const send=edit=>({token:owner.token,frameId:state.view.frame.id,basisRevision:state.basis,edit});
+  state=applyPreviewEdit(state,send({kind:'content',content:{x:0,y:0,width:0,height:1080}}),n=>`Region ${n}`);
+  assert.equal(state.display.tool,'content','refused setup remains adjustable');
+  state=applyPreviewEdit(state,send({kind:'content',content:{x:0,y:60,width:1920,height:960}}),n=>`Region ${n}`);
+  assert.deepEqual(state.display,{zoom:200,tool:'zones'});
+  assert.equal(geometryConfirmed(state),false);
+  for (const box of [edges(10,70,60,120),edges(100,70,160,120)]) {
+    state=applyPreviewEdit(state,send({kind:'create',region:regionFromEdges(box,state.document.basis)}),n=>`Region ${n}`);
+    assert.equal(state.display.tool,'zones');
+  }
+  assert.deepEqual(state.document.definitions.map(item=>mapRegion(item.region,state.document.basis)),[edges(10,70,60,120),edges(100,70,160,120)]);
+  state=setDisplay(state,{zoom:200,tool:'content'});
+  state=applyView(state,{...state.view,frame:{...FRAME,id:'next',revision:2,confirmed:false}});
+  assert.equal(state.display.tool,'zones','each scene starts with region authoring');
 });

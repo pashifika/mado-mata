@@ -27,6 +27,7 @@ pub(super) struct RecognitionState {
     document: Option<RecognitionDocument>,
     saved_document: Option<RecognitionDocument>,
     revision: u64,
+    basis_confirmed: bool,
     frame: Option<Frame>,
     next_frame: u64,
     max_ocr_zones: Option<usize>,
@@ -58,6 +59,7 @@ pub struct RecognitionView {
     pub document: Option<RecognitionDocument>,
     pub saved_document: Option<RecognitionDocument>,
     pub document_revision: u64,
+    pub basis_confirmed: bool,
     pub frame: Option<RecognitionFrame>,
     pub capabilities: Value,
     pub configuration_revision: String,
@@ -89,6 +91,7 @@ pub struct RecognitionCopy {
     pub source: String,
     pub basis: GeometryBasis,
     pub verified: bool,
+    pub definition_ids: Vec<String>,
     pub document_revision: u64,
 }
 
@@ -109,6 +112,7 @@ impl RecognitionState {
             let saved = candidate.recognition()?;
             if !self.initialized || self.document == self.saved_document {
                 self.document = saved.clone();
+                self.basis_confirmed = saved.is_some();
                 self.reconcile_frame();
             }
             if self.initialized && saved != self.saved_document {
@@ -193,6 +197,7 @@ impl Application {
             document: recognition.document.clone(),
             saved_document: recognition.saved_document.clone(),
             document_revision: recognition.revision,
+            basis_confirmed: recognition.basis_confirmed,
             frame: recognition.frame.as_ref().map(|frame| RecognitionFrame {
                 id: frame.id.clone(),
                 width: frame.image.width,
@@ -257,6 +262,7 @@ impl Application {
             recognition.advance()?;
             recognition.document = Some(document);
             if basis_changed {
+                recognition.basis_confirmed = false;
                 if let Some(frame) = &mut recognition.frame {
                     frame.confirmed = false;
                 }
@@ -285,6 +291,7 @@ impl Application {
             return Err(stale());
         }
         frame.confirmed = true;
+        recognition.basis_confirmed = true;
         self.recognition_snapshot(&mut state, owner, revision)
     }
 
@@ -299,6 +306,7 @@ impl Application {
         recognition.initialize(&candidate)?;
         recognition.advance()?;
         recognition.document = recognition.saved_document.clone();
+        recognition.basis_confirmed = recognition.saved_document.is_some();
         recognition.reconcile_frame();
         if let Some(frame) = &mut recognition.frame {
             frame.confirmed = false;
@@ -342,7 +350,7 @@ impl Application {
         state.work_idle()?;
         let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
         recognition.initialize(&candidate)?;
-        let replacement = recognition.next_frame != 0 || recognition.document.is_some();
+        let first_frame = recognition.next_frame == 0 && recognition.document.is_none();
         recognition.advance()?;
         recognition.frame = None;
         recognition.preview_payload = None;
@@ -363,6 +371,16 @@ impl Application {
             width: image.width,
             height: image.height,
         };
+        // A confirmed setup is reusable only at the same frame dimensions. Keep the
+        // trust bit separate from the disposable frame so a failed PNG load cannot
+        // turn unconfirmed coordinates into an implicitly confirmed setup.
+        let confirmed = first_frame
+            || (recognition.basis_confirmed
+                && recognition.document.as_ref().is_some_and(|document| {
+                    document.basis.frame_width == image.width
+                        && document.basis.frame_height == image.height
+                }));
+        recognition.basis_confirmed = confirmed;
         let document = recognition
             .document
             .get_or_insert_with(|| RecognitionDocument {
@@ -390,7 +408,7 @@ impl Application {
             id: format!("{}-frame-{frame_revision}", owner.token),
             revision: frame_revision,
             image,
-            confirmed: !replacement,
+            confirmed,
         });
         self.recognition_snapshot(&mut state, owner, revision)
     }
@@ -552,7 +570,14 @@ impl Application {
         let configuration_revision = identity(&environment)?;
         let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
         recognition.initialize(&candidate)?;
-        recognition.check(document_revision, frame_id)?;
+        if sample_id.is_some() {
+            // Saved samples use package pixels, not the currently loaded frame.
+            if recognition.revision != document_revision || frame_id.is_some() {
+                return Err(stale());
+            }
+        } else {
+            recognition.check(document_revision, frame_id)?;
+        }
         let document = recognition
             .document
             .as_ref()
@@ -622,7 +647,8 @@ impl Application {
         let is_stale = lease.revision != revision
             || recognition.revision != document_revision
             || current_configuration != configuration_revision
-            || recognition.frame.as_ref().map(|frame| frame.id.as_str()) != frame_id;
+            || (sample_id.is_none()
+                && recognition.frame.as_ref().map(|frame| frame.id.as_str()) != frame_id);
         let result = RecognitionTrial {
             owner: owner.clone(),
             revision: revision.to_owned(),
@@ -662,6 +688,16 @@ impl Application {
             .clone()
             .ok_or_else(|| invalid("No recognition definitions to save"))?;
         document.validate()?;
+        // Only confirmed setup becomes reusable package geometry. Saving a new
+        // basis must not bypass confirmation by reopening the package afterward.
+        if !recognition.basis_confirmed
+            && recognition
+                .saved_document
+                .as_ref()
+                .is_none_or(|saved| saved.basis != document.basis)
+        {
+            return Err(invalid("Confirm changed content geometry before saving"));
+        }
         let distinct: BTreeSet<_> = crop_ids.iter().collect();
         if distinct.len() != crop_ids.len() {
             return Err(invalid("Crop selection contains duplicates"));
@@ -746,7 +782,7 @@ impl Application {
         owner: &AuthoringRef,
         revision: &str,
         document_revision: u64,
-        definition_id: &str,
+        definition_ids: &[String],
         mode: SnippetKind,
     ) -> Result<RecognitionCopy, Fault> {
         let (_command, mut state) = self.command_state()?;
@@ -771,29 +807,36 @@ impl Application {
                 "Source changed before Copy",
             ));
         }
+        // The cached engine report is the only grouped-request bound; setup and template
+        // Copy do not need it.
         let source = generate_snippet(
             document,
-            definition_id,
+            definition_ids,
             mode,
             "mado-host-v1",
             true,
             template_current,
-            1000,
+            recognition.max_ocr_zones,
         )?;
-        let verified = recognition.trial.as_ref().is_some_and(|trial| {
-            !trial.stale
-                && trial.sample_id.is_none()
-                && trial.document_revision == document_revision
-                && trial.configuration_revision == configuration
-                && trial.controller["error"].is_null()
-                && trial.controller["result"]["primary"].is_null()
-                && trial.controller["result"]["cleanup"]["clean"] == true
-                && observed_definition(&trial.controller["result"]["result"], definition_id)
-        });
+        // Game content setup is geometry data and never recognition evidence.
+        let verified = mode != SnippetKind::GameContent
+            && recognition.trial.as_ref().is_some_and(|trial| {
+                !trial.stale
+                    && trial.sample_id.is_none()
+                    && trial.document_revision == document_revision
+                    && trial.configuration_revision == configuration
+                    && trial.controller["error"].is_null()
+                    && trial.controller["result"]["primary"].is_null()
+                    && trial.controller["result"]["cleanup"]["clean"] == true
+                    && definition_ids
+                        .iter()
+                        .all(|id| observed_definition(&trial.controller["result"]["result"], id))
+            });
         Ok(RecognitionCopy {
             source,
             basis: document.basis,
             verified,
+            definition_ids: definition_ids.to_vec(),
             document_revision,
         })
     }

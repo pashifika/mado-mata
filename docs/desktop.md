@@ -261,7 +261,13 @@ Neither action inspects, binds, or runs the package.
   with arrow/Home/End navigation.
   Actions target that row, not another selected file. Rename updates declarations,
   not source imports. Required entries/schema/presets cannot be removed; unsafe
-  paths, links, collisions and undeclared files are refused.
+  paths, links, collisions and undeclared files are refused, except known ordinary
+  OS metadata files (`.DS_Store`, AppleDouble `._*`, `Thumbs.db`, `ehthumbs.db`,
+  `ehthumbs_vista.db`, and `desktop.ini`). These files are left untouched and do
+  not affect package revisions or application-owned storage; links, special
+  files, directories with those names, and explicit package declarations of
+  reserved metadata names are still refused. This is not a general hidden-file
+  exception.
   Both the main and Recognition preview windows disable the ordinary Web
   Inspector, including debug builds; normal text-editing clipboard menus remain
   available outside these owned menus.
@@ -339,8 +345,9 @@ Opening Recognition probes the engine's grouped OCR capability without loading
 models; **Check engine** retries a missing capability. No guessed limit or
 substitute backend enables a trial.
 
-**Open preview** opens one separate native window for the image, **Fit**/zoom,
-**Game content**, and on-image region editing. Definitions, results,
+**Open preview** opens one independent, normal-level native window for the image,
+**Fit**/zoom, and the **Regions / Game content** tool switch. It is not attached above
+the main window; either window can come to the front. Definitions, results,
 **Save recognition**, and **Copy snippet** remain in the main Edit window.
 Selection, metadata, and bounded Undo are shared; closing and reopening the
 preview keeps the draft and Edit lease. The preview receives a bounded display
@@ -351,19 +358,24 @@ minus/plus buttons do not change the stored geometry.
 
 Use this workflow:
 
-1. In the preview, select **Game content** and exclude black bars or other
-   non-content borders. Select **Regions**, then drag empty content to add an OCR
-   definition; select, move, resize, delete, or Undo through the same shared state.
+1. Set up the content rectangle once with **Game content**, excluding
+   black bars or other non-content borders. The preview returns to **Regions**
+   after committing the adjustment. Regions is the default tool: repeatedly drag
+   empty content to add OCR definitions for each scene; select, move, resize,
+   delete, or Undo through the same shared state.
    Region coordinates are normalized to the content rectangle, then mapped to
    original capture pixels with floor for left/top and ceil for right/bottom.
    Empty, non-finite, or out-of-bounds rectangles are refused. Zoom, scrolling,
    and Retina display scale never resize the recognition input or saved crop.
 2. Review **Geometry** in the main window. The first new document starts with
-   the whole image confirmed. Replacing an image or changing its content basis
-   requires **Confirm geometry**, even when the replacement has identical
-   dimensions. Equal dimensions do not establish equal content placement.
-   Definitions survive replacement, but earlier observations and Copy records
-   do not become current for the replacement.
+   the whole image confirmed. Confirm an explicit content adjustment. Confirmed
+   content is reused for same-size scene images and, once saved, after reopening
+   the package. Different image dimensions require **Confirm geometry**;
+   repeatedly loading that size cannot bypass confirmation. Equal dimensions
+   cannot detect changed placement: use **Game content** when it changes.
+   Every replacement retains definitions and saved assets but clears current
+   crop selections and invalidates earlier frame observations. Copy source
+   freshness follows its geometry or definitions, separately from trial evidence.
 3. Name definitions and choose **OCR** or **Template** explicitly; there is no
    automatic fallback. Up to **256 definitions** fit within **256 KiB** of
    metadata. Nine or more definitions are valid even though the pinned engine
@@ -387,33 +399,60 @@ Use this workflow:
    tuning controls. Fine matching criteria belong to Script authors.
 6. Check **Save crop** only for definitions whose current pixels should be
    persisted, then choose **Save recognition**. Metadata-only Save needs no
-   loaded image; new or replacement crops require confirmed geometry. The
-   transaction writes metadata JSON, selected original-resolution PNG crops,
-   and required template manifest/maps. It never persists the loaded original,
-   trial text, or trial results. Template pixels require a license, creator,
-   optional purpose, and explicit rights review; the application invents none.
-7. Choose **Copy OCR recognize**, **Copy query_wait**, or **Copy template
-   recognize** for the selected definition. **Script wait text** is optional
-   metadata, limited to **4 KiB UTF-8**, and required only for `query_wait` Copy.
-   It is never a trial filter. Copy publishes generated `mado-host-v1` source
-   through the native macOS clipboard, only after the explicit Copy action;
-   no browser clipboard permission or general clipboard plugin is required.
-   It never edits package source. Review and paste deliberately; later edits
-   mark the Copy obsolete and never rewrite pasted code.
+   loaded image when retaining confirmed content setup, including after a failed
+   image replacement. A changed, unconfirmed basis cannot be saved and reopened
+   to bypass confirmation.
+   New or replacement crops require confirmed geometry. The transaction writes
+   metadata JSON, selected original-resolution PNG crops, and required template
+   manifest/maps. It never persists the loaded original, trial text, or trial
+   results. Template pixels require a license, creator, optional purpose, and
+   explicit rights review; the application invents none.
+7. **Copy Game content setup** copies a `recognitionBasis` declaration from the
+   confirmed frame dimensions and content rectangle. It needs no selected or
+   checked definition. Paste it once before the grouped OCR snippets, inside
+   the existing workflow or another scope where they can access it.
+   This is Script data, not Engine initialization: models, runtime libraries,
+   environment settings, and target/input authority remain application-owned.
+8. **Copy checked OCR (one request)** uses every checked OCR **Trial** row in
+   list order, independently of **Selected definition**. The adjacent names and
+   count show the selection. Capability discovery must have completed; an
+   unknown bound or more than the engine's **8 zones** refuses the whole Copy.
+   There is no hidden batching. **Copy selected template recognize** retains
+   its selected saved-template behavior.
+   Optional **Script reference text** is bounded to **4 KiB UTF-8** and preserved
+   across kind changes. It appears only as escaped author-context comments in
+   OCR Copy, never as a recognition filter, wait condition, or trial verdict.
 
-Copy always requires a loaded, confirmed frame. OCR Copy can be unverified when
-no current trial exists; a current trial still does not prove text correctness.
-Template Copy additionally requires current saved metadata, pattern pixels,
-rights, and mappings. Generated source checks frame dimensions, uses the current
-capture-pixel ROI, and releases managed observations/results; `query_wait` Copy
-uses a finite **1,000 ms** wait. It supplies no input or automatic text logging.
-The dimension guard cannot detect changed content placement.
+Copy publishes `mado-host-v1` source through the native macOS clipboard only
+after the explicit action. It needs no browser clipboard permission or general
+clipboard plugin and never edits package source. Preserve the package's existing
+Readiness/workflow exports when pasting. Relevant edits mark the corresponding
+Copy obsolete; pasted code is never updated automatically.
 
-After reopening a package without its original image, definitions remain editable
-and **Recheck saved crop** recognizes the complete saved OCR sample. Sample bounds
-are crop-local; the result proves neither original-frame placement nor a current
-frame trial and cannot authorize Copy. Load and confirm a frame for Copy, new
-crops, or frame trials.
+Copy requires a loaded, confirmed frame. Setup is geometry only, never a verified
+recognition result. Grouped OCR emits one `scan_ocr_zones` call over one retained
+observation, using normalized regions relative to `recognitionBasis`. The host
+requires matching frame dimensions and valid content/zone bounds before engine
+work. Results contain every public region per zone, including explicit
+`no_match` zones, in caller/engine order. They are plain snapshots without result
+handles; `finally` releases the original observation. No waits, text matching,
+input, or automatic text logging are generated.
+
+Copy verification describes trial observations **at Copy time**, not later
+images or text correctness. Setup freshness follows the actual geometry values;
+grouped source follows definitions and checked selection, so it can be reused
+with another frame and separately updated setup. Template source uses concrete
+ROIs and additionally requires current saved metadata, pixels, rights, and maps.
+Equal dimensions cannot detect changed content placement: adjust Game content,
+copy the setup again, and replace the pasted `recognitionBasis` when needed.
+
+**Recheck saved crop** recognizes the complete saved OCR sample whether or not
+a scene image is currently loaded. It reads the saved PNG, not the loaded scene
+or its current region pixels. Sample bounds are crop-local; the result proves
+neither original-frame placement nor a current frame trial and cannot authorize
+Copy. After reopening, definitions remain editable without the original image.
+Load a frame for Copy, new crops, or frame trials; the saved basis is reused only
+at matching dimensions.
 
 Recognition Save shares the existing source-revision transaction. Save or discard
 a dirty manifest first; unrelated script drafts remain independent.
@@ -847,6 +886,10 @@ Source paths and explicit backup destinations are absolute UTF-8 paths of at mos
 **4,096 bytes**. Filesystem case/normalization aliases and containing-identity
 mismatches are refused rather than selecting another owner's data.
 
+Known ordinary OS metadata files are left untouched and excluded from the
+managed count, byte budget, and configuration snapshots. Raw enumeration remains
+bounded, and genuine pending writes and unsafe managed entries still refuse.
+
 Writes validate first and use a same-directory temporary file plus atomic
 publication. A failed save preserves the previous valid file. Portable profile
 values exclude executable/model paths, credentials, permission grants, and input
@@ -1224,9 +1267,11 @@ separately.
    compare Fit and zoomed/scrolling geometry, exclude black bars, and create,
    move, resize, select, delete, and Undo regions. Check exact original-pixel
    coordinates, shared main-window selection, narrow-window overflow, and both
-   languages. Close/reopen the preview and verify the draft survives. Record
-   whether pointer actions were WebView events or physical OS input; one does
-   not qualify the other.
+   languages. Close/reopen the preview and verify the draft survives. Bring the
+   main window, preview, then main window to the front and observe native window
+   order; the preview must not remain above the main window. Record whether
+   pointer actions were WebView events or physical OS input; one does not
+   qualify the other.
 2. Keep at least nine definitions. Confirm the actual child reports its grouped
    limit; trial a non-contiguous selection within it and verify attribution/order.
    Over-limit selection must refuse without hidden batching or omitted zones.
@@ -1239,15 +1284,23 @@ separately.
    check original-resolution crop bytes, manifest/maps, unchanged Script source,
    and saved-sample rechecking. Copy must remain unavailable without a confirmed
    loaded frame.
-4. Replace with same-size and different-size images; require confirmation and
-   stale prior results. Discard a different-size replacement and verify the
-   incompatible frame is released while saved coordinates remain unchanged.
-   Exercise invalid PNG refusal and late responses without reviving old pixels.
+4. Replace with a same-size scene image and verify confirmed content is reused,
+   Regions remains the default, and prior results, Copy, and crop selections are
+   invalidated. Save/reopen and repeat without setting up content again. Adjust
+   content explicitly and verify the tool returns to Regions. Different-size
+   images require confirmation, including repeated loads; changed, unconfirmed
+   geometry must not be saved and reopened to bypass this gate. Discard an
+   incompatible replacement and verify saved coordinates survive without its
+   pixels. Exercise invalid PNG refusal and late responses without reviving them.
 5. Exercise native Copy for all three purposes, including optional wait text with
-   quotes and Unicode. Inspect clipboard source privately and paste into a
-   disposable Script; validate against the actual SDK. Check finite wait,
-   geometry guard, managed release, unchanged source before paste, and obsolete
-   Copy after edits. Clipboard failure must remain visible, not claim success.
+   quotes and Unicode. Check two OCR Trial rows while selecting a third unchecked
+   row: `query_wait` must include exactly the checked rows. Remove one criterion
+   and verify no partial clipboard publication. Change the checked selection and
+   verify prior Copy becomes obsolete even if the original selection is restored.
+   Inspect clipboard source privately and paste into a disposable Script; validate
+   against the actual SDK. Check each finite sequential wait, geometry guards,
+   managed release, unchanged source before paste, and obsolete Copy after edits.
+   Clipboard failure must remain visible, not claim success.
 6. Resolve dirty Script, manifest, and Recognition state through Save/Discard/
    Cancel, including application close and source conflicts. Where a real
    post-commit refresh failure can be observed, confirm the completed Save is not

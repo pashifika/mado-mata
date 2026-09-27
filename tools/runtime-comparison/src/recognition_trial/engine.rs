@@ -328,44 +328,5 @@ fn ocr(
     let scanned = session
         .scan_ocr_zones(request)
         .map_err(|error| fault("ocr_recognition", error))?;
-    let mut count = 0usize;
-    let mut text_bytes = 0usize;
-    let mut output = Vec::with_capacity(zones.len());
-    for (index, zone) in zones.iter().enumerate() {
-        let group = scanned
-            .group(index)
-            .ok_or_else(|| blocked("ocr_projection", "engine omitted selected OCR zone"))?;
-        let mut regions = Vec::new();
-        for region in group.iter() {
-            count += 1;
-            text_bytes = text_bytes.saturating_add(region.text().len());
-            if count > DIAGNOSTIC_REGIONS || text_bytes > DIAGNOSTIC_BYTES {
-                return Err(Fault::new(
-                    "RecognitionOutputLimit",
-                    "recognition diagnostics exceed their finite projection budget",
-                ));
-            }
-            let points = region.geometry().points();
-            let left = points.iter().map(|p| p.x()).fold(f64::INFINITY, f64::min);
-            let top = points.iter().map(|p| p.y()).fold(f64::INFINITY, f64::min);
-            let right = points
-                .iter()
-                .map(|p| p.x())
-                .fold(f64::NEG_INFINITY, f64::max);
-            let bottom = points
-                .iter()
-                .map(|p| p.y())
-                .fold(f64::NEG_INFINITY, f64::max);
-            regions.push(
-                json!({"text":region.text(),"confidence":region.confidence().get(),
-                "bounds":{"x":left,"y":top,"width":right-left,"height":bottom-top},
-                "geometry":points.iter().map(|point| [point.x(),point.y()]).collect::<Vec<_>>()}),
-            );
-        }
-        output.push(json!({"id":zone.id,"outcome":if regions.is_empty() {"no_match"} else {"recognized"},"regions":regions}));
-    }
-    bounded_diagnostics(
-        json!({"kind":"ocr","text_contract":TEXT_CONTRACT,"zones":output}),
-        count,
-    )
+    crate::ocr_scan::project(&scanned, zones, None)
 }

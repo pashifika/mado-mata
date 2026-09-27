@@ -6,7 +6,7 @@ import {
   mapRegion, recognitionDirty, renameDefinition, sameJson, saveBlock, selectDefinition, setExpected, setKind, setRights, toggleCrop, toggleTrial,
   trialBlock, trialEnvelope, trialFreshness, undoRecognition, utf8Bytes,
 } from '../recognition.ts';
-import type {NormalizedRect, RecognitionDefinition, RecognitionKind, RecognitionState, SnippetKind, TemplateRights, TrialDiagnostics} from '../recognition.ts';
+import type {NormalizedRect, RecognitionKind, RecognitionState, SnippetKind, TemplateRights, TrialDiagnostics} from '../recognition.ts';
 
 export interface RecognitionHandlers {
   // Explicit PNG selection, then `recognition_load`.
@@ -17,7 +17,7 @@ export interface RecognitionHandlers {
   // The independent authoring Stop.
   stop: () => void;
   save: () => void;
-  copy: (id: string, kind: SnippetKind) => void;
+  copy: (ids: string[], kind: SnippetKind) => void;
   discard: () => void;
   capabilities: () => void;
   openPreview: () => void;
@@ -94,14 +94,29 @@ export default function RecognitionPage({state, onState, handlers, locked, lockR
     onState(current => setRights(current, {...(current.document?.template_rights ?? EMPTY_RIGHTS), ...change}));
   }
 
-  function copyButton(definition: RecognitionDefinition, kind: SnippetKind, label: string) {
-    const reason = copyBlock(state, definition.id, kind);
+  function copyButton(ids: string[], kind: SnippetKind, label: string) {
+    const reason = copyBlock(state, ids, kind);
     return <button id={`recognition-copy-${kind}`} type="button" disabled={commands || reason !== null} title={reason ? r.block(reason) : undefined}
-      onClick={() => handlers.copy(definition.id, kind)}>{label}</button>;
+      onClick={() => handlers.copy(ids, kind)}>{label}</button>;
   }
 
-  const copy = selected ? state.copies[selected.id] : undefined;
-  const copyState = selected ? copyFreshness(state, selected.id) : null;
+  const setupReason = copyBlock(state, [], 'game_content');
+  const groupedReason = copyBlock(state, state.trialIds, 'ocr_recognize');
+
+  function copyStatus(kind: SnippetKind, label: string) {
+    const copy = state.copies[kind];
+    const copyState = copyFreshness(state, kind);
+    return copy && copyState && <div key={kind} data-copy-kind={kind}>
+      <strong>{label}</strong>{copy.definition_ids.length > 0 && <p>{copy.definition_ids.map(nameOf).join(', ')}</p>}
+      <span className={`tag ${copyState === 'current' ? 'current' : copyState === 'failed' ? 'unsaved' : 'stale'}`}>
+        {copyState === 'current' ? r.copied : copyState === 'failed' ? r.copyFailed : r.copyObsolete}</span>
+      {copyState === 'obsolete' && <p className="inline-warning">{kind === 'game_content' ? r.copySetupObsoleteHelp : r.copyObsoleteHelp}</p>}
+      {copy.error && <FaultMessage title={r.copyFailed} value={copy.error}/>}
+      {!copy.error && <p className="field-help">{kind === 'game_content' ? r.copyGeometryOnly : copy.verified ? r.copyVerified : r.copyUnverified}</p>}
+      {copy.basis && kind !== 'ocr_recognize' && <p className="field-help mono">{r.basis(copy.basis.frame_width, copy.basis.frame_height,
+        copy.basis.content.x, copy.basis.content.y, copy.basis.content.width, copy.basis.content.height)}</p>}
+    </div>;
+  }
 
   return <section id="recognition" className="recognition-page" aria-labelledby="recognition-heading">
     <div className="recognition-header">
@@ -193,10 +208,10 @@ export default function RecognitionPage({state, onState, handlers, locked, lockR
           {selected.kind === 'template' && !selected.saved && <p className="field-help">{r.templateNeedsCrop}</p>}
           {selected.kind === 'template' && selected.saved && savedDefinition && !sameJson(savedDefinition.region, selected.region)
             && <p className="inline-warning">{r.patternChanged}</p>}
-          {selected.kind === 'ocr' && <div className="field"><label htmlFor="recognition-wait-text">{r.waitText}</label>
-            <textarea id="recognition-wait-text" rows={2} value={selected.expected ?? ''} disabled={leaseLost} spellCheck={false}
-              aria-describedby="recognition-wait-text-help" onChange={event => onState(current => setExpected(current, selected.id, event.target.value))}/>
-            <p id="recognition-wait-text-help" className="field-help">{r.waitTextHelp} {r.bytes(utf8Bytes(selected.expected ?? ''), MAX_EXPECTED_BYTES)}</p></div>}
+          {selected.kind === 'ocr' && <div className="field"><label htmlFor="recognition-reference-text">{r.referenceText}</label>
+            <textarea id="recognition-reference-text" rows={2} value={selected.expected ?? ''} disabled={leaseLost} spellCheck={false}
+              aria-describedby="recognition-reference-text-help" onChange={event => onState(current => setExpected(current, selected.id, event.target.value))}/>
+            <p id="recognition-reference-text-help" className="field-help">{r.referenceTextHelp} {r.bytes(utf8Bytes(selected.expected ?? ''), MAX_EXPECTED_BYTES)}</p></div>}
         </>}
       </div>
     </section>
@@ -291,24 +306,24 @@ export default function RecognitionPage({state, onState, handlers, locked, lockR
       <div className="panel-heading"><h4 id="recognition-copy-heading">{r.copyHeading}</h4></div>
       <div className="panel-body">
         <p className="field-help">{r.copyHelp}</p>
-        {!selected ? <p className="muted">{r.noSelection}</p> : <>
-          <div className="button-row">
-            {selected.kind === 'ocr' && copyButton(selected, 'ocr_recognize', r.copyOcr)}
-            {selected.kind === 'ocr' && copyButton(selected, 'ocr_wait', r.copyWait)}
-            {selected.kind === 'template' && copyButton(selected, 'template_recognize', r.copyTemplate)}
-          </div>
-          {selected.kind === 'template' && copyBlock(state, selected.id, 'template_recognize') === 'templateUnsaved' && <p className="muted">{r.block('templateUnsaved')}</p>}
+        <div className="button-row">{copyButton([], 'game_content', r.copySetup)}</div>
+        <p className="field-help">{r.copySetupHelp}</p>
+        {setupReason && <p className="muted">{r.block(setupReason)}</p>}
+        <div className="button-row">{copyButton(state.trialIds, 'ocr_recognize', r.copyOcr)}
+          <span id="recognition-copy-ocr-selection" className={groupedReason === 'overLimit' ? 'inline-warning' : 'muted'}>{r.selection(state.trialIds.length, limit)}</span></div>
+        <p className="field-help">{r.copyOcrHelp}</p>
+        <p id="recognition-copy-ocr-names" className="field-help">{state.trialIds.map(nameOf).join(', ') || r.block('empty')}</p>
+        {groupedReason && groupedReason !== 'empty' && <p className="muted">{r.block(groupedReason)}</p>}
+        {selected?.kind === 'template' ? <>
+          <div className="button-row">{copyButton([selected.id], 'template_recognize', r.copyTemplate)}</div>
+          {copyBlock(state, [selected.id], 'template_recognize') === 'templateUnsaved' && <p className="muted">{r.block('templateUnsaved')}</p>}
           <p className="field-help">{trialIds.has(selected.id) ? <>{freshnessTag(selected.id)} {r.freshnessHelp(trialFreshness(state, selected.id))}</> : r.noTrialFor}</p>
-          {copy && copyState && <div id="recognition-copy-state">
-            <span className={`tag ${copyState === 'current' ? 'current' : copyState === 'failed' ? 'unsaved' : 'stale'}`}>
-              {copyState === 'current' ? r.copied : copyState === 'failed' ? r.copyFailed : r.copyObsolete}</span>
-            {copyState === 'obsolete' && <p className="inline-warning">{r.copyObsoleteHelp}</p>}
-            {copy.error && <FaultMessage title={r.copyFailed} value={copy.error}/>}
-            {!copy.error && <p className="field-help">{copy.verified ? r.copyVerified : r.copyUnverified}</p>}
-            {copy.basis && <p className="field-help mono">{r.basis(copy.basis.frame_width, copy.basis.frame_height, copy.basis.content.x, copy.basis.content.y,
-              copy.basis.content.width, copy.basis.content.height)}</p>}
-          </div>}
-        </>}
+        </> : definitions.some(item => item.kind === 'template') && <p className="muted">{r.copyTemplateSelect}</p>}
+        <div id="recognition-copy-state">
+          {copyStatus('game_content', r.copySetup)}
+          {copyStatus('ocr_recognize', r.copyOcr)}
+          {copyStatus('template_recognize', r.copyTemplate)}
+        </div>
       </div>
     </section>
   </section>;

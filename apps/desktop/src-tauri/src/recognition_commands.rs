@@ -182,14 +182,14 @@ pub async fn recognition_copy(
     owner: AuthoringRef,
     revision: String,
     document_revision: u64,
-    definition_id: String,
+    definition_ids: Vec<String>,
     mode: SnippetKind,
     app: tauri::AppHandle,
     state: tauri::State<'_, Backend>,
 ) -> Result<RecognitionCopy, Fault> {
     let application = state.bootstrap.application()?;
     let copied = background(move || {
-        application.recognition_copy(&owner, &revision, document_revision, &definition_id, mode)
+        application.recognition_copy(&owner, &revision, document_revision, &definition_ids, mode)
     })
     .await?;
     publish_clipboard(app, copied).await
@@ -279,9 +279,6 @@ pub async fn recognition_open_preview(
                 .map_err(preview_fault)?;
             return Ok(());
         }
-        let main = app
-            .get_webview_window("main")
-            .ok_or_else(|| Fault::new("RecognitionPreview", "Main window is unavailable"))?;
         tauri::WebviewWindowBuilder::new(
             &app,
             PREVIEW_WINDOW,
@@ -291,8 +288,6 @@ pub async fn recognition_open_preview(
         .title("MadoMata — Recognition preview")
         .inner_size(1100.0, 760.0)
         .min_inner_size(480.0, 320.0)
-        .parent(&main)
-        .map_err(preview_fault)?
         .build()
         .map_err(preview_fault)?;
         Ok(())

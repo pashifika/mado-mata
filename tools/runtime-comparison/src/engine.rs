@@ -565,6 +565,18 @@ mod enabled {
             attempt: u64,
             handle_budget: Arc<HandleBudget>,
         ) -> Self {
+            Self::replay_with_ocr_for_test(plan, control, attempt_id, attempt, handle_budget, None)
+        }
+
+        #[cfg(test)]
+        pub(crate) fn replay_with_ocr_for_test(
+            plan: &Plan,
+            control: Arc<Control>,
+            attempt_id: &str,
+            attempt: u64,
+            handle_budget: Arc<HandleBudget>,
+            backend: Option<Arc<dyn mp::OcrBackend>>,
+        ) -> Self {
             // Public replay only: no desktop, OCR models, permission probes, or OS input.
             let descriptor =
                 mp::FrameDescriptor::packed(mp::PixelExtent::new(8, 8), mp::PixelFormat::Rgba8)
@@ -585,7 +597,11 @@ mod enabled {
                 mp::replay::ReplayTarget::new("shared-budget", frames).expect("replay target"),
             ])
             .expect("replay source");
-            let engine = mp::replay_engine(source).expect("replay engine");
+            let mut request = mp::ReplayEngineRequest::new(source);
+            if let Some(backend) = backend {
+                request = request.with_ocr_backend(backend);
+            }
+            let engine = mp::replay_engine(request).expect("replay engine");
             let operation = mp::OperationContext::new();
             let targets = engine.discover(&operation).expect("replay discovery");
             let session = engine
@@ -652,6 +668,7 @@ mod enabled {
                     }
                     self.recognize(&mut state, &request, self.limits.wait_ms)
                 }
+                "scan_ocr_zones" => self.scan_ocr_zones(&state, decode(args)?, self.limits.wait_ms),
                 "query" => {
                     let mut request: RecognitionRequest = decode(args)?;
                     if request
@@ -1033,6 +1050,65 @@ mod enabled {
             compact["id"] = Value::String(id.clone());
             state.results.insert(id, Managed::new(retained, permit));
             Ok(compact)
+        }
+
+        fn scan_ocr_zones(
+            &self,
+            state: &State,
+            request: crate::ocr_scan::Request,
+            wait_ms: u64,
+        ) -> Result<Value, Fault> {
+            let observation = self.observation(state, &request.observation)?;
+            let extent = observation.frame.descriptor().extent();
+            let (source, zones) =
+                request.into_zones(extent.width(), extent.height(), mp::MAX_OCR_ZONES)?;
+            let rois = zones
+                .iter()
+                .map(|zone| {
+                    mp::Rect::from_origin_size(
+                        mp::CoordinateSpace::CapturePixels,
+                        f64::from(zone.rect.x),
+                        f64::from(zone.rect.y),
+                        f64::from(zone.rect.width),
+                        f64::from(zone.rect.height),
+                    )
+                    .map(|rect| mp::OcrZone::new(rect, mp::ClipPolicy::Reject))
+                    .map_err(|error| engine_error("ocr_roi", error.into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let backend = self
+                .resources
+                .engine
+                .ocr_backend()
+                .ok_or_else(|| internal("OCR backend missing"))?;
+            let operation = self.operation(wait_ms)?;
+            let request = mp::OcrZoneScanRequest::new(
+                &observation.frame,
+                backend.backend_identity(),
+                backend.model_identity(),
+                &rois,
+                mp::CoordinateSpace::CapturePixels,
+                &operation,
+            )
+            .map_err(|error| engine_error("ocr_request", error))?;
+            self.check_session(state)?;
+            let session = state
+                .session
+                .as_ref()
+                .ok_or_else(|| Fault::new("Closed", "session closed"))?;
+            let _active = self.active();
+            // One public grouped operation over the retained frame, never a per-zone scan.
+            // The outcome is scoped to this call, not added to the managed result table.
+            let scanned = session
+                .scan_ocr_zones(request)
+                .map_err(|error| engine_error("ocr_recognition", error))?;
+            self.check_session(state)?;
+            if scanned.stamp() != observation.frame.stamp() {
+                return Err(internal("recognition source correlation mismatch"));
+            }
+            let value = crate::ocr_scan::project(&scanned, &zones, Some(source))?;
+            self.check_session(state)?;
+            Ok(value)
         }
 
         fn query_wait(&self, state: &mut State, request: WaitRequest) -> Result<Value, Fault> {

@@ -87,7 +87,7 @@ const adapterArguments = {
   'ui.recognition.savedFacts': [['recognition/crops/r1.png',40,12]], 'ui.recognition.threshold': [['0.9',8]], 'ui.recognition.bytes': [[12,4096]],
   'ui.recognition.issue': ['name','region','search','searchSmall'].map(code=>[code]),
   'ui.recognition.notice': ['definitionLimit','documentLimit','expectedLimit','nameLimit','invalidGeometry','staleEdit'].map(code=>[code]),
-  'ui.recognition.block': ['noDocument','noFrame','unconfirmed','confirmed','running','noCapability','empty','overLimit','mixedKinds','templateSingle','noSample','invalid','noChanges','rights','cropFrame','kind','waitText','templateUnsaved'].map(code=>[code]),
+  'ui.recognition.block': ['noDocument','noFrame','unconfirmed','confirmed','running','noCapability','empty','overLimit','mixedKinds','templateSingle','noSample','invalid','noChanges','rights','cropFrame','kind','templateUnsaved'].map(code=>[code]),
   'ui.recognition.engineLimit': [[8]], 'ui.recognition.selection': [[3,8],[3,null]],
   'ui.recognition.freshness': ['fresh','stale','historical'].map(value=>[value]), 'ui.recognition.freshnessHelp': ['fresh','stale','historical'].map(value=>[value]),
   'ui.recognition.regions': [[1],[2]], 'ui.recognition.rect': [[10,20,300,40]], 'ui.recognition.templateThreshold': [['0.9']], 'ui.recognition.score': [['0.97']],

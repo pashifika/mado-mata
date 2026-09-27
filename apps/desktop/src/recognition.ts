@@ -28,7 +28,8 @@ export interface TemplateSettings {search_region:NormalizedRect; threshold:numbe
 export interface TemplateRights {license:string; created_by:string; created_for:string|null; reviewed:boolean}
 export type RecognitionKind = 'ocr' | 'template';
 // `region` is the OCR ROI or the template pattern crop; `template.search_region` is the separate search ROI.
-// `expected` is script wait text used only for `ocr_wait` Copy, never to judge a trial. `saved` is host-derived.
+// `expected` is optional Script reference text: grouped OCR Copy carries it only as an escaped comment beside its
+// zone. It is never sent to the engine, matched, awaited or used to judge a trial. `saved` is host-derived.
 export interface RecognitionDefinition {
   id:string; name:string; revision:number; kind:RecognitionKind; region:NormalizedRect;
   expected:string|null; template:TemplateSettings|null; saved:SavedCrop|null;
@@ -36,9 +37,11 @@ export interface RecognitionDefinition {
 export interface RecognitionDocument {
   version:number; rounding:number; basis:GeometryBasis; definitions:RecognitionDefinition[]; template_rights:TemplateRights|null;
 }
-export type SnippetKind = 'ocr_recognize' | 'ocr_wait' | 'template_recognize';
+// `game_content` is the reusable `recognitionBasis` setup, `ocr_recognize` one grouped request for every checked OCR
+// Trial row, `template_recognize` the selected saved template.
+export type SnippetKind = 'game_content' | 'ocr_recognize' | 'template_recognize';
 
-// Owner-scoped frame descriptor; pixels stay in the host. A replacement arrives unconfirmed.
+// Owner-scoped frame descriptor; pixels stay in the host. Compatible frames reuse confirmed content setup.
 export interface RecognitionFrame {id:string; width:number; height:number; revision:number; confirmed:boolean}
 // Read-only host image policy.
 export interface ImagePolicy {
@@ -55,7 +58,7 @@ export interface RecognitionCapabilities {
 // the host-validated draft at `document_revision`, which confirmation, trials, saves and Copy name.
 export interface RecognitionView {
   owner:AuthoringRef; revision:string; document:RecognitionDocument|null; saved_document:RecognitionDocument|null;
-  document_revision:number; frame:RecognitionFrame|null; capabilities:RecognitionCapabilities;
+  document_revision:number; basis_confirmed:boolean; frame:RecognitionFrame|null; capabilities:RecognitionCapabilities;
   // Identity of the effective App OCR configuration; a change makes earlier trials stale.
   configuration_revision:string; trial:RecognitionTrial|null;
 }
@@ -76,7 +79,7 @@ export interface RecognitionTrial {
   owner:AuthoringRef; revision:string; document_revision:number; frame_id:string|null; frame_revision:number;
   configuration_revision:string; sample_id:string|null; stale:boolean; controller:ControllerView;
 }
-export interface CopyResult {source:string; basis:GeometryBasis; verified:boolean; document_revision:number}
+export interface CopyResult {source:string; basis:GeometryBasis; verified:boolean; document_revision:number; definition_ids:string[]}
 
 export function trialEnvelope(trial:RecognitionTrial):TrialEnvelope|null {
   const result = trial.controller.result;
@@ -93,12 +96,13 @@ export interface TrialTicket {
 // `fault` is a refusal before any trial settled. A ticketless record is a trial the host retained from before
 // this state existed; it is never shown as current.
 export interface TrialRecord {ticket:TrialTicket|null; trial:RecognitionTrial|null; fault:Fault|null}
-// `mark` is the recognition-input stamp: a Copy made before an Undo of its geometry is obsolete even though the
-// restored revision matches again.
-export interface CopyStamp {basis:number; revision:number; mark:number; source:string|null}
-export interface CopyTicket {token:string; revision:string; document_revision:number; definition_id:string; kind:SnippetKind; stamp:CopyStamp}
+// A Copy captures every input and its selection generation; changing a checked set and restoring it does not
+// revive copied source. Recognition-input marks likewise prevent geometry Undo from reviving a Copy. Setup source
+// is the basis value itself, so it is compared by value.
+export interface CopyStamp {basis:number; definitions:Record<string, {revision:number; mark:number}>; source:string|null; selection:number}
+export interface CopyTicket {token:string; revision:string; document_revision:number; definition_ids:string[]; kind:SnippetKind; stamp:CopyStamp}
 // `error` is the host refusal or the clipboard failure; either way no package file changed.
-export interface CopyRecord {kind:SnippetKind; stamp:CopyStamp; basis:GeometryBasis|null; verified:boolean; error:Fault|null}
+export interface CopyRecord {definition_ids:string[]; stamp:CopyStamp; basis:GeometryBasis|null; verified:boolean; error:Fault|null}
 export interface SyncTicket {token:string; revision:string; document_revision:number; local_revision:number; frame_id:string|null; document:RecognitionDocument}
 export interface ConfirmTicket {token:string; revision:string; frame_id:string; document_revision:number}
 export interface SaveTicket {
@@ -115,7 +119,7 @@ export interface PreviewDisplay {zoom:Zoom; tool:PreviewTool}
 export type RecognitionNotice = 'definitionLimit' | 'documentLimit' | 'expectedLimit' | 'nameLimit' | 'invalidGeometry' | 'staleEdit';
 export type RecognitionBlock =
   | 'noDocument' | 'noFrame' | 'unconfirmed' | 'confirmed' | 'running' | 'noCapability' | 'empty' | 'overLimit' | 'mixedKinds'
-  | 'templateSingle' | 'noSample' | 'invalid' | 'noChanges' | 'rights' | 'cropFrame' | 'kind' | 'waitText' | 'templateUnsaved';
+  | 'templateSingle' | 'noSample' | 'invalid' | 'noChanges' | 'rights' | 'cropFrame' | 'kind' | 'templateUnsaved';
 export type DefinitionIssue = 'name' | 'region' | 'search' | 'searchSmall';
 export type Freshness = 'fresh' | 'stale' | 'historical';
 export type CopyFreshness = 'current' | 'obsolete' | 'failed';
@@ -129,12 +133,12 @@ export interface RecognitionState {
   clock:number; basis:number; marks:Record<string, number>;
   // Shared by the list and the preview overlay.
   selected:string|null;
-  // OCR definitions chosen for the next grouped trial, kept in document order.
-  trialIds:string[];
+  // OCR definitions checked for the next grouped trial and grouped OCR Copy, in document order.
+  trialIds:string[]; trialSelection:number;
   // Definitions whose crop the next Save derives from the confirmed current frame, and when each was chosen.
   cropIds:string[]; cropMarks:Record<string, number>;
   undo:UndoEntry[]; undoBytes:number; group:string|null;
-  trial:TrialRecord|null; running:TrialTicket|null; copies:Record<string, CopyRecord>;
+  trial:TrialRecord|null; running:TrialTicket|null; copies:Partial<Record<SnippetKind, CopyRecord>>;
   // Preview zoom and tool, kept here so a reopened preview window resumes them.
   display:PreviewDisplay;
   nextId:number; notice:RecognitionNotice|null; error:Fault|null;
@@ -354,7 +358,7 @@ function idNumber(...documents:(RecognitionDocument|null)[]):number {
   return max + 1;
 }
 
-// What a trial of the definition depends on; its name and script wait text are not recognition inputs.
+// What a trial of the definition depends on; its name and Script reference text are not recognition inputs.
 function recognitionInputs(definition:RecognitionDefinition):unknown {
   return [definition.kind, definition.region, definition.template, definition.saved?.sha256 ?? null];
 }
@@ -382,14 +386,15 @@ function stamp(state:RecognitionState, before:RecognitionDocument|null):Recognit
   const order = after?.definitions.map(definition => definition.id) ?? [];
   const ocr = new Set(after?.definitions.filter(definition => definition.kind === 'ocr').map(definition => definition.id) ?? []);
   const cropIds = basis === state.basis ? order.filter(id => state.cropIds.includes(id)) : [];
+  const trialIds = order.filter(id => ocr.has(id) && state.trialIds.includes(id));
   return {...state, clock, basis, marks,
     selected: state.selected !== null && order.includes(state.selected) ? state.selected : null,
-    trialIds: order.filter(id => ocr.has(id) && state.trialIds.includes(id)),
+    trialIds, trialSelection: state.trialSelection + (sameJson(trialIds, state.trialIds) ? 0 : 1),
     cropIds, cropMarks: Object.fromEntries(cropIds.map(id => [id, state.cropMarks[id]]))};
 }
 
-// A different frame (or none) invalidates the basis and chosen crops. Following the host rule, a frame keeps the
-// content rectangle when it still fits and otherwise restarts at the full image; either way it awaits confirmation.
+// Every frame invalidates trials, copied source and chosen crops, even when content setup is reusable.
+// Changed dimensions keep a fitting rectangle as an editable proposal, never as confirmed correspondence.
 function adoptFrame(state:RecognitionState, previous:RecognitionFrame|null, frame:RecognitionFrame|null):RecognitionState {
   if ((previous?.id ?? null) === (frame?.id ?? null)) return state;
   let document = state.document;
@@ -401,7 +406,7 @@ function adoptFrame(state:RecognitionState, previous:RecognitionFrame|null, fram
     }
   }
   const next = stamp({...state, document, localRevision: state.localRevision + 1, cropIds: [], cropMarks: {}}, state.document);
-  return {...next, basis: next.basis === state.basis ? state.basis + 1 : next.basis};
+  return {...next, basis: next.basis === state.basis ? state.basis + 1 : next.basis, display: {...next.display, tool: 'zones'}};
 }
 
 // Host-owned saved-crop references follow the host even under unsaved local edits.
@@ -418,7 +423,7 @@ export function openRecognition(view:RecognitionView):RecognitionState {
   const empty: RecognitionState = {
     owner: view.owner, view: {...view, frame: null}, document: null, localRevision: 0,
     clock: maxRevision(view.document, view.saved_document), basis: 0, marks: {},
-    selected: null, trialIds: [], cropIds: [], cropMarks: {}, undo: [], undoBytes: 0, group: null,
+    selected: null, trialIds: [], trialSelection: 0, cropIds: [], cropMarks: {}, undo: [], undoBytes: 0, group: null,
     trial: view.trial ? {ticket: null, trial: view.trial, fault: null} : null, running: null, copies: {},
     display: {zoom: 'fit', tool: 'zones'}, nextId: idNumber(view.document, view.saved_document), notice: null, error: null,
   };
@@ -481,7 +486,7 @@ export function recognitionDirty(state:RecognitionState):boolean {
   return document.definitions.length > 0 || document.template_rights !== null || !full;
 }
 
-// Copy and frame trials require an explicitly confirmed current image, not only saved coordinates.
+// Copy and frame trials require current confirmed setup, either explicit or reused on a compatible frame.
 export function geometryConfirmed(state:RecognitionState):boolean {
   const {document, view} = state;
   return document !== null && view.frame !== null && view.frame.confirmed && sameBasis(document.basis, view.document?.basis);
@@ -558,7 +563,8 @@ export function setContent(state:RecognitionState, content:PixelRect):Recognitio
   if (!document) return state;
   const basis = {...document.basis, content};
   if (!validBasis(basis)) return {...state, notice: 'invalidGeometry'};
-  return edit(state, {...document, basis}, null);
+  const next = edit(state, {...document, basis}, null);
+  return sameBasis(next.document?.basis, basis) ? setDisplay(next, {...next.display, tool: 'zones'}) : next;
 }
 
 export function renameDefinition(state:RecognitionState, id:string, name:string):RecognitionState {
@@ -566,7 +572,7 @@ export function renameDefinition(state:RecognitionState, id:string, name:string)
   return withDefinition(state, id, item => ({...item, name}), `name:${id}`);
 }
 
-// Script wait text for `ocr_wait` Copy; empty means unset. It never participates in a trial.
+// Optional Script reference text; empty means unset. It never participates in a trial or a recognition request.
 export function setExpected(state:RecognitionState, id:string, text:string):RecognitionState {
   if (utf8Bytes(text) > MAX_EXPECTED_BYTES) return {...state, notice: 'expectedLimit'};
   return withDefinition(state, id, item => ({...item, expected: text === '' ? null : text}), `expected:${id}`);
@@ -622,7 +628,7 @@ export function toggleTrial(state:RecognitionState, id:string):RecognitionState 
   if (!document?.definitions.some(item => item.id === id && item.kind === 'ocr')) return state;
   const chosen = new Set(state.trialIds);
   if (chosen.has(id)) chosen.delete(id); else chosen.add(id);
-  return {...state, trialIds: document.definitions.map(item => item.id).filter(item => chosen.has(item))};
+  return {...state, trialIds: document.definitions.map(item => item.id).filter(item => chosen.has(item)), trialSelection: state.trialSelection + 1};
 }
 
 export function toggleCrop(state:RecognitionState, id:string):RecognitionState {
@@ -759,6 +765,8 @@ export function saveBlock(state:RecognitionState):RecognitionBlock|null {
   if (!documentValid(document)) return 'invalid';
   if (state.cropIds.length > 0 && state.view.frame === null) return 'cropFrame';
   if (state.cropIds.length > 0 && !geometryConfirmed(state)) return 'unconfirmed';
+  const basisConfirmed = state.view.basis_confirmed && sameBasis(document.basis, state.view.document?.basis);
+  if (!basisConfirmed && !sameBasis(document.basis, state.view.saved_document?.basis)) return 'unconfirmed';
   if (!recognitionDirty(state)) return 'noChanges';
   const savedTemplate = document.definitions.some(item => item.kind === 'template' && (item.saved !== null || state.cropIds.includes(item.id)));
   if (savedTemplate && !rightsValid(document.template_rights)) return 'rights';
@@ -793,41 +801,67 @@ export function templateSavedCurrent(state:RecognitionState, id:string):boolean 
     && disk !== undefined && sameJson(definition, disk) && sameJson(state.document!.template_rights, saved.template_rights) && rightsValid(saved.template_rights);
 }
 
-export function copyBlock(state:RecognitionState, id:string, kind:SnippetKind):RecognitionBlock|null {
+// The definitions each Copy purpose names: none for the Game content setup, every checked OCR Trial row for grouped
+// OCR (independent of Selected definition), and the Selected definition for a template.
+function copySelection(state:RecognitionState, kind:SnippetKind):string[] {
+  if (kind === 'game_content') return [];
+  if (kind === 'ocr_recognize') return state.trialIds;
+  return state.selected ? [state.selected] : [];
+}
+
+// Mirrors the host's whole-request validation; the host and its cached engine report stay authoritative. Grouped
+// OCR needs the engine's reported bound and is refused above it, never split; setup and template Copy do not.
+export function copyBlock(state:RecognitionState, ids:readonly string[], kind:SnippetKind):RecognitionBlock|null {
   const document = state.document;
   if (document === null) return 'noDocument';
-  const definition = document.definitions.find(item => item.id === id);
-  if (!definition) return 'empty';
-  if (definitionIssue(definition, document.basis) !== null) return 'invalid';
+  if (kind !== 'game_content' && ids.length === 0) return 'empty';
+  if ((kind === 'game_content' && ids.length !== 0) || (kind === 'template_recognize' && ids.length !== 1) || new Set(ids).size !== ids.length) return 'invalid';
+  const definitions = ids.map(id => document.definitions.find(item => item.id === id));
+  if (!documentValid(document) || definitions.some(item => item === undefined)) return 'invalid';
   if (state.view.frame === null) return 'noFrame';
   if (!geometryConfirmed(state)) return 'unconfirmed';
-  if ((kind === 'template_recognize') !== (definition.kind === 'template')) return 'kind';
-  if (kind === 'ocr_wait' && !definition.expected) return 'waitText';
-  if (kind === 'template_recognize' && !templateSavedCurrent(state, id)) return 'templateUnsaved';
+  if (definitions.some(item => (kind === 'template_recognize') !== (item!.kind === 'template'))) return 'kind';
+  if (kind === 'ocr_recognize') {
+    const limit = state.view.capabilities.max_ocr_zones;
+    if (limit === null) return 'noCapability';
+    if (ids.length > limit) return 'overLimit';
+  }
+  if (kind === 'template_recognize' && !templateSavedCurrent(state, ids[0])) return 'templateUnsaved';
   return null;
 }
 
-export function copyTicket(state:RecognitionState, id:string, kind:SnippetKind):CopyTicket|null {
-  const definition = state.document?.definitions.find(item => item.id === id);
-  if (!definition || copyBlock(state, id, kind) !== null || !hostCurrent(state)) return null;
-  return {token: state.owner.token, revision: state.view.revision, document_revision: state.view.document_revision, definition_id: id, kind,
-    stamp: {basis: state.basis, revision: definition.revision, mark: state.marks[id], source: kind === 'template_recognize' ? state.view.revision : null}};
+export function copyTicket(state:RecognitionState, ids:readonly string[], kind:SnippetKind):CopyTicket|null {
+  if (copyBlock(state, ids, kind) !== null || !hostCurrent(state) || !sameJson(ids, copySelection(state, kind))) return null;
+  return {token: state.owner.token, revision: state.view.revision, document_revision: state.view.document_revision, definition_ids: [...ids], kind,
+    stamp: {basis: state.basis, definitions: Object.fromEntries(ids.map(id => {
+      const definition = state.document!.definitions.find(item => item.id === id)!;
+      return [id, {revision: definition.revision, mark: state.marks[id]}];
+    })), source: kind === 'template_recognize' ? state.view.revision : null, selection: state.trialSelection}};
 }
 
-// `result` is the host's generated source envelope; `error` its refusal or the clipboard failure.
+// `result` is the host's complete generated source envelope; `error` its refusal or the clipboard failure.
 export function applyCopy(state:RecognitionState, ticket:CopyTicket, result:CopyResult|null, error:Fault|null):RecognitionState {
   if (ticket.token !== state.owner.token) return state;
-  const copy: CopyRecord = {kind: ticket.kind, stamp: ticket.stamp, basis: result?.basis ?? null, verified: result?.verified ?? false, error};
-  return {...state, copies: {...state.copies, [ticket.definition_id]: copy}};
+  const copy: CopyRecord = {definition_ids: result?.definition_ids ?? ticket.definition_ids, stamp: ticket.stamp,
+    basis: result?.basis ?? null, verified: result?.verified ?? false, error};
+  return {...state, copies: {...state.copies, [ticket.kind]: copy}};
 }
 
-export function copyFreshness(state:RecognitionState, id:string):CopyFreshness|null {
-  const copy = state.copies[id];
+// Whether published source still equals what the same purpose would copy now. Setup follows its basis value. Grouped
+// OCR follows its checked set and zone definitions, not Game content, because it reads the pasted `recognitionBasis`.
+// A template Copy is bound to the frame, content basis and saved package revision.
+export function copyFreshness(state:RecognitionState, kind:SnippetKind):CopyFreshness|null {
+  const copy = state.copies[kind];
   if (!copy) return null;
   if (copy.error) return 'failed';
-  const definition = state.document?.definitions.find(item => item.id === id);
-  const obsolete = !definition || definition.revision !== copy.stamp.revision || state.marks[id] !== copy.stamp.mark || state.basis !== copy.stamp.basis
-    || (copy.stamp.source !== null && copy.stamp.source !== state.view.revision);
+  if (kind === 'game_content') return sameBasis(copy.basis, state.document?.basis) ? 'current' : 'obsolete';
+  const changed = !sameJson(copy.definition_ids, copySelection(state, kind)) || copy.definition_ids.some(id => {
+    const definition = state.document?.definitions.find(item => item.id === id);
+    const captured = copy.stamp.definitions[id];
+    return !definition || !captured || definition.revision !== captured.revision || state.marks[id] !== captured.mark;
+  });
+  const obsolete = changed || (kind === 'ocr_recognize' ? copy.stamp.selection !== state.trialSelection
+    : state.basis !== copy.stamp.basis || copy.stamp.source !== state.view.revision);
   return obsolete ? 'obsolete' : 'current';
 }
 

@@ -6,6 +6,8 @@ pub(crate) use admission::{HandleBudget, HandlePermit, Managed};
 pub use options::{option_path, resolve_options};
 
 #[cfg(test)]
+mod ocr_scan_tests;
+#[cfg(test)]
 mod test_support;
 
 use crate::images::PayloadBytes;
@@ -234,10 +236,11 @@ struct Worker {
     thread: JoinHandle<()>,
 }
 
-const OPERATIONS: [&str; 13] = [
+const OPERATIONS: [&str; 14] = [
     "asset",
     "observe",
     "recognize",
+    "scan_ocr_zones",
     "query",
     "query_wait",
     "submit",
@@ -475,7 +478,12 @@ impl Host {
         if let Some(engine) = &self.inner.engine {
             if matches!(
                 method,
-                "observe" | "recognize" | "query" | "query_wait" | "postcondition"
+                "observe"
+                    | "recognize"
+                    | "scan_ocr_zones"
+                    | "query"
+                    | "query_wait"
+                    | "postcondition"
             ) {
                 if method == "postcondition"
                     && lock(&self.inner.state).postconditions.len()
@@ -492,7 +500,7 @@ impl Host {
                 let mut state = lock(&self.inner.state);
                 match method {
                     "observe" => state.observations += 1,
-                    "recognize" | "query_wait" => state.recognitions += 1,
+                    "recognize" | "scan_ocr_zones" | "query_wait" => state.recognitions += 1,
                     "postcondition"
                         if state.postconditions.len() < self.inner.plan.limits.max_actions =>
                     {
@@ -517,6 +525,7 @@ impl Host {
                 self.observe()
             }
             "recognize" => self.recognize(&args, false),
+            "scan_ocr_zones" => self.scan_ocr_zones(args),
             "query" => self.recognize(&args, true),
             "query_wait" => self.query_wait(&args),
             "submit" => self.submit(&args),
@@ -740,6 +749,60 @@ impl Host {
         } else {
             Ok(result)
         }
+    }
+
+    fn scan_ocr_zones(&self, args: Value) -> Result<Value, Fault> {
+        let request: crate::ocr_scan::Request =
+            serde_json::from_value(args).map_err(|error| argument(error.to_string()))?;
+        self.check()?;
+        let mut state = lock(&self.inner.state);
+        let frame = self.observation(&state, &request.observation)?;
+        let (observation, zones) =
+            request.into_zones(640, 480, crate::ocr_scan::CONTROLLED_MAX_ZONES)?;
+        state.recognitions += 1;
+        if self.inner.plan.scenario == "backend-failure" {
+            return Err(
+                Fault::new("Backend", "controlled recognition backend failure")
+                    .with_context(json!({"operation":"ocr","observation":frame.value["id"],
+                    "cause":"injected-backend-failure"})),
+            );
+        }
+        let absent = matches!(
+            self.inner.plan.scenario.as_str(),
+            "no-match" | "query-absent"
+        );
+        let fixture = Region {
+            x: 100,
+            y: 80,
+            width: 40,
+            height: 20,
+        };
+        let mut output = Vec::with_capacity(zones.len());
+        let mut count = 0;
+        let mut text_bytes = 0usize;
+        for zone in zones {
+            let roi = Region {
+                x: zone.rect.x,
+                y: zone.rect.y,
+                width: zone.rect.width,
+                height: zone.rect.height,
+            };
+            let recognized = !absent && roi.contains(&fixture);
+            let regions = if recognized {
+                count += 1;
+                text_bytes = text_bytes.saturating_add(frame.visible.len());
+                crate::ocr_scan::check_region_budget(count, text_bytes)?;
+                vec![crate::ocr_scan::region_value(
+                    &frame.visible,
+                    0.98,
+                    [[100.0, 80.0], [140.0, 80.0], [140.0, 100.0], [100.0, 100.0]],
+                )]
+            } else {
+                Vec::new()
+            };
+            output.push(crate::ocr_scan::zone_value(zone.id, regions));
+        }
+        crate::ocr_scan::snapshot(Some(observation), output, count)
     }
 
     fn start_held_work(&self, frame: Arc<Frame>) -> Result<Arc<PhysicalWork>, Fault> {

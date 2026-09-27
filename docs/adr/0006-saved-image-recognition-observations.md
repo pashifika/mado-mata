@@ -11,11 +11,12 @@ unexpected text, concatenate regions, or add application-side normalization.
 A recognition-present result does not establish that the text is correct.
 
 Fine matching criteria and score policy belong to Script authors. Optional
-script-wait text exists only for explicit `query`/`query_wait` source Copy;
-it is not a trial filter or an authoring pass/fail oracle. Template trials use
-validated asset defaults and display their effective threshold, actual scores,
-and returned boxes. No-match has no invented score. The authoring surface does
-not add fine score-tuning controls or automatic OCR/template fallback.
+reference text is preserved author context, including across kind changes.
+Grouped OCR Copy includes it only in escaped comments, not as an engine argument,
+wait condition, filter, or authoring pass/fail oracle. Template trials use validated
+asset defaults and display their effective threshold, actual scores, and returned
+boxes. No-match has no invented score. The authoring surface adds no fine
+score-tuning controls or automatic OCR/template fallback.
 
 This replaces the earlier proposal to display exact-match verdicts against
 independently entered expected text. It follows the operator's decision after
@@ -38,10 +39,19 @@ remains authoritative and is unrelated to the number of saved definitions.
 
 ## Preview window
 
-One separate native window owns the image display, zoom, content selection,
-and on-image region editing. Definition lists, trial results, Save, and Copy
-remain in the main Edit window. Both use the same owner and revision-bound
-metadata; closing the preview does not discard drafts or release Edit.
+One independent, normal-level native window owns the image display, zoom, content
+selection, and on-image region editing. It is not parented above the main window.
+Definition lists, trial results, Save, and Copy remain in the main Edit window.
+Both use the same owner and revision-bound metadata; closing the preview does
+not discard drafts or release Edit.
+
+Game content is reusable setup; Regions is the default repeated-authoring tool.
+Confirmed content is reused for same-size scene images and from saved metadata
+after reopening. Explicit content edits and different image dimensions require
+confirmation. Equal dimensions cannot establish equal placement; the operator
+must adjust content when placement changes. Every replacement still invalidates
+frame observations and current crop selections. Copy source freshness is separate
+from the historical trial evidence shown at Copy time.
 
 ## Image policy
 
@@ -95,9 +105,30 @@ change.
 ## Source Copy
 
 Copy requires a loaded frame with confirmed geometry; a saved-sample trial does
-not establish placement. Template Copy also requires current saved pixels,
-metadata, rights, and maps. A current trial is observation evidence, not a
-correctness verdict; otherwise OCR Copy is explicitly unverified.
+not establish placement. Game content setup emits reusable `recognitionBasis`
+data without requiring selected definitions. This is not Engine initialization;
+resource paths, environment, target selection, and native authority remain outside
+Script. Setup follows actual geometry values and is never trial-verified.
+
+The original Script SDK exposed single-ROI recognition, although the public engine
+already supported grouped OCR. The operator approved extending the SDK rather than
+presenting sequential waits as grouping. `scan_ocr_zones` now maps every checked OCR
+region relative to the pasted basis and invokes one public grouped scan over one
+retained observation. The whole selection must fit the actual engine capability;
+unknown bounds and excess selection are refused, not split.
+
+The bounded result preserves every public observation, caller/engine ordering, and
+explicit no-match zones. It is a plain snapshot without a result handle; generated
+code releases the observation in `finally`. OCR source has no expected-text filter,
+wait, input, or logging. Legacy single-ROI `recognize`, `query`, and `query_wait`
+remain legitimate Script APIs, but sequential wait Copy is removed.
+
+Grouped source freshness follows normalized definitions and checked selection.
+The separately copied setup must be replaced after Game content changes.
+Template Copy retains its concrete basis, selected saved pixels, metadata, rights,
+and maps. Trial evidence describes observations at Copy time, never later images
+or text correctness. Absence of current successful observations is unverified,
+not a reason to filter or discard generated source.
 
 Only explicit Copy publishes generated `mado-host-v1` source to the macOS
 `NSPasteboard` on the main thread. The WebView does not write through

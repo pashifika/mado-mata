@@ -97,6 +97,11 @@ pub struct NormalizedRect {
 impl NormalizedRect {
     pub fn map_to_pixels(&self, basis: &GeometryBasis) -> Result<PixelRect, Fault> {
         basis.validate()?;
+        self.map_in_content(basis.content)
+    }
+
+    pub(crate) fn map_in_content(&self, content: PixelRect) -> Result<PixelRect, Fault> {
+        content.validate_in(u32::MAX, u32::MAX)?;
         if [self.u0, self.v0, self.u1, self.v1]
             .iter()
             .any(|edge| !edge.is_finite() || !(0.0..=1.0).contains(edge))
@@ -107,8 +112,7 @@ impl NormalizedRect {
                 "normalized region must have finite ordered edges within content",
             ));
         }
-        let content = basis.content;
-        // The validated image bound makes every conversion exact and non-overflowing.
+        // Validated content bounds make the integer conversions and origin additions safe.
         let left = (self.u0 * f64::from(content.width)).floor() as u32;
         let top = (self.v0 * f64::from(content.height)).floor() as u32;
         let right = (self.u1 * f64::from(content.width)).ceil() as u32;
@@ -295,14 +299,11 @@ impl RecognitionDocument {
             match (definition.kind, &definition.template) {
                 (RecognitionKind::Ocr, None) => {}
                 (RecognitionKind::Template, Some(settings)) => {
-                    if definition.expected.is_some()
-                        || !settings.threshold.is_finite()
+                    if !settings.threshold.is_finite()
                         || !(0.0..=1.0).contains(&settings.threshold)
                         || settings.max_results == 0
                     {
-                        return Err(invalid(
-                            "template requires supported match defaults and no OCR expectation",
-                        ));
+                        return Err(invalid("template requires supported match defaults"));
                     }
                     let search = settings.search_region.map_to_pixels(&self.basis)?;
                     let (width, height) = definition

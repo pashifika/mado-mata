@@ -1191,16 +1191,16 @@ export default function App() {
     });
   }
 
-  async function copyRecognition(id: string, mode: recognition.SnippetKind) {
+  async function copyRecognition(ids: string[], mode: recognition.SnippetKind) {
     await recognitionCommand('copyingRecognition', async initial => {
       const {session, state} = await synchronizeRecognition(initial.owner);
-      const ticket = recognition.copyTicket(state, id, mode);
+      const ticket = recognition.copyTicket(state, ids, mode);
       if (!ticket) throw new LocalFault({key: 'recognitionDraftChanged'});
       const captured = ticket;
       let result: recognition.CopyResult | null = null;
       try {
         result = await invoke<recognition.CopyResult>('recognition_copy', {
-          owner: session.owner, revision: session.revision, documentRevision: ticket.document_revision, definitionId: id, mode,
+          owner: session.owner, revision: session.revision, documentRevision: ticket.document_revision, definitionIds: ticket.definition_ids, mode,
         });
         updateRecognition(captured.token, current => recognition.applyCopy(current, captured, result, null));
         updateAuthoring(current => current?.owner.token === captured.token ? {...current, notice: {key: 'recognitionCopied'}} : current);
@@ -1915,7 +1915,7 @@ export default function App() {
               handlers={{
                 load: () => void loadRecognition(), confirm: () => void confirmRecognition(),
                 trial: (kind, ids) => void ownAuthoringWorker(() => trialRecognition(kind, ids)), stop: () => void stopValidation(),
-                save: () => void saveRecognition(), copy: (id, mode) => void copyRecognition(id, mode),
+                save: () => void saveRecognition(), copy: (ids, mode) => void copyRecognition(ids, mode),
                 discard: () => void discardRecognition(), capabilities: () => void ownAuthoringWorker(checkRecognitionCapabilities),
                 openPreview: () => void openRecognitionPreview(), reload: () => void readRecognition(),
               }}/>

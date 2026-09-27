@@ -135,7 +135,7 @@ export default function RecognitionPreview() {
         <div className="segmented" role="group" aria-label={r.toolLabel}>
           <button id="preview-tool-zones" type="button" aria-pressed={display.tool === 'zones'} disabled={!frame}
             onClick={() => changeDisplay({...display, tool: 'zones'})}>{r.toolZones}</button>
-          <button id="preview-tool-content" type="button" aria-pressed={display.tool === 'content'} disabled={!frame}
+          <button id="preview-tool-content" type="button" aria-pressed={display.tool === 'content'} disabled={!frame || !editable}
             onClick={() => changeDisplay({...display, tool: 'content'})}>{r.toolContent}</button>
         </div>
         <div className="segmented" role="group" aria-label={r.zoomLabel}>
