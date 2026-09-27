@@ -490,6 +490,10 @@ that the backend returned, its session closed, or its child was reaped.
 No subsequent operation is admitted while the owned worker is unsettled.
 Read primary outcome and cleanup independently; forced or incomplete cleanup
 does not become a successful trial.
+An unexpected child exit without a verified terminal outcome reports `Transport`
+unless an earlier failure or cancellation already explains it. The collapsed
+cleanup summary flags incomplete or unconfirmed cleanup independently of child
+reaping; expand it for the retained details.
 Confirmed child reaping releases Edit admission even after failed cleanup, unless
 the supervisor reports containment. Unconfirmed ownership continues to refuse
 Save, Exit and new operations. Terminal collection retains the outcome before

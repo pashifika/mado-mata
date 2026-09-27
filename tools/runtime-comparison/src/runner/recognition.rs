@@ -322,6 +322,7 @@ fn supervise(
             "recognition child required bounded containment",
         ));
     }
+    primary = child_exit_primary(primary, &evidence, exit.success(), exit.code());
     let clean =
         build.is_some() && evidence["cleanup"]["clean"] == true && exit.success() && !forced;
     let cleanup = if clean {
@@ -338,6 +339,31 @@ fn supervise(
         "capabilities":evidence["capabilities"],"text_contract":trial::TEXT_CONTRACT,
         "elapsed_us":started.elapsed().as_micros(),"image_payload_scope":"owned image buffers; native-library scratch is not a total RSS bound"}),
     )
+}
+
+// EOF alone is not a terminal outcome. Apply this only after established primary,
+// cancellation, and containment causes so an incomplete exchange cannot replace them.
+pub(super) fn child_exit_primary(
+    primary: Option<Fault>,
+    evidence: &Value,
+    exit_success: bool,
+    exit_code: Option<i32>,
+) -> Option<Fault> {
+    primary.or_else(|| {
+        let terminal_received = evidence["event"] == "Terminal";
+        if terminal_received && exit_success {
+            return None;
+        }
+        Some(
+            Fault::new(
+                "Transport",
+                "recognition child exited without a verified terminal outcome",
+            )
+            .with_context(json!({
+                "stage":"child_exit","terminal_received":terminal_received,"exit_code":exit_code
+            })),
+        )
+    })
 }
 
 fn limits() -> Limits {

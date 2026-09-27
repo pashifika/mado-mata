@@ -129,6 +129,7 @@
     "score": "スコア {value}",
     "scoreUnavailable": "候補が返されなかったため、スコアはありません。",
     "cleanup": "後始末",
+    "cleanupIncomplete": "未完了または未確認",
     "cleanupStates": {"reaped": "子プロセスを回収済み", "forced": "子プロセスを強制停止して回収済み", "unreported": "子プロセスの回収は報告されていません"},
     "saveHeading": "保存",
     "unsaved": "未保存",
