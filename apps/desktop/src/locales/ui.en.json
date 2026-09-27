@@ -162,6 +162,8 @@
     "basis": "Geometry basis: image {frameWidth} × {frameHeight}, content x {x}, y {y}, {width} × {height}. Coordinates are bound to this basis.",
     "defaultName": "Region {number}",
     "previewTitle": "Recognition preview",
+    "previewDone": "Done",
+    "previewCloseFailed": "The preview could not be closed",
     "previewWaiting": "Waiting for the Edit window…",
     "previewNoOwner": "No Edit session shares recognition state. Close this window.",
     "previewNoFrame": "No image loaded. Load a PNG from the Edit window.",

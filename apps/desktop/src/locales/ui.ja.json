@@ -162,6 +162,8 @@
     "basis": "座標の基準: 画像 {frameWidth} × {frameHeight}、ゲーム画面の範囲 x {x}、y {y}、{width} × {height}。座標はこの基準に依存します。",
     "defaultName": "領域 {number}",
     "previewTitle": "認識プレビュー",
+    "previewDone": "完了",
+    "previewCloseFailed": "プレビューを閉じられませんでした",
     "previewWaiting": "編集ウィンドウからの応答を待っています…",
     "previewNoOwner": "認識の状態を共有している編集セッションがありません。このウィンドウを閉じてください。",
     "previewNoFrame": "画像が読み込まれていません。編集ウィンドウから PNG を読み込んでください。",

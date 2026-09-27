@@ -2,6 +2,7 @@ import {useEffect, useRef, useState} from 'react';
 import type {KeyboardEvent} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {emitTo, listen} from '@tauri-apps/api/event';
+import {getCurrentWindow} from '@tauri-apps/api/window';
 import RecognitionCanvas from '../components/RecognitionCanvas.tsx';
 import Select from '../components/Select.tsx';
 import {FaultMessage, fault} from '../components/ResultPanel.tsx';
@@ -26,6 +27,7 @@ export default function RecognitionPreview() {
   const [rasterError, setRasterError] = useState<Fault | null>(null);
   const [sendError, setSendError] = useState<Fault | null>(null);
   const [stopError, setStopError] = useState<Fault | null>(null);
+  const [closeError, setCloseError] = useState<Fault | null>(null);
   const [display, setDisplay] = useState<PreviewDisplay>({zoom: 'fit', tool: 'zones'});
   const [viewport, setViewport] = useState({width: 0, height: 0});
   const stage = useRef<HTMLDivElement>(null);
@@ -163,9 +165,14 @@ export default function RecognitionPreview() {
         }}>{r.stop}</button>}
         {frame && <span className={snapshot?.confirmed ? 'tag current' : 'tag stale'}>{snapshot?.confirmed ? r.confirmed : r.unconfirmed}</span>}
         {frame && <span id="preview-scale" className="muted mono">{r.scale(frame.width, frame.height, percent)}</span>}
+        <button id="preview-done" type="button" className="preview-done" onClick={() => {
+          setCloseError(null);
+          getCurrentWindow().close().catch(cause => setCloseError(fault(cause)));
+        }}>{r.previewDone}</button>
       </header>
       <p className="preview-help field-help">{display.tool === 'content' ? r.contentHelp : r.zonesHelp}</p>
       {stopError && <FaultMessage title={r.stopFailed} value={stopError}/>}
+      {closeError && <FaultMessage title={r.previewCloseFailed} value={closeError}/>}
       {snapshot && !editable && <p className="inline-warning">{snapshot.lockReason ? `${r.readOnly} · ${snapshot.lockReason}` : r.readOnly}</p>}
       {snapshot?.notice && <p id="preview-notice" className="inline-warning" role="status">{r.notice(snapshot.notice)}</p>}
       {rasterError && <FaultMessage title={r.previewImageFailed} value={rasterError}/>}

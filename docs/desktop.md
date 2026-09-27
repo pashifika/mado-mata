@@ -355,6 +355,9 @@ raster, not a second editable original. Its scale does not change stored geometr
 The percentage picker uses the same keyboard-accessible dropdown as the main
 window. Tool and zoom controls retain separate focus outlines; **Fit** and the
 minus/plus buttons do not change the stored geometry.
+The toolbar's rightmost **Done** button closes only the preview, including when
+no image is loaded. It does not save, discard, exit Edit, or stop a running trial.
+Reopen with **Open preview** to continue the same draft.
 
 Use this workflow:
 

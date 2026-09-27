@@ -33,6 +33,7 @@
 .preview-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
 .preview-toolbar button { font-size: 12px; padding: 4px 10px; }
 .preview-toolbar > .button-row { margin: 0; }
+.preview-toolbar .preview-done { margin-inline-start: auto; flex-shrink: 0; }
 /* The zoom Select matches the toolbar buttons; recognition.css precedes the base Select rules, hence the scoping. */
 .preview-toolbar .select-trigger { min-height: 0; gap: 8px; border-color: #c9d2dd; }
 .preview-toolbar .select-trigger:disabled { background: var(--surface); color: inherit; }
