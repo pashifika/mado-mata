@@ -23,6 +23,7 @@ serde_json = { version = "=1.0.145", features = ["float_roundtrip"] }
 sha2 = "=0.10.9"
 unicode-normalization = "=0.1.25"
 zip = { version = "=8.6.0", default-features = false }
+xid = { git = "https://github.com/pashifika/xid-rs", rev = "bb7de7a0370d051f7fc07f31b87db62549118bfe", default-features = false }
 # Pinned streaming API bounds XML/binary plist expansion without a Value tree.
 plist = { version = "=1.10.1", default-features = false, features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] }
 tauri = { version = "=2.11.6", optional = true }

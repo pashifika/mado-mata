@@ -277,6 +277,7 @@ struct Workspaces {
 
 pub struct Application {
     runner: DesktopController,
+    root: PathBuf,
     store: Arc<Mutex<Store>>,
     commands: Mutex<()>,
     target_observation: Arc<Mutex<ObservationSlot>>,
@@ -339,6 +340,12 @@ impl Application {
     ) -> Result<Arc<Self>, Fault> {
         let store = Store::new(root.clone())?;
         store.settings()?;
+        if crate::restore::pending(&root)? {
+            return Err(Fault::new(
+                "RestorePending",
+                "Resolve the interrupted configuration transaction before constructing an Application",
+            ));
+        }
         let publisher = Arc::new(Publisher::new(root.clone()));
         // Discover before any restored source is inspected. Keep the application
         // available for explicit recovery; every source admission checks the journal.
@@ -411,6 +418,7 @@ impl Application {
         };
         let application = Arc::new(Self {
             runner,
+            root,
             store: Arc::new(Mutex::new(store)),
             commands: Mutex::new(()),
             target_observation,
@@ -445,6 +453,26 @@ impl Application {
     }
 
     fn command_state(
+        &self,
+    ) -> Result<
+        (
+            std::sync::MutexGuard<'_, ()>,
+            std::sync::MutexGuard<'_, Workspaces>,
+        ),
+        Fault,
+    > {
+        let guards = self.reconstruction_state()?;
+        // Root lookup must not wait on a preparation worker's Store lock.
+        if crate::restore::pending(&self.root)? {
+            return Err(Fault::new(
+                "RestorePending",
+                "Resolve the interrupted configuration transaction before using this session",
+            ));
+        }
+        Ok(guards)
+    }
+
+    fn reconstruction_state(
         &self,
     ) -> Result<
         (

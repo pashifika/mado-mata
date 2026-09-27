@@ -2,7 +2,7 @@ use crate::application::{Application, ObservationSlot, WorkspaceCatalog};
 use crate::backup::{self, SnapshotReceipt};
 use crate::configuration;
 use crate::restore;
-use crate::storage::{self, EditableSettings, Profile, Settings, Store};
+use crate::storage::{self, EditableSettings, Settings, Store};
 use mado_runtime_comparison::model::Fault;
 use serde::Serialize;
 use serde_json::json;
@@ -175,7 +175,15 @@ impl Bootstrap {
                 Ok(catalog) => status.catalog = Some(catalog),
                 Err(error) if matches!(status.state, Phase::Ready) => {
                     let transient = error.category == "WorkspaceBusy";
-                    status.stage = if transient { "workspace" } else { "tabs" }.into();
+                    status.stage = if error.category == "RestorePending" {
+                        status.pending_restore = true;
+                        "restore"
+                    } else if transient {
+                        "workspace"
+                    } else {
+                        "tabs"
+                    }
+                    .into();
                     status.fault = Some(error.clone());
                     if !transient {
                         status.state = Phase::Recovery;
@@ -188,6 +196,7 @@ impl Bootstrap {
                         {
                             state.phase = Phase::Recovery;
                             state.stage = status.stage.clone();
+                            state.pending_restore = status.pending_restore;
                             state.fault = Some(error);
                         }
                     }
@@ -274,7 +283,7 @@ impl Bootstrap {
                     "restore",
                     Fault::new(
                         "RestorePending",
-                        "An interrupted restore must be completed or rolled back",
+                        "An interrupted configuration operation must be completed or rolled back",
                     ),
                 );
                 return;
@@ -303,6 +312,11 @@ impl Bootstrap {
                 return;
             }
         };
+        if let Err(error) = crate::identity_migrations::migrate(root) {
+            lock(&self.state).pending_restore = restore::pending(root).unwrap_or(true);
+            self.fail("identity_migration", error);
+            return;
+        }
         if self.closing.load(Ordering::Acquire) {
             return;
         }
@@ -357,7 +371,7 @@ impl Bootstrap {
         if restore::pending(root)? {
             return Err(Fault::new(
                 "RestorePending",
-                "Resolve the interrupted restore first",
+                "Resolve the interrupted configuration operation first",
             ));
         }
         if self.legacy_root.is_some() && !confirm_fresh {
@@ -459,7 +473,7 @@ impl Bootstrap {
         if restore::pending(root)? {
             return Err(Fault::new(
                 "RestorePending",
-                "Resolve the interrupted restore before taking another snapshot",
+                "Resolve the interrupted configuration operation before taking another snapshot",
             ));
         }
         let application = lock(&self.state).application.clone();
@@ -497,7 +511,7 @@ impl Bootstrap {
         if restore::pending(root)? {
             return Err(Fault::new(
                 "RestorePending",
-                "Resolve the interrupted restore first",
+                "Resolve the interrupted configuration operation first",
             ));
         }
         let incoming = backup::read(archive)?;
@@ -613,79 +627,43 @@ impl Bootstrap {
 }
 
 fn legacy_files(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, Fault> {
-    storage::check_directory(root)?;
-    if storage::exists(&root.join("settings.pending"))? {
+    if restore::pending(root)? {
         return Err(Fault::new(
             "LegacyImport",
-            "Historical settings have an interrupted pending write",
+            "Historical configuration has an interrupted transaction",
         ));
     }
-    let mut files = BTreeMap::new();
-    let bytes = storage::read_bytes(&root.join("settings.json"), storage::MAX_SETTINGS_BYTES)?;
-    storage::validate_settings(&storage::decode::<Settings>(&bytes)?)?;
-    files.insert("settings.json".into(), bytes);
     let profiles = root.join("profiles");
-    if !storage::exists(&profiles)? {
-        return Ok(files);
+    if storage::exists(&profiles)? {
+        storage::check_directory(&profiles)?;
+        for (index, entry) in fs::read_dir(&profiles)
+            .map_err(|error| configuration::io_fault("enumerate historical profiles", error))?
+            .enumerate()
+        {
+            entry
+                .map_err(|error| configuration::io_fault("read historical profile entry", error))?;
+            if index >= storage::MAX_DIRECTORY_ENTRIES {
+                return Err(Fault::new(
+                    "StorageLimit",
+                    "Historical profile directory has too many entries",
+                ));
+            }
+        }
     }
-    storage::check_directory(&profiles)?;
-    let mut total = 0;
-    let entries =
-        fs::read_dir(&profiles).map_err(|error| Fault::new("LegacyImport", error.to_string()))?;
-    for (index, entry) in entries.enumerate() {
-        if index >= storage::MAX_DIRECTORY_ENTRIES {
-            return Err(Fault::new(
-                "StorageLimit",
-                "Historical profile directory has too many entries",
-            ));
-        }
-        let entry = entry.map_err(|error| Fault::new("LegacyImport", error.to_string()))?;
-        let filename = entry.file_name();
-        let raw = filename.as_encoded_bytes();
-        if !raw.ends_with(b".json") && !raw.ends_with(b".pending") {
-            continue;
-        }
-        let name = filename.to_str().ok_or_else(|| {
-            Fault::new("LegacyImport", "Historical profile filename is not UTF-8")
-        })?;
-        if name.ends_with(".pending") {
-            return Err(Fault::new(
-                "LegacyImport",
-                "Historical profiles have an interrupted pending write",
-            ));
-        }
-        let Some(id) = name.strip_suffix(".json") else {
-            continue;
-        };
-        storage::validate_id(id)?;
-        if files.len() > storage::MAX_PROFILES {
-            return Err(Fault::new(
-                "StorageLimit",
-                "Historical profile count exceeds 64",
-            ));
-        }
-        let bytes = storage::read_bytes(&entry.path(), storage::MAX_PROFILE_BYTES)?;
-        let profile: Profile = storage::decode(&bytes)?;
-        storage::validate_profile(&profile)?;
-        if profile.id != id {
-            return Err(Fault::new(
-                "ProfileIdentity",
-                "Historical profile ID does not match its filename",
-            ));
-        }
-        total += bytes.len();
-        if total > storage::MAX_TOTAL_BYTES {
-            return Err(Fault::new(
-                "StorageLimit",
-                "Historical profiles exceed 1 MiB",
-            ));
-        }
-        files.insert(format!("profiles/{name}"), bytes);
-    }
-    Ok(files)
+    let captured = configuration::capture(root)?;
+    restore::validate(&captured)?;
+    Ok(captured.files)
 }
 
 fn import_legacy(source: &Path, destination: &Path) -> Result<(), Fault> {
+    import_legacy_with(source, destination, || {})
+}
+
+fn import_legacy_with(
+    source: &Path,
+    destination: &Path,
+    staged: impl FnOnce(),
+) -> Result<(), Fault> {
     if storage::exists(destination)? {
         return Err(Fault::new(
             "LegacyConflict",
@@ -693,6 +671,10 @@ fn import_legacy(source: &Path, destination: &Path) -> Result<(), Fault> {
         ));
     }
     let files = legacy_files(source)?;
+    let normalized = crate::identity_migrations::normalize_restore(
+        configuration::Capture::from_files(files.clone(), true)?,
+        &configuration::Capture::from_files(BTreeMap::new(), false)?,
+    )?;
     let parent = destination
         .parent()
         .ok_or_else(|| Fault::new("LegacyImport", "Destination has no parent"))?;
@@ -726,21 +708,34 @@ fn import_legacy(source: &Path, destination: &Path) -> Result<(), Fault> {
         .create(&stage)
         .map_err(|error| Fault::new("LegacyImport", error.to_string()))?;
     let result = (|| {
-        for (relative, bytes) in &files {
+        for (relative, bytes) in &normalized.files {
             let path = stage.join(relative);
             storage::private_directory(path.parent().expect("known contained path"))?;
             storage::write_atomic(&path, bytes, configuration::publish_no_replace)?;
         }
+        staged();
         if legacy_files(source)? != files {
             return Err(Fault::new(
                 "LegacyImport",
                 "Historical configuration changed during import",
             ));
         }
-        if stage.join("profiles").exists() {
-            configuration::sync_directory(&stage.join("profiles"))?;
+        let mut directories = std::collections::BTreeSet::new();
+        for relative in normalized.files.keys() {
+            let mut parent = stage.join(relative);
+            while parent.pop() && parent.starts_with(&stage) {
+                directories.insert(parent.clone());
+            }
         }
-        configuration::sync_directory(&stage)?;
+        for directory in directories.iter().rev() {
+            configuration::sync_directory(directory)?;
+        }
+        if configuration::capture(&stage)? != normalized {
+            return Err(Fault::new(
+                "LegacyImport",
+                "Staged historical configuration changed before publication",
+            ));
+        }
         configuration::publish_no_replace(&stage, destination)
             .map_err(|error| Fault::new("LegacyImport", error.to_string()))?;
         configuration::sync_directory(parent).map_err(|mut fault| {
@@ -1457,3 +1452,6 @@ mod tests {
         bootstrap.shutdown().unwrap();
     }
 }
+
+#[cfg(test)]
+mod migration_tests;

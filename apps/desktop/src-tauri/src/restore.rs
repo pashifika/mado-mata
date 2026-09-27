@@ -6,7 +6,7 @@ use crate::configuration::{self, Capture, Kind, MAX_ENUMERATED, capture, io_faul
 use crate::storage::{
     self, MAX_OPEN_TABS, MAX_PROFILES, MAX_TABS, MAX_TOTAL_BYTES, Profile, Settings, TabRecord,
     check_directory, checked_file, decode, encode, exists, filesystem_key, read_bytes,
-    validate_package_id, validate_profile, validate_settings, validate_tab,
+    validate_package_id, validate_settings, validate_tab,
 };
 use crate::target::{MAX_TARGET_BYTES, TargetRecord};
 use mado_runtime_comparison::model::Fault;
@@ -24,6 +24,18 @@ const MAX_JOURNAL: usize = 2 * MAX_MANIFEST + 1024;
 /// Preservation archives can contain malformed or future documents. Only a
 /// complete, supported and ownership-consistent set may be installed.
 pub fn validate(capture: &Capture) -> Result<(), Fault> {
+    validate_set(capture, true, true)
+}
+
+pub(crate) fn validate_installed(capture: &Capture) -> Result<(), Fault> {
+    validate_set(capture, false, true)
+}
+
+pub(crate) fn validate_owned(capture: &Capture, allow_legacy: bool) -> Result<(), Fault> {
+    validate_set(capture, allow_legacy, false)
+}
+
+fn validate_set(capture: &Capture, allow_legacy: bool, unassigned: bool) -> Result<(), Fault> {
     capture.check()?;
     let settings = capture.files.get("settings.json").ok_or_else(|| {
         invalid("snapshot has no App settings; it is preservation material, not a complete restore")
@@ -47,56 +59,75 @@ pub fn validate(capture: &Capture) -> Result<(), Fault> {
     }
     let mut budgets: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for (path, bytes) in &capture.files {
-        match path_kind(path)? {
-            Kind::Settings | Kind::Tab => {}
-            Kind::LegacyProfile => {
-                let profile: Profile = decode(bytes)?;
-                validate_profile(&profile)?;
-                if path != &format!("profiles/{}.json", profile.id) {
-                    return Err(invalid("legacy profile identity differs from its filename"));
-                }
-                budget(&mut budgets, "profiles", bytes.len())?;
-            }
-            Kind::Package => {
-                let parts: Vec<_> = path.split('/').collect();
-                let tab = tabs.get(parts[1]).ok_or_else(|| {
-                    invalid("orphaned package configuration has no supported Tab record")
-                })?;
-                validate_package_id(parts[2])?;
-                if !tab
-                    .packages
-                    .iter()
-                    .any(|reference| reference.package_id == parts[2])
-                {
-                    return Err(invalid(
-                        "package configuration is not owned by a saved Tab reference",
-                    ));
-                }
-                if parts[3] == "target.config" {
-                    if bytes.len() > MAX_TARGET_BYTES {
-                        return Err(invalid("target configuration exceeds its byte bound"));
+        let result = (|| {
+            match path_kind(path)? {
+                Kind::Settings | Kind::Tab => {}
+                Kind::IdentityMigrations => crate::identity_migrations::validate_ledger(capture)?,
+                Kind::LegacyProfile => {
+                    if !unassigned {
+                        return Ok(());
                     }
-                    let target: TargetRecord = decode(bytes)?;
-                    target.validate_owned(parts[1], parts[2])?;
-                    // Target has its own per-file limit; Capture enforces the shared
-                    // file/byte budget without consuming a portable-profile slot.
-                    continue;
+                    let mut profile: Profile = decode(bytes)?;
+                    crate::identity_migrations::validate_profile(&mut profile, true)?;
+                    if path != &format!("profiles/{}.json", profile.id) {
+                        return Err(invalid("legacy profile identity differs from its filename"));
+                    }
+                    budget(&mut budgets, "profiles", bytes.len())?;
                 }
-                let profile: Profile = decode(bytes)
-                    .map_err(|_| invalid("unsupported or malformed package configuration owner"))?;
-                validate_profile(&profile)?;
-                if parts[3] != format!("{}.config", profile.id) || profile.package_id != parts[2] {
-                    return Err(invalid(
-                        "profile identity differs from its Tab/package/file scope",
-                    ));
+                Kind::Package => {
+                    let parts: Vec<_> = path.split('/').collect();
+                    let tab = tabs.get(parts[1]).ok_or_else(|| {
+                        invalid("orphaned package configuration has no supported Tab record")
+                    })?;
+                    validate_package_id(parts[2])?;
+                    if !tab
+                        .packages
+                        .iter()
+                        .any(|reference| reference.package_id == parts[2])
+                    {
+                        return Err(invalid(
+                            "package configuration is not owned by a saved Tab reference",
+                        ));
+                    }
+                    if parts[3] == "target.config" {
+                        if bytes.len() > MAX_TARGET_BYTES {
+                            return Err(invalid("target configuration exceeds its byte bound"));
+                        }
+                        let mut target: TargetRecord = decode(bytes)?;
+                        crate::identity_migrations::validate_target(
+                            &mut target,
+                            parts[1],
+                            parts[2],
+                            allow_legacy,
+                        )?;
+                        // Target has its own per-file limit; Capture enforces the shared
+                        // file/byte budget without consuming a portable-profile slot.
+                        return Ok(());
+                    }
+                    let mut profile: Profile = decode(bytes).map_err(|_| {
+                        invalid("unsupported or malformed package configuration owner")
+                    })?;
+                    crate::identity_migrations::validate_profile(&mut profile, allow_legacy)?;
+                    if parts[3] != format!("{}.config", profile.id)
+                        || profile.package_id != parts[2]
+                    {
+                        return Err(invalid(
+                            "profile identity differs from its Tab/package/file scope",
+                        ));
+                    }
+                    budget(
+                        &mut budgets,
+                        &format!("{}/{}", parts[1], parts[2]),
+                        bytes.len(),
+                    )?;
                 }
-                budget(
-                    &mut budgets,
-                    &format!("{}/{}", parts[1], parts[2]),
-                    bytes.len(),
-                )?;
             }
-        }
+            Ok(())
+        })();
+        result.map_err(|mut fault: Fault| {
+            fault.context["path"] = json!(path);
+            fault
+        })?;
     }
     Ok(())
 }
@@ -127,8 +158,19 @@ pub fn pending(root: &Path) -> Result<bool, Fault> {
 #[serde(deny_unknown_fields)]
 struct Journal {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation: Option<crate::identity_migrations::Operation>,
     before: Manifest,
     after: Manifest,
+}
+
+impl Journal {
+    fn check(&self) -> Result<(), Fault> {
+        match (self.version, &self.operation) {
+            (1, None) | (2, Some(_)) => Ok(()),
+            _ => Err(invalid("unsupported or ambiguous configuration journal")),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -169,7 +211,7 @@ fn install_with(
     validate(&new)?;
     if pending(root)? {
         return Err(invalid(
-            "an interrupted restore must be completed or rolled back first",
+            "an interrupted configuration transaction must be recovered first",
         ));
     }
     let observed = capture(root)?;
@@ -179,6 +221,44 @@ fn install_with(
         return Err(Fault::new(
             "SnapshotReceiptStale",
             "a separately requested snapshot matching the current configuration is required",
+        ));
+    }
+    let new = crate::identity_migrations::normalize_restore(new, &observed)?;
+    publish(
+        root,
+        observed,
+        new,
+        crate::identity_migrations::Operation::Restore,
+        hook,
+    )
+}
+
+pub(crate) fn install_migration(
+    root: &Path,
+    plan: crate::identity_migrations::Plan,
+) -> Result<(), Fault> {
+    let (before, after, operation) = plan.into_parts();
+    publish(root, before, after, operation, &mut |_| Ok(()))
+}
+
+fn publish(
+    root: &Path,
+    observed: Capture,
+    new: Capture,
+    operation: crate::identity_migrations::Operation,
+    hook: &mut impl FnMut(Point) -> Result<(), Fault>,
+) -> Result<(), Fault> {
+    crate::identity_migrations::validate_transition(&observed, &new, &operation)?;
+    crate::identity_migrations::check_rollback_budget(&observed, &new)?;
+    if pending(root)? {
+        return Err(invalid(
+            "an interrupted restore must be completed or rolled back first",
+        ));
+    }
+    if capture(root)? != observed {
+        return Err(Fault::new(
+            "ConfigurationChanged",
+            "configuration changed after transaction admission",
         ));
     }
     // Changing the spelling of an existing directory is not an authorized tree
@@ -192,7 +272,8 @@ fn install_with(
     let staging = configuration::temporary(root, "restore-stage");
     configuration::create_private_directory(&staging)?;
     let journal = Journal {
-        version: 1,
+        version: 2,
+        operation: Some(operation),
         before: Manifest::new(&before),
         after: Manifest::new(&new),
     };
@@ -272,12 +353,14 @@ fn recover_with(
     let directory = root.join(JOURNAL);
     check_directory(&directory)?;
     let journal: Journal = decode(&read_bytes(&directory.join("journal.json"), MAX_JOURNAL)?)?;
-    if journal.version != 1 {
-        return Err(invalid("unsupported restore journal version"));
-    }
+    journal.check()?;
     let before = load_capture(&directory, "old", &journal.before)?;
     let after = load_capture(&directory, "new", &journal.after)?;
-    validate(&after)?;
+    if let Some(operation) = &journal.operation {
+        crate::identity_migrations::validate_transition(&before, &after, operation)?;
+    } else {
+        validate(&after)?;
+    }
     let mut aliases = BTreeMap::new();
     for path in before.files.keys().chain(after.files.keys()) {
         configuration::check_aliases(path, &mut aliases)?;
@@ -320,7 +403,13 @@ fn apply(
     rollback: bool,
     hook: &mut impl FnMut(Point) -> Result<(), Fault>,
 ) -> Result<(), Fault> {
-    let target = if rollback { before } else { after };
+    let retained;
+    let target = if rollback {
+        retained = crate::identity_migrations::rollback_capture(before, after)?;
+        &retained
+    } else {
+        after
+    };
     let live = capture(root)?;
     let paths: BTreeSet<_> = before
         .files
@@ -531,11 +620,13 @@ fn finish(
         } else {
             let journal: Journal =
                 decode(&read_bytes(&directory.join("journal.json"), MAX_JOURNAL)?)?;
-            if journal.version != 1 {
-                return Err(invalid("unsupported restore journal version"));
-            }
+            journal.check()?;
             let target = if rollback {
-                journal.before
+                let before = load_capture(&directory, "old", &journal.before)?;
+                let after = load_capture(&directory, "new", &journal.after)?;
+                Manifest::new(&crate::identity_migrations::rollback_capture(
+                    &before, &after,
+                )?)
             } else {
                 journal.after
             };
@@ -742,7 +833,7 @@ pub(crate) mod tests {
         }
     }
     fn profile_id() -> String {
-        format!("p-{}-{}-{}", "0".repeat(32), "0".repeat(8), "0".repeat(16))
+        "00000000000000000000".into()
     }
     fn tab(name: &str, open: bool) -> Vec<u8> {
         serde_json::to_vec(&TabRecord {
@@ -1342,7 +1433,7 @@ pub(crate) mod tests {
         };
         let profile = Profile {
             version: 1,
-            id: format!("p-{}-{}-{}", "0".repeat(32), "0".repeat(8), "0".repeat(16)),
+            id: profile_id(),
             name: "Profile".into(),
             package_id: "pkg".into(),
             schema_identity: "a".repeat(64),
@@ -1438,7 +1529,7 @@ pub(crate) mod tests {
         files.insert("tabs/Owner/tab.config".into(), tab("Owner", true));
         for index in 0..MAX_PROFILES {
             let mut profile: Profile = decode(&profile()).unwrap();
-            profile.id = format!("p-{index:032x}-{:08x}-{:016x}", 0, 0);
+            profile.id = format!("{index:019x}0");
             files.insert(
                 format!("tabs/Owner/pkg/{}.config", profile.id),
                 serde_json::to_vec(&profile).unwrap(),
@@ -1487,3 +1578,6 @@ pub(crate) mod tests {
         assert!(Capture::from_files(aggregate, true).is_err());
     }
 }
+
+#[cfg(test)]
+pub(crate) mod migration_tests;

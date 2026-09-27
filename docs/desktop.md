@@ -107,15 +107,17 @@ An absent root is not created merely by launching the application.
 
 New application-owned directories use private Unix permissions. Existing managed
 directories or files with group/other access, unsafe types, or links are refused
-without changing their modes. Root and configuration failures open **Recovery**;
-the desktop performs no automatic repair, elevation, or fallback to another root.
+without changing their modes. Root and configuration failures open **Recovery**.
+Only supported, owner-scoped legacy identifiers are converted automatically;
+schema/value repair, elevation, and fallback to another root remain prohibited.
 See [ADR 0005](adr/0005-desktop-configuration-recovery.md) for the configuration
 ownership and reconstruction boundary.
 
 ## Setup and Recovery
 
-**Loading** waits for the selected root and saved configuration to be read; it
-does not expose a default settings draft or start normal application polling.
+**Loading** waits for the selected root, saved configuration, and any supported
+legacy-ID conversion. Conversion finishes before Application publication or
+normal polling; it never supplies default settings or repairs profile values.
 A missing root or missing `settings.json` leads to **Setup**. Choose **Saved
 language** and an optional backup directory, then click **Initialize**. The host
 validates before publishing missing settings without replacement. Existing data
@@ -161,15 +163,15 @@ historical root**, or explicitly confirm **Start fresh without importing the
 historical root** before Initialize. Explicit `--data-dir` roots do not discover
 or import this location.
 
-Import validates and copies only recognized `settings.json` and legacy
-`profiles/*.json` into private staging, then publishes the complete root without
-replacement. It refuses an existing destination, source changes, invalid owned
-files, and interrupted `.pending` writes; it neither merges nor deletes the
-source. Limits are **32 KiB** for settings, **64 profiles**, **64 KiB per profile**,
-**1 MiB total profile bytes**, and **128 entries** in the legacy profile directory.
-Logs, backups, package payloads, and unrecognized files stay in the old root.
-Imported legacy profiles still require the separate per-workspace import below;
-the historical package-location hint does not create or bind a Tab.
+Import captures the bounded managed configuration into private staging, validates
+its ownership, and converts eligible owned profile/target IDs before publishing
+the complete root without replacement. It refuses an existing destination,
+source changes, unsafe input, and pending transactions; it neither merges nor
+deletes the source. The [managed configuration limits](#configuration-files-and-limits)
+apply. Logs, backups, package payloads, and unrecognized files stay in the old
+root. Unassigned `profiles/*.json` remain byte-identical and require the separate
+per-workspace import below; a historical package-location hint never creates or
+binds a Tab.
 
 Legacy-root import does not support symlinked destination ancestors and refuses
 them even where Initialize can use the same location. This environment is outside
@@ -896,12 +898,13 @@ Paths below are relative to the selected root:
 | `tabs/<internal_name>/<package_id>/<profile_id>.config` | One saved profile; **64 KiB**, **64 profiles / 1 MiB per Tab/package** |
 | `tabs/<internal_name>/<package_id>/target.config` | Versioned local target record, revision, and optional binding; **64 KiB** |
 | `profiles/<profile_id>.json` | Recognized legacy profiles; explicit import only |
+| `identity-migrations.config` | Versioned legacy-to-XID reservations; **4,096 entries / 4 MiB**, included in the shared managed-set limits |
 | `logs/` | File diagnostics; not configuration |
 | `backups/app.config.<unix_time>` | Default manual snapshot destination |
 
 The managed set is bounded to **4,096 files / 16 MiB**, across open and closed
-Tabs, settings, and recognized legacy files. Bounded store directories permit
-at most **128 entries**; snapshot enumeration permits **16,384 entries** overall.
+Tabs, settings, the migration ledger, and recognized legacy files. Bounded store
+directories permit at most **128 entries**; snapshot enumeration permits **16,384 entries** overall.
 Source paths and explicit backup destinations are absolute UTF-8 paths of at most
 **4,096 bytes**. Filesystem case/normalization aliases and containing-identity
 mismatches are refused rather than selecting another owner's data.
@@ -928,15 +931,69 @@ instead of silently discarding evidence or overwriting it. Close the app and mov
 that file outside the data root before explicitly retrying; keep the prior
 valid `.config` or `.json` file intact.
 
+### Persisted identifiers and automatic conversion
+
+New profile and target-binding identities use canonical **20-character XIDs**
+from the immutable public Fork revision pinned in Cargo. Save, rename, schema
+repair, and restart retain the current ID. Allocation failures or exhausted
+collision attempts refuse the operation; they never overwrite an existing
+profile or fall back to an application-specific generator.
+
+During Loading, supported owned `p-<32hex>-<8hex>-<16hex>` identities are converted
+before ordinary commands can run. Only typed IDs, profile `.config` basenames,
+and their typed references change. Names, values, schema identity, target
+configuration and revisions remain unchanged. Schema-rejected profiles remain
+rejected until explicit repair. Package IDs and payloads, Region IDs, assets,
+aliases, pasted source, and unassigned `profiles/*.json` are not rewritten.
+
+`identity-migrations.config` reserves each assignment by entity kind, Tab internal
+name, package ID, and old ID. Identical old text in another owner or entity kind
+does not share an identity. Reservations survive rollback, deletion, and owner
+retirement; they do not recreate missing entities. Limits, invalid metadata,
+conflicting mappings, or unsafe records refuse conversion without eviction or
+best-effort replacement. Do not edit or delete the ledger to retry a failed import.
+
+Conversion uses the same bounded journal and explicit pending-Recovery controls
+as Restore, without creating an automatic backup or bypassing Restore consent.
+Rollback preserves assignments while restoring original user configuration.
+After interruption, use the displayed transaction controls; do not remove
+`.restore-journal` or `.restore-completion` to force Ready. Old session/profile/
+target expectations are not translated into fresh command authority.
+
+XIDs are not secrets, capabilities, or anonymous identifiers. Their time,
+machine-derived, process-derived, and counter components are observable.
+A converted XID records **allocation at migration time**, not the entity's
+original creation time or creation order. It grants no native authority.
+
+### Development transition notes
+
+This converter is an **unreleased development change**. The pre-converter
+`dev/m3` baseline is `64e1dc8f5f37cfbd4eaacef7de0bce67763e93ef`.
+No product release or tag existed when this transition was introduced; the
+manifest's `0.1.0` is not a published release boundary. The first published
+converter release must identify itself and the last released legacy writer, if
+one exists, rather than infer either from the unchanged development version.
+
+Keep automatic legacy conversion enabled until a separate approved Change names
+the first rejecting product version, retains an available converter-release path
+for old roots/backups, and decides ledger retirement. There is no date-based
+expiry or timer cleanup. Converted roots and version-2 archives are not supported
+by legacy-only binaries; do not downgrade in place or delete retained backups.
+
 ### Import legacy profiles
 
-After real inspection, **Import legacy profiles** copies compatible
-`profiles/*.json` from the selected root into that Tab's package scope. It
-preserves IDs and exact bytes, validates values against the inspected schema,
-and keeps source files. Nothing is adopted automatically or shared with another
-Tab. Byte-identical committed entries are skipped on retry; a conflicting ID is
-refused without overwriting either file. Partial success remains committed and
-the UI reports imported, already-present, and failed entries separately.
+After real inspection, **Import legacy profiles** imports compatible
+`profiles/*.json` into the explicitly selected Tab/package and keeps source bytes
+unchanged. Legacy IDs use that owner's reserved XIDs; current XIDs stay unchanged.
+Each committed profile and its mapping form one recoverable unit. A repeated
+import skips identical normalized content, refuses edited-destination conflicts
+without overwrite, and recreates an explicitly reimported deleted profile with
+its reserved ID. Another Tab receives a separate mapping. A later-file failure
+retains the actual committed subset, reported separately from already-present
+and failed entries.
+Journal admission captures the bounded managed set: an unresolved pending write
+or unsafe entry in another owner can refuse Import until repaired. This does not
+broaden the existing owner-scoped admission for ordinary profile edits.
 
 ## Configuration snapshots and restore
 
@@ -959,7 +1016,10 @@ digests, and observed root/settings absence. Checksums detect corruption; they
 do not authenticate the archive or grant execution authority.
 
 A snapshot includes present `settings.json`, all saved open and closed Tab
-`tab.config` files, package `.config` files, and recognized legacy profiles.
+`tab.config` files, package `.config` files, recognized legacy profiles, and
+`identity-migrations.config` when present. Ledger-bearing snapshots use archive
+version 2; the delivered version-1 archives remain readable during the transition.
+Back up now neither converts IDs nor creates a missing ledger.
 Capture is structural, not dependent on successfully decoding a registry:
 safe readable malformed, unsupported, and orphaned configuration is preserved
 byte for byte. Missing entries remain absent. An empty managed set reports
@@ -1027,18 +1087,25 @@ are not permission to publish its contents.
    nothing was replaced; repair the cause and **Retry** rather than restoring
    again.
 
-Restore replaces the whole managed file set; it is not a profile merge or a
-whole-root swap. Package payloads, file logs, backups, and unrelated data stay
-outside its write set. Before the first managed write, it stages incoming bytes
-and rollback preimages privately and persists `.restore-journal`. Completion
-requires checking the entire installed generation. Failure rolls back or keeps
-Recovery with the journal/preimages and explicit incomplete-cleanup diagnostics;
-installed configuration and successful reconstruction are separate outcomes.
+Restore replaces the managed user configuration, not package payloads, file logs,
+backups, or unrelated data. Eligible legacy identities are normalized only in the
+validated proposed generation; archive bytes remain unchanged. Compatible live
+and archived reservations coalesce, and ledger-free archives retain live
+reservations. Conflicting mappings refuse before replacement. Repeated restoration
+therefore preserves mapped IDs within one maintained root; independent empty
+roots restoring a ledger-free archive need not assign equal IDs.
+
+Before the first identity replacement, the host stages incoming bytes, durable
+reservations, and rollback preimages and persists `.restore-journal`. Completion
+requires checking the entire installed generation. Failure restores original user
+configuration while retaining reservations, or keeps Recovery and its evidence
+if publication, reservation preservation, or cleanup remains unresolved.
+Installed configuration and successful Application reconstruction are separate.
 
 Before deleting preimages, cleanup publishes `.restore-completion`. This marker
 keeps restart admission blocked even after partial journal deletion. Restart with
 either artifact enters Recovery, not a mixed configuration. Explicitly confirm
-the recovery scope and choose **Complete restore** or **Roll back restore**.
+the recovery scope and choose **Complete operation** or **Roll back operation**.
 Once the completion marker commits a direction, only that same direction can
 finish cleanup; the opposite action is refused. Do not delete these artifacts
 to bypass Recovery. Retry, Restore, and transaction recovery share idle and
@@ -1384,9 +1451,27 @@ separately.
    confirmation, source preservation, bounded recognized-file copying, and
    refusal of a conflicting destination or invalid source. Repeat launch with
    `--data-dir` and confirm discovery is skipped. Within a bound Tab, explicitly
-   import compatible legacy profiles: check exact bytes/IDs, idempotent retry,
-   conflict refusal, partial-success reporting, and independence from another
-   Tab inspecting the same source.
+   import compatible legacy profiles: check unchanged source bytes, stable
+   owner-scoped XIDs, idempotent retry, conflict refusal, partial-success reporting,
+   and independence from another Tab inspecting the same source.
+
+### Identifier migration acceptance
+
+1. Copy a legacy root into a private isolated location with multiple Tabs/packages,
+   profiles, target bindings, and a structurally safe stale-schema profile. Launch
+   the actual app with that root. Observe Loading followed by Ready or an
+   attributed Recovery; never admit a mixed generation.
+2. Compare saved user content, package hashes, ownership, target revisions, and
+   unassigned sources. Active IDs must be canonical 20-character XIDs; the
+   stale-schema profile must still require explicit recovery. Rename, save,
+   delete/reimport, close, and restart; surviving/reserved IDs must stay stable.
+3. Repeat explicit Import and legacy archive Restore, including after restart.
+   Verify no duplicates, edited-import conflict refusal, unchanged archive bytes,
+   and the still-required clicked current preimage receipt and disposal consent.
+4. Where safe interruption can be observed in a disposable generation, restart
+   with the retained journal. Exercise validated recovery and stable assignments,
+   stale-command refusal, visible cleanup failure, and reachable Exit. Record
+   unexecuted crash or platform scenarios separately from core regression checks.
 
 ### Configuration snapshot and restore acceptance
 

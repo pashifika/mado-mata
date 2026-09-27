@@ -97,7 +97,27 @@ impl Store {
                 {
                     binding.id.clone()
                 }
-                _ => new_id()?,
+                _ => {
+                    let mut assigned = None;
+                    for _ in 0..16 {
+                        let candidate = new_id()?;
+                        if record
+                            .binding
+                            .as_ref()
+                            .is_none_or(|binding| binding.id != candidate)
+                            && !crate::identity_migrations::reserved(&self.root, &candidate)?
+                        {
+                            assigned = Some(candidate);
+                            break;
+                        }
+                    }
+                    assigned.ok_or_else(|| {
+                        Fault::new(
+                            "IdentityGeneration",
+                            "could not allocate an unoccupied target identity within 16 attempts",
+                        )
+                    })?
+                }
             };
             record.revision = revision;
             record.binding = Some(TargetBinding {

@@ -258,6 +258,7 @@ pub(crate) fn write_atomic(
     check_directory(directory)?;
     let maximum = match destination.file_name().and_then(|name| name.to_str()) {
         Some("settings.json") => MAX_SETTINGS_BYTES,
+        Some("identity-migrations.config") => crate::identity_migrations::MAX_LEDGER_BYTES,
         Some("tab.config") => MAX_TAB_BYTES,
         Some("target.config") => MAX_TARGET_BYTES,
         _ => MAX_PROFILE_BYTES,

@@ -88,6 +88,7 @@ pub(crate) enum Kind {
     Tab,
     Package,
     LegacyProfile,
+    IdentityMigrations,
 }
 
 impl Kind {
@@ -96,6 +97,7 @@ impl Kind {
             Self::Settings => MAX_SETTINGS_BYTES,
             Self::Tab => MAX_TAB_BYTES,
             Self::Package | Self::LegacyProfile => MAX_PROFILE_BYTES,
+            Self::IdentityMigrations => crate::identity_migrations::MAX_LEDGER_BYTES,
         }
     }
 }
@@ -150,6 +152,7 @@ pub(crate) fn path_kind(path: &str) -> Result<Kind, Fault> {
     let parts: Vec<_> = path.split('/').collect();
     match parts.as_slice() {
         ["settings.json"] => Ok(Kind::Settings),
+        ["identity-migrations.config"] => Ok(Kind::IdentityMigrations),
         ["profiles", file] if file.ends_with(".json") => Ok(Kind::LegacyProfile),
         ["tabs", _, "tab.config"] => Ok(Kind::Tab),
         ["tabs", _, package, file]
@@ -214,18 +217,33 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
     for entry in entries(root, &mut enumerated)? {
         if let Some(name) = entry.file_name().to_str() {
             let key = filesystem_key(name);
-            if key == "settings.pending" {
+            if matches!(
+                key.as_str(),
+                "settings.pending" | "identity-migrations.pending"
+            ) {
                 return Err(fault(
-                    "an unresolved App settings write must be preserved or repaired first",
+                    "an unresolved configuration write must be preserved or repaired first",
                 ));
             }
-            if matches!(key.as_str(), "settings.json" | "profiles" | "tabs") && name != key {
+            if matches!(
+                key.as_str(),
+                "settings.json" | "profiles" | "tabs" | "identity-migrations.config"
+            ) && name != key
+            {
                 return Err(fault("managed root entry has an alias spelling"));
             }
         }
     }
     if exists(&root.join("settings.json"))? {
         add_file(root, "settings.json", &mut files, &mut remaining)?;
+    }
+    if exists(&root.join("identity-migrations.config"))? {
+        add_file(
+            root,
+            "identity-migrations.config",
+            &mut files,
+            &mut remaining,
+        )?;
     }
     let legacy = root.join("profiles");
     if exists(&legacy)? {

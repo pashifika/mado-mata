@@ -64,6 +64,7 @@ The version and integrity sources are:
 | Desktop Rust | Tauri 2.11.6, tauri-build 2.6.3, tracing 0.1.41, tracing-subscriber 0.3.20 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Saved-image payloads | png 0.18.1; flate2 1.1.9 (default features disabled; `rust_backend`) | [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock) |
 | Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Desktop persisted identifiers | Public `pashifika/xid-rs` Git dependency at the immutable `rev` in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml), repeated in its [lockfile](../apps/desktop/src-tauri/Cargo.lock); default features disabled | The public checkout fetches the Fork directly; no maintenance checkout or local path override is required |
 | macOS application metadata, picker, and clipboard | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | GitHub Actions | Full commit SHAs | [Workflow](../.github/workflows/ci.yml) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
@@ -132,11 +133,13 @@ The full check has these responsibilities:
   projection, Recognition geometry/Undo, grouped selection, and stale trial/Copy
   state), and type-check/build its trusted UI.
 - Test the Rust application core with `--no-default-features --lib`: explicit
-  setup/recovery, named Tab ownership, scoped profiles, byte-preserving legacy
-  imports, bounded snapshots, archive refusals, and journaled restore/rollback
-  are checked alongside bounded logging and the shared controller contracts.
-  Restore regressions cover interrupted publication and discoverable cleanup
-  after restart, not physical power loss. The
+  setup/recovery, named Tab ownership, scoped profiles, source-preserving legacy
+  imports, bounded snapshots, and journaled restore/rollback are checked alongside
+  bounded logging and the shared controller contracts. Identifier regressions
+  cover canonical XIDs, typed owner-scoped conversion, bounded durable mappings,
+  repeat ingress/conflicts, stale-schema preservation, and reservation retention
+  through interrupted publication and recovery. Restore/migration regressions
+  cover discoverable cleanup after restart, not physical power loss. The
   [configuration recovery ADR](adr/0005-desktop-configuration-recovery.md) records
   the storage boundaries and Windows directory-sync qualification limitation.
   Optional OCR settings, bounded replay projection, admission races, and
