@@ -165,7 +165,7 @@ export default function RecognitionPreview() {
         }}>{r.stop}</button>}
         {frame && <span className={snapshot?.confirmed ? 'tag current' : 'tag stale'}>{snapshot?.confirmed ? r.confirmed : r.unconfirmed}</span>}
         {frame && <span id="preview-scale" className="muted mono">{r.scale(frame.width, frame.height, percent)}</span>}
-        <button id="preview-done" type="button" className="preview-done" onClick={() => {
+        <button id="preview-done" type="button" className="preview-done primary" onClick={() => {
           setCloseError(null);
           getCurrentWindow().close().catch(cause => setCloseError(fault(cause)));
         }}>{r.previewDone}</button>

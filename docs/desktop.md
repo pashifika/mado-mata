@@ -355,8 +355,9 @@ raster, not a second editable original. Its scale does not change stored geometr
 The percentage picker uses the same keyboard-accessible dropdown as the main
 window. Tool and zoom controls retain separate focus outlines; **Fit** and the
 minus/plus buttons do not change the stored geometry.
-The toolbar's rightmost **Done** button closes only the preview, including when
-no image is loaded. It does not save, discard, exit Edit, or stop a running trial.
+The toolbar's rightmost **Done** button uses the primary accent color and closes
+only the preview, including when no image is loaded. It does not save, discard,
+exit Edit, or stop a running trial.
 Reopen with **Open preview** to continue the same draft.
 
 Use this workflow:
@@ -1300,9 +1301,12 @@ separately.
    and saved-sample rechecking. Copy must remain unavailable without a confirmed
    loaded frame.
 4. Replace with a same-size scene image and verify confirmed content is reused,
-   Regions remains the default, and prior results, Copy, and crop selections are
-   invalidated. Save/reopen and repeat without setting up content again. Adjust
-   content explicitly and verify the tool returns to Regions. Different-size
+   Regions remains the default, and prior frame-dependent results and crop
+   selections are invalidated. Check Copy source freshness per purpose:
+   unchanged Game content setup and grouped OCR definitions/selection remain
+   current; template Copy stays bound to its frame, content basis, and saved
+   package revision. Save/reopen and repeat without setting up content again.
+   Adjust content explicitly and verify the tool returns to Regions. Different-size
    images require confirmation, including repeated loads; changed, unconfirmed
    geometry must not be saved and reopened to bypass this gate. Discard an
    incompatible replacement and verify saved coordinates survive without its
