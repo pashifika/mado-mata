@@ -2,7 +2,7 @@ use super::validation::{
     ImageBudget, catalog, declare, json_file, portable_component, portable_path, text_file,
     validate_manifest, validate_map, validate_source,
 };
-use super::{Inventory, MAX_BYTES, MAX_DEPTH, MAX_FILES, Manifest, invalid};
+use super::{Inventory, MAX_BYTES, MAX_DEPTH, MAX_FILES, Manifest, invalid, is_os_metadata_entry};
 use crate::host::resolve_options;
 use crate::images::{PayloadBytes, reserve_payload};
 use crate::model::{Fault, Limits};
@@ -267,15 +267,18 @@ impl Capture<'_> {
         }
         let path = root.join(id);
         let before = checked_metadata(&path)?;
-        let original = stamp(&before)?;
+        let original = path_stamp(&path, &before)?;
         if before.is_dir() {
             self.stamps.insert(id.to_owned(), original);
             let mut names = BTreeSet::new();
             for entry in fs::read_dir(&path).map_err(|error| io_fault(id, error))? {
                 self.check()?;
                 let entry = entry.map_err(|error| io_fault(id, error))?;
-                let name = entry
-                    .file_name()
+                let filename = entry.file_name();
+                if is_os_metadata_entry(&filename, &entry).map_err(|error| io_fault(id, error))? {
+                    continue;
+                }
+                let name = filename
                     .into_string()
                     .map_err(|_| invalid("non-UTF-8 package path"))?;
                 portable_component(&name)?;
@@ -292,7 +295,7 @@ impl Capture<'_> {
                 portable_path(&child)?;
                 self.collect(root, &child, depth + 1)?;
             }
-            if self.stamps.get(id) != Some(&stamp(&checked_metadata(&path)?)?) {
+            if self.stamps.get(id) != Some(&path_stamp(&path, &checked_metadata(&path)?)?) {
                 return Err(changed(id));
             }
         } else {
@@ -315,28 +318,11 @@ impl Capture<'_> {
         for (id, original) in &self.stamps {
             self.check()?;
             let path = root.join(id);
-            if stamp(&checked_metadata(&path)?)? != *original {
+            if path_stamp(&path, &checked_metadata(&path)?)? != *original {
                 return Err(changed(id));
             }
             if original.directory {
-                let mut count = 0usize;
-                for entry in fs::read_dir(&path).map_err(|error| io_fault(id, error))? {
-                    self.check()?;
-                    let entry = entry.map_err(|error| io_fault(id, error))?;
-                    let name = entry.file_name().into_string().map_err(|_| changed(id))?;
-                    let child = if id.is_empty() {
-                        name
-                    } else {
-                        format!("{id}/{name}")
-                    };
-                    if !self.stamps.contains_key(&child) {
-                        return Err(changed(&child));
-                    }
-                    count += 1;
-                    if count > self.file_limit.saturating_mul(2) {
-                        return Err(invalid("snapshot directory membership exceeds bound"));
-                    }
-                }
+                self.verify_membership(&path, id)?;
             } else {
                 let expected = self.files.get(id).ok_or_else(|| changed(id))?;
                 let bytes = read_stable(&path, id, original, expected.len(), self.deadline)?;
@@ -347,11 +333,41 @@ impl Capture<'_> {
         }
         for (id, original) in &self.stamps {
             self.check()?;
-            if stamp(&checked_metadata(&root.join(id))?)? != *original {
+            let path = root.join(id);
+            if path_stamp(&path, &checked_metadata(&path)?)? != *original {
                 return Err(changed(id));
+            }
+            if original.directory {
+                self.verify_membership(&path, id)?;
             }
         }
         checked_root(root)?;
+        Ok(())
+    }
+
+    fn verify_membership(&self, path: &Path, id: &str) -> Result<(), Fault> {
+        let mut count = 0usize;
+        for entry in fs::read_dir(path).map_err(|error| io_fault(id, error))? {
+            self.check()?;
+            let entry = entry.map_err(|error| io_fault(id, error))?;
+            let filename = entry.file_name();
+            if is_os_metadata_entry(&filename, &entry).map_err(|error| io_fault(id, error))? {
+                continue;
+            }
+            let name = filename.into_string().map_err(|_| changed(id))?;
+            let child = if id.is_empty() {
+                name
+            } else {
+                format!("{id}/{name}")
+            };
+            if !self.stamps.contains_key(&child) {
+                return Err(changed(&child));
+            }
+            count += 1;
+            if count > self.file_limit.saturating_mul(2) {
+                return Err(invalid("snapshot directory membership exceeds bound"));
+            }
+        }
         Ok(())
     }
 }
@@ -416,6 +432,31 @@ fn checked_metadata(path: &Path) -> Result<Metadata, Fault> {
     Ok(metadata)
 }
 
+fn path_stamp(_path: &Path, metadata: &Metadata) -> Result<Stamp, Fault> {
+    let original = stamp(metadata)?;
+    #[cfg(windows)]
+    if metadata.is_dir() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let file = OpenOptions::new()
+            .access_mode(0)
+            .share_mode(7)
+            .custom_flags(0x02200000) // OPEN_REPARSE_POINT | BACKUP_SEMANTICS
+            .open(_path)
+            .map_err(|error| io_fault("directory identity", error))?;
+        let opened = file
+            .metadata()
+            .map_err(|error| io_fault("directory identity", error))?;
+        if !opened.is_dir() || stamp(&opened)? != original {
+            return Err(changed("directory identity"));
+        }
+        let (volume, high, low) = windows_file_identity(&file)?;
+        let mut original = original;
+        original.identity = (u64::from(volume), u64::from(high), u64::from(low), 0);
+        return Ok(original);
+    }
+    Ok(original)
+}
+
 fn stamp(metadata: &Metadata) -> Result<Stamp, Fault> {
     #[cfg(unix)]
     let identity = {
@@ -423,8 +464,16 @@ fn stamp(metadata: &Metadata) -> Result<Stamp, Fault> {
         (
             metadata.dev(),
             metadata.ino(),
-            metadata.ctime() as u64,
-            metadata.ctime_nsec() as u64,
+            if metadata.is_dir() {
+                0
+            } else {
+                metadata.ctime() as u64
+            },
+            if metadata.is_dir() {
+                0
+            } else {
+                metadata.ctime_nsec() as u64
+            },
         )
     };
     #[cfg(windows)]
@@ -432,7 +481,11 @@ fn stamp(metadata: &Metadata) -> Result<Stamp, Fault> {
         use std::os::windows::fs::MetadataExt;
         (
             metadata.creation_time(),
-            metadata.last_write_time(),
+            if metadata.is_dir() {
+                0
+            } else {
+                metadata.last_write_time()
+            },
             metadata.file_attributes() as u64,
             0,
         )
@@ -444,10 +497,16 @@ fn stamp(metadata: &Metadata) -> Result<Stamp, Fault> {
     #[cfg(any(unix, windows))]
     Ok(Stamp {
         directory: metadata.is_dir(),
-        length: metadata.len(),
-        modified: metadata
-            .modified()
-            .map_err(|error| io_fault("file timestamp", error))?,
+        // Metadata creation/removal changes directory timestamps and size, not its
+        // identity. Both passes still verify every retained child and file stamp.
+        length: if metadata.is_dir() { 0 } else { metadata.len() },
+        modified: if metadata.is_dir() {
+            SystemTime::UNIX_EPOCH
+        } else {
+            metadata
+                .modified()
+                .map_err(|error| io_fault("file timestamp", error))?
+        },
         identity,
     })
 }
@@ -522,7 +581,7 @@ fn read_stable(
 }
 
 #[cfg(windows)]
-fn windows_file_identity(file: &File) -> Result<(u32, u32, u32), Fault> {
+pub(super) fn windows_file_identity(file: &File) -> Result<(u32, u32, u32), Fault> {
     use std::os::windows::io::AsRawHandle;
     // BY_HANDLE_FILE_INFORMATION: DWORD fields and three FILETIME pairs.
     #[repr(C)]
@@ -566,3 +625,6 @@ fn io_fault(id: &str, error: std::io::Error) -> Fault {
     invalid("package file operation failed")
         .with_context(json!({"path": id, "cause": error.to_string()}))
 }
+
+#[cfg(test)]
+mod tests;

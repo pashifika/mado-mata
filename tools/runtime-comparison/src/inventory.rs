@@ -20,6 +20,69 @@ const MAX_PATH_BYTES: usize = 240;
 const MAX_FILES: usize = 65_536;
 const MAX_BYTES: usize = crate::images::PACKAGE_BYTES;
 
+/// Only these OS-owned file names are outside package and workspace content.
+fn os_metadata_name(name: &str) -> bool {
+    name == ".DS_Store"
+        || name
+            .strip_prefix("._")
+            .is_some_and(|leaf| !leaf.is_empty() && !matches!(leaf, "." | ".."))
+        || [
+            "Thumbs.db",
+            "ehthumbs.db",
+            "ehthumbs_vista.db",
+            "desktop.ini",
+        ]
+        .iter()
+        .any(|known| name.eq_ignore_ascii_case(known))
+}
+
+/// Recognizes OS metadata without following links or opening its contents.
+/// Directories, hard links, reparse points and special files are never excluded.
+pub fn is_os_metadata_entry(
+    name: &std::ffi::OsStr,
+    entry: &std::fs::DirEntry,
+) -> std::io::Result<bool> {
+    if !name.to_str().is_some_and(os_metadata_name) || !entry.file_type()?.is_file() {
+        return Ok(false);
+    }
+    let metadata = match entry.metadata() {
+        Ok(metadata) => metadata,
+        // A regular metadata file observed by read_dir may disappear before inspection.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Ok(false);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Ok(false);
+        }
+        let file = match std::fs::OpenOptions::new()
+            .access_mode(0)
+            .share_mode(7)
+            .custom_flags(0x00200000) // OPEN_REPARSE_POINT; inspect identity, never content
+            .open(entry.path())
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(error),
+        };
+        capture::windows_file_identity(&file)
+            .map_err(|fault| std::io::Error::other(fault.message))?;
+    }
+    Ok(true)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {

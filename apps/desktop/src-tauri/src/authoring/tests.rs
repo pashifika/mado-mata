@@ -471,6 +471,12 @@ fn interrupted_file_and_manifest_publication_is_refused_until_restart_recovery()
         .unwrap_err();
     assert_eq!(failure.category, "AuthoringRecoveryRequired");
     assert!(original.root().join("helper.ts").exists());
+    let metadata = original.root().join(".DS_Store");
+    fs::write(
+        &metadata,
+        b"metadata appeared during interrupted publication",
+    )
+    .unwrap();
     assert!(Inventory::capture(original.root(), &limits().unwrap()).is_err());
     assert_eq!(
         fixture
@@ -491,6 +497,10 @@ fn interrupted_file_and_manifest_publication_is_refused_until_restart_recovery()
     assert_eq!(
         recovered.validate().unwrap().sources["helper.ts"],
         "export const answer = 42;\n"
+    );
+    assert_eq!(
+        fs::read(metadata).unwrap(),
+        b"metadata appeared during interrupted publication"
     );
 }
 
@@ -1087,3 +1097,48 @@ fn collection_links_aliases_and_nested_packages_are_refused_without_changing_sou
 }
 
 mod recognition;
+
+#[test]
+fn metadata_appearing_after_open_does_not_conflict_with_save_or_reopen() {
+    let fixture = Fixture::new();
+    let original = fixture.package();
+    let identity = original.validate().unwrap().identity;
+    let paths = [".DS_Store", "profiles/._default.json", "desktop.ini"];
+    for path in paths {
+        fs::write(original.root().join(path), b"retained OS metadata").unwrap();
+    }
+    let reopened = fixture.publisher.open(original.root()).unwrap();
+    assert_eq!(reopened.revision(), original.revision());
+    assert_eq!(reopened.validate().unwrap().identity, identity);
+    assert_eq!(
+        Inventory::capture(original.root(), &limits().unwrap())
+            .unwrap()
+            .identity,
+        identity
+    );
+    let saved = fixture.save(&original, "main.ts", "export const saved = 7;\n");
+    assert_eq!(
+        saved.validate().unwrap().sources["main.ts"],
+        "export const saved = 7;\n"
+    );
+    assert_eq!(
+        fixture.publisher.open(saved.root()).unwrap().revision(),
+        saved.revision()
+    );
+    for path in paths {
+        assert_eq!(
+            fs::read(saved.root().join(path)).unwrap(),
+            b"retained OS metadata"
+        );
+        fs::remove_file(saved.root().join(path)).unwrap();
+    }
+    assert_eq!(
+        fixture.publisher.open(saved.root()).unwrap().revision(),
+        saved.revision()
+    );
+    let next = fixture.save(&saved, "main.ts", "export const saved = 8;\n");
+    assert_eq!(
+        next.validate().unwrap().sources["main.ts"],
+        "export const saved = 8;\n"
+    );
+}

@@ -18,6 +18,7 @@ pub(crate) use tabs::{validate_internal_name, validate_tab};
 
 use self::fs::{limit, storage};
 use crate::configuration::{MAX_BYTES, MAX_ENUMERATED, MAX_FILES};
+use mado_runtime_comparison::inventory::is_os_metadata_entry;
 use mado_runtime_comparison::model::Fault;
 use serde_json::json;
 use std::fs as std_fs;
@@ -272,15 +273,17 @@ impl Budget<'_> {
             }
             let entry = entry
                 .map_err(|error| measure_fault(storage("read managed entry", error), relative))?;
+            let filename = entry.file_name();
+            if is_os_metadata_entry(&filename, &entry).map_err(|error| {
+                measure_fault(storage("inspect managed metadata", error), relative)
+            })? {
+                continue;
+            }
             let path = entry.path();
             let metadata = std_fs::symlink_metadata(&path).map_err(|error| {
                 measure_fault(storage("inspect managed entry", error), relative)
             })?;
-            entries.push((
-                path,
-                entry.file_name().to_string_lossy().into_owned(),
-                metadata,
-            ));
+            entries.push((path, filename.to_string_lossy().into_owned(), metadata));
         }
         Ok(entries)
     }

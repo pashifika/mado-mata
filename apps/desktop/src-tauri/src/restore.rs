@@ -802,6 +802,75 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn os_metadata_is_preserved_but_never_archived_or_installed_as_configuration() {
+        let source = Root::new();
+        let archive_directory = Root::new();
+        let destination = Root::new();
+        let id = profile_id();
+        source.put("settings.json", &settings(100));
+        source.put("tabs/One/tab.config", &tab("One", true));
+        source.put(&format!("tabs/One/pkg/{id}.config"), &profile());
+        source.put(&format!("profiles/{id}.json"), &profile());
+        let expected = capture(&source.0).unwrap();
+        validate(&expected).unwrap();
+        let metadata_paths = [
+            ".DS_Store".to_owned(),
+            "profiles/._legacy.pending".to_owned(),
+            format!("profiles/._{id}.json"),
+            "tabs/One/._tab.pending".to_owned(),
+            format!("tabs/One/pkg/._{id}.config"),
+            format!("tabs/One/pkg/._{id}.pending"),
+            "tabs/One/pkg/desktop.ini".to_owned(),
+        ];
+        for path in &metadata_paths {
+            source.put(path, b"source OS metadata");
+            destination.put(path, b"destination OS metadata");
+        }
+        let captured = capture(&source.0).unwrap();
+        assert_eq!(captured, expected);
+        let receipt =
+            crate::backup::write(&source.0, captured, Some(&archive_directory.0)).unwrap();
+        let archived = crate::backup::read(Path::new(&receipt.path)).unwrap();
+        assert_eq!(archived, expected);
+        validate(&archived).unwrap();
+
+        destination.put("settings.json", &settings(200));
+        let before = capture(&destination.0).unwrap();
+        // New metadata after the preservation receipt must not invalidate it.
+        destination.put("tabs/One/pkg/Thumbs.db", b"new thumbnail cache");
+        install(&destination.0, archived, Some(&before.generation)).unwrap();
+        assert_eq!(capture(&destination.0).unwrap(), expected);
+        assert!(!pending(&destination.0).unwrap());
+        let store = Store::new(destination.0.clone()).unwrap();
+        let tabs = store.tabs().unwrap();
+        assert!(tabs.faults.is_empty());
+        assert_eq!(tabs.tabs.len(), 1);
+        assert_eq!(tabs.tabs[0].internal_name, "One");
+        let profiles = store
+            .profile_store("One", "pkg")
+            .unwrap()
+            .list("pkg", &"a".repeat(64))
+            .unwrap();
+        assert!(profiles.rejected.is_empty());
+        assert_eq!(profiles.profiles.len(), 1);
+        assert_eq!(profiles.profiles[0].id, id);
+        for path in metadata_paths {
+            assert_eq!(
+                fs::read(source.0.join(&path)).unwrap(),
+                b"source OS metadata"
+            );
+            assert_eq!(
+                fs::read(destination.0.join(path)).unwrap(),
+                b"destination OS metadata"
+            );
+        }
+        assert_eq!(
+            fs::read(destination.0.join("tabs/One/pkg/Thumbs.db")).unwrap(),
+            b"new thumbnail cache"
+        );
+    }
+
+    #[test]
     fn each_publication_and_file_failure_restores_original_generation() {
         for point in [
             Point::BeforeJournal,

@@ -337,6 +337,20 @@ pub(super) fn validate_manifest(manifest: &Manifest) -> Result<(), Fault> {
     {
         return Err(invalid("unsupported package/runtime/SDK/entry contract"));
     }
+    for path in manifest
+        .sources
+        .iter()
+        .chain(std::iter::once(&manifest.schema))
+        .chain(manifest.profiles.values())
+        .chain(manifest.assets.values().map(|asset| &asset.path))
+        .chain(manifest.source_maps.values())
+    {
+        if path.rsplit('/').next().is_some_and(super::os_metadata_name) {
+            return Err(invalid(format!(
+                "package file name is reserved for OS metadata: {path}"
+            )));
+        }
+    }
     if manifest.sources.is_empty() || manifest.profiles.is_empty() {
         return Err(invalid("package sources and profiles must be nonempty"));
     }
