@@ -110,6 +110,7 @@ pub(super) fn apply(
         }
     }
     save.document.validate()?;
+    let mut crop_number = None;
     for crop in save.crops {
         let shared = {
             let definition = save.document.definition(&crop.definition_id)?;
@@ -139,16 +140,9 @@ pub(super) fn apply(
             .find(|item| item.id == crop.definition_id)
             .ok_or_else(|| refusal("selected crop definition is missing"))?;
         let rect = definition.region.map_to_pixels(&save.document.basis)?;
-        // A replacement gets an independent asset when the old crop is shared.
-        let base = format!("recognition_crop_{}", definition.id);
-        let asset = if shared {
-            let suffix = definition.revision;
-            format!("{base}_{suffix}")
-        } else {
-            definition
-                .saved
-                .as_ref()
-                .map_or(base, |saved| saved.asset.clone())
+        let asset = match definition.saved.as_ref().filter(|_| !shared) {
+            Some(saved) => saved.asset.clone(),
+            None => crate::storage::new_id()?,
         };
         let saved = SavedCrop::from_png(asset.clone(), &crop.png)?;
         if saved.width != rect.width || saved.height != rect.height {
@@ -167,7 +161,14 @@ pub(super) fn apply(
                 .ok_or_else(|| refusal("retained crop declaration is missing"))?
                 .to_owned()
         } else {
-            let path = format!("recognition/crops/{asset}.png");
+            let number = match crop_number {
+                Some(number) => number,
+                None => maximum_crop_number(&files)?,
+            }
+            .checked_add(1)
+            .ok_or_else(|| refusal("numeric crop filename exceeds its integer bound"))?;
+            crop_number = Some(number);
+            let path = format!("recognition/crops/{number:04}.png");
             vacant(&manifest, &files, &asset, &path)?;
             path
         };
@@ -223,6 +224,29 @@ pub(super) fn apply(
     let next = PackageDraft::from_files(files, &limits()?)?;
     load(&next)?;
     Ok(next)
+}
+
+fn maximum_crop_number(files: &BTreeMap<String, PayloadBytes>) -> Result<u64, Fault> {
+    let mut maximum = 0;
+    for path in files.keys() {
+        let Some(name) = path.strip_prefix("recognition/crops/") else {
+            continue;
+        };
+        let Some((stem, extension)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if !extension.eq_ignore_ascii_case("png")
+            || stem.is_empty()
+            || !stem.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let number = stem
+            .parse::<u64>()
+            .map_err(|_| refusal("numeric crop filename exceeds its integer bound"))?;
+        maximum = maximum.max(number);
+    }
+    Ok(maximum)
 }
 
 pub(super) fn check_remove(draft: &PackageDraft, path: &str) -> Result<(), Fault> {

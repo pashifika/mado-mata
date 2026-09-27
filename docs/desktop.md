@@ -477,6 +477,21 @@ revisions. Save refusals identify the actual geometry or template-rights
 requirement; the dirty-choice dialog disables Save and leaves Cancel and Discard
 available.
 
+New crop assets use independent checked XIDs and flat paths
+`recognition/crops/0001.png`, `0002.png`, and onward. Each Save derives the
+greatest numeric PNG basename from the current package inventory, ignores
+custom names and nested directories, and assigns consecutive numbers in the
+submitted crop order. Padding is at least four digits; `9999.png` is followed
+by `10000.png`. Numeric overflow, stale inventory, or a collision refuses Save
+without fallback names or partial publication. There is no persisted counter.
+
+Updating an unshared crop keeps its asset ID and current path. Package editor
+**Rename** preserves that ID and its declared/template references; replacing a
+shared crop instead creates a new independent asset. Renaming or deleting the
+highest numeric filename permits later reuse of that filename, not its asset
+identity. Existing assets, local Region IDs, saved aliases and pasted Script
+are not migrated or automatically refactored.
+
 Deleting a definition does not immediately delete saved pixels. Save reconciles
 owned crop references and generated template assets, preserving shared crops and
 unrelated JSON consumers. Pasted Script references are never refactored. Saved

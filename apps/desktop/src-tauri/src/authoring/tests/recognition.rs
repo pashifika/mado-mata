@@ -231,6 +231,14 @@ fn explicit_replacement_does_not_change_a_crop_retained_by_another_definition() 
         }],
     );
     let metadata = replaced.recognition().unwrap().unwrap();
+    assert_eq!(
+        saved_path(&replaced, "shared").1,
+        "recognition/crops/0001.png"
+    );
+    assert_eq!(
+        saved_path(&replaced, "region").1,
+        "recognition/crops/0002.png"
+    );
     assert_eq!(metadata.definitions[1].saved.as_ref(), Some(&old));
     assert_ne!(
         metadata.definitions[0].saved.as_ref().unwrap().asset,
@@ -281,12 +289,23 @@ fn image_sized_transaction_recovers_the_same_complete_revision_after_interruptio
     let png = crop(512, pixels);
     assert!(png.len() > MAX_BYTES);
     let expected = png_digest(&png);
+    let mut metadata = document(512);
+    metadata.definitions.push(RecognitionDefinition {
+        id: "second".into(),
+        ..metadata.definitions[0].clone()
+    });
     let edit = Edit::Recognition(RecognitionSave {
-        document: document(512),
-        crops: vec![SelectedCrop {
-            definition_id: "region".into(),
-            png,
-        }],
+        document: metadata,
+        crops: vec![
+            SelectedCrop {
+                definition_id: "region".into(),
+                png: png.clone(),
+            },
+            SelectedCrop {
+                definition_id: "second".into(),
+                png,
+            },
+        ],
     });
     let interrupted = fixture.publisher.publish_with(
         &original,
@@ -309,6 +328,22 @@ fn image_sized_transaction_recovers_the_same_complete_revision_after_interruptio
     let recovered = fixture.publisher.open(original.root()).unwrap();
     let metadata = recovered.recognition().unwrap().unwrap();
     assert_eq!(
+        saved_path(&recovered, "region").1,
+        "recognition/crops/0001.png"
+    );
+    assert_eq!(
+        saved_path(&recovered, "second").1,
+        "recognition/crops/0002.png"
+    );
+    assert_ne!(
+        saved_path(&recovered, "region").0,
+        saved_path(&recovered, "second").0
+    );
+    assert_eq!(
+        png_digest(&recovered.recognition_crop("second").unwrap().unwrap()),
+        expected
+    );
+    assert_eq!(
         metadata.definitions[0].saved.as_ref().unwrap().sha256,
         expected
     );
@@ -329,5 +364,260 @@ fn image_sized_transaction_recovers_the_same_complete_revision_after_interruptio
                 }
             )
             .is_err()
+    );
+}
+
+fn add_png(fixture: &Fixture, candidate: &Candidate, id: &str, path: &str) -> Candidate {
+    fixture.catalog(
+        candidate,
+        CatalogEdit::Add {
+            path: path.into(),
+            file_kind: CatalogFileKind::Asset,
+            text: None,
+            bytes: Some(crop(2, vec![10; 16]).to_vec()),
+            id: Some(id.into()),
+            module: None,
+            format: Some("png".into()),
+            width: Some(2),
+            height: Some(2),
+        },
+    )
+}
+
+fn saved_path(candidate: &Candidate, definition_id: &str) -> (String, String) {
+    let document = candidate.recognition().unwrap().unwrap();
+    let asset = document
+        .definition(definition_id)
+        .unwrap()
+        .saved
+        .as_ref()
+        .unwrap()
+        .asset
+        .clone();
+    let manifest = candidate.draft.manifest().unwrap();
+    let path = manifest["assets"][&asset]["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (asset, path)
+}
+
+#[test]
+fn crop_batches_use_numeric_inventory_maximum_and_submission_order() {
+    for (paths, first) in [
+        (vec![], 1),
+        (
+            vec![
+                "recognition/crops/named.png",
+                "recognition/crops/nested/9000.png",
+            ],
+            1,
+        ),
+        (
+            vec![
+                "recognition/crops/0001.png",
+                "recognition/crops/0007.png",
+                "recognition/crops/0010.png",
+            ],
+            11,
+        ),
+        (
+            vec!["recognition/crops/9999.png", "recognition/crops/10000.PNG"],
+            10001,
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let mut original = fixture.package();
+        for (index, path) in paths.iter().enumerate() {
+            original = add_png(&fixture, &original, &format!("unrelated{index}"), path);
+        }
+        let before = original.draft.files().clone();
+        let mut metadata = document(2);
+        metadata.definitions.push(RecognitionDefinition {
+            id: "second".into(),
+            ..metadata.definitions[0].clone()
+        });
+        let saved = save(
+            &fixture,
+            &original,
+            metadata,
+            vec![
+                SelectedCrop {
+                    definition_id: "second".into(),
+                    png: crop(2, vec![20; 16]),
+                },
+                SelectedCrop {
+                    definition_id: "region".into(),
+                    png: crop(2, vec![30; 16]),
+                },
+            ],
+        );
+        let (second_id, second_path) = saved_path(&saved, "second");
+        let (first_id, first_path) = saved_path(&saved, "region");
+        crate::storage::validate_id(&second_id).unwrap();
+        crate::storage::validate_id(&first_id).unwrap();
+        assert_ne!(second_id, first_id);
+        assert_eq!(second_path, format!("recognition/crops/{first:04}.png"));
+        assert_eq!(
+            first_path,
+            format!("recognition/crops/{:04}.png", first + 1)
+        );
+        for path in paths {
+            assert_eq!(saved.draft.files()[path], before[path]);
+        }
+        let reopened = fixture.publisher.open(saved.root()).unwrap();
+        assert_eq!(saved_path(&reopened, "region"), (first_id, first_path));
+        reopened.validate().unwrap();
+    }
+}
+
+#[test]
+fn renamed_and_deleted_highest_crops_reuse_paths_but_never_asset_identity() {
+    let fixture = Fixture::new();
+    let original = fixture.package();
+    let saved = save(
+        &fixture,
+        &original,
+        document(2),
+        vec![SelectedCrop {
+            definition_id: "region".into(),
+            png: crop(2, vec![10; 16]),
+        }],
+    );
+    let (original_id, original_path) = saved_path(&saved, "region");
+    assert_eq!(original_path, "recognition/crops/0001.png");
+    let renamed = fixture.catalog(
+        &saved,
+        CatalogEdit::Rename {
+            path: original_path.clone(),
+            destination: "recognition/crops/named.png".into(),
+        },
+    );
+    let mut metadata = renamed.recognition().unwrap().unwrap();
+    metadata.definitions.push(RecognitionDefinition {
+        id: "second".into(),
+        saved: None,
+        ..metadata.definitions[0].clone()
+    });
+    let updated = save(
+        &fixture,
+        &renamed,
+        metadata,
+        vec![
+            SelectedCrop {
+                definition_id: "region".into(),
+                png: crop(2, vec![20; 16]),
+            },
+            SelectedCrop {
+                definition_id: "second".into(),
+                png: crop(2, vec![30; 16]),
+            },
+        ],
+    );
+    assert_eq!(
+        saved_path(&updated, "region"),
+        (original_id.clone(), "recognition/crops/named.png".into())
+    );
+    let (second_id, second_path) = saved_path(&updated, "second");
+    assert_ne!(second_id, original_id);
+    assert_eq!(second_path, original_path);
+    let mut metadata = updated.recognition().unwrap().unwrap();
+    metadata.definitions.retain(|item| item.id != "second");
+    let deleted = save(&fixture, &updated, metadata, Vec::new());
+    assert!(!deleted.root().join(&second_path).exists());
+    let mut metadata = deleted.recognition().unwrap().unwrap();
+    metadata.definitions.push(RecognitionDefinition {
+        id: "second".into(),
+        saved: None,
+        ..metadata.definitions[0].clone()
+    });
+    let recreated = save(
+        &fixture,
+        &deleted,
+        metadata,
+        vec![SelectedCrop {
+            definition_id: "second".into(),
+            png: crop(2, vec![40; 16]),
+        }],
+    );
+    let (recreated_id, recreated_path) = saved_path(&recreated, "second");
+    assert_ne!(recreated_id, second_id);
+    assert_eq!(recreated_path, original_path);
+    assert_eq!(
+        saved_path(&recreated, "region"),
+        (original_id, "recognition/crops/named.png".into())
+    );
+    recreated.validate().unwrap();
+}
+
+#[test]
+fn overflowing_numeric_names_refuse_without_publishing_any_batch_bytes() {
+    for stem in ["18446744073709551615", "18446744073709551616"] {
+        let fixture = Fixture::new();
+        let original = fixture.package();
+        let original = add_png(
+            &fixture,
+            &original,
+            "unrelated",
+            &format!("recognition/crops/{stem}.png"),
+        );
+        let fault = fixture
+            .publisher
+            .publish_recognition(
+                &original,
+                original.revision(),
+                RecognitionSave {
+                    document: document(2),
+                    crops: vec![SelectedCrop {
+                        definition_id: "region".into(),
+                        png: crop(2, vec![20; 16]),
+                    }],
+                },
+            )
+            .unwrap_err();
+        assert_eq!(fault.category, "RecognitionSave");
+        let reopened = fixture.publisher.open(original.root()).unwrap();
+        assert_eq!(reopened.revision(), original.revision());
+        assert_eq!(reopened.draft.files(), original.draft.files());
+        assert!(reopened.recognition().unwrap().is_none());
+    }
+}
+
+#[test]
+fn stale_inventory_refuses_then_explicit_save_recomputes_from_new_revision() {
+    let fixture = Fixture::new();
+    let original = fixture.package();
+    let changed = add_png(
+        &fixture,
+        &original,
+        "unrelated",
+        "recognition/crops/0042.png",
+    );
+    let make_save = || RecognitionSave {
+        document: document(2),
+        crops: vec![SelectedCrop {
+            definition_id: "region".into(),
+            png: crop(2, vec![20; 16]),
+        }],
+    };
+    let fault = fixture
+        .publisher
+        .publish_recognition(&original, original.revision(), make_save())
+        .unwrap_err();
+    assert_eq!(fault.category, "AuthoringConflict");
+    assert_eq!(
+        fixture.publisher.open(original.root()).unwrap().revision(),
+        changed.revision()
+    );
+    let saved = fixture
+        .publisher
+        .publish_recognition(&changed, changed.revision(), make_save())
+        .unwrap()
+        .candidate
+        .unwrap();
+    assert_eq!(saved_path(&saved, "region").1, "recognition/crops/0043.png");
+    assert_eq!(
+        saved.draft.files()["recognition/crops/0042.png"],
+        changed.draft.files()["recognition/crops/0042.png"]
     );
 }
