@@ -129,6 +129,7 @@
     "score": "Score {value}",
     "scoreUnavailable": "No candidate was returned, so no score exists.",
     "cleanup": "Cleanup",
+    "cleanupIncomplete": "incomplete or unconfirmed",
     "cleanupStates": {"reaped": "child reaped", "forced": "child forcibly stopped and reaped", "unreported": "child reaping not reported"},
     "saveHeading": "Save",
     "unsaved": "Unsaved",

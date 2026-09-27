@@ -1,5 +1,6 @@
 use super::evidence::settlement_bytes;
 use super::protocol::frame;
+use super::recognition::child_exit_primary;
 use super::supervision::{comparison_identity, settled_evidence, terminal_primary};
 use crate::images::PayloadBytes;
 use crate::inventory::Inventory;
@@ -44,6 +45,87 @@ fn forced_exit_does_not_excuse_other_protocol_failures() {
             .category,
         "Script"
     );
+}
+
+#[test]
+fn recognition_child_exit_before_entry_has_a_primary_despite_clean_pipe_eof() {
+    assert!(
+        frame(&mut b"".as_slice(), MAX_TRANSPORT_BYTES)
+            .unwrap()
+            .is_none()
+    );
+    let started = json!({"event":"ChildStarted","run":"recognition","attempt":1});
+    let evidence = settled_evidence(None, &[started]);
+    let primary = child_exit_primary(
+        terminal_primary(&evidence, None, false),
+        &evidence,
+        false,
+        None,
+    )
+    .expect("a signaled child exit before EntrySettled must be attributable");
+    assert_eq!(primary.category, "Transport");
+    assert_eq!(primary.context["stage"], "child_exit");
+    assert_eq!(primary.context["terminal_received"], false);
+    assert!(primary.context["exit_code"].is_null());
+}
+
+#[test]
+fn recognition_child_exit_requires_both_terminal_evidence_and_successful_exit() {
+    let entry = json!({"event":"EntrySettled","primary":null,"result":{"matched":false}});
+    let terminal = json!({"event":"Terminal","primary":null,"result":{"matched":false},
+        "cleanup":{"clean":true,"status":"CleanupFinished","session_closed":true}});
+    for (scenario, terminal, exit_success, exit_code, expected_terminal) in [
+        ("missing terminal", None, true, Some(0), false),
+        (
+            "nonzero exit after terminal",
+            Some(terminal.clone()),
+            false,
+            Some(1),
+            true,
+        ),
+    ] {
+        let evidence = settled_evidence(terminal, std::slice::from_ref(&entry));
+        let primary = child_exit_primary(
+            terminal_primary(&evidence, None, false),
+            &evidence,
+            exit_success,
+            exit_code,
+        )
+        .unwrap_or_else(|| panic!("{scenario} must not become a successful trial"));
+        assert_eq!(primary.category, "Transport", "{scenario}");
+        assert_eq!(
+            primary.context["terminal_received"], expected_terminal,
+            "{scenario}"
+        );
+        assert_eq!(primary.context["exit_code"], json!(exit_code), "{scenario}");
+    }
+    let evidence = settled_evidence(Some(terminal), &[entry]);
+    assert!(
+        child_exit_primary(
+            terminal_primary(&evidence, None, false),
+            &evidence,
+            true,
+            Some(0),
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn recognition_child_exit_preserves_the_settled_primary_and_cancellation_context() {
+    let cancelled = Fault::new("Cancelled", "recognition was stopped").with_context(
+        json!({"stage":"ocr_recognition","status":"cancelled","native_cleanup":"unverified"}),
+    );
+    let entry = json!({"event":"EntrySettled","primary":cancelled,"result":null});
+    let evidence = settled_evidence(None, &[entry]);
+    let primary = child_exit_primary(
+        terminal_primary(&evidence, None, false),
+        &evidence,
+        false,
+        None,
+    )
+    .expect("the child cancellation remains primary despite an incomplete exchange");
+    assert_eq!(json!(primary), json!(cancelled));
 }
 
 #[test]

@@ -2,6 +2,7 @@ import {FaultMessage} from '../components/ResultPanel.tsx';
 import Select from '../components/Select.tsx';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
+import {record as jsonRecord} from '../state.ts';
 import {
   MAX_DEFINITIONS, MAX_EXPECTED_BYTES, UNDO_ENTRIES, confirmBlock, copyBlock, copyFreshness, definitionIssue, deleteDefinition, geometryConfirmed,
   mapRegion, recognitionDirty, renameDefinition, sameJson, saveBlock, selectDefinition, setExpected, setKind, setRights, toggleCrop, toggleTrial,
@@ -266,7 +267,7 @@ export default function RecognitionPage({state, onState, handlers, locked, lockR
               </li>)}</ol>}
           </article>}
           {envelope && <details className="recognition-cleanup">
-            <summary>{r.cleanup}: {r.cleanupState(envelope.child_reaped, envelope.forced)}</summary>
+            <summary>{r.cleanup}: {jsonRecord(envelope.cleanup).clean !== true && <><span className="inline-warning">{r.cleanupIncomplete}</span>{' · '}</>}{r.cleanupState(envelope.child_reaped, envelope.forced)}</summary>
             <pre className="diagnostic">{JSON.stringify(envelope.cleanup, null, 2)}</pre>
           </details>}
         </div>}
