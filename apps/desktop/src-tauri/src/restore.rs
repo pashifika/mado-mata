@@ -196,25 +196,22 @@ enum Point {
     CompletionMarkerRemoved,
 }
 
-/// The receipt's session authority and idle/discard admission are shell-owned.
-/// This boundary independently binds the receipt to the actual source bytes.
-pub fn install(root: &Path, new: Capture, expected_generation: Option<&str>) -> Result<(), Fault> {
-    install_with(root, new, expected_generation, &mut |_| Ok(()))
+/// A normalized Restore generation whose deterministic publication checks passed.
+/// Only Bootstrap supplies session receipt, confirmation, and discard authority.
+pub(crate) struct PreparedRestore(PreparedPublication);
+
+struct PreparedPublication {
+    observed: Capture,
+    new: Capture,
+    operation: crate::identity_migrations::Operation,
 }
 
-fn install_with(
-    root: &Path,
+/// Bind the preparation to the preserved live generation without retiring its session.
+pub(crate) fn prepare(
     new: Capture,
+    observed: Capture,
     expected_generation: Option<&str>,
-    hook: &mut impl FnMut(Point) -> Result<(), Fault>,
-) -> Result<(), Fault> {
-    validate(&new)?;
-    if pending(root)? {
-        return Err(invalid(
-            "an interrupted configuration transaction must be recovered first",
-        ));
-    }
-    let observed = capture(root)?;
+) -> Result<PreparedRestore, Fault> {
     if (!observed.files.is_empty() && expected_generation != Some(observed.generation.as_str()))
         || expected_generation.is_some_and(|expected| expected != observed.generation)
     {
@@ -224,13 +221,23 @@ fn install_with(
         ));
     }
     let new = crate::identity_migrations::normalize_restore(new, &observed)?;
-    publish(
-        root,
+    Ok(PreparedRestore(prepare_publication(
         observed,
         new,
         crate::identity_migrations::Operation::Restore,
-        hook,
-    )
+    )?))
+}
+
+pub(crate) fn install(root: &Path, plan: PreparedRestore) -> Result<(), Fault> {
+    install_with(root, plan, &mut |_| Ok(()))
+}
+
+fn install_with(
+    root: &Path,
+    plan: PreparedRestore,
+    hook: &mut impl FnMut(Point) -> Result<(), Fault>,
+) -> Result<(), Fault> {
+    publish(root, plan.0, hook)
 }
 
 pub(crate) fn install_migration(
@@ -238,21 +245,43 @@ pub(crate) fn install_migration(
     plan: crate::identity_migrations::Plan,
 ) -> Result<(), Fault> {
     let (before, after, operation) = plan.into_parts();
-    publish(root, before, after, operation, &mut |_| Ok(()))
+    let prepared = prepare_publication(before, after, operation)?;
+    publish(root, prepared, &mut |_| Ok(()))
+}
+
+fn prepare_publication(
+    observed: Capture,
+    new: Capture,
+    operation: crate::identity_migrations::Operation,
+) -> Result<PreparedPublication, Fault> {
+    crate::identity_migrations::validate_transition(&observed, &new, &operation)?;
+    crate::identity_migrations::check_rollback_budget(&observed, &new)?;
+    // Changing the spelling of an existing directory is not an authorized tree
+    // migration, and may alias a retained empty container after replacement.
+    let mut aliases = BTreeMap::new();
+    for path in observed.files.keys().chain(new.files.keys()) {
+        configuration::check_aliases(path, &mut aliases)?;
+    }
+    Ok(PreparedPublication {
+        observed,
+        new,
+        operation,
+    })
 }
 
 fn publish(
     root: &Path,
-    observed: Capture,
-    new: Capture,
-    operation: crate::identity_migrations::Operation,
+    prepared: PreparedPublication,
     hook: &mut impl FnMut(Point) -> Result<(), Fault>,
 ) -> Result<(), Fault> {
-    crate::identity_migrations::validate_transition(&observed, &new, &operation)?;
-    crate::identity_migrations::check_rollback_budget(&observed, &new)?;
+    let PreparedPublication {
+        observed,
+        new,
+        operation,
+    } = prepared;
     if pending(root)? {
         return Err(invalid(
-            "an interrupted restore must be completed or rolled back first",
+            "an interrupted configuration transaction must be recovered first",
         ));
     }
     if capture(root)? != observed {
@@ -260,12 +289,6 @@ fn publish(
             "ConfigurationChanged",
             "configuration changed after transaction admission",
         ));
-    }
-    // Changing the spelling of an existing directory is not an authorized tree
-    // migration, and may alias a retained empty container after replacement.
-    let mut aliases = BTreeMap::new();
-    for path in observed.files.keys().chain(new.files.keys()) {
-        configuration::check_aliases(path, &mut aliases)?;
     }
     storage::private_directory(root)?;
     let before = Capture::from_files(observed.files, true)?;
@@ -744,6 +767,7 @@ pub(crate) mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     pub(crate) fn interrupt_install(root: &Path, new: Capture, expected_generation: &str) {
+        let plan = prepare(new, capture(root).unwrap(), Some(expected_generation)).unwrap();
         let mut hook = |at| {
             if at
                 == (Point::Displaced {
@@ -755,15 +779,7 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| install_with(
-                root,
-                new,
-                Some(expected_generation),
-                &mut hook
-            )))
-            .is_err()
-        );
+        assert!(catch_unwind(AssertUnwindSafe(|| install_with(root, plan, &mut hook))).is_err());
         assert!(pending(root).unwrap());
     }
 
@@ -870,14 +886,14 @@ pub(crate) mod tests {
     #[test]
     fn requires_current_receipt_and_rejects_invalid_before_mutation() {
         let (root, old) = fixture();
-        assert!(install(&root.0, replacement(200), None).is_err());
-        assert!(install(&root.0, replacement(200), Some("stale")).is_err());
+        assert!(prepare(replacement(200), old.clone(), None).is_err());
+        assert!(prepare(replacement(200), old.clone(), Some("stale")).is_err());
         let invalid = Capture::from_files(
             BTreeMap::from([("settings.json".into(), b"broken".to_vec())]),
             true,
         )
         .unwrap();
-        assert!(install(&root.0, invalid, Some(&old.generation)).is_err());
+        assert!(prepare(invalid, old.clone(), Some(&old.generation)).is_err());
         assert_eq!(capture(&root.0).unwrap(), old);
         assert!(!pending(&root.0).unwrap());
     }
@@ -886,10 +902,43 @@ pub(crate) mod tests {
     fn successful_install_replaces_only_managed_configuration() {
         let (root, old) = fixture();
         let new = replacement(200);
-        install(&root.0, new.clone(), Some(&old.generation)).unwrap();
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        install(&root.0, plan).unwrap();
         assert_eq!(capture(&root.0).unwrap(), new);
         assert!(!pending(&root.0).unwrap());
         assert_unrelated(&root);
+    }
+
+    #[test]
+    fn prepared_restore_rechecks_live_generation_and_pending_recovery_before_writes() {
+        for interrupted in [false, true] {
+            let (root, old) = fixture();
+            let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+            if interrupted {
+                root.put(COMPLETION, b"pending recovery evidence");
+            } else {
+                fs::write(root.0.join("settings.json"), settings(333)).unwrap();
+            }
+            let current = capture(&root.0).unwrap();
+            let error = install(&root.0, plan).unwrap_err();
+            assert_eq!(
+                error.category,
+                if interrupted {
+                    "Restore"
+                } else {
+                    "ConfigurationChanged"
+                }
+            );
+            assert_eq!(capture(&root.0).unwrap(), current);
+            assert_eq!(pending(&root.0).unwrap(), interrupted);
+            assert!(!root.0.join(JOURNAL).exists());
+            if interrupted {
+                assert_eq!(
+                    fs::read(root.0.join(COMPLETION)).unwrap(),
+                    b"pending recovery evidence"
+                );
+            }
+        }
     }
 
     #[test]
@@ -929,7 +978,9 @@ pub(crate) mod tests {
         let before = capture(&destination.0).unwrap();
         // New metadata after the preservation receipt must not invalidate it.
         destination.put("tabs/One/pkg/Thumbs.db", b"new thumbnail cache");
-        install(&destination.0, archived, Some(&before.generation)).unwrap();
+        let expected_generation = before.generation.clone();
+        let plan = prepare(archived, before, Some(&expected_generation)).unwrap();
+        install(&destination.0, plan).unwrap();
         assert_eq!(capture(&destination.0).unwrap(), expected);
         assert!(!pending(&destination.0).unwrap());
         let store = Store::new(destination.0.clone()).unwrap();
@@ -993,9 +1044,8 @@ pub(crate) mod tests {
                     Ok(())
                 }
             };
-            assert!(
-                install_with(&root.0, replacement(200), Some(&old.generation), &mut hook).is_err()
-            );
+            let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+            assert!(install_with(&root.0, plan, &mut hook).is_err());
             assert!(fired);
             assert_eq!(capture(&root.0).unwrap(), old);
             assert!(!pending(&root.0).unwrap());
@@ -1019,14 +1069,9 @@ pub(crate) mod tests {
                 }
                 Ok(())
             };
+            let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
             assert!(
-                catch_unwind(AssertUnwindSafe(|| install_with(
-                    &root.0,
-                    new.clone(),
-                    Some(&old.generation),
-                    &mut hook
-                )))
-                .is_err()
+                catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook))).is_err()
             );
             assert!(pending(&root.0).unwrap());
             recover(&root.0, rollback).unwrap();
@@ -1045,7 +1090,8 @@ pub(crate) mod tests {
             } => Err(invalid("injected rollback failure")),
             _ => Ok(()),
         };
-        assert!(install_with(&root.0, replacement(200), Some(&old.generation), &mut hook).is_err());
+        let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+        assert!(install_with(&root.0, plan, &mut hook).is_err());
         assert!(pending(&root.0).unwrap());
         recover(&root.0, true).unwrap();
         assert_eq!(capture(&root.0).unwrap(), old);
@@ -1060,9 +1106,8 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            install_with(&root.0, replacement(200), Some(&old.generation), &mut hook)
-        }));
+        let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+        let _ = catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook)));
         fs::write(root.0.join("settings.json"), settings(333)).unwrap();
         assert!(recover(&root.0, false).is_err());
         assert!(recover(&root.0, true).is_err());
@@ -1088,8 +1133,8 @@ pub(crate) mod tests {
                 Ok(())
             }
         };
-        let fault =
-            install_with(&root.0, new.clone(), Some(&old.generation), &mut hook).unwrap_err();
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        let fault = install_with(&root.0, plan, &mut hook).unwrap_err();
         assert_eq!(fault.context["configuration_installed"], true);
         assert_eq!(capture(&root.0).unwrap(), new);
         assert!(pending(&root.0).unwrap());
@@ -1112,14 +1157,9 @@ pub(crate) mod tests {
                 }
                 Ok(())
             };
+            let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
             assert!(
-                catch_unwind(AssertUnwindSafe(|| install_with(
-                    &root.0,
-                    new.clone(),
-                    Some(&old.generation),
-                    &mut hook
-                )))
-                .is_err()
+                catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook))).is_err()
             );
             assert_eq!(capture(&root.0).unwrap(), new);
             assert!(pending(&root.0).unwrap());
@@ -1148,8 +1188,8 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        let fault =
-            install_with(&root.0, new.clone(), Some(&old.generation), &mut hook).unwrap_err();
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        let fault = install_with(&root.0, plan, &mut hook).unwrap_err();
         assert_eq!(fault.context["configuration_installed"], true);
         assert_eq!(fault.context["cleanup_incomplete"], true);
         assert!(pending(&root.0).unwrap());
@@ -1174,9 +1214,8 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            install_with(&root.0, replacement(200), Some(&old.generation), &mut hook)
-        }));
+        let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+        let _ = catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook)));
         fs::write(root.0.join("settings.json"), settings(333)).unwrap();
         assert!(recover(&root.0, false).is_err());
         assert!(pending(&root.0).unwrap());
@@ -1199,15 +1238,8 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| install_with(
-                &root.0,
-                new.clone(),
-                Some(&old.generation),
-                &mut hook
-            )))
-            .is_err()
-        );
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        assert!(catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook))).is_err());
         let committed = fs::read(root.0.join(COMPLETION)).unwrap();
         let mut unsupported: serde_json::Value = serde_json::from_slice(&committed).unwrap();
         unsupported["version"] = json!(2);
@@ -1246,15 +1278,8 @@ pub(crate) mod tests {
             Point::AfterCleanupCommit => panic!("exit during rollback cleanup"),
             _ => Ok(()),
         };
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| install_with(
-                &root.0,
-                replacement(200),
-                Some(&old.generation),
-                &mut hook
-            )))
-            .is_err()
-        );
+        let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+        assert!(catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook))).is_err());
         assert_eq!(capture(&root.0).unwrap(), old);
         assert!(pending(&root.0).unwrap());
         let wrong_direction = recover(&root.0, false).unwrap_err();
@@ -1323,7 +1348,8 @@ pub(crate) mod tests {
     #[test]
     fn restore_removing_a_tab_with_package_configuration_frees_its_name_and_slots() {
         let (root, old, new) = tabbed_fixture();
-        install(&root.0, new.clone(), Some(&old.generation)).unwrap();
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        install(&root.0, plan).unwrap();
         assert_converged_catalog(&root, &new);
     }
 
@@ -1338,7 +1364,8 @@ pub(crate) mod tests {
             .delete(&profile_id())
             .unwrap();
         let old = capture(&root.0).unwrap();
-        install(&root.0, new.clone(), Some(&old.generation)).unwrap();
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        install(&root.0, plan).unwrap();
         assert_converged_catalog(&root, &new);
     }
 
@@ -1359,15 +1386,8 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| install_with(
-                &root.0,
-                new.clone(),
-                Some(&old.generation),
-                &mut hook
-            )))
-            .is_err()
-        );
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        assert!(catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook))).is_err());
         assert!(pending(&root.0).unwrap());
         assert!(root.0.join("tabs/Beta/pkg").is_dir());
         recover(&root.0, false).unwrap();
@@ -1400,7 +1420,8 @@ pub(crate) mod tests {
                 Ok(())
             }
         };
-        let fault = install_with(&root.0, new, Some(&old.generation), &mut hook).unwrap_err();
+        let plan = prepare(new, old.clone(), Some(&old.generation)).unwrap();
+        let fault = install_with(&root.0, plan, &mut hook).unwrap_err();
         assert!(fired);
         assert_eq!(fault.context["rolled_back"], true);
         assert_eq!(capture(&root.0).unwrap(), old);
@@ -1508,7 +1529,9 @@ pub(crate) mod tests {
         destination.put("settings.json", &settings(100));
         destination.put("logs/retained.log", b"unrelated");
         let before = capture(&destination.0).unwrap();
-        install(&destination.0, snapshot.clone(), Some(&before.generation)).unwrap();
+        let expected_generation = before.generation.clone();
+        let plan = prepare(snapshot.clone(), before, Some(&expected_generation)).unwrap();
+        install(&destination.0, plan).unwrap();
         assert_eq!(capture(&destination.0).unwrap(), snapshot);
         assert_eq!(
             Store::new(destination.0.clone())

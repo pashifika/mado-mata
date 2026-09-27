@@ -1,6 +1,6 @@
 use super::*;
 use crate::configuration::tests::Root;
-use crate::identity_migrations::tests::{fixture, old_id};
+use crate::identity_migrations::tests::{fixture, normalized, old_id};
 use crate::identity_migrations::{self, LEDGER};
 
 fn bootstrap(root: &Path) -> Bootstrap {
@@ -214,6 +214,100 @@ fn legacy_restore_keeps_receipt_disposal_and_stale_session_authority_separate() 
         "StaleIdentity"
     );
     assert_eq!(fs::read(&archive.path).unwrap(), archive_bytes);
+    app.shutdown().unwrap();
+}
+
+#[test]
+fn foreign_restore_lineage_refusal_preserves_the_ready_application_and_workspace() {
+    let (root, original) = fixture();
+    let foreign = normalized(&original);
+    let source = Root::new();
+    for (path, bytes) in &foreign.files {
+        source.put(path, bytes);
+    }
+    let archive = backup::write(&source.0, foreign, None).unwrap();
+    let archive_bytes = fs::read(&archive.path).unwrap();
+    let app = bootstrap(&root.0);
+    assert!(matches!(app.ensure_started().unwrap().state, Phase::Ready));
+    let previous = app.application().unwrap();
+    let catalog = previous.workspace_catalog().unwrap();
+    let workspace = crate::application::WorkspaceRef {
+        workspace_id: catalog.open[0].workspace_id.clone(),
+        revision: catalog.open[0].revision,
+    };
+    let before = previous.capture_configuration().unwrap();
+    let preimages = Root::new();
+    let receipt = app.snapshot(Some(&preimages.0)).unwrap();
+    let error = app
+        .restore_snapshot(
+            Path::new(&archive.path),
+            Some(&receipt.generation),
+            true,
+            true,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(error.category, "IdentityMigration");
+    let status = app.status();
+    assert!(matches!(status.state, Phase::Ready));
+    assert!(status.application_available);
+    assert!(!status.pending_restore);
+    assert!(Arc::ptr_eq(&previous, &app.application().unwrap()));
+    assert_eq!(previous.capture_configuration().unwrap(), before);
+    assert_eq!(fs::read(&archive.path).unwrap(), archive_bytes);
+    previous.close_workspace(&workspace).unwrap();
+    assert!(
+        previous
+            .workspace_catalog()
+            .unwrap()
+            .open
+            .iter()
+            .all(|open| open.workspace_id != workspace.workspace_id)
+    );
+    app.shutdown().unwrap();
+}
+
+#[test]
+fn restore_rollback_budget_refusal_does_not_retire_the_ready_session() {
+    let (source, incoming) = fixture();
+    let archive = backup::write(&source.0, incoming.clone(), None).unwrap();
+    let root = Root::new();
+    for path in ["settings.json", "tabs/Alpha/tab.config"] {
+        root.put(path, &incoming.files[path]);
+    }
+    // Raw preservation admits these unassigned recovery records. Retaining the
+    // incoming identity ledger on rollback would require one more managed file.
+    for index in 0..configuration::MAX_FILES - 2 {
+        root.put(&format!("profiles/{index:020}.json"), b"unreadable source");
+    }
+    let app = bootstrap(&root.0);
+    assert!(matches!(app.ensure_started().unwrap().state, Phase::Ready));
+    let previous = app.application().unwrap();
+    let catalog = previous.workspace_catalog().unwrap();
+    let workspace = crate::application::WorkspaceRef {
+        workspace_id: catalog.open[0].workspace_id.clone(),
+        revision: catalog.open[0].revision,
+    };
+    let before = previous.capture_configuration().unwrap();
+    assert_eq!(before.files.len(), configuration::MAX_FILES);
+    assert!(!before.files.contains_key(LEDGER));
+    let preimages = Root::new();
+    let receipt = app.snapshot(Some(&preimages.0)).unwrap();
+    let error = app
+        .restore_snapshot(
+            Path::new(&archive.path),
+            Some(&receipt.generation),
+            true,
+            true,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(error.category, "IdentityMigration");
+    assert!(matches!(app.status().state, Phase::Ready));
+    assert!(!app.status().pending_restore);
+    assert!(Arc::ptr_eq(&previous, &app.application().unwrap()));
+    assert_eq!(previous.capture_configuration().unwrap(), before);
+    previous.close_workspace(&workspace).unwrap();
     app.shutdown().unwrap();
 }
 

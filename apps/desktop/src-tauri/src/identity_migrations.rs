@@ -482,7 +482,7 @@ pub(crate) enum Operation {
     },
 }
 
-/// Only checked planners construct this admission token; manual Restore has no token route.
+/// Only checked automatic-migration and explicit-import planners construct this token.
 pub(crate) struct Plan {
     before: Capture,
     after: Capture,

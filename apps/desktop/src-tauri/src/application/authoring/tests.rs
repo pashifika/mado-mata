@@ -783,6 +783,46 @@ fn host_publication_refuses_unsafe_and_incoherent_edits_without_touching_source(
 }
 
 #[test]
+fn pending_restore_evidence_blocks_commands_but_not_close_and_survives_shutdown() {
+    for marker in [".restore-journal", ".restore-completion"] {
+        let sources = Sources::new();
+        let app = sources.app();
+        let selection = inspect_named(app, "owner", &sources.package).unwrap();
+        let workspace = workspace_ref(&selection);
+        let path = sources.fixture.root.join(marker);
+        let evidence = if marker == ".restore-journal" {
+            fs::create_dir(&path).unwrap();
+            path.join("journal.json")
+        } else {
+            path.clone()
+        };
+        fs::write(&evidence, b"unresolved restore evidence").unwrap();
+
+        assert_eq!(
+            app.start(&workspace, request(&selection))
+                .unwrap_err()
+                .category,
+            "RestorePending",
+            "{marker}"
+        );
+        app.prepare_close(None).unwrap();
+        app.prepare_close(None).unwrap();
+        assert_eq!(
+            app.create_workspace("late", "Late").unwrap_err().category,
+            "Closing",
+            "{marker}"
+        );
+        app.shutdown().unwrap();
+        assert!(crate::restore::pending(&sources.fixture.root).unwrap());
+        assert_eq!(
+            fs::read(&evidence).unwrap(),
+            b"unresolved restore evidence",
+            "{marker}"
+        );
+    }
+}
+
+#[test]
 fn retired_application_can_still_close() {
     let sources = Sources::new();
     let app = sources.app();

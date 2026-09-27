@@ -6,19 +6,14 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 pub(crate) fn interrupt_migration(root: &Path) {
     let before = capture(root).unwrap();
     let after = normalized(&before);
+    let prepared = prepare_publication(before, after, Operation::IdentityMigration).unwrap();
     assert!(
-        catch_unwind(AssertUnwindSafe(|| publish(
-            root,
-            before,
-            after,
-            Operation::IdentityMigration,
-            &mut |point| {
-                if point == Point::AfterJournal {
-                    panic!("simulated process exit after durable migration plan");
-                }
-                Ok(())
+        catch_unwind(AssertUnwindSafe(|| publish(root, prepared, &mut |point| {
+            if point == Point::AfterJournal {
+                panic!("simulated process exit after durable migration plan");
             }
-        )))
+            Ok(())
+        })))
         .is_err()
     );
     assert!(pending(root).unwrap());
@@ -67,19 +62,16 @@ fn migration_failure_at_each_publication_boundary_rolls_back_content_but_keeps_a
             },
             _ => Point::Verified { rollback: false },
         };
-        let error = publish(
-            &root.0,
-            before.clone(),
-            after.clone(),
-            Operation::IdentityMigration,
-            &mut |at| {
-                if at == point {
-                    Err(invalid("injected migration publication failure"))
-                } else {
-                    Ok(())
-                }
-            },
-        )
+        let prepared =
+            prepare_publication(before.clone(), after.clone(), Operation::IdentityMigration)
+                .unwrap();
+        let error = publish(&root.0, prepared, &mut |at| {
+            if at == point {
+                Err(invalid("injected migration publication failure"))
+            } else {
+                Ok(())
+            }
+        })
         .unwrap_err();
         assert_eq!(error.context["rolled_back"], true);
         assert!(!pending(&root.0).unwrap());
@@ -128,23 +120,19 @@ fn real_target_install_failure_retains_partial_migration_for_restart() {
         .position(|path| path == "tabs/Alpha/pkg/target.config")
         .unwrap();
     let target = root.0.join("tabs/Alpha/pkg/target.config");
-    let error = publish(
-        &root.0,
-        before,
-        after.clone(),
-        Operation::IdentityMigration,
-        &mut |point| {
-            if point
-                == (Point::Displaced {
-                    index: target_index,
-                    rollback: false,
-                })
-            {
-                configuration::create_private_directory(&target)?;
-            }
-            Ok(())
-        },
-    )
+    let prepared =
+        prepare_publication(before, after.clone(), Operation::IdentityMigration).unwrap();
+    let error = publish(&root.0, prepared, &mut |point| {
+        if point
+            == (Point::Displaced {
+                index: target_index,
+                rollback: false,
+            })
+        {
+            configuration::create_private_directory(&target)?;
+        }
+        Ok(())
+    })
     .unwrap_err();
     assert_eq!(error.category, "ConfigurationIo");
     assert_eq!(error.context["pending_restore"], true);
@@ -162,19 +150,15 @@ fn reservation_preservation_failure_keeps_journal_until_validated_rollback() {
     let (root, before) = fixture();
     let after = normalized(&before);
     let ledger = root.0.join(LEDGER);
-    let error = publish(
-        &root.0,
-        before.clone(),
-        after.clone(),
-        Operation::IdentityMigration,
-        &mut |point| {
-            if point == Point::AfterJournal {
-                configuration::create_private_directory(&ledger)?;
-                return Err(invalid("fail before reservation publication"));
-            }
-            Ok(())
-        },
-    )
+    let prepared =
+        prepare_publication(before.clone(), after.clone(), Operation::IdentityMigration).unwrap();
+    let error = publish(&root.0, prepared, &mut |point| {
+        if point == Point::AfterJournal {
+            configuration::create_private_directory(&ledger)?;
+            return Err(invalid("fail before reservation publication"));
+        }
+        Ok(())
+    })
     .unwrap_err();
     assert_eq!(error.context["pending_restore"], true);
     assert!(pending(&root.0).unwrap());
@@ -192,12 +176,12 @@ fn reservation_preservation_failure_keeps_journal_until_validated_rollback() {
 fn committed_migration_cleanup_only_resumes_in_its_original_direction() {
     let (root, before) = fixture();
     let after = normalized(&before);
+    let prepared =
+        prepare_publication(before, after.clone(), Operation::IdentityMigration).unwrap();
     assert!(
         catch_unwind(AssertUnwindSafe(|| publish(
             &root.0,
-            before,
-            after.clone(),
-            Operation::IdentityMigration,
+            prepared,
             &mut |point| {
                 if point == (Point::CleanupRemoved { index: 0 }) {
                     panic!("exit after committed partial cleanup");
@@ -242,37 +226,36 @@ fn repeated_legacy_restore_preserves_archive_and_live_lineage_across_rollback() 
     let archive_path = Path::new(&receipt.path);
     let archive_bytes = fs::read(archive_path).unwrap();
     let destination = crate::configuration::tests::Root::new();
-    install(
-        &destination.0,
+    let plan = prepare(
         crate::backup::read(archive_path).unwrap(),
+        capture(&destination.0).unwrap(),
         None,
     )
     .unwrap();
+    install(&destination.0, plan).unwrap();
     let first = capture(&destination.0).unwrap();
-    install(
-        &destination.0,
+    let plan = prepare(
         crate::backup::read(archive_path).unwrap(),
+        first.clone(),
         Some(&first.generation),
     )
     .unwrap();
+    install(&destination.0, plan).unwrap();
     assert_eq!(capture(&destination.0).unwrap(), first);
-    let error = install_with(
-        &destination.0,
-        original,
-        Some(&first.generation),
-        &mut |point| {
-            if point == Point::AfterJournal {
-                Err(invalid("refuse after assignments are durable"))
-            } else {
-                Ok(())
-            }
-        },
-    )
+    let plan = prepare(original, first.clone(), Some(&first.generation)).unwrap();
+    let error = install_with(&destination.0, plan, &mut |point| {
+        if point == Point::AfterJournal {
+            Err(invalid("refuse after assignments are durable"))
+        } else {
+            Ok(())
+        }
+    })
     .unwrap_err();
     assert_eq!(error.context["rolled_back"], true);
     assert_eq!(capture(&destination.0).unwrap(), first);
     assert_eq!(fs::read(archive_path).unwrap(), archive_bytes);
-    install(&destination.0, first.clone(), Some(&first.generation)).unwrap();
+    let plan = prepare(first.clone(), first.clone(), Some(&first.generation)).unwrap();
+    install(&destination.0, plan).unwrap();
     assert_eq!(capture(&destination.0).unwrap(), first);
 }
 
@@ -356,12 +339,11 @@ fn rollback_reuses_pretty_archive_ledger_bytes_after_interruption() {
     let pretty = serde_json::to_vec_pretty(&ledger).unwrap();
     files.insert(LEDGER.into(), pretty.clone());
     let after = Capture::from_files(files, true).unwrap();
+    let prepared = prepare_publication(before.clone(), after.clone(), Operation::Restore).unwrap();
     assert!(
         catch_unwind(AssertUnwindSafe(|| publish(
             &root.0,
-            before.clone(),
-            after.clone(),
-            Operation::Restore,
+            prepared,
             &mut |point| {
                 if point == Point::AfterJournal {
                     return Err(invalid("fail before installing archive"));
@@ -403,9 +385,9 @@ fn conflicting_archive_lineage_refuses_before_live_mutation() {
     let archive = crate::backup::write(&source.0, foreign, None).unwrap();
     let archive_bytes = fs::read(&archive.path).unwrap();
     assert!(
-        install(
-            &root.0,
+        prepare(
             crate::backup::read(Path::new(&archive.path)).unwrap(),
+            before.clone(),
             Some(&before.generation)
         )
         .is_err()
@@ -413,4 +395,147 @@ fn conflicting_archive_lineage_refuses_before_live_mutation() {
     assert_eq!(capture(&root.0).unwrap(), before);
     assert_eq!(fs::read(&archive.path).unwrap(), archive_bytes);
     assert!(!pending(&root.0).unwrap());
+}
+
+fn profile_import_fixture() -> (
+    crate::configuration::tests::Root,
+    Capture,
+    Capture,
+    Operation,
+) {
+    let (root, _) = fixture();
+    identity_migrations::migrate(&root.0).unwrap();
+    let mut profile: Profile =
+        decode(&fs::read(root.0.join(format!("profiles/{}.json", old_id(1)))).unwrap()).unwrap();
+    profile.id = old_id(2);
+    root.put(
+        &format!("profiles/{}.json", profile.id),
+        &serde_json::to_vec_pretty(&profile).unwrap(),
+    );
+    let unselected = Profile {
+        id: old_id(3),
+        ..profile.clone()
+    };
+    root.put(
+        &format!("profiles/{}.json", unselected.id),
+        &serde_json::to_vec_pretty(&unselected).unwrap(),
+    );
+    let before = capture(&root.0).unwrap();
+    let mut files = before.files.clone();
+    files.insert(
+        format!("tabs/Alpha/pkg/{}.config", profile.id),
+        encode(&profile, storage::MAX_PROFILE_BYTES).unwrap(),
+    );
+    let after =
+        identity_migrations::normalize_restore(Capture::from_files(files, true).unwrap(), &before)
+            .unwrap();
+    let operation = Operation::ProfileImport {
+        internal_name: "Alpha".into(),
+        package_id: "pkg".into(),
+        source_id: profile.id,
+    };
+    (root, before, after, operation)
+}
+
+#[test]
+fn interrupted_profile_import_recovers_with_durable_reservations_and_unchanged_sources() {
+    for rollback in [false, true] {
+        let (root, before, after, operation) = profile_import_fixture();
+        let destination = after
+            .files
+            .keys()
+            .find(|path| !before.files.contains_key(*path))
+            .unwrap();
+        let imported: Profile = decode(&after.files[destination]).unwrap();
+        let paths: BTreeSet<_> = before.files.keys().chain(after.files.keys()).collect();
+        let index = paths.iter().position(|path| *path == destination).unwrap();
+        let prepared = prepare_publication(before.clone(), after.clone(), operation).unwrap();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| publish(
+                &root.0,
+                prepared,
+                &mut |point| {
+                    if point
+                        == (Point::Installed {
+                            index,
+                            rollback: false,
+                        })
+                    {
+                        panic!("exit after installing imported profile before verification");
+                    }
+                    Ok(())
+                }
+            )))
+            .is_err()
+        );
+        assert!(pending(&root.0).unwrap());
+        assert_eq!(fs::read(root.0.join(LEDGER)).unwrap(), after.files[LEDGER]);
+        let source = format!("profiles/{}.json", old_id(2));
+        assert_eq!(
+            fs::read(root.0.join(&source)).unwrap(),
+            before.files[&source]
+        );
+        recover(&root.0, rollback).unwrap();
+        let expected = if rollback {
+            identity_migrations::rollback_capture(&before, &after).unwrap()
+        } else {
+            after.clone()
+        };
+        assert_eq!(capture(&root.0).unwrap(), expected);
+        assert!(!pending(&root.0).unwrap());
+        let result = identity_migrations::import_profile(
+            &root.0,
+            "Alpha",
+            decode(&before.files[&source]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result, (imported.id, !rollback));
+        assert_eq!(capture(&root.0).unwrap(), after);
+    }
+}
+
+#[test]
+fn committed_profile_import_cleanup_preserves_only_the_selected_import_and_direction() {
+    let (root, before, after, operation) = profile_import_fixture();
+    let prepared = prepare_publication(before.clone(), after.clone(), operation).unwrap();
+    let error = publish(&root.0, prepared, &mut |point| {
+        if point == (Point::CleanupRemoved { index: 0 }) {
+            Err(invalid("injected partial profile import cleanup failure"))
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap_err();
+    assert_eq!(error.context["configuration_installed"], true);
+    assert_eq!(error.context["rolled_back"], false);
+    assert_eq!(error.context["cleanup_incomplete"], true);
+    assert_eq!(error.context["pending_restore"], true);
+    assert_eq!(capture(&root.0).unwrap(), after);
+    for (path, bytes) in &before.files {
+        if path != LEDGER {
+            assert_eq!(&after.files[path], bytes);
+        }
+    }
+    let wrong_direction = recover(&root.0, true).unwrap_err();
+    assert_eq!(wrong_direction.context["configuration_installed"], true);
+    assert_eq!(wrong_direction.context["rolled_back"], false);
+    assert_eq!(capture(&root.0).unwrap(), after);
+    recover(&root.0, false).unwrap();
+    assert!(!pending(&root.0).unwrap());
+    assert_eq!(capture(&root.0).unwrap(), after);
+    let untouched_source = format!("profiles/{}.json", old_id(3));
+    let (id, unchanged) = identity_migrations::import_profile(
+        &root.0,
+        "Alpha",
+        decode(&before.files[&untouched_source]).unwrap(),
+    )
+    .unwrap();
+    assert!(!unchanged);
+    let imported: Profile =
+        decode(&fs::read(root.0.join(format!("tabs/Alpha/pkg/{id}.config"))).unwrap()).unwrap();
+    assert_eq!(imported.id, id);
+    assert_eq!(
+        fs::read(root.0.join(&untouched_source)).unwrap(),
+        before.files[&untouched_source]
+    );
 }

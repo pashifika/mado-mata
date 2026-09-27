@@ -152,7 +152,11 @@ fails rather than falling back to an overwriting operation.
 Before replacing nonempty configuration, require a separately requested snapshot
 receipt from this session, its still-readable matching archive, and a generation
 matching the current managed bytes. Restore requires explicit replacement
-confirmation. Retry, Restore, and interrupted-restore recovery require explicit
+confirmation. Prepare one normalized Restore generation and validate its identity
+transition, rollback budget, and aliases before session retirement. Deterministic
+refusals preserve the Ready Application and its drafts; installation consumes that
+checked plan and rechecks pending recovery and the live generation before writing.
+Retry, Restore, and interrupted-restore recovery require explicit
 session disposal whenever an Application exists, even with clean profile drafts.
 Reconstruction admits only settled commands and an idle controller, closes future
 admission, and retires owned resources before replacement. An incomplete logger
@@ -162,6 +166,9 @@ or recovery consumes it. Window close and native Quit contain a published
 Application before waiting for an in-flight snapshot or recovery action, and
 retire an Application published by a load that raced ahead of closing once that
 action settles; the wait does not make a hung filesystem call interruptible.
+Close admission retains command serialization and editor guards but does not use
+the ordinary-command pending-transaction gate. Exit preserves journal and
+completion evidence rather than resolving it implicitly.
 
 [`restore`](../../apps/desktop/src-tauri/src/restore.rs) stages and syncs the
 journal and preimages before the first managed replacement. It verifies the

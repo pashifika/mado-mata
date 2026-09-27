@@ -265,6 +265,31 @@ fn migration_candidate_requires_complete_safe_owned_scope_without_schema_repair(
     assert!(normalize_with(future.clone(), &future, &mut storage::new_id).is_err());
 }
 
+#[test]
+fn migration_capture_refusals_identify_the_managed_path_without_mutation() {
+    for path in [
+        "settings.pending",
+        "profiles/legacy.pending",
+        "profiles/foreign.JSON",
+        "tabs/Beta/tab.pending",
+        "tabs/Beta/pkg/00000000000000000000.pending",
+        "tabs/Beta/pkg/foreign.CONFIG",
+    ] {
+        let (root, before) = fixture();
+        let interrupted = b"preserve the interrupted or aliased configuration";
+        root.put(path, interrupted);
+        let error = migrate(&root.0).unwrap_err();
+        assert_eq!(
+            Path::new(error.context["path"].as_str().unwrap()),
+            Path::new(path)
+        );
+        assert_eq!(fs::read(root.0.join(path)).unwrap(), interrupted);
+        assert!(!crate::restore::pending(&root.0).unwrap());
+        fs::remove_file(root.0.join(path)).unwrap();
+        assert_eq!(configuration::capture(&root.0).unwrap(), before);
+    }
+}
+
 fn inventory() -> Inventory {
     Inventory {
         identity: "fixture".into(),
@@ -442,6 +467,47 @@ fn generation_faults_and_exhausted_collisions_publish_nothing() {
 }
 
 #[test]
+fn reserved_destinations_never_overwrite_or_adopt_existing_entities() {
+    for (tab, kind) in [
+        ("Alpha", EntityKind::Profile),
+        ("Beta", EntityKind::Profile),
+        ("Alpha", EntityKind::TargetBinding),
+    ] {
+        let (root, _) = fixture();
+        let ledger = Ledger {
+            version: 1,
+            entries: vec![Assignment {
+                kind: EntityKind::Profile,
+                internal_name: "Alpha".into(),
+                package_id: "pkg".into(),
+                legacy_id: old_id(1),
+                xid: VALIDATION_ID.into(),
+            }],
+        };
+        root.put(LEDGER, &encode(&ledger, MAX_LEDGER_BYTES).unwrap());
+        if kind == EntityKind::Profile {
+            let mut occupied = profile("pkg");
+            occupied.id = VALIDATION_ID.into();
+            occupied.name = "Existing current profile".into();
+            root.put(
+                &format!("tabs/{tab}/pkg/{VALIDATION_ID}.config"),
+                &serde_json::to_vec(&occupied).unwrap(),
+            );
+        } else {
+            let path = root.0.join("tabs/Alpha/pkg/target.config");
+            let mut occupied: TargetRecord = decode(&fs::read(&path).unwrap()).unwrap();
+            occupied.binding.as_mut().unwrap().id = VALIDATION_ID.into();
+            fs::write(path, serde_json::to_vec(&occupied).unwrap()).unwrap();
+        }
+        let before = configuration::capture(&root.0).unwrap();
+        let error = migrate(&root.0).unwrap_err();
+        assert_eq!(error.category, "IdentityMigration");
+        assert_eq!(configuration::capture(&root.0).unwrap(), before);
+        assert!(!crate::restore::pending(&root.0).unwrap());
+    }
+}
+
+#[test]
 fn archive_replay_reuses_live_mappings_and_refuses_a_conflicting_lineage() {
     let (root, archive) = fixture();
     let after = normalized(&archive);
@@ -477,7 +543,9 @@ fn tombstones_survive_owner_retirement_and_do_not_recreate_configuration() {
     assert_eq!(retired.files.len(), 2);
     assert_eq!(retired.files[LEDGER], after.files[LEDGER]);
     let observed = configuration::capture(&root.0).unwrap();
-    crate::restore::install(&root.0, retired.clone(), Some(&observed.generation)).unwrap();
+    let generation = observed.generation.clone();
+    let plan = crate::restore::prepare(retired.clone(), observed, Some(&generation)).unwrap();
+    crate::restore::install(&root.0, plan).unwrap();
     assert_eq!(configuration::capture(&root.0).unwrap(), retired);
     migrate(&root.0).unwrap();
     assert_eq!(configuration::capture(&root.0).unwrap(), retired);

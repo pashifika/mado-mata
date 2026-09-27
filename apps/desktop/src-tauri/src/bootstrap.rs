@@ -545,9 +545,10 @@ impl Bootstrap {
                 ));
             }
         }
+        let expected = (!current.files.is_empty()).then(|| current.generation.clone());
+        let prepared = restore::prepare(incoming, current, expected.as_deref())?;
         self.retire(discard)?;
-        let expected = (!current.files.is_empty()).then_some(current.generation.as_str());
-        match restore::install(root, incoming, expected) {
+        match restore::install(root, prepared) {
             Ok(()) => {
                 lock(&self.state).receipt = None;
                 self.load();

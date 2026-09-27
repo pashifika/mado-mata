@@ -1091,9 +1091,12 @@ Restore replaces the managed user configuration, not package payloads, file logs
 backups, or unrelated data. Eligible legacy identities are normalized only in the
 validated proposed generation; archive bytes remain unchanged. Compatible live
 and archived reservations coalesce, and ledger-free archives retain live
-reservations. Conflicting mappings refuse before replacement. Repeated restoration
-therefore preserves mapped IDs within one maintained root; independent empty
-roots restoring a ledger-free archive need not assign equal IDs.
+reservations. Normalization, conflicting mappings, filesystem aliases, and rollback
+budgets are checked before retiring a Ready session; these refusals preserve its
+workspaces and unsaved drafts. Publication rechecks the live generation and pending
+recovery before writing. Repeated restoration preserves mapped IDs within one
+maintained root; independent empty roots restoring a ledger-free archive need not
+assign equal IDs.
 
 Before the first identity replacement, the host stages incoming bytes, durable
 reservations, and rollback preimages and persists `.restore-journal`. Completion
@@ -1111,11 +1114,16 @@ finish cleanup; the opposite action is refused. Do not delete these artifacts
 to bypass Recovery. Retry, Restore, and transaction recovery share idle and
 session-disposal requirements; incomplete log-writer shutdown requires Exit and
 relaunch before any reconstruction.
+Pending transaction evidence blocks ordinary commands, not **Exit** or window
+close. Closing still contains owned resources and preserves that evidence; it
+does not complete or roll back the transaction or bypass unresolved editor guards.
 
 Recovery distinguishes incomplete restoration, cleanup failure and failed
 Application reconstruction. If installation and automatic rollback both fail,
 the current configuration may be partly replaced; neither generation is
 claimed to be intact. Resolve the displayed cause before continuing.
+Interrupted-write and alias refusals identify the relative managed path. Private
+file-read and directory-enumeration failures also retain their path attribution.
 
 While a restore remains pending, use the transaction controls in its committed
 direction; **Retry** is unavailable. An unreadable or unsupported completion
