@@ -97,8 +97,8 @@ export interface TrialTicket {
 // this state existed; it is never shown as current.
 export interface TrialRecord {ticket:TrialTicket|null; trial:RecognitionTrial|null; fault:Fault|null}
 // A Copy captures every input and its selection generation; changing a checked set and restoring it does not
-// revive copied source. Recognition-input marks likewise prevent geometry Undo from reviving a Copy. Setup source
-// is the basis value itself, so it is compared by value.
+// revive copied source. Recognition-input (or, for grouped OCR, source-input) marks likewise prevent geometry Undo
+// from reviving a Copy. Setup source is the basis value itself, so it is compared by value.
 export interface CopyStamp {basis:number; definitions:Record<string, {revision:number; mark:number}>; source:string|null; selection:number}
 export interface CopyTicket {token:string; revision:string; document_revision:number; definition_ids:string[]; kind:SnippetKind; stamp:CopyStamp}
 // `error` is the host refusal or the clipboard failure; either way no package file changed.
@@ -131,6 +131,8 @@ export interface RecognitionState {
   // Bumped by every local metadata change; the preview Undo fence.
   localRevision:number;
   clock:number; basis:number; marks:Record<string, number>;
+  // Like `marks` (same never-reused clock) but blind to the saved crop, which grouped OCR source never carries.
+  sourceMarks:Record<string, number>;
   // Shared by the list and the preview overlay.
   selected:string|null;
   // OCR definitions checked for the next grouped trial and grouped OCR Copy, in document order.
@@ -305,6 +307,24 @@ export function hitHandle(edges:Edges, point:Point, tolerance:number):Handle|nul
   return x > left && x < right && y > top && y < bottom ? 'move' : null;
 }
 
+// The region part a press grabs: the selected definition first (its pattern, then only the edges and corners of its
+// template search area, whose body never covers other regions or empty content to create in), then the others from
+// the topmost. `edges` gives the part's shown frame edges.
+export function hitRegion(definitions:readonly PreviewDefinition[], selected:string|null, point:Point, tolerance:number,
+  edges:(definition:PreviewDefinition, part:'region' | 'search') => Edges|null):{definition:PreviewDefinition; part:'region' | 'search'; handle:Handle; edges:Edges}|null {
+  const chosen = definitions.find(item => item.id === selected);
+  const ordered = chosen ? [chosen, ...definitions.filter(item => item !== chosen).reverse()] : [...definitions].reverse();
+  for (const definition of ordered) {
+    const parts: ('region' | 'search')[] = definition === chosen && definition.search ? ['region', 'search'] : ['region'];
+    for (const part of parts) {
+      const shown = edges(definition, part);
+      const handle = shown && hitHandle(shown, point, tolerance);
+      if (shown && handle && (part === 'region' || handle !== 'move')) return {definition, part, handle, edges: shown};
+    }
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Validation mirrored from the host so the UI can explain refusals before a round trip; the host stays authoritative.
 
@@ -363,6 +383,17 @@ function recognitionInputs(definition:RecognitionDefinition):unknown {
   return [definition.kind, definition.region, definition.template, definition.saved?.sha256 ?? null];
 }
 
+// Stored content equality. A definition `revision` is fence bookkeeping (a newer one may name restored content), so
+// it is ignored; basis, rights, definition order and every other field compare exactly, as the host compares saved
+// correspondence.
+function sameContent(a:RecognitionDocument|null, b:RecognitionDocument|null):boolean {
+  if (a === null || b === null) return a === b;
+  const {definitions: left, ...rest} = a;
+  const {definitions: right, ...other} = b;
+  return left.length === right.length && sameJson(rest, other)
+    && left.every((definition, index) => sameJson({...definition, revision: 0}, {...right[index], revision: 0}));
+}
+
 function sameBasis(a:GeometryBasis|null|undefined, b:GeometryBasis|null|undefined):boolean {
   return a !== null && a !== undefined && b !== null && b !== undefined && sameJson(a, b);
 }
@@ -378,16 +409,22 @@ function stamp(state:RecognitionState, before:RecognitionDocument|null):Recognit
   if (!sameBasis(before?.basis, after?.basis)) basis += 1;
   const previous = new Map(before?.definitions.map(definition => [definition.id, definition]) ?? []);
   const marks: Record<string, number> = {};
+  const sourceMarks: Record<string, number> = {};
   for (const definition of after?.definitions ?? []) {
     const old = previous.get(definition.id);
     const mark = state.marks[definition.id];
+    const sourceMark = state.sourceMarks[definition.id];
     marks[definition.id] = old && mark !== undefined && sameJson(recognitionInputs(old), recognitionInputs(definition)) ? mark : ++clock;
+    // Grouped OCR source depends on the same inputs except the saved diagnostic crop (name and reference text are
+    // covered by the definition revision).
+    sourceMarks[definition.id] = old && sourceMark !== undefined
+      && sameJson([old.kind, old.region, old.template], [definition.kind, definition.region, definition.template]) ? sourceMark : ++clock;
   }
   const order = after?.definitions.map(definition => definition.id) ?? [];
   const ocr = new Set(after?.definitions.filter(definition => definition.kind === 'ocr').map(definition => definition.id) ?? []);
   const cropIds = basis === state.basis ? order.filter(id => state.cropIds.includes(id)) : [];
   const trialIds = order.filter(id => ocr.has(id) && state.trialIds.includes(id));
-  return {...state, clock, basis, marks,
+  return {...state, clock, basis, marks, sourceMarks,
     selected: state.selected !== null && order.includes(state.selected) ? state.selected : null,
     trialIds, trialSelection: state.trialSelection + (sameJson(trialIds, state.trialIds) ? 0 : 1),
     cropIds, cropMarks: Object.fromEntries(cropIds.map(id => [id, state.cropMarks[id]]))};
@@ -422,7 +459,7 @@ function withSavedRefs(document:RecognitionDocument, host:RecognitionDocument|nu
 export function openRecognition(view:RecognitionView):RecognitionState {
   const empty: RecognitionState = {
     owner: view.owner, view: {...view, frame: null}, document: null, localRevision: 0,
-    clock: maxRevision(view.document, view.saved_document), basis: 0, marks: {},
+    clock: maxRevision(view.document, view.saved_document), basis: 0, marks: {}, sourceMarks: {},
     selected: null, trialIds: [], trialSelection: 0, cropIds: [], cropMarks: {}, undo: [], undoBytes: 0, group: null,
     trial: view.trial ? {ticket: null, trial: view.trial, fault: null} : null, running: null, copies: {},
     display: {zoom: 'fit', tool: 'zones'}, nextId: idNumber(view.document, view.saved_document), notice: null, error: null,
@@ -473,13 +510,14 @@ export function hostCurrent(state:RecognitionState):boolean {
   return state.document === null || sameJson(state.document, state.view.document);
 }
 
-// Unsaved compared with the document on disk, or crops chosen for the next Save.
+// Unsaved compared with the document on disk, or crops chosen for the next Save. A hand-restored saved value is clean
+// although its definition revision advanced.
 export function recognitionDirty(state:RecognitionState):boolean {
   const {document} = state;
   if (state.cropIds.length > 0) return true;
   if (document === null) return false;
   const saved = state.view.saved_document;
-  if (saved !== null) return !sameJson(document, saved);
+  if (saved !== null) return !sameContent(document, saved);
   // Without saved metadata only the untouched full-image default is clean; a chosen content rectangle is a draft.
   const {frame_width: width, frame_height: height, content} = document.basis;
   const full = content.x === 0 && content.y === 0 && content.width === width && content.height === height;
@@ -584,9 +622,11 @@ export function setKind(state:RecognitionState, id:string, kind:RecognitionKind)
     template: kind === 'template' ? {search_region: {...FULL_REGION}, ...TEMPLATE_DEFAULTS} : null}, null);
 }
 
+// A wholly empty, unreviewed rights form is no rights draft: typing and clearing it leaves the document unchanged.
 export function setRights(state:RecognitionState, rights:TemplateRights|null):RecognitionState {
   const document = state.document;
-  return document ? edit(state, {...document, template_rights: rights}, 'rights') : state;
+  const empty = rights !== null && rights.license === '' && rights.created_by === '' && (rights.created_for ?? '') === '' && !rights.reviewed;
+  return document ? edit(state, {...document, template_rights: empty ? null : rights}, 'rights') : state;
 }
 
 export function deleteDefinition(state:RecognitionState, id:string):RecognitionState {
@@ -792,13 +832,13 @@ export function applySave(state:RecognitionState, ticket:SaveTicket, view:Recogn
   return view ? applyView(cleared, view, ticket.document) : cleared;
 }
 
-// A saved template's runtime Copy needs its definition, PNG reference and rights to match the saved document.
+// A saved template's runtime Copy needs the whole draft to be the saved document (the host's check), with the
+// template's PNG reference and reviewed rights.
 export function templateSavedCurrent(state:RecognitionState, id:string):boolean {
   const definition = state.document?.definitions.find(item => item.id === id);
   const saved = state.view.saved_document;
-  const disk = saved?.definitions.find(item => item.id === id);
-  return definition !== undefined && definition.kind === 'template' && definition.saved !== null && saved !== null && saved !== undefined
-    && disk !== undefined && sameJson(definition, disk) && sameJson(state.document!.template_rights, saved.template_rights) && rightsValid(saved.template_rights);
+  return definition !== undefined && definition.kind === 'template' && definition.saved !== null && saved !== null
+    && sameContent(state.document, saved) && rightsValid(saved.template_rights);
 }
 
 // The definitions each Copy purpose names: none for the Game content setup, every checked OCR Trial row for grouped
@@ -835,7 +875,7 @@ export function copyTicket(state:RecognitionState, ids:readonly string[], kind:S
   return {token: state.owner.token, revision: state.view.revision, document_revision: state.view.document_revision, definition_ids: [...ids], kind,
     stamp: {basis: state.basis, definitions: Object.fromEntries(ids.map(id => {
       const definition = state.document!.definitions.find(item => item.id === id)!;
-      return [id, {revision: definition.revision, mark: state.marks[id]}];
+      return [id, {revision: definition.revision, mark: (kind === 'ocr_recognize' ? state.sourceMarks : state.marks)[id]}];
     })), source: kind === 'template_recognize' ? state.view.revision : null, selection: state.trialSelection}};
 }
 
@@ -848,17 +888,19 @@ export function applyCopy(state:RecognitionState, ticket:CopyTicket, result:Copy
 }
 
 // Whether published source still equals what the same purpose would copy now. Setup follows its basis value. Grouped
-// OCR follows its checked set and zone definitions, not Game content, because it reads the pasted `recognitionBasis`.
-// A template Copy is bound to the frame, content basis and saved package revision.
+// OCR follows its checked set and zone definitions (not their saved diagnostic crops), not Game content, because it
+// reads the pasted `recognitionBasis`. A template Copy is bound to the frame, content basis and saved package revision.
 export function copyFreshness(state:RecognitionState, kind:SnippetKind):CopyFreshness|null {
   const copy = state.copies[kind];
   if (!copy) return null;
   if (copy.error) return 'failed';
   if (kind === 'game_content') return sameBasis(copy.basis, state.document?.basis) ? 'current' : 'obsolete';
+  // Grouped OCR source ignores saved diagnostic crops; a template Copy carries its saved PNG.
+  const marks = kind === 'ocr_recognize' ? state.sourceMarks : state.marks;
   const changed = !sameJson(copy.definition_ids, copySelection(state, kind)) || copy.definition_ids.some(id => {
     const definition = state.document?.definitions.find(item => item.id === id);
     const captured = copy.stamp.definitions[id];
-    return !definition || !captured || definition.revision !== captured.revision || state.marks[id] !== captured.mark;
+    return !definition || !captured || definition.revision !== captured.revision || marks[id] !== captured.mark;
   });
   const obsolete = changed || (kind === 'ocr_recognize' ? copy.stamp.selection !== state.trialSelection
     : state.basis !== copy.stamp.basis || copy.stamp.source !== state.view.revision);

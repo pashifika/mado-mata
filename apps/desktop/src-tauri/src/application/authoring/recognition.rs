@@ -4,8 +4,8 @@ use crate::authoring::{Candidate, RecognitionSave, SelectedCrop};
 use mado_runtime_comparison::images::{self, DecodedImage, ImageKind, PayloadReservation};
 use mado_runtime_comparison::model::{Fault, identity};
 use mado_runtime_comparison::recognition::{
-    GeometryBasis, PixelRect, RecognitionDocument, RecognitionKind, SavedCrop, SnippetKind,
-    build_template_assets, generate_snippet,
+    GeometryBasis, PixelRect, RecognitionDefinition, RecognitionDocument, RecognitionKind,
+    SavedCrop, SnippetKind, build_template_assets, generate_snippet,
 };
 use mado_runtime_comparison::recognition_trial::{
     OcrZone, TemplateInput, TrialFrame, TrialIdentity, TrialSelection,
@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::Read;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Default)]
@@ -32,8 +32,44 @@ pub(super) struct RecognitionState {
     next_frame: u64,
     max_ocr_zones: Option<usize>,
     trial: Option<RecognitionTrial>,
+    run: Option<RecognitionRun>,
     preview_payload: Option<PayloadReservation>,
     preview_generation: u64,
+}
+
+/// A child started by this lease. `collect` settles it in the critical section that
+/// ends run ownership; its command then takes the settled controller to reply.
+struct RecognitionRun {
+    id: String,
+    /// Captured trial inputs; `None` for a capability read.
+    trial: Option<TrialTicket>,
+    settled: Option<Arc<Value>>,
+}
+
+struct TrialTicket {
+    owner: AuthoringRef,
+    revision: String,
+    document_revision: u64,
+    frame_id: Option<String>,
+    frame_revision: u64,
+    configuration_revision: String,
+    sample_id: Option<String>,
+}
+
+impl TrialTicket {
+    fn into_trial(self, stale: bool, controller: Arc<Value>) -> RecognitionTrial {
+        RecognitionTrial {
+            owner: self.owner,
+            revision: self.revision,
+            document_revision: self.document_revision,
+            frame_id: self.frame_id,
+            frame_revision: self.frame_revision,
+            configuration_revision: self.configuration_revision,
+            sample_id: self.sample_id,
+            stale,
+            controller,
+        }
+    }
 }
 
 struct Frame {
@@ -168,6 +204,145 @@ impl RecognitionState {
             .filter(|frame| frame.confirmed)
             .ok_or_else(|| invalid("Load an image and confirm its content geometry first"))
     }
+
+    /// Settles this lease's run where `collect` ends its ownership, so no command is
+    /// admitted between terminal evidence and the retained outcome.
+    pub(super) fn settle(&mut self, package_revision: &str, run: &str, controller: &Arc<Value>) {
+        let Some(pending) = self
+            .run
+            .as_mut()
+            .filter(|pending| pending.id == run && pending.settled.is_none())
+        else {
+            return;
+        };
+        pending.settled = Some(controller.clone());
+        if let Some(ticket) = pending.trial.take() {
+            let stale = ticket.revision != package_revision
+                || ticket.document_revision != self.revision
+                || (ticket.sample_id.is_none()
+                    && self.frame.as_ref().map(|frame| frame.id.as_str())
+                        != ticket.frame_id.as_deref());
+            self.trial = Some(ticket.into_trial(stale, controller.clone()));
+        } else if let Some(maximum) = capability_limit(controller) {
+            self.max_ocr_zones = Some(maximum);
+        }
+    }
+
+    /// A settled cleanup failure whose command has not returned it yet.
+    pub(super) fn unreturned_cleanup(&self) -> Option<Fault> {
+        incomplete_cleanup(self.run.as_ref()?.settled.as_ref()?)
+    }
+}
+
+/// Cleanup is reported beside the primary outcome. A returned runner envelope carries
+/// its own cleanup and reaping facts; a worker fault attests cleanup only in its context.
+fn cleanup_facts(controller: &Value) -> (bool, Value) {
+    let result = &controller["result"];
+    let error = &controller["error"];
+    let (cleanup, primary) = if error.is_null() {
+        (&result["cleanup"], &result["primary"]["category"])
+    } else {
+        (&error["context"]["cleanup"], &error["category"])
+    };
+    (
+        cleanup["clean"] == true,
+        json!({"operation":controller["operation"],"primary":primary,"cleanup":cleanup,
+            "child_reaped":result["child_reaped"],"forced":result["forced"],"exit_code":result["exit_code"]}),
+    )
+}
+
+/// Only unconfirmed child ownership contains the Edit session: incomplete cleanup without
+/// an explicit reaping fact, or a supervision containment fault. A reaped child with
+/// incomplete cleanup stays a visible failed outcome and does not refuse Save or Exit.
+pub(super) fn containment(controller: &Value) -> Option<Fault> {
+    let (clean, facts) = cleanup_facts(controller);
+    ((!clean && facts["child_reaped"] != true) || facts["primary"] == "Containment").then(|| {
+        Fault::new(
+            "RecognitionCleanup",
+            "Recognition child ownership is unconfirmed; close the application before further work",
+        )
+        .with_context(facts)
+    })
+}
+
+fn incomplete_cleanup(controller: &Value) -> Option<Fault> {
+    let (clean, facts) = cleanup_facts(controller);
+    (!clean).then(|| {
+        Fault::new("RecognitionCleanup", "Recognition cleanup is incomplete").with_context(facts)
+    })
+}
+
+/// A failed capability read keeps its primary category, with cleanup and reaping facts
+/// beside it; with no primary failure, incomplete cleanup is the failure.
+fn capability_failure(controller: &Value) -> Option<Fault> {
+    let error = &controller["error"];
+    if !error.is_null() {
+        return Some(serde_json::from_value(error.clone()).unwrap_or_else(|_| stale()));
+    }
+    let primary = &controller["result"]["primary"];
+    if primary.is_null() {
+        return incomplete_cleanup(controller);
+    }
+    let mut fault: Fault = serde_json::from_value(primary.clone()).unwrap_or_else(|_| stale());
+    let (_, mut facts) = cleanup_facts(controller);
+    let cause = std::mem::take(&mut fault.context);
+    facts["stage"] = cause["stage"].clone();
+    facts["cause"] = cause;
+    fault.context = facts;
+    Some(fault)
+}
+
+fn capability_limit(controller: &Value) -> Option<usize> {
+    let result = &controller["result"];
+    if !controller["error"].is_null()
+        || !result["primary"].is_null()
+        || result["cleanup"]["clean"] != true
+    {
+        return None;
+    }
+    result["capabilities"]["max_ocr_zones"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+}
+
+/// Saved correspondence compares stored meaning. Definition revisions are edit fences, so a
+/// hand-restored definition is saved-current without resetting its revision.
+fn same_saved_content(draft: &RecognitionDocument, stored: &RecognitionDocument) -> bool {
+    let RecognitionDocument {
+        version,
+        rounding,
+        basis,
+        definitions,
+        template_rights,
+    } = draft;
+    *version == stored.version
+        && *rounding == stored.rounding
+        && *basis == stored.basis
+        && *template_rights == stored.template_rights
+        && definitions.len() == stored.definitions.len()
+        && definitions
+            .iter()
+            .zip(&stored.definitions)
+            .all(|(definition, stored)| {
+                let RecognitionDefinition {
+                    id,
+                    name,
+                    revision: _,
+                    kind,
+                    region,
+                    expected,
+                    template,
+                    saved,
+                } = definition;
+                *id == stored.id
+                    && *name == stored.name
+                    && *kind == stored.kind
+                    && *region == stored.region
+                    && *expected == stored.expected
+                    && *template == stored.template
+                    && *saved == stored.saved
+            })
 }
 
 impl Application {
@@ -479,27 +654,21 @@ impl Application {
         state.work_idle()?;
         let mut stop = lock(&self.authoring_stop);
         let run = self.runner.recognition_capabilities()?;
-        self.own_recognition_run(&mut state, owner, &run, &mut stop);
+        self.own_recognition_run(&mut state, owner, &run, &mut stop, None);
         drop(stop);
         drop(state);
         drop(command);
-        let controller = self.settle_recognition_run(owner, &run)?;
-        if !controller["error"].is_null() {
-            return Err(serde_json::from_value(controller["error"].clone()).map_err(|_| stale())?);
+        let (state, controller) = self.settle_recognition_run(owner, &run)?;
+        drop(state);
+        // `collect` retained a successful limit; a failed read reports its own outcome.
+        if let Some(fault) = capability_failure(&controller) {
+            return Err(fault);
         }
-        let maximum = controller["result"]["capabilities"]["max_ocr_zones"]
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-            .filter(|value| *value > 0)
-            .ok_or_else(|| invalid("Engine did not return a grouped OCR capability"))?;
+        if capability_limit(&controller).is_none() {
+            return Err(invalid("Engine did not return a grouped OCR capability"));
+        }
         let (_command, mut state) = self.command_state()?;
         state.authoring_revision(owner, revision)?;
-        state
-            .authoring
-            .as_mut()
-            .ok_or_else(stale)?
-            .recognition
-            .max_ocr_zones = Some(maximum);
         self.recognition_snapshot(&mut state, owner, revision)
     }
 
@@ -509,6 +678,7 @@ impl Application {
         owner: &AuthoringRef,
         run: &str,
         stop: &mut Option<super::StopOwner>,
+        trial: Option<TrialTicket>,
     ) {
         state.owner = Some(OperationOwner {
             run: run.to_owned(),
@@ -516,37 +686,46 @@ impl Application {
             check: None,
             terminal: false,
         });
+        if let Some(lease) = state.authoring.as_mut() {
+            lease.recognition.run = Some(RecognitionRun {
+                id: run.to_owned(),
+                trial,
+                settled: None,
+            });
+        }
         if let Some(slot) = stop.as_mut() {
             slot.run = Some(run.to_owned());
         }
     }
 
-    fn settle_recognition_run(&self, owner: &AuthoringRef, run: &str) -> Result<Arc<Value>, Fault> {
+    /// Waits until `collect` has settled this lease's run, then takes that outcome in the
+    /// same critical section, which the caller keeps to reply. Until then shutdown can
+    /// still report a settled cleanup failure this command never returned.
+    fn settle_recognition_run(
+        &self,
+        owner: &AuthoringRef,
+        run: &str,
+    ) -> Result<(MutexGuard<'_, Workspaces>, Arc<Value>), Fault> {
         loop {
             let mut state = lock(&self.workspaces);
             state.authoring(owner)?;
             self.collect(&mut state);
-            let operation = state
-                .owner
+            let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
+            let settled = recognition
+                .run
                 .as_ref()
-                .filter(|operation| operation.run == run)
-                .ok_or_else(stale)?;
-            if operation.terminal {
-                let result = state.controller.clone();
+                .filter(|pending| pending.id == run)
+                .ok_or_else(stale)?
+                .settled
+                .clone();
+            if let Some(controller) = settled {
+                recognition.run = None;
                 if let Some(slot) = lock(&self.authoring_stop).as_mut() {
                     if slot.run.as_deref() == Some(run) {
                         slot.run = None;
                     }
                 }
-                if result["result"]["cleanup"]["clean"] == false
-                    || result["error"]["context"]["cleanup"]["clean"] == false
-                {
-                    state.authoring.as_mut().ok_or_else(stale)?.containment = Some(Fault::new(
-                        "RecognitionCleanup",
-                        "Recognition cleanup is incomplete; close the application before further work",
-                    ));
-                }
-                return Ok(result);
+                return Ok((state, controller));
             }
             drop(state);
             std::thread::sleep(Duration::from_millis(5));
@@ -608,6 +787,15 @@ impl Application {
             zones_revision: document_revision,
             configuration_revision: configuration_revision.clone(),
         };
+        let ticket = TrialTicket {
+            owner: owner.clone(),
+            revision: revision.to_owned(),
+            document_revision,
+            frame_id: frame_id.map(str::to_owned),
+            frame_revision,
+            configuration_revision,
+            sample_id: sample_id.map(str::to_owned),
+        };
         let mut stop = lock(&self.authoring_stop);
         let run = self.runner.recognition_trial(
             captured,
@@ -634,34 +822,24 @@ impl Application {
             },
             environment,
         )?;
-        self.own_recognition_run(&mut state, owner, &run, &mut stop);
+        self.own_recognition_run(&mut state, owner, &run, &mut stop, Some(ticket));
         drop(stop);
         drop(state);
         drop(command);
-        let controller = self.settle_recognition_run(owner, &run)?;
-        let mut state = lock(&self.workspaces);
-        state.authoring(owner)?;
+        let (mut state, controller) = self.settle_recognition_run(owner, &run)?;
         let current_configuration = self.recognition_configuration()?;
-        let lease = state.authoring.as_mut().ok_or_else(stale)?;
-        let recognition = &mut lease.recognition;
-        let is_stale = lease.revision != revision
-            || recognition.revision != document_revision
-            || current_configuration != configuration_revision
-            || (sample_id.is_none()
-                && recognition.frame.as_ref().map(|frame| frame.id.as_str()) != frame_id);
-        let result = RecognitionTrial {
-            owner: owner.clone(),
-            revision: revision.to_owned(),
-            document_revision,
-            frame_id: frame_id.map(str::to_owned),
-            frame_revision,
-            configuration_revision,
-            sample_id: sample_id.map(str::to_owned),
-            stale: is_stale,
-            controller,
-        };
-        recognition.trial = Some(result.clone());
-        Ok(result)
+        let trial = state
+            .authoring
+            .as_mut()
+            .ok_or_else(stale)?
+            .recognition
+            .trial
+            .as_mut()
+            .filter(|trial| trial.controller["run"] == controller["run"])
+            .ok_or_else(stale)?;
+        // An effective OCR configuration change during the run permanently stales it.
+        trial.stale |= trial.configuration_revision != current_configuration;
+        Ok(trial.clone())
     }
 
     pub fn recognition_save(
@@ -785,20 +963,18 @@ impl Application {
         definition_ids: &[String],
         mode: SnippetKind,
     ) -> Result<RecognitionCopy, Fault> {
+        // Command admission stays held throughout; only the workspaces lock is released
+        // while the package is recaptured.
         let (_command, mut state) = self.command_state()?;
         let candidate = state.authoring_revision(owner, revision)?;
-        let configuration = self.recognition_configuration()?;
         let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
         recognition.initialize(&candidate)?;
         if recognition.revision != document_revision {
             return Err(stale());
         }
-        recognition.confirmed_frame()?;
-        let document = recognition.document.as_ref().ok_or_else(stale)?;
-        let template_current = recognition
-            .saved_document
-            .as_ref()
-            .is_some_and(|saved| saved == document);
+        let frame_id = recognition.confirmed_frame()?.id.clone();
+        // Poll, preview and the preview Destroyed handler must not wait behind this capture.
+        drop(state);
         // Reopen saved source before returning a runtime alias; an old trial is not asset authority.
         let saved = self.publisher.open(candidate.root())?;
         if saved.revision() != revision {
@@ -807,6 +983,17 @@ impl Application {
                 "Source changed before Copy",
             ));
         }
+        let configuration = self.recognition_configuration()?;
+        let state = lock(&self.workspaces);
+        state.authoring_revision(owner, revision)?;
+        let recognition = &state.authoring.as_ref().ok_or_else(stale)?.recognition;
+        recognition.check(document_revision, Some(frame_id.as_str()))?;
+        let frame = recognition.confirmed_frame()?;
+        let document = recognition.document.as_ref().ok_or_else(stale)?;
+        let template_current = recognition
+            .saved_document
+            .as_ref()
+            .is_some_and(|stored| same_saved_content(document, stored));
         // The cached engine report is the only grouped-request bound; setup and template
         // Copy do not need it.
         let source = generate_snippet(
@@ -818,12 +1005,18 @@ impl Application {
             template_current,
             recognition.max_ocr_zones,
         )?;
-        // Game content setup is geometry data and never recognition evidence.
+        // Game content setup is geometry data and never recognition evidence. Evidence
+        // shares the displayed trial row's owner, package, draft, frame and configuration
+        // fences, so a stale row cannot certify a fresh receipt.
         let verified = mode != SnippetKind::GameContent
             && recognition.trial.as_ref().is_some_and(|trial| {
                 !trial.stale
-                    && trial.sample_id.is_none()
+                    && trial.owner == *owner
+                    && trial.revision == revision
                     && trial.document_revision == document_revision
+                    && trial.sample_id.is_none()
+                    && trial.frame_id.as_deref() == Some(frame.id.as_str())
+                    && trial.frame_revision == frame.revision
                     && trial.configuration_revision == configuration
                     && trial.controller["error"].is_null()
                     && trial.controller["result"]["primary"].is_null()

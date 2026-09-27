@@ -220,6 +220,10 @@ export default function App() {
   const leaseLost = authoring !== null && hostAuthoring !== undefined && authoring.pending === null && authoringBusy === null
     && hostAuthoring?.token !== authoring.owner.token;
   const recognitionDirty = authoring?.recognition ? recognition.recognitionDirty(authoring.recognition) : false;
+  // Why a dirty recognition draft cannot be saved as it is (unconfirmed geometry, unreviewed rights, …); Save all and
+  // the dirty-choice dialog explain it instead of attempting and blaming a concurrent edit.
+  const recognitionSaveRefusal = authoring?.recognition && recognitionDirty ? recognition.saveBlock(authoring.recognition) : null;
+  const recognitionSaveReason = recognitionSaveRefusal === null ? null : t.recognitionSaveBlocked(recognitionSaveRefusal);
   const unsavedCount = (authoring ? dirtyDrafts(authoring).length : 0) + Number(recognitionDirty);
   const validationActive = busy(view.state) && view.operation === 'authoring_validate';
   const recognitionActive = authoring?.pending?.kind === 'recognition_trial' || (busy(view.state) && view.operation.startsWith('recognition_'));
@@ -1164,10 +1168,20 @@ export default function App() {
       recognitionFailed(initial.owner.token, new LocalFault({key: 'recognitionManifestDirty'}));
       return false;
     }
+    const refused = recognition.saveBlock(initial.recognition);
+    if (refused !== null) {
+      recognitionFailed(initial.owner.token, new LocalFault({key: 'recognitionSaveBlocked', args: [refused]}));
+      return false;
+    }
     return recognitionCommand('savingRecognition', async current => {
       const {session, state} = await synchronizeRecognition(current.owner);
       const ticket = recognition.saveTicket(state);
-      if (!ticket) throw new LocalFault({key: 'recognitionDraftChanged'});
+      if (!ticket) {
+        // Synchronization may leave nothing to save; any other refusal reports its own reason, not a concurrent edit.
+        const block = recognition.saveBlock(state);
+        if (block === 'noChanges') return;
+        throw new LocalFault(block === null ? {key: 'recognitionDraftChanged'} : {key: 'recognitionSaveBlocked', args: [block]});
+      }
       const result = await invoke<{mutation: AuthoringMutation; recognition: recognition.RecognitionView | null}>('recognition_save', {
         owner: session.owner, revision: session.revision, documentRevision: ticket.document_revision, cropIds: ticket.crop_ids,
       });
@@ -1905,6 +1919,7 @@ export default function App() {
         {selected && selected.page === 'edit' && editVisible && authoring && <EditPage key={authoring.owner.token} session={authoring} label={workspaceLabel(selected, workspaces)}
           handlers={editHandlers} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
           packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive} recognitionDirty={recognitionDirty}
+          recognitionSaveBlock={recognitionSaveReason}
           recognition={authoring.recognition
             ? <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null}
               lockReason={commandReason ?? (closing ? t.applicationClosing : authoring.pending !== null ? ui.authoring.block('pending') : null)}
@@ -1977,7 +1992,8 @@ export default function App() {
       checkError={dialogError?.kind === 'check' ? dialogError.value : null} authoringReason={authoringReason}
       retained={logs.items.length} evicted={logs.evicted}
       onSnapshot={() => void snapshot(null)} snapshotPending={bootstrap.snapshotPending} snapshotOutcome={bootstrap.snapshotOutcome} strip={strip('dialog', () => {if (appBusy !== 'savingSettings') {setDialogOpen(false); returnToEdit();}})}/>
-    <DirtyChoiceDialog intent={choice?.kind ?? null} drafts={authoring ? dirtyDrafts(authoring) : []} recognitionDirty={recognitionDirty} busy={choiceBusy} saveBlock={leaseLost ? ui.authoring.leaseLost : null}
+    <DirtyChoiceDialog intent={choice?.kind ?? null} drafts={authoring ? dirtyDrafts(authoring) : []} recognitionDirty={recognitionDirty} busy={choiceBusy}
+      saveBlock={leaseLost ? ui.authoring.leaseLost : recognitionSaveReason}
       onSave={() => {if (choice) void resolveChoice(choice, true);}} onDiscard={() => {if (choice) void resolveChoice(choice, false);}}
       onCancel={() => {if (!choiceBusy) setChoice(null);}}/>
   </div></LocaleContext>;

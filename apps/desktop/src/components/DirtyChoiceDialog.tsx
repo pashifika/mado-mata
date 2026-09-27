@@ -7,7 +7,8 @@ export type DirtyIntent = 'exit' | 'duplicate' | 'close' | 'closeTab';
 
 interface Props {
   intent: DirtyIntent | null; drafts: FileDraft[]; recognitionDirty: boolean; busy: boolean;
-  // Why Save cannot publish at all (for example, the host no longer reports this Edit session).
+  // Why Save cannot complete (for example, the host no longer reports this Edit session, or the recognition draft
+  // cannot be saved as it is); Discard and Cancel stay available.
   saveBlock: string | null;
   onSave: () => void; onDiscard: () => void; onCancel: () => void;
 }

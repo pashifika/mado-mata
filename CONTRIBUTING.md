@@ -74,6 +74,10 @@ open `dev/<topic> -> main` and use a merge commit. Do not squash or rebase a
 promotion: the topic and `main` must retain shared ancestry. If strict checks
 require an update, reconcile through the sync procedure before promotion.
 
+After any PR base change, follow the
+[retarget revalidation procedure](docs/ci.md#hosted-workflow-and-required-gate)
+and require a PR `CI Gate` from a run created after that change.
+
 ## Checked emergency fix
 
 Use `fix/<change-name>` based on current `main` only for an urgent, narrow fix.

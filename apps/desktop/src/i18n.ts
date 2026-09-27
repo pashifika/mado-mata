@@ -13,7 +13,8 @@ export type Command = "initializing" | "retrying" | "importingRoot" | "restoring
   | "exitingEdit" | "recoveringPackage" | "readingRecognition" | "loadingRecognition" | "updatingRecognition"
   | "savingRecognition" | "copyingRecognition";
 
-function appMessages(copy: typeof en) {
+// `ui` supplies wording an app message reuses, so a retained fault renders both parts in the current language.
+function appMessages(copy: typeof en, ui: typeof uiMessages.en) {
   return {...copy.app,
     workspaceLimit: (limit: number) => interpolate(copy.app.workspaceLimit, {limit}),
     closeConfirm: (name: string) => interpolate(copy.app.closeConfirm, {name}),
@@ -52,12 +53,13 @@ function appMessages(copy: typeof en) {
     authoringInvalid: (revision: string, count: number) => interpolate(copy.app.authoringInvalid, {revision, count}),
     authoringEarlierValidated: (revision: string) => interpolate(copy.app.authoringEarlierValidated, {revision}),
     authoringDiscarded: (path: string) => interpolate(copy.app.authoringDiscarded, {path}),
+    recognitionSaveBlocked: (block: Parameters<typeof ui.recognition.block>[0]) => interpolate(copy.app.recognitionSaveBlocked, {reason: ui.recognition.block(block)}),
   };
 }
 
 export const messages = {
-  en: {app: appMessages(en), validation: en.validation, ui: uiMessages.en},
-  ja: {app: appMessages(ja), validation: ja.validation, ui: uiMessages.ja},
+  en: {app: appMessages(en, uiMessages.en), validation: en.validation, ui: uiMessages.en},
+  ja: {app: appMessages(ja, uiMessages.ja), validation: ja.validation, ui: uiMessages.ja},
 };
 
 type AppMessages = typeof messages.en.app;

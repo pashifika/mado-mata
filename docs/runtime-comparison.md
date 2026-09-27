@@ -130,6 +130,12 @@ An explicit lower `limits.snapshot_bytes` still applies; the larger image ceilin
 does not enlarge source or metadata allowances. Inventory checks validate complete
 PNG content and declared dimensions, not just its header.
 
+Comparison cohorts bind asset names, lengths and cached SHA-256 digests using
+the inventory's sorted framing, rather than serializing every image byte again.
+Candidate language and source are intentionally excluded from the cohort key;
+the full package inventory still binds them. Regenerate comparison samples
+together when changing builds or identity framing.
+
 Desktop [saved-image Recognition](desktop.md#author-saved-image-recognition)
 persists versioned metadata and explicitly selected crops as declared assets.
 Template assets include reviewed rights, content identities, match defaults, and

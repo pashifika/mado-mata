@@ -81,6 +81,8 @@ export interface PageAuthoring {
 interface Props {
   session: AuthoringSession; label: string; handlers: EditHandlers;
   recognition: ReactNode; recognitionDirty: boolean;
+  // Why the dirty recognition draft cannot be saved as it is; Save all still saves file drafts first.
+  recognitionSaveBlock: string | null;
   // The effective packages root (the sources folder) the host resolves Duplicate destinations in; shown as a preview only.
   packagesRoot: string;
   // Another host command is in flight or the application is closing; typing stays available.
@@ -214,7 +216,7 @@ function CodeEditor({draft, reveal, readOnly, label, help, selection, handlers, 
   </div>;
 }
 
-export default function EditPage({session, label, handlers, recognition, recognitionDirty, packagesRoot, locked, lockReason, leaseLost, validationActive}: Props) {
+export default function EditPage({session, label, handlers, recognition, recognitionDirty, recognitionSaveBlock, packagesRoot, locked, lockReason, leaseLost, validationActive}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const a = t.authoring;
@@ -443,7 +445,8 @@ export default function EditPage({session, label, handlers, recognition, recogni
       <div className="actions">
         <button id="authoring-save" type="button" className="primary" disabled={publishLocked || !selected || saveReason !== null}
           title={saveReason ? a.block(saveReason) : undefined} onClick={() => selected && handlers.save(selected.path)}>{pending?.kind === 'save' ? a.working : a.save}</button>
-        <button id="authoring-save-all" type="button" disabled={publishLocked || (savable.length === 0 && !recognitionDirty) || saveAllReason !== null} title={saveAllReason ?? undefined} onClick={handlers.saveAll}>{a.saveAll}</button>
+        <button id="authoring-save-all" type="button" disabled={publishLocked || (savable.length === 0 && (!recognitionDirty || recognitionSaveBlock !== null)) || saveAllReason !== null}
+          title={saveAllReason ?? recognitionSaveBlock ?? undefined} onClick={handlers.saveAll}>{a.saveAll}</button>
         <button id="authoring-validate" type="button" disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button>
         <button id="authoring-exit" type="button" disabled={locked || (pending !== null && pending.kind !== 'recognition_trial' && pending.kind !== 'validate')}
           title={a.exitHelp} onClick={handlers.exit}>{pending?.kind === 'exit' ? a.working : a.exit}</button>

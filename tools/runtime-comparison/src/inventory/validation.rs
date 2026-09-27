@@ -232,14 +232,16 @@ impl Inventory {
         let mut writer = HashWriter(Sha256::new());
         serde_json::to_writer(&mut writer, &content)
             .map_err(|error| invalid(format!("cannot identify inventory: {error}")))?;
-        // Immutable payload fingerprints avoid decimal expansion and repeated image hashing.
-        for (name, bytes) in &self.assets {
-            writer.0.update((name.len() as u64).to_le_bytes());
-            writer.0.update(name.as_bytes());
-            writer.0.update((bytes.len() as u64).to_le_bytes());
-            writer.0.update(bytes.digest());
-        }
+        hash_assets(&mut writer.0, &self.assets);
         Ok(format!("sha256:{:x}", writer.0.finalize()))
+    }
+
+    /// Asset-only projection of the v2 content framing for run comparison
+    /// cohorts, which stay independent of candidate language and sources.
+    pub(crate) fn asset_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hash_assets(&mut hasher, &self.assets);
+        hasher.finalize().into()
     }
 }
 
@@ -301,6 +303,16 @@ impl Write for HashWriter {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+// Immutable payload fingerprints avoid decimal expansion and repeated image hashing.
+fn hash_assets(hasher: &mut Sha256, assets: &BTreeMap<String, PayloadBytes>) {
+    for (name, bytes) in assets {
+        hasher.update((name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes.digest());
     }
 }
 

@@ -1,6 +1,8 @@
 use super::*;
 use crate::application::test_support::{Fixture, view_ref};
-use mado_runtime_comparison::recognition::{NormalizedRect, RecognitionDefinition};
+use mado_runtime_comparison::recognition::{
+    NormalizedRect, RecognitionDefinition, TemplateRights, TemplateSettings,
+};
 use std::fs;
 
 struct Editor {
@@ -11,7 +13,10 @@ struct Editor {
 
 impl Editor {
     fn new() -> Self {
-        let fixture = Fixture::new();
+        Self::with_fixture(Fixture::new())
+    }
+
+    fn with_fixture(fixture: Fixture) -> Self {
         let workspace = fixture
             .application
             .create_workspace("recognition", "Recognition")
@@ -55,6 +60,42 @@ fn grant_capability(app: &Application, maximum: usize) {
         .unwrap()
         .recognition
         .max_ocr_zones = Some(maximum);
+}
+
+/// Retains a settled trial observing `zones`, shaped like the runner's clean envelope.
+/// Tests inject it rather than granting native OCR authority.
+fn retain_observed_trial(
+    app: &Application,
+    owner: &AuthoringRef,
+    revision: &str,
+    view: &RecognitionView,
+    zones: &[&str],
+) {
+    let frame = view.frame.as_ref().unwrap();
+    let controller = json!({
+        "run": "observed-trial", "operation": "recognition_trial", "state": "terminal", "error": null,
+        "result": {"version": 1, "operation": "recognition_trial", "primary": null,
+            "cleanup": {"clean": true}, "child_reaped": true, "forced": false, "exit_code": 0,
+            "result": {"kind": "ocr", "zones": zones.iter().map(|id| {
+                json!({"id": id, "regions": [{"text": "trial observation"}]})
+            }).collect::<Vec<_>>()}}
+    });
+    lock(&app.workspaces)
+        .authoring
+        .as_mut()
+        .unwrap()
+        .recognition
+        .trial = Some(RecognitionTrial {
+        owner: owner.clone(),
+        revision: revision.to_owned(),
+        document_revision: view.document_revision,
+        frame_id: Some(frame.id.clone()),
+        frame_revision: frame.revision,
+        configuration_revision: view.configuration_revision.clone(),
+        sample_id: None,
+        stale: false,
+        controller: Arc::new(controller),
+    });
 }
 
 fn zone(id: &str) -> RecognitionDefinition {
@@ -750,32 +791,14 @@ fn grouped_copy_uses_the_cached_engine_limit_and_verifies_every_checked_zone() {
     );
 
     // A settled trial is evidence only for the definitions actually observed.
-    // Inject diagnostics here rather than granting native OCR authority to tests.
-    let frame = current.frame.as_ref().unwrap();
     for observed in [vec!["first"], vec!["first", "second"]] {
-        let result = json!({
-            "error": null,
-            "result": {"primary": null, "cleanup": {"clean": true},
-                "result": {"kind": "ocr", "zones": observed.iter().map(|id| {
-                    json!({"id": id, "regions": [{"text": "trial observation"}]})
-                }).collect::<Vec<_>>()}}
-        });
-        lock(&app.workspaces)
-            .authoring
-            .as_mut()
-            .unwrap()
-            .recognition
-            .trial = Some(RecognitionTrial {
-            owner: editor.view.owner.clone(),
-            revision: editor.view.revision.clone(),
-            document_revision: current.document_revision,
-            frame_id: Some(frame.id.clone()),
-            frame_revision: frame.revision,
-            configuration_revision: current.configuration_revision.clone(),
-            sample_id: None,
-            stale: false,
-            controller: Arc::new(result),
-        });
+        retain_observed_trial(
+            app,
+            &editor.view.owner,
+            &editor.view.revision,
+            &current,
+            &observed,
+        );
         let copied = copy(&ids, SnippetKind::OcrRecognize).unwrap();
         assert_eq!(copied.definition_ids, ids);
         assert_eq!(copied.verified, observed.len() == 2);
@@ -802,4 +825,267 @@ fn grouped_copy_uses_the_cached_engine_limit_and_verifies_every_checked_zone() {
         copy(&ids, SnippetKind::OcrRecognize).is_err(),
         "the previous document revision cannot publish"
     );
+}
+
+#[test]
+fn copy_never_certifies_a_trial_captured_at_an_older_package_revision() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let owner = &editor.view.owner;
+    let loaded = editor.load();
+    let mut document = loaded.document.unwrap();
+    document.definitions.push(zone("first"));
+    let current = app
+        .recognition_update(
+            owner,
+            &editor.view.revision,
+            document,
+            loaded.frame.as_ref().map(|frame| frame.id.as_str()),
+            loaded.document_revision,
+        )
+        .unwrap();
+    grant_capability(app, 1);
+    retain_observed_trial(app, owner, &editor.view.revision, &current, &["first"]);
+    let ids = vec!["first".to_owned()];
+    let verified = |revision: &str| {
+        app.recognition_copy(
+            owner,
+            revision,
+            current.document_revision,
+            &ids,
+            SnippetKind::OcrRecognize,
+        )
+        .unwrap()
+        .verified
+    };
+    assert!(verified(&editor.view.revision));
+    // A source-only save keeps the recognition draft revision but stales the trial row.
+    let saved = app
+        .authoring_save(
+            owner,
+            &editor.view.revision,
+            "main.ts",
+            "export const copied = 1;".into(),
+        )
+        .unwrap();
+    let view = app
+        .recognition_view(owner, &saved.committed_revision)
+        .unwrap();
+    assert_eq!(view.document_revision, current.document_revision);
+    assert!(view.trial.unwrap().stale);
+    assert!(
+        !verified(&saved.committed_revision),
+        "the displayed stale row cannot certify a fresh Copy receipt"
+    );
+}
+
+#[test]
+fn template_copy_accepts_a_hand_restored_saved_definition_without_reusing_its_revision() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let owner = &editor.view.owner;
+    let loaded = editor.load();
+    let frame_id = loaded.frame.as_ref().unwrap().id.clone();
+    let mut document = loaded.document.unwrap();
+    document.definitions.push(RecognitionDefinition {
+        kind: RecognitionKind::Template,
+        expected: None,
+        template: Some(TemplateSettings {
+            search_region: NormalizedRect {
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+            },
+            threshold: 0.9,
+            max_results: 4,
+        }),
+        ..zone("pattern")
+    });
+    document.template_rights = Some(TemplateRights {
+        license: "CC0-1.0".into(),
+        created_by: "regression test".into(),
+        created_for: None,
+        reviewed: true,
+    });
+    let updated = app
+        .recognition_update(
+            owner,
+            &editor.view.revision,
+            document,
+            Some(&frame_id),
+            loaded.document_revision,
+        )
+        .unwrap();
+    let saved = app
+        .recognition_save(
+            owner,
+            &editor.view.revision,
+            updated.document_revision,
+            &["pattern".into()],
+        )
+        .unwrap();
+    let revision = saved.mutation.committed_revision;
+    let mut view = saved.recognition.unwrap();
+    let stored = view.saved_document.clone().unwrap();
+    let ids = vec!["pattern".to_owned()];
+    let mut edit = |name: &str| {
+        let mut draft = view.document.clone().unwrap();
+        draft.definitions[0].name = name.into();
+        draft.definitions[0].revision += 1;
+        view = app
+            .recognition_update(
+                owner,
+                &revision,
+                draft,
+                Some(&frame_id),
+                view.document_revision,
+            )
+            .unwrap();
+        app.recognition_copy(
+            owner,
+            &revision,
+            view.document_revision,
+            &ids,
+            SnippetKind::TemplateRecognize,
+        )
+    };
+    assert!(
+        edit("renamed").is_err(),
+        "an unsaved name keeps template Copy blocked"
+    );
+    let restored = edit(&stored.definitions[0].name).expect("restored saved content is current");
+    assert!(!restored.verified);
+    let document = view.document.unwrap();
+    assert!(
+        document.definitions[0].revision > stored.definitions[0].revision,
+        "the edit fence keeps advancing; restoring content never restores its revision"
+    );
+    assert_ne!(Some(document), view.saved_document);
+}
+
+/// `/usr/bin/true` is a real child that exits before authenticating as the engine runner.
+/// The supervisor reaps it and reports incomplete cleanup beside the primary failure, with
+/// no engine, capture, input or focus authority involved.
+#[cfg(unix)]
+#[test]
+fn reaped_child_with_incomplete_cleanup_stays_failed_without_refusing_save_or_exit() {
+    let editor = Editor::with_fixture(Fixture::with_engine(|_| {
+        std::path::PathBuf::from("/usr/bin/true")
+    }));
+    let app = editor.app();
+    let owner = &editor.view.owner;
+    let failure = app
+        .recognition_capabilities(owner, &editor.view.revision)
+        .err()
+        .expect("the unauthenticated child must fail");
+    assert_eq!(failure.category, "EngineUnavailable");
+    assert_eq!(failure.context["child_reaped"], true);
+    assert_eq!(failure.context["cleanup"]["clean"], false);
+    let controller = app.poll().controller;
+    assert_eq!(controller["operation"], "recognition_capabilities");
+    assert_eq!(
+        controller["result"]["cleanup"]["status"], "IncompleteCleanup",
+        "the failed cleanup outcome stays visible"
+    );
+
+    // Reaped ownership has settled: local drafts still save and Edit can be left.
+    let loaded = editor.load();
+    assert!(
+        loaded.capabilities["max_ocr_zones"].is_null(),
+        "a failed read never supplies a grouped limit"
+    );
+    let mut document = loaded.document.unwrap();
+    document.definitions.push(zone("kept"));
+    let updated = app
+        .recognition_update(
+            owner,
+            &editor.view.revision,
+            document,
+            loaded.frame.as_ref().map(|frame| frame.id.as_str()),
+            loaded.document_revision,
+        )
+        .unwrap();
+    let saved = app
+        .recognition_save(owner, &editor.view.revision, updated.document_revision, &[])
+        .unwrap();
+    app.authoring_save(
+        owner,
+        &saved.mutation.committed_revision,
+        "main.ts",
+        "export const reaped = 1;".into(),
+    )
+    .unwrap();
+    app.authoring_exit(owner).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn shutdown_settles_an_unreturned_recognition_run_and_reports_its_cleanup_failure() {
+    let editor = Editor::with_fixture(Fixture::with_engine(|_| {
+        std::path::PathBuf::from("/usr/bin/true")
+    }));
+    let app = editor.app();
+    let owner = &editor.view.owner;
+    // Start the run as the capability command does, but leave its reply unsent, as when
+    // confirmed close overtakes that command's settlement.
+    let (command, mut state) = app.command_state().unwrap();
+    let mut stop = lock(&app.authoring_stop);
+    let run = app.runner.recognition_capabilities().unwrap();
+    app.own_recognition_run(&mut state, owner, &run, &mut stop, None);
+    drop(stop);
+    drop(state);
+    drop(command);
+    // Wait for the reaped child through the runner itself, without the application collector.
+    let terminal = crate::application::test_support::settled(app);
+    assert_eq!(terminal.result.unwrap()["child_reaped"], true);
+
+    app.prepare_close(Some(owner)).unwrap();
+    let failure = app.shutdown().unwrap_err();
+    assert_eq!(failure.category, "RecognitionCleanup");
+    assert_eq!(failure.context["operation"], "recognition_capabilities");
+    assert_eq!(failure.context["child_reaped"], true);
+    assert_eq!(failure.context["cleanup"]["clean"], false);
+    assert!(
+        app.authoring_owner().is_none(),
+        "reaped ownership has settled, so the lease is released"
+    );
+}
+
+#[test]
+fn only_unconfirmed_child_ownership_contains_the_edit_session() {
+    // Terminal controllers as the runner produces them (`desktop/recognition.rs`
+    // `preparation_fault`, `desktop/operation.rs` worker join, `runner/recognition.rs`).
+    let started_without_reaping = json!({"operation": "recognition_trial", "result": null,
+        "error": {"category": "Transport", "message": "owned recognition pipe unavailable",
+            "context": {"operation": "recognition_trial", "stage": "preparation",
+                "cause": {"cleanup": {"clean": false, "child_started": true}, "stage": "child_startup"},
+                "cleanup": {"clean": false, "child_started": true}}}});
+    let worker_panic = json!({"operation": "recognition_capabilities", "result": null,
+        "error": {"category": "Controller", "message": "operation worker panicked; inspect containment evidence",
+            "context": {"operation": "recognition_capabilities", "stage": "worker",
+                "cleanup": {"clean": false, "child_started": null}}}});
+    let reaped = |primary: &str| {
+        json!({"operation": "recognition_trial", "error": null, "result": {
+            "operation": "recognition_trial", "primary": {"category": primary, "message": "m", "context": null},
+            "cleanup": {"clean": false, "status": "IncompleteCleanup", "child_cleanup": null},
+            "child_reaped": true, "forced": true, "exit_code": null, "result": null}})
+    };
+    for unconfirmed in [started_without_reaping, worker_panic, reaped("Containment")] {
+        assert_eq!(
+            containment(&unconfirmed).unwrap().category,
+            "RecognitionCleanup"
+        );
+    }
+    let forced = reaped("Timeout");
+    assert!(containment(&forced).is_none());
+    assert_eq!(
+        incomplete_cleanup(&forced).unwrap().context["child_reaped"],
+        true
+    );
+    let clean_refusal = json!({"operation": "recognition_trial", "result": null,
+        "error": {"category": "EnvironmentUnset", "message": "m",
+            "context": {"cleanup": {"clean": true, "child_started": false}}}});
+    assert!(containment(&clean_refusal).is_none());
+    assert!(incomplete_cleanup(&clean_refusal).is_none());
 }

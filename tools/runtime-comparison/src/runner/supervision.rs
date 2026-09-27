@@ -646,9 +646,7 @@ fn supervise(
             } else {
                 "attempt owners after cleanup, not peak"
             },"budgets":plan.budgets,
-            "comparison_identity":identity(&(&plan.lane,&plan.scenario,&plan.profile,&plan.limits,&plan.budgets,
-                (plan.samples,plan.warmups,plan.repetitions),&inventory.metadata["runtime_scenario"],
-                &plan.native_config,&inventory.package_id,&inventory.schema,&inventory.profiles,&inventory.assets))?,
+            "comparison_identity":comparison_identity(plan, inventory)?,
             "protocol_fault":protocol_fault,"entry_emission_failure":terminal["entry_emission_failure"],
             "diagnostic_details_omitted":terminal["diagnostic_details_omitted"],
             "stderr_bytes_retained":stderr.len(),"stderr":String::from_utf8_lossy(&stderr),
@@ -659,6 +657,25 @@ fn supervise(
         forced: forced || exit.code() == Some(124),
         build: child_build.unwrap_or(Value::Null),
     })
+}
+
+/// Candidate-independent cohort data; assets use the cached inventory-v2
+/// name/length/digest framing rather than streaming every byte as decimal JSON.
+pub(super) fn comparison_identity(plan: &Plan, inventory: &Inventory) -> Result<String, Fault> {
+    identity(&(
+        &plan.lane,
+        &plan.scenario,
+        &plan.profile,
+        &plan.limits,
+        &plan.budgets,
+        (plan.samples, plan.warmups, plan.repetitions),
+        &inventory.metadata["runtime_scenario"],
+        &plan.native_config,
+        &inventory.package_id,
+        &inventory.schema,
+        &inventory.profiles,
+        inventory.asset_digest(),
+    ))
 }
 
 // Call only after run/attempt correlation. Metadata is evidence, never a source

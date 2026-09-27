@@ -394,8 +394,10 @@ Use this workflow:
    Results exceeding **256 regions or 256 KiB** fail rather than become a
    truncated success. [ADR 0006](adr/0006-saved-image-recognition-observations.md)
    owns this observation contract.
-5. For a template, edit its pattern crop and separate search area in the preview.
-   The search must fit the pattern. Enter and review **Template rights** before
+5. For a template, move its pattern crop or resize its separate search area from
+   an edge or corner. The search area's interior remains available for selecting
+   other regions and drawing new ones. The search must fit the pattern.
+   Enter and review **Template rights** before
    trialing or saving template pixels. **Try template** tests one template and
    reports the effective threshold, actual scores, and boxes; no-match invents
    no score. Threshold and maximum-result defaults are displayed, not editable
@@ -446,6 +448,7 @@ images or text correctness. Setup freshness follows the actual geometry values;
 grouped source follows definitions and checked selection, so it can be reused
 with another frame and separately updated setup. Template source uses concrete
 ROIs and additionally requires current saved metadata, pixels, rights, and maps.
+Saving an OCR diagnostic crop alone does not obsolete grouped OCR source.
 Equal dimensions cannot detect changed content placement: adjust Game content,
 copy the setup again, and replace the pasted `recognitionBasis` when needed.
 
@@ -466,6 +469,10 @@ metadata and clears crop selections. If its saved basis has different dimensions
 from the loaded replacement, the host releases that incompatible frame and preview
 instead of remapping saved coordinates. A retained compatible frame still needs
 geometry confirmation.
+Manually restoring saved metadata clears its dirty state without rewinding edit
+revisions. Save refusals identify the actual geometry or template-rights
+requirement; the dirty-choice dialog disables Save and leaves Cancel and Discard
+available.
 
 Deleting a definition does not immediately delete saved pixels. Save reconciles
 owned crop references and generated template assets, preserving shared crops and
@@ -482,6 +489,11 @@ that the backend returned, its session closed, or its child was reaped.
 No subsequent operation is admitted while the owned worker is unsettled.
 Read primary outcome and cleanup independently; forced or incomplete cleanup
 does not become a successful trial.
+Confirmed child reaping releases Edit admission even after failed cleanup, unless
+the supervisor reports containment. Unconfirmed ownership continues to refuse
+Save, Exit and new operations. Terminal collection retains the outcome before
+releasing admission; shutdown also reports incomplete cleanup that its command
+had not yet returned. Reaping alone does not prove successful session cleanup.
 
 The [image policy](adr/0006-saved-image-recognition-observations.md#image-policy)
 bounds encoded input, original pixels, crop size, package content, decoded
@@ -1295,15 +1307,17 @@ separately.
    geometry must not be saved and reopened to bypass this gate. Discard an
    incompatible replacement and verify saved coordinates survive without its
    pixels. Exercise invalid PNG refusal and late responses without reviving them.
-5. Exercise native Copy for all three purposes, including optional wait text with
-   quotes and Unicode. Check two OCR Trial rows while selecting a third unchecked
-   row: `query_wait` must include exactly the checked rows. Remove one criterion
-   and verify no partial clipboard publication. Change the checked selection and
-   verify prior Copy becomes obsolete even if the original selection is restored.
-   Inspect clipboard source privately and paste into a disposable Script; validate
-   against the actual SDK. Check each finite sequential wait, geometry guards,
-   managed release, unchanged source before paste, and obsolete Copy after edits.
-   Clipboard failure must remain visible, not claim success.
+5. Exercise native Copy for all three purposes. Check two OCR Trial rows while
+   selecting a third unchecked row: the single `scan_ocr_zones` request must
+   contain exactly the checked rows in list order. Optional reference text with
+   quotes and Unicode appears only in escaped comments. Nine checked rows or an
+   unknown capability must refuse the whole Copy without partial publication.
+   Change the checked selection and verify prior Copy becomes obsolete even if
+   the original selection is restored. Inspect clipboard source privately; paste
+   setup and the grouped block into a disposable Script and validate against the
+   actual SDK. Check geometry guards and observation release in `finally`, with
+   no waits or input. Verify unchanged source before paste, obsolete Copy after
+   relevant edits, and visible clipboard failure rather than false success.
 6. Resolve dirty Script, manifest, and Recognition state through Save/Discard/
    Cancel, including application close and source conflicts. Where a real
    post-commit refresh failure can be observed, confirm the completed Save is not

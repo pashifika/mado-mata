@@ -15,6 +15,11 @@ pub(super) struct Fixture {
 
 impl Fixture {
     pub(super) fn new() -> Self {
+        Self::with_engine(|root| root.join("engine-must-not-be-launched"))
+    }
+
+    /// Only a test that exercises a real child lifecycle names an engine executable.
+    pub(super) fn with_engine(engine: impl FnOnce(&Path) -> PathBuf) -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -31,7 +36,7 @@ impl Fixture {
         let application = Application::new(
             root.clone(),
             root.join("runner-must-not-be-launched"),
-            root.join("engine-must-not-be-launched"),
+            engine(&root),
         )
         .unwrap();
         Self { root, application }

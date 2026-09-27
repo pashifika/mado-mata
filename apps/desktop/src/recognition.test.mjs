@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {
   MAX_DEFINITIONS, UNDO_BYTES, UNDO_ENTRIES, applyConfirm, applyCopy, applyDiscard, applyPreviewEdit, applySave, applySync, applyTrial, applyView,
   clientToFrame, confirmTicket, copyBlock, copyFreshness, copyTicket, createDefinition, deleteDefinition, displayScale, dragEdges, geometryConfirmed,
-  hitHandle, mapRegion, openRecognition, previewSnapshot, regionFromEdges, renameDefinition, saveBlock, saveTicket, selectDefinition, setContent,
-  setDisplay, setExpected, setKind, setRegion, spanEdges, syncTicket, toggleCrop, toggleTrial, trialBlock, trialFreshness, trialTicket, undoRecognition,
+  hitHandle, hitRegion, mapRegion, openRecognition, previewSnapshot, recognitionDirty, regionFromEdges, renameDefinition, saveBlock, saveTicket,
+  selectDefinition, setContent, setDisplay, setExpected, setKind, setRegion, setRights, spanEdges, syncTicket, toggleCrop, toggleTrial, trialBlock,
+  trialFreshness, trialTicket, undoRecognition,
 } from './recognition.ts';
 
 const MIB=1_048_576;
@@ -111,6 +112,30 @@ test('mouse moves stay inside the content and resized edges never cross',()=>{
   assert.equal(hitHandle(edges(10,10,13,40),{x:11.5,y:25},6),'move');
   assert.equal(hitHandle(edges(10,10,13,40),{x:6,y:25},6),'w');
   assert.equal(hitHandle(edges(10,10,13,40),{x:30,y:25},6),null);
+});
+
+test('a selected template search area grabs only its edges, so regions and empty content inside it stay reachable',()=>{
+  let state=setContent(loaded(),{x:0,y:140,width:1920,height:800});
+  state=create(create(state,edges(100,200,200,260),'A'),edges(400,300,500,400),'C');
+  state=setKind(selectDefinition(state,'r1'),'r1','template');
+  const snapshot=previewSnapshot(state,'en',true,null);
+  assert.equal(snapshot.selected,'r1');
+  const shown=(definition,part)=>mapRegion(part==='region'?definition.region:definition.search,snapshot.basis);
+  assert.deepEqual(shown(snapshot.definitions[0],'search'),edges(0,140,1920,940),'a new search area is the whole content');
+  const hit=(x,y,tolerance)=>{
+    const found=hitRegion(snapshot.definitions,snapshot.selected,{x,y},tolerance,shown);
+    return found&&[found.definition.id,found.part,found.handle];
+  };
+  // The same 6 CSS pixel grab radius at Fit (0.25 CSS px per frame pixel) and at 200%.
+  for (const tolerance of [24,3]) {
+    assert.deepEqual(hit(450,350,tolerance),['r2','region','move'],'another region inside the search area is selectable');
+    assert.equal(hit(1000,600,tolerance),null,'empty content inside the search area creates a region');
+    assert.deepEqual(hit(150,230,tolerance),['r1','region','move'],'the pattern stays movable');
+    assert.deepEqual(hit(1919,600,tolerance),['r1','search','e']);
+    assert.deepEqual(hit(1,141,tolerance),['r1','search','nw'],'edges follow the content offset');
+  }
+  assert.deepEqual(hit(1900,600,24),['r1','search','e']);
+  assert.equal(hit(1900,600,3),null);
 });
 
 test('overlay and list share stable IDs through create, delete and Undo; IDs are never reused',()=>{
@@ -346,6 +371,59 @@ test('grouped OCR Copy becomes obsolete after a zone edit, even when undone',()=
   assert.equal(copyFreshness(late, 'ocr_recognize'),'obsolete','a completed native Copy remains published, not failed, after a concurrent edit');
   const failed=applyCopy(state,ticket,null,{category:'Clipboard',message:'denied',context:null});
   assert.equal(copyFreshness(failed, 'ocr_recognize'),'failed');
+});
+
+test('saving a diagnostic OCR crop keeps grouped Copy current; zone, name and checked-set changes still obsolete it',()=>{
+  let state=toggleTrial(sync(create(loaded(),edges(10,10,50,50),'HP')),'r1');
+  const copied=copyTicket(state,['r1'],'ocr_recognize');
+  state=applyCopy(state,copied,{source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1']},null);
+  state=toggleCrop(state,'r1');
+  const ticket=saveTicket(state);
+  const saved={...ticket.document,definitions:ticket.document.definitions.map(item=>({...item,saved:{asset:'recognition/r1.png',sha256:'a'.repeat(64),width:40,height:40}}))};
+  state=applySave(state,ticket,{...state.view,revision:'rev-2',document:saved,saved_document:saved,document_revision:state.view.document_revision+1});
+  assert.equal(state.document.definitions[0].saved.sha256,'a'.repeat(64));
+  assert.equal(recognitionDirty(state),false);
+  assert.equal(copyFreshness(state,'ocr_recognize'),'current','grouped source carries no saved crop');
+  const moved=setRegion(state,'r1','region',regionFromEdges(edges(11,10,51,50),state.document.basis));
+  assert.equal(copyFreshness(moved,'ocr_recognize'),'obsolete');
+  assert.equal(copyFreshness(undoRecognition(moved),'ocr_recognize'),'obsolete','Undo does not revive it');
+  assert.equal(copyFreshness(renameDefinition(state,'r1','MP'),'ocr_recognize'),'obsolete');
+  assert.equal(copyFreshness(toggleTrial(toggleTrial(state,'r1'),'r1'),'ocr_recognize'),'obsolete');
+});
+
+test('hand-restored saved metadata is clean again without reusing an old definition revision',()=>{
+  let state=sync(create(loaded(),edges(10,10,50,50),'HP'));
+  state=applyView(state,{...state.view,saved_document:state.document});
+  const savedRevision=state.document.definitions[0].revision;
+  const snapshot=previewSnapshot(state,'en',true,null);
+  let restored=renameDefinition(state,'r1','HPx');
+  assert.equal(recognitionDirty(restored),true);
+  restored=renameDefinition(restored,'r1','HP');
+  assert.equal(recognitionDirty(restored),false);
+  assert.equal(saveBlock(restored),'noChanges');
+  assert.ok(restored.document.definitions[0].revision>savedRevision,'revisions stay monotonic');
+  const late={token:owner.token,frameId:snapshot.frame.id,basisRevision:snapshot.basisRevision,
+    edit:{kind:'region',id:'r1',part:'region',revision:snapshot.definitions[0].revision,region:regionFromEdges(edges(20,10,60,50),state.document.basis)}};
+  assert.equal(applyPreviewEdit(restored,late,n=>`Region ${n}`).notice,'staleEdit','an edit on the pre-rename snapshot stays fenced');
+  assert.equal(recognitionDirty(setKind(setKind(state,'r1','template'),'r1','ocr')),false);
+  const typed=setRights(state,{license:'M',created_by:'',created_for:null,reviewed:false});
+  assert.equal(recognitionDirty(typed),true);
+  const cleared=setRights(typed,{license:'',created_by:'',created_for:null,reviewed:false});
+  assert.equal(cleared.document.template_rights,null);
+  assert.equal(recognitionDirty(cleared),false);
+  assert.deepEqual(setRights(typed,{license:'',created_by:'',created_for:null,reviewed:true}).document.template_rights,
+    {license:'',created_by:'',created_for:null,reviewed:true},'a meaningful invalid rights draft is kept');
+
+  // Template Copy follows the host's whole saved-document check.
+  let template=sync(setRights(setKind(state,'r1','template'),{license:'CC0',created_by:'author',created_for:null,reviewed:true}));
+  const png={asset:'recognition/r1.png',sha256:'b'.repeat(64),width:40,height:40};
+  const savedTemplate={...template.document,definitions:template.document.definitions.map(item=>({...item,saved:png}))};
+  template=applyView(template,{...template.view,revision:'rev-2',document:savedTemplate,saved_document:savedTemplate,document_revision:template.view.document_revision+1});
+  assert.equal(copyBlock(template,['r1'],'template_recognize'),null);
+  const reverted=sync(renameDefinition(renameDefinition(template,'r1','HPx'),'r1','HP'));
+  assert.equal(copyBlock(reverted,['r1'],'template_recognize'),null);
+  assert.ok(copyTicket(reverted,['r1'],'template_recognize'));
+  assert.equal(copyBlock(create(template,edges(60,10,90,50),'MP'),['r1'],'template_recognize'),'templateUnsaved');
 });
 
 test('grouped OCR Copy captures every checked region independently of Selected definition; setup follows Game content',()=>{

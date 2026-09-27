@@ -1,4 +1,5 @@
 import {FaultMessage} from '../components/ResultPanel.tsx';
+import Select from '../components/Select.tsx';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import {
@@ -193,9 +194,9 @@ export default function RecognitionPage({state, onState, handlers, locked, lockR
               onChange={event => onState(current => renameDefinition(current, selected.id, event.target.value))}/>
             {!selected.name.trim() && <p className="field-help inline-warning">{r.issue('name')}</p>}</div>
           <div className="field"><label htmlFor="recognition-kind">{r.kind}</label>
-            <select id="recognition-kind" value={selected.kind} disabled={leaseLost}
-              onChange={event => onState(current => setKind(current, selected.id, event.target.value as RecognitionKind))}>
-              <option value="ocr">{r.kindOcr}</option><option value="template">{r.kindTemplate}</option></select>
+            <Select id="recognition-kind" value={selected.kind} disabled={leaseLost}
+              onChange={value => {if (value === 'ocr' || value === 'template') onState(current => setKind(current, selected.id, value));}}
+              options={[{value: 'ocr', label: r.kindOcr}, {value: 'template', label: r.kindTemplate}]}/>
             <p className="field-help">{r.kindHelp}</p></div>
           <dl className="recognition-geometry">
             <div><dt>{selected.kind === 'ocr' ? r.region : r.pattern}</dt><dd className="mono">{pixels(selected.region)}</dd></div>

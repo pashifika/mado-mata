@@ -1,6 +1,6 @@
 import {useEffect, useRef, useState} from 'react';
 import type {KeyboardEvent, PointerEvent} from 'react';
-import {clientToFrame, dragEdges, edgesRect, hitHandle, mapRegion, rectEdges, regionFromEdges, spanEdges} from '../recognition.ts';
+import {clientToFrame, dragEdges, edgesRect, hitHandle, hitRegion, mapRegion, rectEdges, regionFromEdges, spanEdges} from '../recognition.ts';
 import type {Edges, GeometryBasis, Handle, Point, PreviewDefinition, PreviewEdit, PreviewObservation, PreviewTool} from '../recognition.ts';
 
 // CSS pixels around an edge that grab it; converted to frame pixels by the rendered scale.
@@ -101,24 +101,9 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
     return pending?.key === 'content' ? pending.edges : content;
   }
 
-  // The selected definition's parts first (pattern before its search area), then others from the topmost.
-  function target(point: Point, tolerance: number): {definition: PreviewDefinition; part: Part; handle: Handle; edges: Edges} | null {
-    const chosen = definitions.find(item => item.id === selected);
-    const ordered = chosen ? [chosen, ...definitions.filter(item => item !== chosen).reverse()] : [...definitions].reverse();
-    for (const definition of ordered) {
-      const parts: Part[] = definition === chosen && definition.search ? ['region', 'search'] : ['region'];
-      for (const part of parts) {
-        const edges = shown(definition, part);
-        const handle = edges && hitHandle(edges, point, tolerance);
-        if (edges && handle) return {definition, part, handle, edges};
-      }
-    }
-    return null;
-  }
-
   function hover(point: Point, tolerance: number): Handle | null {
     if (tool === 'content') return hitHandle(shownContent(), point, tolerance);
-    return target(point, tolerance)?.handle ?? null;
+    return hitRegion(definitions, selected, point, tolerance, shown)?.handle ?? null;
   }
 
   function down(event: PointerEvent<HTMLDivElement>) {
@@ -133,7 +118,7 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
       update({kind: 'content', handle, start: content, origin: point, client, current: handle ? content : null, bounds: frame});
       return;
     }
-    const hit = target(point, tolerance);
+    const hit = hitRegion(definitions, selected, point, tolerance, shown);
     if (hit) {
       if (hit.definition.id !== selected) onEdit({kind: 'select', id: hit.definition.id});
       update({kind: 'region', id: hit.definition.id, part: hit.part, revision: hit.definition.revision, handle: hit.handle, start: hit.edges, origin: point, current: hit.edges, bounds: content});

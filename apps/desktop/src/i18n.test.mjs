@@ -41,6 +41,7 @@ const adapterArguments = {
   'app.authoringCatalogSaved': [['rev-A']], 'app.authoringCatalogRefreshFailed': [['rev-A']], 'app.authoringRefreshed': [['rev-A']],
   'app.authoringDiskChanged': [[1],[2]], 'app.authoringValidated': [['rev-A']], 'app.authoringInvalid': [['rev-A',1],['rev-A',2]],
   'app.authoringEarlierValidated': [['rev-A']], 'app.authoringDiscarded': [['src/main.ts']],
+  'app.recognitionSaveBlocked': ['invalid','cropFrame','unconfirmed','rights'].map(code=>[code]),
   'ui.phase': [['idle']], 'ui.operation': [['run']], 'ui.lane': [['controlled']],
   'ui.severity': [['ERROR']], 'ui.entryOutcome': [['Returned']],
   'ui.common.revision': [['package-A',2]],

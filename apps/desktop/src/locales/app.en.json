@@ -163,6 +163,7 @@
     "authoringStopRequested": "Authoring Stop requested. Waiting for its child to be cleaned up.",
     "recognitionDraftChanged": "The recognition draft changed while the command was pending. The newer edits were kept; retry the action.",
     "recognitionManifestDirty": "Save or discard the manifest draft before Recognition Save. Save all saves file drafts first and preserves failures.",
+    "recognitionSaveBlocked": "Recognition metadata cannot be saved as it is. {reason}",
     "recognitionPreviewFailed": "The preview window could not receive the current Edit state. Reopen the preview to retry.",
     "recognitionSaved": "Recognition metadata and selected crops were saved. Package source was not generated or synchronized.",
     "recognitionCopied": "Snippet copied. Paste deliberately; no package source file was changed.",
