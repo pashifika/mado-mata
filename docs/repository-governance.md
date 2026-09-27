@@ -16,8 +16,8 @@ zero required approvals, stale-approval dismissal, and no code-owner or last-pus
 approval requirement. Zero approvals supports solo maintenance, not independent
 review; add independent approval when a reliable second reviewer is available.
 
-Main permits only merge commits and blocks deletion. Topics permit squash and
-merge, allow deliberate retirement, and match both `refs/heads/dev/*` and the
+Main permits only merge commits and blocks deletion. Topics permit merge and
+squash, allow deliberate retirement, and match both `refs/heads/dev/*` and the
 recursive catch-all `refs/heads/dev/**/*`. CI rejects nested topic names even
 though the catch-all protects them. No linear-history rule is used because
 promotion and reconciliation must preserve merge ancestry.
@@ -25,10 +25,15 @@ promotion and reconciliation must preserve merge ancestry.
 Repository settings enable merge, squash, and automatic deletion of merged PR
 head branches; rebase merge remains disabled. Check head-branch dependencies
 before merging, and inspect any branches GitHub retains before retiring them.
-Topic rules cannot distinguish sync PRs from ordinary
-leaf PRs; maintainers must select the correct method. The metadata check cannot
-prove urgency, content correctness, or branch ancestry and is not an immutable
-security boundary against an authorized maintainer changing the workflow.
+Merge commits are the default for all supported routes. Keep squash enabled for
+the explicit-user-request or documented-exception leaf PRs defined in
+[CONTRIBUTING.md](../CONTRIBUTING.md#ordinary-change-and-promotion); promotion,
+emergency, and sync PRs remain merge-only. Topic rules cannot distinguish sync
+PRs from ordinary leaf PRs or enforce the reason for a squash exception.
+Allowed-method settings do not choose the merge method for an individual PR;
+maintainers must select it explicitly. The metadata check cannot prove urgency,
+content correctness, or branch ancestry and is not an immutable security
+boundary against an authorized maintainer changing the workflow.
 
 Topic required checks use `do_not_enforce_on_create: true`. A maintainer may
 create a topic at a verified, successfully checked `main` tip, whose push result
@@ -151,9 +156,12 @@ enforcement. Do not infer GitHub ruleset pattern behavior from Actions globs.
 Retain a real passing PR run and a controlled failing PR that GitHub reports as
 blocked, then correct the failure and rerun checks. Do not merge intentional
 failure, attempt a force push, or delete a protected branch to test protection.
-Verify the implementation enters its topic by squash and reaches `main` through
-a checked merge-commit promotion. Confirm the final main push run and new-topic
-creation at that checked tip, with effective protection on subsequent updates.
+Verify the implementation enters its topic by a checked merge commit and reaches
+`main` through a checked merge-commit promotion. If a leaf PR uses squash by
+exception, retain its explicit user request or documented exceptional reason
+with the PR evidence; it does not replace the ordinary merge-commit exercise.
+Confirm the final main push run and new-topic creation at that checked tip, with
+effective protection on subsequent updates.
 Until these exercises pass, live governance setup and the M0 prerequisite remain
 incomplete even if all source checks pass.
 

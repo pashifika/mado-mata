@@ -32,7 +32,7 @@ Only these routes are supported:
 
 | Head | Base | Head repository | Merge method |
 | --- | --- | --- | --- |
-| `change/<change-name>` or `fix/<change-name>` | `dev/<topic>` | Product or fork | Squash |
+| `change/<change-name>` or `fix/<change-name>` | `dev/<topic>` | Product or fork | Merge commit by default; squash only by exception |
 | `dev/<topic>` | `main` | Product only | Merge commit |
 | `fix/<change-name>` for an emergency | `main` | Product or fork | Merge commit |
 | `sync/<topic>` | The matching `dev/<topic>` | Product only | Merge commit |
@@ -69,10 +69,15 @@ gh pr create --base dev/runtime-comparison --head change/m0-runtime-comparison
 ```
 
 The maintainer resolves conversations, confirms the current `CI Gate` succeeds,
-and squash-merges the leaf PR. When the topic's intended scope is complete,
-open `dev/<topic> -> main` and use a merge commit. Do not squash or rebase a
-promotion: the topic and `main` must retain shared ancestry. If strict checks
-require an update, reconcile through the sync procedure before promotion.
+and uses a merge commit for the leaf PR by default. Squash is allowed only when
+the user explicitly requests it or a maintainer identifies an exceptional reason.
+Record the request or reason in the PR before merging. This exception applies
+only to ordinary leaf PRs into `dev/<topic>`.
+
+When the topic's intended scope is complete, open `dev/<topic> -> main` and use a
+merge commit. Do not squash or rebase a promotion: the topic and `main` must
+retain shared ancestry. If strict checks require an update, reconcile through
+the sync procedure before promotion.
 
 After any PR base change, follow the
 [retarget revalidation procedure](docs/ci.md#hosted-workflow-and-required-gate)
@@ -110,9 +115,13 @@ the topic keeps that work off `main` while preserving ancestry.
 
 Zero required approvals permits solo maintenance; it is not independent review.
 There is no standing bypass. Merge only after the required current checks pass
-and conversations are resolved. Repository settings allow merge and squash,
-not rebase; topic rules permit both and cannot select by head prefix, so the
-maintainer must choose the method in the route table.
+and conversations are resolved. Merge commits are the default for every route.
+Repository settings allow merge and squash, not rebase; topic rules permit both
+and cannot select by head prefix, so the maintainer must choose the method in
+the route table. Allowed methods are permissions, not an automatic default
+selection. With GitHub CLI, use `gh pr merge <number> --merge`; use `--squash`
+only for a recorded leaf-PR exception. In the web UI, explicitly select
+`Create a merge commit` rather than relying on the previously selected method.
 
 Automatic deletion of merged PR head branches is enabled. Before merging,
 confirm that no unfinished work or dependent PR still needs the head branch.
