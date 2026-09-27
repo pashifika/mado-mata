@@ -1,8 +1,10 @@
 //! Raw, bounded configuration capture. No typed document loading or package traversal.
+//! Ordinary OS metadata files remain on disk and never enter the captured generation.
 use crate::storage::{
     MAX_PROFILE_BYTES, MAX_SETTINGS_BYTES, MAX_TAB_BYTES, check_directory, checked_file, exists,
     filesystem_key, read_bytes,
 };
+use mado_runtime_comparison::inventory::is_os_metadata_entry;
 use mado_runtime_comparison::model::Fault;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -339,7 +341,13 @@ fn entries(path: &Path, count: &mut usize) -> Result<Vec<fs::DirEntry>, Fault> {
         if *count > MAX_ENUMERATED {
             return Err(fault("configuration enumeration exceeds its bound"));
         }
-        output.push(entry.map_err(|e| io_fault("read configuration entry", e))?);
+        let entry = entry.map_err(|e| io_fault("read configuration entry", e))?;
+        if is_os_metadata_entry(&entry.file_name(), &entry)
+            .map_err(|e| io_fault("inspect configuration metadata", e))?
+        {
+            continue;
+        }
+        output.push(entry);
     }
     Ok(output)
 }
@@ -544,6 +552,106 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn os_metadata_changes_do_not_change_the_configuration_generation() {
+        let root = Root::new();
+        root.put("settings.json", b"preserved settings");
+        root.put("profiles/old.json", b"preserved legacy");
+        root.put("tabs/One/tab.config", b"preserved Tab");
+        root.put("tabs/One/pkg/profile.config", b"preserved profile");
+        let before = capture(&root.0).unwrap();
+        let paths = [
+            ".DS_Store",
+            "._settings.pending",
+            "profiles/._old.json",
+            "profiles/._old.pending",
+            "tabs/._One",
+            "tabs/One/._tab.config",
+            "tabs/One/._tab.pending",
+            "tabs/One/pkg/._profile.config",
+            "tabs/One/pkg/._profile.pending",
+            "tabs/One/pkg/desktop.ini",
+            "tabs/One/pkg/Thumbs.db",
+        ];
+        let appeared = capture_between(&root.0, || {
+            for path in paths {
+                fs::write(root.0.join(path), b"OS metadata").unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(appeared, before);
+        let updated = capture_between(&root.0, || {
+            for path in paths {
+                fs::write(root.0.join(path), b"updated OS metadata").unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(updated, before);
+        for path in paths {
+            assert_eq!(fs::read(root.0.join(path)).unwrap(), b"updated OS metadata");
+        }
+        let disappeared = capture_between(&root.0, || {
+            for path in paths {
+                fs::remove_file(root.0.join(path)).unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(disappeared, before);
+    }
+
+    #[test]
+    fn metadata_exclusion_keeps_raw_enumeration_bounded() {
+        let root = Root::new();
+        root.put(".DS_Store", b"metadata");
+        let mut count = MAX_ENUMERATED - 1;
+        assert!(entries(&root.0, &mut count).unwrap().is_empty());
+        assert_eq!(count, MAX_ENUMERATED);
+        assert!(entries(&root.0, &mut count).is_err());
+        assert_eq!(fs::read(root.0.join(".DS_Store")).unwrap(), b"metadata");
+    }
+
+    #[test]
+    fn metadata_named_directories_do_not_hide_managed_configuration() {
+        let root = Root::new();
+        for path in ["profiles/._old.json", "tabs/One/pkg/._profile.config"] {
+            let path = root.0.join(path);
+            crate::storage::private_directory(&path).unwrap();
+            assert!(capture(&root.0).is_err());
+            fs::remove_dir(path).unwrap();
+        }
+        root.put("tabs/One/pkg/.unknown.config", b"unknown retained record");
+        let captured = capture(&root.0).unwrap();
+        assert_eq!(
+            captured.files["tabs/One/pkg/.unknown.config"],
+            b"unknown retained record"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_named_links_cannot_bypass_configuration_file_safety() {
+        use std::os::unix::fs::symlink;
+        let root = Root::new();
+        root.put("outside", b"retained linked bytes");
+        let outside = root.0.join("outside");
+        for path in [
+            "profiles/._old.json",
+            "profiles/._old.pending",
+            "tabs/One/pkg/._profile.config",
+            "tabs/One/pkg/._profile.pending",
+        ] {
+            let path = root.0.join(path);
+            crate::storage::private_directory(path.parent().unwrap()).unwrap();
+            symlink(&outside, &path).unwrap();
+            assert!(capture(&root.0).is_err());
+            fs::remove_file(&path).unwrap();
+            fs::hard_link(&outside, &path).unwrap();
+            assert!(capture(&root.0).is_err());
+            fs::remove_file(path).unwrap();
+        }
+        assert_eq!(fs::read(outside).unwrap(), b"retained linked bytes");
+    }
+
+    #[test]
     fn packages_subtree_is_not_read_or_admitted_to_configuration_snapshots() {
         let root = Root::new();
         root.put("settings.json", b"retained settings");
@@ -665,6 +773,10 @@ pub(crate) mod tests {
         ] {
             let root = Root::new();
             root.put(path, b"pending");
+            root.put(
+                "profiles/._old.pending",
+                b"metadata beside a genuine pending write",
+            );
             assert!(capture(&root.0).is_err(), "{path}");
         }
         let root = Root::new();

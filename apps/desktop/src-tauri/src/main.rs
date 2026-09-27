@@ -20,11 +20,13 @@ use tauri::{Emitter, Manager};
 
 #[cfg(target_os = "macos")]
 mod picker;
+mod recognition_commands;
 
 struct Backend {
     bootstrap: Arc<Bootstrap>,
     closing: AtomicBool,
     exiting: AtomicBool,
+    preview_owner: std::sync::Mutex<Option<AuthoringRef>>,
 }
 
 async fn background<T: Send + 'static>(
@@ -613,6 +615,7 @@ fn main() {
                 )),
                 closing: AtomicBool::new(false),
                 exiting: AtomicBool::new(false),
+                preview_owner: std::sync::Mutex::new(None),
             });
             Ok(())
         })
@@ -662,10 +665,42 @@ fn main() {
             authoring_stop,
             authoring_exit,
             authoring_recover,
+            recognition_commands::recognition_view,
+            recognition_commands::recognition_capabilities,
+            recognition_commands::recognition_pick,
+            recognition_commands::recognition_load,
+            recognition_commands::recognition_preview,
+            recognition_commands::recognition_update,
+            recognition_commands::recognition_confirm,
+            recognition_commands::recognition_discard,
+            recognition_commands::recognition_trial,
+            recognition_commands::recognition_save,
+            recognition_commands::recognition_copy,
+            recognition_commands::recognition_open_preview,
+            recognition_commands::recognition_close_preview,
             app_close,
             poll
         ])
         .on_window_event(|window, event| {
+            if window.label() == recognition_commands::PREVIEW_WINDOW {
+                if let tauri::WindowEvent::Destroyed = event {
+                    let backend = window.app_handle().state::<Backend>();
+                    let owner = backend
+                        .preview_owner
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    if let (Some(owner), Ok(application)) =
+                        (owner, backend.bootstrap.running_application())
+                    {
+                        application.recognition_release_preview(&owner);
+                    }
+                    let _ = window
+                        .app_handle()
+                        .emit_to("main", "recognition-preview-closed", ());
+                }
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 request_close(window.app_handle());

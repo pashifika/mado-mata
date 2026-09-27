@@ -1,5 +1,6 @@
 //! Non-native configuration and immutable resource/corpus capture.
 
+use crate::images::{PayloadBytes, REPLAY_DECODED_BYTES};
 use crate::inventory::Inventory;
 use crate::model::{Control, ENGINE_REVISION, Fault, Limits, identity};
 use serde::{Deserialize, Serialize};
@@ -226,8 +227,13 @@ pub fn capture_replay(
     {
         return Err(changed("replay_descriptor"));
     }
-    let config: ReplayConfig = serde_json::from_slice(&bytes)
+    let mut config: ReplayConfig = serde_json::from_slice(&bytes)
         .map_err(|error| blocked("replay_validation", &error.to_string()))?;
+    crate::recognition::merge_effective_template_maps(
+        inventory,
+        &mut config.package_entries,
+        &mut config.templates,
+    )?;
     validate_replay(&config, &inventory.assets, limits, control)?;
     let declarations = &inventory.metadata["manifest"]["assets"];
     for frame in &config.frames {
@@ -582,7 +588,7 @@ fn package_path(path: &str) -> bool {
 
 pub(crate) fn validate_replay(
     config: &ReplayConfig,
-    assets: &BTreeMap<String, Vec<u8>>,
+    assets: &BTreeMap<String, PayloadBytes>,
     limits: &Limits,
     control: &Control,
 ) -> Result<(), Fault> {
@@ -640,10 +646,10 @@ pub(crate) fn validate_replay(
         bytes = bytes
             .checked_add(pixels.len())
             .ok_or_else(|| blocked("replay_limit", "replay byte count overflow"))?;
-        if bytes > limits.snapshot_bytes {
+        if bytes > REPLAY_DECODED_BYTES {
             return Err(blocked(
                 "replay_limit",
-                "replay corpus exceeds snapshot_bytes",
+                "replay corpus exceeds the decoded-frame allowance",
             ));
         }
         if let Some(placement) = &record.placement {
@@ -780,9 +786,10 @@ mod tests {
             &limits,
         )
         .unwrap();
-        inventory
-            .assets
-            .insert("engine-manifest".into(), b"{}".to_vec());
+        inventory.assets.insert(
+            "engine-manifest".into(),
+            PayloadBytes::new(b"{}".to_vec()).unwrap(),
+        );
         inventory.metadata["manifest"]["assets"]["engine-manifest"] = json!({
             "path":"assets/engine.json","format":"json","width":0,"height":0,
         });
@@ -798,7 +805,11 @@ mod tests {
         });
         let file = CapturedFile::new(&serde_json::to_vec(&descriptor).unwrap());
         let captured = capture_replay(&file.0, &inventory, &limits, &control).unwrap();
-        inventory.assets.get_mut("marker").unwrap()[0] ^= 1;
+        let mut changed = inventory.assets["marker"].as_slice().to_vec();
+        changed[0] ^= 1;
+        inventory
+            .assets
+            .insert("marker".into(), PayloadBytes::new(changed).unwrap());
         inventory.refresh_identity().unwrap();
         assert_ne!(
             captured.identity,
@@ -820,7 +831,11 @@ mod tests {
                     "asset":"marker","width":1,"height":4,"pixel_format":"rgba8","captured_ns":0,"discontinuous":false,"placement":null,
                 }),
             ),
-            ("pixel format mismatch", "/frames/0/pixel_format", json!("bgra8")),
+            (
+                "pixel format mismatch",
+                "/frames/0/pixel_format",
+                json!("bgra8"),
+            ),
             ("nonincreasing timestamp", "/frames/1/captured_ns", json!(0)),
             (
                 "uncaptured frame",

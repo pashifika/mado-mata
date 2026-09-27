@@ -1,8 +1,12 @@
 use super::evidence::settlement_bytes;
 use super::protocol::frame;
-use super::supervision::{settled_evidence, terminal_primary};
+use super::supervision::{comparison_identity, settled_evidence, terminal_primary};
+use crate::images::PayloadBytes;
+use crate::inventory::Inventory;
 use crate::model::{Fault, MAX_TRANSPORT_BYTES};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
+use std::path::Path;
 
 #[test]
 fn forced_eof_preserves_a_returned_entry_without_claiming_cleanup() {
@@ -80,4 +84,70 @@ fn bounded_fallback_retains_receipts_and_owners_without_inventing_cleanup() {
     }
     assert_eq!(retained["diagnostic_details_omitted"], true);
     assert!(retained.get("cleanup").is_none());
+}
+
+#[test]
+fn comparison_cohort_spans_candidate_sources_but_binds_asset_names_lengths_and_bytes() {
+    let capture = |candidate: &str| {
+        let plan = crate::check::plan(candidate, "success", "template-first");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join(candidate);
+        let inventory = Inventory::capture(&root, &plan.limits).unwrap();
+        (plan, inventory)
+    };
+    let (plan, javascript) = capture("javascript");
+    let (lua_plan, lua) = capture("lua");
+    assert_ne!(
+        javascript.identity, lua.identity,
+        "candidate sources split whole-package identity"
+    );
+    let common = comparison_identity(&plan, &javascript).unwrap();
+    assert_eq!(
+        comparison_identity(&lua_plan, &lua).unwrap(),
+        common,
+        "candidates over the same data and configuration share one cohort"
+    );
+
+    let with_assets = |assets: &[(&str, &[u8])]| {
+        let mut inventory = javascript.clone();
+        inventory.assets = assets
+            .iter()
+            .map(|&(name, bytes)| (name.to_owned(), PayloadBytes::new(bytes.to_vec()).unwrap()))
+            .collect();
+        comparison_identity(&plan, &inventory).unwrap()
+    };
+    let marker = javascript.assets["marker"].as_slice();
+    assert_eq!(
+        with_assets(&[("marker", marker)]),
+        common,
+        "identical bytes without a cached digest stay in the cohort"
+    );
+    let mut changed = marker.to_vec();
+    changed[0] ^= 1;
+    let mut extended = marker.to_vec();
+    extended.push(0);
+    let other = vec![7_u8; marker.len()];
+    let mut schema = javascript.clone();
+    schema.schema["version"] = json!(2);
+    let mut distinct = BTreeSet::from([common]);
+    for (case, identity) in [
+        ("changed byte", with_assets(&[("marker", &changed)])),
+        ("extended length", with_assets(&[("marker", &extended)])),
+        ("renamed asset", with_assets(&[("renamed", marker)])),
+        (
+            "added asset",
+            with_assets(&[("marker", marker), ("other", &other)]),
+        ),
+        (
+            "swapped bytes",
+            with_assets(&[("marker", &other), ("other", marker)]),
+        ),
+        (
+            "changed schema",
+            comparison_identity(&plan, &schema).unwrap(),
+        ),
+    ] {
+        assert!(distinct.insert(identity), "{case} must split the cohort");
+    }
 }

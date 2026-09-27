@@ -234,10 +234,11 @@ impl Application {
         if let Some(defaults) = &package.effective_defaults {
             check_webview_value(defaults, "$.effective_defaults")?;
         }
-        let plan: Plan = serde_json::from_str(include_str!(
+        let mut plan: Plan = serde_json::from_str(include_str!(
             "../../../../../tools/runtime-comparison/fixtures/manual-plan.json"
         ))
         .map_err(|error| Fault::new("Application", error.to_string()))?;
+        plan.limits.snapshot_bytes = mado_runtime_comparison::images::PACKAGE_BYTES;
         let inventory = Inventory::capture(&path, &plan.limits)?;
         publisher.check_admission(&path)?;
         if inventory.identity != package.inventory_identity {

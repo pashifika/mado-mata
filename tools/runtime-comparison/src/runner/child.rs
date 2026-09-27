@@ -3,7 +3,7 @@ use super::evidence::{
 };
 use super::protocol::{Invocation, Operation, emit, frame};
 use crate::host::{Host, resolve_options, run_rust};
-use crate::model::{Control, Fault, MAX_TRANSPORT_BYTES, RuntimeMetrics};
+use crate::model::{Control, Fault, RuntimeMetrics};
 use serde_json::{Value, json};
 use std::io::BufReader;
 use std::sync::{
@@ -60,10 +60,7 @@ fn process_metrics() -> Value {
 
 pub fn child() -> Result<bool, Fault> {
     let mut input = BufReader::new(std::io::stdin());
-    let bytes = frame(&mut input, MAX_TRANSPORT_BYTES)?
-        .ok_or_else(|| Fault::new("Transport", "missing child invocation"))?;
-    let invocation: Invocation =
-        serde_json::from_slice(&bytes).map_err(|e| Fault::new("Transport", e.to_string()))?;
+    let invocation = super::payload::read(&mut input)?;
     invocation.plan.validate()?;
     invocation.inventory.validate()?;
     invocation.operation.validate(&invocation.plan)?;

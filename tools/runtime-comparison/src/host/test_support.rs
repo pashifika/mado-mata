@@ -49,7 +49,7 @@ pub(super) fn make_host(scenario: &str, selected_profile: &str) -> Host {
     Host::new(
         plan,
         options,
-        BTreeMap::from([("marker".into(), vec![255; 16])]),
+        BTreeMap::from([("marker".into(), PayloadBytes::new(vec![255; 16]).unwrap())]),
         control,
     )
     .expect("controlled host")

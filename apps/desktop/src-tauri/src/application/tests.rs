@@ -578,10 +578,11 @@ fn stale_saved_values_are_refused_before_runner_startup() {
     let path = package_path();
     let selection = inspect_named(application, "Main", &path).unwrap();
     let workspace = workspace_ref(&selection);
-    let plan: Plan = serde_json::from_str(include_str!(
+    let mut plan: Plan = serde_json::from_str(include_str!(
         "../../../../../tools/runtime-comparison/fixtures/manual-plan.json"
     ))
     .unwrap();
+    plan.limits.snapshot_bytes = mado_runtime_comparison::images::PACKAGE_BYTES;
     let inventory = Inventory::capture(&path, &plan.limits).unwrap();
     let values = inventory.profiles["template-first"]["options"].clone();
     let saved = application

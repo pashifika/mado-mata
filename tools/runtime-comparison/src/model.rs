@@ -162,7 +162,11 @@ impl Limits {
             ("vm_bytes", self.vm_bytes, 256 * 1024 * 1024),
             ("max_actions", self.max_actions, 4096),
             ("snapshot_files", self.snapshot_files, 1024),
-            ("snapshot_bytes", self.snapshot_bytes, 2 * 1024 * 1024),
+            (
+                "snapshot_bytes",
+                self.snapshot_bytes,
+                crate::images::PACKAGE_BYTES,
+            ),
         ] {
             if value == 0 || value > ceiling {
                 return Err(Fault::new(
@@ -388,8 +392,20 @@ pub struct RuntimeMetrics {
 }
 
 pub fn identity<T: Serialize>(value: &T) -> Result<String, Fault> {
-    let bytes = serde_json::to_vec(value).map_err(|e| Fault::new("Encoding", e.to_string()))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    struct HashWriter(Sha256);
+    impl Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(Sha256::new());
+    serde_json::to_writer(&mut writer, value)
+        .map_err(|error| Fault::new("Encoding", error.to_string()))?;
+    Ok(format!("{:x}", writer.0.finalize()))
 }
 
 #[cfg(test)]

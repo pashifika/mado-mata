@@ -19,7 +19,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod authoring;
-pub use authoring::{AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView};
+pub use authoring::{
+    AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, RecognitionCopy,
+    RecognitionFrame, RecognitionPickerGuard, RecognitionSaved, RecognitionTrial, RecognitionView,
+};
 mod operations;
 mod profiles;
 mod recovery;

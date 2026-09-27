@@ -2,7 +2,7 @@ use super::RunRecord;
 use super::evidence::{Observer, receive_evidence};
 use super::protocol::{Invocation, Operation, emit, frame};
 use crate::inventory::Inventory;
-use crate::model::{Fault, MAX_TRANSPORT_BYTES, Plan, encode_bounded, identity};
+use crate::model::{Fault, MAX_TRANSPORT_BYTES, Plan, identity};
 use serde_json::{Value, json};
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
-struct OwnedChild(Child);
+pub(super) struct OwnedChild(pub(super) Child);
 impl Drop for OwnedChild {
     fn drop(&mut self) {
         if !matches!(self.0.try_wait(), Ok(Some(_))) {
@@ -157,6 +157,14 @@ fn child_loader_environment(command: &mut Command, plan: &Plan) -> Result<Value,
         serde_json::from_value(raw.clone()).map_err(|error| {
             crate::environment::blocked("configuration_validation", &error.to_string())
         })?;
+    configure_engine_loader(command, &configuration)
+}
+
+pub(super) fn configure_engine_loader(
+    command: &mut Command,
+    configuration: &crate::environment::Configuration<Value>,
+) -> Result<Value, Fault> {
+    command.env("ORT_DISABLE_TELEMETRY", "1");
     let mut directories = Vec::new();
     for library in
         std::iter::once(&configuration.ocr.runtime).chain(&configuration.native_libraries)
@@ -263,7 +271,7 @@ fn supervise(
         .map_err(|e| Fault::new("Clock", e.to_string()))?
         .as_nanos();
     let run = format!("{}-{}-{nonce}", plan.id, std::process::id());
-    let invocation = Invocation {
+    let mut invocation = Invocation {
         run: run.clone(),
         attempt: 1,
         operation,
@@ -271,8 +279,9 @@ fn supervise(
         inventory: inventory.clone(),
         observe_logs: observer.is_some(),
     };
-    let mut bytes = encode_bounded(&invocation, MAX_TRANSPORT_BYTES - 1)?;
-    bytes.push(b'\n');
+    let bytes = super::payload::header(&mut invocation)?;
+    let transfer_assets = invocation.inventory.assets.clone();
+    let _image_reservation = super::payload::reserve_child_images(plan, inventory)?;
     if observer.is_some() && operator_stop.as_mut().is_some_and(|poll| poll()) {
         return Err(
             Fault::new("Cancelled", "Stop requested before child startup").with_context(json!({
@@ -320,6 +329,11 @@ fn supervise(
         input
             .write_all(&bytes)
             .map_err(|e| Fault::new("Startup", e.to_string()))?;
+        for asset in transfer_assets.values() {
+            input
+                .write_all(asset)
+                .map_err(|e| Fault::new("Startup", e.to_string()))?;
+        }
         if let Ok(command) = command_receive.recv() {
             writeln!(input, "{command}").map_err(|e| Fault::new("Transport", e.to_string()))?;
         }
@@ -632,9 +646,7 @@ fn supervise(
             } else {
                 "attempt owners after cleanup, not peak"
             },"budgets":plan.budgets,
-            "comparison_identity":identity(&(&plan.lane,&plan.scenario,&plan.profile,&plan.limits,&plan.budgets,
-                (plan.samples,plan.warmups,plan.repetitions),&inventory.metadata["runtime_scenario"],
-                &plan.native_config,&inventory.package_id,&inventory.schema,&inventory.profiles,&inventory.assets))?,
+            "comparison_identity":comparison_identity(plan, inventory)?,
             "protocol_fault":protocol_fault,"entry_emission_failure":terminal["entry_emission_failure"],
             "diagnostic_details_omitted":terminal["diagnostic_details_omitted"],
             "stderr_bytes_retained":stderr.len(),"stderr":String::from_utf8_lossy(&stderr),
@@ -647,9 +659,32 @@ fn supervise(
     })
 }
 
+/// Candidate-independent cohort data; assets use the cached inventory-v2
+/// name/length/digest framing rather than streaming every byte as decimal JSON.
+pub(super) fn comparison_identity(plan: &Plan, inventory: &Inventory) -> Result<String, Fault> {
+    identity(&(
+        &plan.lane,
+        &plan.scenario,
+        &plan.profile,
+        &plan.limits,
+        &plan.budgets,
+        (plan.samples, plan.warmups, plan.repetitions),
+        &inventory.metadata["runtime_scenario"],
+        &plan.native_config,
+        &inventory.package_id,
+        &inventory.schema,
+        &inventory.profiles,
+        inventory.asset_digest(),
+    ))
+}
+
 // Call only after run/attempt correlation. Metadata is evidence, never a source
 // of executable paths or authority; the PID comes from the supervisor's child.
-fn retain_child_build(started: &Value, pid: u32, build: &mut Option<Value>) -> Result<(), Fault> {
+pub(super) fn retain_child_build(
+    started: &Value,
+    pid: u32,
+    build: &mut Option<Value>,
+) -> Result<(), Fault> {
     if build.is_some() {
         return Err(Fault::new("Transport", "duplicate child startup identity"));
     }
@@ -709,10 +744,7 @@ pub(super) fn terminal_primary(
 
 pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     let mut input = BufReader::new(std::io::stdin());
-    let bytes = frame(&mut input, MAX_TRANSPORT_BYTES)?
-        .ok_or_else(|| Fault::new("Fixture", "missing probe invocation"))?;
-    let invocation: Invocation = serde_json::from_slice(&bytes)
-        .map_err(|error| Fault::new("Transport", error.to_string()))?;
+    let mut invocation = super::payload::read(&mut input)?;
     if intentional {
         let record = run_once_after_milestone(
             &invocation.plan,
@@ -748,9 +780,7 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
         .stdin
         .take()
         .ok_or_else(|| Fault::new("Transport", "no probe control"))?;
-    control
-        .write_all(&bytes)
-        .map_err(|e| Fault::new("Transport", e.to_string()))?;
+    super::payload::write(&mut invocation, &mut control)?;
     let mut output = BufReader::new(
         child
             .0
@@ -773,7 +803,7 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
 
 pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value, Fault> {
     let run = format!("parent-loss-{}", std::process::id());
-    let invocation = Invocation {
+    let mut invocation = Invocation {
         run: run.clone(),
         attempt: 1,
         operation: Operation::Run,
@@ -805,12 +835,7 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
         .stdin
         .take()
         .ok_or_else(|| Fault::new("Transport", "no parent input"))?;
-    writeln!(
-        input,
-        "{}",
-        serde_json::to_string(&invocation).map_err(|e| Fault::new("Encoding", e.to_string()))?
-    )
-    .map_err(|e| Fault::new("Transport", e.to_string()))?;
+    super::payload::write(&mut invocation, &mut input)?;
     drop(input);
     let output = parent
         .0
@@ -892,7 +917,7 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
 pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value, Fault> {
     let executable =
         std::env::current_exe().map_err(|error| Fault::new("Startup", error.to_string()))?;
-    let invocation = Invocation {
+    let mut invocation = Invocation {
         run: format!("intentional-exit-{}", std::process::id()),
         attempt: 1,
         operation: Operation::Run,
@@ -900,15 +925,6 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         inventory: inventory.clone(),
         observe_logs: false,
     };
-    let mut bytes = serde_json::to_vec(&invocation)
-        .map_err(|error| Fault::new("Encoding", error.to_string()))?;
-    bytes.push(b'\n');
-    if bytes.len() > MAX_TRANSPORT_BYTES {
-        return Err(Fault::new(
-            "LimitExceeded",
-            "probe invocation exceeds its bound",
-        ));
-    }
     let mut target = OwnedChild(
         Command::new(&executable)
             .arg("target-probe")
@@ -937,7 +953,7 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         .stdout
         .take()
         .ok_or_else(|| Fault::new("Transport", "no probe output"))?;
-    let writer = thread::spawn(move || input.write_all(&bytes));
+    let writer = thread::spawn(move || super::payload::write(&mut invocation, &mut input));
     let reader = thread::spawn(move || {
         let mut bytes = Vec::new();
         output

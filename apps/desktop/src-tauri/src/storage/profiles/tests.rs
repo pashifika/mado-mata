@@ -199,6 +199,12 @@ fn foreign_entries_consume_bounded_directory_capacity() {
     for index in 0..MAX_DIRECTORY_ENTRIES - 2 {
         fs::write(store.directory().join(format!("note-{index}.txt")), b"").unwrap();
     }
+    fs::write(store.directory().join(".DS_Store"), b"Finder metadata").unwrap();
+    fs::write(
+        store.directory().join("._note-0.txt"),
+        b"AppleDouble metadata",
+    )
+    .unwrap();
     let inv = inventory();
     let saved = store.save(&inv, None, "Last slot", options()).unwrap();
     store.rename(&inv, &saved.id, "At capacity").unwrap();
@@ -923,4 +929,129 @@ fn recovery_preserves_other_profile_fault_attribution() {
         fs::read(store.profile_path(&other.id)).unwrap(),
         b"invalid JSON"
     );
+}
+
+#[test]
+fn os_metadata_preserves_profile_listing_recovery_save_and_legacy_import() {
+    let directory = Directory::new();
+    let scoped = directory.profiles("Owner");
+    let inv = inventory();
+    let original = scoped.save(&inv, None, "Original", options()).unwrap();
+    let record = scoped.recovery_records().unwrap().pop().unwrap();
+    let names = [
+        ".DS_Store".to_owned(),
+        format!("._{}.config", original.id),
+        format!("._{}.pending", original.id),
+        "Thumbs.db".to_owned(),
+        "desktop.ini".to_owned(),
+    ];
+    for name in &names {
+        fs::write(scoped.directory().join(name), b"retained OS metadata").unwrap();
+    }
+    let listing = scoped
+        .list(&inv.package_id, &original.schema_identity)
+        .unwrap();
+    assert!(listing.rejected.is_empty());
+    assert_eq!(listing.profiles.len(), 1);
+    assert_eq!(listing.profiles[0].id, original.id);
+    assert_eq!(
+        scoped.recovery_records().unwrap()[0].fingerprint,
+        record.fingerprint
+    );
+    let renamed = scoped.rename(&inv, &original.id, "Renamed").unwrap();
+    assert_eq!(renamed.name, "Renamed");
+    let store = directory.store();
+    store.set_tab_open("Owner", false).unwrap();
+    store.set_tab_open("Owner", true).unwrap();
+    assert_eq!(
+        directory
+            .store()
+            .profile_store("Owner", &inv.package_id)
+            .unwrap()
+            .read_profile(&original.id)
+            .unwrap()
+            .0
+            .name,
+        "Renamed"
+    );
+
+    let imported = legacy_profile(1, "Legacy");
+    let bytes = legacy(&directory, &imported);
+    let sidecar = directory.0.join(format!("profiles/._{}.json", imported.id));
+    fs::write(&sidecar, b"legacy metadata").unwrap();
+    let result = store.import_legacy_profiles("Owner", &inv).unwrap();
+    assert!(result.fault.is_none());
+    assert_eq!(result.imported, [imported.id.clone()]);
+    assert_eq!(fs::read(scoped.profile_path(&imported.id)).unwrap(), bytes);
+    assert_eq!(fs::read(sidecar).unwrap(), b"legacy metadata");
+    for name in names {
+        assert_eq!(
+            fs::read(scoped.directory().join(name)).unwrap(),
+            b"retained OS metadata"
+        );
+    }
+}
+
+#[test]
+fn metadata_named_directories_and_unknown_profile_records_still_refuse_mutation() {
+    let directory = Directory::new();
+    let scoped = directory.profiles("Owner");
+    let inv = inventory();
+    let saved = scoped.save(&inv, None, "Original", options()).unwrap();
+    let original = fs::read(scoped.profile_path(&saved.id)).unwrap();
+    let sidecar = scoped.directory().join(format!("._{}.config", saved.id));
+    private_directory(&sidecar).unwrap();
+    assert!(
+        scoped
+            .list(&inv.package_id, &saved.schema_identity)
+            .is_err()
+    );
+    assert!(scoped.rename(&inv, &saved.id, "Refused").is_err());
+    fs::remove_dir(&sidecar).unwrap();
+    let unknown = scoped.directory().join(".unknown.config");
+    fs::write(&unknown, b"retained unknown record").unwrap();
+    assert!(scoped.recovery_records().is_err());
+    assert!(scoped.save(&inv, None, "Refused", options()).is_err());
+    assert_eq!(fs::read(unknown).unwrap(), b"retained unknown record");
+    assert_eq!(fs::read(scoped.profile_path(&saved.id)).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn metadata_named_links_cannot_bypass_profile_admission() {
+    use std::os::unix::fs::symlink;
+
+    let directory = Directory::new();
+    let scoped = directory.profiles("Owner");
+    let inv = inventory();
+    let saved = scoped.save(&inv, None, "Original", options()).unwrap();
+    let original = fs::read(scoped.profile_path(&saved.id)).unwrap();
+    let sidecar = scoped.directory().join("._entry.config");
+    symlink(scoped.profile_path(&saved.id), &sidecar).unwrap();
+    assert!(scoped.recovery_records().is_err());
+    assert!(scoped.rename(&inv, &saved.id, "Refused").is_err());
+    fs::remove_file(&sidecar).unwrap();
+    fs::hard_link(scoped.profile_path(&saved.id), &sidecar).unwrap();
+    assert!(
+        scoped
+            .list(&inv.package_id, &saved.schema_identity)
+            .is_err()
+    );
+    assert!(scoped.save(&inv, None, "Refused", options()).is_err());
+    fs::remove_file(&sidecar).unwrap();
+    assert_eq!(fs::read(scoped.profile_path(&saved.id)).unwrap(), original);
+}
+
+#[test]
+fn os_metadata_does_not_consume_managed_configuration_byte_budget() {
+    let directory = Directory::new();
+    let scoped = directory.profiles("Owner");
+    let inv = inventory();
+    let saved = scoped.save(&inv, None, "Original", options()).unwrap();
+    let metadata = scoped.directory().join(format!("._{}.config", saved.id));
+    let bytes = crate::configuration::MAX_BYTES as u64 + 1;
+    fs::File::create(&metadata).unwrap().set_len(bytes).unwrap();
+    let renamed = scoped.rename(&inv, &saved.id, "Renamed").unwrap();
+    assert_eq!(renamed.name, "Renamed");
+    assert_eq!(fs::metadata(metadata).unwrap().len(), bytes);
 }

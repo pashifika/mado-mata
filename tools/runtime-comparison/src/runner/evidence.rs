@@ -237,23 +237,36 @@ pub(super) fn receive_evidence(
     observer: Option<&Observer>,
     invocation: &Invocation,
 ) -> (mpsc::Receiver<Result<Value, Fault>>, thread::JoinHandle<()>) {
-    let run = &invocation.run;
-    let plan = &invocation.plan;
+    receive_frames(
+        stdout,
+        observer,
+        &invocation.run,
+        if observer.is_some() {
+            invocation.plan.limits.log_records
+        } else {
+            0
+        },
+        MAX_TRANSPORT_BYTES,
+    )
+}
+
+pub(super) fn receive_frames(
+    stdout: ChildStdout,
+    observer: Option<&Observer>,
+    run: &str,
+    log_limit: usize,
+    frame_bytes: usize,
+) -> (mpsc::Receiver<Result<Value, Fault>>, thread::JoinHandle<()>) {
     // Logs bypass the independent sixteen-record lifecycle allowance.
     let (sender, receiver) = mpsc::sync_channel(17);
     let log_observer = observer.cloned();
-    let event_run = run.clone();
-    let log_limit = if observer.is_some() {
-        plan.limits.log_records
-    } else {
-        0
-    };
+    let event_run = run.to_owned();
     let reader = thread::spawn(move || {
         let mut input = BufReader::new(stdout);
         let mut control_records = 0;
         let mut log_records = 0;
         for _ in 0..16 + log_limit {
-            match frame(&mut input, MAX_TRANSPORT_BYTES) {
+            match frame(&mut input, frame_bytes) {
                 Ok(Some(bytes)) => {
                     let result = serde_json::from_slice::<Value>(&bytes)
                         .map_err(|e| Fault::new("Transport", e.to_string()));

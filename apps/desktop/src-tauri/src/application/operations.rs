@@ -88,7 +88,12 @@ impl Application {
         let terminal = value["state"] == "terminal";
         let controller = Arc::new(value);
         if terminal {
-            if controller["operation"] != "authoring_validate" {
+            let recognition_operation = controller["operation"]
+                .as_str()
+                .is_some_and(|operation| operation.starts_with("recognition_"));
+            let authoring_operation =
+                recognition_operation || controller["operation"] == "authoring_validate";
+            if !authoring_operation {
                 let outcome = TerminalOutcome::from_view(&controller);
                 let (level, message) = outcome.notice();
                 self.logger.emit(
@@ -101,9 +106,7 @@ impl Application {
                     outcome.fields(&controller["operation"]),
                 );
             }
-            if let Some(workspace) =
-                workspace.filter(|_| controller["operation"] != "authoring_validate")
-            {
+            if let Some(workspace) = workspace.filter(|_| !authoring_operation) {
                 if let Some(selected) = state
                     .open
                     .iter_mut()
@@ -123,6 +126,13 @@ impl Application {
                     package_inventory_identity: check.package_inventory_identity.clone(),
                     controller: controller.clone(),
                 }));
+            }
+            if recognition_operation {
+                // Containment and the retained outcome settle with terminal ownership,
+                // before any admission check can observe this run as terminal.
+                if let Some(lease) = state.authoring.as_mut() {
+                    lease.settle_recognition(&owner.run, &controller);
+                }
             }
             owner.terminal = true;
         }
@@ -330,10 +340,20 @@ impl Application {
                     match self.commands.try_lock() {
                         Ok(_command) => {
                             let mut state = lock(&self.workspaces);
-                            if let Some(fault) = state.authoring.as_ref().and_then(|lease| lease.containment.as_ref()) {
+                            // The joined worker's evidence settles a just-finished recognition
+                            // run here even if no command or poll has collected it yet.
+                            self.collect(&mut state);
+                            let lease = state.authoring.as_ref();
+                            if let Some(fault) = lease.and_then(|lease| lease.containment.as_ref()) {
                                 outcome = Err(fault.clone());
-                            }
-                            if outcome.is_ok() {
+                            } else if outcome.is_ok() {
+                                // Reaped ownership has settled, but a cleanup failure its
+                                // command never returned is still reported.
+                                if let Some(fault) = lease
+                                    .and_then(super::authoring::Lease::unreturned_recognition_cleanup)
+                                {
+                                    outcome = Err(fault);
+                                }
                                 state.authoring = None;
                                 *lock(&self.authoring_stop) = None;
                             }

@@ -2,6 +2,7 @@
 //! serializes calls; this module owns source revisions and durable publication.
 mod catalog;
 mod publication;
+mod recognition;
 
 #[cfg(test)]
 mod tests;
@@ -14,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 pub use catalog::{CatalogEdit, CatalogFileKind};
 pub(crate) use publication::check_package_ancestors;
+pub use recognition::{RecognitionSave, SelectedCrop};
 
 pub const MAX_FILES: usize = 128;
 pub const MAX_BYTES: usize = 1024 * 1024;
@@ -44,6 +46,7 @@ pub struct Commit {
 pub enum Edit {
     Text { path: String, text: String },
     Catalog(CatalogEdit),
+    Recognition(RecognitionSave),
 }
 
 pub struct Publisher {
@@ -287,10 +290,11 @@ impl Publisher {
 }
 
 fn limits() -> Result<Limits, Fault> {
-    let plan: Plan = serde_json::from_str(include_str!(
+    let mut plan: Plan = serde_json::from_str(include_str!(
         "../../../../tools/runtime-comparison/fixtures/manual-plan.json"
     ))
     .map_err(|error| Fault::new("InvalidPlan", error.to_string()))?;
+    plan.limits.snapshot_bytes = mado_runtime_comparison::images::PACKAGE_BYTES;
     Ok(plan.limits)
 }
 

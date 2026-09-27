@@ -1,5 +1,6 @@
 import type {Message} from './i18n.ts';
 import type {AuthoringFile, AuthoringFileKind, AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, CatalogEdit, Fault} from './types.ts';
+import type {RecognitionState} from './recognition.ts';
 
 // Host fault categories the editor reacts to; every other category is shown as an ordinary action failure.
 export const AUTHORING_ACTIVE = 'AuthoringActive';
@@ -38,7 +39,7 @@ export interface FileDraft {
   typed:TypedText[];
 }
 
-export type AuthoringPending = {kind:'save'; path:string} | {kind:'catalog'} | {kind:'refresh'} | {kind:'validate'} | {kind:'exit'} | {kind:'duplicate'};
+export type AuthoringPending = {kind:'save'; path:string} | {kind:'catalog'} | {kind:'refresh'} | {kind:'validate'} | {kind:'recognition'} | {kind:'recognition_trial'} | {kind:'exit'} | {kind:'duplicate'};
 export interface ValidationState {revision:string; valid:boolean; diagnostics:Fault[]}
 
 // The frontend half of one host-issued Edit lease. `revision` is the source revision every draft is based on and
@@ -46,6 +47,8 @@ export interface ValidationState {revision:string; valid:boolean; diagnostics:Fa
 export interface AuthoringSession {
   owner:AuthoringRef; packagePath:string; packageId:string; revision:string;
   order:string[]; drafts:Map<string,FileDraft>; selected:string|null;
+  destination:'file'|'recognition';
+  recognition:RecognitionState|null;
   // Bumped whenever the stored selection must be applied to the editor (file switch, undo, search, diagnostics).
   reveal:number;
   pending:AuthoringPending|null;
@@ -106,7 +109,7 @@ export function openSession(view:AuthoringView, notice:Message|null = null):Auth
   const manifest = view.files.find(file => file.kind === 'manifest')?.path;
   const selected = order.find(path => drafts.get(path)?.kind === 'source') ?? manifest ?? firstEditable(order, drafts);
   return {owner: view.owner, packagePath: view.package_path, packageId: view.package_id, revision: view.revision, order, drafts, selected,
-    reveal: 0, pending: null, refreshRequired: false, conflict: false, refreshError: null, error: null, notice, validation: null};
+    destination: 'file', recognition: null, reveal: 0, pending: null, refreshRequired: false, conflict: false, refreshError: null, error: null, notice, validation: null};
 }
 
 function withDraft(session:AuthoringSession, draft:FileDraft):AuthoringSession {
@@ -215,10 +218,10 @@ export function discardFile(session:AuthoringSession, path:string):AuthoringSess
 
 // Keeps the outgoing file's selection so returning to it restores the caret.
 export function selectFile(session:AuthoringSession, path:string, previous:TextRange|null):AuthoringSession {
-  if (!session.drafts.has(path) || session.selected === path) return session;
+  if (!session.drafts.has(path) || (session.selected === path && session.destination === 'file')) return session;
   const outgoing = session.selected === null ? undefined : session.drafts.get(session.selected);
   const kept = outgoing && previous ? recordRange(session, outgoing.path, previous) : session;
-  return {...kept, selected: path, reveal: session.reveal + 1};
+  return {...kept, selected: path, destination: 'file', reveal: session.reveal + 1};
 }
 
 // A caret recorded somewhere else than the last edit left it also ends the current typing undo step.
@@ -233,7 +236,12 @@ export function recordRange(session:AuthoringSession, path:string, range:TextRan
 export function revealRange(session:AuthoringSession, path:string, range:TextRange):AuthoringSession {
   const draft = session.drafts.get(path);
   if (!draft || draft.text === null) return session;
-  return {...withDraft(session, {...draft, range: clamp(range, draft.text.length), group: null}), selected: path, reveal: session.reveal + 1};
+  return {...withDraft(session, {...draft, range: clamp(range, draft.text.length), group: null}), selected: path, destination: 'file', reveal: session.reveal + 1};
+}
+
+export function selectRecognition(session:AuthoringSession, previous:TextRange|null):AuthoringSession {
+  const kept = session.selected && previous ? recordRange(session, session.selected, previous) : session;
+  return {...kept, destination: 'recognition'};
 }
 
 export function beginPending(session:AuthoringSession, pending:AuthoringPending):AuthoringSession {
@@ -336,8 +344,21 @@ export function applyCatalogMutation(session:AuthoringSession|null, ticket:Catal
     return {...next, refreshRequired: true, refreshError: mutation.refresh_error, notice: {key: 'authoringCatalogRefreshFailed', args: [revision]}};
   }
   const merged = mergeView(next, mutation.view).session;
-  const selected = edit.kind === 'add' && merged.drafts.has(edit.path) ? edit.path : merged.selected;
-  return {...merged, selected, reveal: session.reveal + 1, refreshRequired: false, refreshError: null, notice: {key: 'authoringCatalogSaved', args: [revision]}};
+  const added = edit.kind === 'add' && merged.drafts.has(edit.path);
+  const selected = added ? edit.path : merged.selected;
+  return {...merged, selected, destination: added ? 'file' : merged.destination, reveal: session.reveal + 1,
+    refreshRequired: false, refreshError: null, notice: {key: 'authoringCatalogSaved', args: [revision]}};
+}
+
+// Recognition publishes declared metadata/assets through the same source revision without replacing text drafts.
+export function applyRecognitionMutation(session:AuthoringSession|null, mutation:AuthoringMutation):AuthoringSession|null {
+  if (!session || !sameAuthoringRef(session.owner, mutation.owner)) return session;
+  const next:AuthoringSession = {...session, revision: mutation.committed_revision, pending: null, error: null, conflict: false};
+  if (mutation.view === null || !sameAuthoringRef(mutation.view.owner, session.owner)) {
+    return {...next, refreshRequired: true, refreshError: mutation.refresh_error,
+      notice: {key: 'authoringCatalogRefreshFailed', args: [shortRevision(mutation.committed_revision)]}};
+  }
+  return {...mergeView(next, mutation.view).session, refreshRequired: false, refreshError: null, notice: {key: 'recognitionSaved'}};
 }
 
 export function applyRefresh(session:AuthoringSession|null, view:AuthoringView):AuthoringSession|null {

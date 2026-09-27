@@ -4,12 +4,18 @@ use super::{
 use crate::authoring::{AuthoringFile, Candidate, CatalogEdit, Edit};
 use mado_runtime_comparison::model::Fault;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+
+mod recognition;
+pub use recognition::{
+    RecognitionCopy, RecognitionFrame, RecognitionPickerGuard, RecognitionSaved, RecognitionTrial,
+    RecognitionView,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +54,7 @@ pub(super) struct Lease {
     candidate: Arc<Candidate>,
     revision: String,
     pub containment: Option<Fault>,
+    recognition: recognition::RecognitionState,
     // Duplicate changes the lease source; every previously edited source still
     // needs explicit reinspection when the session exits.
     roots: BTreeSet<PathBuf>,
@@ -56,6 +63,21 @@ pub(super) struct Lease {
 pub(super) struct StopOwner {
     owner: AuthoringRef,
     run: Option<String>,
+}
+
+impl Lease {
+    /// Settles a recognition run in the `collect` critical section that ends its ownership.
+    pub(super) fn settle_recognition(&mut self, run: &str, controller: &Arc<Value>) {
+        if self.containment.is_none() {
+            self.containment = recognition::containment(controller);
+        }
+        self.recognition.settle(&self.revision, run, controller);
+    }
+
+    /// A settled recognition cleanup failure that its command has not returned.
+    pub(super) fn unreturned_recognition_cleanup(&self) -> Option<Fault> {
+        self.recognition.unreturned_cleanup()
+    }
 }
 
 impl Workspaces {
@@ -154,6 +176,7 @@ impl Application {
             revision: candidate.revision().to_owned(),
             candidate: Arc::new(candidate),
             containment: None,
+            recognition: recognition::RecognitionState::default(),
             roots,
         });
         *lock(&self.authoring_stop) = Some(StopOwner { owner, run: None });
@@ -194,6 +217,7 @@ impl Application {
         lease.owner = next.clone();
         lease.revision = candidate.revision().to_owned();
         lease.candidate = Arc::new(candidate);
+        lease.recognition = recognition::RecognitionState::default();
         *lock(&self.authoring_stop) = Some(StopOwner {
             owner: next,
             run: None,

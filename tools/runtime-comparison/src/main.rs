@@ -10,6 +10,7 @@ fn execute() -> Result<bool, Fault> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [command] if command == "child" => runner::child(),
+        [command] if command == "recognition-child" => runner::recognition_child(),
         [command] if command == "parent-probe" => runner::parent_probe(false),
         [command] if command == "parent-stop-probe" => runner::parent_probe(true),
         [command] if command == "target-probe" => {

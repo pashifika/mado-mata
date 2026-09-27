@@ -4,7 +4,9 @@ use serde_json::Value;
 
 mod child;
 mod evidence;
+mod payload;
 mod protocol;
+mod recognition;
 mod supervision;
 
 pub use child::child;
@@ -13,6 +15,8 @@ pub use evidence::Observer;
 pub(crate) use evidence::emit_backend_initialization_started;
 pub(crate) use evidence::{emit_host_wait_entered, emit_script_log, emit_vm_hook_reached};
 pub use protocol::read_json;
+pub use recognition::recognition_child;
+pub(crate) use recognition::{run_capabilities, run_trial};
 pub(crate) use supervision::run_once_after_milestone;
 pub use supervision::{
     intentional_exit_evidence, parent_loss_evidence, parent_probe,

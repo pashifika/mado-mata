@@ -3,6 +3,7 @@ export const methods = Object.freeze({
   observe: ["Record<string, never>", "MadoObservation"],
   asset: ["{ id: string }", "{ readonly id: string; readonly bytes: number }"],
   recognize: ["MadoRecognitionRequest", "MadoRecognition | null"],
+  scan_ocr_zones: ["MadoOcrZoneScanRequest", "MadoOcrZoneScanResult"],
   query: ["MadoRecognitionRequest & { expected?: string }", "{ readonly id: string }"],
   query_wait: ["{ id: string; timeout_ms: number }", "MadoRecognition"],
   submit: ["{ observation: MadoObservation; actions: readonly MadoAction[] }", "{ readonly id: string; readonly order: number }"],
@@ -48,6 +49,31 @@ interface MadoRecognition {
   readonly id: string; readonly observation: MadoObservation;
   readonly kind: "template" | "ocr"; readonly region: MadoRegion;
   readonly score: number; readonly text?: string;
+}
+interface MadoRecognitionBasis {
+  readonly frame_width: number; readonly frame_height: number; readonly content: MadoRegion;
+}
+interface MadoNormalizedRegion {
+  readonly u0: number; readonly v0: number; readonly u1: number; readonly v1: number;
+}
+interface MadoOcrZoneScanRequest {
+  readonly observation: MadoObservation;
+  readonly basis: MadoRecognitionBasis;
+  readonly zones: ReadonlyArray<{ readonly id: string; readonly region: MadoNormalizedRegion }>;
+}
+interface MadoOcrZoneScanResult {
+  readonly kind: "ocr"; readonly observation: MadoObservation;
+  readonly text_contract: "facade-nfc-unicode-trimmed-no-additional-application-normalization";
+  readonly zones: ReadonlyArray<{
+    readonly id: string; readonly outcome: "recognized" | "no_match";
+    readonly regions: ReadonlyArray<{
+      readonly text: string; readonly confidence: number; readonly bounds: MadoRegion;
+      readonly geometry: readonly [
+        readonly [number, number], readonly [number, number],
+        readonly [number, number], readonly [number, number]
+      ];
+    }>;
+  }>;
 }
 type MadoAction =
   | { readonly kind: "key_down" | "key_up"; readonly key: string; readonly x?: never; readonly y?: never; readonly button?: never }
