@@ -314,6 +314,23 @@ fn legacy_profile(sequence: u64, name: &str) -> Profile {
     }
 }
 
+fn current_profile(sequence: u64, name: &str) -> Profile {
+    let mut profile = legacy_profile(sequence, name);
+    profile.id = format!("{sequence:019x}0");
+    profile
+}
+
+fn assert_imported(scoped: &ProfileStore, id: &str, source: &Profile) {
+    validate_id(id).unwrap();
+    let actual = scoped.read_profile(id).unwrap().0;
+    let mut expected = source.clone();
+    expected.id = id.into();
+    assert_eq!(
+        serde_json::to_value(actual).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+}
+
 fn legacy(directory: &Directory, profile: &Profile) -> Vec<u8> {
     let bytes = serde_json::to_vec_pretty(profile).unwrap();
     put(
@@ -343,12 +360,13 @@ fn explicit_legacy_import_is_exact_idempotent_and_not_shared() {
     );
     let store = directory.store();
     let imported = store.import_legacy_profiles("First", &inv).unwrap();
-    assert_eq!(imported.imported, [profile.id.clone()]);
+    let id = imported.imported[0].clone();
+    assert_ne!(id, profile.id);
     assert!(imported.fault.is_none());
-    assert_eq!(fs::read(first.profile_path(&profile.id)).unwrap(), bytes);
+    assert_imported(&first, &id, &profile);
     let retry = store.import_legacy_profiles("First", &inv).unwrap();
     assert!(retry.imported.is_empty());
-    assert_eq!(retry.unchanged, [profile.id.clone()]);
+    assert_eq!(retry.unchanged, [id.clone()]);
     assert!(retry.fault.is_none());
     assert!(
         second
@@ -367,6 +385,16 @@ fn explicit_legacy_import_is_exact_idempotent_and_not_shared() {
         .unwrap(),
         bytes
     );
+    let other = store.import_legacy_profiles("Second", &inv).unwrap();
+    assert_ne!(other.imported[0], id);
+    assert_imported(&second, &other.imported[0], &profile);
+    first.delete(&id).unwrap();
+    let restarted = directory
+        .store()
+        .import_legacy_profiles("First", &inv)
+        .unwrap();
+    assert_eq!(restarted.imported, [id.clone()]);
+    assert_imported(&first, &id, &profile);
 }
 
 #[test]
@@ -375,27 +403,29 @@ fn legacy_conflict_reports_committed_subset_and_retry_preserves_sources() {
     let scoped = directory.profiles("Owner");
     let first = legacy_profile(1, "First");
     let second = legacy_profile(2, "Second");
-    let first_bytes = legacy(&directory, &first);
     let second_bytes = legacy(&directory, &second);
-    let mut conflict = second.clone();
-    conflict.name = "Different retained value".into();
-    let conflicting_bytes = encode(&conflict, MAX_PROFILE_BYTES).unwrap();
-    put(&scoped.profile_path(&second.id), &conflicting_bytes);
     let store = directory.store();
+    let initial = store.import_legacy_profiles("Owner", &inventory()).unwrap();
+    let second_id = initial.imported[0].clone();
+    scoped
+        .rename(&inventory(), &second_id, "Different retained value")
+        .unwrap();
+    let conflicting_bytes = fs::read(scoped.profile_path(&second_id)).unwrap();
+    legacy(&directory, &first);
     let result = store.import_legacy_profiles("Owner", &inventory()).unwrap();
-    assert_eq!(result.imported, [first.id.clone()]);
+    let first_id = result.imported[0].clone();
+    assert_imported(&scoped, &first_id, &first);
     assert_eq!(result.fault.unwrap().category, "LegacyConflict");
     assert_eq!(
-        fs::read(scoped.profile_path(&first.id)).unwrap(),
-        first_bytes
-    );
-    assert_eq!(
-        fs::read(scoped.profile_path(&second.id)).unwrap(),
+        fs::read(scoped.profile_path(&second_id)).unwrap(),
         conflicting_bytes
     );
-    let retry = store.import_legacy_profiles("Owner", &inventory()).unwrap();
+    let retry = directory
+        .store()
+        .import_legacy_profiles("Owner", &inventory())
+        .unwrap();
     assert!(retry.imported.is_empty());
-    assert_eq!(retry.unchanged, [first.id.clone()]);
+    assert_eq!(retry.unchanged, [first_id]);
     assert_eq!(retry.fault.unwrap().category, "LegacyConflict");
     assert_eq!(
         fs::read(
@@ -415,7 +445,7 @@ fn interrupted_legacy_batch_resumes_after_external_source_repair() {
     let scoped = directory.profiles("Owner");
     let first = legacy_profile(1, "First");
     let second = legacy_profile(2, "Second");
-    let first_bytes = legacy(&directory, &first);
+    legacy(&directory, &first);
     let broken = directory
         .0
         .join("profiles")
@@ -423,27 +453,16 @@ fn interrupted_legacy_batch_resumes_after_external_source_repair() {
     put(&broken, b"interrupted source");
     let store = directory.store();
     let partial = store.import_legacy_profiles("Owner", &inventory()).unwrap();
-    assert_eq!(partial.imported, [first.id.clone()]);
+    let first_id = partial.imported[0].clone();
     assert_eq!(partial.fault.unwrap().category, "StorageFormat");
-    assert_eq!(
-        fs::read(scoped.profile_path(&first.id)).unwrap(),
-        first_bytes
-    );
-    assert!(!scoped.profile_path(&second.id).exists());
+    assert_imported(&scoped, &first_id, &first);
     assert_eq!(fs::read(&broken).unwrap(), b"interrupted source");
-    let second_bytes = legacy(&directory, &second);
+    legacy(&directory, &second);
     let resumed = store.import_legacy_profiles("Owner", &inventory()).unwrap();
-    assert_eq!(resumed.unchanged, [first.id.clone()]);
-    assert_eq!(resumed.imported, [second.id.clone()]);
+    assert_eq!(resumed.unchanged, [first_id.clone()]);
     assert!(resumed.fault.is_none());
-    assert_eq!(
-        fs::read(scoped.profile_path(&second.id)).unwrap(),
-        second_bytes
-    );
-    assert_eq!(
-        fs::read(scoped.profile_path(&first.id)).unwrap(),
-        first_bytes
-    );
+    assert_imported(&scoped, &resumed.imported[0], &second);
+    assert_imported(&scoped, &first_id, &first);
 }
 
 #[test]
@@ -772,7 +791,7 @@ fn recovery_preserves_record_count_directory_and_owner_byte_bounds() {
     let path = store.profile_path(&saved.id);
     let before = fs::read(&path).unwrap();
     for sequence in 1..MAX_PROFILES {
-        let retained = legacy_profile(sequence as u64, "Retained");
+        let retained = current_profile(sequence as u64, "Retained");
         put(
             &store.profile_path(&retained.id),
             &encode(&retained, MAX_PROFILE_BYTES).unwrap(),
@@ -780,7 +799,7 @@ fn recovery_preserves_record_count_directory_and_owner_byte_bounds() {
     }
     let recovered = store.replace_recovery(&inv, &expected, options()).unwrap();
     assert_eq!(recovered.id, saved.id);
-    let excess = legacy_profile(MAX_PROFILES as u64, "Excess");
+    let excess = current_profile(MAX_PROFILES as u64, "Excess");
     let excess_path = store.profile_path(&excess.id);
     put(&excess_path, &encode(&excess, MAX_PROFILE_BYTES).unwrap());
     assert_eq!(
@@ -823,7 +842,7 @@ fn recovery_preserves_record_count_directory_and_owner_byte_bounds() {
     let before = fs::read(&path).unwrap();
     let large_values = json!({"priorities":["left"],"label":"x".repeat(59 * 1024)});
     for sequence in 1..=17 {
-        let mut retained = legacy_profile(sequence, "Large");
+        let mut retained = current_profile(sequence, "Large");
         retained.values = large_values.clone();
         put(
             &large.profile_path(&retained.id),
@@ -840,7 +859,7 @@ fn recovery_preserves_record_count_directory_and_owner_byte_bounds() {
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(!path.with_extension("pending").exists());
     }
-    let mut excess = legacy_profile(18, "Excess");
+    let mut excess = current_profile(18, "Excess");
     excess.values = json!({"priorities":["left"],"label":"x".repeat(59 * 1024)});
     put(
         &large.profile_path(&excess.id),
@@ -981,8 +1000,11 @@ fn os_metadata_preserves_profile_listing_recovery_save_and_legacy_import() {
     fs::write(&sidecar, b"legacy metadata").unwrap();
     let result = store.import_legacy_profiles("Owner", &inv).unwrap();
     assert!(result.fault.is_none());
-    assert_eq!(result.imported, [imported.id.clone()]);
-    assert_eq!(fs::read(scoped.profile_path(&imported.id)).unwrap(), bytes);
+    assert_imported(&scoped, &result.imported[0], &imported);
+    assert_eq!(
+        fs::read(directory.0.join(format!("profiles/{}.json", imported.id))).unwrap(),
+        bytes
+    );
     assert_eq!(fs::read(sidecar).unwrap(), b"legacy metadata");
     for name in names {
         assert_eq!(
@@ -1054,4 +1076,41 @@ fn os_metadata_does_not_consume_managed_configuration_byte_budget() {
     let renamed = scoped.rename(&inv, &saved.id, "Renamed").unwrap();
     assert_eq!(renamed.name, "Renamed");
     assert_eq!(fs::metadata(metadata).unwrap().len(), bytes);
+}
+
+#[test]
+fn current_xid_import_retains_identity_and_compares_typed_content() {
+    let directory = Directory::new();
+    let scoped = directory.profiles("Owner");
+    let source = current_profile(42, "Current import");
+    let original = legacy(&directory, &source);
+    let result = directory
+        .store()
+        .import_legacy_profiles("Owner", &inventory())
+        .unwrap();
+    assert_eq!(result.imported, [source.id.clone()]);
+    assert!(result.fault.is_none());
+    assert_imported(&scoped, &source.id, &source);
+    assert!(
+        !directory
+            .0
+            .join(crate::identity_migrations::LEDGER)
+            .exists()
+    );
+    // Source formatting changes are not an identity or payload conflict.
+    put(
+        &directory.0.join(format!("profiles/{}.json", source.id)),
+        &serde_json::to_vec(&source).unwrap(),
+    );
+    let retry = directory
+        .store()
+        .import_legacy_profiles("Owner", &inventory())
+        .unwrap();
+    assert_eq!(retry.unchanged, [source.id.clone()]);
+    assert!(retry.fault.is_none());
+    assert_imported(&scoped, &source.id, &source);
+    assert_ne!(
+        fs::read(directory.0.join(format!("profiles/{}.json", source.id))).unwrap(),
+        original
+    );
 }

@@ -28,8 +28,8 @@ workspace IDs and revisions remain session-local. Reopening revalidates the
 selected source and retains owner-scoped source failures. Profiles belong to
 `tabs/<internal_name>/<package_id>/<profile_id>.config`, not a shared catalog.
 Historical-root import and compatible legacy-profile import require explicit
-actions and preserve source bytes. Identical imported profile bytes are
-idempotent; conflicts retain both the source and any already committed subset.
+actions and preserve source bytes. Identical normalized profile payloads are
+idempotent; conflicts retain the source and any already committed subset.
 
 Inspect changes only the owning `tab.config` among managed configuration files,
 before publishing the in-memory selection. It never writes the App
@@ -57,6 +57,63 @@ draft are independent. [`bootstrap.ts`](../../apps/desktop/src/bootstrap.ts)
 keeps them separate; [`App.tsx`](../../apps/desktop/src/App.tsx) gives loaded saved
 settings precedence. Changing temporary presentation does not save preferences.
 
+## Persisted identity transition
+
+Use the public `pashifika/xid-rs` Fork at the immutable revision recorded in Cargo
+and its lockfile. The shared boundary returns allocation errors and accepts only
+canonical 20-character XIDs, including canonical trailing bits. Ordinary writers
+never generate the former 60-character `p-` format. No sibling checkout, local
+replacement generator, or floating dependency is a public build prerequisite.
+
+Before Application construction, convert eligible typed profile/target identities
+and profile filenames without changing values, schema identities, ownership, or
+target revisions. A rejected schema stays rejected. Ordinary reads remain
+non-mutating. Explicit historical-root/profile Import and Restore normalize only
+their installed copy; unassigned profiles and original archives remain unchanged.
+Package content, local Region IDs, and existing assets are outside this transition.
+
+One versioned `identity-migrations.config` maps `(kind, Tab, package, legacy ID)`
+to its XID. Bound it to 4,096 entries and 4 MiB inside the managed-set budgets.
+Reject duplicate/conflicting mappings, unknown metadata, and overflow rather than
+evict history. Retain reservations for deleted entities and retired owners without
+reactivating them. Repeat Import compares normalized content and refuses edits;
+Restore combines compatible archive/live reservations and preserves live entries
+even when the archive has no ledger. Conflicting lineages refuse before mutation.
+
+Reuse only the narrow recoverable publisher, not manual Restore admission.
+Automatic conversion has a typed plan bound to the captured generation; Restore
+still requires the clicked current receipt and explicit disposal/replacement
+consent. Version-2 journals tag Restore, automatic migration and owner-bound profile
+Import separately; version-1 Restore journals remain recoverable. Journal the
+assignments and complete preimages before replacing identities. Rollback restores
+user content while retaining exact staged ledger bytes before cleanup; its
+reservation-bearing generation must fit the managed budget before publication.
+Pending evidence blocks ordinary admission and uses explicit validated recovery;
+a completion marker fixes the permitted direction. Reconstruction retires old
+runtime expectations rather than translating stale commands. Admission reads the
+immutable root without taking the preparation worker's Store lock, preserving
+polling and Stop independence.
+
+Snapshots preserve present ledger bytes even when malformed. Ledger-bearing
+archives use version 2; supported version-1 archives remain readable. Preservation
+does not establish restore eligibility. Never down-convert storage for an older
+binary or rewrite old backups.
+
+XID components are observable, not cryptographic secrets or authority. A converted
+ID records migration-time allocation, not historical creation time. Conversion
+has no date expiry or timer-driven ledger cleanup. Removing legacy input requires
+a separate approved release decision naming the first rejecting version, an
+available converter-release path for old roots/backups, and ledger retirement.
+Capture/asset migration, Windows durability, native qualification, and R6 remain
+independent gates.
+
+The release-boundary plan originally assumed published product releases.
+GitHub's release list and remote tags were empty at implementation; both desktop
+manifests still identify development version `0.1.0`. Record the exact
+pre-converter checkout baseline in the [transition notes](../desktop.md#development-transition-notes)
+instead of inventing a release. The first actual converter release must record
+the published boundary; this does not authorize release packaging or a cutoff.
+
 ## Snapshot and restore boundary
 
 Use standard stored ZIP, not CustomZip or a new package container. CustomZip's
@@ -72,8 +129,9 @@ The archive is not encrypted; hashes establish byte consistency, not author
 trust or execution authority.
 
 [`configuration::capture`](../../apps/desktop/src-tauri/src/configuration.rs)
-collects at most 4,096 managed files and 16 MiB of raw bytes, including safe
-malformed or orphaned configuration. Two observations detect source changes;
+collects at most 4,096 managed files and 16 MiB of raw bytes, including the
+migration ledger and safe malformed or orphaned configuration. Two observations
+detect source changes;
 the Application store lock serializes in-process writers, not external ones.
 [`backup`](../../apps/desktop/src-tauri/src/backup.rs) limits the manifest to
 4 MiB and the archive to 32 MiB. It excludes package payloads, logs, temporary
@@ -94,7 +152,11 @@ fails rather than falling back to an overwriting operation.
 Before replacing nonempty configuration, require a separately requested snapshot
 receipt from this session, its still-readable matching archive, and a generation
 matching the current managed bytes. Restore requires explicit replacement
-confirmation. Retry, Restore, and interrupted-restore recovery require explicit
+confirmation. Prepare one normalized Restore generation and validate its identity
+transition, rollback budget, and aliases before session retirement. Deterministic
+refusals preserve the Ready Application and its drafts; installation consumes that
+checked plan and rechecks pending recovery and the live generation before writing.
+Retry, Restore, and interrupted-restore recovery require explicit
 session disposal whenever an Application exists, even with clean profile drafts.
 Reconstruction admits only settled commands and an idle controller, closes future
 admission, and retires owned resources before replacement. An incomplete logger
@@ -104,6 +166,9 @@ or recovery consumes it. Window close and native Quit contain a published
 Application before waiting for an in-flight snapshot or recovery action, and
 retire an Application published by a load that raced ahead of closing once that
 action settles; the wait does not make a hung filesystem call interruptible.
+Close admission retains command serialization and editor guards but does not use
+the ordinary-command pending-transaction gate. Exit preserves journal and
+completion evidence rather than resolving it implicitly.
 
 [`restore`](../../apps/desktop/src-tauri/src/restore.rs) stages and syncs the
 journal and preimages before the first managed replacement. It verifies the

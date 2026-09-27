@@ -99,7 +99,14 @@ fn bounded_manifest_entries<'de, D: serde::Deserializer<'de>>(
 impl Manifest {
     pub(crate) fn new(capture: &Capture) -> Self {
         Self {
-            version: 1,
+            version: if capture
+                .files
+                .contains_key(crate::identity_migrations::LEDGER)
+            {
+                2
+            } else {
+                1
+            },
             root_present: capture.root_present,
             settings_present: capture.settings_present,
             generation: capture.generation.clone(),
@@ -117,7 +124,7 @@ impl Manifest {
     }
 
     pub(crate) fn check(&self) -> Result<(), Fault> {
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
             || self.files.len() > MAX_FILES
             || (!self.root_present && !self.files.is_empty())
         {
@@ -130,6 +137,7 @@ impl Manifest {
         let mut total = 0usize;
         for entry in &self.files {
             if path_kind(&entry.path)? != entry.kind
+                || (self.version == 1 && entry.kind == Kind::IdentityMigrations)
                 || entry.length > entry.kind.maximum()
                 || !names.insert(entry.path.as_str())
                 || !is_digest(&entry.sha256)
@@ -427,7 +435,7 @@ fn read_entry(
     Ok(bytes)
 }
 
-/// Supported v1 is deliberately narrow: no ZIP64, descriptors, extra fields,
+/// Supported containers are deliberately narrow: no ZIP64, descriptors, extra fields,
 /// comments, encryption, compression, directory/link entries, prefixes or gaps.
 /// ZIP remains responsible for CRC and entry reads; this checks bounded framing
 /// and rejects duplicates before ZipArchive's name-index can collapse them.
@@ -570,6 +578,10 @@ mod tests {
         let destination = Root::new();
         root.put("settings.json", b"malformed\0raw");
         root.put("tabs/Closed/tab.config", br#"{"open":false}"#);
+        root.put(
+            crate::identity_migrations::LEDGER,
+            b"malformed mapping bytes preserved",
+        );
         let original = capture(&root.0).unwrap();
         let receipt = write_at(&root.0, original.clone(), Some(&destination.0), 42).unwrap();
         assert_eq!(
@@ -707,7 +719,7 @@ mod tests {
         )
         .unwrap();
         let mut manifest = Manifest::new(&capture);
-        manifest.version = 2;
+        manifest.version = 3;
         let manifest = encode(&manifest, MAX_MANIFEST).unwrap();
         assert!(
             read_container(&archive(&[(MANIFEST, &manifest), ("settings.json", b"{}")])).is_err()

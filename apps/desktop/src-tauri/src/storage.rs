@@ -23,8 +23,6 @@ use mado_runtime_comparison::model::Fault;
 use serde_json::json;
 use std::fs as std_fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 mod fixtures;
@@ -43,7 +41,6 @@ const MAX_NAME_BYTES: usize = 128;
 pub(crate) const MAX_PATH_BYTES: usize = 4096;
 const MAX_VALUE_NODES: usize = 8192;
 const MAX_VALUE_DEPTH: usize = 32;
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A package owner, not a global catalog. Callers serialize it with the Store mutex.
 pub struct ProfileStore {
@@ -205,6 +202,14 @@ impl Budget<'_> {
                 "settings.json" | "settings.pending" => {
                     self.account(&name, &key, &metadata, MAX_SETTINGS_BYTES);
                 }
+                "identity-migrations.config" | "identity-migrations.pending" => {
+                    self.account(
+                        &name,
+                        &key,
+                        &metadata,
+                        crate::identity_migrations::MAX_LEDGER_BYTES,
+                    );
+                }
                 "profiles" => {
                     if self.container(&name, &metadata)? {
                         for (_, child, metadata) in self.entries(&path, &name)? {
@@ -329,30 +334,16 @@ fn measure_fault(mut fault: Fault, relative: &str) -> Fault {
     fault
 }
 
-fn new_id() -> Result<String, Fault> {
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| Fault::new("Storage", "system clock precedes the profile ID epoch"))?;
-    Ok(format!(
-        "p-{:032x}-{:08x}-{:016x}",
-        time.as_nanos(),
-        std::process::id(),
-        NEXT_ID.fetch_add(1, Ordering::Relaxed)
-    ))
+pub(crate) fn new_id() -> Result<String, Fault> {
+    xid::try_new()
+        .map(|id| id.to_string())
+        .map_err(|error| Fault::new("IdentityGeneration", error.to_string()))
 }
 
 pub(crate) fn validate_id(id: &str) -> Result<(), Fault> {
-    if id.len() != 60
-        || !id.starts_with("p-")
-        || id.as_bytes()[34] != b'-'
-        || id.as_bytes()[43] != b'-'
-        || !id.as_bytes()[2..].iter().enumerate().all(|(index, byte)| {
-            matches!(index, 32 | 41) || byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)
-        })
-    {
-        return Err(Fault::new("ProfileIdentity", "invalid profile ID"));
-    }
-    Ok(())
+    id.parse::<xid::Id>()
+        .map(|_| ())
+        .map_err(|_| Fault::new("ProfileIdentity", "invalid canonical XID"))
 }
 
 #[cfg(test)]

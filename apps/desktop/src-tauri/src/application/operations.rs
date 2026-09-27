@@ -141,7 +141,7 @@ impl Application {
 
     pub fn prepare_reconstruction(&self) -> Result<(), Fault> {
         {
-            let (_command, mut state) = self.command_state().map_err(|error| {
+            let (_command, mut state) = self.reconstruction_state().map_err(|error| {
                 if self.closing.load(Ordering::Acquire) {
                     retired_fault(error)
                 } else {

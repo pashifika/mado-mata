@@ -4,7 +4,7 @@
     "retrying": "起動を再試行中",
     "importingRoot": "旧ルートを取り込み中",
     "restoring": "スナップショットを復元中",
-    "recovering": "中断した復元を処理中",
+    "recovering": "中断した設定操作を処理中",
     "refreshingStatus": "起動状態を更新中",
     "creatingWorkspace": "ワークスペースを作成中",
     "reopeningWorkspace": "ワークスペースを再度開いています",

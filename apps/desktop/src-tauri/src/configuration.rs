@@ -88,6 +88,7 @@ pub(crate) enum Kind {
     Tab,
     Package,
     LegacyProfile,
+    IdentityMigrations,
 }
 
 impl Kind {
@@ -96,6 +97,7 @@ impl Kind {
             Self::Settings => MAX_SETTINGS_BYTES,
             Self::Tab => MAX_TAB_BYTES,
             Self::Package | Self::LegacyProfile => MAX_PROFILE_BYTES,
+            Self::IdentityMigrations => crate::identity_migrations::MAX_LEDGER_BYTES,
         }
     }
 }
@@ -145,11 +147,12 @@ pub(crate) fn safe_component(value: &str) -> bool {
 
 pub(crate) fn path_kind(path: &str) -> Result<Kind, Fault> {
     if path.len() > 1024 || !path.split('/').all(safe_component) {
-        return Err(fault("unsafe configuration path"));
+        return Err(fault("unsafe configuration path").with_context(json!({"path": path})));
     }
     let parts: Vec<_> = path.split('/').collect();
     match parts.as_slice() {
         ["settings.json"] => Ok(Kind::Settings),
+        ["identity-migrations.config"] => Ok(Kind::IdentityMigrations),
         ["profiles", file] if file.ends_with(".json") => Ok(Kind::LegacyProfile),
         ["tabs", _, "tab.config"] => Ok(Kind::Tab),
         ["tabs", _, package, file]
@@ -157,7 +160,8 @@ pub(crate) fn path_kind(path: &str) -> Result<Kind, Fault> {
         {
             Ok(Kind::Package)
         }
-        _ => Err(fault("path is outside the managed configuration set")),
+        _ => Err(fault("path is outside the managed configuration set")
+            .with_context(json!({"path": path}))),
     }
 }
 
@@ -178,7 +182,8 @@ pub(crate) fn check_aliases(
             .get(&key)
             .is_some_and(|previous| previous != &prefix)
         {
-            return Err(fault("configuration contains filesystem aliases"));
+            return Err(fault("configuration contains filesystem aliases")
+                .with_context(json!({"path": path, "alias": aliases[&key]})));
         }
         aliases.insert(key, prefix.clone());
     }
@@ -207,36 +212,56 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
     if !exists(root)? {
         return Capture::from_files(BTreeMap::new(), false);
     }
-    check_directory(root)?;
+    check_directory(root).map_err(|error| at_path(error, root, root))?;
     let mut files = BTreeMap::new();
     let mut remaining = MAX_BYTES;
     let mut enumerated = 0;
-    for entry in entries(root, &mut enumerated)? {
+    for entry in entries(root, &mut enumerated).map_err(|error| at_path(error, root, root))? {
         if let Some(name) = entry.file_name().to_str() {
             let key = filesystem_key(name);
-            if key == "settings.pending" {
+            if matches!(
+                key.as_str(),
+                "settings.pending" | "identity-migrations.pending"
+            ) {
                 return Err(fault(
-                    "an unresolved App settings write must be preserved or repaired first",
-                ));
+                    "an unresolved configuration write must be preserved or repaired first",
+                )
+                .with_context(json!({"path": name})));
             }
-            if matches!(key.as_str(), "settings.json" | "profiles" | "tabs") && name != key {
-                return Err(fault("managed root entry has an alias spelling"));
+            if matches!(
+                key.as_str(),
+                "settings.json" | "profiles" | "tabs" | "identity-migrations.config"
+            ) && name != key
+            {
+                return Err(fault("managed root entry has an alias spelling")
+                    .with_context(json!({"path": name})));
             }
         }
     }
     if exists(&root.join("settings.json"))? {
         add_file(root, "settings.json", &mut files, &mut remaining)?;
     }
+    if exists(&root.join("identity-migrations.config"))? {
+        add_file(
+            root,
+            "identity-migrations.config",
+            &mut files,
+            &mut remaining,
+        )?;
+    }
     let legacy = root.join("profiles");
     if exists(&legacy)? {
-        for entry in entries(&legacy, &mut enumerated)? {
+        for entry in
+            entries(&legacy, &mut enumerated).map_err(|error| at_path(error, root, &legacy))?
+        {
             let name = entry.file_name();
             let name = name
                 .to_str()
                 .ok_or_else(|| fault("non-UTF-8 legacy configuration entry"))?;
-            refuse_pending(&entry, name)?;
+            refuse_pending(root, &entry, name)?;
             if filesystem_key(name).ends_with(".json") && !name.ends_with(".json") {
-                return Err(fault("legacy configuration has an alias extension"));
+                return Err(fault("legacy configuration has an alias extension")
+                    .with_context(json!({"path": format!("profiles/{name}")})));
             }
             if name.ends_with(".json") {
                 add_file(
@@ -250,7 +275,7 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
     }
     let tabs = root.join("tabs");
     if exists(&tabs)? {
-        for tab in entries(&tabs, &mut enumerated)? {
+        for tab in entries(&tabs, &mut enumerated).map_err(|error| at_path(error, root, &tabs))? {
             let name = tab.file_name();
             let name = name
                 .to_str()
@@ -263,7 +288,9 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
             if !safe_component(name) {
                 return Err(fault("unsafe Tab container name"));
             }
-            for entry in entries(&tab.path(), &mut enumerated)? {
+            for entry in entries(&tab.path(), &mut enumerated)
+                .map_err(|error| at_path(error, root, &tab.path()))?
+            {
                 let child = entry.file_name();
                 let child = child
                     .to_str()
@@ -271,10 +298,12 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
                 if filesystem_key(child) == "tab.pending" {
                     return Err(fault(
                         "an unresolved Tab write must be preserved or repaired first",
-                    ));
+                    )
+                    .with_context(json!({"path": format!("tabs/{name}/{child}")})));
                 }
                 if filesystem_key(child) == "tab.config" && child != "tab.config" {
-                    return Err(fault("Tab document has an alias spelling"));
+                    return Err(fault("Tab document has an alias spelling")
+                        .with_context(json!({"path": format!("tabs/{name}/{child}")})));
                 }
                 if child == "tab.config" {
                     add_file(
@@ -292,16 +321,21 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
                     if !safe_component(child) {
                         return Err(fault("unsafe package container name"));
                     }
-                    for file in entries(&entry.path(), &mut enumerated)? {
+                    for file in entries(&entry.path(), &mut enumerated)
+                        .map_err(|error| at_path(error, root, &entry.path()))?
+                    {
                         let filename = file.file_name();
                         let filename = filename
                             .to_str()
                             .ok_or_else(|| fault("non-UTF-8 package configuration entry"))?;
-                        refuse_pending(&file, filename)?;
+                        refuse_pending(root, &file, filename)?;
                         if filesystem_key(filename).ends_with(".config")
                             && !filename.ends_with(".config")
                         {
-                            return Err(fault("package configuration has an alias extension"));
+                            return Err(fault("package configuration has an alias extension")
+                                .with_context(
+                                    json!({"path": format!("tabs/{name}/{child}/{filename}")}),
+                                ));
                         }
                         if filename.ends_with(".config") {
                             add_file(
@@ -319,15 +353,17 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
     Capture::from_files(files, true)
 }
 
-fn refuse_pending(entry: &fs::DirEntry, name: &str) -> Result<(), Fault> {
+fn refuse_pending(root: &Path, entry: &fs::DirEntry, name: &str) -> Result<(), Fault> {
     if filesystem_key(name).ends_with(".pending")
         && !entry
             .file_type()
             .map_err(|e| io_fault("inspect pending configuration", e))?
             .is_dir()
     {
-        return Err(fault(
-            "an unresolved configuration write must be preserved or repaired first",
+        return Err(at_path(
+            fault("an unresolved configuration write must be preserved or repaired first"),
+            root,
+            &entry.path(),
         ));
     }
     Ok(())
@@ -363,9 +399,9 @@ fn add_file(
     }
     let maximum = path_kind(relative)?.maximum().min(*remaining);
     let path = root.join(relative);
-    let before = checked_file(&path, maximum)?;
-    let bytes = read_bytes(&path, maximum)?;
-    let after = checked_file(&path, maximum)?;
+    let before = checked_file(&path, maximum).map_err(|error| at_path(error, root, &path))?;
+    let bytes = read_bytes(&path, maximum).map_err(|error| at_path(error, root, &path))?;
+    let after = checked_file(&path, maximum).map_err(|error| at_path(error, root, &path))?;
     if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
         return Err(fault("configuration changed while being read"));
     }
@@ -380,6 +416,17 @@ fn add_file(
     *remaining -= bytes.len();
     files.insert(relative.to_owned(), bytes);
     Ok(())
+}
+
+fn at_path(mut error: Fault, root: &Path, path: &Path) -> Fault {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let attributed = if relative.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        relative
+    };
+    error.context["path"] = json!(attributed.to_string_lossy());
+    error
 }
 
 /// Atomic no-replace publication for both files and directories. An unsupported

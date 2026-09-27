@@ -794,7 +794,7 @@ export default function App() {
           const catalog = await readProfiles(ref);
           return {catalog, update: item => ({...item, legacyImport: result,
             notice: {key: result.fault ? 'profilesImportPartial' : 'profilesImported', args: [result.imported.length, result.unchanged.length]}})};
-        });
+        }).then(() => bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false));
       },
       reinspect: () => inspectFor(workspace),
       recovery: recoveryHandlers(workspace),

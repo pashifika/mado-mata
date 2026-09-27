@@ -4,7 +4,7 @@
     "retrying": "Retrying bootstrap",
     "importingRoot": "Importing historical root",
     "restoring": "Restoring snapshot",
-    "recovering": "Resolving interrupted restore",
+    "recovering": "Resolving interrupted configuration operation",
     "refreshingStatus": "Refreshing bootstrap status",
     "creatingWorkspace": "Creating workspace",
     "reopeningWorkspace": "Reopening workspace",

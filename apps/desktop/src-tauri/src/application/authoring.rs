@@ -502,7 +502,7 @@ impl Application {
                 return Ok(());
             }
         }
-        let (_command, state) = match self.command_state() {
+        let (_command, state) = match self.reconstruction_state() {
             Ok(state) => state,
             Err(fault) if fault.category == "Closing" => return Ok(()),
             Err(fault) => return Err(fault),

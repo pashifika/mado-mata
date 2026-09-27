@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 impl Application {
     pub fn import_legacy_profiles(&self, workspace: &WorkspaceRef) -> Result<LegacyImport, Fault> {
         let result = (|| {
-            let (_command, state) = self.command_state()?;
+            let (_command, mut state) = self.command_state()?;
+            self.collect(&mut state);
+            state.idle()?;
             let selected = state.resolve(workspace)?.clone();
             drop(state);
             lock(&self.store).import_legacy_profiles(&selected.internal_name, &selected.inventory)
