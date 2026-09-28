@@ -30,19 +30,18 @@ pub struct CacheWrite {
 }
 
 impl CaptureCache {
-    /// The shell supplies its platform-resolved application cache root, never an IPC path.
-    pub fn new(app_cache_root: PathBuf) -> Result<Self, Fault> {
-        if !app_cache_root.is_absolute()
-            || app_cache_root
-                .components()
-                .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    /// Derives private originals from the selected configuration root, never an IPC path.
+    pub fn new(config_root: &Path) -> Result<Self, Fault> {
+        let root = std::path::absolute(config_root)
+            .map_err(|error| io_fault("resolve configuration root", error))?;
+        if root
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
         {
-            return Err(refused(
-                "application cache root is not absolute and normalized",
-            ));
+            return Err(refused("configuration root is not normalized"));
         }
         Ok(Self {
-            folder: app_cache_root.join("captures"),
+            folder: root.join("caches"),
         })
     }
 

@@ -1,28 +1,19 @@
 use super::{Backend, background};
 use mado_mata_desktop::application::{AuthoringRef, RecognitionView};
-use mado_mata_desktop::capture_cache::{CacheInfo, CaptureCache};
+use mado_mata_desktop::capture_cache::CacheInfo;
 use mado_runtime_comparison::model::Fault;
 use std::path::Path;
-use tauri::Manager;
 
-pub fn cache(app: &tauri::AppHandle) -> Result<CaptureCache, Fault> {
-    let root = app
-        .path()
-        .app_cache_dir()
-        .map_err(|_| Fault::new("CaptureCache", "application cache directory is unavailable"))?;
-    CaptureCache::new(root)
+#[tauri::command]
+pub async fn capture_cache_info(state: tauri::State<'_, Backend>) -> Result<CacheInfo, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || Ok(application.capture_cache()?.info())).await
 }
 
 #[tauri::command]
-pub async fn capture_cache_info(app: tauri::AppHandle) -> Result<CacheInfo, Fault> {
-    let cache = cache(&app)?;
-    background(move || Ok(cache.info())).await
-}
-
-#[tauri::command]
-pub async fn capture_cache_open(app: tauri::AppHandle) -> Result<(), Fault> {
-    let cache = cache(&app)?;
-    background(move || open_folder(&cache.folder_for_open()?)).await
+pub async fn capture_cache_open(state: tauri::State<'_, Backend>) -> Result<(), Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || open_folder(&application.capture_cache()?.folder_for_open()?)).await
 }
 
 #[tauri::command]
@@ -31,12 +22,11 @@ pub async fn recognition_load_cached(
     revision: String,
     capture_id: String,
     document_revision: u64,
-    app: tauri::AppHandle,
     state: tauri::State<'_, Backend>,
 ) -> Result<RecognitionView, Fault> {
     let application = state.bootstrap.application()?;
-    let cache = cache(&app)?;
     background(move || {
+        let cache = application.capture_cache()?;
         application.recognition_load_cached(
             &owner,
             &revision,

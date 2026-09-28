@@ -311,6 +311,10 @@ impl Application {
         Self::with_observation_slot(root, controlled, engine, Arc::default())
     }
 
+    pub fn capture_cache(&self) -> Result<crate::capture_cache::CaptureCache, Fault> {
+        crate::capture_cache::CaptureCache::new(&self.root)
+    }
+
     pub(crate) fn with_observation_slot(
         root: PathBuf,
         controlled: PathBuf,

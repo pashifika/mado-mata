@@ -61,11 +61,23 @@ rebase/confirmation. Saved crops change only on explicit Save. Publication uses
 the existing recoverable transaction, not a second persistence framework.
 
 Original PNG caching is persisted and OFF by default in App settings, alongside
-size/path/folder management. Only accepted images enter the platform application
-cache; refresh replaces only its capture's original. Cache failure does not erase
+size/path/folder management. Accepted images use the selected configuration
+root's `caches/` directory: `~/.config/mado-mata/caches` by default, or
+`PATH/caches` with `--data-dir PATH`. Every cache operation shares that root;
+the former platform cache is neither a fallback nor automatically migrated.
+Refresh replaces only its capture's original. Cache failure does not erase
 an accepted frame. Explicit reload restores historical pixels with fresh runtime
-revisions, never native authority. Image bytes/native identities remain excluded
-from packages, profiles, backups and routine logs; the preference may be backed up.
+revisions, never native authority. Configuration snapshots use their existing
+managed-file whitelist, excluding cache bytes despite the shared parent root.
+Image bytes/native identities remain excluded from packages, profiles, backups
+and routine logs; the preference may be backed up.
+
+Preview feedback must not change the image viewport or its Fit scale. A fixed
+status rail holds progress; help and bounded scrollable errors/warnings overlay
+the image. Toolbar rows depend on window width, not capture/error state. This
+replaces in-flow feedback, which resized the image at capture start and finish.
+There is no outer feedback frame. Individual error, warning and help messages use
+red, amber and blue borders, respectively.
 
 ## Boundaries and evidence
 

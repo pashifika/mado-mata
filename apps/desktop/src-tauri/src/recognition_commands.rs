@@ -66,7 +66,6 @@ pub async fn native_capture(
     new_capture: bool,
     crop_ids: Vec<String>,
     crop_sources: std::collections::BTreeMap<String, String>,
-    app: tauri::AppHandle,
     state: tauri::State<'_, Backend>,
 ) -> Result<mado_mata_desktop::application::NativeCaptureResult, Fault> {
     let application = state.bootstrap.application()?;
@@ -76,7 +75,7 @@ pub async fn native_capture(
         let cache = application
             .settings()?
             .capture_cache_enabled
-            .then(|| crate::cache_commands::cache(&app));
+            .then(|| application.capture_cache());
         application.native_capture(
             &owner,
             &revision,

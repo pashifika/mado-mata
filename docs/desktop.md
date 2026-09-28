@@ -120,8 +120,9 @@ apps/desktop/src-tauri/target/debug/mado-mata-desktop --data-dir "$HOME/.config/
 ```
 
 `--data-dir PATH` selects the configuration root explicitly and skips historical-root
-discovery. It also supplies the default editable collection at `PATH/sources`; it
-does not select a runner, compiler, package to inspect, or input route. Keep the
+discovery. It supplies the default editable collection at `PATH/sources` and
+the private image cache at `PATH/caches`; it does not select a runner, compiler,
+package to inspect, or input route. Keep the
 root outside an existing package source and public tracked files. Reuse it for
 restart checks; choose another private root to isolate work without deleting data.
 An absent root is not created merely by launching the application.
@@ -368,8 +369,13 @@ launcher to bypass them.
 The fused capture control sits directly left of **Done**. Its left SVG target
 icon selects a window; after selection it becomes the stacked-frame **New capture**
 icon. The main segment shows **Start capture** for a saved locator, **Capture**
-when ready, and **Stop** during native work. There is no separate capture panel;
-only active progress and failures appear below the toolbar.
+when ready, and **Stop** during native work. There is no separate capture panel.
+Progress uses the fixed-height bottom status bar. **Help** opens the interaction
+guide; help and scrollable errors/warnings overlay the image without resizing its
+viewport or changing Fit scale. Help closes with its button or Escape. Toolbar
+rows change only with window width, not operation state.
+Feedback has no enclosing panel: individual red error, amber warning and blue
+help borders distinguish message types.
 The native-failure notice has a top-right close button. Dismissal hides that
 notice through ordinary updates without changing native refusal or cleanup state;
 a later failure can appear again.
@@ -447,8 +453,11 @@ PNGs are bounded to 32 MiB. Native accounted image storage is limited to
 payload limits, not total RSS or opaque GPU/driver allocation guarantees.
 
 **Cache new native captures on this machine** in **App settings** is persisted
-and OFF by default. When enabled, accepted originals are written under the
-platform application cache: `captures/<package_id>/<capture_id>.png`.
+and OFF by default. Accepted originals are written to
+`~/.config/mado-mata/caches/<package_id>/<capture_id>.png` when enabled.
+An explicit `--data-dir PATH` uses `PATH/caches/` for writes, reloads, size
+measurement and folder opening. The former platform application cache is no
+longer used; existing files there are not automatically moved or deleted.
 Refreshing replaces only that capture's cached original, never saved package crops.
 Cache failure is reported separately and does not discard a usable accepted
 frame. **Load cached original** is explicit, retains the capture ID, and creates
@@ -461,7 +470,8 @@ as a successful total. **Open folder** uses Finder/Explorer and reports launch
 failure. Unsafe links/reparse paths are refused. There is no polling, quota,
 eviction, cleanup daemon, custom location or cache database. The preference may
 participate in configuration backup; original images and cache paths stay outside
-packages, profiles, configuration backups and routine logs.
+packages, profiles, configuration backup payloads and routine logs, even though
+the `caches/` directory is inside the selected configuration root.
 
 ## Author saved-image Recognition
 

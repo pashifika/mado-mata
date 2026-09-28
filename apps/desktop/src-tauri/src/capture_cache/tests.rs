@@ -11,7 +11,7 @@ impl Directory {
         Self(root)
     }
     fn cache(&self) -> CaptureCache {
-        CaptureCache::new(self.0.clone()).unwrap()
+        CaptureCache::new(&self.0).unwrap()
     }
 }
 impl Drop for Directory {
@@ -22,6 +22,127 @@ impl Drop for Directory {
 fn png(value: u8) -> images::EncodedImage {
     let image = DecodedImage::from_rgba(2, 2, vec![value; 16]).unwrap();
     images::encode_crop(&image, [0, 0, 2, 2]).unwrap()
+}
+
+#[test]
+fn selected_configuration_roots_isolate_the_same_capture_key() {
+    let first = Directory::new();
+    let second = Directory::new();
+    let first_cache = first.cache();
+    let second_cache = second.cache();
+    let id = crate::storage::new_id().unwrap();
+    let original = png(17);
+    assert!(
+        first_cache
+            .persist("package", &id, original.as_bytes())
+            .cached
+    );
+    let first_path = first.0.join("caches/package").join(format!("{id}.png"));
+    let second_path = second.0.join("caches/package").join(format!("{id}.png"));
+    assert_eq!(first_cache.image_path("package", &id).unwrap(), first_path);
+    assert_eq!(
+        second_cache.image_path("package", &id).unwrap(),
+        second_path
+    );
+    assert_eq!(fs::read(&first_path).unwrap(), original.as_bytes());
+    assert_eq!(
+        fs::read(&second_path).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+    assert_eq!(second_cache.info().bytes, Some(0));
+    assert!(!second.0.exists());
+
+    let replacement = png(42);
+    assert!(
+        second_cache
+            .persist("package", &id, replacement.as_bytes())
+            .cached
+    );
+    assert_eq!(fs::read(&first_path).unwrap(), original.as_bytes());
+    assert_eq!(fs::read(&second_path).unwrap(), replacement.as_bytes());
+    assert_eq!(
+        first_cache.folder_for_open().unwrap(),
+        first.0.join("caches")
+    );
+    assert_eq!(
+        second_cache.folder_for_open().unwrap(),
+        second.0.join("caches")
+    );
+    assert_eq!(
+        first_cache.info().bytes,
+        Some(original.as_bytes().len() as u64)
+    );
+    assert_eq!(
+        second_cache.info().bytes,
+        Some(replacement.as_bytes().len() as u64)
+    );
+}
+
+#[test]
+fn relative_configuration_root_is_resolved_without_creating_cache_on_measurement() {
+    let relative = PathBuf::from(".").join(format!(
+        "mado-capture-cache-{}",
+        crate::storage::new_id().unwrap()
+    ));
+    let directory = Directory(std::path::absolute(&relative).unwrap());
+    let cache = CaptureCache::new(&relative).unwrap();
+    assert_eq!(cache.info().bytes, Some(0));
+    assert!(!directory.0.exists());
+    let id = crate::storage::new_id().unwrap();
+    let original = png(17);
+    assert!(cache.persist("package", &id, original.as_bytes()).cached);
+    let path = directory.0.join("caches/package").join(format!("{id}.png"));
+    assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+    assert_eq!(cache.image_path("package", &id).unwrap(), path);
+    assert_eq!(cache.folder_for_open().unwrap(), directory.0.join("caches"));
+}
+
+#[test]
+fn cache_pngs_and_pending_writes_do_not_enter_or_change_configuration_snapshots() {
+    let directory = Directory::new();
+    ensure_directories(&directory.0.join("tabs/Closed/package")).unwrap();
+    let files = std::collections::BTreeMap::from([
+        ("settings.json".to_owned(), b"preserved settings".to_vec()),
+        (
+            "tabs/Closed/tab.config".to_owned(),
+            br#"{"open":false}"#.to_vec(),
+        ),
+        (
+            "tabs/Closed/package/profile.config".to_owned(),
+            b"preserved profile".to_vec(),
+        ),
+    ]);
+    for (path, bytes) in &files {
+        crate::configuration::write_private(&directory.0.join(path), bytes).unwrap();
+    }
+    let before = crate::configuration::capture(&directory.0).unwrap();
+    assert_eq!(before.files, files);
+    let cache = directory.cache();
+    let id = crate::storage::new_id().unwrap();
+    let original = png(17);
+    assert!(cache.persist("package", &id, original.as_bytes()).cached);
+    let path = cache.image_path("package", &id).unwrap();
+    let pending = path.with_extension("pending");
+    fs::write(&pending, b"unresolved cache write").unwrap();
+    let captured = crate::configuration::capture(&directory.0).unwrap();
+    assert_eq!(captured, before);
+    let receipt = crate::backup::write(&directory.0, captured, None).unwrap();
+    assert_eq!(
+        crate::backup::read(Path::new(&receipt.path)).unwrap(),
+        before
+    );
+    assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+    assert_eq!(fs::read(&pending).unwrap(), b"unresolved cache write");
+    fs::remove_file(pending).unwrap();
+    let replacement = png(42);
+    assert!(cache.persist("package", &id, replacement.as_bytes()).cached);
+    assert_eq!(crate::configuration::capture(&directory.0).unwrap(), before);
+    assert_eq!(fs::read(&path).unwrap(), replacement.as_bytes());
+    fs::remove_file(path).unwrap();
+    assert_eq!(crate::configuration::capture(&directory.0).unwrap(), before);
+    for (path, bytes) in files {
+        assert_eq!(fs::read(directory.0.join(path)).unwrap(), bytes);
+    }
 }
 
 #[test]
