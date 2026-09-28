@@ -5,6 +5,8 @@ use mado_mata_desktop::application::{
 };
 use mado_runtime_comparison::model::Fault;
 use std::sync::{Arc, atomic::Ordering};
+#[cfg(windows)]
+use tauri::Manager;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -19,6 +21,11 @@ pub async fn native_pick_window(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, Backend>,
 ) -> Result<Option<NativeSelectionView>, Fault> {
+    // Main relays Preview actions; Win32 overlays must belong to Preview, not Main.
+    #[cfg(windows)]
+    let window = window
+        .get_webview_window(super::recognition_commands::PREVIEW_WINDOW)
+        .ok_or_else(|| unavailable("Open Preview before visual selection"))?;
     let application = state.bootstrap.application()?;
     let worker = application.clone();
     let expected_owner = owner.clone();

@@ -385,6 +385,9 @@ a later failure can appear again.
    visual picker outlines the intended capture area; click selects and Escape
    cancels without forwarding input to the game. Its overlays leave before
    capture. Opening Preview alone acquires no pixels and initializes no OCR.
+   On Windows, picker overlays belong to Preview rather than the main editor,
+   so selection does not bring the main window above Preview. Preview remains
+   an independent window, not an always-on-top window.
    This also works before **Inspect/Reinspect**. The verified target configuration
    belongs to the open workspace and package ID; saving it does not register a
    Run source, create profiles, or inspect the package.
