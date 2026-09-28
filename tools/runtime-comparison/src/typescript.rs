@@ -1,10 +1,11 @@
 use crate::inventory::Inventory;
 use crate::model::{Control, Fault, Limits};
+use crate::owned_child::{ChildStdio, Environment, OwnedChild};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -39,17 +40,6 @@ struct Reply {
     ok: bool,
     value: Option<Value>,
     fault: Option<Fault>,
-}
-
-struct CompilerChild(Child);
-
-impl Drop for CompilerChild {
-    fn drop(&mut self) {
-        if !matches!(self.0.try_wait(), Ok(Some(_))) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
 }
 
 fn transport(
@@ -87,14 +77,10 @@ fn transport(
         ));
     }
     #[cfg(windows)]
-    let node = std::env::var_os("MADO_COMPILER_NODE")
-        .map(std::path::PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| "node".into());
+    let node = compiler_node()?;
     #[cfg(not(windows))]
     let node = "node";
     let mut command = Command::new(node);
-    command.env_clear();
     // Resolve the trusted compiler installation without inheriting Node hooks.
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
@@ -120,26 +106,20 @@ fn transport(
                 .to_string(),
         )
         .arg("--owner-pid")
-        .arg(std::process::id().to_string())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = CompilerChild(command.spawn().map_err(|error| {
+        .arg(std::process::id().to_string());
+    let mut child = OwnedChild::spawn(&mut command, ChildStdio::Piped, Environment::Cleared).map_err(|error| {
         Fault::new("Blocked", "application-owned TypeScript compiler could not start")
-            .with_context(json!({"cause": error.to_string(), "requires": "Node 24 and npm ci --ignore-scripts in compiler/"}))
-    })?);
+            .with_context(json!({"cause": error, "requires": "Node 24 and npm ci --ignore-scripts in compiler/"}))
+    })?;
     let stdin = child
-        .0
         .stdin
         .take()
         .ok_or_else(|| Fault::new("CompilerProtocol", "missing compiler stdin"))?;
     let stdout = child
-        .0
         .stdout
         .take()
         .ok_or_else(|| Fault::new("CompilerProtocol", "missing compiler stdout"))?;
     let stderr = child
-        .0
         .stderr
         .take()
         .ok_or_else(|| Fault::new("CompilerProtocol", "missing compiler stderr"))?;
@@ -190,7 +170,7 @@ fn transport(
                 Err(error) => failure = Some(Fault::new("CompilerTransport", error.to_string())),
             }
         }
-        match child.0.try_wait() {
+        match child.try_wait() {
             Ok(Some(exit)) => status = Some(exit),
             Ok(None) => {}
             Err(error) => failure = Some(Fault::new("CompilerTransport", error.to_string())),
@@ -211,13 +191,13 @@ fn transport(
         thread::sleep(Duration::from_millis(2));
     }
     if status.is_none() {
-        if let Err(error) = child.0.kill() {
+        if let Err(error) = child.kill() {
             failure = Some(
                 Fault::new("CompilerContainment", "compiler termination failed")
                     .with_context(json!({"cause": error.to_string(), "primary": failure})),
             );
         }
-        if let Err(error) = child.0.wait() {
+        if let Err(error) = child.wait() {
             failure = Some(
                 Fault::new("CompilerContainment", "compiler reaping failed")
                     .with_context(json!({"cause": error.to_string(), "primary": failure})),
@@ -259,6 +239,65 @@ fn transport(
     reply
         .value
         .ok_or_else(|| Fault::new("CompilerProtocol", "compiler response has no value"))
+}
+
+#[cfg(windows)]
+fn compiler_node() -> Result<std::path::PathBuf, Fault> {
+    if let Some(path) = std::env::var_os("MADO_COMPILER_NODE") {
+        let path = std::path::PathBuf::from(path);
+        if !path.is_absolute()
+            || !path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+        {
+            return Err(Fault::new(
+                "Blocked",
+                "The owned compiler requires an absolute Node executable",
+            ));
+        }
+        return path
+            .canonicalize()
+            .and_then(|path| {
+                if path.is_file() {
+                    Ok(path)
+                } else {
+                    Err(std::io::Error::other(
+                        "Node executable is not a regular file",
+                    ))
+                }
+            })
+            .map_err(|error| Fault::new("Blocked", error.to_string()));
+    }
+    node_from_path()
+}
+
+#[cfg(windows)]
+pub(crate) fn node_from_path() -> Result<std::path::PathBuf, Fault> {
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path).filter(|directory| directory.is_absolute()) {
+            let node = directory.join("node.exe");
+            match std::fs::metadata(&node) {
+                Ok(metadata) if metadata.is_file() => {
+                    return node
+                        .canonicalize()
+                        .map_err(|error| Fault::new("Blocked", error.to_string()));
+                }
+                Ok(_) => {
+                    return Err(Fault::new(
+                        "Blocked",
+                        "Node executable is not a regular file",
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(Fault::new("Blocked", error.to_string())),
+            }
+        }
+    }
+    Err(Fault::new(
+        "Blocked",
+        "Node 24.18.0 node.exe is required on an absolute PATH entry",
+    ))
 }
 
 /// Inspect JavaScript with the pinned parser without type checking or emitting.

@@ -96,7 +96,7 @@ export interface RetainedCheck {
   package_inventory_identity:string|null; controller:ControllerView;
 }
 // `authoring` is the host's single application-wide Edit lease, present in every Workspace view while held.
-export interface Poll {controller:ControllerView; logs:LogBatch; workspace_results:WorkspaceResult[]; last_check:RetainedCheck|null; authoring:AuthoringRef|null}
+export interface Poll {controller:ControllerView; logs:LogBatch; workspace_results:WorkspaceResult[]; last_check:RetainedCheck|null; authoring:AuthoringRef|null; native_selection:NativeSelectionView|null}
 export interface StartRequest {
   package_path:string; inventory_identity:string; package_id:string; schema_identity:string; profile_id:string;
   values:Record<string,Json>; lane:string; scenario:string; replay_descriptor_path:string|null;
@@ -104,6 +104,14 @@ export interface StartRequest {
 
 // Host-issued Edit lease: the token is bound to one application generation, Workspace session and package source.
 export interface AuthoringRef {workspace:WorkspaceRef; token:string}
+export interface NativeCandidateView {id:string; application_label:string; window_label:string}
+export type NativeSelectionStatus = 'unselected'|'discovering'|'selecting'|'selected'|'capturing'|'consumed'|'expired'|'cancelling'|'cancelled'|'failed';
+export interface NativeSelectionView {
+  owner:AuthoringRef; revision:string; selection_generation:number; selected_id:string|null;
+  candidates:NativeCandidateView[]; status:NativeSelectionStatus; platform:'macos'|'windows'|'unsupported';
+  occupied:boolean; error:Fault|null;
+}
+export interface CaptureCacheReceipt {cached:boolean; error:Fault|null}
 export type AuthoringFileKind = 'manifest'|'source'|'schema'|'profile'|'asset'|'source_map';
 // A declared package file. Binary assets carry `text: null`: listed, never edited as text.
 export interface AuthoringFile {path:string; kind:AuthoringFileKind; text:string|null; bytes:number}

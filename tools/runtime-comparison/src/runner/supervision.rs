@@ -3,24 +3,15 @@ use super::evidence::{Observer, receive_evidence};
 use super::protocol::{Invocation, Operation, emit, frame};
 use crate::inventory::Inventory;
 use crate::model::{Fault, MAX_TRANSPORT_BYTES, Plan, identity};
+use crate::owned_child::{ChildStdio, Environment, OwnedChild};
 use serde_json::{Value, json};
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-
-pub(super) struct OwnedChild(pub(super) Child);
-impl Drop for OwnedChild {
-    fn drop(&mut self) {
-        if !matches!(self.0.try_wait(), Ok(Some(_))) {
-            let _ = self.0.kill();
-        }
-        let _ = self.0.wait();
-    }
-}
 
 pub fn sample(plan: &Plan, inventory: &Inventory) -> Result<Vec<RunRecord>, Fault> {
     plan.validate()?;
@@ -132,16 +123,8 @@ fn child_loader_environment(command: &mut Command, plan: &Plan) -> Result<Value,
     {
         command.env_remove("MADO_COMPILER_NODE");
         // Resolve Node before restricting the engine's DLL search path.
-        if let Some(path) = std::env::var_os("PATH") {
-            for directory in std::env::split_paths(&path) {
-                let node = directory.join("node.exe");
-                if node.is_file()
-                    && let Ok(node) = node.canonicalize()
-                {
-                    command.env("MADO_COMPILER_NODE", node);
-                    break;
-                }
-            }
+        if plan.candidate == "typescript" {
+            command.env("MADO_COMPILER_NODE", crate::typescript::node_from_path()?);
         }
     }
     if plan.lane == "controlled" {
@@ -292,11 +275,7 @@ fn supervise(
     }
     let started = Instant::now();
     let mut command = Command::new(executable);
-    command
-        .arg("child")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.arg("child");
     let loader_environment = match child_loader_environment(&mut command, plan) {
         Ok(environment) => environment,
         Err(error) => {
@@ -311,14 +290,8 @@ fn supervise(
             })),
         );
     }
-    let mut child = OwnedChild(command.spawn().map_err(|error| {
-        Fault::new("ChildStartup", error.to_string()).with_context(json!({
-            "stage":"child_startup","boundary":"spawn","io_kind":format!("{:?}",error.kind()),
-            "child_started":false,"cleanup":{"clean":true,"child_started":false}
-        }))
-    })?);
+    let mut child = OwnedChild::spawn(&mut command, ChildStdio::Piped, Environment::Inherited)?;
     let mut input = child
-        .0
         .stdin
         .take()
         .ok_or_else(|| Fault::new("Transport", "child stdin unavailable"))?;
@@ -340,12 +313,10 @@ fn supervise(
         Ok(())
     });
     let stdout = child
-        .0
         .stdout
         .take()
         .ok_or_else(|| Fault::new("Transport", "child stdout unavailable"))?;
     let stderr = child
-        .0
         .stderr
         .take()
         .ok_or_else(|| Fault::new("Transport", "child stderr unavailable"))?;
@@ -371,7 +342,7 @@ fn supervise(
     let mut startup_us = None;
     let mut child_build = None;
     let mut system = System::new();
-    let child_pid = Pid::from_u32(child.0.id());
+    let child_pid = Pid::from_u32(child.id());
     let mut milestone_received_at = None;
     let parent_pid = Pid::from_u32(std::process::id());
     let mut sampled_child_rss = 0u64;
@@ -383,8 +354,7 @@ fn supervise(
             match message {
                 Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
                     if value["event"] == "ChildStarted" {
-                        if let Err(error) =
-                            retain_child_build(&value, child.0.id(), &mut child_build)
+                        if let Err(error) = retain_child_build(&value, child.id(), &mut child_build)
                         {
                             protocol_fault = Some(error);
                             continue;
@@ -413,7 +383,6 @@ fn supervise(
             }
         }
         if let Some(status) = child
-            .0
             .try_wait()
             .map_err(|e| Fault::new("Containment", e.to_string()))?
         {
@@ -450,11 +419,9 @@ fn supervise(
         {
             forced = true;
             child
-                .0
                 .kill()
                 .map_err(|e| Fault::new("Containment", e.to_string()))?;
             exit = child
-                .0
                 .wait()
                 .map_err(|e| Fault::new("Containment", e.to_string()))?;
             break;
@@ -483,7 +450,7 @@ fn supervise(
         match message {
             Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
                 if value["event"] == "ChildStarted" {
-                    if let Err(error) = retain_child_build(&value, child.0.id(), &mut child_build) {
+                    if let Err(error) = retain_child_build(&value, child.id(), &mut child_build) {
                         protocol_fault = Some(error);
                         continue;
                     }
@@ -764,26 +731,16 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     }
     let mut command =
         Command::new(std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?);
-    command
-        .arg("child")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    command.arg("child");
     child_loader_environment(&mut command, &invocation.plan)?;
-    let mut child = OwnedChild(
-        command
-            .spawn()
-            .map_err(|e| Fault::new("Startup", e.to_string()))?,
-    );
+    let mut child = OwnedChild::spawn(&mut command, ChildStdio::Protocol, Environment::Inherited)?;
     let mut control = child
-        .0
         .stdin
         .take()
         .ok_or_else(|| Fault::new("Transport", "no probe control"))?;
     super::payload::write(&mut invocation, &mut control)?;
     let mut output = BufReader::new(
         child
-            .0
             .stdout
             .take()
             .ok_or_else(|| Fault::new("Transport", "no probe evidence"))?,
@@ -795,7 +752,6 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     }
     drop(control);
     Ok(child
-        .0
         .wait()
         .map_err(|e| Fault::new("Containment", e.to_string()))?
         .success())
@@ -812,33 +768,23 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
         observe_logs: false,
     };
     let executable = std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?;
-    let mut target = OwnedChild(
-        Command::new(&executable)
-            .arg("target-probe")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| Fault::new("Startup", e.to_string()))?,
-    );
-    let mut parent = OwnedChild(
-        Command::new(executable)
-            .arg("parent-probe")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| Fault::new("Startup", e.to_string()))?,
-    );
+    let mut target = OwnedChild::spawn(
+        Command::new(&executable).arg("target-probe"),
+        ChildStdio::Null,
+        Environment::Inherited,
+    )?;
+    let mut parent = OwnedChild::spawn(
+        Command::new(executable).arg("parent-probe"),
+        ChildStdio::Protocol,
+        Environment::Inherited,
+    )?;
     let mut input = parent
-        .0
         .stdin
         .take()
         .ok_or_else(|| Fault::new("Transport", "no parent input"))?;
     super::payload::write(&mut invocation, &mut input)?;
     drop(input);
     let output = parent
-        .0
         .stdout
         .take()
         .ok_or_else(|| Fault::new("Transport", "no parent output"))?;
@@ -871,11 +817,9 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
     let child_start = system.process(child_pid).map(sysinfo::Process::start_time);
     let started = Instant::now();
     parent
-        .0
         .kill()
         .map_err(|e| Fault::new("Containment", e.to_string()))?;
     let parent_status = parent
-        .0
         .wait()
         .map_err(|e| Fault::new("Containment", e.to_string()))?;
     let mut child_exited = false;
@@ -898,7 +842,6 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
         thread::sleep(Duration::from_millis(5));
     }
     let target_alive = target
-        .0
         .try_wait()
         .map_err(|e| Fault::new("Fixture", e.to_string()))?
         .is_none();
@@ -925,31 +868,21 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         inventory: inventory.clone(),
         observe_logs: false,
     };
-    let mut target = OwnedChild(
-        Command::new(&executable)
-            .arg("target-probe")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| Fault::new("Startup", error.to_string()))?,
-    );
-    let mut parent = OwnedChild(
-        Command::new(&executable)
-            .arg("parent-stop-probe")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| Fault::new("Startup", error.to_string()))?,
-    );
+    let mut target = OwnedChild::spawn(
+        Command::new(&executable).arg("target-probe"),
+        ChildStdio::Null,
+        Environment::Inherited,
+    )?;
+    let mut parent = OwnedChild::spawn(
+        Command::new(&executable).arg("parent-stop-probe"),
+        ChildStdio::Protocol,
+        Environment::Inherited,
+    )?;
     let mut input = parent
-        .0
         .stdin
         .take()
         .ok_or_else(|| Fault::new("Transport", "no probe input"))?;
     let output = parent
-        .0
         .stdout
         .take()
         .ok_or_else(|| Fault::new("Transport", "no probe output"))?;
@@ -965,7 +898,6 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
     let mut forced = false;
     let status = loop {
         if let Some(status) = parent
-            .0
             .try_wait()
             .map_err(|error| Fault::new("Containment", error.to_string()))?
         {
@@ -976,11 +908,9 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         {
             forced = true;
             parent
-                .0
                 .kill()
                 .map_err(|error| Fault::new("Containment", error.to_string()))?;
             break parent
-                .0
                 .wait()
                 .map_err(|error| Fault::new("Containment", error.to_string()))?;
         }
@@ -998,7 +928,6 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
     };
     let record = &response["record"];
     let target_alive = target
-        .0
         .try_wait()
         .map_err(|error| Fault::new("Containment", error.to_string()))?
         .is_none();

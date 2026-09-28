@@ -37,12 +37,13 @@ export interface RecognitionDefinition {
 export interface RecognitionDocument {
   version:number; rounding:number; basis:GeometryBasis; definitions:RecognitionDefinition[]; template_rights:TemplateRights|null;
 }
+export interface CaptureDocument {capture_id:string; document:RecognitionDocument}
 // `game_content` is the reusable `recognitionBasis` setup, `ocr_recognize` one grouped request for every checked OCR
 // Trial row, `template_recognize` the selected saved template.
 export type SnippetKind = 'game_content' | 'ocr_recognize' | 'template_recognize';
 
 // Owner-scoped frame descriptor; pixels stay in the host. Compatible frames reuse confirmed content setup.
-export interface RecognitionFrame {id:string; width:number; height:number; revision:number; confirmed:boolean}
+export interface RecognitionFrame {id:string; width:number; height:number; revision:number; confirmed:boolean; historical_capture_at_ms:number|null}
 // Read-only host image policy.
 export interface ImagePolicy {
   input_bytes:number; input_pixels:number; crop_bytes:number; crop_pixels:number; package_image_bytes:number;
@@ -58,7 +59,8 @@ export interface RecognitionCapabilities {
 // the host-validated draft at `document_revision`, which confirmation, trials, saves and Copy name.
 export interface RecognitionView {
   owner:AuthoringRef; revision:string; document:RecognitionDocument|null; saved_document:RecognitionDocument|null;
-  document_revision:number; basis_confirmed:boolean; frame:RecognitionFrame|null; capabilities:RecognitionCapabilities;
+  capture_id:string|null; captures:CaptureDocument[]; saved_captures:CaptureDocument[]; migration_required:boolean;
+  document_revision:number; basis_confirmed:boolean; other_bases_confirmed:boolean; frame:RecognitionFrame|null; capabilities:RecognitionCapabilities;
   // Identity of the effective App OCR configuration; a change makes earlier trials stale.
   configuration_revision:string; trial:RecognitionTrial|null;
 }
@@ -77,9 +79,10 @@ export interface TrialEnvelope {
 // A settled trial with the inputs the host captured for it; `stale` is the host's own input-change verdict.
 export interface RecognitionTrial {
   owner:AuthoringRef; revision:string; document_revision:number; frame_id:string|null; frame_revision:number;
+  capture_id:string;
   configuration_revision:string; sample_id:string|null; stale:boolean; controller:ControllerView;
 }
-export interface CopyResult {source:string; basis:GeometryBasis; verified:boolean; document_revision:number; definition_ids:string[]}
+export interface CopyResult {capture_id:string; source:string; basis:GeometryBasis; verified:boolean; document_revision:number; definition_ids:string[]}
 
 export function trialEnvelope(trial:RecognitionTrial):TrialEnvelope|null {
   const result = trial.controller.result;
@@ -91,6 +94,7 @@ export function trialEnvelope(trial:RecognitionTrial):TrialEnvelope|null {
 export interface TrialStamp {basis:number; marks:Record<string, number>}
 export interface TrialTicket {
   token:string; revision:string; kind:'frame' | 'sample'; frame_id:string|null; document_revision:number;
+  capture_id:string;
   selected_ids:string[]; sample_id:string|null; stamp:TrialStamp;
 }
 // `fault` is a refusal before any trial settled. A ticketless record is a trial the host retained from before
@@ -100,23 +104,24 @@ export interface TrialRecord {ticket:TrialTicket|null; trial:RecognitionTrial|nu
 // revive copied source. Recognition-input (or, for grouped OCR, source-input) marks likewise prevent geometry Undo
 // from reviving a Copy. Setup source is the basis value itself, so it is compared by value.
 export interface CopyStamp {basis:number; definitions:Record<string, {revision:number; mark:number}>; source:string|null; selection:number}
-export interface CopyTicket {token:string; revision:string; document_revision:number; definition_ids:string[]; kind:SnippetKind; stamp:CopyStamp}
+export interface CopyTicket {capture_id:string; token:string; revision:string; document_revision:number; definition_ids:string[]; kind:SnippetKind; stamp:CopyStamp}
 // `error` is the host refusal or the clipboard failure; either way no package file changed.
-export interface CopyRecord {definition_ids:string[]; stamp:CopyStamp; basis:GeometryBasis|null; verified:boolean; error:Fault|null}
-export interface SyncTicket {token:string; revision:string; document_revision:number; local_revision:number; frame_id:string|null; document:RecognitionDocument}
-export interface ConfirmTicket {token:string; revision:string; frame_id:string; document_revision:number}
+export interface CopyRecord {capture_id:string; definition_ids:string[]; stamp:CopyStamp; basis:GeometryBasis|null; verified:boolean; error:Fault|null}
+export interface SyncTicket {capture_id:string; token:string; revision:string; document_revision:number; local_revision:number; frame_id:string|null; document:RecognitionDocument}
+export interface ConfirmTicket {capture_id:string; token:string; revision:string; frame_id:string; document_revision:number}
 export interface SaveTicket {
   token:string; revision:string; document_revision:number; crop_ids:string[]; document:RecognitionDocument;
+  capture_id:string;
   // Selection stamp and recognition-input mark of each submitted crop, so a crop re-selected or changed while the
   // save was pending stays selected.
   crops:Record<string, [number, number]>;
 }
-export interface UndoEntry {document:RecognitionDocument; selected:string|null; bytes:number}
+export interface UndoEntry {capture_id:string; document:RecognitionDocument; selected:string|null; bytes:number}
 export type PreviewTool = 'zones' | 'content';
 export type Zoom = 'fit' | number;
 export interface PreviewDisplay {zoom:Zoom; tool:PreviewTool}
 
-export type RecognitionNotice = 'definitionLimit' | 'documentLimit' | 'expectedLimit' | 'nameLimit' | 'invalidGeometry' | 'staleEdit';
+export type RecognitionNotice = 'definitionLimit' | 'documentLimit' | 'expectedLimit' | 'nameLimit' | 'invalidGeometry' | 'staleEdit' | 'confirmBeforeReplace';
 export type RecognitionBlock =
   | 'noDocument' | 'noFrame' | 'unconfirmed' | 'confirmed' | 'running' | 'noCapability' | 'empty' | 'overLimit' | 'mixedKinds'
   | 'templateSingle' | 'noSample' | 'invalid' | 'noChanges' | 'rights' | 'cropFrame' | 'kind' | 'templateUnsaved';
@@ -144,6 +149,7 @@ export interface RecognitionState {
   // Preview zoom and tool, kept here so a reopened preview window resumes them.
   display:PreviewDisplay;
   nextId:number; notice:RecognitionNotice|null; error:Fault|null;
+  nextIds:Record<string, number>;
 }
 
 const encoder = new TextEncoder();
@@ -153,6 +159,27 @@ export function utf8Bytes(text:string):number {
 
 export function documentBytes(document:RecognitionDocument):number {
   return utf8Bytes(JSON.stringify(document));
+}
+
+export function captureDocuments(state:RecognitionState, document:RecognitionDocument|null = state.document):CaptureDocument[] {
+  return state.view.captures.map(capture => capture.capture_id === state.view.capture_id && document
+    ? {...capture, document} : capture);
+}
+
+export function aggregateDefinitions(state:RecognitionState):number {
+  return captureDocuments(state).reduce((count, capture) => count + capture.document.definitions.length, 0);
+}
+
+function packageBytes(state:RecognitionState, document:RecognitionDocument):number {
+  return utf8Bytes(JSON.stringify({version: 2, captures: captureDocuments(state, document)}));
+}
+
+export function canUndoRecognition(state:RecognitionState):boolean {
+  return state.undo.some(entry => entry.capture_id === state.view.capture_id);
+}
+
+export function discardPixelCrops(state:RecognitionState):RecognitionState {
+  return {...state, cropIds: [], cropMarks: {}, group: null};
 }
 
 // Structural equality for JSON-shaped host data, independent of key order.
@@ -463,6 +490,7 @@ export function openRecognition(view:RecognitionView):RecognitionState {
     selected: null, trialIds: [], trialSelection: 0, cropIds: [], cropMarks: {}, undo: [], undoBytes: 0, group: null,
     trial: view.trial ? {ticket: null, trial: view.trial, fault: null} : null, running: null, copies: {},
     display: {zoom: 'fit', tool: 'zones'}, nextId: idNumber(view.document, view.saved_document), notice: null, error: null,
+    nextIds: {},
   };
   const state = adoptFrame(stamp({...empty, document: view.document}, null), null, view.frame);
   return {...state, view, selected: state.document?.definitions[0]?.id ?? null};
@@ -471,7 +499,17 @@ export function openRecognition(view:RecognitionView):RecognitionState {
 // Applies a host read for the same owner. The local draft adopts the host document only when the host knew
 // exactly this draft (`sent`); otherwise newer local edits are kept and only host-owned fields merge.
 export function applyView(state:RecognitionState, view:RecognitionView, sent:RecognitionDocument|null = state.view.document):RecognitionState {
-  if (view.owner.token !== state.owner.token) return state;
+  if (view.owner.token !== state.owner.token || view.document_revision < state.view.document_revision) return state;
+  if (view.capture_id !== state.view.capture_id) {
+    if (view.document_revision <= state.view.document_revision) return state;
+    const fresh = openRecognition(view);
+    const nextIds = Object.fromEntries(view.captures.map(capture => [capture.capture_id,
+      capture.capture_id === state.view.capture_id ? state.nextId : state.nextIds[capture.capture_id] ?? 1]));
+    const next = stamp({...fresh, clock: Math.max(state.clock, fresh.clock), marks: {}, sourceMarks: {},
+      basis: state.basis + 1, localRevision: state.localRevision + 1, undo: state.undo, undoBytes: state.undoBytes,
+      nextIds, nextId: Math.max(fresh.nextId, view.capture_id ? nextIds[view.capture_id] ?? 1 : 1)}, null);
+    return next;
+  }
   const local = state.document;
   const document = local === null || sameJson(local, sent) ? hostDocument(view) : withSavedRefs(local, view.document);
   const changed = !sameJson(document, local);
@@ -513,15 +551,12 @@ export function hostCurrent(state:RecognitionState):boolean {
 // Unsaved compared with the document on disk, or crops chosen for the next Save. A hand-restored saved value is clean
 // although its definition revision advanced.
 export function recognitionDirty(state:RecognitionState):boolean {
-  const {document} = state;
-  if (state.cropIds.length > 0) return true;
-  if (document === null) return false;
-  const saved = state.view.saved_document;
-  if (saved !== null) return !sameContent(document, saved);
-  // Without saved metadata only the untouched full-image default is clean; a chosen content rectangle is a draft.
-  const {frame_width: width, frame_height: height, content} = document.basis;
-  const full = content.x === 0 && content.y === 0 && content.width === width && content.height === height;
-  return document.definitions.length > 0 || document.template_rights !== null || !full;
+  if (state.cropIds.length > 0 || state.view.migration_required) return true;
+  const captures = captureDocuments(state);
+  return captures.length !== state.view.saved_captures.length || captures.some(capture => {
+    const saved = state.view.saved_captures.find(item => item.capture_id === capture.capture_id);
+    return !saved || !sameContent(capture.document, saved.document);
+  });
 }
 
 // Copy and frame trials require current confirmed setup, either explicit or reused on a compatible frame.
@@ -536,7 +571,9 @@ export function geometryConfirmed(state:RecognitionState):boolean {
 function record(state:RecognitionState, group:string|null):Pick<RecognitionState, 'undo' | 'undoBytes' | 'group'> {
   if (group !== null && group === state.group) return {undo: state.undo, undoBytes: state.undoBytes, group};
   const document = state.document!;
-  const entry: UndoEntry = {document, selected: state.selected, bytes: documentBytes(document) + utf8Bytes(state.selected ?? '')};
+  const capture_id = state.view.capture_id!;
+  const entry: UndoEntry = {capture_id, document, selected: state.selected,
+    bytes: documentBytes(document) + utf8Bytes(state.selected ?? '') + utf8Bytes(capture_id)};
   let undo = [...state.undo, entry];
   let undoBytes = state.undoBytes + entry.bytes;
   while (undo.length > 0 && (undo.length > UNDO_ENTRIES || undoBytes > UNDO_BYTES)) {
@@ -550,7 +587,8 @@ function edit(state:RecognitionState, document:RecognitionDocument, group:string
   const before = state.document;
   if (before === null) return state;
   if (sameJson(before, document)) return selected === state.selected ? state : {...state, selected};
-  if (documentBytes(document) > MAX_DOCUMENT_BYTES) return {...state, notice: 'documentLimit'};
+  if (packageBytes(state, document) > MAX_DOCUMENT_BYTES) return {...state, notice: 'documentLimit'};
+  if (captureDocuments(state, document).reduce((count, capture) => count + capture.document.definitions.length, 0) > MAX_DEFINITIONS) return {...state, notice: 'definitionLimit'};
   let {clock} = state;
   const previous = new Map(before.definitions.map(definition => [definition.id, definition]));
   const definitions = document.definitions.map(definition => {
@@ -576,7 +614,7 @@ export function selectDefinition(state:RecognitionState, id:string|null):Recogni
 export function createDefinition(state:RecognitionState, region:NormalizedRect, name:string):RecognitionState {
   const document = state.document;
   if (!document) return state;
-  if (document.definitions.length >= MAX_DEFINITIONS) return {...state, notice: 'definitionLimit'};
+  if (aggregateDefinitions(state) >= MAX_DEFINITIONS) return {...state, notice: 'definitionLimit'};
   if (!mapRegion(region, document.basis)) return {...state, notice: 'invalidGeometry'};
   const ids = new Set(document.definitions.map(definition => definition.id));
   let number = state.nextId;
@@ -649,8 +687,10 @@ function replaceDocument(state:RecognitionState, document:RecognitionDocument|nu
 // never makes an earlier trial or Copy current again. Host-owned saved references and a basis for other frame
 // dimensions are not restored.
 export function undoRecognition(state:RecognitionState):RecognitionState {
-  const entry = state.undo.at(-1);
-  if (!entry) return state;
+  let index = state.undo.length - 1;
+  while (index >= 0 && state.undo[index].capture_id !== state.view.capture_id) index -= 1;
+  if (index < 0) return state;
+  const entry = state.undo[index];
   const current = state.document;
   const live = new Map(current?.definitions.map(definition => [definition.id, definition.saved]) ?? []);
   const disk = new Map(state.view.saved_document?.definitions.map(definition => [definition.id, definition.saved]) ?? []);
@@ -659,8 +699,11 @@ export function undoRecognition(state:RecognitionState):RecognitionState {
     return sameJson(saved, definition.saved) ? definition : {...definition, saved};
   });
   const basis = current && !sameDimensions(entry.document.basis, current.basis) ? current.basis : entry.document.basis;
-  const next = {...state, undo: state.undo.slice(0, -1), undoBytes: state.undoBytes - entry.bytes};
-  return replaceDocument(next, {...entry.document, basis, definitions}, entry.selected);
+  const document = {...entry.document, basis, definitions};
+  if (packageBytes(state, document) > MAX_DOCUMENT_BYTES) return {...state, notice: 'documentLimit'};
+  if (captureDocuments(state, document).reduce((count, capture) => count + capture.document.definitions.length, 0) > MAX_DEFINITIONS) return {...state, notice: 'definitionLimit'};
+  const next = {...state, undo: state.undo.filter((_, position) => position !== index), undoBytes: state.undoBytes - entry.bytes};
+  return replaceDocument(next, document, entry.selected);
 }
 
 export function toggleTrial(state:RecognitionState, id:string):RecognitionState {
@@ -695,7 +738,8 @@ export function setDisplay(state:RecognitionState, display:PreviewDisplay):Recog
 
 export function syncTicket(state:RecognitionState):SyncTicket|null {
   if (state.document === null || hostCurrent(state)) return null;
-  return {token: state.owner.token, revision: state.view.revision, document_revision: state.view.document_revision,
+  if (state.view.capture_id === null) return null;
+  return {capture_id: state.view.capture_id, token: state.owner.token, revision: state.view.revision, document_revision: state.view.document_revision,
     local_revision: state.localRevision, frame_id: state.view.frame?.id ?? null, document: state.document};
 }
 
@@ -705,14 +749,16 @@ export function syncBlock(state:RecognitionState):RecognitionBlock|null {
 }
 
 export function applySync(state:RecognitionState, ticket:SyncTicket, view:RecognitionView):RecognitionState {
-  return ticket.token === state.owner.token ? applyView({...state, error: null}, view, ticket.document) : state;
+  return ticket.token === state.owner.token && ticket.capture_id === state.view.capture_id
+    && ticket.document_revision === state.view.document_revision ? applyView({...state, error: null}, view, ticket.document) : state;
 }
 
 // `recognition_discard`: the host restored the saved document (possibly none). The draft follows it exactly, the
 // replaced draft stays one Undo away, and chosen crops are dropped. Edits made while the command was pending are
 // replaced too: Discard is the author's explicit choice.
 export function applyDiscard(state:RecognitionState, view:RecognitionView):RecognitionState {
-  if (view.owner.token !== state.owner.token) return state;
+  if (view.owner.token !== state.owner.token || view.document_revision < state.view.document_revision) return state;
+  if (view.capture_id !== state.view.capture_id) return applyView(state, view);
   const target = hostDocument(view);
   const history = state.document !== null && !sameJson(state.document, target) ? record(state, null) : {};
   const next = replaceDocument({...state, ...history, cropIds: [], cropMarks: {}, error: null}, target, state.selected);
@@ -730,11 +776,13 @@ export function confirmBlock(state:RecognitionState):RecognitionBlock|null {
 export function confirmTicket(state:RecognitionState):ConfirmTicket|null {
   const frame = state.view.frame;
   if (confirmBlock(state) !== null || !hostCurrent(state) || frame === null) return null;
-  return {token: state.owner.token, revision: state.view.revision, frame_id: frame.id, document_revision: state.view.document_revision};
+  if (state.view.capture_id === null) return null;
+  return {capture_id: state.view.capture_id, token: state.owner.token, revision: state.view.revision, frame_id: frame.id, document_revision: state.view.document_revision};
 }
 
 export function applyConfirm(state:RecognitionState, ticket:ConfirmTicket, view:RecognitionView):RecognitionState {
-  return ticket.token === state.owner.token ? applyView({...state, error: null}, view) : state;
+  return ticket.token === state.owner.token && ticket.capture_id === state.view.capture_id
+    && ticket.document_revision === state.view.document_revision ? applyView({...state, error: null}, view) : state;
 }
 
 // Grouped OCR (1..=engine bound, one request, document order) or exactly one template; a sample rechecks one
@@ -759,23 +807,25 @@ export function trialBlock(state:RecognitionState, kind:'frame' | 'sample', ids:
 export function trialTicket(state:RecognitionState, kind:'frame' | 'sample', ids:readonly string[]):TrialTicket|null {
   const document = state.document;
   if (!document || trialBlock(state, kind, ids) !== null || !hostCurrent(state)) return null;
+  if (state.view.capture_id === null) return null;
   const order = document.definitions.map(item => item.id).filter(id => ids.includes(id));
   const marks = Object.fromEntries(order.map(id => [id, state.marks[id]]));
-  return {token: state.owner.token, revision: state.view.revision, kind, frame_id: kind === 'frame' ? state.view.frame!.id : null,
+  return {capture_id: state.view.capture_id, token: state.owner.token, revision: state.view.revision, kind, frame_id: kind === 'frame' ? state.view.frame!.id : null,
     document_revision: state.view.document_revision, selected_ids: order, sample_id: kind === 'sample' ? order[0] : null,
     stamp: {basis: state.basis, marks}};
 }
 
 export function beginTrial(state:RecognitionState, ticket:TrialTicket):RecognitionState {
-  return ticket.token === state.owner.token ? {...state, running: ticket, error: null} : state;
+  return ticket.token === state.owner.token && ticket.capture_id === state.view.capture_id ? {...state, running: ticket, error: null} : state;
 }
 
 // A settled trial or refusal stays attributed to its ticket's inputs, however late it arrives. A trial whose
 // captured owner, revisions, frame or sample differ from the ticket is kept only as historical.
 export function applyTrial(state:RecognitionState, ticket:TrialTicket, trial:RecognitionTrial|null, fault:Fault|null = null):RecognitionState {
-  if (ticket.token !== state.owner.token) return state;
+  if (ticket.token !== state.owner.token || ticket.capture_id !== state.view.capture_id || ticket.document_revision !== state.view.document_revision) return state;
   const running = state.running === ticket ? null : state.running;
   const matches = trial === null || (trial.owner.token === ticket.token && trial.revision === ticket.revision && trial.document_revision === ticket.document_revision
+    && trial.capture_id === ticket.capture_id
     && trial.frame_id === ticket.frame_id && trial.sample_id === ticket.sample_id);
   return {...state, running, trial: {ticket: matches ? ticket : null, trial, fault}};
 }
@@ -790,7 +840,7 @@ export function trialFreshness(state:RecognitionState, id:string):Freshness {
   if (!ticket || !trial) return 'historical';
   const {view} = state;
   const mark = ticket.stamp.marks[id];
-  if (trial.stale || trial.owner.token !== state.owner.token || trial.revision !== view.revision || trial.document_revision !== view.document_revision
+  if (trial.stale || trial.capture_id !== view.capture_id || ticket.capture_id !== view.capture_id || trial.owner.token !== state.owner.token || trial.revision !== view.revision || trial.document_revision !== view.document_revision
     || !hostCurrent(state) || trial.configuration_revision !== view.configuration_revision || mark === undefined || mark !== state.marks[id]) return 'stale';
   if (ticket.kind === 'frame') {
     const frame = view.frame;
@@ -799,14 +849,23 @@ export function trialFreshness(state:RecognitionState, id:string):Freshness {
   return 'fresh';
 }
 
+function basisReusable(state:RecognitionState):boolean {
+  const document = state.document;
+  return document === null || (state.view.basis_confirmed && sameBasis(document.basis, state.view.document?.basis))
+    || sameBasis(document.basis, state.view.saved_document?.basis);
+}
+
+export function canReleaseImage(state:RecognitionState, leavingCapture:boolean):boolean {
+  return (!leavingCapture && state.view.frame === null) || basisReusable(state);
+}
+
 export function saveBlock(state:RecognitionState):RecognitionBlock|null {
   const document = state.document;
   if (document === null) return 'noDocument';
   if (!documentValid(document)) return 'invalid';
   if (state.cropIds.length > 0 && state.view.frame === null) return 'cropFrame';
   if (state.cropIds.length > 0 && !geometryConfirmed(state)) return 'unconfirmed';
-  const basisConfirmed = state.view.basis_confirmed && sameBasis(document.basis, state.view.document?.basis);
-  if (!basisConfirmed && !sameBasis(document.basis, state.view.saved_document?.basis)) return 'unconfirmed';
+  if (!state.view.other_bases_confirmed || !basisReusable(state)) return 'unconfirmed';
   if (!recognitionDirty(state)) return 'noChanges';
   const savedTemplate = document.definitions.some(item => item.kind === 'template' && (item.saved !== null || state.cropIds.includes(item.id)));
   if (savedTemplate && !rightsValid(document.template_rights)) return 'rights';
@@ -815,7 +874,8 @@ export function saveBlock(state:RecognitionState):RecognitionBlock|null {
 
 export function saveTicket(state:RecognitionState):SaveTicket|null {
   if (saveBlock(state) !== null || !hostCurrent(state) || state.document === null) return null;
-  return {token: state.owner.token, revision: state.view.revision, document_revision: state.view.document_revision,
+  if (state.view.capture_id === null) return null;
+  return {capture_id: state.view.capture_id, token: state.owner.token, revision: state.view.revision, document_revision: state.view.document_revision,
     crop_ids: [...state.cropIds], document: state.document,
     crops: Object.fromEntries(state.cropIds.map(id => [id, [state.cropMarks[id], state.marks[id]]]))};
 }
@@ -823,7 +883,7 @@ export function saveTicket(state:RecognitionState):SaveTicket|null {
 // The commit is authoritative even when the follow-up read failed (`view` null, the recognition view must be read
 // again). A submitted crop stays chosen when it was re-chosen or its recognition inputs changed meanwhile.
 export function applySave(state:RecognitionState, ticket:SaveTicket, view:RecognitionView|null):RecognitionState {
-  if (ticket.token !== state.owner.token) return state;
+  if (ticket.token !== state.owner.token || ticket.capture_id !== state.view.capture_id || ticket.document_revision !== state.view.document_revision) return state;
   const pending = state.cropIds.filter(id => {
     const submitted = ticket.crops[id];
     return !submitted || submitted[0] !== state.cropMarks[id] || submitted[1] !== state.marks[id];
@@ -872,7 +932,8 @@ export function copyBlock(state:RecognitionState, ids:readonly string[], kind:Sn
 
 export function copyTicket(state:RecognitionState, ids:readonly string[], kind:SnippetKind):CopyTicket|null {
   if (copyBlock(state, ids, kind) !== null || !hostCurrent(state) || !sameJson(ids, copySelection(state, kind))) return null;
-  return {token: state.owner.token, revision: state.view.revision, document_revision: state.view.document_revision, definition_ids: [...ids], kind,
+  if (state.view.capture_id === null) return null;
+  return {capture_id: state.view.capture_id, token: state.owner.token, revision: state.view.revision, document_revision: state.view.document_revision, definition_ids: [...ids], kind,
     stamp: {basis: state.basis, definitions: Object.fromEntries(ids.map(id => {
       const definition = state.document!.definitions.find(item => item.id === id)!;
       return [id, {revision: definition.revision, mark: (kind === 'ocr_recognize' ? state.sourceMarks : state.marks)[id]}];
@@ -881,8 +942,9 @@ export function copyTicket(state:RecognitionState, ids:readonly string[], kind:S
 
 // `result` is the host's complete generated source envelope; `error` its refusal or the clipboard failure.
 export function applyCopy(state:RecognitionState, ticket:CopyTicket, result:CopyResult|null, error:Fault|null):RecognitionState {
-  if (ticket.token !== state.owner.token) return state;
-  const copy: CopyRecord = {definition_ids: result?.definition_ids ?? ticket.definition_ids, stamp: ticket.stamp,
+  if (ticket.token !== state.owner.token || ticket.capture_id !== state.view.capture_id || ticket.document_revision !== state.view.document_revision
+    || (result !== null && (result.capture_id !== ticket.capture_id || result.document_revision !== ticket.document_revision))) return state;
+  const copy: CopyRecord = {capture_id: ticket.capture_id, definition_ids: result?.definition_ids ?? ticket.definition_ids, stamp: ticket.stamp,
     basis: result?.basis ?? null, verified: result?.verified ?? false, error};
   return {...state, copies: {...state.copies, [ticket.kind]: copy}};
 }
@@ -893,6 +955,7 @@ export function applyCopy(state:RecognitionState, ticket:CopyTicket, result:Copy
 export function copyFreshness(state:RecognitionState, kind:SnippetKind):CopyFreshness|null {
   const copy = state.copies[kind];
   if (!copy) return null;
+  if (copy.capture_id !== state.view.capture_id) return 'obsolete';
   if (copy.error) return 'failed';
   if (kind === 'game_content') return sameBasis(copy.basis, state.document?.basis) ? 'current' : 'obsolete';
   // Grouped OCR source ignores saved diagnostic crops; a template Copy carries its saved PNG.
@@ -925,6 +988,7 @@ export interface PreviewDefinition {
 export interface PreviewObservation {id:string; bounds:PixelRect; fresh:boolean}
 export interface PreviewSnapshot {
   owner:AuthoringRef; revision:string; locale:Locale; editable:boolean; lockReason:string|null;
+  capture_id:string|null;
   localRevision:number; documentRevision:number; basisRevision:number;
   frame:RecognitionFrame|null; basis:GeometryBasis|null; definitions:PreviewDefinition[]; selected:string|null;
   confirmed:boolean; canUndo:boolean; canCreate:boolean; display:PreviewDisplay; observations:PreviewObservation[];
@@ -943,7 +1007,7 @@ export type PreviewEdit =
   | {kind:'undo'; localRevision:number};
 // `frameId` and `basisRevision` are the snapshot the preview edited on; geometry made for another frame or
 // content basis never applies.
-export interface PreviewEditMessage {token:string; frameId:string|null; basisRevision:number; edit:PreviewEdit}
+export interface PreviewEditMessage {token:string; capture_id:string|null; revision:string; frameId:string|null; basisRevision:number; edit:PreviewEdit}
 
 function observations(state:RecognitionState):PreviewObservation[] {
   const trial = state.trial?.trial;
@@ -963,13 +1027,13 @@ function observations(state:RecognitionState):PreviewObservation[] {
 export function previewSnapshot(state:RecognitionState, locale:Locale, editable:boolean, lockReason:string|null, running:boolean = state.running !== null):PreviewSnapshot {
   const document = state.document;
   return {
-    owner: state.owner, revision: state.view.revision, locale, editable, lockReason,
+    owner: state.owner, capture_id: state.view.capture_id, revision: state.view.revision, locale, editable, lockReason,
     localRevision: state.localRevision, documentRevision: state.view.document_revision, basisRevision: state.basis,
     frame: state.view.frame, basis: document?.basis ?? null,
     definitions: document?.definitions.map(item => ({id: item.id, name: item.name, kind: item.kind, revision: item.revision,
       region: item.region, search: item.template?.search_region ?? null})) ?? [],
-    selected: state.selected, confirmed: geometryConfirmed(state), canUndo: state.undo.length > 0,
-    canCreate: document !== null && document.definitions.length < MAX_DEFINITIONS, display: state.display, observations: observations(state),
+    selected: state.selected, confirmed: geometryConfirmed(state), canUndo: canUndoRecognition(state),
+    canCreate: document !== null && aggregateDefinitions(state) < MAX_DEFINITIONS, display: state.display, observations: observations(state),
     notice: state.notice, running,
   };
 }
@@ -978,12 +1042,12 @@ export function previewSnapshot(state:RecognitionState, locale:Locale, editable:
 // geometry and deletion also by the definition revision, and Undo by the local revision, so an edit made on an
 // older snapshot is refused (`staleEdit`) instead of overwriting newer main-window changes.
 export function applyPreviewEdit(state:RecognitionState, message:PreviewEditMessage, defaultName:(number:number) => string):RecognitionState {
-  if (message.token !== state.owner.token) return state;
+  if (message.token !== state.owner.token || message.capture_id !== state.view.capture_id || message.revision !== state.view.revision) return state;
   const {edit: change} = message;
-  if (change.kind === 'select') return selectDefinition(state, change.id);
-  if (change.kind === 'display') return setDisplay(state, change.display);
   const stale = {...state, notice: 'staleEdit' as const};
   if (message.frameId !== (state.view.frame?.id ?? null) || message.basisRevision !== state.basis) return stale;
+  if (change.kind === 'select') return selectDefinition(state, change.id);
+  if (change.kind === 'display') return setDisplay(state, change.display);
   const revision = (id:string) => state.document?.definitions.find(item => item.id === id)?.revision;
   switch (change.kind) {
     case 'create': return createDefinition(state, change.region, defaultName(state.nextId));

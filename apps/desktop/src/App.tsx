@@ -44,6 +44,7 @@ import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScop
 import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
 import type {TargetOperation, TargetPickerField, TargetPickerTicket, TargetState} from './target.ts';
 import type {AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, BootstrapStatus, CatalogEdit, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetApplicationResponse, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {CaptureCacheReceipt, NativeSelectionView} from './types.ts';
 
 const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0, workspace_id: null, workspace_revision: null};
 const EMPTY_FILTER: LogFilter = {text: '', level: ''};
@@ -154,6 +155,8 @@ export default function App() {
   // The host's lease as last polled; undefined until the first poll of this session answers.
   const hostAuthoringRef = useRef<AuthoringRef | null | undefined>(undefined);
   const [hostAuthoring, setHostAuthoring] = useState<AuthoringRef | null | undefined>(undefined);
+  const [nativeSelection, setNativeSelection] = useState<NativeSelectionView|null>(null);
+  const [nativeCache, setNativeCache] = useState<{owner:AuthoringRef; captureId:string; result:CaptureCacheReceipt}|null>(null);
   // Bumped around every Edit host command, so a poll answered before its reply cannot overwrite the lease it created.
   const authoringEpoch = useRef(0);
   const [authoringBusy, setAuthoringBusy] = useState<Command | null>(null);
@@ -166,6 +169,7 @@ export default function App() {
   const previewBridge = useRef({ready: () => {}, edit: (_message: recognition.PreviewEditMessage) => {}});
   const knownOcrEnvironment = useRef<Settings['ocr_environment']>(null);
   const recognitionConfigurationDirty = useRef(false);
+  const captureTransition = useRef(false);
   const expectedRun = useRef<string | null>(null);
   const epoch = useRef(0);
   const sessionGeneration = useRef(0);
@@ -195,7 +199,8 @@ export default function App() {
   const packagesRoot = settings?.packages_root ?? defaultPackagesRoot;
   const derived = useMemo(() => Object.fromEntries(workspaces.filter(isBound).map(workspace => [workspace.id, deriveBound(workspace.bound, savedEnvironment, locale)])) as Record<string, Derived>, [workspaces, savedEnvironment, locale]);
   const authoringWorkerPending = authoring?.pending?.kind === 'recognition_trial' || authoring?.pending?.kind === 'validate';
-  const active = starting !== null || busy(view.state) || authoringWorkerPending;
+  const nativeOccupied = nativeSelection?.occupied === true;
+  const active = starting !== null || busy(view.state) || authoringWorkerPending || nativeOccupied;
   const selected = nav.kind === 'workspace' ? workspaces.find(workspace => workspace.id === nav.id) : undefined;
   const closedSelected = nav.kind === 'closed' ? closed.find(item => item.id === nav.id) : undefined;
   const noSelection = nav.kind === 'none' || (nav.kind === 'workspace' && !selected);
@@ -430,7 +435,10 @@ export default function App() {
         setLastCheck(old => check ? old && old.view.run === check.controller.run && old.view.state === check.controller.state ? old : retainedCheck(check) : null);
         setPollError(null);
         // An Edit command settled during this poll decides the lease itself; this answer may predate it.
-        if (pollAuthoring === authoringEpoch.current) publishHostAuthoring(incoming.authoring ?? null);
+        if (pollAuthoring === authoringEpoch.current) {
+          publishHostAuthoring(incoming.authoring ?? null);
+          setNativeSelection(incoming.native_selection ?? null);
+        }
         if (pollEpoch === epoch.current && !startInFlight.current) {
           const next = {...idle, ...incoming.controller};
           setView(current => {
@@ -1081,7 +1089,7 @@ export default function App() {
     const ticket = recognition.syncTicket(session.recognition);
     if (ticket) {
       const next = await invoke<recognition.RecognitionView>('recognition_update', {
-        owner, revision: session.revision, document: ticket.document, frameId: ticket.frame_id, documentRevision: ticket.document_revision,
+        owner, revision: session.revision, captureId: ticket.capture_id, document: ticket.document, frameId: ticket.frame_id, documentRevision: ticket.document_revision,
       });
       updateRecognition(owner.token, state => recognition.applySync(state, ticket, next));
     }
@@ -1091,25 +1099,94 @@ export default function App() {
     return {session, state: session.recognition};
   }
 
-  async function loadRecognition() {
-    await recognitionCommand('loadingRecognition', async session => {
-      const path = await invoke<string | null>('recognition_pick', {owner: session.owner, revision: session.revision});
-      if (path === null) return;
-      if (session.recognition) await synchronizeRecognition(session.owner);
-      // Never leave the predecessor raster visible while replacement is pending or after its failure.
-      updateRecognition(session.owner.token, state => recognition.applyView(state, {...state.view, frame: null}));
-      await publishRecognitionPreview();
+  async function changeRecognitionCapture(intent: {newCapture:boolean} | {captureId:string} | {cached:true}) {
+    await recognitionCommand('loadingRecognition', async initial => {
+      captureTransition.current = true;
       try {
-        const next = await invoke<recognition.RecognitionView>('recognition_load', {owner: session.owner, revision: session.revision, path});
-        acceptRecognitionView(session.owner, next);
-      } catch (cause) {
-        // Replacement may have advanced the host revision before decoding failed. Reconcile only an explicit
-        // no-frame view; a refused admission must not silently restore the predecessor preview.
+        const path = 'newCapture' in intent
+          ? await invoke<string | null>('recognition_pick', {owner: initial.owner, revision: initial.revision}) : null;
+        if ('newCapture' in intent && path === null) return;
+        const {session, state} = await synchronizeRecognition(initial.owner);
+        // A crop choice created after the discard prompt needs a new decision.
+        if (state.cropIds.length > 0) throw new LocalFault({key: 'recognitionDraftChanged'});
+        const expected = {owner: session.owner, revision: session.revision, captureId: state.view.capture_id,
+          documentRevision: state.view.document_revision};
+        updateRecognition(session.owner.token, current => recognition.applyView(current, {...current.view, frame: null}));
+        await publishRecognitionPreview();
         try {
-          const next = await invoke<recognition.RecognitionView>('recognition_view', {owner: session.owner, revision: session.revision});
-          if (next.frame === null) acceptRecognitionView(session.owner, next);
-        } catch {/* The original load failure remains the visible outcome; Reload can reconcile later. */}
-        throw cause;
+          const next = 'newCapture' in intent
+            ? await invoke<recognition.RecognitionView>('recognition_load', {...expected, path, newCapture: intent.newCapture})
+            : 'cached' in intent
+              ? await invoke<recognition.RecognitionView>('recognition_load_cached', expected)
+              : await invoke<recognition.RecognitionView>('recognition_select', {...expected, selectedCaptureId: intent.captureId});
+          acceptRecognitionView(session.owner, next);
+        } catch (cause) {
+          try {
+            const next = await invoke<recognition.RecognitionView>('recognition_view', {owner: session.owner, revision: session.revision});
+            if (next.frame === null) acceptRecognitionView(session.owner, next);
+          } catch {/* Keep the original refusal; Reload can reconcile later. */}
+          throw cause;
+        }
+      } finally {
+        captureTransition.current = false;
+      }
+    });
+  }
+
+  function acceptNativeSelection(owner:AuthoringRef, next:NativeSelectionView|null) {
+    const session = authoringStore.current;
+    if (next && session && sameAuthoringRef(session.owner, owner) && sameAuthoringRef(next.owner, owner) && next.revision === session.revision) {
+      setNativeSelection(next);
+    }
+  }
+
+  async function discoverNativeCapture(path?:string|null) {
+    await recognitionCommand('readingRecognition', async session => {
+      const next = path === undefined
+        ? await invoke<NativeSelectionView>('native_discover', {owner:session.owner, revision:session.revision})
+        : await invoke<NativeSelectionView|null>('choose_authoring_executable', {owner:session.owner, revision:session.revision, path});
+      acceptNativeSelection(session.owner, next);
+    });
+  }
+
+  async function selectNativeCapture(candidateId?:string) {
+    await recognitionCommand('readingRecognition', async session => {
+      const next = candidateId === undefined
+        ? await invoke<NativeSelectionView|null>('native_pick_window', {owner:session.owner, revision:session.revision})
+        : await invoke<NativeSelectionView>('native_select_candidate', {owner:session.owner, revision:session.revision,
+          generation:nativeSelection?.selection_generation, candidateId});
+      acceptNativeSelection(session.owner, next);
+    });
+  }
+
+  async function captureNative(cacheOriginal:boolean) {
+    await recognitionCommand('loadingRecognition', async initial => {
+      captureTransition.current = true;
+      try {
+        const {session, state} = await synchronizeRecognition(initial.owner);
+        if (state.cropIds.length > 0 || !nativeSelection || !sameAuthoringRef(nativeSelection.owner, session.owner)
+          || nativeSelection.revision !== session.revision || nativeSelection.status !== 'selected') {
+          throw new LocalFault({key:'recognitionDraftChanged'});
+        }
+        const expected = {owner:session.owner, revision:session.revision, captureId:state.view.capture_id,
+          documentRevision:state.view.document_revision, generation:nativeSelection.selection_generation, cacheOriginal};
+        updateRecognition(session.owner.token, current => recognition.applyView(current, {...current.view, frame:null}));
+        await publishRecognitionPreview();
+        try {
+          const result = await invoke<{recognition:recognition.RecognitionView; selection:NativeSelectionView; cache:CaptureCacheReceipt|null}>('native_capture', expected);
+          acceptRecognitionView(session.owner, result.recognition);
+          acceptNativeSelection(session.owner, result.selection);
+          if (result.recognition.capture_id) setNativeCache({owner:session.owner, captureId:result.recognition.capture_id,
+            result:result.cache ?? {cached:false, error:null}});
+        } catch (cause) {
+          try {
+            const next = await invoke<recognition.RecognitionView>('recognition_view', {owner:session.owner, revision:session.revision});
+            acceptRecognitionView(session.owner, next);
+          } catch {/* Keep the acquisition refusal; Reload reconciles the current frame. */}
+          throw cause;
+        }
+      } finally {
+        captureTransition.current = false;
       }
     });
   }
@@ -1120,7 +1197,7 @@ export default function App() {
       const ticket = recognition.confirmTicket(state);
       if (!ticket) throw new LocalFault({key: 'recognitionDraftChanged'});
       const next = await invoke<recognition.RecognitionView>('recognition_confirm', {
-        owner: session.owner, revision: session.revision, frameId: ticket.frame_id, documentRevision: ticket.document_revision,
+        owner: session.owner, revision: session.revision, captureId: ticket.capture_id, frameId: ticket.frame_id, documentRevision: ticket.document_revision,
       });
       updateRecognition(ticket.token, current => recognition.applyConfirm(current, ticket, next));
     });
@@ -1144,7 +1221,7 @@ export default function App() {
       epoch.current += 1;
       setStripMessage(null);
       const result = await invoke<recognition.RecognitionTrial>('recognition_trial', {
-        owner: session.owner, revision: session.revision, frameId: ticket.frame_id, documentRevision: ticket.document_revision,
+        owner: session.owner, revision: session.revision, captureId: ticket.capture_id, frameId: ticket.frame_id, documentRevision: ticket.document_revision,
         selectedIds: ticket.selected_ids, sampleId: ticket.sample_id,
       });
       const retained = recognitionConfigurationDirty.current ? {...result, stale: true} : result;
@@ -1183,7 +1260,7 @@ export default function App() {
         throw new LocalFault(block === null ? {key: 'recognitionDraftChanged'} : {key: 'recognitionSaveBlocked', args: [block]});
       }
       const result = await invoke<{mutation: AuthoringMutation; recognition: recognition.RecognitionView | null}>('recognition_save', {
-        owner: session.owner, revision: session.revision, documentRevision: ticket.document_revision, cropIds: ticket.crop_ids,
+        owner: session.owner, revision: session.revision, captureId: ticket.capture_id, documentRevision: ticket.document_revision, cropIds: ticket.crop_ids,
       });
       updateAuthoring(latest => {
         const next = applyRecognitionMutation(latest, result.mutation);
@@ -1196,7 +1273,9 @@ export default function App() {
   async function discardRecognition() {
     await recognitionCommand('updatingRecognition', async session => {
       const sent = session.recognition;
-      const next = await invoke<recognition.RecognitionView>('recognition_discard', {owner: session.owner, revision: session.revision});
+      if (!sent) throw new LocalFault({key: 'recognitionUnavailable'});
+      const next = await invoke<recognition.RecognitionView>('recognition_discard', {owner: session.owner, revision: session.revision,
+        captureId: sent.view.capture_id, documentRevision: sent.view.document_revision});
       updateRecognition(session.owner.token, state => {
         const unchanged = sent && state.localRevision === sent.localRevision
           && state.cropIds.length === sent.cropIds.length && state.cropIds.every(id => state.cropMarks[id] === sent.cropMarks[id]);
@@ -1214,7 +1293,7 @@ export default function App() {
       let result: recognition.CopyResult | null = null;
       try {
         result = await invoke<recognition.CopyResult>('recognition_copy', {
-          owner: session.owner, revision: session.revision, documentRevision: ticket.document_revision, definitionIds: ticket.definition_ids, mode,
+          owner: session.owner, revision: session.revision, captureId: ticket.capture_id, documentRevision: ticket.document_revision, definitionIds: ticket.definition_ids, mode,
         });
         updateRecognition(captured.token, current => recognition.applyCopy(current, captured, result, null));
         updateAuthoring(current => current?.owner.token === captured.token ? {...current, notice: {key: 'recognitionCopied'}} : current);
@@ -1242,7 +1321,7 @@ export default function App() {
   async function publishRecognitionPreview() {
     if (!previewConnected.current) return;
     const session = authoringStore.current;
-    const editable = !closing && choice === null && !choiceRunning.current && !leaseLost && session?.pending?.kind !== 'exit' && session?.pending?.kind !== 'duplicate';
+    const editable = !captureTransition.current && !closing && choice === null && !choiceRunning.current && !leaseLost && session?.pending?.kind !== 'exit' && session?.pending?.kind !== 'duplicate';
     const running = session?.pending?.kind === 'recognition_trial' || session?.pending?.kind === 'validate'
       || (busy(view.state) && (view.operation === 'authoring_validate' || view.operation?.startsWith('recognition_') === true));
     const snapshot = session?.recognition ? recognition.previewSnapshot(session.recognition, locale, editable, editable ? null : ui.authoring.block('pending'), running) : null;
@@ -1258,7 +1337,7 @@ export default function App() {
     ready: () => {previewConnected.current = true; void publishRecognitionPreview();},
     edit: message => {
       const session = authoringStore.current;
-      if (!session || leaseLost || closing || choice !== null || choiceRunning.current || session.pending?.kind === 'exit' || session.pending?.kind === 'duplicate') return;
+      if (!session || captureTransition.current || leaseLost || closing || choice !== null || choiceRunning.current || session.pending?.kind === 'exit' || session.pending?.kind === 'duplicate') return;
       updateRecognition(session.owner.token, state => recognition.applyPreviewEdit(state, message, ui.recognition.defaultName));
       void publishRecognitionPreview();
     },
@@ -1430,6 +1509,13 @@ export default function App() {
         await stopValidation();
         // The operation handler retains its primary/cleanup outcome before this promise settles.
         await worker.catch(() => {});
+      }
+      const session = authoringStore.current;
+      if (session) {
+        const released = await authoringCall('readingRecognition', () => invoke<NativeSelectionView>('native_release_selection', {
+          owner:session.owner, revision:session.revision,
+        }));
+        acceptNativeSelection(session.owner, released);
       }
       if (save && !await saveAll()) return;
       if (intent.kind === 'duplicate') {
@@ -1805,7 +1891,7 @@ export default function App() {
   }
 
   const awaitingAuthoringWorker = authoringWorkerPending && !busy(view.state);
-  const owner = authoringWorkerPending ? leaseOwnerId : starting ? starting.workspaceId : view.workspace_id;
+  const owner = nativeOccupied ? nativeSelection.owner.workspace.workspace_id : authoringWorkerPending ? leaseOwnerId : starting ? starting.workspaceId : view.workspace_id;
   const phase = starting || awaitingAuthoringWorker ? 'preparing' : view.state;
   const stripKind = awaitingAuthoringWorker ? ui.operation(authoring?.pending?.kind === 'validate' ? 'authoring_validate'
     : authoring?.recognition?.running ? 'recognition_trial' : 'recognition_capabilities')
@@ -1813,7 +1899,11 @@ export default function App() {
   const editVisible = selected !== undefined && selected.id === leaseOwnerId && selected.page === 'edit' && authoring !== null;
   // Every surface, dialogs included, keeps the operation's Stop and the Edit owner's Return to Edit reachable.
   const strip = (idPrefix: string, onReturn: () => void = returnToEdit): ReactNode => <>
-    {active && <OperationStrip idPrefix={idPrefix} owner={owner === null ? t.applicationOwner : labelOf(owner)} kind={stripKind} phase={phase} run={starting || awaitingAuthoringWorker ? null : view.run}
+    {nativeOccupied && <OperationStrip idPrefix={`${idPrefix}-native`} owner={labelOf(nativeSelection.owner.workspace.workspace_id)}
+      kind={ui.nativeCapture.heading} phase={nativeSelection.status === 'capturing' || nativeSelection.status === 'discovering' ? 'running' : 'idle'}
+      run={null} message={{text:ui.nativeCapture.status[nativeSelection.status], error:nativeSelection.error !== null}}
+      stopDisabled={stopping || closing} onStop={() => void stopValidation()}/>}
+    {active && !nativeOccupied && <OperationStrip idPrefix={idPrefix} owner={owner === null ? t.applicationOwner : labelOf(owner)} kind={stripKind} phase={phase} run={starting || awaitingAuthoringWorker ? null : view.run}
       message={stripMessage && {text: renderMessage(locale, stripMessage.text), error: stripMessage.error}}
       stopDisabled={stopping || closing || (!authoringWorkerPending && (!view.run || !busy(view.state) || view.state === 'stopping' || starting !== null))}
       onStop={() => void (authoringWorkerPending || validationActive || recognitionActive ? stopValidation() : stopRun())}/>}
@@ -1924,11 +2014,19 @@ export default function App() {
             ? <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null}
               lockReason={commandReason ?? (closing ? t.applicationClosing : authoring.pending !== null ? ui.authoring.block('pending') : null)}
               leaseLost={leaseLost} trialActive={recognitionActive}
+              nativeSelection={nativeSelection && sameAuthoringRef(nativeSelection.owner, authoring.owner) && nativeSelection.revision === authoring.revision ? nativeSelection : null}
+              nativeCache={nativeCache && sameAuthoringRef(nativeCache.owner, authoring.owner) && nativeCache.captureId === authoring.recognition.view.capture_id ? nativeCache.result : null}
               onState={update => {
-                if (!closing && choice === null && !choiceRunning.current && !leaseLost) updateRecognition(authoring.owner.token, update);
+                if (!captureTransition.current && !closing && choice === null && !choiceRunning.current && !leaseLost) updateRecognition(authoring.owner.token, update);
               }}
               handlers={{
-                load: () => void loadRecognition(), confirm: () => void confirmRecognition(),
+                load: newCapture => void changeRecognitionCapture({newCapture}), selectCapture: captureId => void changeRecognitionCapture({captureId}),
+                reloadCached: () => void changeRecognitionCapture({cached:true}), selectNative: () => void ownAuthoringWorker(() => selectNativeCapture()),
+                discoverNative: () => void ownAuthoringWorker(() => discoverNativeCapture()),
+                executableNative: path => void ownAuthoringWorker(() => discoverNativeCapture(path)),
+                candidateNative: id => void ownAuthoringWorker(() => selectNativeCapture(id)),
+                captureNative: cacheOriginal => void ownAuthoringWorker(() => captureNative(cacheOriginal)),
+                confirm: () => void confirmRecognition(),
                 trial: (kind, ids) => void ownAuthoringWorker(() => trialRecognition(kind, ids)), stop: () => void stopValidation(),
                 save: () => void saveRecognition(), copy: (ids, mode) => void copyRecognition(ids, mode),
                 discard: () => void discardRecognition(), capabilities: () => void ownAuthoringWorker(checkRecognitionCapabilities),

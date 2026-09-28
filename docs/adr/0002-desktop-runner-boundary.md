@@ -100,9 +100,11 @@ and bound discovery to 64 candidates and private projection to 64 KiB. Publicati
 rechecks ownership, saved binding, installation, lifetime, and cancellation.
 
 These observations do not enable native Start, establish a window/input route,
-or replace M0/R6 qualification. Windows target implementation remains deferred;
-portable declaration/storage/restore and existing Windows core CI remain in scope.
-Actual WebView and authorized OS observations are separate from hosted checks.
+or replace M0/R6 qualification. General Windows target/launch configuration remains
+deferred. [ADR 0007](0007-native-capture-authoring.md) adds a separate transient
+Windows authoring selection and checkout shell without extending this macOS
+observation API. Actual WebView and authorized OS observations remain separate
+from hosted checks.
 
 ## Shell evidence
 

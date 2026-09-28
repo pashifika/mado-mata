@@ -18,14 +18,19 @@ use std::sync::{
 };
 use tauri::{Emitter, Manager};
 
+mod cache_commands;
 #[cfg(target_os = "macos")]
 mod picker;
 mod recognition_commands;
+mod visual_picker;
+#[cfg(windows)]
+mod windows_shell;
 
 struct Backend {
     bootstrap: Arc<Bootstrap>,
     closing: AtomicBool,
     exiting: AtomicBool,
+    shutdown_finished: AtomicBool,
     preview_owner: std::sync::Mutex<Option<AuthoringRef>>,
 }
 
@@ -315,6 +320,44 @@ async fn choose_target_application(
 }
 
 #[tauri::command]
+async fn choose_authoring_executable(
+    owner: AuthoringRef,
+    revision: String,
+    path: Option<String>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Backend>,
+) -> Result<Option<mado_mata_desktop::application::NativeSelectionView>, Fault> {
+    #[cfg(windows)]
+    {
+        let application = state.bootstrap.application()?;
+        let worker = application.clone();
+        let expected_owner = owner.clone();
+        let expected_revision = revision.clone();
+        let guard = background(move || {
+            worker.begin_recognition_picker(&expected_owner, &expected_revision)
+        })
+        .await?;
+        let selected = windows_shell::choose_executable(window, guard, path).await?;
+        match selected {
+            Some(path) => background(move || {
+                application.native_discover(&owner, &revision, Some(std::path::Path::new(&path)))
+            })
+            .await
+            .map(Some),
+            None => Ok(None),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (owner, revision, path, window, state);
+        Err(Fault::new(
+            "AuthoringPlatform",
+            "Executable selection is available only for Windows authoring",
+        ))
+    }
+}
+
+#[tauri::command]
 fn reserve_running_application(
     workspace: WorkspaceRef,
     request_id: String,
@@ -571,6 +614,10 @@ fn close(app: &tauri::AppHandle) {
         if app
             .run_on_main_thread(move || {
                 if !exit_app.state::<Backend>().exiting.load(Ordering::SeqCst) {
+                    exit_app
+                        .state::<Backend>()
+                        .shutdown_finished
+                        .store(true, Ordering::SeqCst);
                     exit_app.exit(i32::from(outcome.is_err()));
                 }
             })
@@ -591,11 +638,11 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let executable = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../tools/runtime-comparison/target/debug/mado-runtime-comparison");
-    let engine_executable = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../../../tools/runtime-comparison/target/desktop-engine/debug/mado-runtime-comparison",
-    );
+    let runner_name = format!("mado-runtime-comparison{}", std::env::consts::EXE_SUFFIX);
+    let runtime =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../tools/runtime-comparison/target");
+    let executable = runtime.join("debug").join(&runner_name);
+    let engine_executable = runtime.join("desktop-engine/debug").join(&runner_name);
     let builder = tauri::Builder::default()
         .setup(move |app| {
             let home = if data_root.is_some() {
@@ -615,6 +662,7 @@ fn main() {
                 )),
                 closing: AtomicBool::new(false),
                 exiting: AtomicBool::new(false),
+                shutdown_finished: AtomicBool::new(false),
                 preview_owner: std::sync::Mutex::new(None),
             });
             Ok(())
@@ -645,6 +693,12 @@ fn main() {
             save_target,
             remove_target,
             choose_target_application,
+            choose_authoring_executable,
+            visual_picker::native_pick_window,
+            recognition_commands::native_discover,
+            recognition_commands::native_select_candidate,
+            recognition_commands::native_capture,
+            recognition_commands::native_release_selection,
             reserve_running_application,
             check_running_application,
             cancel_running_application,
@@ -668,7 +722,11 @@ fn main() {
             recognition_commands::recognition_view,
             recognition_commands::recognition_capabilities,
             recognition_commands::recognition_pick,
+            recognition_commands::recognition_select,
             recognition_commands::recognition_load,
+            cache_commands::capture_cache_info,
+            cache_commands::capture_cache_open,
+            cache_commands::recognition_load_cached,
             recognition_commands::recognition_preview,
             recognition_commands::recognition_update,
             recognition_commands::recognition_confirm,
@@ -713,9 +771,12 @@ fn main() {
         .expect("desktop initialization")
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { api, .. } => {
-                if !app.state::<Backend>().closing.load(Ordering::SeqCst) {
+                let backend = app.state::<Backend>();
+                if !backend.shutdown_finished.load(Ordering::SeqCst) {
                     api.prevent_exit();
-                    request_close(app);
+                    if !backend.closing.load(Ordering::SeqCst) {
+                        request_close(app);
+                    }
                 }
             }
             tauri::RunEvent::Exit => {

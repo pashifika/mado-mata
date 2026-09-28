@@ -222,6 +222,27 @@ fn deinterlaces_and_crops_original_pixels_without_metadata() {
 }
 
 #[test]
+fn full_original_encoding_keeps_input_allowance_without_expanding_crop_allowance() {
+    let (width, height) = (2048, 2049);
+    let length = checked_rgba_bytes(width, height, ImageKind::Input).unwrap();
+    let reservation = reserve_payload(length).unwrap();
+    let mut pixels = vec![0; length];
+    pixels[..4].copy_from_slice(&[13, 71, 219, 255]);
+    pixels[length - 4..].copy_from_slice(&[231, 19, 5, 128]);
+    let image = DecodedImage::from_reserved_rgba(width, height, pixels, reservation).unwrap();
+    assert_eq!(
+        encode_crop(&image, [0, 0, width, height])
+            .unwrap_err()
+            .category,
+        "ImageLimit"
+    );
+    let encoded = encode_input(&image).unwrap();
+    let restored = decode_png(encoded.as_bytes(), ImageKind::Input).unwrap();
+    assert_eq!((restored.width, restored.height), (width, height));
+    assert_eq!(restored.rgba, image.rgba);
+}
+
+#[test]
 fn aggregate_reservation_follows_shared_owner_and_refuses_overcommit() {
     let budget = PayloadBudget::default();
     let occupied = budget.reserve(PAYLOAD_BYTES - 8).unwrap();

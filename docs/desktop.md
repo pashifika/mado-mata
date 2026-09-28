@@ -1,20 +1,23 @@
-# macOS desktop: controlled runs and recorded replay
+# Desktop checkout: authoring, controlled runs and recorded replay
 
-MadoMata's trusted Tauri/React WebView provides directory-package authoring,
-saved-image Recognition, inspection, profile editing, run control, App-local OCR
-configuration, and structured logs. Package code runs in the supervised
-QuickJS runner, never in the WebView. Controlled runs need no OCR installation.
-Optional recorded replay uses real engine OCR/template recognition over
-explicitly selected, previously authorized frames. Both desktop execution lanes
-retain the **controlled, non-native input sink**. Saved-image trials execute no
-package code or input. None grants live capture, game launch, focus changes to
-another application, permission prompts, or OS input.
+MadoMata's trusted Tauri/React WebView provides directory-package and Recognition
+authoring, inspection, profiles, run control, App-local OCR settings, and logs.
+Package code runs in the supervised QuickJS runner, never in the WebView.
+Controlled runs need no OCR installation. Recorded replay uses real engine
+OCR/template recognition over explicitly selected, previously authorized frames.
+Both execution lanes retain the **controlled, non-native input sink**.
 
-Only macOS desktop development is supported. Linux and Windows CI check the
-frontend and shell-independent Rust core, not additional desktop platforms.
-Live native qualification, R6, per-game background compatibility, and release
-distribution remain separate work. See the [engine prerequisites](runtime-native.md)
-and [replay boundary decision](adr/0003-desktop-recorded-replay.md).
+Recognition has a separate explicit, read-only native window acquisition path.
+It requires an authorized target and the fixed engine child; opening the editor
+does not capture, initialize OCR, or request permissions. Native Script Start,
+game launch, target activation, OS input, and automatic recovery remain refused.
+
+The checkout includes macOS and Windows shells; Linux checks the frontend and
+shell-independent core. Windows interactive authoring and both-OS native
+qualification are separate acceptance obligations, not claims made by a build.
+Release packaging and full runtime adoption remain unresolved. See the
+[engine prerequisites](runtime-native.md) and
+[capture boundary decision](adr/0007-native-capture-authoring.md).
 
 ## Build and run from the checkout
 
@@ -88,6 +91,24 @@ Rebuild both relevant runner artifacts after runtime changes. Rebuilding only
 the GUI is insufficient. Follow these explicit target directories; do not use a
 cross-compilation target for a local app run. CI may use other directories for
 compilation checks. Moving a binary alone does not supply the fixed paths.
+
+On Windows, use an x64 MSVC developer terminal with the Windows SDK, Node.js
+24.18.0, Rust 1.98.1, and an installed WebView2 runtime for interactive use.
+Preserve the [tracked symlink](development-guidance.md#claude-symlink).
+The same dependency installation, frontend build, and Cargo build commands above
+apply. Launch the checkout artifact with:
+
+```powershell
+.\apps\desktop\src-tauri\target\debug\mado-mata-desktop.exe --data-dir "$env:USERPROFILE\.config\mado-mata-acceptance"
+```
+
+The owned controlled and engine runners use the same directories with `.exe`
+suffixes. Build the optional engine from that terminal using the
+[Windows native setup](runtime-native.md#install-the-engine-prerequisites),
+adding `--target-dir tools/runtime-comparison/target/desktop-engine`.
+Windows CI compiles the shell and runs portable/Windows contract checks; it does
+not launch a GUI or qualify native capture, clipboard interaction, or OCR.
+
 An absent engine artifact or failure before Rust startup remains a typed
 diagnostic in the non-native GUI; controlled execution remains independent.
 
@@ -329,10 +350,93 @@ Snapshot destinations inside `sources`, `pkgs`, the configured collection, or an
 existing package are refused before creating directories or archives.
 
 Interruption regressions cover process-level failures, not physical power loss.
-Windows core checks do not qualify crash durability or an additional desktop OS;
-directory sync retains the [existing platform limitation](adr/0005-desktop-configuration-recovery.md).
-Custom archives, remote download, native capture/input, and the broader practical
-Edit readiness gate remain separate work.
+Windows directory sync retains the
+[existing platform limitation](adr/0005-desktop-configuration-recovery.md).
+Custom archives, remote download, game input, and native qualification remain
+separate work.
+
+## Acquire a native historical frame
+
+Use **Recognition** inside an owned Edit session. On macOS, first save a
+compatible application-bundle binding in the workspace's target settings.
+Discovery freshly verifies the installed application and running process.
+On Windows, choose the actual game's absolute `.exe`, either through the picker
+or literal field; this transient selection does not create a launch/input profile.
+Access-denied, replaced/reparse paths, ambiguous or unverifiable correspondence,
+and incompatible platform declarations refuse selection. Do not elevate or
+substitute a launcher to bypass refusal.
+
+1. Explicitly discover candidates. Discovery has a 5-second bound and accepts
+   at most 64 matching processes and 64 eligible windows. Opening controls alone
+   performs no capture or OCR initialization.
+2. Choose a verified candidate with the keyboard-operable list, or enter the
+   visual picker. Its outline represents the intended capture area, not an
+   assumed decorated window. Click selects; Escape cancels. Picker cancellation
+   preserves the previous selection and frozen image. Overlays must be removed
+   before Capture, and picker input is not forwarded to the game.
+3. Choose **Capture** explicitly. One request acquires at most one frame under
+   a 10-second bound. The original retained engine/window authority is used;
+   a changed lifetime or geometry requires fresh selection. There is no
+   full-display fallback, target focus/resize, retry, or liveness capture.
+4. The session must close cleanly and the owned child must be reaped without
+   forced containment before pixels become usable. **Cancel / Stop** remains
+   independent of native work. Cleanup has a 1-second bound and containment a
+   2-second bound; a logical timeout or Stop receipt is not cleanup proof.
+5. The accepted image is historical, not a live connection or readiness result.
+   Later target exit does not change frozen pixels. Trials run on those pixels
+   without another live capture. Native Script Start remains unavailable.
+
+Selection retains one metadata-only worker for at most 120 seconds, without an
+idle capture session or deadline extension. Capture consumes that selection.
+**Refresh** therefore starts fresh discovery and requires explicit selection
+and Capture; it never reconstructs authority from a PID, title, or window number.
+Other authoring children wait for selection-worker settlement, not an implicit
+queue. Ordinary Start and independent OCR Check remain excluded throughout Edit.
+
+The responsible capture executable is the fixed engine runner, not the WebView.
+Missing permission is a refusal; the application does not request a permission
+prompt to make an attempt succeed. Authorize each real target, environment and
+operation separately. Both-OS GUI, permission, target-loss, overlapping-window,
+mixed-DPI and negative-origin acceptance remain distinct from CI.
+
+### Captures, migration and private originals
+
+Each accepted new acquisition or **Add capture from PNG** gets a checked XID.
+Recognition JSON version 2 contains `captures: [{capture_id, document}]`; each
+inner document retains the existing basis, rounding and local `r1`/`r2` IDs.
+The package-wide definition key is `(capture_id, region_id)`, not a filename.
+Legacy single-image metadata is read without writing; explicit Save wraps it
+without changing existing Region IDs, asset IDs, paths, aliases or pasted code.
+Unknown versions and invalid data are refused rather than repaired.
+
+Only one original is decoded at a time. Switching preserves other capture
+metadata and assets, but releases the previous original before loading another.
+Resolve pending pixel crops explicitly, and confirm an unsaved basis or discard
+its changes before losing its only pixels. A failed replacement leaves no active
+image; it never relabels old pixels as the new capture. Switching, reopening,
+Undo, trials, previews, Copy and Save retain capture/revision fences.
+
+Limits remain aggregate: 256 definitions, 256 KiB metadata, 64 Undo actions /
+1 MiB, and 512 MiB accounted image payload. Originals are at most 16,384 pixels
+per axis, 16,777,216 pixels / 64 MiB decoded; encoded input, transfer and cache
+PNGs are bounded to 32 MiB. Native accounted image storage is limited to
+256 MiB, including retained mapping copies and observable padding. These are
+payload limits, not total RSS or opaque GPU/driver allocation guarantees.
+
+**Cache new native captures on this machine** is OFF by default. When enabled,
+only accepted, cleanly detached originals are written under the platform-resolved
+application cache: `captures/<package_id>/<capture_id>.png`.
+Cache failure is reported separately and does not discard a usable accepted
+frame. **Load cached original** is explicit, retains the capture ID, and creates
+fresh runtime revisions; it restores no native authority. Missing/corrupt files
+leave saved metadata, crops and templates intact. Nothing auto-loads on reopen.
+
+**Manage image cache** measures regular-file bytes when opened and displays the
+managed folder. Incomplete/failed measurement is not displayed as a successful
+total. **Open folder** uses Finder/Explorer and reports launch failure. Unsafe
+links/reparse paths are refused. There is no polling, quota, eviction, cleanup
+daemon, custom location or cache database. Originals and cache paths stay outside
+package duplication/export, profiles, configuration backups and routine logs.
 
 ## Author saved-image Recognition
 
@@ -431,8 +535,8 @@ Use this workflow:
    across kind changes. It appears only as escaped author-context comments in
    OCR Copy, never as a recognition filter, wait condition, or trial verdict.
 
-Copy publishes `mado-host-v1` source through the native macOS clipboard only
-after the explicit action. It needs no browser clipboard permission or general
+Copy publishes `mado-host-v1` source through the native macOS or Windows clipboard
+only after the explicit action. It needs no browser clipboard permission or general
 clipboard plugin and never edits package source. Preserve the package's existing
 Readiness/workflow exports when pasting. Relevant edits mark the corresponding
 Copy obsolete; pasted code is never updated automatically.

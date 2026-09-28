@@ -13,6 +13,8 @@ function bounds(min: number | undefined, max: number | undefined) {
 
 function catalog(data: typeof enData) {
   return {
+    captureCache: data.captureCache,
+    nativeCapture: data.nativeCapture,
     recognition: {
       ...data.recognition,
       frame: (width: number, height: number) => interpolate(data.recognition.frame, {width, height}),

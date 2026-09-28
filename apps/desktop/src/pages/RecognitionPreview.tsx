@@ -15,7 +15,7 @@ import type {Fault} from '../types.ts';
 // The main window's label in tauri.conf.json; it owns the Edit session and applies every relayed edit.
 const MAIN_LABEL = 'main';
 
-interface Raster {frameId: string; url: string}
+interface Raster {captureId: string; frameId: string; url: string}
 
 // Root of the detached preview window: the frame image, zoom, content selection and on-image region editing.
 // It holds no authoritative metadata. The main window emits snapshots; edits are relayed back and apply only there.
@@ -60,24 +60,25 @@ export default function RecognitionPreview() {
   // The raster is read once per frame through the owner-scoped host command; no image data crosses windows.
   const token = snapshot?.owner.token ?? null;
   const frameId = snapshot?.frame?.id ?? null;
+  const captureId = snapshot?.capture_id ?? null;
   useEffect(() => {
-    if (snapshot === null || frameId === null) {
+    if (snapshot === null || frameId === null || captureId === null) {
       setRaster(null);
       return;
     }
     let alive = true;
     let url: string | null = null;
     setRasterError(null);
-    invoke<ArrayBuffer>('recognition_preview', {owner: snapshot.owner, frameId}).then(bytes => {
+    invoke<ArrayBuffer>('recognition_preview', {owner: snapshot.owner, frameId, captureId}).then(bytes => {
       if (!alive) return;
       url = URL.createObjectURL(new Blob([bytes], {type: 'image/png'}));
-      setRaster({frameId, url});
+      setRaster({captureId, frameId, url});
     }).catch(cause => {if (alive) {setRaster(null); setRasterError(fault(cause));}});
     return () => {
       alive = false;
       if (url !== null) URL.revokeObjectURL(url);
     };
-  }, [token, frameId]);
+  }, [token, captureId, frameId]);
 
   useEffect(() => {
     const element = stage.current;
@@ -89,7 +90,8 @@ export default function RecognitionPreview() {
 
   function send(edit: PreviewEdit) {
     if (snapshot === null) return;
-    const message: PreviewEditMessage = {token: snapshot.owner.token, frameId: snapshot.frame?.id ?? null, basisRevision: snapshot.basisRevision, edit};
+    const message: PreviewEditMessage = {token: snapshot.owner.token, capture_id: snapshot.capture_id, revision: snapshot.revision,
+      frameId: snapshot.frame?.id ?? null, basisRevision: snapshot.basisRevision, edit};
     setSendError(null);
     emitTo(MAIN_LABEL, PREVIEW_EDIT, message).catch(cause => setSendError(fault(cause)));
   }
@@ -127,7 +129,7 @@ export default function RecognitionPreview() {
         ? <p className="preview-message">{r.previewNoFrame}</p>
         : <div ref={stage} className={display.zoom === 'fit' ? 'recognition-stage fit' : 'recognition-stage'}>
           <RecognitionCanvas width={frame.width} height={frame.height} basis={basis} definitions={snapshot.definitions} selected={snapshot.selected}
-            observations={snapshot.observations} image={raster?.frameId === frame.id ? raster.url : null} scale={scale} tool={display.tool}
+            observations={snapshot.observations} image={raster?.captureId === snapshot.capture_id && raster?.frameId === frame.id ? raster.url : null} scale={scale} tool={display.tool}
             editable={editable} generation={snapshot} labels={{surface: r.surfaceLabel, search: r.searchLabel, observed: r.observed}} onEdit={send}/>
         </div>;
 

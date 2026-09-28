@@ -1997,6 +1997,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
  "objc2-security",
  "objc2-uniform-type-identifiers",
@@ -2027,6 +2028,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "sysinfo",
+ "windows-sys 0.61.2",
+ "xid",
 ]
 
 [[package]]

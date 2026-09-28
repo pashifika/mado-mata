@@ -1,11 +1,12 @@
 use super::evidence::{Observer, receive_frames};
 use super::protocol::{emit, frame};
 use super::supervision::{
-    OwnedChild, configure_engine_loader, retain_child_build, settled_evidence, terminal_primary,
+    configure_engine_loader, retain_child_build, settled_evidence, terminal_primary,
 };
 use crate::environment::Configuration;
 use crate::images::{DecodedImage, PayloadBytes, reserve_payload};
 use crate::model::{Control, Fault, Limits, encode_bounded};
+use crate::owned_child::{ChildStdio, Environment, OwnedChild};
 use crate::recognition_trial::{
     self as trial, Capabilities, TrialRequest, TrialSelection, WireRequest, WireSelection,
 };
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -156,11 +157,7 @@ fn supervise(
     bytes.push(b'\n');
     let run = &invocation.run;
     let mut command = Command::new(executable);
-    command
-        .arg("recognition-child")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.arg("recognition-child");
     command.env("ORT_DISABLE_TELEMETRY", "1");
     if let Some(value) = &invocation.configuration {
         let configuration: Configuration<Value> = serde_json::from_value(value.clone())
@@ -168,22 +165,20 @@ fn supervise(
         configure_engine_loader(&mut command, &configuration)?;
     }
     control.check()?;
-    let mut child = OwnedChild(command.spawn().map_err(|error| {
-        Fault::new(
-            "EngineUnavailable",
-            "the fixed engine runner could not start",
-        )
-        .with_context(json!({"stage":"child_startup","io_kind":format!("{:?}",error.kind())}))
-    })?);
-    let pid = child.0.id();
+    let mut child = OwnedChild::spawn(&mut command, ChildStdio::Piped, Environment::Inherited)
+        .map_err(|mut error| {
+            error.category = "EngineUnavailable".into();
+            error
+        })?;
+    let pid = child.id();
     let pipe_fault = || {
         Fault::new("Transport", "owned recognition pipe unavailable").with_context(
             json!({"cleanup":{"clean":false,"child_started":true},"stage":"child_startup"}),
         )
     };
-    let mut input = child.0.stdin.take().ok_or_else(pipe_fault)?;
-    let stdout = child.0.stdout.take().ok_or_else(pipe_fault)?;
-    let mut stderr = child.0.stderr.take().ok_or_else(pipe_fault)?;
+    let mut input = child.stdin.take().ok_or_else(pipe_fault)?;
+    let stdout = child.stdout.take().ok_or_else(pipe_fault)?;
+    let mut stderr = child.stderr.take().ok_or_else(pipe_fault)?;
     let (sender, commands) = mpsc::sync_channel::<Value>(1);
     let mut sender = Some(sender);
     let writer = thread::spawn(move || -> Result<(), Fault> {
@@ -255,7 +250,7 @@ fn supervise(
         for message in receiver.try_iter() {
             faulted |= accept(message);
         }
-        match child.0.try_wait() {
+        match child.try_wait() {
             Ok(Some(exit)) => break exit,
             Ok(None) => {}
             Err(_) => {
@@ -280,8 +275,8 @@ fn supervise(
             forced = true;
             // Keep ownership even if OS containment/reaping fails. An error must not
             // detach transport workers or admit a successor while the PID is outstanding.
-            let _ = child.0.kill();
-            match child.0.wait() {
+            let _ = child.kill();
+            match child.wait() {
                 Ok(exit) => break exit,
                 Err(_) => {
                     containment_fault = Some(Fault::new(

@@ -9,13 +9,13 @@ signed checksums. Rustup installs Rust **1.98.1** with the command below.
 Linux needs a C compiler and linker; macOS needs Xcode Command Line Tools;
 Windows needs the Visual Studio C++ build tools and Windows SDK for Rust's
 MSVC target. The controlled runtime and desktop core do not require OCR models,
-capture permissions, or a sibling engine checkout. Only macOS builds the Tauri
-desktop shell; Linux and Windows check the frontend and shell-independent core.
+capture permissions, or a sibling engine checkout. macOS and Windows build the
+Tauri desktop shell; Linux checks the frontend and shell-independent core.
 
 The actionlint/lychee installer supports Linux x86_64/aarch64 and macOS
 arm64/x86_64. It does not provide Windows assets; use a supported Linux
-environment for the full check, or run the documented runtime/desktop-core mode
-on Windows. This tooling limitation is not an application support decision.
+environment for the full check, or run the documented runtime/desktop mode on
+Windows. This tooling limitation is not native GUI acceptance.
 
 The pinned binary-only Python requirements cover CPython 3.11 through 3.14.
 Other interpreter versions need reviewed wheel hashes; do not fall back to an
@@ -44,7 +44,7 @@ application-owned compiler and desktop directories inside a temporary
 tracked-file snapshot. It verifies Node's exact version and uses the committed
 npm lockfiles. Compiler self-checks precede the Rust comparison checks; desktop
 state tests, the frontend build, and Rust core tests follow the controlled suite.
-macOS then builds the shell with `custom-protocol`, without `webdriver`.
+macOS and Windows then build the shell with `custom-protocol`, without `webdriver`.
 Installation never runs a workload package's installer or dependency lifecycle
 scripts; only the trusted application test/build scripts run explicitly.
 Cargo and npm need access to public dependency sources on a fresh checkout;
@@ -154,16 +154,18 @@ The full check has these responsibilities:
   [Edit WebView acceptance](desktop.md#directory-package-authoring-acceptance),
   including left-tree navigation and contextual file actions, physical OS IME
   input, and storage power-loss durability are not hosted CI claims.
-- On macOS, build the real Tauri shell with `--features custom-protocol` after
-  building frontend assets. The test-only `webdriver` feature is not enabled.
+- On macOS and Windows, build the real Tauri shell with `--features custom-protocol`
+  after building frontend assets. Windows also runs non-GUI shell validation and
+  real owned-process/Job lifetime regressions; the test-only `webdriver` feature
+  is not enabled. Linux reports the shell build as unexecuted.
   The separate engine artifact, actual
-  [recorded-replay WebView acceptance](desktop.md#recorded-replay-acceptance), and
+  [recorded-replay WebView acceptance](desktop.md#recorded-replay-acceptance),
   [saved-image Recognition acceptance](desktop.md#saved-image-recognition-acceptance)
-  remain explicit local checks; no private corpus, model, or native permission
-  is added to default CI. Source tests do not prove native picker/clipboard
-  interaction, recognition quality, physical pointer input, session cleanup under
-  a real backend, or total RSS. Linux and Windows explicitly report the shell
-  build as unexecuted.
+  and [native authoring acceptance](desktop.md#acquire-a-native-historical-frame)
+  remain explicit local checks. No private target, corpus, model, or native
+  permission is added to default CI. These checks do not prove native picker or
+  clipboard interaction, recognition quality, physical pointer behavior,
+  capture-session cleanup under a real backend, or total RSS.
 
 For governance policy and its behavioral tests only, after Python dependency
 setup:
@@ -337,7 +339,7 @@ job runs with `always()` and needs the selector plus all four mandatory jobs:
 | `branch-flow` | Event and branch-route validation |
 | `repository` | Full local check, controlled runtime, desktop frontend/core on Linux |
 | `runtime-macos` | Policy, governance tests, controlled runtime, desktop frontend/core, and shell build on Apple Silicon macOS |
-| `runtime-windows` | Policy, governance tests, controlled runtime, desktop frontend/core on Windows |
+| `runtime-windows` | Policy, governance tests, controlled runtime, desktop frontend/core, Windows shell build and non-GUI shell/owned-process contracts |
 
 Only success from every mandatory job passes. Failure, cancellation, missing
 results, unexpected dependencies, and skipped mandatory work cannot produce a

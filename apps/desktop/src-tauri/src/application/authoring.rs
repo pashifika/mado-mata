@@ -11,6 +11,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+mod native_capture;
+pub use native_capture::{
+    NativeCandidateView, NativeCaptureArea, NativeCaptureBounds, NativeCaptureResult,
+    NativeCoordinateUnit, NativePickerCandidate, NativePickerSnapshot, NativeSelectionView,
+};
+
 mod recognition;
 pub use recognition::{
     RecognitionCopy, RecognitionFrame, RecognitionPickerGuard, RecognitionSaved, RecognitionTrial,
@@ -52,9 +58,10 @@ pub struct AuthoringValidation {
 pub(super) struct Lease {
     pub owner: AuthoringRef,
     candidate: Arc<Candidate>,
-    revision: String,
+    pub(super) revision: String,
     pub containment: Option<Fault>,
     recognition: recognition::RecognitionState,
+    pub(super) native: native_capture::NativeState,
     // Duplicate changes the lease source; every previously edited source still
     // needs explicit reinspection when the session exits.
     roots: BTreeSet<PathBuf>,
@@ -63,6 +70,7 @@ pub(super) struct Lease {
 pub(super) struct StopOwner {
     owner: AuthoringRef,
     run: Option<String>,
+    native: Option<native_capture::NativeControl>,
 }
 
 impl Lease {
@@ -177,9 +185,14 @@ impl Application {
             candidate: Arc::new(candidate),
             containment: None,
             recognition: recognition::RecognitionState::default(),
+            native: native_capture::NativeState::default(),
             roots,
         });
-        *lock(&self.authoring_stop) = Some(StopOwner { owner, run: None });
+        *lock(&self.authoring_stop) = Some(StopOwner {
+            owner,
+            run: None,
+            native: None,
+        });
         Ok(result)
     }
 
@@ -218,9 +231,11 @@ impl Application {
         lease.revision = candidate.revision().to_owned();
         lease.candidate = Arc::new(candidate);
         lease.recognition = recognition::RecognitionState::default();
+        lease.native = native_capture::NativeState::default();
         *lock(&self.authoring_stop) = Some(StopOwner {
             owner: next,
             run: None,
+            native: None,
         });
         Ok(result)
     }
@@ -409,8 +424,12 @@ impl Application {
                     "Stop does not name the current authoring owner",
                 )
             })?;
+        let native = owned.native.as_ref().is_some_and(|control| {
+            control.cancel();
+            true
+        });
         let Some(run) = &owned.run else {
-            return Ok(false);
+            return Ok(native);
         };
         self.runner.stop(run)?;
         Ok(true)
@@ -421,6 +440,7 @@ impl Application {
         let lease = state.authoring(owner)?;
         self.publisher.check_admission(lease.candidate.root())?;
         self.collect(&mut state);
+        state = self.settle_native_selection(owner, state)?;
         state.work_idle()?;
         let lease = state.authoring.as_ref().expect("owner checked");
         let affected = |workspace: &super::Workspace| {

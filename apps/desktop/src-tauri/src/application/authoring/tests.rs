@@ -5,14 +5,14 @@ use std::fs;
 use std::sync::{Barrier, mpsc};
 use std::time::Instant;
 
-struct Sources {
+pub(super) struct Sources {
     fixture: Fixture,
     root: PathBuf,
     package: PathBuf,
 }
 
 impl Sources {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let fixture = Fixture::new();
         let root = fixture.root.with_extension("authoring-sources");
         fs::create_dir(&root).unwrap();
@@ -25,7 +25,7 @@ impl Sources {
         }
     }
 
-    fn app(&self) -> &Arc<Application> {
+    pub(super) fn app(&self) -> &Arc<Application> {
         &self.fixture.application
     }
 }
@@ -35,6 +35,57 @@ impl Drop for Sources {
         let _ = self.app().shutdown();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn forged_native_selection_preserves_historical_pixels_and_owner_fences() {
+    let sources = Sources::new();
+    let app = sources.app();
+    let workspace = inspect_named(app, "native-selection", &sources.package).unwrap();
+    let editor = app
+        .authoring_open(&workspace_ref(&workspace), &sources.package)
+        .unwrap();
+    let prepared = app
+        .recognition_prepare_capture(&editor.owner, &editor.revision, None, 0)
+        .unwrap();
+    let image =
+        mado_runtime_comparison::images::DecodedImage::from_rgba(1, 1, vec![12, 34, 56, 255])
+            .unwrap();
+    let before = app
+        .recognition_install_capture(&editor.owner, &editor.revision, None, prepared, image)
+        .unwrap();
+    assert!(
+        matches!(app.native_picker_snapshot(&editor.owner, &editor.revision),
+        Err(error) if error.category == "StaleNativeSelection")
+    );
+    assert!(
+        matches!(app.native_select_candidate(&editor.owner, &editor.revision, 1, "renderer-invented"),
+        Err(error) if error.category == "StaleNativeSelection")
+    );
+    assert!(
+        matches!(app.native_capture(&editor.owner, &editor.revision, 1,
+        before.capture_id.as_deref(), before.document_revision, None),
+        Err(error) if error.category == "StaleNativeSelection")
+    );
+    assert!(
+        matches!(app.native_picker_finished(&editor.owner, &editor.revision, 1),
+        Err(error) if error.category == "StaleNativePicker")
+    );
+    let after = app
+        .recognition_view(&editor.owner, &editor.revision)
+        .unwrap();
+    assert_eq!(after.capture_id, before.capture_id);
+    assert_eq!(after.frame.unwrap().id, before.frame.unwrap().id);
+    let mut expired = editor.owner.clone();
+    expired.token.push_str("-expired");
+    assert!(
+        matches!(app.native_picker_snapshot(&expired, &editor.revision),
+        Err(error) if error.category == "StaleAuthoring")
+    );
+    assert!(
+        matches!(app.native_picker_snapshot(&editor.owner, "expired-revision"),
+        Err(error) if error.category == "AuthoringConflict")
+    );
 }
 
 #[test]

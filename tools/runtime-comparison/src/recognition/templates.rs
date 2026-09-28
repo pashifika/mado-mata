@@ -1,6 +1,7 @@
 use super::{
     AUTHORING_ASSET, ENGINE_MANIFEST_ASSET, ENGINE_MANIFEST_PATH, MAX_METADATA_BYTES,
-    RecognitionDocument, RecognitionKind, TEMPLATE_MAPS_ASSET, bounded_json, invalid,
+    RecognitionDocument, RecognitionKind, RecognitionMetadata, TEMPLATE_MAPS_ASSET, bounded_json,
+    invalid,
 };
 use crate::images::{ImageKind, validate_png};
 use crate::inventory::{Inventory, PackageDraft};
@@ -19,11 +20,10 @@ pub struct TemplateMaps {
 
 /// Builds only the authored manifest. Paths here are engine-relative entry names,
 /// not filesystem paths. Shared crops must agree on their matching defaults.
-pub fn build_template_assets(
-    document: &RecognitionDocument,
+pub fn build_template_assets<'a>(
+    documents: impl IntoIterator<Item = &'a RecognitionDocument>,
     package_id: &str,
 ) -> Result<Option<(TemplateMaps, Vec<u8>)>, Fault> {
-    document.validate()?;
     PackageDraft::check_id(package_id)?;
     let mut entries = BTreeMap::from([(
         ENGINE_MANIFEST_PATH.to_owned(),
@@ -31,46 +31,62 @@ pub fn build_template_assets(
     )]);
     let mut aliases = BTreeMap::new();
     let mut templates = BTreeMap::<String, Value>::new();
-    for definition in &document.definitions {
-        if definition.kind != RecognitionKind::Template {
+    let mut rights = None;
+    for document in documents {
+        document.validate()?;
+        if !document.definitions.iter().any(|definition| {
+            definition.kind == RecognitionKind::Template && definition.saved.is_some()
+        }) {
             continue;
         }
-        let Some(saved) = &definition.saved else {
-            continue;
-        };
-        let settings = definition
-            .template
+        let current = document
+            .template_rights
             .as_ref()
-            .ok_or_else(|| invalid("template settings are missing"))?;
-        // A crop can be retained by multiple definitions. Its engine identity must
-        // therefore depend on the crop rather than on whichever definition is first.
-        let id = format!("recognition.{}", saved.asset);
-        let path = format!("templates/{}.png", saved.asset);
-        let template = json!({
-            "id":id,"path":path,"width":saved.width,"height":saved.height,
-            "coordinate_space":"capture_pixels",
-            "content":{"algorithm":"sha256","value":saved.sha256},
-            "match_defaults":{"min_score":settings.threshold,"max_results":settings.max_results}
-        });
-        if templates
-            .get(&saved.asset)
-            .is_some_and(|previous| previous != &template)
-        {
+            .ok_or_else(|| invalid("template rights are missing"))?;
+        if rights.is_some_and(|previous| previous != current) {
             return Err(invalid(
-                "shared template crop has conflicting match defaults",
+                "saved templates across captures require agreeing license and provenance",
             ));
         }
-        templates.insert(saved.asset.clone(), template);
-        entries.insert(path, saved.asset.clone());
-        aliases.insert(saved.asset.clone(), id);
+        rights = Some(current);
+        for definition in &document.definitions {
+            if definition.kind != RecognitionKind::Template {
+                continue;
+            }
+            let Some(saved) = &definition.saved else {
+                continue;
+            };
+            let settings = definition
+                .template
+                .as_ref()
+                .ok_or_else(|| invalid("template settings are missing"))?;
+            // A crop can be retained by multiple definitions. Its engine identity must
+            // therefore depend on the crop rather than on whichever definition is first.
+            let id = format!("recognition.{}", saved.asset);
+            let path = format!("templates/{}.png", saved.asset);
+            let template = json!({
+                "id":id,"path":path,"width":saved.width,"height":saved.height,
+                "coordinate_space":"capture_pixels",
+                "content":{"algorithm":"sha256","value":saved.sha256},
+                "match_defaults":{"min_score":settings.threshold,"max_results":settings.max_results}
+            });
+            if templates
+                .get(&saved.asset)
+                .is_some_and(|previous| previous != &template)
+            {
+                return Err(invalid(
+                    "shared template crop has conflicting match defaults",
+                ));
+            }
+            templates.insert(saved.asset.clone(), template);
+            entries.insert(path, saved.asset.clone());
+            aliases.insert(saved.asset.clone(), id);
+        }
     }
     if templates.is_empty() {
         return Ok(None);
     }
-    let rights = document
-        .template_rights
-        .as_ref()
-        .ok_or_else(|| invalid("template rights are missing"))?;
+    let rights = rights.ok_or_else(|| invalid("template rights are missing"))?;
     let mut provenance = json!({"created_by":rights.created_by});
     if let Some(created_for) = &rights.created_for {
         provenance["created_for"] = json!(created_for);
@@ -94,7 +110,7 @@ pub fn build_template_assets(
 pub fn validate_package_assets<'a>(
     manifest: &Value,
     asset: impl Fn(&str) -> Option<&'a [u8]>,
-) -> Result<Option<RecognitionDocument>, Fault> {
+) -> Result<Option<RecognitionMetadata>, Fault> {
     let declarations = manifest["assets"]
         .as_object()
         .ok_or_else(|| invalid("package asset declarations are missing"))?;
@@ -107,9 +123,9 @@ pub fn validate_package_assets<'a>(
         return Ok(None);
     }
     let metadata = declared_json(manifest, AUTHORING_ASSET, &asset)?;
-    let document = RecognitionDocument::from_bytes(metadata)?;
+    let document = RecognitionMetadata::from_bytes(metadata)?;
     let mut checked = BTreeMap::new();
-    for definition in &document.definitions {
+    for definition in document.definitions() {
         let Some(saved) = &definition.saved else {
             continue;
         };
@@ -144,7 +160,7 @@ pub fn validate_package_assets<'a>(
     let package_id = manifest["package_id"]
         .as_str()
         .ok_or_else(|| invalid("package identity is missing"))?;
-    match build_template_assets(&document, package_id)? {
+    match build_template_assets(document.documents(), package_id)? {
         Some((expected_maps, expected_manifest)) => {
             let maps: TemplateMaps =
                 serde_json::from_slice(declared_json(manifest, TEMPLATE_MAPS_ASSET, &asset)?)
@@ -178,7 +194,7 @@ pub fn validate_package_assets<'a>(
     Ok(Some(document))
 }
 
-pub fn validate_inventory(inventory: &Inventory) -> Result<Option<RecognitionDocument>, Fault> {
+pub fn validate_inventory(inventory: &Inventory) -> Result<Option<RecognitionMetadata>, Fault> {
     validate_package_assets(&inventory.metadata["manifest"], |id| {
         inventory.assets.get(id).map(AsRef::as_ref)
     })
@@ -194,7 +210,8 @@ pub fn merge_effective_template_maps(
     let Some(document) = validate_inventory(inventory)? else {
         return Ok(());
     };
-    let Some((maps, _)) = build_template_assets(&document, &inventory.package_id)? else {
+    let Some((maps, _)) = build_template_assets(document.documents(), &inventory.package_id)?
+    else {
         return Ok(());
     };
     for (destination, incoming) in [

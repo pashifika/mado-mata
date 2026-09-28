@@ -45,10 +45,42 @@ impl Editor {
         &self.fixture.application
     }
     fn load(&self) -> RecognitionView {
-        self.app()
-            .recognition_load(&self.view.owner, &self.view.revision, &self.source)
-            .unwrap()
+        load_selected(
+            self.app(),
+            &self.view.owner,
+            &self.view.revision,
+            &self.source,
+        )
+        .unwrap()
     }
+}
+
+fn current_capture(app: &Application) -> String {
+    lock(&app.workspaces)
+        .authoring
+        .as_ref()
+        .unwrap()
+        .recognition
+        .capture_id
+        .clone()
+        .unwrap()
+}
+
+fn load_selected(
+    app: &Application,
+    owner: &AuthoringRef,
+    revision: &str,
+    path: &Path,
+) -> Result<RecognitionView, Fault> {
+    let view = app.recognition_view(owner, revision)?;
+    app.recognition_load(
+        owner,
+        revision,
+        path,
+        view.capture_id.as_deref(),
+        view.document_revision,
+        false,
+    )
 }
 
 /// Stands in for the fixed engine child's reported grouped-request bound; these
@@ -88,6 +120,7 @@ fn retain_observed_trial(
         .trial = Some(RecognitionTrial {
         owner: owner.clone(),
         revision: revision.to_owned(),
+        capture_id: view.capture_id.clone().unwrap(),
         document_revision: view.document_revision,
         frame_id: Some(frame.id.clone()),
         frame_revision: frame.revision,
@@ -137,6 +170,7 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
             document,
             Some(&frame_id),
             loaded.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     assert!(!updated.frame.as_ref().unwrap().confirmed);
@@ -146,6 +180,7 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
             &editor.view.revision,
             &frame_id,
             updated.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     let source_path = Path::new(&editor.view.package_path).join("main.ts");
@@ -163,6 +198,7 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
                 confirmed.document_revision,
                 &ids,
                 mode,
+                &current_capture(editor.app()),
             )
             .unwrap();
         assert!(!copied.verified);
@@ -174,6 +210,7 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
             &editor.view.revision,
             confirmed.document_revision,
             &["zone0".into()],
+            &current_capture(editor.app()),
         )
         .unwrap();
     let new_revision = saved.mutation.committed_revision;
@@ -183,12 +220,20 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
         .publisher
         .open(Path::new(&editor.view.package_path))
         .unwrap();
-    let crop = candidate.recognition_crop("zone0").unwrap().unwrap();
+    let crop = candidate
+        .recognition_crop(&current_capture(app), "zone0")
+        .unwrap()
+        .unwrap();
     let decoded = images::decode_png(&crop, ImageKind::Crop).unwrap();
     assert_eq!((decoded.width, decoded.height), (10, 8));
     assert_eq!(&decoded.rgba[..4], &[7, 7, 17, 255]);
     assert_eq!(&decoded.rgba[decoded.rgba.len() - 4..], &[16, 14, 17, 255]);
-    assert!(candidate.recognition_crop("zone1").unwrap().is_none());
+    assert!(
+        candidate
+            .recognition_crop(&current_capture(app), "zone1")
+            .unwrap()
+            .is_none()
+    );
     let manifest: Value = serde_json::from_slice(
         &fs::read(Path::new(&editor.view.package_path).join("package.json")).unwrap(),
     )
@@ -216,6 +261,7 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
                 requested_revision,
                 &["zone0".into()],
                 sample,
+                &current_capture(editor.app()),
             )
             .err()
             .unwrap();
@@ -230,6 +276,7 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
                 view.document_revision,
                 &["zone0".into()],
                 Some("zone0"),
+                &current_capture(editor.app()),
             )
             .unwrap();
         assert!(
@@ -245,8 +292,12 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
         // not inference: it must not launch a child without a configured environment.
     };
     recheck_sample(&editor.view.owner, &new_revision, &saved_view);
-    app.recognition_preview(&editor.view.owner, &frame_id)
-        .unwrap();
+    app.recognition_preview(
+        &editor.view.owner,
+        &frame_id,
+        &current_capture(editor.app()),
+    )
+    .unwrap();
     app.recognition_release_preview(&editor.view.owner);
     assert_eq!(
         app.recognition_view(&editor.view.owner, &new_revision)
@@ -276,6 +327,7 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
                 restored.document_revision,
                 &ids,
                 mode,
+                &current_capture(editor.app()),
             )
             .err()
             .expect("saved coordinates and a crop do not confirm a loaded frame");
@@ -302,6 +354,7 @@ fn failed_replacement_has_no_frame_and_stale_metadata_cannot_overwrite_newer_edi
             document.clone(),
             Some(&frame_id),
             loaded.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     document.definitions[0].name = "stale overwrite".into();
@@ -313,16 +366,20 @@ fn failed_replacement_has_no_frame_and_stale_metadata_cannot_overwrite_newer_edi
             document,
             Some(&frame_id),
             loaded.document_revision,
+            &current_capture(editor.app()),
         )
         .err()
         .unwrap();
     assert_eq!(refusal.category, "StaleRecognition");
     fs::write(&editor.source, b"not a PNG").unwrap();
     assert!(
-        editor
-            .app()
-            .recognition_load(&editor.view.owner, &editor.view.revision, &editor.source)
-            .is_err()
+        load_selected(
+            editor.app(),
+            &editor.view.owner,
+            &editor.view.revision,
+            &editor.source
+        )
+        .is_err()
     );
     let failed = editor
         .app()
@@ -338,7 +395,8 @@ fn failed_replacement_has_no_frame_and_stale_metadata_cannot_overwrite_newer_edi
                 &editor.view.revision,
                 failed.document_revision,
                 &["retained".into()],
-                SnippetKind::OcrRecognize
+                SnippetKind::OcrRecognize,
+                &current_capture(editor.app()),
             )
             .is_err()
     );
@@ -350,6 +408,7 @@ fn failed_replacement_has_no_frame_and_stale_metadata_cannot_overwrite_newer_edi
                 &editor.view.revision,
                 failed.document_revision,
                 &["retained".into()],
+                &current_capture(editor.app()),
             )
             .is_err(),
         "a confirmed basis cannot substitute for crop pixels"
@@ -361,6 +420,7 @@ fn failed_replacement_has_no_frame_and_stale_metadata_cannot_overwrite_newer_edi
             &editor.view.revision,
             failed.document_revision,
             &[],
+            &current_capture(editor.app()),
         )
         .unwrap()
         .recognition
@@ -390,6 +450,7 @@ fn scene_images_reuse_confirmed_setup_and_definitions_across_save_and_reopen() {
             document,
             loaded.frame.as_ref().map(|frame| frame.id.as_str()),
             loaded.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     let confirmed = app
@@ -398,6 +459,7 @@ fn scene_images_reuse_confirmed_setup_and_definitions_across_save_and_reopen() {
             &editor.view.revision,
             &updated.frame.as_ref().unwrap().id,
             updated.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     let saved = app
@@ -406,6 +468,7 @@ fn scene_images_reuse_confirmed_setup_and_definitions_across_save_and_reopen() {
             &editor.view.revision,
             confirmed.document_revision,
             &[],
+            &current_capture(editor.app()),
         )
         .unwrap();
     let revision = saved.mutation.committed_revision;
@@ -419,11 +482,10 @@ fn scene_images_reuse_confirmed_setup_and_definitions_across_save_and_reopen() {
         draft.clone(),
         saved_view.frame.as_ref().map(|frame| frame.id.as_str()),
         saved_view.document_revision,
+        &current_capture(editor.app()),
     )
     .unwrap();
-    let replacement = app
-        .recognition_load(&editor.view.owner, &revision, &editor.source)
-        .unwrap();
+    let replacement = load_selected(app, &editor.view.owner, &revision, &editor.source).unwrap();
     assert!(replacement.frame.as_ref().unwrap().confirmed);
     assert_ne!(
         replacement.frame.as_ref().unwrap().id,
@@ -437,9 +499,7 @@ fn scene_images_reuse_confirmed_setup_and_definitions_across_save_and_reopen() {
     let reopened = app
         .authoring_open(&view_ref(&workspace), Path::new(&editor.view.package_path))
         .unwrap();
-    let next = app
-        .recognition_load(&reopened.owner, &reopened.revision, &editor.source)
-        .unwrap();
+    let next = load_selected(app, &reopened.owner, &reopened.revision, &editor.source).unwrap();
     assert!(next.frame.as_ref().unwrap().confirmed);
     assert_eq!(next.document, Some(saved_document.clone()));
     let setup = app
@@ -449,6 +509,7 @@ fn scene_images_reuse_confirmed_setup_and_definitions_across_save_and_reopen() {
             next.document_revision,
             &[],
             SnippetKind::GameContent,
+            &current_capture(editor.app()),
         )
         .unwrap();
     assert_eq!(setup.basis, saved_document.basis);
@@ -457,50 +518,59 @@ fn scene_images_reuse_confirmed_setup_and_definitions_across_save_and_reopen() {
         "setup geometry is never recognition evidence"
     );
 
-    // Even when the old content rectangle fits, different dimensions are only
-    // an editable proposal. Repeated loading and Save cannot silently confirm it.
+    // Different dimensions remain a proposal until explicitly confirmed.
     let resized = DecodedImage::from_rgba(40, 24, vec![255; 40 * 24 * 4]).unwrap();
     let png = images::encode_crop(&resized, [0, 0, 40, 24]).unwrap();
     fs::write(&editor.source, png.as_bytes()).unwrap();
-    for _ in 0..2 {
-        let next = app
-            .recognition_load(&reopened.owner, &reopened.revision, &editor.source)
-            .unwrap();
-        assert!(!next.frame.as_ref().unwrap().confirmed);
-        assert_eq!(
-            next.document.as_ref().unwrap().basis.content,
-            saved_document.basis.content
-        );
-        assert_eq!(
-            next.document.as_ref().unwrap().definitions,
-            saved_document.definitions
-        );
-        assert!(
-            app.recognition_copy(
-                &reopened.owner,
-                &reopened.revision,
-                next.document_revision,
-                &[],
-                SnippetKind::GameContent,
-            )
-            .is_err(),
-            "unconfirmed geometry is never published as setup"
-        );
-        assert!(
-            app.recognition_save(
-                &reopened.owner,
-                &reopened.revision,
-                next.document_revision,
-                &[],
-            )
-            .is_err()
-        );
-    }
-    fs::write(&editor.source, b"not a PNG").unwrap();
-    assert!(
-        app.recognition_load(&reopened.owner, &reopened.revision, &editor.source)
-            .is_err()
+    let next = load_selected(app, &reopened.owner, &reopened.revision, &editor.source).unwrap();
+    assert!(!next.frame.as_ref().unwrap().confirmed);
+    assert_eq!(
+        next.document.as_ref().unwrap().basis.content,
+        saved_document.basis.content
     );
+    assert_eq!(
+        next.document.as_ref().unwrap().definitions,
+        saved_document.definitions
+    );
+    assert!(
+        app.recognition_copy(
+            &reopened.owner,
+            &reopened.revision,
+            next.document_revision,
+            &[],
+            SnippetKind::GameContent,
+            &current_capture(editor.app()),
+        )
+        .is_err()
+    );
+    assert!(
+        app.recognition_save(
+            &reopened.owner,
+            &reopened.revision,
+            next.document_revision,
+            &[],
+            &current_capture(editor.app()),
+        )
+        .is_err()
+    );
+    assert!(load_selected(app, &reopened.owner, &reopened.revision, &editor.source).is_err());
+    let retained = app
+        .recognition_view(&reopened.owner, &reopened.revision)
+        .unwrap();
+    assert_eq!(
+        retained.frame.as_ref().unwrap().id,
+        next.frame.as_ref().unwrap().id
+    );
+    app.recognition_confirm(
+        &reopened.owner,
+        &reopened.revision,
+        next.frame.as_ref().unwrap().id.as_str(),
+        next.document_revision,
+        &current_capture(editor.app()),
+    )
+    .unwrap();
+    fs::write(&editor.source, b"not a PNG").unwrap();
+    assert!(load_selected(app, &reopened.owner, &reopened.revision, &editor.source).is_err());
     assert!(
         app.recognition_view(&reopened.owner, &reopened.revision)
             .unwrap()
@@ -508,27 +578,9 @@ fn scene_images_reuse_confirmed_setup_and_definitions_across_save_and_reopen() {
             .is_none()
     );
     fs::write(&editor.source, png.as_bytes()).unwrap();
-    let restored = app
-        .recognition_load(&reopened.owner, &reopened.revision, &editor.source)
-        .unwrap();
-    assert!(
-        !restored.frame.as_ref().unwrap().confirmed,
-        "failed loads do not grant geometry authority"
-    );
-    let current = app
-        .recognition_view(&reopened.owner, &reopened.revision)
-        .unwrap();
-    app.recognition_confirm(
-        &reopened.owner,
-        &reopened.revision,
-        &current.frame.as_ref().unwrap().id,
-        current.document_revision,
-    )
-    .unwrap();
-    let next = app
-        .recognition_load(&reopened.owner, &reopened.revision, &editor.source)
-        .unwrap();
-    assert!(next.frame.as_ref().unwrap().confirmed);
+    let restored = load_selected(app, &reopened.owner, &reopened.revision, &editor.source).unwrap();
+    assert!(restored.frame.as_ref().unwrap().confirmed);
+    assert_eq!(restored.document, next.document);
 }
 
 #[test]
@@ -552,6 +604,7 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
             document,
             Some(&frame_id),
             loaded.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     let confirmed = app
@@ -560,6 +613,7 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
             &editor.view.revision,
             &frame_id,
             updated.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     let saved = app
@@ -568,6 +622,7 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
             &editor.view.revision,
             confirmed.document_revision,
             &["saved".into()],
+            &current_capture(editor.app()),
         )
         .unwrap();
     let revision = saved.mutation.committed_revision;
@@ -577,9 +632,7 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
     let replacement = DecodedImage::from_rgba(16, 12, vec![255; 16 * 12 * 4]).unwrap();
     let png = images::encode_crop(&replacement, [0, 0, 16, 12]).unwrap();
     fs::write(&editor.source, png.as_bytes()).unwrap();
-    let loaded = app
-        .recognition_load(&editor.view.owner, &revision, &editor.source)
-        .unwrap();
+    let loaded = load_selected(app, &editor.view.owner, &revision, &editor.source).unwrap();
     let replaced_frame = loaded.frame.as_ref().unwrap();
     let replaced_id = replaced_frame.id.clone();
     assert_eq!((replaced_frame.width, replaced_frame.height), (16, 12));
@@ -603,13 +656,25 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
         draft,
         Some(&replaced_id),
         loaded.document_revision,
+        &current_capture(editor.app()),
     )
     .unwrap();
-    app.recognition_preview(&editor.view.owner, &replaced_id)
-        .unwrap();
+    app.recognition_preview(
+        &editor.view.owner,
+        &replaced_id,
+        &current_capture(editor.app()),
+    )
+    .unwrap();
 
     let discarded = app
-        .recognition_discard(&editor.view.owner, &revision)
+        .recognition_discard(
+            &editor.view.owner,
+            &revision,
+            Some(&current_capture(editor.app())),
+            app.recognition_view(&editor.view.owner, &revision)
+                .unwrap()
+                .document_revision,
+        )
         .unwrap();
     assert_eq!(discarded.document.as_ref(), Some(&saved_document));
     assert_eq!(discarded.saved_document.as_ref(), Some(&saved_document));
@@ -618,7 +683,7 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
         "restored metadata cannot describe the replacement image"
     );
     assert_eq!(
-        app.recognition_preview(&editor.view.owner, &replaced_id)
+        app.recognition_preview(&editor.view.owner, &replaced_id, &current_capture(app))
             .unwrap_err()
             .category,
         "StaleRecognition"
@@ -630,14 +695,13 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
             discarded.document_revision,
             &["saved".into()],
             SnippetKind::OcrRecognize,
+            &current_capture(editor.app()),
         )
         .err()
         .expect("Discard must not leave incompatible geometry available for Copy");
     assert_eq!(refusal.category, "RecognitionInput");
 
-    let loaded = app
-        .recognition_load(&editor.view.owner, &revision, &editor.source)
-        .unwrap();
+    let loaded = load_selected(app, &editor.view.owner, &revision, &editor.source).unwrap();
     let frame = loaded.frame.as_ref().unwrap();
     assert_ne!(frame.id, replaced_id);
     assert!(!frame.confirmed);
@@ -647,6 +711,7 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
             &revision,
             &frame.id,
             loaded.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     assert!(confirmed.frame.as_ref().unwrap().confirmed);
@@ -674,6 +739,7 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
             edited_document.clone(),
             Some(&frame.id),
             confirmed.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     assert_eq!(edited.document.as_ref(), Some(&edited_document));
@@ -687,6 +753,7 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
             edited.document_revision,
             &["new".into()],
             SnippetKind::OcrRecognize,
+            &current_capture(editor.app()),
         )
         .unwrap();
     assert_eq!(copied.basis, edited_document.basis);
@@ -695,13 +762,14 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
             .open(Path::new(&editor.view.package_path))
             .unwrap()
             .recognition()
-            .unwrap(),
+            .unwrap()
+            .map(|metadata| metadata.document(&current_capture(app)).unwrap().clone()),
         Some(saved_document)
     );
 }
 
 #[test]
-fn preview_keeps_frame_pixels_after_source_save_while_command_admission_is_busy() {
+fn preview_keeps_frame_pixels_after_source_save() {
     let editor = Editor::new();
     let app = editor.app();
     let loaded = editor.load();
@@ -717,12 +785,9 @@ fn preview_keeps_frame_pixels_after_source_save_while_command_admission_is_busy(
         .unwrap();
     assert_ne!(mutation.committed_revision, editor.view.revision);
 
-    // An admitted command does not own these immutable, owner/frame-bound pixels.
-    let preview = {
-        let _command = lock(&app.commands);
-        app.recognition_preview(&editor.view.owner, &frame_id)
-            .unwrap()
-    };
+    let preview = app
+        .recognition_preview(&editor.view.owner, &frame_id, &current_capture(app))
+        .unwrap();
     let decoded = images::decode_png(&preview, ImageKind::Crop).unwrap();
     assert_eq!(
         (decoded.width, decoded.height),
@@ -747,6 +812,7 @@ fn grouped_copy_uses_the_cached_engine_limit_and_verifies_every_checked_zone() {
             document,
             loaded.frame.as_ref().map(|frame| frame.id.as_str()),
             loaded.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     let copy = |ids: &[String], mode| {
@@ -756,6 +822,7 @@ fn grouped_copy_uses_the_cached_engine_limit_and_verifies_every_checked_zone() {
             current.document_revision,
             ids,
             mode,
+            &current_capture(editor.app()),
         )
     };
     let ids: Vec<String> = vec!["first".into(), "second".into()];
@@ -817,6 +884,7 @@ fn grouped_copy_uses_the_cached_engine_limit_and_verifies_every_checked_zone() {
             next.document_revision,
             &ids,
             SnippetKind::OcrRecognize,
+            &current_capture(app),
         )
         .unwrap()
         .verified
@@ -842,6 +910,7 @@ fn copy_never_certifies_a_trial_captured_at_an_older_package_revision() {
             document,
             loaded.frame.as_ref().map(|frame| frame.id.as_str()),
             loaded.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     grant_capability(app, 1);
@@ -854,6 +923,7 @@ fn copy_never_certifies_a_trial_captured_at_an_older_package_revision() {
             current.document_revision,
             &ids,
             SnippetKind::OcrRecognize,
+            &current_capture(editor.app()),
         )
         .unwrap()
         .verified
@@ -915,6 +985,7 @@ fn template_copy_accepts_a_hand_restored_saved_definition_without_reusing_its_re
             document,
             Some(&frame_id),
             loaded.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     let saved = app
@@ -923,6 +994,7 @@ fn template_copy_accepts_a_hand_restored_saved_definition_without_reusing_its_re
             &editor.view.revision,
             updated.document_revision,
             &["pattern".into()],
+            &current_capture(editor.app()),
         )
         .unwrap();
     let revision = saved.mutation.committed_revision;
@@ -940,6 +1012,7 @@ fn template_copy_accepts_a_hand_restored_saved_definition_without_reusing_its_re
                 draft,
                 Some(&frame_id),
                 view.document_revision,
+                &current_capture(editor.app()),
             )
             .unwrap();
         app.recognition_copy(
@@ -948,6 +1021,7 @@ fn template_copy_accepts_a_hand_restored_saved_definition_without_reusing_its_re
             view.document_revision,
             &ids,
             SnippetKind::TemplateRecognize,
+            &current_capture(editor.app()),
         )
     };
     assert!(
@@ -1004,10 +1078,17 @@ fn reaped_child_with_incomplete_cleanup_stays_failed_without_refusing_save_or_ex
             document,
             loaded.frame.as_ref().map(|frame| frame.id.as_str()),
             loaded.document_revision,
+            &current_capture(editor.app()),
         )
         .unwrap();
     let saved = app
-        .recognition_save(owner, &editor.view.revision, updated.document_revision, &[])
+        .recognition_save(
+            owner,
+            &editor.view.revision,
+            updated.document_revision,
+            &[],
+            &current_capture(editor.app()),
+        )
         .unwrap();
     app.authoring_save(
         owner,
@@ -1088,4 +1169,473 @@ fn only_unconfirmed_child_ownership_contains_the_edit_session() {
             "context": {"cleanup": {"clean": true, "child_started": false}}}});
     assert!(containment(&clean_refusal).is_none());
     assert!(incomplete_cleanup(&clean_refusal).is_none());
+}
+
+#[test]
+fn saved_images_add_select_save_and_reopen_independent_capture_namespaces() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let owner = &editor.view.owner;
+    let a = editor.load();
+    let a_id = a.capture_id.clone().unwrap();
+    crate::storage::validate_id(&a_id).unwrap();
+    let a_pixels = {
+        let state = lock(&app.workspaces);
+        Arc::downgrade(
+            &state
+                .authoring
+                .as_ref()
+                .unwrap()
+                .recognition
+                .frame
+                .as_ref()
+                .unwrap()
+                .image,
+        )
+    };
+    let mut a_document = a.document.clone().unwrap();
+    a_document.definitions.push(zone("r1"));
+    a_document.basis.content = PixelRect {
+        x: 2,
+        y: 3,
+        width: 20,
+        height: 16,
+    };
+    let a = app
+        .recognition_update(
+            owner,
+            &editor.view.revision,
+            a_document,
+            a.frame.as_ref().map(|frame| frame.id.as_str()),
+            a.document_revision,
+            &a_id,
+        )
+        .unwrap();
+    let a = app
+        .recognition_confirm(
+            owner,
+            &editor.view.revision,
+            &a.frame.as_ref().unwrap().id,
+            a.document_revision,
+            &a_id,
+        )
+        .unwrap();
+    let a_saved = app
+        .recognition_save(
+            owner,
+            &editor.view.revision,
+            a.document_revision,
+            &["r1".into()],
+            &a_id,
+        )
+        .unwrap();
+    let revision = a_saved.mutation.committed_revision;
+    let a = a_saved.recognition.unwrap();
+    let a_document = a.document.clone().unwrap();
+
+    let b_image = DecodedImage::from_rgba(32, 24, vec![90; 32 * 24 * 4]).unwrap();
+    fs::write(
+        &editor.source,
+        images::encode_crop(&b_image, [0, 0, 32, 24])
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    drop(b_image);
+    let b = app
+        .recognition_load(
+            owner,
+            &revision,
+            &editor.source,
+            Some(&a_id),
+            a.document_revision,
+            true,
+        )
+        .unwrap();
+    assert!(
+        a_pixels.upgrade().is_none(),
+        "adding B releases the only decoded A original"
+    );
+    let b_id = b.capture_id.clone().unwrap();
+    crate::storage::validate_id(&b_id).unwrap();
+    assert_ne!(a_id, b_id);
+    let mut b_document = b.document.clone().unwrap();
+    b_document.definitions.push(zone("r1"));
+    let b = app
+        .recognition_update(
+            owner,
+            &revision,
+            b_document,
+            b.frame.as_ref().map(|frame| frame.id.as_str()),
+            b.document_revision,
+            &b_id,
+        )
+        .unwrap();
+    let b_pixels = {
+        let state = lock(&app.workspaces);
+        Arc::downgrade(
+            &state
+                .authoring
+                .as_ref()
+                .unwrap()
+                .recognition
+                .frame
+                .as_ref()
+                .unwrap()
+                .image,
+        )
+    };
+    let b_saved = app
+        .recognition_save(owner, &revision, b.document_revision, &["r1".into()], &b_id)
+        .unwrap();
+    let revision = b_saved.mutation.committed_revision;
+    let b = b_saved.recognition.unwrap();
+    let b_document = b.document.clone().unwrap();
+    assert_ne!(a_document.basis, b_document.basis);
+    assert_ne!(
+        a_document.definitions[0].saved,
+        b_document.definitions[0].saved
+    );
+
+    // Even current B generations cannot authorize A's identically named Region.
+    assert_eq!(
+        app.recognition_update(
+            owner,
+            &revision,
+            a_document.clone(),
+            b.frame.as_ref().map(|frame| frame.id.as_str()),
+            b.document_revision,
+            &a_id
+        )
+        .err()
+        .unwrap()
+        .category,
+        "StaleRecognition"
+    );
+    assert_eq!(
+        app.recognition_save(owner, &revision, b.document_revision, &[], &a_id)
+            .err()
+            .unwrap()
+            .category,
+        "StaleRecognition"
+    );
+    assert_eq!(
+        app.recognition_copy(
+            owner,
+            &revision,
+            b.document_revision,
+            &[],
+            SnippetKind::GameContent,
+            &a_id
+        )
+        .err()
+        .unwrap()
+        .category,
+        "StaleRecognition"
+    );
+    assert_eq!(
+        app.recognition_preview(owner, &b.frame.as_ref().unwrap().id, &a_id)
+            .err()
+            .unwrap()
+            .category,
+        "StaleRecognition"
+    );
+    assert_eq!(
+        app.recognition_trial(
+            owner,
+            &revision,
+            None,
+            b.document_revision,
+            &["r1".into()],
+            Some("r1"),
+            &a_id
+        )
+        .err()
+        .unwrap()
+        .category,
+        "StaleRecognition"
+    );
+
+    let selected = app
+        .recognition_select(owner, &revision, Some(&b_id), b.document_revision, &a_id)
+        .unwrap();
+    assert!(
+        b_pixels.upgrade().is_none(),
+        "selecting metadata never retains a decoded history"
+    );
+    assert!(selected.frame.is_none());
+    assert_eq!(selected.document.as_ref(), Some(&a_document));
+    assert!(
+        app.recognition_copy(
+            owner,
+            &revision,
+            selected.document_revision,
+            &[],
+            SnippetKind::GameContent,
+            &a_id
+        )
+        .is_err()
+    );
+    let sample = app
+        .recognition_trial(
+            owner,
+            &revision,
+            None,
+            selected.document_revision,
+            &["r1".into()],
+            Some("r1"),
+            &a_id,
+        )
+        .unwrap();
+    assert_eq!(sample.capture_id, a_id);
+    assert!(sample.frame_id.is_none());
+    assert_eq!(sample.controller["error"]["category"], "EnvironmentUnset");
+    let mut metadata_only = a_document.clone();
+    metadata_only.definitions[0].name = "A without original pixels".into();
+    let selected = app
+        .recognition_update(
+            owner,
+            &revision,
+            metadata_only.clone(),
+            None,
+            selected.document_revision,
+            &a_id,
+        )
+        .unwrap();
+    let saved = app
+        .recognition_save(owner, &revision, selected.document_revision, &[], &a_id)
+        .unwrap();
+    let revision = saved.mutation.committed_revision;
+    let saved = saved.recognition.unwrap();
+    assert_eq!(
+        saved
+            .captures
+            .iter()
+            .find(|capture| capture.capture_id == b_id)
+            .unwrap()
+            .document,
+        b_document
+    );
+    fs::write(&editor.source, b"corrupt selected image").unwrap();
+    assert!(
+        app.recognition_load(
+            owner,
+            &revision,
+            &editor.source,
+            Some(&a_id),
+            saved.document_revision,
+            false
+        )
+        .is_err()
+    );
+    let failed = app.recognition_view(owner, &revision).unwrap();
+    assert!(failed.frame.is_none());
+    assert_eq!(failed.document, Some(metadata_only.clone()));
+    let historical = DecodedImage::from_rgba(32, 24, vec![70; 32 * 24 * 4]).unwrap();
+    fs::write(
+        &editor.source,
+        images::encode_crop(&historical, [0, 0, 32, 24])
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    drop(historical);
+    let reloaded = app
+        .recognition_load(
+            owner,
+            &revision,
+            &editor.source,
+            Some(&a_id),
+            failed.document_revision,
+            false,
+        )
+        .unwrap();
+    assert_eq!(reloaded.capture_id.as_deref(), Some(a_id.as_str()));
+    assert_eq!(reloaded.document, Some(metadata_only.clone()));
+    assert!(reloaded.frame.as_ref().unwrap().confirmed);
+    assert_ne!(
+        reloaded.frame.as_ref().unwrap().id,
+        a.frame.as_ref().unwrap().id
+    );
+
+    let workspace = app.authoring_exit(owner).unwrap();
+    let reopened = app
+        .authoring_open(&view_ref(&workspace), Path::new(&editor.view.package_path))
+        .unwrap();
+    let restored = app
+        .recognition_view(&reopened.owner, &reopened.revision)
+        .unwrap();
+    assert!(restored.frame.is_none());
+    assert_eq!(restored.capture_id.as_deref(), Some(a_id.as_str()));
+    assert_eq!(restored.document, Some(metadata_only));
+    let restored_b = app
+        .recognition_select(
+            &reopened.owner,
+            &reopened.revision,
+            restored.capture_id.as_deref(),
+            restored.document_revision,
+            &b_id,
+        )
+        .unwrap();
+    assert!(restored_b.frame.is_none());
+    assert_eq!(restored_b.document, Some(b_document));
+}
+
+#[test]
+fn accepted_image_seam_rejects_stale_publication_and_clipboard_after_selection() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let owner = &editor.view.owner;
+    let empty = app.recognition_view(owner, &editor.view.revision).unwrap();
+    let prepared = app
+        .recognition_prepare_capture(owner, &editor.view.revision, None, empty.document_revision)
+        .unwrap();
+    let image = DecodedImage::from_rgba(2, 2, vec![30; 16]).unwrap();
+    let a = app
+        .recognition_install_capture(owner, &editor.view.revision, None, prepared, image)
+        .unwrap();
+    let a_id = a.capture_id.clone().unwrap();
+    assert!(!a.frame.as_ref().unwrap().confirmed);
+    let a = app
+        .recognition_confirm(
+            owner,
+            &editor.view.revision,
+            &a.frame.as_ref().unwrap().id,
+            a.document_revision,
+            &a_id,
+        )
+        .unwrap();
+    let copied = app
+        .recognition_copy(
+            owner,
+            &editor.view.revision,
+            a.document_revision,
+            &[],
+            SnippetKind::GameContent,
+            &a_id,
+        )
+        .unwrap();
+    let next = app
+        .recognition_prepare_capture(
+            owner,
+            &editor.view.revision,
+            Some(&a_id),
+            a.document_revision,
+        )
+        .unwrap();
+    let stale_image = DecodedImage::from_rgba(2, 2, vec![40; 16]).unwrap();
+    assert_eq!(
+        app.recognition_install_capture(owner, &editor.view.revision, None, prepared, stale_image)
+            .err()
+            .unwrap()
+            .category,
+        "StaleRecognition"
+    );
+    let b = app
+        .recognition_install_capture(
+            owner,
+            &editor.view.revision,
+            Some(&a_id),
+            next,
+            DecodedImage::from_rgba(2, 2, vec![50; 16]).unwrap(),
+        )
+        .unwrap();
+    assert_ne!(
+        b.capture_id.as_deref(),
+        Some(a_id.as_str()),
+        "equal dimensions still create another namespace"
+    );
+    let written = std::cell::Cell::new(false);
+    let refusal = app.recognition_publish_copy(owner, &editor.view.revision, copied, |_| {
+        written.set(true);
+        Ok(())
+    });
+    assert_eq!(refusal.err().unwrap().category, "StaleRecognition");
+    assert!(
+        !written.get(),
+        "a stale receipt never reaches the irreversible clipboard write"
+    );
+}
+
+#[test]
+fn unconfirmed_capture_cannot_lose_its_only_pixels_before_confirmation() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let owner = &editor.view.owner;
+    let revision = &editor.view.revision;
+    let saved_image = editor.load();
+    let b_id = saved_image.capture_id.unwrap();
+    let prepared = app
+        .recognition_prepare_capture(owner, revision, Some(&b_id), saved_image.document_revision)
+        .unwrap();
+    let captured = app
+        .recognition_install_capture(
+            owner,
+            revision,
+            Some(&b_id),
+            prepared,
+            DecodedImage::from_rgba(2, 2, vec![30; 16]).unwrap(),
+        )
+        .unwrap();
+    let a_id = captured.capture_id.clone().unwrap();
+    let frame_id = captured.frame.as_ref().unwrap().id.clone();
+    assert!(
+        app.recognition_select(
+            owner,
+            revision,
+            Some(&a_id),
+            captured.document_revision,
+            &b_id
+        )
+        .is_err(),
+        "switching must not strand unconfirmed native geometry without its original"
+    );
+    assert!(
+        app.recognition_prepare_capture(owner, revision, Some(&a_id), captured.document_revision)
+            .is_err()
+    );
+    assert!(
+        app.recognition_load(
+            owner,
+            revision,
+            &editor.source,
+            Some(&a_id),
+            captured.document_revision,
+            true,
+        )
+        .is_err()
+    );
+    let retained = app.recognition_view(owner, revision).unwrap();
+    assert_eq!(retained.capture_id.as_deref(), Some(a_id.as_str()));
+    assert_eq!(retained.frame.unwrap().id, frame_id);
+    assert_eq!(retained.document_revision, captured.document_revision);
+    let confirmed = app
+        .recognition_confirm(
+            owner,
+            revision,
+            &frame_id,
+            captured.document_revision,
+            &a_id,
+        )
+        .unwrap();
+    let selected = app
+        .recognition_select(
+            owner,
+            revision,
+            Some(&a_id),
+            confirmed.document_revision,
+            &b_id,
+        )
+        .unwrap();
+    let saved = app
+        .recognition_save(owner, revision, selected.document_revision, &[], &b_id)
+        .unwrap();
+    assert!(
+        saved
+            .recognition
+            .unwrap()
+            .captures
+            .iter()
+            .any(|capture| capture.capture_id == a_id)
+    );
 }

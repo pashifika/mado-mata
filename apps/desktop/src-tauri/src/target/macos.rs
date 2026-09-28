@@ -43,7 +43,7 @@ impl Guard<'_> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 struct FileIdentity {
     device: u64,
     inode: u64,
@@ -472,6 +472,127 @@ pub(super) fn observe(
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> Result<ApplicationObservation, Fault> {
+    inspect_application(
+        configuration,
+        declaration,
+        expected_resolution,
+        cancelled,
+        deadline,
+        None,
+    )
+}
+
+pub(super) fn authoring_application(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    expected_resolution: &TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<super::AuthoringApplication, Fault> {
+    let mut proof = super::AuthoringApplication {
+        processes: Vec::new(),
+        installation: String::new(),
+    };
+    let observation = inspect_application(
+        configuration,
+        declaration,
+        expected_resolution,
+        cancelled,
+        deadline,
+        Some(&mut proof),
+    )?;
+    if proof.processes.is_empty() {
+        return Err(Fault::new(
+            "NativeCorrespondence",
+            "Fresh signed application correspondence is unavailable",
+        )
+        .with_context(
+            json!({"status":observation.status,"stage":observation.diagnostics["stage"]}),
+        ));
+    }
+    Ok(proof)
+}
+
+fn installation_identity(
+    selected: &InstalledBundle,
+    codes: &std::collections::BTreeMap<i32, signing::SelectedCode>,
+    processes: &[super::AuthoringProcess],
+) -> Result<String, Fault> {
+    let signatures: Vec<_> = codes
+        .iter()
+        .filter(|(architecture, _)| processes.iter().any(|p| p.architecture == **architecture))
+        .map(|(architecture, code)| {
+            let signature = match &code.identity {
+                SigningIdentity::Unsigned => None,
+                SigningIdentity::Signed(identity) => {
+                    Some((&identity.identifier, &identity.team, &identity.unique))
+                }
+            };
+            (architecture, signature)
+        })
+        .collect();
+    mado_runtime_comparison::model::identity(&(&selected.identities, signatures))
+}
+
+pub(super) fn revalidate_authoring_installation(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    expected_resolution: &TargetResolution,
+    proof: &super::AuthoringApplication,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), Fault> {
+    let guard = Guard {
+        cancelled,
+        deadline,
+    };
+    guard.check()?;
+    configuration.validate_declaration(declaration)?;
+    if configuration.game.kind != "bundle" || proof.processes.is_empty() {
+        return Err(unavailable("installation_changed"));
+    }
+    let result = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
+        autoreleasepool(|_| {
+            let selected = inspect_bundle(&configuration.game.path, "game", &|| guard.check())?;
+            if selected.resolution != expected_resolution.game
+                || declaration.macos.as_ref().is_some_and(|constraint| {
+                    selected.bundle_id.as_deref() != Some(constraint.bundle_id.as_str())
+                })
+            {
+                return Err(unavailable("installation_changed"));
+            }
+            let mut codes = std::collections::BTreeMap::new();
+            for process in &proof.processes {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    codes.entry(process.architecture)
+                {
+                    entry.insert(signing::selected(
+                        &selected.resolution.executable,
+                        process.architecture,
+                        &guard,
+                    )?);
+                }
+            }
+            if installation_identity(&selected, &codes, &proof.processes)? != proof.installation
+                || inspect_bundle(&configuration.game.path, "game", &|| guard.check())? != selected
+            {
+                return Err(unavailable("installation_changed"));
+            }
+            Ok(())
+        })
+    }));
+    guard.check()?;
+    result.map_err(|_| unavailable("platform_exception"))?
+}
+
+fn inspect_application(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    expected_resolution: &TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+    mut proof: Option<&mut super::AuthoringApplication>,
+) -> Result<ApplicationObservation, Fault> {
     let guard = Guard {
         cancelled,
         deadline,
@@ -542,7 +663,7 @@ pub(super) fn observe(
                         details.push(json!({"pid": snapshot.lifetime.pid, "architecture": snapshot.architecture,
                         "result": match candidate { Candidate::Verified(kind) => kind.name(), Candidate::Different => "different", Candidate::Unverifiable => "identity_mismatch" }}));
                         candidates.push(candidate);
-                        snapshots.push((app, snapshot, identity));
+                        snapshots.push((app, snapshot, identity, candidate));
                     }
                     Err(fault) if invalidation(&fault) => return Err(fault),
                     Err(fault) => {
@@ -565,7 +686,7 @@ pub(super) fn observe(
                     }
                 }
             }
-            for (app, before, identity) in &snapshots {
+            for (app, before, identity, _) in &snapshots {
                 match signing::running(before.lifetime.pid, &before.executable, &guard) {
                     Ok(after) if after.identity == *identity => {}
                     Err(fault) if invalidation(&fault) => return Err(fault),
@@ -617,7 +738,7 @@ pub(super) fn observe(
             }
             let lifetimes = snapshots
                 .iter()
-                .map(|(_, before, _)| (before.lifetime, lifetime(before.lifetime.pid, &guard)));
+                .map(|(_, before, _, _)| (before.lifetime, lifetime(before.lifetime.pid, &guard)));
             let (status, evidence) = match summarize_revalidated(
                 &candidates,
                 &mut discovered_pids,
@@ -630,6 +751,40 @@ pub(super) fn observe(
                     return observation("unverifiable", None, fault.context, &guard);
                 }
             };
+            if let Some(proof) = proof.as_mut() {
+                if candidates
+                    .iter()
+                    .any(|candidate| matches!(candidate, Candidate::Unverifiable))
+                {
+                    return Err(unavailable("unverifiable_candidate"));
+                }
+                for (app, snapshot, _, candidate) in &snapshots {
+                    if matches!(candidate, Candidate::Verified(_)) {
+                        // SDK's descriptive lifetime domain is the exact Foundation
+                        // reference-date double. Keep libproc's independent lifetime too.
+                        let launch = guard
+                            .call(|| app.launchDate())?
+                            .ok_or_else(|| unavailable("process_lifetime"))?;
+                        let launch = guard.call(|| launch.timeIntervalSinceReferenceDate())?;
+                        if !launch.is_finite() || launch <= 0.0 {
+                            return Err(unavailable("process_lifetime"));
+                        }
+                        if lifetime(snapshot.lifetime.pid, &guard)? != snapshot.lifetime {
+                            return Err(unavailable("process_changed"));
+                        }
+                        proof.processes.push(super::AuthoringProcess {
+                            pid: snapshot.lifetime.pid as u32,
+                            lifetime: launch.to_bits(),
+                            architecture: snapshot.architecture,
+                            started: (snapshot.lifetime.seconds, snapshot.lifetime.microseconds),
+                            executable: PathBuf::from(&snapshot.executable),
+                        });
+                    }
+                }
+                proof.processes.sort_by_key(|process| process.pid);
+                proof.installation =
+                    installation_identity(&selected, &selected_codes, &proof.processes)?;
+            }
             observation(
                 status,
                 evidence.map(|kind| kind.name()),

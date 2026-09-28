@@ -20,7 +20,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod authoring;
 pub use authoring::{
-    AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, RecognitionCopy,
+    AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, NativeCandidateView,
+    NativeCaptureArea, NativeCaptureBounds, NativeCaptureResult, NativeCoordinateUnit,
+    NativePickerCandidate, NativePickerSnapshot, NativeSelectionView, RecognitionCopy,
     RecognitionFrame, RecognitionPickerGuard, RecognitionSaved, RecognitionTrial, RecognitionView,
 };
 mod operations;
@@ -206,6 +208,7 @@ pub struct RetainedCheck {
 #[derive(Serialize)]
 pub struct Poll {
     pub authoring: Option<AuthoringRef>,
+    pub native_selection: Option<NativeSelectionView>,
     #[serde(serialize_with = "serialize_shared")]
     pub controller: Arc<Value>,
     pub logs: LogBatch,
@@ -284,6 +287,7 @@ pub struct Application {
     publisher: Arc<Publisher>,
     // Stop never waits for command, workspace, store, or publication locks.
     authoring_stop: Mutex<Option<authoring::StopOwner>>,
+    native_engine: PathBuf,
     #[cfg(test)]
     command_admitted: AtomicBool,
     #[cfg(test)]
@@ -350,7 +354,7 @@ impl Application {
         // Discover before any restored source is inspected. Keep the application
         // available for explicit recovery; every source admission checks the journal.
         let _ = publisher.recover_pending();
-        let runner = DesktopController::new(controlled, engine);
+        let runner = DesktopController::new(controlled, engine.clone());
         let mut workspaces = Workspaces {
             open: Vec::new(),
             session: format!(
@@ -424,6 +428,7 @@ impl Application {
             target_observation,
             publisher,
             authoring_stop: Mutex::new(None),
+            native_engine: engine,
             #[cfg(test)]
             command_admitted: AtomicBool::new(false),
             #[cfg(test)]

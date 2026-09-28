@@ -130,6 +130,81 @@ pub struct ApplicationObservation {
     pub diagnostics: serde_json::Value,
 }
 
+/// Fresh host-only signed application correspondence, never a capture handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AuthoringApplication {
+    pub processes: Vec<AuthoringProcess>,
+    pub installation: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AuthoringProcess {
+    pub pid: u32,
+    pub lifetime: u64,
+    pub architecture: i32,
+    pub started: (u64, u64),
+    pub executable: PathBuf,
+}
+
+pub(crate) fn authoring_application(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    resolution: &TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<AuthoringApplication, Fault> {
+    #[cfg(target_os = "macos")]
+    return macos::authoring_application(
+        configuration,
+        declaration,
+        resolution,
+        cancelled,
+        deadline,
+    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (configuration, declaration, resolution, cancelled, deadline);
+        Err(Fault::new(
+            "TargetPlatform",
+            "Saved bundle capture requires macOS",
+        ))
+    }
+}
+
+/// Revalidates only saved installation evidence, never the former running cohort.
+pub(crate) fn revalidate_authoring_installation(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    resolution: &TargetResolution,
+    proof: &AuthoringApplication,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), Fault> {
+    #[cfg(target_os = "macos")]
+    return macos::revalidate_authoring_installation(
+        configuration,
+        declaration,
+        resolution,
+        proof,
+        cancelled,
+        deadline,
+    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (
+            configuration,
+            declaration,
+            resolution,
+            proof,
+            cancelled,
+            deadline,
+        );
+        Err(Fault::new(
+            "TargetPlatform",
+            "Saved bundle capture requires macOS",
+        ))
+    }
+}
 pub fn observe_application(
     configuration: &TargetConfiguration,
     declaration: &TargetDeclaration,

@@ -1,11 +1,13 @@
 //! Portable saved-image recognition metadata. This module never evaluates source,
 //! reads arbitrary paths, acquires a target, or persists an original frame.
+mod captures;
 mod snippets;
 mod templates;
 
 #[cfg(test)]
 mod tests;
 
+pub use captures::{CaptureDocument, PACKAGE_VERSION, RecognitionMetadata, RecognitionPackage};
 pub use snippets::{SnippetKind, generate_snippet};
 pub use templates::{
     TemplateMaps, build_template_assets, merge_effective_template_maps, validate_inventory,

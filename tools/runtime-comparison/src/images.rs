@@ -301,6 +301,7 @@ impl DecodedImage {
 pub struct EncodedImage {
     bytes: Vec<u8>,
     reservation: PayloadReservation,
+    maximum: usize,
 }
 
 impl EncodedImage {
@@ -722,11 +723,24 @@ fn validate_deflate(bytes: &[u8], expected: u64) -> Result<(), Fault> {
     Ok(())
 }
 
+/// Encodes one full original under the input/transfer limit, without inherited metadata.
+pub fn encode_input(image: &DecodedImage) -> Result<EncodedImage, Fault> {
+    encode_region(image, [0, 0, image.width, image.height], ImageKind::Input)
+}
+
 /// Encodes original pixels row by row, with no full crop copy or inherited metadata.
 pub fn encode_crop(image: &DecodedImage, rect: [u32; 4]) -> Result<EncodedImage, Fault> {
+    encode_region(image, rect, ImageKind::Crop)
+}
+
+fn encode_region(
+    image: &DecodedImage,
+    rect: [u32; 4],
+    kind: ImageKind,
+) -> Result<EncodedImage, Fault> {
     image.validate()?;
     let [x, y, width, height] = rect;
-    checked_rgba_bytes(width, height, ImageKind::Crop)?;
+    checked_rgba_bytes(width, height, kind)?;
     if x.checked_add(width).is_none_or(|right| right > image.width)
         || y.checked_add(height)
             .is_none_or(|bottom| bottom > image.height)
@@ -740,6 +754,7 @@ pub fn encode_crop(image: &DecodedImage, rect: [u32; 4]) -> Result<EncodedImage,
     let mut output = EncodedImage {
         bytes: Vec::new(),
         reservation: reserve_payload(0)?,
+        maximum: kind.compressed_limit(),
     };
     {
         let mut encoder = png::Encoder::new(&mut output, width, height);
@@ -769,15 +784,10 @@ impl Write for EncodedImage {
             .bytes
             .len()
             .checked_add(bytes.len())
-            .filter(|length| *length <= CROP_MAX_BYTES)
-            .ok_or_else(|| std::io::Error::other("compressed crop byte limit exceeded"))?;
-        grow_payload(
-            &mut self.bytes,
-            &mut self.reservation,
-            length,
-            CROP_MAX_BYTES,
-        )
-        .map_err(std::io::Error::other)?;
+            .filter(|length| *length <= self.maximum)
+            .ok_or_else(|| std::io::Error::other("compressed image byte limit exceeded"))?;
+        grow_payload(&mut self.bytes, &mut self.reservation, length, self.maximum)
+            .map_err(std::io::Error::other)?;
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }

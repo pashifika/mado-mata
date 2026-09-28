@@ -3,8 +3,8 @@ use mado_runtime_comparison::images::PayloadBytes;
 use mado_runtime_comparison::inventory::PackageDraft;
 use mado_runtime_comparison::model::Fault;
 use mado_runtime_comparison::recognition::{
-    AUTHORING_ASSET, ENGINE_MANIFEST_ASSET, RecognitionDocument, SavedCrop, TEMPLATE_MAPS_ASSET,
-    build_template_assets, validate_package_assets,
+    AUTHORING_ASSET, ENGINE_MANIFEST_ASSET, RecognitionMetadata, RecognitionPackage, SavedCrop,
+    TEMPLATE_MAPS_ASSET, build_template_assets, validate_package_assets,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,21 +17,30 @@ pub struct SelectedCrop {
 
 #[derive(Debug)]
 pub struct RecognitionSave {
-    pub document: RecognitionDocument,
+    pub package: RecognitionPackage,
+    pub capture_id: String,
     /// Host-encoded selected regions only; never supplied by a WebView byte array.
     pub crops: Vec<SelectedCrop>,
 }
 
 impl Candidate {
-    pub fn recognition(&self) -> Result<Option<RecognitionDocument>, Fault> {
+    pub fn recognition(&self) -> Result<Option<RecognitionMetadata>, Fault> {
         load(&self.draft)
     }
 
-    pub fn recognition_crop(&self, definition_id: &str) -> Result<Option<PayloadBytes>, Fault> {
-        let document = self
+    pub fn recognition_crop(
+        &self,
+        capture_id: &str,
+        definition_id: &str,
+    ) -> Result<Option<PayloadBytes>, Fault> {
+        let metadata = self
             .recognition()?
             .ok_or_else(|| refusal("recognition metadata is absent"))?;
-        let Some(saved) = &document.definition(definition_id)?.saved else {
+        let Some(saved) = &metadata
+            .document(capture_id)?
+            .definition(definition_id)?
+            .saved
+        else {
             return Ok(None);
         };
         let manifest = self.draft.manifest()?;
@@ -58,7 +67,7 @@ impl Publisher {
     }
 }
 
-pub(super) fn load(draft: &PackageDraft) -> Result<Option<RecognitionDocument>, Fault> {
+pub(super) fn load(draft: &PackageDraft) -> Result<Option<RecognitionMetadata>, Fault> {
     let manifest = draft.manifest()?;
     validate_package_assets(&manifest, |id| {
         manifest["assets"][id]["path"]
@@ -72,10 +81,20 @@ pub(super) fn apply(
     draft: &PackageDraft,
     mut save: RecognitionSave,
 ) -> Result<PackageDraft, Fault> {
-    if save.document.definitions.len() > mado_runtime_comparison::recognition::MAX_DEFINITIONS {
-        return Err(refusal("recognition definition limit exceeded"));
-    }
+    save.package.validate()?;
+    save.package.document(&save.capture_id)?;
     let previous = load(draft)?;
+    if let Some(RecognitionMetadata::Captures(previous)) = &previous {
+        if previous
+            .captures
+            .iter()
+            .any(|capture| save.package.document(&capture.capture_id).is_err())
+        {
+            return Err(refusal(
+                "Recognition Save must retain every existing capture",
+            ));
+        }
+    }
     let mut manifest = draft.manifest()?;
     let mut files = draft.files().clone();
     let mut selected = BTreeSet::new();
@@ -83,44 +102,59 @@ pub(super) fn apply(
         if !selected.insert(crop.definition_id.as_str()) {
             return Err(refusal("a crop may be selected only once per save"));
         }
-        save.document.definition(&crop.definition_id)?;
+        save.package
+            .document(&save.capture_id)?
+            .definition(&crop.definition_id)?;
     }
-    for definition in &mut save.document.definitions {
-        let prior = previous.as_ref().and_then(|document| {
-            document
-                .definitions
-                .iter()
-                .find(|item| item.id == definition.id)
-        });
-        let retained = prior.and_then(|item| item.saved.as_ref());
-        if let Some(submitted) = &definition.saved {
-            let known = previous.as_ref().is_some_and(|document| {
-                document
-                    .definitions
-                    .iter()
-                    .any(|item| item.saved.as_ref() == Some(submitted))
-            });
-            if !known || retained.is_some_and(|saved| saved != submitted) {
-                return Err(refusal(
-                    "saved crop identities are host-owned; select an explicit replacement",
-                ));
+    let legacy_id = save
+        .package
+        .captures
+        .first()
+        .map(|capture| capture.capture_id.clone());
+    for capture in &mut save.package.captures {
+        let prior = previous.as_ref().and_then(|metadata| match metadata {
+            RecognitionMetadata::Legacy(document)
+                if legacy_id.as_deref() == Some(capture.capture_id.as_str()) =>
+            {
+                Some(document)
             }
-        } else if let Some(retained) = retained {
-            definition.saved = Some(retained.clone());
+            RecognitionMetadata::Captures(package) => package.document(&capture.capture_id).ok(),
+            _ => None,
+        });
+        for definition in &mut capture.document.definitions {
+            let retained = prior
+                .and_then(|document| document.definition(&definition.id).ok())
+                .and_then(|item| item.saved.as_ref());
+            if let Some(submitted) = &definition.saved {
+                let known = previous.as_ref().is_some_and(|metadata| {
+                    metadata
+                        .definitions()
+                        .any(|item| item.saved.as_ref() == Some(submitted))
+                });
+                if !known || retained.is_some_and(|saved| saved != submitted) {
+                    return Err(refusal(
+                        "saved crop identities are host-owned; select an explicit replacement",
+                    ));
+                }
+            } else if let Some(retained) = retained {
+                definition.saved = Some(retained.clone());
+            }
         }
     }
-    save.document.validate()?;
+    save.package.validate()?;
     let mut crop_number = None;
     for crop in save.crops {
         let shared = {
-            let definition = save.document.definition(&crop.definition_id)?;
+            let definition = save
+                .package
+                .document(&save.capture_id)?
+                .definition(&crop.definition_id)?;
             if let Some(saved) = &definition.saved {
                 let path = manifest["assets"][&saved.asset]["path"]
                     .as_str()
                     .ok_or_else(|| refusal("retained crop declaration is missing"))?;
-                save.document
-                    .definitions
-                    .iter()
+                save.package
+                    .definitions()
                     .filter(|item| {
                         item.saved
                             .as_ref()
@@ -133,13 +167,13 @@ pub(super) fn apply(
                 false
             }
         };
-        let definition = save
-            .document
+        let document = save.package.document_mut(&save.capture_id)?;
+        let definition = document
             .definitions
             .iter_mut()
             .find(|item| item.id == crop.definition_id)
             .ok_or_else(|| refusal("selected crop definition is missing"))?;
-        let rect = definition.region.map_to_pixels(&save.document.basis)?;
+        let rect = definition.region.map_to_pixels(&document.basis)?;
         let asset = match definition.saved.as_ref().filter(|_| !shared) {
             Some(saved) => saved.asset.clone(),
             None => crate::storage::new_id()?,
@@ -177,17 +211,15 @@ pub(super) fn apply(
             json!({"path":path,"format":"png","width":saved.width,"height":saved.height});
         definition.saved = Some(saved);
     }
-    save.document.validate()?;
+    save.package.validate()?;
     if let Some(previous) = &previous {
         let retained: BTreeSet<_> = save
-            .document
-            .definitions
-            .iter()
+            .package
+            .definitions()
             .filter_map(|item| item.saved.as_ref().map(|saved| saved.asset.as_str()))
             .collect();
         let old: BTreeSet<_> = previous
-            .definitions
-            .iter()
+            .definitions()
             .filter_map(|item| item.saved.as_ref().map(|saved| saved.asset.as_str()))
             .collect();
         for asset in old.difference(&retained) {
@@ -211,11 +243,11 @@ pub(super) fn apply(
         &mut files,
         AUTHORING_ASSET,
         "recognition/authoring.json",
-        save.document.to_bytes()?,
+        save.package.to_bytes()?,
         previous.is_some(),
     )?;
     synchronize(
-        &save.document,
+        save.package.documents(),
         &mut manifest,
         &mut files,
         previous.is_some(),
@@ -258,8 +290,7 @@ pub(super) fn check_remove(draft: &PackageDraft, path: &str) -> Result<(), Fault
         .into_iter()
         .chain(
             document
-                .definitions
-                .iter()
+                .definitions()
                 .filter_map(|item| item.saved.as_ref().map(|saved| saved.asset.as_str())),
         )
     {
@@ -283,8 +314,8 @@ pub(super) fn check_remove(draft: &PackageDraft, path: &str) -> Result<(), Fault
     Ok(())
 }
 
-pub(super) fn synchronize(
-    document: &RecognitionDocument,
+pub(super) fn synchronize<'a>(
+    documents: impl IntoIterator<Item = &'a mado_runtime_comparison::recognition::RecognitionDocument>,
     manifest: &mut Value,
     files: &mut BTreeMap<String, PayloadBytes>,
     owned: bool,
@@ -292,7 +323,7 @@ pub(super) fn synchronize(
     let id = manifest["package_id"]
         .as_str()
         .ok_or_else(|| refusal("package identity is missing"))?;
-    match build_template_assets(document, id)? {
+    match build_template_assets(documents, id)? {
         Some((maps, engine)) => {
             let maps = serde_json::to_vec(&maps)
                 .map_err(|_| refusal("template maps cannot be encoded"))?;

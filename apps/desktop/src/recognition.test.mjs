@@ -5,7 +5,7 @@ import {
   clientToFrame, confirmTicket, copyBlock, copyFreshness, copyTicket, createDefinition, deleteDefinition, displayScale, dragEdges, geometryConfirmed,
   hitHandle, hitRegion, mapRegion, openRecognition, previewSnapshot, recognitionDirty, regionFromEdges, renameDefinition, saveBlock, saveTicket,
   selectDefinition, setContent, setDisplay, setExpected, setKind, setRegion, setRights, spanEdges, syncTicket, toggleCrop, toggleTrial, trialBlock,
-  trialFreshness, trialTicket, undoRecognition,
+  trialFreshness, trialTicket, undoRecognition, captureDocuments, aggregateDefinitions, canUndoRecognition, discardPixelCrops, canReleaseImage,
 } from './recognition.ts';
 
 const MIB=1_048_576;
@@ -13,10 +13,17 @@ const owner={workspace:{workspace_id:'a',revision:1},token:'lease-1'};
 const policy={input_bytes:32*MIB,input_pixels:16_777_216,crop_bytes:16*MIB,crop_pixels:4_194_304,package_image_bytes:64*MIB,package_non_image_bytes:MIB,
   package_bytes:65*MIB,package_decoded_bytes:128*MIB,replay_decoded_bytes:128*MIB,payload_bytes:512*MIB,preview_pixels:4_194_304};
 const FRAME={id:'f1',width:1920,height:1080,revision:1,confirmed:true};
+const CAPTURE_A='00000000000000000000';
+const CAPTURE_B='0000000000000000000g';
 function hostView(overrides={}){
-  return {owner,revision:'rev-1',document:null,saved_document:null,document_revision:1,basis_confirmed:false,frame:null,
+  const view={owner,revision:'rev-1',document:null,saved_document:null,document_revision:1,basis_confirmed:false,frame:null,
+    capture_id:null,captures:[],saved_captures:[],migration_required:false,other_bases_confirmed:true,
     capabilities:{max_ocr_zones:8,diagnostic_regions:256,diagnostic_bytes:262144,expected_bytes:4096,image_policy:policy},
     configuration_revision:'cfg-1',trial:null,...overrides};
+  if (view.document && !Object.hasOwn(overrides,'capture_id')) view.capture_id=CAPTURE_A;
+  if (view.document && !Object.hasOwn(overrides,'captures')) view.captures=[{capture_id:view.capture_id,document:view.document}];
+  if (view.saved_document && !Object.hasOwn(overrides,'saved_captures')) view.saved_captures=[{capture_id:view.capture_id,document:view.saved_document}];
+  return view;
 }
 const edges=(left,top,right,bottom)=>({left,top,right,bottom});
 // The host accepts exactly the local draft, as recognition_update does; a changed basis needs confirmation again.
@@ -25,7 +32,7 @@ function sync(state){
   if (!ticket) return state;
   const basisChanged=JSON.stringify(ticket.document.basis)!==JSON.stringify(state.view.document?.basis);
   const frame=state.view.frame&&{...state.view.frame,confirmed:state.view.frame.confirmed&&!basisChanged};
-  return applySync(state,ticket,{...state.view,document:ticket.document,document_revision:state.view.document_revision+1,
+  return applySync(state,ticket,{...state.view,document:ticket.document,captures:captureDocuments(state),document_revision:state.view.document_revision+1,
     basis_confirmed:state.view.basis_confirmed&&!basisChanged,frame});
 }
 function confirm(state){
@@ -35,8 +42,14 @@ function confirm(state){
 }
 // A confirmed frame whose default full-image document the host already holds.
 function loaded(frame=FRAME){
-  const state=openRecognition(hostView({frame}));
+  const document={version:1,rounding:1,basis:{frame_width:frame.width,frame_height:frame.height,
+    content:{x:0,y:0,width:frame.width,height:frame.height}},definitions:[],template_rights:null};
+  const state=openRecognition(hostView({frame:{...frame,confirmed:false},document}));
   return confirm(sync(state));
+}
+function savedView(state,document=state.document,overrides={}){
+  const captures=captureDocuments(state,document);
+  return {...state.view,document,saved_document:document,captures,saved_captures:structuredClone(captures),migration_required:false,...overrides};
 }
 function create(state,box,name='zone'){
   return createDefinition(state,regionFromEdges(box,state.document.basis),name);
@@ -44,7 +57,7 @@ function create(state,box,name='zone'){
 function trialResult(ticket,zones,overrides={}){
   const envelope={version:1,operation:'recognition_trial',environment_identity:'env',primary:null,cleanup:{clean:true},child_reaped:true,forced:false,exit_code:0,
     result:{kind:'ocr',text_contract:'facade',zones}};
-  return {owner,revision:ticket.revision,document_revision:ticket.document_revision,frame_id:ticket.frame_id,frame_revision:1,configuration_revision:'cfg-1',
+  return {owner,capture_id:ticket.capture_id,revision:ticket.revision,document_revision:ticket.document_revision,frame_id:ticket.frame_id,frame_revision:1,configuration_revision:'cfg-1',
     sample_id:ticket.sample_id,stale:false,
     controller:{run:'run-1',state:'finished',operation:'recognition_trial',result:envelope,error:null,progress:[],dropped_logs:0,workspace_id:'a',workspace_revision:1},
     ...overrides};
@@ -210,13 +223,13 @@ test('same-size scenes reuse content and setup Copy but stale trials and crops; 
   let state=create(loaded(),edges(100,100,200,200));
   state=setContent(state,{x:0,y:60,width:1920,height:960});
   state=confirm(sync(state));
-  state=applyView(state,{...state.view,saved_document:state.document});
+  state=applyView(state,savedView(state));
   state=sync(create(state,edges(400,200,500,300),'unsaved region'));
   state=selectDefinition(state,'r1');
   const ticket=trialTicket(state,'frame',['r1']);
   state=applyTrial(state,ticket,trialResult(ticket,[zone('r1','scene A')]));
   const copied=copyTicket(state,[],'game_content');
-  state=applyCopy(state,copied,{source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:[]},null);
+  state=applyCopy(state,copied,{capture_id:state.view.capture_id,source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:[]},null);
   const definitions=state.document.definitions;
   state=toggleCrop(state,'r1');
   const region=state.document.definitions[0].region;
@@ -253,10 +266,10 @@ test('a late result for edited inputs never marks the edited zone current, and U
   // The zone moves while the trial is outstanding; the result settles afterwards.
   let edited=setRegion(state,'r1','region',regionFromEdges(edges(12,10,52,50),state.document.basis));
   edited=applyTrial(sync(edited),ticket,trialResult(ticket,[zone('r1','HP'),zone('r2',null)]));
-  assert.equal(trialFreshness(edited,'r1'),'stale');
+  assert.notEqual(trialFreshness(edited,'r1'),'fresh');
   const restored=sync(undoRecognition(edited));
   assert.deepEqual(restored.document.definitions[0].region,state.document.definitions[0].region);
-  assert.equal(trialFreshness(restored,'r1'),'stale');
+  assert.notEqual(trialFreshness(restored,'r1'),'fresh');
   // A result that does not carry the ticket's captured inputs is historical only.
   const foreign=applyTrial(state,ticket,trialResult(ticket,[zone('r1','HP')],{document_revision:ticket.document_revision+5}));
   assert.equal(trialFreshness(foreign,'r1'),'historical');
@@ -268,7 +281,7 @@ test('a late result for edited inputs never marks the edited zone current, and U
 test('preview edits apply only to the snapshot they were made on',()=>{
   let state=sync(create(create(loaded(),edges(10,10,50,50),'a'),edges(60,10,90,50),'b'));
   const snapshot=previewSnapshot(state,'en',true,null);
-  const message=edit=>({token:owner.token,frameId:snapshot.frame.id,basisRevision:snapshot.basisRevision,edit});
+  const message=edit=>({token:owner.token,capture_id:snapshot.capture_id,revision:snapshot.revision,frameId:snapshot.frame.id,basisRevision:snapshot.basisRevision,edit});
   const target=snapshot.definitions[0];
   const moved=regionFromEdges(edges(20,10,60,50),state.document.basis);
   // A main-window rename of another definition does not block the relayed move.
@@ -299,13 +312,13 @@ test('Save keeps a crop chosen again or changed while the save was pending',()=>
   assert.deepEqual(state.cropIds,['r1']);
 });
 
-test('Discard to a package without metadata keeps the frame and stays one Undo away',()=>{
-  let state=sync(create(loaded(),edges(10,10,50,50)));
-  const discarded=applyDiscard(state,{...state.view,document:null,document_revision:state.view.document_revision+1,frame:{...state.view.frame,confirmed:false}});
-  assert.deepEqual(discarded.document.definitions,[]);
-  assert.deepEqual(discarded.document.basis,state.document.basis);
-  assert.equal(discarded.view.frame.id,'f1');
-  assert.deepEqual(undoRecognition(discarded).document.definitions.map(item=>item.id),['r1']);
+test('discarding an unsaved capture releases its image and does not offer cross-capture Undo',()=>{
+  const state=sync(create(loaded(),edges(10,10,50,50)));
+  const discarded=applyDiscard(state,hostView({document_revision:state.view.document_revision+1}));
+  assert.equal(discarded.document,null);
+  assert.equal(discarded.view.frame,null);
+  assert.equal(canUndoRecognition(discarded),false);
+  assert.equal(undoRecognition(discarded),discarded);
 });
 
 test('Discard restores exact saved metadata after a differently sized image, then a new image can be confirmed and edited',()=>{
@@ -313,7 +326,7 @@ test('Discard restores exact saved metadata after a differently sized image, the
   state=setExpected(create(state,edges(100,200,300,260),'saved zone'),'Script query text');
   state=confirm(sync(state));
   const saved=state.document;
-  state=applyView(state,{...state.view,saved_document:saved});
+  state=applyView(state,savedView(state,saved));
   const replacement={...saved,basis:{frame_width:1280,frame_height:720,content:{x:0,y:0,width:1280,height:720}}};
   state=applyView(state,{...state.view,document:replacement,document_revision:state.view.document_revision+1,
     frame:{id:'f2',width:1280,height:720,revision:2,confirmed:false}});
@@ -362,12 +375,12 @@ test('reopened metadata requires a frame, then reuses saved content on a compati
 test('grouped OCR Copy becomes obsolete after a zone edit, even when undone',()=>{
   let state=toggleTrial(sync(create(loaded(),edges(10,10,50,50))),'r1');
   const ticket=copyTicket(state, ['r1'], 'ocr_recognize');
-  state=applyCopy(state,ticket,{source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1']},null);
+  state=applyCopy(state,ticket,{capture_id:state.view.capture_id,source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1']},null);
   assert.equal(copyFreshness(state, 'ocr_recognize'),'current');
   const moved=setRegion(state,'r1','region',regionFromEdges(edges(11,10,51,50),state.document.basis));
   assert.equal(copyFreshness(moved, 'ocr_recognize'),'obsolete');
   assert.equal(copyFreshness(undoRecognition(moved), 'ocr_recognize'),'obsolete');
-  const late=applyCopy(moved,ticket,{source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1']},null);
+  const late=applyCopy(moved,ticket,{capture_id:state.view.capture_id,source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1']},null);
   assert.equal(copyFreshness(late, 'ocr_recognize'),'obsolete','a completed native Copy remains published, not failed, after a concurrent edit');
   const failed=applyCopy(state,ticket,null,{category:'Clipboard',message:'denied',context:null});
   assert.equal(copyFreshness(failed, 'ocr_recognize'),'failed');
@@ -376,11 +389,11 @@ test('grouped OCR Copy becomes obsolete after a zone edit, even when undone',()=
 test('saving a diagnostic OCR crop keeps grouped Copy current; zone, name and checked-set changes still obsolete it',()=>{
   let state=toggleTrial(sync(create(loaded(),edges(10,10,50,50),'HP')),'r1');
   const copied=copyTicket(state,['r1'],'ocr_recognize');
-  state=applyCopy(state,copied,{source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1']},null);
+  state=applyCopy(state,copied,{capture_id:state.view.capture_id,source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1']},null);
   state=toggleCrop(state,'r1');
   const ticket=saveTicket(state);
   const saved={...ticket.document,definitions:ticket.document.definitions.map(item=>({...item,saved:{asset:'recognition/r1.png',sha256:'a'.repeat(64),width:40,height:40}}))};
-  state=applySave(state,ticket,{...state.view,revision:'rev-2',document:saved,saved_document:saved,document_revision:state.view.document_revision+1});
+  state=applySave(state,ticket,savedView(state,saved,{revision:'rev-2',document_revision:state.view.document_revision+1}));
   assert.equal(state.document.definitions[0].saved.sha256,'a'.repeat(64));
   assert.equal(recognitionDirty(state),false);
   assert.equal(copyFreshness(state,'ocr_recognize'),'current','grouped source carries no saved crop');
@@ -393,7 +406,7 @@ test('saving a diagnostic OCR crop keeps grouped Copy current; zone, name and ch
 
 test('hand-restored saved metadata is clean again without reusing an old definition revision',()=>{
   let state=sync(create(loaded(),edges(10,10,50,50),'HP'));
-  state=applyView(state,{...state.view,saved_document:state.document});
+  state=applyView(state,savedView(state));
   const savedRevision=state.document.definitions[0].revision;
   const snapshot=previewSnapshot(state,'en',true,null);
   let restored=renameDefinition(state,'r1','HPx');
@@ -402,7 +415,7 @@ test('hand-restored saved metadata is clean again without reusing an old definit
   assert.equal(recognitionDirty(restored),false);
   assert.equal(saveBlock(restored),'noChanges');
   assert.ok(restored.document.definitions[0].revision>savedRevision,'revisions stay monotonic');
-  const late={token:owner.token,frameId:snapshot.frame.id,basisRevision:snapshot.basisRevision,
+  const late={token:owner.token,capture_id:snapshot.capture_id,revision:snapshot.revision,frameId:snapshot.frame.id,basisRevision:snapshot.basisRevision,
     edit:{kind:'region',id:'r1',part:'region',revision:snapshot.definitions[0].revision,region:regionFromEdges(edges(20,10,60,50),state.document.basis)}};
   assert.equal(applyPreviewEdit(restored,late,n=>`Region ${n}`).notice,'staleEdit','an edit on the pre-rename snapshot stays fenced');
   assert.equal(recognitionDirty(setKind(setKind(state,'r1','template'),'r1','ocr')),false);
@@ -418,7 +431,7 @@ test('hand-restored saved metadata is clean again without reusing an old definit
   let template=sync(setRights(setKind(state,'r1','template'),{license:'CC0',created_by:'author',created_for:null,reviewed:true}));
   const png={asset:'recognition/r1.png',sha256:'b'.repeat(64),width:40,height:40};
   const savedTemplate={...template.document,definitions:template.document.definitions.map(item=>({...item,saved:png}))};
-  template=applyView(template,{...template.view,revision:'rev-2',document:savedTemplate,saved_document:savedTemplate,document_revision:template.view.document_revision+1});
+  template=applyView(template,savedView(template,savedTemplate,{revision:'rev-2',document_revision:template.view.document_revision+1}));
   assert.equal(copyBlock(template,['r1'],'template_recognize'),null);
   const reverted=sync(renameDefinition(renameDefinition(template,'r1','HPx'),'r1','HP'));
   assert.equal(copyBlock(reverted,['r1'],'template_recognize'),null);
@@ -437,7 +450,7 @@ test('grouped OCR Copy captures every checked region independently of Selected d
   const ticket=copyTicket(state,state.trialIds,'ocr_recognize');
   assert.deepEqual(ticket.definition_ids,['r1','r2']);
   assert.equal(copyTicket(state,['r3'],'ocr_recognize'),null,'the editor row is not the checked set');
-  const result={source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1','r2']};
+  const result={capture_id:state.view.capture_id,source:'x',basis:state.document.basis,verified:false,document_revision:state.view.document_revision,definition_ids:['r1','r2']};
   state=applyCopy(state,ticket,result,null);
   const setup=copyTicket(state,[],'game_content');
   state=applyCopy(state,setup,{...result,definition_ids:[]},null);
@@ -490,14 +503,14 @@ test('Copy refuses invalid whole requests and unknown or exceeded engine limits,
   assert.equal(copyBlock(changed,['r1','r2'],'ocr_recognize'),'unconfirmed');
   assert.equal(copyBlock(changed,[],'game_content'),'unconfirmed','unconfirmed geometry is never copied as setup');
   assert.equal(saveBlock(changed),'unconfirmed','Save cannot persist unconfirmed geometry for later implicit reuse');
-  const saved=applyView(state,{...state.view,saved_document:state.document,frame:null});
+  const saved=applyView(state,savedView(state,state.document,{frame:null}));
   assert.equal(saveBlock(renameDefinition(saved,'r1','metadata edit')),null,'saved geometry remains editable without a frame');
 });
 
 for (const savedSetup of [false,true]) test(`confirmed ${savedSetup?'changed saved':'first'} setup remains saveable after a failed image load`,()=>{
   let state=sync(create(loaded(),edges(100,100,200,200)));
   if (savedSetup) {
-    state=applyView(state,{...state.view,saved_document:state.document});
+    state=applyView(state,savedView(state));
     state=confirm(sync(setContent(state,{x:0,y:60,width:1920,height:960})));
   }
   const changed=sync(setContent(state,{x:0,y:80,width:1920,height:900}));
@@ -513,7 +526,7 @@ for (const savedSetup of [false,true]) test(`confirmed ${savedSetup?'changed sav
 
 test('content setup returns to repeat region drawing only after a valid commit',()=>{
   let state=setDisplay(loaded(),{zoom:200,tool:'content'});
-  const send=edit=>({token:owner.token,frameId:state.view.frame.id,basisRevision:state.basis,edit});
+  const send=edit=>({token:owner.token,capture_id:state.view.capture_id,revision:state.view.revision,frameId:state.view.frame.id,basisRevision:state.basis,edit});
   state=applyPreviewEdit(state,send({kind:'content',content:{x:0,y:0,width:0,height:1080}}),n=>`Region ${n}`);
   assert.equal(state.display.tool,'content','refused setup remains adjustable');
   state=applyPreviewEdit(state,send({kind:'content',content:{x:0,y:60,width:1920,height:960}}),n=>`Region ${n}`);
@@ -527,4 +540,134 @@ test('content setup returns to repeat region drawing only after a valid commit',
   state=setDisplay(state,{zoom:200,tool:'content'});
   state=applyView(state,{...state.view,frame:{...FRAME,id:'next',revision:2,confirmed:false}});
   assert.equal(state.display.tool,'zones','each scene starts with region authoring');
+});
+
+test('capture switches isolate identical r1 names, Undo and every delayed receipt',()=>{
+  let state=sync(create(loaded(),edges(10,10,50,50),'same'));
+  state=applyView(state,savedView(state));
+  const storedA=state.document;
+  const b={...structuredClone(storedA),basis:{frame_width:640,frame_height:480,content:{x:0,y:20,width:640,height:440}}};
+  state=renameDefinition(state,'r1','A edited');
+  const delayedSync=syncTicket(state);
+  state=sync(state);
+  const delayedSave=saveTicket(state);
+  const delayedCopy=copyTicket(state,[],'game_content');
+  const delayedTrial=trialTicket(state,'frame',['r1']);
+  const preview=previewSnapshot(state,'en',true,null);
+  const a=state.document;
+  const captures=[{capture_id:CAPTURE_A,document:a},{capture_id:CAPTURE_B,document:b}];
+  const saved=[{capture_id:CAPTURE_A,document:storedA},{capture_id:CAPTURE_B,document:b}];
+  state=applyView(state,{...state.view,capture_id:CAPTURE_B,document:b,saved_document:b,captures,saved_captures:saved,
+    document_revision:state.view.document_revision+1,frame:null});
+  assert.deepEqual(state.document.basis,b.basis);
+  assert.equal(state.view.frame,null);
+  assert.equal(copyBlock(state,[],'game_content'),'noFrame');
+  assert.equal(canUndoRecognition(state),false,'A metadata actions do not undo B r1');
+  assert.equal(undoRecognition(state),state);
+  assert.equal(applyCopy(state,delayedCopy,null,{category:'late',message:'late',context:null}),state);
+  assert.equal(applyTrial(state,delayedTrial,trialResult(delayedTrial,[zone('r1','A')])),state);
+  const selectedA={token:owner.token,capture_id:CAPTURE_A,revision:preview.revision,frameId:preview.frame.id,
+    basisRevision:preview.basisRevision,edit:{kind:'select',id:null}};
+  assert.equal(applyPreviewEdit(state,selectedA,n=>`Region ${n}`),state);
+  state=renameDefinition(state,'r1','B edited');
+  const all=captureDocuments(state);
+  state=applyView(state,{...state.view,capture_id:CAPTURE_A,document:a,saved_document:storedA,captures:all,
+    document_revision:state.view.document_revision+1,frame:null});
+  assert.deepEqual(state.document,a);
+  assert.equal(state.view.frame,null,'A is metadata-only until an explicit image load');
+  assert.equal(state.trial,null);
+  assert.equal(state.copies.game_content,undefined);
+  const before=state.document;
+  assert.equal(applySync(state,delayedSync,{...state.view,document:delayedSync.document}),state);
+  assert.equal(applySave(state,delayedSave,savedView(state)),state);
+  assert.equal(applyCopy(state,delayedCopy,null,null),state);
+  assert.equal(applyTrial(state,delayedTrial,trialResult(delayedTrial,[zone('r1','A')])),state);
+  assert.equal(applyPreviewEdit(state,{...selectedA,edit:{kind:'undo',localRevision:preview.localRevision}},n=>`Region ${n}`).document,before);
+  state=undoRecognition(state);
+  assert.equal(state.document.definitions[0].name,'same');
+  assert.equal(state.view.captures.find(capture=>capture.capture_id===CAPTURE_B).document.definitions[0].name,'B edited');
+});
+
+test('metadata and Undo ceilings are aggregate and Undo cannot overflow another capture',()=>{
+  const seed=create(loaded(),edges(10,10,50,50)).document;
+  const makeDocument=count=>({...structuredClone(seed),definitions:Array.from({length:count},(_,index)=>({...seed.definitions[0],id:`r${index+1}`}))});
+  const a=makeDocument(128), b=makeDocument(128);
+  let state=openRecognition(hostView({capture_id:CAPTURE_A,document:a,saved_document:a,
+    captures:[{capture_id:CAPTURE_A,document:a},{capture_id:CAPTURE_B,document:b}],
+    saved_captures:[{capture_id:CAPTURE_A,document:a},{capture_id:CAPTURE_B,document:b}],basis_confirmed:true}));
+  assert.equal(aggregateDefinitions(state),256);
+  assert.equal(create(state,edges(100,100,110,110)).notice,'definitionLimit');
+  state=deleteDefinition(state,'r128');
+  let captures=captureDocuments(state);
+  state=applyView(state,{...state.view,capture_id:CAPTURE_B,document:b,saved_document:b,captures,document_revision:state.view.document_revision+1});
+  state=create(state,edges(100,100,110,110));
+  captures=captureDocuments(state);
+  const aAfter=captures.find(capture=>capture.capture_id===CAPTURE_A).document;
+  state=applyView(state,{...state.view,capture_id:CAPTURE_A,document:aAfter,saved_document:a,captures,document_revision:state.view.document_revision+1});
+  assert.equal(undoRecognition(state).notice,'definitionLimit');
+  assert.equal(aggregateDefinitions(state),256);
+
+  for(let index=0;index<70;index++){
+    const capture_id=index%2===0?CAPTURE_B:CAPTURE_A;
+    const captures=captureDocuments(state);
+    const document=captures.find(capture=>capture.capture_id===capture_id).document;
+    state=applyView(state,{...state.view,capture_id,document,captures,document_revision:state.view.document_revision+1});
+    state=renameDefinition(state,'r1',`edit ${index}`);
+  }
+  assert.ok(state.undo.length<=UNDO_ENTRIES);
+  assert.ok(state.undoBytes<=UNDO_BYTES);
+  assert.ok(state.undo.some(entry=>entry.capture_id===CAPTURE_A));
+  assert.ok(state.undo.some(entry=>entry.capture_id===CAPTURE_B));
+
+  const large=makeDocument(40);
+  large.definitions=large.definitions.map(item=>({...item,expected:'x'.repeat(4096)}));
+  const empty=makeDocument(0);
+  state=openRecognition(hostView({capture_id:CAPTURE_B,document:empty,
+    captures:[{capture_id:CAPTURE_A,document:large},{capture_id:CAPTURE_B,document:empty}]}));
+  for(let index=0;index<40;index++){
+    state=create(state,edges(index,0,index+1,1));
+    state=setExpected(state,state.selected,'x'.repeat(4096));
+    if(state.notice==='documentLimit') break;
+  }
+  assert.equal(state.notice,'documentLimit');
+  assert.equal(state.view.captures[0].document,large);
+  assert.ok(state.document.definitions.length<40);
+});
+
+test('legacy migration stays explicitly dirty and crop discard retains all metadata',()=>{
+  const document=create(loaded(),edges(10,10,50,50)).document;
+  let state=openRecognition(hostView({document,saved_document:document,basis_confirmed:true,migration_required:true}));
+  assert.equal(recognitionDirty(state),true);
+  assert.equal(saveBlock(state),null,'migration is saveable without original pixels');
+  const ticket=saveTicket(state);
+  state=applySave(state,ticket,savedView(state,document,{document_revision:state.view.document_revision+1}));
+  assert.equal(recognitionDirty(state),false);
+  const chosen=toggleCrop(state,'r1');
+  const discarded=discardPixelCrops(chosen);
+  assert.deepEqual(discarded.cropIds,[]);
+  assert.equal(discarded.document,chosen.document);
+  assert.equal(discarded.view.captures,chosen.view.captures);
+});
+
+test('unconfirmed native geometry retains pixels until confirm or discard, while missing-image recovery remains possible',()=>{
+  const document=loaded().document;
+  let state=openRecognition(hostView({document,frame:{...FRAME,confirmed:false}}));
+  assert.equal(canReleaseImage(state,true),false);
+  assert.equal(canReleaseImage(state,false),false);
+  state=confirm(state);
+  assert.equal(canReleaseImage(state,true),true);
+  state=setContent(state,{x:0,y:10,width:1920,height:1000});
+  assert.equal(canReleaseImage(state,true),false,'local unsynchronized geometry is guarded too');
+  state=applyView(state,{...state.view,frame:null});
+  assert.equal(canReleaseImage(state,false),true,'a lost image can be explicitly reloaded for confirmation');
+  assert.equal(canReleaseImage(state,true),false,'missing pixels do not approve abandoning changed geometry');
+});
+
+test('saving an active confirmed capture cannot hide another unconfirmed capture basis',()=>{
+  let state=create(loaded(),edges(10,10,50,50));
+  state={...state,view:{...state.view,other_bases_confirmed:false}};
+  assert.equal(saveBlock(state),'unconfirmed');
+  assert.equal(saveTicket(state),null);
+  state={...state,view:{...state.view,other_bases_confirmed:true}};
+  assert.equal(saveBlock(state),null);
 });

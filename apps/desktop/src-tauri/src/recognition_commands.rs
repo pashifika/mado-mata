@@ -7,6 +7,68 @@ use mado_runtime_comparison::recognition::{RecognitionDocument, SnippetKind};
 use std::path::Path;
 use tauri::{Emitter, Manager};
 
+#[tauri::command]
+pub async fn native_discover(
+    owner: AuthoringRef,
+    revision: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<mado_mata_desktop::application::NativeSelectionView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.native_discover(&owner, &revision, None)).await
+}
+
+#[tauri::command]
+pub async fn native_select_candidate(
+    owner: AuthoringRef,
+    revision: String,
+    generation: u64,
+    candidate_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<mado_mata_desktop::application::NativeSelectionView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || {
+        application.native_select_candidate(&owner, &revision, generation, &candidate_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn native_capture(
+    owner: AuthoringRef,
+    revision: String,
+    generation: u64,
+    capture_id: Option<String>,
+    document_revision: u64,
+    cache_original: bool,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Backend>,
+) -> Result<mado_mata_desktop::application::NativeCaptureResult, Fault> {
+    let application = state.bootstrap.application()?;
+    // Cache availability cannot fail image acceptance. Never resolve it when OFF.
+    let cache = cache_original.then(|| crate::cache_commands::cache(&app));
+    background(move || {
+        application.native_capture(
+            &owner,
+            &revision,
+            generation,
+            capture_id.as_deref(),
+            document_revision,
+            cache,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn native_release_selection(
+    owner: AuthoringRef,
+    revision: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<mado_mata_desktop::application::NativeSelectionView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.native_release_selection(&owner, &revision)).await
+}
+
 pub const PREVIEW_WINDOW: &str = "recognition-preview";
 
 #[tauri::command]
@@ -42,12 +104,16 @@ pub async fn recognition_pick(
     {
         crate::picker::choose_png(window, guard).await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        crate::windows_shell::choose_png(window, guard).await
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (window, guard);
         Err(Fault::new(
             "RecognitionPlatform",
-            "PNG selection requires macOS",
+            "PNG selection requires macOS or Windows",
         ))
     }
 }
@@ -57,16 +123,52 @@ pub async fn recognition_load(
     owner: AuthoringRef,
     revision: String,
     path: String,
+    capture_id: Option<String>,
+    document_revision: u64,
+    new_capture: bool,
     state: tauri::State<'_, Backend>,
 ) -> Result<RecognitionView, Fault> {
     let application = state.bootstrap.application()?;
-    background(move || application.recognition_load(&owner, &revision, Path::new(&path))).await
+    background(move || {
+        application.recognition_load(
+            &owner,
+            &revision,
+            Path::new(&path),
+            capture_id.as_deref(),
+            document_revision,
+            new_capture,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn recognition_select(
+    owner: AuthoringRef,
+    revision: String,
+    capture_id: Option<String>,
+    document_revision: u64,
+    selected_capture_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<RecognitionView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || {
+        application.recognition_select(
+            &owner,
+            &revision,
+            capture_id.as_deref(),
+            document_revision,
+            &selected_capture_id,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn recognition_preview(
     owner: AuthoringRef,
     frame_id: String,
+    capture_id: String,
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, Backend>,
@@ -80,7 +182,8 @@ pub async fn recognition_preview(
     let application = state.bootstrap.application()?;
     let worker = application.clone();
     let expected = owner.clone();
-    let bytes = background(move || worker.recognition_preview(&expected, &frame_id)).await?;
+    let bytes =
+        background(move || worker.recognition_preview(&expected, &frame_id, &capture_id)).await?;
     if app.get_webview_window(PREVIEW_WINDOW).is_none() {
         application.recognition_release_preview(&owner);
         return Err(Fault::new(
@@ -98,6 +201,7 @@ pub async fn recognition_update(
     document: RecognitionDocument,
     frame_id: Option<String>,
     document_revision: u64,
+    capture_id: String,
     state: tauri::State<'_, Backend>,
 ) -> Result<RecognitionView, Fault> {
     let application = state.bootstrap.application()?;
@@ -108,6 +212,7 @@ pub async fn recognition_update(
             document,
             frame_id.as_deref(),
             document_revision,
+            &capture_id,
         )
     })
     .await
@@ -119,11 +224,18 @@ pub async fn recognition_confirm(
     revision: String,
     frame_id: String,
     document_revision: u64,
+    capture_id: String,
     state: tauri::State<'_, Backend>,
 ) -> Result<RecognitionView, Fault> {
     let application = state.bootstrap.application()?;
     background(move || {
-        application.recognition_confirm(&owner, &revision, &frame_id, document_revision)
+        application.recognition_confirm(
+            &owner,
+            &revision,
+            &frame_id,
+            document_revision,
+            &capture_id,
+        )
     })
     .await
 }
@@ -132,10 +244,15 @@ pub async fn recognition_confirm(
 pub async fn recognition_discard(
     owner: AuthoringRef,
     revision: String,
+    capture_id: Option<String>,
+    document_revision: u64,
     state: tauri::State<'_, Backend>,
 ) -> Result<RecognitionView, Fault> {
     let application = state.bootstrap.application()?;
-    background(move || application.recognition_discard(&owner, &revision)).await
+    background(move || {
+        application.recognition_discard(&owner, &revision, capture_id.as_deref(), document_revision)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -146,6 +263,7 @@ pub async fn recognition_trial(
     document_revision: u64,
     selected_ids: Vec<String>,
     sample_id: Option<String>,
+    capture_id: String,
     state: tauri::State<'_, Backend>,
 ) -> Result<RecognitionTrial, Fault> {
     let application = state.bootstrap.application()?;
@@ -157,6 +275,7 @@ pub async fn recognition_trial(
             document_revision,
             &selected_ids,
             sample_id.as_deref(),
+            &capture_id,
         )
     })
     .await
@@ -168,11 +287,12 @@ pub async fn recognition_save(
     revision: String,
     document_revision: u64,
     crop_ids: Vec<String>,
+    capture_id: String,
     state: tauri::State<'_, Backend>,
 ) -> Result<RecognitionSaved, Fault> {
     let application = state.bootstrap.application()?;
     background(move || {
-        application.recognition_save(&owner, &revision, document_revision, &crop_ids)
+        application.recognition_save(&owner, &revision, document_revision, &crop_ids, &capture_id)
     })
     .await
 }
@@ -184,43 +304,59 @@ pub async fn recognition_copy(
     document_revision: u64,
     definition_ids: Vec<String>,
     mode: SnippetKind,
+    capture_id: String,
     app: tauri::AppHandle,
     state: tauri::State<'_, Backend>,
 ) -> Result<RecognitionCopy, Fault> {
     let application = state.bootstrap.application()?;
+    let worker = application.clone();
+    let expected_owner = owner.clone();
+    let expected_revision = revision.clone();
     let copied = background(move || {
-        application.recognition_copy(&owner, &revision, document_revision, &definition_ids, mode)
+        worker.recognition_copy(
+            &expected_owner,
+            &expected_revision,
+            document_revision,
+            &definition_ids,
+            mode,
+            &capture_id,
+        )
     })
     .await?;
-    publish_clipboard(app, copied).await
+    publish_clipboard(app, application, owner, revision, copied).await
 }
 
 #[cfg(target_os = "macos")]
 async fn publish_clipboard(
     app: tauri::AppHandle,
+    application: std::sync::Arc<mado_mata_desktop::application::Application>,
+    owner: AuthoringRef,
+    revision: String,
     copied: RecognitionCopy,
 ) -> Result<RecognitionCopy, Fault> {
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
     use objc2_foundation::NSString;
     let (send, mut receive) = tauri::async_runtime::channel(1);
     app.run_on_main_thread(move || {
-        let pasteboard = NSPasteboard::generalPasteboard();
-        let text = NSString::from_str(&copied.source);
-        // SAFETY: AppKit exports this immutable process-lifetime string type; publication runs on the main thread.
-        #[expect(
-            unsafe_code,
-            reason = "audited immutable AppKit pasteboard type constant"
-        )]
-        let text_type = unsafe { NSPasteboardTypeString };
-        pasteboard.clearContents();
-        let result = if pasteboard.setString_forType(&text, text_type) {
-            Ok(copied)
-        } else {
-            Err(Fault::new(
-                "RecognitionClipboard",
-                "Clipboard publication failed; package source was not changed",
-            ))
-        };
+        let result = application.recognition_publish_copy(&owner, &revision, copied, |source| {
+            let pasteboard = NSPasteboard::generalPasteboard();
+            let text = NSString::from_str(source);
+            // SAFETY: AppKit exports this immutable process-lifetime string type.
+            #[expect(
+                unsafe_code,
+                reason = "audited immutable AppKit pasteboard type constant"
+            )]
+            let text_type = unsafe { NSPasteboardTypeString };
+            pasteboard.clearContents();
+            if pasteboard.setString_forType(&text, text_type) {
+                Ok(())
+            } else {
+                Err(Fault::new(
+                    "RecognitionClipboard",
+                    "Clipboard publication failed; package source was not changed",
+                ))
+            }
+        });
         let _ = send.try_send(result);
     })
     .map_err(|_| {
@@ -237,14 +373,36 @@ async fn publish_clipboard(
     })?
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 async fn publish_clipboard(
     _app: tauri::AppHandle,
+    application: std::sync::Arc<mado_mata_desktop::application::Application>,
+    owner: AuthoringRef,
+    revision: String,
+    copied: RecognitionCopy,
+) -> Result<RecognitionCopy, Fault> {
+    background(move || {
+        application.recognition_publish_copy(
+            &owner,
+            &revision,
+            copied,
+            crate::windows_shell::copy_text,
+        )
+    })
+    .await
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+async fn publish_clipboard(
+    _app: tauri::AppHandle,
+    _application: std::sync::Arc<mado_mata_desktop::application::Application>,
+    _owner: AuthoringRef,
+    _revision: String,
     _copied: RecognitionCopy,
 ) -> Result<RecognitionCopy, Fault> {
     Err(Fault::new(
         "RecognitionPlatform",
-        "Native clipboard publication requires macOS",
+        "Native clipboard publication requires macOS or Windows",
     ))
 }
 
