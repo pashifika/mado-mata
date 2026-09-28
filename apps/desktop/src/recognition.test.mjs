@@ -55,6 +55,19 @@ function savedView(state,document=state.document,overrides={}){
 function create(state,box,name='zone'){
   return createDefinition(state,regionFromEdges(box,state.document.basis),name);
 }
+// Host capture selection/New capture reports all drafts, but staged originals only for the active capture.
+function captureView(state,capture_id,document,overrides={}){
+  const captures=captureDocuments(state);
+  const existing=captures.some(capture=>capture.capture_id===capture_id);
+  return {...state.view,capture_id,document,
+    captures:existing?captures.map(capture=>capture.capture_id===capture_id?{capture_id,document}:capture):[...captures,{capture_id,document}],
+    saved_document:state.view.saved_captures.find(capture=>capture.capture_id===capture_id)?.document??null,
+    document_revision:state.view.document_revision+1,frame:null,staged_crop_ids:[],stale_crop_ids:[],staged_crop_sources:{},...overrides};
+}
+function stagedOriginal(){
+  const state=toggleCrop(sync(create(loaded(),edges(10,10,50,50))),'r1');
+  return applyView(state,{...state.view,staged_crop_ids:['r1'],staged_crop_sources:{r1:'f1'},frame:{...FRAME,id:'f2',revision:2}});
+}
 function trialResult(ticket,zones,overrides={}){
   const envelope={version:1,operation:'recognition_trial',environment_identity:'env',primary:null,cleanup:{clean:true},child_reaped:true,forced:false,exit_code:0,
     result:{kind:'ocr',text_contract:'facade',zones}};
@@ -340,6 +353,203 @@ test('Save keeps a crop chosen again or changed while the save was pending',()=>
   assert.deepEqual(state.cropIds,['r1']);
 });
 
+test('Delete and Undo recover the selected F1 original while F2 is active, including a synchronized deletion',()=>{
+  let state=stagedOriginal();
+  const originalMark=state.cropMarks.r1;
+  state=sync(deleteDefinition(state,'r1'));
+  state=applyView(state,{...state.view,staged_crop_ids:[],stale_crop_ids:['r1']});
+  state=undoRecognition(state);
+  assert.equal(state.view.frame.id,'f2');
+  assert.equal(state.selected,'r1');
+  assert.deepEqual(state.cropIds,['r1']);
+  assert.equal(state.cropMarks.r1,originalMark);
+  assert.deepEqual(state.cropSources,{r1:'f1'});
+  state=sync(state);
+  state=applyView(state,{...state.view,staged_crop_ids:['r1'],stale_crop_ids:[]});
+  assert.deepEqual(saveTicket(state).crop_sources,{r1:'f1'});
+
+  const current=toggleCrop(sync(create(loaded(),edges(10,10,50,50))),'r1');
+  assert.deepEqual(saveTicket(sync(undoRecognition(deleteDefinition(current,'r1')))).crop_sources,{r1:'f1'},
+    'an unstaged original is recoverable while its live frame is still held');
+});
+
+test('Undo never substitutes a missing or wrong-frame stage for a deleted original',()=>{
+  const deleted=deleteDefinition(stagedOriginal(),'r1');
+  const missing=applyView(deleted,{...deleted.view,staged_crop_ids:[],staged_crop_sources:{}});
+  const restored=undoRecognition(missing);
+  assert.equal(restored.document.definitions[0].id,'r1');
+  assert.deepEqual(restored.cropIds,[]);
+  assert.deepEqual(restored.cropSources,{});
+  const wrong=applyView(deleted,{...deleted.view,staged_crop_sources:{r1:'f3'}});
+  assert.deepEqual(undoRecognition(wrong).cropIds,[],'a retained stage from another frame is not the deleted choice');
+});
+
+test('a Save reply invalidates deleted crop Undo even when its recognition follow-up read fails',()=>{
+  const state=stagedOriginal();
+  const ticket=saveTicket(state);
+  const deleted=deleteDefinition(state,'r1');
+  const restored=undoRecognition(applySave(deleted,ticket,null));
+  assert.equal(restored.document.definitions[0].id,'r1');
+  assert.deepEqual(restored.cropIds,[]);
+  assert.deepEqual(restored.cropSources,{},'the old host view must not authorize released F1 pixels');
+
+  const saved={...ticket.document,definitions:ticket.document.definitions.map(item=>({...item,
+    saved:{asset:`captures/${CAPTURE_A}/r1.png`,sha256:'a'.repeat(64),width:40,height:40}}))};
+  const committed=applySave(deleted,ticket,savedView(state,saved,{revision:'rev-2',
+    document_revision:state.view.document_revision+1,staged_crop_ids:[],staged_crop_sources:{}}));
+  const afterUndo=undoRecognition(committed);
+  assert.equal(afterUndo.document.definitions[0].saved.sha256,'a'.repeat(64));
+  assert.deepEqual(afterUndo.cropIds,[]);
+  assert.deepEqual(afterUndo.cropSources,{});
+});
+
+test('a committed Save cannot lend stale staging metadata to a later Delete and Undo',()=>{
+  const state=stagedOriginal();
+  const ticket=saveTicket(state);
+  const edited=setRegion(state,'r1','region',regionFromEdges(edges(20,10,60,50),state.document.basis));
+  const committed=applySave(edited,ticket,null);
+  assert.deepEqual(committed.cropIds,['r1'],'newer crop intent remains explicit after the commit');
+  assert.equal(saveBlock(committed),'cropFrame','the consumed F1 original is no longer saveable');
+  const restored=undoRecognition(deleteDefinition(committed,'r1'));
+  assert.deepEqual(restored.document.definitions[0].region,edited.document.definitions[0].region);
+  assert.deepEqual(restored.cropIds,[]);
+  assert.deepEqual(restored.cropSources,{});
+});
+
+test('metadata-only Save and explicit pixel discard invalidate hidden deleted-crop Undo',()=>{
+  const deleted=sync(deleteDefinition(stagedOriginal(),'r1'));
+  const ticket=saveTicket(deleted);
+  assert.deepEqual(ticket.crop_ids,[]);
+  const saved=applySave(deleted,ticket,savedView(deleted,deleted.document,{revision:'rev-2',
+    document_revision:deleted.view.document_revision+1,staged_crop_ids:[],staged_crop_sources:{}}));
+  const restored=undoRecognition(saved);
+  assert.equal(restored.document.definitions[0].id,'r1');
+  assert.deepEqual(restored.cropSources,{});
+  assert.deepEqual(restored.cropIds,[],'Save releases every stage owned by this capture, not just submitted ids');
+  const discarded=undoRecognition(discardPixelCrops(deleted));
+  assert.equal(discarded.document.definitions[0].id,'r1');
+  assert.deepEqual(discarded.cropIds,[],'acknowledged pixel discard cannot be undone into abandoned pixels');
+  assert.deepEqual(discarded.cropSources,{});
+});
+
+test('Discard removes obsolete pending captures and authoring can create and save crops again',()=>{
+  let state=stagedOriginal();
+  const empty=loaded().document;
+  state=applyView(state,captureView(state,CAPTURE_B,empty,{frame:{...FRAME,id:'f3',revision:3},basis_confirmed:true}));
+  state=toggleCrop(sync(create(state,edges(60,10,90,50))),'r1');
+  state=applyDiscard(state,hostView({document_revision:state.view.document_revision+1}));
+  assert.equal(recognitionDirty(state),false);
+  assert.deepEqual(state.cropIds,[]);
+  assert.deepEqual(state.cropMarks,{});
+  assert.deepEqual(state.cropSources,{});
+  assert.deepEqual(state.pendingCrops,{});
+  assert.equal(canUndoRecognition(state),false);
+
+  const captureId='00000000000000000100';
+  state=applyView(state,captureView(state,captureId,empty,{frame:{...FRAME,id:'f4',revision:4},basis_confirmed:true}));
+  state=toggleCrop(sync(create(state,edges(100,10,150,50))),'r1');
+  assert.equal(saveBlock(state),null);
+  const ticket=saveTicket(state);
+  assert.deepEqual(ticket.crop_sources,{r1:'f4'});
+  state=applySave(state,ticket,savedView(state,state.document,{revision:'rev-2',document_revision:state.view.document_revision+1}));
+  assert.equal(recognitionDirty(state),false);
+});
+
+test('Discard keeps newer metadata on a retained capture but clears all pixel intent and deleted-crop Undo',()=>{
+  let state=sync(create(create(loaded(),edges(10,10,50,50)),edges(60,10,90,50)));
+  state=applyView(state,savedView(state));
+  const saved=state.document;
+  state=toggleCrop(toggleCrop(state,'r1'),'r2');
+  const savedCaptures=[...state.view.saved_captures,{capture_id:CAPTURE_B,document:saved}];
+  state=applyView(state,captureView(state,CAPTURE_B,saved,{saved_captures:savedCaptures,saved_document:saved,
+    frame:{...FRAME,id:'f2',revision:2},basis_confirmed:true}));
+  state=toggleCrop(toggleCrop(state,'r1'),'r2');
+  state=applyView(state,{...state.view,staged_crop_ids:['r1','r2'],staged_crop_sources:{r1:'f2',r2:'f2'},
+    frame:{...FRAME,id:'f3',revision:3}});
+  state=sync(deleteDefinition(state,'r1'));
+  const sent=state;
+  state=renameDefinition(state,'r2','newer metadata');
+  const reply={...state.view,document:saved,captures:state.view.saved_captures,frame:null,
+    document_revision:state.view.document_revision+1,staged_crop_ids:[],stale_crop_ids:[],staged_crop_sources:{}};
+  assert.equal(applyDiscard(state,{...reply,owner:{...owner,token:'other'}},sent),state);
+  assert.equal(applyDiscard(state,{...reply,document_revision:sent.view.document_revision-1},sent),state);
+  assert.deepEqual(state.pendingCrops[CAPTURE_A].sources,{r1:'f1',r2:'f1'});
+  state=applyDiscard(state,reply,sent);
+  assert.equal(state.document.definitions[0].name,'newer metadata');
+  assert.deepEqual(state.cropIds,[]);
+  assert.deepEqual(state.cropMarks,{});
+  assert.deepEqual(state.cropSources,{});
+  assert.deepEqual(state.pendingCrops,{});
+  assert.equal(recognitionDirty(state),true,'the later rename is still an unsaved metadata edit');
+  state=undoRecognition(undoRecognition(state));
+  assert.deepEqual(state.document.definitions.map(item=>item.id),['r1','r2']);
+  assert.deepEqual(state.cropIds,[]);
+  assert.deepEqual(state.cropSources,{},'metadata Undo cannot restore any globally discarded original');
+});
+
+test('saving B then A preserves both original sources without reviving the saved B choice',()=>{
+  let state=toggleCrop(sync(create(loaded(),edges(10,10,50,50))),'r1');
+  state=applyView(state,captureView(state,CAPTURE_B,loaded().document,{frame:{...FRAME,id:'f2',revision:2},basis_confirmed:true}));
+  state=toggleCrop(sync(create(state,edges(60,10,90,50))),'r1');
+  state=applyView(state,{...state.view,staged_crop_ids:['r1'],staged_crop_sources:{r1:'f2'},
+    frame:{...FRAME,id:'f3',revision:3}});
+  assert.equal(saveBlock(state),null);
+  const bTicket=saveTicket(state);
+  assert.deepEqual(bTicket.crop_sources,{r1:'f2'});
+  const b={...bTicket.document,definitions:bTicket.document.definitions.map(item=>({...item,
+    saved:{asset:`captures/${CAPTURE_B}/r1.png`,sha256:'b'.repeat(64),width:30,height:40}}))};
+  state=applySave(state,bTicket,savedView(state,b,{revision:'rev-2',document_revision:state.view.document_revision+1,
+    staged_crop_ids:[],staged_crop_sources:{}}));
+  assert.deepEqual(state.cropIds,[]);
+  assert.deepEqual(state.cropSources,{});
+  assert.deepEqual(state.pendingCrops[CAPTURE_A].sources,{r1:'f1'});
+  assert.equal(recognitionDirty(state),true);
+  assert.equal(saveBlock(state),'noChanges','only the other capture still needs its pixel Save');
+  const a=state.view.captures.find(capture=>capture.capture_id===CAPTURE_A).document;
+  state=applyView(state,captureView(state,CAPTURE_A,a,{staged_crop_ids:['r1'],staged_crop_sources:{r1:'f1'}}));
+  const aTicket=saveTicket(state);
+  assert.deepEqual(aTicket.crop_sources,{r1:'f1'});
+  const savedA={...a,definitions:a.definitions.map(item=>({...item,
+    saved:{asset:`captures/${CAPTURE_A}/r1.png`,sha256:'a'.repeat(64),width:40,height:40}}))};
+  state=applySave(state,aTicket,savedView(state,savedA,{revision:'rev-3',document_revision:state.view.document_revision+1,
+    staged_crop_ids:[],staged_crop_sources:{}}));
+  assert.equal(recognitionDirty(state),false);
+  state=applyView(state,captureView(state,CAPTURE_B,b));
+  assert.deepEqual(state.cropIds,[]);
+  assert.deepEqual(state.cropMarks,{});
+  assert.deepEqual(state.cropSources,{});
+  assert.deepEqual(state.pendingCrops,{});
+  assert.equal(recognitionDirty(state),false);
+});
+
+test('saving another capture retains deleted-crop Undo for its still-staged original',()=>{
+  let state=sync(deleteDefinition(stagedOriginal(),'r1'));
+  const a=state.document;
+  state=applyView(state,captureView(state,CAPTURE_B,loaded().document,{frame:{...FRAME,id:'f3',revision:3},basis_confirmed:true}));
+  state=toggleCrop(sync(create(state,edges(60,10,90,50))),'r1');
+  const ticket=saveTicket(state);
+  state=applySave(state,ticket,savedView(state,state.document,{revision:'rev-2',document_revision:state.view.document_revision+1}));
+  state=applyView(state,captureView(state,CAPTURE_A,a,{stale_crop_ids:['r1'],staged_crop_sources:{r1:'f1'}}));
+  state=undoRecognition(state);
+  assert.deepEqual(state.cropIds,['r1']);
+  assert.deepEqual(state.cropSources,{r1:'f1'});
+  state=sync(state);
+  state=applyView(state,{...state.view,staged_crop_ids:['r1'],stale_crop_ids:[]});
+  assert.deepEqual(saveTicket(state).crop_sources,{r1:'f1'});
+});
+
+test('a host view removing an inactive capture prunes its pending crops and Undo history',()=>{
+  let state=stagedOriginal();
+  const b=loaded().document;
+  state=applyView(state,captureView(state,CAPTURE_B,b,{basis_confirmed:true}));
+  const captures=[{capture_id:CAPTURE_B,document:b}];
+  state=applyView(state,{...state.view,captures,saved_captures:captures,saved_document:b,document_revision:state.view.document_revision+1});
+  assert.deepEqual(state.pendingCrops,{});
+  assert.equal(recognitionDirty(state),false);
+  assert.equal(state.undo.some(entry=>entry.capture_id===CAPTURE_A),false);
+  assert.equal(state.undoBytes,0);
+});
+
 test('discarding an unsaved capture releases its image and does not offer cross-capture Undo',()=>{
   const state=sync(create(loaded(),edges(10,10,50,50)));
   const discarded=applyDiscard(state,hostView({document_revision:state.view.document_revision+1}));
@@ -591,7 +801,7 @@ test('capture switches isolate identical r1 names, Undo and every delayed receip
   assert.deepEqual(state.document.basis,b.basis);
   assert.equal(state.view.frame,null);
   assert.equal(recognitionDirty(state),true,'pending crops on another capture still block a silent Edit exit');
-  assert.equal(saveBlock(state),'otherCrops','Save must direct the author to the capture that owns its staged pixels');
+  assert.equal(saveBlock(state),null,'metadata on B can be saved without consuming A staged pixels');
   assert.equal(copyBlock(state,[],'game_content'),'noFrame');
   assert.equal(canUndoRecognition(state),false,'A metadata actions do not undo B r1');
   assert.equal(undoRecognition(state),state);

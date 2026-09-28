@@ -117,7 +117,11 @@ export interface SaveTicket {
   // save was pending stays selected.
   crops:Record<string, [number, number]>;
 }
-export interface UndoEntry {capture_id:string; document:RecognitionDocument; selected:string|null; bytes:number}
+export interface UndoEntry {
+  capture_id:string; document:RecognitionDocument; selected:string|null; bytes:number;
+  // Only selections removed with a definition; pixels remain in the host.
+  crops:Record<string, {mark:number; source:string}>;
+}
 export type PreviewTool = 'zones' | 'content';
 export type Zoom = 'fit' | number;
 export interface PreviewDisplay {zoom:Zoom; tool:PreviewTool}
@@ -125,7 +129,7 @@ export interface PreviewDisplay {zoom:Zoom; tool:PreviewTool}
 export type RecognitionNotice = 'definitionLimit' | 'documentLimit' | 'expectedLimit' | 'nameLimit' | 'invalidGeometry' | 'staleEdit' | 'confirmBeforeReplace';
 export type RecognitionBlock =
   | 'noDocument' | 'noFrame' | 'unconfirmed' | 'confirmed' | 'running' | 'noCapability' | 'empty' | 'overLimit' | 'mixedKinds'
-  | 'templateSingle' | 'noSample' | 'invalid' | 'noChanges' | 'rights' | 'cropFrame' | 'otherCrops' | 'kind' | 'templateUnsaved';
+  | 'templateSingle' | 'noSample' | 'invalid' | 'noChanges' | 'rights' | 'cropFrame' | 'kind' | 'templateUnsaved';
 export type DefinitionIssue = 'name' | 'region' | 'search' | 'searchSmall';
 export type Freshness = 'fresh' | 'stale' | 'historical';
 export type CopyFreshness = 'current' | 'obsolete' | 'failed';
@@ -145,6 +149,7 @@ export interface RecognitionState {
   trialIds:string[]; trialSelection:number;
   // Definitions whose next Save uses the original frame selected for each crop.
   cropIds:string[]; cropMarks:Record<string, number>; cropSources:Record<string,string>;
+  // Only inactive captures; the active capture uses cropIds/cropMarks/cropSources.
   pendingCrops:Record<string,{ids:string[]; marks:Record<string,number>; sources:Record<string,string>}>;
   undo:UndoEntry[]; undoBytes:number; group:string|null;
   trial:TrialRecord|null; running:TrialTicket|null; copies:Partial<Record<SnippetKind, CopyRecord>>;
@@ -180,8 +185,18 @@ export function canUndoRecognition(state:RecognitionState):boolean {
   return state.undo.some(entry => entry.capture_id === state.view.capture_id);
 }
 
+function clearCropUndo(state:RecognitionState, captureId:string|null = null):Pick<RecognitionState, 'undo' | 'undoBytes'> {
+  const undo = state.undo.map(entry => {
+    if ((captureId !== null && entry.capture_id !== captureId) || Object.keys(entry.crops).length === 0) return entry;
+    return {...entry, crops: {}, bytes: entry.bytes - utf8Bytes(JSON.stringify(entry.crops)) + 2};
+  });
+  return {undo, undoBytes: undo.reduce((bytes, entry) => bytes + entry.bytes, 0)};
+}
+
 export function discardPixelCrops(state:RecognitionState):RecognitionState {
-  return {...state, cropIds: [], cropMarks: {}, cropSources: {}, group: null};
+  const pendingCrops = Object.fromEntries(Object.entries(state.pendingCrops).filter(([id]) => id !== state.view.capture_id));
+  return {...state, ...clearCropUndo(state, state.view.capture_id), pendingCrops,
+    cropIds: [], cropMarks: {}, cropSources: {}, group: null};
 }
 
 // Structural equality for JSON-shaped host data, independent of key order.
@@ -490,6 +505,16 @@ export function openRecognition(view:RecognitionView):RecognitionState {
   return {...state, view, selected: state.document?.definitions[0]?.id ?? null};
 }
 
+// A removed capture cannot retain pending pixel choices or an Undo path into its abandoned draft.
+function reconcileCaptures(state:RecognitionState):RecognitionState {
+  const ids = new Set(state.view.captures.map(capture => capture.capture_id));
+  const undo = state.undo.filter(entry => ids.has(entry.capture_id));
+  return {...state, undo, undoBytes: undo.reduce((bytes, entry) => bytes + entry.bytes, 0),
+    pendingCrops: Object.fromEntries(Object.entries(state.pendingCrops).filter(([id, crops]) =>
+      ids.has(id) && id !== state.view.capture_id && crops.ids.length > 0)),
+    nextIds: Object.fromEntries(Object.entries(state.nextIds).filter(([id]) => ids.has(id)))};
+}
+
 // Applies a host read for the same owner. The local draft adopts the host document only when the host knew
 // exactly this draft (`sent`); otherwise newer local edits are kept and only host-owned fields merge.
 export function applyView(state:RecognitionState, view:RecognitionView, sent:RecognitionDocument|null = state.view.document):RecognitionState {
@@ -507,7 +532,7 @@ export function applyView(state:RecognitionState, view:RecognitionView, sent:Rec
       basis: state.basis + 1, localRevision: state.localRevision + 1, undo: state.undo, undoBytes: state.undoBytes,
       pendingCrops, cropIds: restored?.ids ?? [], cropMarks: restored?.marks ?? {}, cropSources: restored?.sources ?? {},
       nextIds, nextId: Math.max(fresh.nextId, view.capture_id ? nextIds[view.capture_id] ?? 1 : 1)}, null);
-    return next;
+    return reconcileCaptures(next);
   }
   const local = state.document;
   const document = local === null || sameJson(local, sent) ? hostDocument(view) : withSavedRefs(local, view.document);
@@ -521,10 +546,10 @@ export function applyView(state:RecognitionState, view:RecognitionView, sent:Rec
     if (known && known.controller.run === view.trial.controller.run) trial = {...trial!, trial: {...view.trial, stale: view.trial.stale || known.stale}};
     else if (trial === null) trial = {ticket: null, trial: view.trial, fault: null};
   }
-  return {...next, trial,
+  return reconcileCaptures({...next, trial,
     clock: Math.max(next.clock, maxRevision(view.document, view.saved_document)),
     nextId: Math.max(next.nextId, idNumber(view.document, view.saved_document)),
-    selected: next.selected ?? next.document?.definitions[0]?.id ?? null};
+    selected: next.selected ?? next.document?.definitions[0]?.id ?? null});
 }
 
 // The saved App OCR configuration changed: the retained trial is stale at once, before the next host read
@@ -554,15 +579,18 @@ function hasOtherPendingCrops(state:RecognitionState):boolean {
   return false;
 }
 
-// Unsaved compared with the document on disk, or crops chosen for the next Save. A hand-restored saved value is clean
-// although its definition revision advanced.
-export function recognitionDirty(state:RecognitionState):boolean {
-  if (state.cropIds.length > 0 || state.view.migration_required || hasOtherPendingCrops(state)) return true;
+function metadataDirty(state:RecognitionState):boolean {
+  if (state.view.migration_required) return true;
   const captures = captureDocuments(state);
   return captures.length !== state.view.saved_captures.length || captures.some(capture => {
     const saved = state.view.saved_captures.find(item => item.capture_id === capture.capture_id);
     return !saved || !sameContent(capture.document, saved.document);
   });
+}
+
+// Pixel choices on any capture keep the global Edit session dirty, even after another capture is saved.
+export function recognitionDirty(state:RecognitionState):boolean {
+  return state.cropIds.length > 0 || hasOtherPendingCrops(state) || metadataDirty(state);
 }
 
 // Copy and frame trials require current confirmed setup, either explicit or reused on a compatible frame.
@@ -574,12 +602,15 @@ export function geometryConfirmed(state:RecognitionState):boolean {
 // ---------------------------------------------------------------------------------------------------------------
 // Local edits. Each returns the same state for a no-op and sets `notice` for a refused edit.
 
-function record(state:RecognitionState, group:string|null):Pick<RecognitionState, 'undo' | 'undoBytes' | 'group'> {
+function record(state:RecognitionState, group:string|null, after:RecognitionDocument|null):Pick<RecognitionState, 'undo' | 'undoBytes' | 'group'> {
   if (group !== null && group === state.group) return {undo: state.undo, undoBytes: state.undoBytes, group};
   const document = state.document!;
   const capture_id = state.view.capture_id!;
-  const entry: UndoEntry = {capture_id, document, selected: state.selected,
-    bytes: documentBytes(document) + utf8Bytes(state.selected ?? '') + utf8Bytes(capture_id)};
+  const crops = Object.fromEntries(state.cropIds
+    .filter(id => state.cropSources[id] && !after?.definitions.some(definition => definition.id === id))
+    .map(id => [id, {mark: state.cropMarks[id], source: state.cropSources[id]}]));
+  const snapshot = {capture_id, document, selected: state.selected, crops};
+  const entry: UndoEntry = {...snapshot, bytes: utf8Bytes(JSON.stringify(snapshot))};
   let undo = [...state.undo, entry];
   let undoBytes = state.undoBytes + entry.bytes;
   while (undo.length > 0 && (undo.length > UNDO_ENTRIES || undoBytes > UNDO_BYTES)) {
@@ -601,7 +632,7 @@ function edit(state:RecognitionState, document:RecognitionDocument, group:string
     const old = previous.get(definition.id);
     return old && sameJson(old, definition) ? old : {...definition, revision: ++clock};
   });
-  const next = {...state, ...record(state, group), clock, document: {...document, definitions}, selected, localRevision: state.localRevision + 1, notice: null};
+  const next = {...state, ...record(state, group, document), clock, document: {...document, definitions}, selected, localRevision: state.localRevision + 1, notice: null};
   return stamp(next, before);
 }
 
@@ -696,9 +727,9 @@ function replaceDocument(state:RecognitionState, document:RecognitionDocument|nu
   return stamp({...state, document, selected: kept, group: null, localRevision: state.localRevision + 1, notice: null}, state.document);
 }
 
-// Restores the previous metadata and selection. Changed recognition inputs get new marks, so a restored geometry
-// never makes an earlier trial or Copy current again. Host-owned saved references and a basis for other frame
-// dimensions are not restored.
+// Restores metadata, selection and any deleted crop whose original is still held by the host. Changed recognition
+// inputs get new marks, so Undo never revives an earlier trial or Copy. Host-owned saved references and a basis for
+// other frame dimensions are not restored.
 export function undoRecognition(state:RecognitionState):RecognitionState {
   let index = state.undo.length - 1;
   while (index >= 0 && state.undo[index].capture_id !== state.view.capture_id) index -= 1;
@@ -717,7 +748,14 @@ export function undoRecognition(state:RecognitionState):RecognitionState {
   const document = {...entry.document, basis, definitions};
   if (packageBytes(state, document) > MAX_DOCUMENT_BYTES) return {...state, notice: 'documentLimit'};
   if (captureDocuments(state, document).reduce((count, capture) => count + capture.document.definitions.length, 0) > MAX_DEFINITIONS) return {...state, notice: 'definitionLimit'};
-  const next = {...state, undo: state.undo.filter((_, position) => position !== index), undoBytes: state.undoBytes - entry.bytes};
+  const restored = Object.entries(entry.crops).filter(([id, crop]) => !live.has(id)
+    && (crop.source === state.view.frame?.id
+      || ((state.view.staged_crop_ids.includes(id) || state.view.stale_crop_ids.includes(id))
+        && state.view.staged_crop_sources[id] === crop.source)));
+  const next = {...state, undo: state.undo.filter((_, position) => position !== index), undoBytes: state.undoBytes - entry.bytes,
+    cropIds: [...state.cropIds, ...restored.map(([id]) => id)],
+    cropMarks: {...state.cropMarks, ...Object.fromEntries(restored.map(([id, crop]) => [id, crop.mark]))},
+    cropSources: {...state.cropSources, ...Object.fromEntries(restored.map(([id, crop]) => [id, crop.source]))}};
   return replaceDocument(next, document, entry.selected);
 }
 
@@ -770,15 +808,18 @@ export function applySync(state:RecognitionState, ticket:SyncTicket, view:Recogn
     && ticket.document_revision === state.view.document_revision ? applyView({...state, error: null}, view, ticket.document) : state;
 }
 
-// `recognition_discard`: the host restored the saved document (possibly none). The draft follows it exactly, the
-// replaced draft stays one Undo away, and chosen crops are dropped. Edits made while the command was pending are
-// replaced too: Discard is the author's explicit choice.
-export function applyDiscard(state:RecognitionState, view:RecognitionView):RecognitionState {
-  if (view.owner.token !== state.owner.token || view.document_revision < state.view.document_revision) return state;
-  if (view.capture_id !== state.view.capture_id) return applyView(state, view);
+// Discard releases every staged original, including captures removed by the host. Keep newer local metadata, but
+// no pixel choice or Undo entry may claim the released images.
+export function applyDiscard(state:RecognitionState, view:RecognitionView, sent:RecognitionState = state):RecognitionState {
+  if (view.owner.token !== state.owner.token || view.document_revision < state.view.document_revision
+    || (view.capture_id !== state.view.capture_id && view.document_revision <= state.view.document_revision)
+    || sent.owner.token !== state.owner.token || sent.view.capture_id !== state.view.capture_id
+    || sent.view.document_revision !== state.view.document_revision) return state;
+  const cleared = {...state, ...clearCropUndo(state), cropIds: [], cropMarks: {}, cropSources: {}, pendingCrops: {}, group: null, error: null};
+  if (view.capture_id !== state.view.capture_id || state.localRevision !== sent.localRevision) return applyView(cleared, view, null);
   const target = hostDocument(view);
-  const history = state.document !== null && !sameJson(state.document, target) ? record(state, null) : {};
-  const next = replaceDocument({...state, ...history, cropIds: [], cropMarks: {}, error: null}, target, state.selected);
+  const history = cleared.document !== null && !sameJson(cleared.document, target) ? record(cleared, null, target) : {};
+  const next = replaceDocument({...cleared, ...history}, target, state.selected);
   return applyView(next, view, target);
 }
 
@@ -879,14 +920,13 @@ export function canReleaseImage(state:RecognitionState, leavingCapture:boolean):
 export function saveBlock(state:RecognitionState):RecognitionBlock|null {
   const document = state.document;
   if (document === null) return 'noDocument';
-  if (hasOtherPendingCrops(state)) return 'otherCrops';
   const staged = (id:string) => state.view.staged_crop_ids.includes(id)
     && state.view.staged_crop_sources[id] === state.cropSources[id] && !state.view.stale_crop_ids.includes(id);
   if (state.cropIds.some(id => !staged(id) && (!state.view.frame || state.cropSources[id] !== state.view.frame.id))) return 'cropFrame';
   if (state.cropIds.some(id => !staged(id)) && !geometryConfirmed(state)) return 'unconfirmed';
   if (!state.view.other_bases_confirmed || (!basisReusable(state)
     && !(state.cropIds.length > 0 && state.cropIds.every(staged)))) return 'unconfirmed';
-  if (!recognitionDirty(state)) return 'noChanges';
+  if (state.cropIds.length === 0 && !metadataDirty(state)) return 'noChanges';
   const savedTemplate = document.definitions.some(item => item.kind === 'template' && (item.saved !== null || state.cropIds.includes(item.id)));
   if (savedTemplate && !rightsValid(document.template_rights)) return 'rights';
   return null;
@@ -900,15 +940,18 @@ export function saveTicket(state:RecognitionState):SaveTicket|null {
     crops: Object.fromEntries(state.cropIds.map(id => [id, [state.cropMarks[id], state.marks[id]]]))};
 }
 
-// The commit is authoritative even when the follow-up read failed (`view` null, the recognition view must be read
-// again). A submitted crop stays chosen when it was re-chosen or its recognition inputs changed meanwhile.
+// The commit is authoritative even when the follow-up read failed (`view` null). It releases this capture's stages.
+// A submitted crop stays chosen when re-chosen or edited meanwhile, but Undo cannot reclaim its released original.
 export function applySave(state:RecognitionState, ticket:SaveTicket, view:RecognitionView|null):RecognitionState {
   if (ticket.token !== state.owner.token || ticket.capture_id !== state.view.capture_id || ticket.document_revision !== state.view.document_revision) return state;
   const pending = state.cropIds.filter(id => {
     const submitted = ticket.crops[id];
     return !submitted || submitted[0] !== state.cropMarks[id] || submitted[1] !== state.marks[id];
   });
-  const cleared = {...state, error: null, cropIds: pending, cropMarks: Object.fromEntries(pending.map(id => [id, state.cropMarks[id]])),
+  const cleared = {...state, ...clearCropUndo(state, ticket.capture_id), error: null,
+    view: {...state.view, staged_crop_ids: [], stale_crop_ids: [], staged_crop_sources: {}},
+    pendingCrops: Object.fromEntries(Object.entries(state.pendingCrops).filter(([id]) => id !== ticket.capture_id)),
+    cropIds: pending, cropMarks: Object.fromEntries(pending.map(id => [id, state.cropMarks[id]])),
     cropSources: Object.fromEntries(pending.map(id => [id, state.cropSources[id]]))};
   return view ? applyView(cleared, view, ticket.document) : cleared;
 }

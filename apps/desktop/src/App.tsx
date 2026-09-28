@@ -1321,11 +1321,7 @@ export default function App() {
       if (!sent) throw new LocalFault({key: 'recognitionUnavailable'});
       const next = await invoke<recognition.RecognitionView>('recognition_discard', {owner: session.owner, revision: session.revision,
         captureId: sent.view.capture_id, documentRevision: sent.view.document_revision});
-      updateRecognition(session.owner.token, state => {
-        const unchanged = sent && state.localRevision === sent.localRevision
-          && state.cropIds.length === sent.cropIds.length && state.cropIds.every(id => state.cropMarks[id] === sent.cropMarks[id]);
-        return unchanged ? recognition.applyDiscard(state, next) : recognition.applyView(state, next, null);
-      });
+      updateRecognition(session.owner.token, state => recognition.applyDiscard(state, next, sent));
     });
   }
 

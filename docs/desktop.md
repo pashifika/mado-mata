@@ -370,6 +370,9 @@ icon selects a window; after selection it becomes the stacked-frame **New captur
 icon. The main segment shows **Start capture** for a saved locator, **Capture**
 when ready, and **Stop** during native work. There is no separate capture panel;
 only active progress and failures appear below the toolbar.
+The native-failure notice has a top-right close button. Dismissal hides that
+notice through ordinary updates without changing native refusal or cleanup state;
+a later failure can appear again.
 
 1. With no saved target, choose the target icon (**Select window**). Discovery is metadata-only,
    bounded to 5 seconds and 64 matching processes / 64 eligible windows. The
@@ -418,15 +421,23 @@ Legacy single-image metadata is read without writing; explicit Save wraps it
 without changing existing Region IDs, asset IDs, paths, aliases or pasted code.
 Unknown versions and invalid data are refused rather than repaired.
 
-Only one original is decoded at a time. Capture refresh preserves metadata and
-stages checked unsaved crop pixels from their original frame before releasing it;
-Save never silently substitutes a later frame. Changed geometry/definitions
-invalidate incompatible staged crops. Same-size refresh reuses confirmed Game
-content; resized pixels require explicit geometry adjustment and confirmation.
-Saved PNG crops change only through explicit Save. Switching captures preserves
-their metadata/assets but requires resolving pending pixel crops. A failed
-replacement leaves no active image, not old pixels relabeled as a new capture.
-Undo, trials, previews, Copy and Save retain capture/revision fences.
+Only one original is decoded at a time. Refresh preserves metadata and stages
+checked unsaved crop pixels before releasing their original; Save never silently
+substitutes a later frame. Crop identity depends on kind, geometry basis and
+region, not names, reference text or metadata revisions. Same-size refresh reuses
+confirmed Game content. Resized pixels require explicit geometry adjustment for
+new-frame operations, while historical metadata and retained original crops remain
+editable and saveable.
+
+Save publishes the selected capture's crops and retains other captures' pending
+originals; save those captures separately. Save all and Exit-save do not finish
+while other crop choices remain. Discard clears crop choices across captures.
+Delete/Undo restores selected originals only while their frame or staged pixels
+remain available, never after Save or explicit discard released them. Switching
+captures or loading an image resolves the current crop choices and releases
+abandoned staged pixels without clearing other captures. Failed replacement leaves
+no active image, not old pixels relabeled as a new capture. Saved PNGs change only
+through explicit Save; trials, previews, Copy and Save retain revision fences.
 
 Limits remain aggregate: 256 definitions, 256 KiB metadata, 64 Undo actions /
 1 MiB, and 512 MiB accounted image payload. Originals are at most 16,384 pixels

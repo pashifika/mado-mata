@@ -109,7 +109,6 @@
       "noChanges": "Nothing to save.",
       "rights": "Saved template PNGs need a license, an author and your review.",
       "cropFrame": "The selected crop's original image is unavailable. Return to its capture or reselect it on a confirmed current image.",
-      "otherCrops": "Selected unsaved crops belong to another capture. Select that capture to save or deselect them.",
       "kind": "This snippet does not match the definition's recognition kind.",
       "templateUnsaved": "Save the template's PNG, metadata and rights before copying runtime source."
     },

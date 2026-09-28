@@ -2250,3 +2250,371 @@ fn new_capture_keeps_old_pending_selection_and_never_overwrites_saved_crop() {
     let crop = images::decode_png(&png, ImageKind::Crop).unwrap();
     assert!(crop.rgba.iter().all(|pixel| *pixel == 80));
 }
+
+fn assert_saved_original_crop(
+    editor: &Editor,
+    view: &RecognitionView,
+    sources: &BTreeMap<String, String>,
+) -> RecognitionView {
+    let capture_id = view.capture_id.as_deref().unwrap();
+    let saved = editor
+        .app()
+        .recognition_save(
+            &editor.view.owner,
+            &view.revision,
+            view.document_revision,
+            &["pending".into()],
+            capture_id,
+            sources,
+        )
+        .unwrap()
+        .recognition
+        .unwrap();
+    let candidate = editor
+        .app()
+        .publisher
+        .open(Path::new(&editor.view.package_path))
+        .unwrap();
+    let png = candidate
+        .recognition_crop(capture_id, "pending")
+        .unwrap()
+        .unwrap();
+    let crop = images::decode_png(&png, ImageKind::Crop).unwrap();
+    assert_eq!((crop.width, crop.height), (16, 12));
+    for y in 0..12usize {
+        for x in 0..16usize {
+            assert_eq!(
+                &crop.rgba[(y * 16 + x) * 4..(y * 16 + x + 1) * 4],
+                &[(x + 8) as u8, (y + 6) as u8, 17, 255],
+            );
+        }
+    }
+    saved
+}
+
+#[test]
+fn refresh_review_metadata_edits_keep_staged_original_pixels() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let original = draft_zone(&editor);
+    let sources = BTreeMap::from([(
+        "pending".into(),
+        original.frame.as_ref().unwrap().id.clone(),
+    )]);
+    let refreshed = refresh_frame(
+        &editor,
+        &original,
+        || DecodedImage::from_rgba(32, 24, vec![80; 32 * 24 * 4]).unwrap(),
+        false,
+        &sources,
+    )
+    .unwrap();
+    let mut document = refreshed.document.clone().unwrap();
+    document.definitions[0].name = "Renamed after refresh".into();
+    document.definitions[0].expected = Some("Updated script query".into());
+    document.definitions[0].revision += 1;
+    let updated = app
+        .recognition_update(
+            &editor.view.owner,
+            &refreshed.revision,
+            document.clone(),
+            Some(&refreshed.frame.as_ref().unwrap().id),
+            refreshed.document_revision,
+            refreshed.capture_id.as_deref().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(updated.staged_crop_ids, ["pending"]);
+    assert!(updated.stale_crop_ids.is_empty());
+    assert_eq!(updated.staged_crop_sources, sources);
+    let saved = assert_saved_original_crop(&editor, &updated, &sources);
+    let stored = saved.saved_document.unwrap();
+    assert_eq!(stored.basis, document.basis);
+    assert_eq!(stored.definitions[0].name, document.definitions[0].name);
+    assert_eq!(
+        stored.definitions[0].expected,
+        document.definitions[0].expected,
+    );
+}
+
+#[test]
+fn refresh_review_resized_frame_accepts_metadata_but_refuses_unmatched_basis_change() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let original = draft_zone(&editor);
+    let sources = BTreeMap::from([(
+        "pending".into(),
+        original.frame.as_ref().unwrap().id.clone(),
+    )]);
+    let resized = refresh_frame(
+        &editor,
+        &original,
+        || DecodedImage::from_rgba(16, 12, vec![90; 16 * 12 * 4]).unwrap(),
+        false,
+        &sources,
+    )
+    .unwrap();
+    let capture_id = resized.capture_id.as_deref().unwrap();
+    let frame_id = &resized.frame.as_ref().unwrap().id;
+    let unchanged = app
+        .recognition_update(
+            &editor.view.owner,
+            &resized.revision,
+            resized.document.clone().unwrap(),
+            Some(frame_id),
+            resized.document_revision,
+            capture_id,
+        )
+        .unwrap();
+    assert_eq!(unchanged.document_revision, resized.document_revision);
+    let mut document = unchanged.document.unwrap();
+    document.definitions[0].name = "Historical selection".into();
+    document.definitions[0].expected = Some("Still uses original pixels".into());
+    document.definitions[0].revision += 1;
+    let updated = app
+        .recognition_update(
+            &editor.view.owner,
+            &resized.revision,
+            document.clone(),
+            Some(frame_id),
+            resized.document_revision,
+            capture_id,
+        )
+        .unwrap();
+    assert_eq!(updated.document, Some(document.clone()));
+    assert!(!updated.basis_confirmed);
+    assert!(!updated.frame.as_ref().unwrap().confirmed);
+    assert_eq!(updated.staged_crop_ids, ["pending"]);
+    let mut unmatched = document.clone();
+    unmatched.basis.content.x = 1;
+    unmatched.basis.content.width = 31;
+    let refused = app
+        .recognition_update(
+            &editor.view.owner,
+            &updated.revision,
+            unmatched,
+            Some(frame_id),
+            updated.document_revision,
+            capture_id,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(refused.category, "RecognitionInput");
+    let retained = app
+        .recognition_view(&editor.view.owner, &updated.revision)
+        .unwrap();
+    assert_eq!(retained.document_revision, updated.document_revision);
+    assert_eq!(retained.document, updated.document);
+    assert_eq!(retained.staged_crop_sources, sources);
+    let saved = assert_saved_original_crop(&editor, &retained, &sources);
+    assert_eq!(saved.saved_document.unwrap().basis, document.basis);
+}
+
+fn two_pending_captures(
+    editor: &Editor,
+) -> (
+    RecognitionView,
+    RecognitionView,
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+) {
+    let first = draft_zone(editor);
+    let first_sources =
+        BTreeMap::from([("pending".into(), first.frame.as_ref().unwrap().id.clone())]);
+    let next = refresh_frame(
+        editor,
+        &first,
+        || DecodedImage::from_rgba(32, 24, vec![80; 32 * 24 * 4]).unwrap(),
+        true,
+        &first_sources,
+    )
+    .unwrap();
+    let next = editor
+        .app()
+        .recognition_confirm(
+            &editor.view.owner,
+            &next.revision,
+            &next.frame.as_ref().unwrap().id,
+            next.document_revision,
+            next.capture_id.as_deref().unwrap(),
+        )
+        .unwrap();
+    let mut document = next.document.clone().unwrap();
+    document.definitions.push(zone("pending"));
+    let next = editor
+        .app()
+        .recognition_update(
+            &editor.view.owner,
+            &next.revision,
+            document,
+            Some(&next.frame.as_ref().unwrap().id),
+            next.document_revision,
+            next.capture_id.as_deref().unwrap(),
+        )
+        .unwrap();
+    let next_sources =
+        BTreeMap::from([("pending".into(), next.frame.as_ref().unwrap().id.clone())]);
+    let next = refresh_frame(
+        editor,
+        &next,
+        || DecodedImage::from_rgba(32, 24, vec![90; 32 * 24 * 4]).unwrap(),
+        false,
+        &next_sources,
+    )
+    .unwrap();
+    (first, next, first_sources, next_sources)
+}
+
+fn pending_crop_budget(editor: &Editor) -> BTreeMap<String, (usize, usize)> {
+    let state = lock(&editor.app().workspaces);
+    let mut budget = BTreeMap::new();
+    for crop in &state.authoring.as_ref().unwrap().recognition.staged_crops {
+        let held = budget.entry(crop.capture_id.clone()).or_insert((0, 0));
+        held.0 += crop.png.len();
+        held.1 += crop.decoded_bytes;
+    }
+    budget
+}
+
+#[test]
+fn refresh_review_explicit_select_releases_only_abandoned_capture_stages() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let (first, next, first_sources, next_sources) = two_pending_captures(&editor);
+    let first_id = first.capture_id.as_deref().unwrap();
+    let next_id = next.capture_id.as_deref().unwrap();
+    let held = pending_crop_budget(&editor);
+    assert_eq!(
+        held.keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([first_id.to_owned(), next_id.to_owned(),])
+    );
+    assert_eq!(held[first_id].1, 16 * 12 * 4);
+    assert_eq!(held[next_id].1, 16 * 12 * 4);
+    assert_eq!(
+        app.recognition_select(
+            &editor.view.owner,
+            &next.revision,
+            Some(next_id),
+            next.document_revision - 1,
+            first_id,
+        )
+        .err()
+        .unwrap()
+        .category,
+        "StaleRecognition",
+    );
+    assert_eq!(pending_crop_budget(&editor), held);
+    let selected = app
+        .recognition_select(
+            &editor.view.owner,
+            &next.revision,
+            Some(next_id),
+            next.document_revision,
+            first_id,
+        )
+        .unwrap();
+    assert_eq!(
+        pending_crop_budget(&editor),
+        BTreeMap::from([(first_id.to_owned(), held[first_id])]),
+        "explicit switching releases only the abandoned capture's encoded and decoded budget",
+    );
+    assert_eq!(selected.staged_crop_sources, first_sources);
+    let saved = assert_saved_original_crop(&editor, &selected, &first_sources);
+    assert!(pending_crop_budget(&editor).is_empty());
+    let abandoned = app
+        .recognition_select(
+            &editor.view.owner,
+            &saved.revision,
+            Some(first_id),
+            saved.document_revision,
+            next_id,
+        )
+        .unwrap();
+    assert!(abandoned.staged_crop_sources.is_empty());
+    assert_eq!(
+        app.recognition_save(
+            &editor.view.owner,
+            &abandoned.revision,
+            abandoned.document_revision,
+            &["pending".into()],
+            next_id,
+            &next_sources,
+        )
+        .err()
+        .unwrap()
+        .category,
+        "RecognitionInput",
+    );
+}
+
+#[test]
+fn refresh_review_explicit_load_releases_current_stages_even_when_read_fails() {
+    for (new_capture, invalid_image) in [(false, false), (true, false), (false, true)] {
+        let editor = Editor::new();
+        let app = editor.app();
+        let (first, next, first_sources, _) = two_pending_captures(&editor);
+        let first_id = first.capture_id.as_deref().unwrap();
+        let held = pending_crop_budget(&editor);
+        let path = if invalid_image {
+            let path = editor.fixture.root.join("invalid.png");
+            fs::write(&path, b"not a PNG").unwrap();
+            path
+        } else {
+            editor.source.clone()
+        };
+        assert_eq!(
+            app.recognition_load(
+                &editor.view.owner,
+                &next.revision,
+                &path,
+                first.capture_id.as_deref(),
+                next.document_revision,
+                new_capture,
+            )
+            .err()
+            .unwrap()
+            .category,
+            "StaleRecognition",
+        );
+        assert_eq!(pending_crop_budget(&editor), held);
+        let result = app.recognition_load(
+            &editor.view.owner,
+            &next.revision,
+            &path,
+            next.capture_id.as_deref(),
+            next.document_revision,
+            new_capture,
+        );
+        let loaded = if invalid_image {
+            assert!(result.is_err());
+            let failed = app
+                .recognition_view(&editor.view.owner, &next.revision)
+                .unwrap();
+            assert!(failed.frame.is_none());
+            failed
+        } else {
+            let loaded = result.unwrap();
+            let frame = loaded.frame.as_ref().unwrap();
+            assert_eq!((frame.width, frame.height), (32, 24));
+            assert_eq!(loaded.capture_id != next.capture_id, new_capture);
+            loaded
+        };
+        assert_eq!(
+            pending_crop_budget(&editor),
+            BTreeMap::from([(first_id.to_owned(), held[first_id])]),
+            "load must not charge abandoned pixels after its release boundary",
+        );
+        assert!(loaded.staged_crop_sources.is_empty());
+        let selected = app
+            .recognition_select(
+                &editor.view.owner,
+                &loaded.revision,
+                loaded.capture_id.as_deref(),
+                loaded.document_revision,
+                first_id,
+            )
+            .unwrap();
+        assert_eq!(selected.staged_crop_sources, first_sources);
+        assert_saved_original_crop(&editor, &selected, &first_sources);
+        assert!(pending_crop_budget(&editor).is_empty());
+    }
+}

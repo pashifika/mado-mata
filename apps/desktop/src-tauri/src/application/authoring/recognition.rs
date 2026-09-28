@@ -102,7 +102,8 @@ struct StagedCrop {
 }
 
 fn crop_fingerprint(document: &RecognitionDocument, id: &str) -> Result<String, Fault> {
-    identity(&(document.basis, document.definition(id)?))
+    let definition = document.definition(id)?;
+    identity(&(document.basis, definition.region, &definition.kind))
 }
 
 fn check_crop_sources<'a>(
@@ -344,6 +345,10 @@ impl RecognitionState {
         self.frame = None;
         self.preview_payload = None;
         self.preview_generation = self.preview_generation.checked_add(1).ok_or_else(stale)?;
+        // Only explicit select/load reaches this abandonment boundary. Native
+        // refresh/New capture retains selected originals through stage_crops.
+        self.staged_crops
+            .retain(|crop| Some(&crop.capture_id) != self.capture_id.as_ref());
         Ok(())
     }
 
@@ -868,17 +873,19 @@ impl Application {
         recognition.initialize(&candidate)?;
         recognition.check(document_revision, frame_id)?;
         recognition.check_capture(Some(capture_id))?;
-        if let Some(frame) = &recognition.frame {
-            if document.basis.frame_width != frame.image.width
-                || document.basis.frame_height != frame.image.height
-            {
-                return Err(invalid("Geometry basis does not match the current frame"));
-            }
-        }
         let basis_changed = recognition
             .document
             .as_ref()
             .is_none_or(|old| old.basis != document.basis);
+        // An unchanged historical basis still describes staged originals after a resize.
+        if let Some(frame) = &recognition.frame {
+            if basis_changed
+                && (document.basis.frame_width != frame.image.width
+                    || document.basis.frame_height != frame.image.height)
+            {
+                return Err(invalid("Geometry basis does not match the current frame"));
+            }
+        }
         if recognition.document.as_ref() != Some(&document) {
             recognition.replace_document(document)?;
             recognition.advance()?;

@@ -28,6 +28,7 @@ export default function RecognitionPreview() {
   const [sendError, setSendError] = useState<Fault | null>(null);
   const [stopError, setStopError] = useState<Fault | null>(null);
   const [closeError, setCloseError] = useState<Fault | null>(null);
+  const [dismissedNativeError, setDismissedNativeError] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
   const [display, setDisplay] = useState<PreviewDisplay>({zoom: 'fit', tool: 'zones'});
   const [viewport, setViewport] = useState({width: 0, height: 0});
@@ -81,6 +82,15 @@ export default function RecognitionPreview() {
   const token = snapshot?.owner.token ?? null;
   const frameId = snapshot?.frame?.id ?? null;
   const captureId = snapshot?.capture_id ?? null;
+  const nativeError = snapshot?.nativeSelection?.error ?? null;
+  const nativeErrorKey = nativeError === null ? null
+    : JSON.stringify([token, snapshot?.nativeSelection?.selection_generation, nativeError]);
+  const nativeErrorHidden = nativeErrorKey !== null && dismissedNativeError === nativeErrorKey;
+  const duplicateNativeError = nativeError !== null && snapshot?.error?.category === nativeError.category
+    && snapshot.error.message === nativeError.message;
+  useEffect(() => {
+    if (nativeErrorKey === null || snapshot?.nativeSelection?.busy) setDismissedNativeError(null);
+  }, [nativeErrorKey, snapshot?.nativeSelection?.busy]);
   useEffect(() => {
     if (snapshot === null || frameId === null || captureId === null) {
       setRaster(null);
@@ -126,6 +136,7 @@ export default function RecognitionPreview() {
       capture_id:snapshot.capture_id, documentRevision:snapshot.documentRevision, localRevision:snapshot.localRevision,
       generation:snapshot.nativeSelection?.selection_generation ?? 0, action:next};
     setSendError(null);
+    setDismissedNativeError(null);
     emitTo(MAIN_LABEL, PREVIEW_ACTION, message).catch(cause => setSendError(fault(cause)));
   }
 
@@ -224,9 +235,8 @@ export default function RecognitionPreview() {
       {snapshot?.nativeSelection?.busy && <p id="native-capture-status" className="preview-capture-status muted" role="status">
         {native.status[snapshot.nativeSelection.status]}
       </p>}
-      {snapshot?.nativeSelection?.error && (snapshot.error?.category !== snapshot.nativeSelection.error.category
-        || snapshot.error?.message !== snapshot.nativeSelection.error.message)
-        && <FaultMessage title={native.status.failed} value={snapshot.nativeSelection.error}/>}
+      {nativeError && !nativeErrorHidden && !duplicateNativeError
+        && <FaultMessage title={native.status.failed} value={nativeError} onDismiss={() => setDismissedNativeError(nativeErrorKey)}/>}
       {snapshot?.nativeCache?.error && <FaultMessage title={native.cacheFailed} value={snapshot.nativeCache.error}/>}
       <p className="preview-help field-help">{display.tool === 'content' ? r.contentHelp : r.zonesHelp}</p>
       {frame && snapshot && !snapshot.frameGeometryReady && <p className="inline-warning" role="status">
@@ -235,7 +245,9 @@ export default function RecognitionPreview() {
       </p>}
       {stopError && <FaultMessage title={r.stopFailed} value={stopError}/>}
       {closeError && <FaultMessage title={r.previewCloseFailed} value={closeError}/>}
-      {snapshot?.error && <FaultMessage title={r.actionFailed} value={snapshot.error}/>}
+      {snapshot?.error && (!duplicateNativeError || !nativeErrorHidden)
+        && <FaultMessage title={r.actionFailed} value={snapshot.error}
+          onDismiss={duplicateNativeError ? () => setDismissedNativeError(nativeErrorKey) : undefined}/>}
       {snapshot && !editable && <p className="inline-warning">{snapshot.lockReason ? `${r.readOnly} · ${snapshot.lockReason}` : r.readOnly}</p>}
       {snapshot?.notice && <p id="preview-notice" className="inline-warning" role="status">{r.notice(snapshot.notice)}</p>}
       {rasterError && <FaultMessage title={r.previewImageFailed} value={rasterError}/>}
