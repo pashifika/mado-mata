@@ -72,6 +72,8 @@ pub struct NativeSelectionView {
     pub status: &'static str,
     pub platform: &'static str,
     pub occupied: bool,
+    pub busy: bool,
+    pub has_saved_target: bool,
     pub error: Option<Fault>,
 }
 #[derive(Serialize)]
@@ -82,6 +84,7 @@ pub struct NativeCaptureResult {
 }
 
 pub(super) struct NativeControl {
+    generation: u64,
     cancelled: Arc<AtomicBool>,
     worker: Option<WorkerCancel>,
     authority: Option<Arc<CaptureAuthority>>,
@@ -117,12 +120,29 @@ enum Source {
         proof: crate::target::AuthoringApplication,
     },
     Windows {
+        internal_name: String,
+        record: crate::target::TargetRecord,
         selected_path: PathBuf,
         executable: WindowsExecutableGuard,
-        declaration: TargetDeclaration,
     },
 }
 impl Source {
+    fn check_target(
+        &self,
+        package_id: &str,
+        declaration: Option<&TargetDeclaration>,
+    ) -> Result<(), Fault> {
+        let declaration = declaration.ok_or_else(stale)?;
+        let record = match self {
+            Self::Macos { record, .. } | Self::Windows { record, .. } => record,
+        };
+        let binding = record.binding.as_ref().ok_or_else(stale)?;
+        if !binding.compatible(package_id, &declaration.id, &declaration.identity()?) {
+            return Err(stale());
+        }
+        binding.configuration.validate_declaration(declaration)
+    }
+
     fn path(&self) -> &Path {
         match self {
             Self::Macos { record, .. } => Path::new(
@@ -139,7 +159,7 @@ impl Source {
     }
     fn title(&self) -> Option<String> {
         match self {
-            Self::Macos { record, .. } => Some(
+            Self::Macos { record, .. } | Self::Windows { record, .. } => Some(
                 record
                     .binding
                     .as_ref()
@@ -148,15 +168,14 @@ impl Source {
                     .window_title
                     .clone(),
             ),
-            Self::Windows { declaration, .. } => declaration.window_title.clone(),
         }
     }
     fn binding_revision(&self) -> Result<String, Fault> {
         match self {
             Self::Macos { record, proof, .. } => identity(&(record, &proof.installation)),
-            Self::Windows { executable, .. } => {
-                identity(&(executable.canonical_path(), executable.identity()))
-            }
+            Self::Windows {
+                record, executable, ..
+            } => identity(&(record, executable.canonical_path(), executable.identity())),
         }
     }
     fn accepts(&self, candidate: &Candidate) -> bool {
@@ -170,17 +189,11 @@ impl Source {
                     })
             }
             // Disk identity stays pinned here; the original worker owns process/window lifetime.
-            Self::Windows { .. } => matches!(candidate.native_window, NativeWindow::Windows(_)),
+            Self::Windows { executable, .. } => {
+                matches!(candidate.native_window, NativeWindow::Windows(_))
+                    && candidate.executable_path == executable.canonical_path()
+            }
         }
-    }
-    fn application_label(&self) -> String {
-        safe_label(
-            self.path()
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .unwrap_or("Application"),
-            "Application",
-        )
     }
 }
 
@@ -196,6 +209,9 @@ pub(crate) struct NativeState {
     candidates: Vec<Candidate>,
     selected: Option<String>,
     status: &'static str,
+    has_saved_target: bool,
+    target_checked_revision: Option<String>,
+    preview_closed: bool,
     error: Option<Fault>,
 }
 impl Default for NativeState {
@@ -212,6 +228,9 @@ impl Default for NativeState {
             candidates: Vec::new(),
             selected: None,
             status: "unselected",
+            has_saved_target: false,
+            target_checked_revision: None,
+            preview_closed: true,
             error: None,
         }
     }
@@ -221,14 +240,9 @@ impl NativeState {
         self.active || self.picker || self.worker.is_some() || self.cancel.is_some()
     }
     pub(crate) fn operation_active(&self) -> bool {
-        self.active || self.picker
+        self.active || self.picker || (self.occupied() && self.cancelled.load(Ordering::Acquire))
     }
     pub(crate) fn view(&self, owner: &AuthoringRef, revision: &str) -> NativeSelectionView {
-        let application_label = self
-            .source
-            .as_ref()
-            .map(Source::application_label)
-            .unwrap_or_default();
         let cancelling = self.occupied() && self.cancelled.load(Ordering::Acquire);
         NativeSelectionView {
             owner: owner.clone(),
@@ -245,6 +259,8 @@ impl NativeState {
                 self.status
             },
             occupied: self.occupied(),
+            busy: self.operation_active() || cancelling,
+            has_saved_target: self.has_saved_target,
             platform: if cfg!(target_os = "macos") {
                 "macos"
             } else if cfg!(windows) {
@@ -258,7 +274,7 @@ impl NativeState {
                 .filter(|_| !cancelling)
                 .map(|candidate| NativeCandidateView {
                     id: candidate.key.clone(),
-                    application_label: application_label.clone(),
+                    application_label: candidate_application_label(candidate),
                     window_label: safe_label(&candidate.label, "Window"),
                 })
                 .collect(),
@@ -268,6 +284,7 @@ impl NativeState {
     fn check(&self, generation: u64) -> Result<(), Fault> {
         if self.generation != generation
             || self.active
+            || self.preview_closed
             || self.cancelled.load(Ordering::Acquire)
             || self.worker.is_none()
             || self.cancel.as_ref().is_some_and(WorkerCancel::is_finished)
@@ -321,6 +338,71 @@ fn cleanup(settlement: &WorkerSettlement) -> Option<Fault> {
         )
     })
 }
+fn native_platform() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "unsupported"
+    }
+}
+
+fn reselection() -> Fault {
+    Fault::new(
+        "NativeReselectionRequired",
+        "Select a window explicitly; no unique proven saved target is available",
+    )
+}
+
+fn unique_saved_candidate(candidates: &[Candidate]) -> Result<&Candidate, Fault> {
+    match candidates {
+        [candidate] => Ok(candidate),
+        _ => Err(reselection()),
+    }
+}
+
+fn selected_configuration(
+    previous: Option<&crate::target::TargetConfiguration>,
+    platform: &str,
+    game: crate::target::TargetLocation,
+    title: &str,
+) -> crate::target::TargetConfiguration {
+    match previous {
+        Some(previous) => crate::target::TargetConfiguration {
+            platform: platform.into(),
+            game,
+            window_title: title.into(),
+            launcher: previous.launcher.clone(),
+            arguments: previous.arguments.clone(),
+            working_directory: previous.working_directory.clone(),
+            input: previous.input.clone(),
+        },
+        None => crate::target::TargetConfiguration {
+            platform: platform.into(),
+            game,
+            window_title: title.into(),
+            launcher: None,
+            arguments: Vec::new(),
+            working_directory: None,
+            input: None,
+        },
+    }
+}
+
+fn candidate_application_label(candidate: &Candidate) -> String {
+    safe_label(
+        candidate
+            .application_bundle_path
+            .as_deref()
+            .unwrap_or(&candidate.executable_path)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Application"),
+        "Application",
+    )
+}
+
 fn safe_label(value: &str, fallback: &str) -> String {
     // Titles can contain control sequences or literal paths; neither belongs in routine UI metadata.
     if value.contains('/') || value.contains('\\') {
@@ -452,41 +534,73 @@ impl Application {
         Ok(state)
     }
 
+    pub(in crate::application) fn refresh_native_target(&self, state: &mut Workspaces) {
+        let Some(lease) = state.authoring.as_ref() else {
+            return;
+        };
+        if lease.native.target_checked_revision.as_deref() == Some(&lease.revision) {
+            return;
+        }
+        let revision = lease.revision.clone();
+        let result = (|| {
+            let internal_name = &state
+                .resolve_workspace(&lease.owner.workspace)?
+                .internal_name;
+            let declaration = lease.candidate.validate()?.target()?;
+            let record =
+                lock(&self.store).read_target(internal_name, lease.candidate.package_id())?;
+            Ok::<_, Fault>(declaration.as_ref().is_some_and(|declaration| {
+                declaration.identity().is_ok_and(|identity| {
+                    record.binding.as_ref().is_some_and(|binding| {
+                        binding.compatible(lease.candidate.package_id(), &declaration.id, &identity)
+                            && binding.configuration.platform == native_platform()
+                            && binding.configuration.game.kind
+                                == (if cfg!(target_os = "macos") {
+                                    "bundle"
+                                } else {
+                                    "executable"
+                                })
+                            && binding
+                                .configuration
+                                .validate_declaration(declaration)
+                                .is_ok()
+                    })
+                })
+            }))
+        })();
+        let native = &mut state.authoring.as_mut().expect("retained owner").native;
+        native.target_checked_revision = Some(revision);
+        match result {
+            Ok(saved) => native.has_saved_target = saved,
+            Err(error) => native.error = Some(public_fault(error)),
+        }
+    }
+
     fn native_source(
         &self,
         candidate: &crate::authoring::Candidate,
         internal_name: &str,
-        executable: Option<&Path>,
         cancelled: &AtomicBool,
         deadline: Instant,
     ) -> Result<Source, Fault> {
-        let current = self.publisher.open(candidate.root())?;
-        if current.revision() != candidate.revision() {
-            return Err(stale());
-        }
-        let inventory = candidate.validate()?;
-        let declaration = inventory
+        let declaration = candidate
+            .validate()?
             .target()?
             .ok_or_else(|| Fault::new("TargetUndeclared", "Package has no target declaration"))?;
-        if cfg!(target_os = "macos") {
-            let record = lock(&self.store).read_target(internal_name, candidate.package_id())?;
-            let binding = record.binding.as_ref().ok_or_else(|| {
-                Fault::new(
-                    "TargetUnbound",
-                    "Save a compatible application bundle binding first",
-                )
-            })?;
-            if !binding.compatible(
-                candidate.package_id(),
-                &declaration.id,
-                &declaration.identity()?,
-            ) || binding.configuration.game.kind != "bundle"
-            {
-                return Err(Fault::new(
-                    "TargetIncompatible",
-                    "Capture requires a compatible saved application bundle",
-                ));
-            }
+        let record = lock(&self.store).read_target(internal_name, candidate.package_id())?;
+        let binding = record
+            .binding
+            .as_ref()
+            .filter(|binding| binding.configuration.platform == native_platform())
+            .ok_or_else(reselection)?;
+        if !binding.compatible(
+            candidate.package_id(),
+            &declaration.id,
+            &declaration.identity()?,
+        ) {
+            return Err(reselection());
+        }
+        if cfg!(target_os = "macos") && binding.configuration.game.kind == "bundle" {
             let proof = crate::target::authoring_application(
                 &binding.configuration,
                 &declaration,
@@ -500,30 +614,120 @@ impl Application {
                 declaration,
                 proof,
             })
-        } else if cfg!(windows) {
-            if declaration.macos.is_some() {
-                return Err(Fault::new(
-                    "TargetIncompatible",
-                    "A macOS-specific target does not authorize Windows capture",
-                ));
+        } else if cfg!(windows)
+            && declaration.macos.is_none()
+            && binding.configuration.game.kind == "executable"
+        {
+            let selected_path = PathBuf::from(&binding.configuration.game.path);
+            let executable = WindowsExecutableGuard::open(&selected_path, cancelled, deadline)?;
+            if executable.canonical_path() != Path::new(&binding.resolution.game.executable) {
+                return Err(stale());
             }
-            let path = executable.ok_or_else(|| {
-                Fault::new(
-                    "NativeExecutableRequired",
-                    "Select the actual game's absolute executable",
-                )
-            })?;
-            let executable = WindowsExecutableGuard::open(path, cancelled, deadline)?;
             Ok(Source::Windows {
-                selected_path: path.to_path_buf(),
+                internal_name: internal_name.into(),
+                record,
+                selected_path,
                 executable,
-                declaration,
             })
         } else {
-            Err(Fault::new(
-                "NativeCapturePlatform",
-                "Native capture requires macOS or Windows",
-            ))
+            Err(reselection())
+        }
+    }
+
+    fn selected_native_source(
+        &self,
+        package: &crate::authoring::Candidate,
+        internal_name: &str,
+        selected: &Candidate,
+        cancel: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<Source, Fault> {
+        publication_checkpoint(cancel, deadline)?;
+        if self.publisher.open(package.root())?.revision() != package.revision() {
+            return Err(stale());
+        }
+        let declaration = package
+            .validate()?
+            .target()?
+            .ok_or_else(|| Fault::new("TargetUndeclared", "Package has no target declaration"))?;
+        let record = lock(&self.store).read_target(internal_name, package.package_id())?;
+        let (path, kind) = match selected.native_window {
+            NativeWindow::Macos(_) if cfg!(target_os = "macos") => (
+                crate::target::selected_application(selected, cancel, deadline)?,
+                "bundle",
+            ),
+            NativeWindow::Windows(_) if cfg!(windows) && declaration.macos.is_none() => {
+                (selected.executable_path.clone(), "executable")
+            }
+            _ => return Err(reselection()),
+        };
+        let configuration = selected_configuration(
+            record
+                .binding
+                .as_ref()
+                .map(|binding| &binding.configuration),
+            native_platform(),
+            crate::target::TargetLocation {
+                kind: kind.into(),
+                path: path.to_str().ok_or_else(reselection)?.into(),
+            },
+            &selected.label,
+        );
+        let resolution = configuration.resolve(&declaration)?;
+        publication_checkpoint(cancel, deadline)?;
+        let proof = if cfg!(target_os = "macos") {
+            Some(crate::target::authoring_application(
+                &configuration,
+                &declaration,
+                &resolution,
+                cancel,
+                deadline,
+            )?)
+        } else {
+            None
+        };
+        let executable = if cfg!(windows) {
+            Some(WindowsExecutableGuard::open(&path, cancel, deadline)?)
+        } else {
+            None
+        };
+        let accepted = proof.as_ref().is_some_and(|proof| {
+            proof.processes.iter().any(|process| {
+                process.pid == selected.process_id
+                    && process.lifetime == selected.process_lifetime
+                    && process.executable == selected.executable_path
+            })
+        }) || executable.as_ref().is_some_and(|executable| {
+            executable.canonical_path() == selected.executable_path
+                && executable.canonical_path() == Path::new(&resolution.game.executable)
+        });
+        if !accepted {
+            return Err(reselection());
+        }
+        publication_checkpoint(cancel, deadline)?;
+        let (record, _) = lock(&self.store).save_target(
+            internal_name,
+            package.package_id(),
+            &declaration,
+            &record.expectation(),
+            configuration,
+            Some(&resolution),
+        )?;
+        self.invalidate_target_observation(None);
+        if let Some(proof) = proof {
+            Ok(Source::Macos {
+                internal_name: internal_name.into(),
+                record,
+                declaration,
+                proof,
+            })
+        } else {
+            Ok(Source::Windows {
+                internal_name: internal_name.into(),
+                record,
+                selected_path: path,
+                executable: executable.ok_or_else(reselection)?,
+            })
         }
     }
 
@@ -565,6 +769,16 @@ impl Application {
             ..
         } = source
         {
+            if let Source::Windows {
+                internal_name,
+                record,
+                ..
+            } = source
+            {
+                if lock(&self.store).read_target(internal_name, &record.package_id)? != *record {
+                    return Err(stale());
+                }
+            }
             executable.validate(selected_path, cancelled, deadline)?;
         }
         if cancelled.load(Ordering::Acquire) {
@@ -623,11 +837,18 @@ impl Application {
         {
             return Err(stale());
         }
-        if let Source::Macos {
-            internal_name,
-            record,
-            ..
-        } = publication.source
+        let (internal_name, record) = match publication.source {
+            Source::Macos {
+                internal_name,
+                record,
+                ..
+            }
+            | Source::Windows {
+                internal_name,
+                record,
+                ..
+            } => (internal_name, record),
+        };
         {
             let current = lock(&self.store).read_target(internal_name, &record.package_id)?;
             if current != *record {
@@ -677,15 +898,44 @@ impl Application {
         &self,
         owner: &AuthoringRef,
         revision: &str,
-        executable: Option<&Path>,
+    ) -> Result<NativeSelectionView, Fault> {
+        self.native_discover_mode(owner, revision, false)
+    }
+
+    pub fn native_start(
+        &self,
+        owner: &AuthoringRef,
+        revision: &str,
+    ) -> Result<NativeSelectionView, Fault> {
+        self.native_discover_mode(owner, revision, true)
+    }
+
+    fn native_discover_mode(
+        &self,
+        owner: &AuthoringRef,
+        revision: &str,
+        saved: bool,
     ) -> Result<NativeSelectionView, Fault> {
         let (_command, mut state) = self.command_state()?;
         let candidate = state.authoring_revision(owner, revision)?;
+        if state
+            .authoring
+            .as_ref()
+            .ok_or_else(stale)?
+            .native
+            .preview_closed
+        {
+            return Err(Fault::new(
+                "NativePreviewClosed",
+                "Open Preview before starting capture",
+            ));
+        }
         let internal_name = state
             .resolve_workspace(&owner.workspace)?
             .internal_name
             .clone();
         self.collect(&mut state);
+        self.refresh_native_target(&mut state);
         state = self.settle_native_selection(owner, state)?;
         state.work_idle()?;
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -706,6 +956,7 @@ impl Application {
             .as_mut()
             .ok_or_else(stale)?
             .native = Some(NativeControl {
+            generation,
             cancelled: cancel.clone(),
             worker: None,
             authority: None,
@@ -713,12 +964,25 @@ impl Application {
         drop(state);
         let mut worker = None;
         let result = (|| {
-            let source =
-                self.native_source(&candidate, &internal_name, executable, &cancel, deadline)?;
+            if self.publisher.open(candidate.root())?.revision() != revision {
+                return Err(stale());
+            }
+            let declaration = candidate.validate()?.target()?.ok_or_else(|| {
+                Fault::new("TargetUndeclared", "Package has no target declaration")
+            })?;
+            let source = if saved {
+                Some(self.native_source(&candidate, &internal_name, &cancel, deadline)?)
+            } else {
+                None
+            };
             let correlation = CaptureIdentity {
                 owner: owner.token.clone(),
                 package_revision: revision.into(),
-                binding_revision: source.binding_revision()?,
+                binding_revision: source
+                    .as_ref()
+                    .map(Source::binding_revision)
+                    .transpose()?
+                    .unwrap_or_else(|| format!("unbound-{generation}")),
                 selection_generation: generation,
                 request_id: format!("{}-selection-{generation}", owner.token),
             };
@@ -727,10 +991,13 @@ impl Application {
             }
             let request = DiscoveryRequest {
                 identity: correlation.clone(),
-                executable_or_bundle: source.path().to_path_buf(),
-                exact_window_title: source.title(),
+                executable_or_bundle: source.as_ref().map(|source| source.path().to_path_buf()),
+                exact_window_title: source
+                    .as_ref()
+                    .and_then(Source::title)
+                    .or(declaration.window_title),
                 verified_processes: match &source {
-                    Source::Macos { proof, .. } => proof
+                    Some(Source::Macos { proof, .. }) => proof
                         .processes
                         .iter()
                         .map(|process| ProcessCorrespondence {
@@ -739,7 +1006,7 @@ impl Application {
                             executable_path: process.executable.clone(),
                         })
                         .collect(),
-                    Source::Windows { .. } => Vec::new(),
+                    _ => Vec::new(),
                 },
                 timeout: deadline.saturating_duration_since(Instant::now()),
             };
@@ -757,14 +1024,17 @@ impl Application {
                     handle.cancel();
                 }
             }
-            let candidates = worker.as_mut().ok_or_else(stale)?.discover()?;
+            let mut candidates = worker.as_mut().ok_or_else(stale)?.discover()?;
+            candidates.retain(|candidate| candidate.process_id != std::process::id());
             if cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
                 return Err(cancelled());
             }
             if candidates.is_empty()
                 || candidates.len() > 64
                 || candidates.iter().any(|candidate| {
-                    candidate.process_id == std::process::id() || !source.accepts(candidate)
+                    source
+                        .as_ref()
+                        .is_some_and(|source| !source.accepts(candidate))
                 })
             {
                 return Err(Fault::new(
@@ -772,7 +1042,20 @@ impl Application {
                     "No complete verified eligible window set is available",
                 ));
             }
-            Ok((source, correlation, candidates))
+            let selected = if saved {
+                let expected = unique_saved_candidate(&candidates)?;
+                let selected = worker
+                    .as_mut()
+                    .ok_or_else(stale)?
+                    .select(&expected.key, &correlation.binding_revision)?;
+                if selected != *expected {
+                    return Err(stale());
+                }
+                Some(expected.key.clone())
+            } else {
+                None
+            };
+            Ok((source, correlation, candidates, selected))
         })();
         let mut state = lock(&self.workspaces);
         let lease = state.authoring.as_mut().ok_or_else(stale)?;
@@ -780,15 +1063,21 @@ impl Application {
         lease.native.worker = worker;
         lease.native.active = false;
         match result {
-            Ok((source, correlation, candidates)) => {
-                lease.native.source = Some(source);
+            Ok((source, correlation, candidates, selected)) => {
+                lease.native.source = source;
                 lease.native.correlation = Some(correlation);
                 lease.native.candidates = candidates;
-                lease.native.status = "selecting";
+                lease.native.status = if selected.is_some() {
+                    "selected"
+                } else {
+                    "selecting"
+                };
+                lease.native.selected = selected;
             }
             Err(error) => {
                 let error = public_fault(error);
                 lease.native.error = Some(error.clone());
+                lease.native.target_checked_revision = None;
                 lease.native.status = "failed";
                 if lease.native.worker.is_some() {
                     drop(self.settle_native_selection(owner, state)?);
@@ -813,17 +1102,184 @@ impl Application {
         &self,
         owner: &AuthoringRef,
         revision: &str,
+        generation: u64,
     ) -> Result<NativeSelectionView, Fault> {
-        let (_command, mut state) = self.command_state()?;
-        state.authoring_revision(owner, revision)?;
-        self.collect(&mut state);
+        self.release_native(owner, Some(revision), generation, false)
+    }
+
+    pub fn native_close_preview(
+        &self,
+        owner: &AuthoringRef,
+        revision: &str,
+        generation: u64,
+    ) -> Result<NativeSelectionView, Fault> {
+        self.release_native(owner, Some(revision), generation, true)
+    }
+
+    /// Host destruction fences resources by owner/generation, not editable metadata revision.
+    pub fn native_finish_preview_close(
+        &self,
+        owner: &AuthoringRef,
+        generation: u64,
+    ) -> Result<NativeSelectionView, Fault> {
+        self.release_native(owner, None, generation, true)
+    }
+
+    fn release_native(
+        &self,
+        owner: &AuthoringRef,
+        revision: Option<&str>,
+        generation: u64,
+        close_preview: bool,
+    ) -> Result<NativeSelectionView, Fault> {
+        // Validate every renderer fence before cancellation. Ordinary Stop has its
+        // separate lock-independent path; stale preview cleanup cannot cancel work.
+        {
+            let mut state = lock(&self.workspaces);
+            if let Some(revision) = revision {
+                state.authoring_revision(owner, revision)?;
+            } else {
+                state.authoring(owner)?;
+            }
+            if state
+                .authoring
+                .as_ref()
+                .ok_or_else(stale)?
+                .native
+                .generation
+                != generation
+            {
+                return Err(stale());
+            }
+            if close_preview {
+                state
+                    .authoring
+                    .as_mut()
+                    .ok_or_else(stale)?
+                    .native
+                    .preview_closed = true;
+            }
+            let stop = lock(&self.authoring_stop);
+            if let Some(control) = stop
+                .as_ref()
+                .filter(|slot| slot.owner == *owner)
+                .and_then(|slot| slot.native.as_ref())
+                .filter(|control| control.generation == generation)
+            {
+                control.cancel();
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(14);
+        let (command, mut state) = loop {
+            let command = lock(&self.commands);
+            let mut state = lock(&self.workspaces);
+            if let Some(revision) = revision {
+                state.authoring_revision(owner, revision)?;
+            } else {
+                state.authoring(owner)?;
+            }
+            let native = &state.authoring.as_ref().ok_or_else(stale)?.native;
+            if native.generation != generation {
+                return Err(stale());
+            }
+            if !native.picker {
+                self.collect(&mut state);
+                break (command, state);
+            }
+            drop(state);
+            drop(command);
+            if Instant::now() >= deadline {
+                return Err(Fault::new(
+                    "NativePickerCleanup",
+                    "Preview close is waiting for picker cleanup",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         state = self.settle_native_selection(owner, state)?;
-        Ok(state
+        let _command = command;
+        let lease = state.authoring.as_ref().ok_or_else(stale)?;
+        Ok(lease.native.view(owner, &lease.revision))
+    }
+
+    /// Reads the current owner fence without changing native admission.
+    pub fn native_preview_fence(&self, owner: &AuthoringRef) -> Result<(String, u64), Fault> {
+        let state = lock(&self.workspaces);
+        let lease = state
             .authoring
             .as_ref()
+            .filter(|lease| lease.owner == *owner)
+            .ok_or_else(stale)?;
+        Ok((lease.revision.clone(), lease.native.generation))
+    }
+
+    /// Actual window destruction closes admission before asynchronous settlement.
+    pub fn native_begin_preview_close(&self, owner: &AuthoringRef) -> Result<(String, u64), Fault> {
+        let mut state = lock(&self.workspaces);
+        let lease = state
+            .authoring
+            .as_mut()
+            .filter(|lease| lease.owner == *owner)
+            .ok_or_else(stale)?;
+        lease.native.preview_closed = true;
+        Ok((lease.revision.clone(), lease.native.generation))
+    }
+
+    pub fn native_open_preview(&self, owner: &AuthoringRef, revision: &str) -> Result<(), Fault> {
+        let (_command, mut state) = self.command_state()?;
+        state.authoring_revision(owner, revision)?;
+        state
+            .authoring
+            .as_mut()
             .ok_or_else(stale)?
             .native
-            .view(owner, revision))
+            .preview_closed = false;
+        Ok(())
+    }
+
+    pub fn native_reset_target(
+        &self,
+        owner: &AuthoringRef,
+        revision: &str,
+    ) -> Result<NativeSelectionView, Fault> {
+        let (_command, mut state) = self.command_state()?;
+        let package = state.authoring_revision(owner, revision)?;
+        self.collect(&mut state);
+        state = self.settle_native_selection(owner, state)?;
+        state.work_idle()?;
+        let internal_name = state
+            .resolve_workspace(&owner.workspace)?
+            .internal_name
+            .clone();
+        {
+            let store = lock(&self.store);
+            let record = store.read_target(&internal_name, package.package_id())?;
+            store.remove_target(&internal_name, package.package_id(), &record.expectation())?;
+        }
+        self.invalidate_target_observation(Some(&owner.workspace));
+        let native = &mut state.authoring.as_mut().ok_or_else(stale)?.native;
+        native.has_saved_target = false;
+        native.target_checked_revision = Some(revision.into());
+        native.status = "unselected";
+        native.error = None;
+        Ok(native.view(owner, revision))
+    }
+
+    pub fn native_prepare_picker(&self, owner: &AuthoringRef, revision: &str) -> Result<(), Fault> {
+        let discover = {
+            let (_command, mut state) = self.command_state()?;
+            state.authoring_revision(owner, revision)?;
+            self.collect(&mut state);
+            state.work_idle()?;
+            let native = &state.authoring.as_ref().ok_or_else(stale)?.native;
+            native.worker.is_none()
+                || native.selected.is_some()
+                || native.cancelled.load(Ordering::Acquire)
+        };
+        if discover {
+            self.native_discover(owner, revision)?;
+        }
+        Ok(())
     }
 
     pub fn native_picker_snapshot(
@@ -843,17 +1299,12 @@ impl Application {
                 "Native picker is already open",
             ));
         }
-        let application_label = native
-            .source
-            .as_ref()
-            .ok_or_else(stale)?
-            .application_label();
         let candidates = native
             .candidates
             .iter()
             .map(|candidate| NativePickerCandidate {
                 id: candidate.key.clone(),
-                application_label: application_label.clone(),
+                application_label: candidate_application_label(candidate),
                 window_label: safe_label(&candidate.label, "Window"),
                 native_window_id: match candidate.native_window {
                     NativeWindow::Macos(id) => u64::from(id),
@@ -899,7 +1350,11 @@ impl Application {
         candidate_id: &str,
     ) -> Result<NativeSelectionView, Fault> {
         let (_command, mut state) = self.command_state()?;
-        state.authoring_revision(owner, revision)?;
+        let package = state.authoring_revision(owner, revision)?;
+        let internal_name = state
+            .resolve_workspace(&owner.workspace)?
+            .internal_name
+            .clone();
         self.collect(&mut state);
         state.work_idle_except_native()?;
         let native = &mut state.authoring.as_mut().ok_or_else(stale)?.native;
@@ -910,40 +1365,71 @@ impl Application {
                 "Remove picker overlays before selection",
             ));
         }
+        if native
+            .selected
+            .as_deref()
+            .is_some_and(|selected| selected != candidate_id)
+        {
+            return Err(stale());
+        }
         let expected = native
             .candidates
             .iter()
             .find(|candidate| candidate.key == candidate_id)
             .ok_or_else(stale)?
             .clone();
-        let source = native.source.clone().ok_or_else(stale)?;
+        let source = native.source.clone();
         let cancel = native.cancelled.clone();
         let mut worker = native.worker.take().ok_or_else(stale)?;
         native.active = true;
         drop(state);
-        let result = self
-            .revalidate_native_source(&source, &cancel, Instant::now() + Duration::from_secs(5))
-            .and_then(|()| worker.select(candidate_id))
-            .and_then(|selected| {
-                if selected == expected {
-                    Ok(())
-                } else {
-                    Err(stale())
+        let result = (|| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let source = match source {
+                Some(source) => {
+                    self.revalidate_native_source(&source, &cancel, deadline)?;
+                    source
                 }
-            });
+                None => self.selected_native_source(
+                    &package,
+                    &internal_name,
+                    &expected,
+                    &cancel,
+                    deadline,
+                )?,
+            };
+            let binding_revision = source.binding_revision()?;
+            let selected = worker.select(candidate_id, &binding_revision)?;
+            if selected != expected || !source.accepts(&selected) {
+                return Err(stale());
+            }
+            publication_checkpoint(&cancel, deadline)?;
+            Ok((source, binding_revision))
+        })();
         let mut state = lock(&self.workspaces);
         let native = &mut state.authoring.as_mut().ok_or_else(stale)?.native;
         native.worker = Some(worker);
         native.active = false;
-        if let Err(error) = result {
-            let error = public_fault(error);
-            native.error = Some(error.clone());
-            drop(self.settle_native_selection(owner, state)?);
-            return Err(error);
-        }
+        let (source, binding_revision) = match result {
+            Ok(selected) => selected,
+            Err(error) => {
+                let error = public_fault(error);
+                native.error = Some(error.clone());
+                native.target_checked_revision = None;
+                drop(self.settle_native_selection(owner, state)?);
+                return Err(error);
+            }
+        };
         if cancel.load(Ordering::Acquire) {
             return Err(cancelled());
         }
+        native.source = Some(source);
+        native
+            .correlation
+            .as_mut()
+            .ok_or_else(stale)?
+            .binding_revision = binding_revision;
+        native.has_saved_target = true;
         native.selected = Some(candidate_id.into());
         native.status = "selected";
         Ok(native.view(owner, revision))
@@ -977,6 +1463,9 @@ impl Application {
         generation: u64,
         capture_id: Option<&str>,
         document_revision: u64,
+        new_capture: bool,
+        crop_ids: &[String],
+        crop_sources: &std::collections::BTreeMap<String, String>,
         cache: Option<Result<crate::capture_cache::CaptureCache, Fault>>,
     ) -> Result<NativeCaptureResult, Fault> {
         let (_command, mut state) = self.command_state()?;
@@ -989,16 +1478,34 @@ impl Application {
             if native.picker || native.selected.is_none() {
                 return Err(stale());
             }
+            let declaration = package.validate()?.target()?;
+            native
+                .source
+                .as_ref()
+                .ok_or_else(stale)?
+                .check_target(package.package_id(), declaration.as_ref())?;
         }
-        let prepared =
-            self.prepare_native_frame(&mut state, owner, revision, capture_id, document_revision)?;
+        let prepared = self.prepare_native_frame(
+            &mut state,
+            owner,
+            revision,
+            capture_id,
+            document_revision,
+            new_capture,
+            crop_ids,
+            crop_sources,
+        )?;
         let native = &mut state.authoring.as_mut().ok_or_else(stale)?.native;
         let mut correlation = native.correlation.clone().ok_or_else(stale)?;
+        let rebase_package = correlation.package_revision != revision;
+        if rebase_package {
+            correlation.package_revision = revision.into();
+        }
         correlation.request_id = format!("{}-capture-{generation}-{prepared}", owner.token);
         let authority = Arc::new(CaptureAuthority::new(correlation.clone())?);
         let source = native.source.clone().ok_or_else(stale)?;
         let cancel = native.cancelled.clone();
-        let worker = native.worker.take().ok_or_else(stale)?;
+        let mut worker = Some(native.worker.take().ok_or_else(stale)?);
         native.active = true;
         native.status = "capturing";
         lock(&self.authoring_stop)
@@ -1015,28 +1522,44 @@ impl Application {
                 if current.revision() != revision {
                     return Err(stale());
                 }
+                if rebase_package {
+                    // Metadata/crop Save may advance package revision, but the target
+                    // declaration and fresh binding proof above must remain identical.
+                    worker
+                        .as_mut()
+                        .ok_or_else(stale)?
+                        .rebase_package(revision)?;
+                }
                 Ok(())
             });
-        let (capture, primary, settlement) = match validation {
+        let (capture, primary, session_clean, settlement) = match validation {
             Ok(()) => {
-                let result = worker.capture(
+                let result = worker.as_mut().ok_or_else(stale)?.capture(
                     correlation.clone(),
                     authority.clone(),
                     deadline.saturating_duration_since(Instant::now()),
                 );
-                (result.capture, result.primary, result.settlement)
+                (
+                    result.capture,
+                    result.primary,
+                    result.session_clean,
+                    result.settlement,
+                )
             }
             Err(error) => {
                 authority.cancel();
-                let settlement = worker.settle();
-                (None, Some(error), settlement)
+                let settlement = worker.take().ok_or_else(stale)?.settle();
+                (None, Some(error), false, Some(settlement))
             }
         };
         state = lock(&self.workspaces);
         let lease = state.authoring.as_mut().ok_or_else(stale)?;
-        if let Some(error) = cleanup(&settlement) {
+        if let Some(error) = settlement.as_ref().and_then(cleanup) {
             lease.native.active = false;
-            if settlement.child_reaped {
+            if settlement
+                .as_ref()
+                .is_some_and(|settlement| settlement.child_reaped)
+            {
                 lease.native.retire("failed");
             }
             lease.native.status = "failed";
@@ -1049,6 +1572,12 @@ impl Application {
             publication_checkpoint(&cancel, deadline)?;
             if let Some(error) = primary {
                 return Err(error);
+            }
+            if !session_clean {
+                return Err(Fault::new(
+                    "NativeCaptureCleanup",
+                    "The frame session did not close cleanly",
+                ));
             }
             let capture = capture
                 .ok_or_else(|| Fault::new("NativeCapture", "Worker returned no accepted frame"))?;
@@ -1066,7 +1595,13 @@ impl Application {
                 },
                 |state| {
                     let prepared = self.prepare_native_install(
-                        state, owner, revision, capture_id, prepared, capture,
+                        state,
+                        owner,
+                        revision,
+                        capture_id,
+                        prepared,
+                        capture,
+                        new_capture,
                     )?;
                     // A detached frame is historical: validate only the retained installation,
                     // not the process/window that may already have exited after capture commit.
@@ -1076,14 +1611,35 @@ impl Application {
             )
         })();
         let lease = state.authoring.as_mut().ok_or_else(stale)?;
-        lease
-            .native
-            .retire(if result.is_ok() { "consumed" } else { "failed" });
+        lease.native.active = false;
         lease.native.error = result.as_ref().err().cloned().map(public_fault);
-        drop(source);
-        if let Some(slot) = lock(&self.authoring_stop).as_mut() {
-            slot.native = None;
+        if settlement.is_some() {
+            lease.native.retire("failed");
+            if let Some(slot) = lock(&self.authoring_stop).as_mut() {
+                slot.native = None;
+            }
+        } else {
+            lease.native.worker = worker.take();
+            if result.is_ok() {
+                lease
+                    .native
+                    .correlation
+                    .as_mut()
+                    .ok_or_else(stale)?
+                    .package_revision = revision.into();
+            }
+            lease.native.status = if result.is_ok() { "selected" } else { "failed" };
+            if let Some(control) = lock(&self.authoring_stop)
+                .as_mut()
+                .and_then(|slot| slot.native.as_mut())
+            {
+                control.authority = None;
+            }
+            if result.is_err() || cancel.load(Ordering::Acquire) {
+                state = self.settle_native_selection(owner, state)?;
+            }
         }
+        drop(source);
         let png = result.map_err(public_fault)?;
         let recognition = self.recognition_snapshot(&mut state, owner, revision)?;
         let selection = state
@@ -1148,6 +1704,118 @@ mod tests {
     }
 
     #[test]
+    fn saved_locator_requires_one_window_without_first_match_fallback() {
+        assert!(matches!(
+            unique_saved_candidate(&[]),
+            Err(error) if error.category == "NativeReselectionRequired"
+        ));
+        let one = [candidate()];
+        assert_eq!(unique_saved_candidate(&one).unwrap().key, one[0].key);
+        let mut other = candidate();
+        other.key = "candidate-2".into();
+        other.native_window = NativeWindow::Windows(74);
+        assert!(matches!(
+            unique_saved_candidate(&[candidate(), other]),
+            Err(error) if error.category == "NativeReselectionRequired"
+        ));
+    }
+
+    #[test]
+    fn selected_application_preserves_explicit_input_and_launch_policy() {
+        let mut prior = crate::target::tests::configuration("/previous/game");
+        prior.launcher = Some(crate::target::TargetLocation {
+            kind: "executable".into(),
+            path: "/previous/launcher".into(),
+        });
+        prior.working_directory = Some("/previous/directory".into());
+        let game = crate::target::TargetLocation {
+            kind: "bundle".into(),
+            path: "/selected/Game.app".into(),
+        };
+        let selected =
+            selected_configuration(Some(&prior), "macos", game.clone(), "Selected window");
+        assert_eq!(selected.game, game);
+        assert_eq!(selected.window_title, "Selected window");
+        assert_eq!(selected.input, prior.input);
+        assert_eq!(selected.launcher, prior.launcher);
+        assert_eq!(selected.arguments, prior.arguments);
+        assert_eq!(selected.working_directory, prior.working_directory);
+        let first = selected_configuration(None, "macos", game, "Selected window");
+        assert!(
+            first.input.is_none(),
+            "window selection cannot grant input authority"
+        );
+        assert!(first.launcher.is_none());
+    }
+
+    #[test]
+    fn stale_preview_close_cannot_cancel_a_newer_selection() {
+        let sources = super::super::tests::Sources::new();
+        let app = sources.app();
+        let workspace = app.create_workspace("close-fence", "Close fence").unwrap();
+        let editor = app
+            .authoring_create(
+                &crate::application::test_support::view_ref(&workspace),
+                "close-fence",
+            )
+            .unwrap();
+        app.native_open_preview(&editor.owner, &editor.revision)
+            .unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        {
+            let mut state = lock(&app.workspaces);
+            state.authoring.as_mut().unwrap().native.generation = 2;
+            lock(&app.authoring_stop).as_mut().unwrap().native = Some(NativeControl {
+                generation: 2,
+                cancelled: cancelled.clone(),
+                worker: None,
+                authority: None,
+            });
+        }
+        assert_eq!(
+            app.native_close_preview(&editor.owner, &editor.revision, 1)
+                .unwrap_err()
+                .category,
+            "StaleNativeSelection"
+        );
+        assert_eq!(
+            app.native_close_preview(&editor.owner, "old-revision", 2)
+                .unwrap_err()
+                .category,
+            "AuthoringConflict"
+        );
+        assert!(!cancelled.load(Ordering::Acquire));
+        assert!(
+            !lock(&app.workspaces)
+                .authoring
+                .as_ref()
+                .unwrap()
+                .native
+                .preview_closed
+        );
+        lock(&app.authoring_stop).as_mut().unwrap().native = None;
+        app.native_begin_preview_close(&editor.owner).unwrap();
+        assert_eq!(
+            app.native_discover(&editor.owner, &editor.revision)
+                .unwrap_err()
+                .category,
+            "NativePreviewClosed"
+        );
+        app.native_close_preview(&editor.owner, &editor.revision, 2)
+            .unwrap();
+        app.native_open_preview(&editor.owner, &editor.revision)
+            .unwrap();
+        assert!(
+            !lock(&app.workspaces)
+                .authoring
+                .as_ref()
+                .unwrap()
+                .native
+                .preview_closed
+        );
+    }
+
+    #[test]
     fn native_candidate_renderer_projection_excludes_private_provenance() {
         let native = NativeState {
             candidates: vec![candidate()],
@@ -1165,7 +1833,7 @@ mod tests {
         assert_eq!(
             value["candidates"],
             serde_json::json!([{
-                "id":"candidate-1", "application_label":"", "window_label":"Window",
+                "id":"candidate-1", "application_label":"game", "window_label":"Window",
             }])
         );
         let serialized = serde_json::to_string(&value).unwrap();
@@ -1197,6 +1865,7 @@ mod tests {
             let mut state = lock(&app.workspaces);
             state.authoring.as_mut().unwrap().native.active = true;
             lock(&app.authoring_stop).as_mut().unwrap().native = Some(NativeControl {
+                generation: 0,
                 cancelled: cancelled.clone(),
                 worker: None,
                 authority: None,

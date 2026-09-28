@@ -5,7 +5,7 @@ import {
   clientToFrame, confirmTicket, copyBlock, copyFreshness, copyTicket, createDefinition, deleteDefinition, displayScale, dragEdges, geometryConfirmed,
   hitHandle, hitRegion, mapRegion, openRecognition, previewSnapshot, recognitionDirty, regionFromEdges, renameDefinition, saveBlock, saveTicket,
   selectDefinition, setContent, setDisplay, setExpected, setKind, setRegion, setRights, spanEdges, syncTicket, toggleCrop, toggleTrial, trialBlock,
-  trialFreshness, trialTicket, undoRecognition, captureDocuments, aggregateDefinitions, canUndoRecognition, discardPixelCrops, canReleaseImage,
+  trialFreshness, trialTicket, undoRecognition, captureDocuments, aggregateDefinitions, canUndoRecognition, discardPixelCrops, canReleaseImage, rebaseFrame, nativePrimaryAction,
 } from './recognition.ts';
 
 const MIB=1_048_576;
@@ -18,6 +18,7 @@ const CAPTURE_B='0000000000000000000g';
 function hostView(overrides={}){
   const view={owner,revision:'rev-1',document:null,saved_document:null,document_revision:1,basis_confirmed:false,frame:null,
     capture_id:null,captures:[],saved_captures:[],migration_required:false,other_bases_confirmed:true,
+    staged_crop_ids:[],stale_crop_ids:[],staged_crop_sources:{},
     capabilities:{max_ocr_zones:8,diagnostic_regions:256,diagnostic_bytes:262144,expected_bytes:4096,image_policy:policy},
     configuration_revision:'cfg-1',trial:null,...overrides};
   if (view.document && !Object.hasOwn(overrides,'capture_id')) view.capture_id=CAPTURE_A;
@@ -63,6 +64,18 @@ function trialResult(ticket,zones,overrides={}){
     ...overrides};
 }
 const zone=(id,text)=>({id,outcome:text===null?'no_match':'recognized',regions:text===null?[]:[{text,confidence:0.9,bounds:{x:1,y:2,width:3,height:4},geometry:[]}]});
+
+test('native capture action follows saved-target and held Engine state without inventing authority',()=>{
+  assert.equal(nativePrimaryAction(null),'select');
+  const unselected={status:'unselected',selected_id:null,has_saved_target:true};
+  assert.equal(nativePrimaryAction(unselected),'start');
+  assert.equal(nativePrimaryAction({...unselected,status:'discovering'}),'start');
+  const selected={...unselected,status:'selected',selected_id:'candidate-1'};
+  assert.equal(nativePrimaryAction(selected),'capture');
+  assert.equal(nativePrimaryAction({...selected,status:'capturing'}),'start');
+  assert.equal(nativePrimaryAction({...selected,status:'selected',selected_id:null}),'start');
+  assert.equal(nativePrimaryAction({...unselected,has_saved_target:false}),'select');
+});
 
 test('every integer pixel edge survives normalized storage and floor/ceil remapping for any content size',()=>{
   for (let size=1; size<=300; size++) {
@@ -219,7 +232,7 @@ test('nine saved definitions stay valid while a grouped trial is bounded by the 
   assert.equal(trialBlock(unknown,'frame',['r1']),'noCapability');
 });
 
-test('same-size scenes reuse content and setup Copy but stale trials and crops; resized scenes require confirmation',()=>{
+test('refresh retains the Game content ROI, unsaved definitions and selected original crops; resized frames require explicit rebase',()=>{
   let state=create(loaded(),edges(100,100,200,200));
   state=setContent(state,{x:0,y:60,width:1920,height:960});
   state=confirm(sync(state));
@@ -233,28 +246,39 @@ test('same-size scenes reuse content and setup Copy but stale trials and crops; 
   const definitions=state.document.definitions;
   state=toggleCrop(state,'r1');
   const region=state.document.definitions[0].region;
-  assert.equal(geometryConfirmed(state),true);
-  state=applyView(state,{...state.view,frame:{id:'f2',width:1920,height:1080,revision:2,confirmed:true}});
-  assert.deepEqual(state.document.definitions[0].region,region);
+  state=applyView(state,{...state.view,staged_crop_ids:['r1'],staged_crop_sources:{r1:'f1'},frame:{id:'f2',width:1920,height:1080,revision:2,confirmed:true}});
+  assert.deepEqual(state.document.definitions,definitions);
   assert.deepEqual(state.document.basis.content,{x:0,y:60,width:1920,height:960});
-  assert.equal(geometryConfirmed(state),true);
-  assert.deepEqual(state.document.definitions,definitions,'saved and unsaved definitions survive scene replacement');
-  assert.deepEqual(state.cropIds,[]);
+  assert.deepEqual(state.cropIds,['r1']);
+  assert.equal(state.cropSources.r1,'f1');
+  assert.deepEqual(saveTicket(state).crop_sources,{r1:'f1'});
   assert.equal(trialFreshness(state,'r1'),'stale');
-  assert.equal(copyFreshness(state,'game_content'),'current','reused content setup keeps the same recognitionBasis');
-  assert.equal(trialBlock(state,'frame',['r1']),null);
-  assert.equal(copyBlock(state,[],'game_content'),null);
-  // Content that does not fit a smaller replacement restarts at the full image.
-  state=applyView(state,{...state.view,frame:{id:'f3',width:1280,height:720,revision:3,confirmed:false}});
-  assert.deepEqual(state.document.basis,{frame_width:1280,frame_height:720,content:{x:0,y:0,width:1280,height:720}});
+  assert.equal(copyFreshness(state,'game_content'),'current','unchanged Game content setup remains reusable');
+  // The previous basis and selected original are retained even when the new frame is differently sized.
+  state=applyView(state,{...state.view,basis_confirmed:false,frame:{id:'f3',width:1280,height:720,revision:3,confirmed:false}});
+  assert.deepEqual(state.document.basis,{frame_width:1920,frame_height:1080,content:{x:0,y:60,width:1920,height:960}});
+  assert.equal(state.cropSources.r1,'f1');
+  assert.equal(previewSnapshot(state,'en',true,null).frameGeometryReady,false);
   assert.equal(trialBlock(state,'frame',['r1']),'unconfirmed');
-  assert.equal(copyBlock(state,[],'game_content'),'unconfirmed');
-  assert.equal(copyFreshness(state,'game_content'),'obsolete');
-  // A failed replacement leaves no frame while geometry metadata stays.
-  state=applyView(state,{...state.view,frame:null});
-  assert.equal(state.view.frame,null);
+  state=rebaseFrame(state);
+  assert.deepEqual(state.document.basis,{frame_width:1280,frame_height:720,content:{x:0,y:0,width:1280,height:720}});
   assert.deepEqual(state.document.definitions[0].region,region);
+  assert.deepEqual(state.cropIds,['r1'],'explicit rebase keeps pending intent so invalid original must be resolved visibly');
+  assert.equal(previewSnapshot(state,'en',true,null).frameGeometryReady,true);
 });
+test('a reselected crop uses the current confirmed frame instead of a stale staged original',()=>{
+  let state=sync(create(loaded(),edges(10,10,50,50)));
+  state=toggleCrop(state,'r1');
+  state=applyView(state,{...state.view,staged_crop_ids:['r1'],staged_crop_sources:{r1:'f1'},
+    frame:{id:'f2',width:1920,height:1080,revision:2,confirmed:true}});
+  assert.equal(saveTicket(state).crop_sources.r1,'f1');
+  state=toggleCrop(toggleCrop(state,'r1'),'r1');
+  assert.equal(state.cropSources.r1,'f2');
+  assert.equal(saveTicket(state).crop_sources.r1,'f2');
+  state=applyView(state,{...state.view,stale_crop_ids:['r1'],frame:{id:'f3',width:1920,height:1080,revision:3,confirmed:true}});
+  assert.equal(saveBlock(state),'cropFrame','stale stage cannot silently recrop from a later frame');
+});
+
 
 test('a late result for edited inputs never marks the edited zone current, and Undo does not revive it',()=>{
   let state=create(create(loaded(),edges(10,10,50,50)),edges(60,10,90,50));
@@ -301,6 +325,10 @@ test('preview edits apply only to the snapshot they were made on',()=>{
   assert.equal(late.document.definitions.length,2);
   const created=applyPreviewEdit(state,{...message({kind:'create',region:moved}),basisRevision:state.basis},n=>`Region ${n}`);
   assert.equal(created.document.definitions.at(-1).name,'Region 3');
+  const refreshed=applyView(state,{...state.view,frame:{...FRAME,id:'next-frame',revision:2,confirmed:true}});
+  const staleFrame=applyPreviewEdit(refreshed,message({kind:'create',region:moved}),n=>`Region ${n}`);
+  assert.equal(staleFrame.notice,'staleEdit','a delayed edit from the prior frame cannot appear on the new image');
+  assert.equal(staleFrame.document.definitions.length,2);
 });
 
 test('Save keeps a crop chosen again or changed while the save was pending',()=>{
@@ -548,6 +576,7 @@ test('capture switches isolate identical r1 names, Undo and every delayed receip
   const storedA=state.document;
   const b={...structuredClone(storedA),basis:{frame_width:640,frame_height:480,content:{x:0,y:20,width:640,height:440}}};
   state=renameDefinition(state,'r1','A edited');
+  state=toggleCrop(state,'r1');
   const delayedSync=syncTicket(state);
   state=sync(state);
   const delayedSave=saveTicket(state);
@@ -561,6 +590,8 @@ test('capture switches isolate identical r1 names, Undo and every delayed receip
     document_revision:state.view.document_revision+1,frame:null});
   assert.deepEqual(state.document.basis,b.basis);
   assert.equal(state.view.frame,null);
+  assert.equal(recognitionDirty(state),true,'pending crops on another capture still block a silent Edit exit');
+  assert.equal(saveBlock(state),'otherCrops','Save must direct the author to the capture that owns its staged pixels');
   assert.equal(copyBlock(state,[],'game_content'),'noFrame');
   assert.equal(canUndoRecognition(state),false,'A metadata actions do not undo B r1');
   assert.equal(undoRecognition(state),state);
@@ -572,8 +603,10 @@ test('capture switches isolate identical r1 names, Undo and every delayed receip
   state=renameDefinition(state,'r1','B edited');
   const all=captureDocuments(state);
   state=applyView(state,{...state.view,capture_id:CAPTURE_A,document:a,saved_document:storedA,captures:all,
-    document_revision:state.view.document_revision+1,frame:null});
+    staged_crop_ids:['r1'],staged_crop_sources:{r1:'f1'},document_revision:state.view.document_revision+1,frame:null});
   assert.deepEqual(state.document,a);
+  assert.deepEqual(state.cropIds,['r1'],'switching captures retains pending original crop selection');
+  assert.deepEqual(saveTicket(state)?.crop_sources,{r1:'f1'},'Save names the original frame after returning to the first capture');
   assert.equal(state.view.frame,null,'A is metadata-only until an explicit image load');
   assert.equal(state.trial,null);
   assert.equal(state.copies.game_content,undefined);

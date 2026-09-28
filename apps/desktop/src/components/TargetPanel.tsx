@@ -43,7 +43,7 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
   const parsed = readTargetDraft(draft);
   const expectation = targetExpectation(state);
   const disabled = locked || active || pickerBusy || expectation === null || state.operation !== null;
-  const chooseDisabled = disabled || state.application.pending !== null || state.picker !== null;
+  const chooseDisabled = disabled || draft.platform === 'windows' || state.application.pending !== null || state.picker !== null;
   const application = state.application;
   const running = application.result?.response.observation;
   const observedAt = running ? new Date(running.observed_at_ms) : null;
@@ -98,7 +98,7 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
     if (remove) handlers.remove();
   }
   return <section id="target-panel" className="panel target-panel" aria-labelledby="target-heading">
-    <div className="panel-heading"><h2 id="target-heading" tabIndex={-1}>{t.heading}</h2><span className="tag">macOS</span></div>
+    <div className="panel-heading"><h2 id="target-heading" tabIndex={-1}>{t.heading}</h2><span className="tag">{draft.platform === 'windows' ? 'Windows' : 'macOS'}</span></div>
     <div className="panel-body">
       <p className="field-help">{t.introduction}</p>
       {state.declaration ? <dl className="run-identity">
@@ -177,7 +177,7 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
           }}>{t.addArgument}</button>
           <div className="two-col">{input('workingDirectory', 'target-working-directory', t.workingDirectory)}{input('windowTitle', 'target-window-title', t.windowTitle, state.declaration.window_title !== null)}</div>
           <p className="field-help">{t.windowHelp}</p>
-          <h3>{t.policy}</h3><p className="field-help">{t.policyHelp}</p>
+          {draft.platform === 'macos' && <><h3>{t.policy}</h3><p className="field-help">{t.policyHelp}</p>
           <div className="two-col">
             {fieldBox('route', 'target-route', t.route, <Select id="target-route" value={draft.route} disabled={editingDisabled} {...attributes('route', 'target-route')}
               options={[{value:'', label:t.choose}, {value:'process_directed', label:t.processDirected}, {value:'system', label:t.system}]}
@@ -190,7 +190,7 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
                 options={[{value:'', label:t.choose}, {value:'core_graphics', label:t.coreGraphics}, {value:'appkit_background', label:t.appkitBackground}]}
                 onChange={value => handlers.edit({...draft, pointerMode:value as TargetDraft['pointerMode']})}/>)}
             {input('clickHold', 'target-click-hold', t.clickHold)}
-          </div>
+          </div></>}
         </fieldset>
         <div className="button-row">
           <button id="target-save" type="button" className="primary" disabled={disabled || !parsed.configuration || review !== null} onClick={() => handlers.save()}>{binding && !state.view?.compatible ? t.replace : t.save}</button>

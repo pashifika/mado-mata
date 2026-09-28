@@ -18,57 +18,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
 
-#[derive(Clone, Copy)]
-enum Selection {
-    Png,
-    Executable,
-}
-
-impl Selection {
-    fn category(self) -> &'static str {
-        match self {
-            Self::Png => "RecognitionPicker",
-            Self::Executable => "AuthoringExecutable",
-        }
-    }
-
-    fn extension(self) -> &'static str {
-        match self {
-            Self::Png => "png",
-            Self::Executable => "exe",
-        }
-    }
-}
-
 pub async fn choose_png(
     window: tauri::WebviewWindow,
     guard: RecognitionPickerGuard,
-) -> Result<Option<String>, Fault> {
-    choose_file(window, guard, Selection::Png).await
-}
-
-/// Selection is only a path, never evidence of a running process or capture authority.
-pub async fn choose_executable(
-    window: tauri::WebviewWindow,
-    guard: RecognitionPickerGuard,
-    path: Option<String>,
-) -> Result<Option<String>, Fault> {
-    if let Some(path) = path {
-        return super::background(move || {
-            guard.validate()?;
-            let path = selected_path(&path, Selection::Executable)?;
-            guard.validate()?;
-            Ok(Some(path))
-        })
-        .await;
-    }
-    choose_file(window, guard, Selection::Executable).await
-}
-
-async fn choose_file(
-    window: tauri::WebviewWindow,
-    guard: RecognitionPickerGuard,
-    selection: Selection,
 ) -> Result<Option<String>, Fault> {
     let (send, mut receive) = tauri::async_runtime::channel(1);
     let parent = window.clone();
@@ -78,23 +30,21 @@ async fn choose_file(
                 guard.validate()?;
                 let hwnd = parent
                     .hwnd()
-                    .map_err(|error| Fault::new(selection.category(), error.to_string()))?;
-                open_file(hwnd.0 as HWND, selection)
+                    .map_err(|error| Fault::new("RecognitionPicker", error.to_string()))?;
+                open_file(hwnd.0 as HWND)
             })();
             let _ = send.try_send((result, guard));
         })
-        .map_err(|error| Fault::new(selection.category(), error.to_string()))?;
+        .map_err(|error| Fault::new("RecognitionPicker", error.to_string()))?;
     let (selected, guard) = receive
         .recv()
         .await
-        .ok_or_else(|| Fault::new(selection.category(), "File selection did not complete"))?;
+        .ok_or_else(|| Fault::new("RecognitionPicker", "File selection did not complete"))?;
     let selected = selected?;
     super::background(move || {
         // The dialog pumps messages; filesystem access must not block the event loop.
         guard.validate()?;
-        let selected = selected
-            .map(|path| selected_path(&path, selection))
-            .transpose()?;
+        let selected = selected.map(|path| selected_path(&path)).transpose()?;
         guard.validate()?;
         Ok(selected)
     })
@@ -102,11 +52,8 @@ async fn choose_file(
 }
 
 #[expect(unsafe_code, reason = "audited owner-modal Win32 common file dialog")]
-fn open_file(owner: HWND, selection: Selection) -> Result<Option<String>, Fault> {
-    let filter = match selection {
-        Selection::Png => windows_sys::core::w!("PNG image (*.png)\0*.png\0"),
-        Selection::Executable => windows_sys::core::w!("Application (*.exe)\0*.exe\0"),
-    };
+fn open_file(owner: HWND) -> Result<Option<String>, Fault> {
+    let filter = windows_sys::core::w!("PNG image (*.png)\0*.png\0");
     let mut path = [0_u16; MAX_PATH_BYTES + 1];
     let mut dialog = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
@@ -132,7 +79,7 @@ fn open_file(owner: HWND, selection: Selection) -> Result<Option<String>, Fault>
             Ok(None)
         } else {
             Err(Fault::new(
-                selection.category(),
+                "RecognitionPicker",
                 format!("File dialog failed ({error:#x})"),
             ))
         };
@@ -140,13 +87,13 @@ fn open_file(owner: HWND, selection: Selection) -> Result<Option<String>, Fault>
     let length = path
         .iter()
         .position(|unit| *unit == 0)
-        .ok_or_else(|| Fault::new(selection.category(), "Selected path exceeds its bound"))?;
+        .ok_or_else(|| Fault::new("RecognitionPicker", "Selected path exceeds its bound"))?;
     String::from_utf16(&path[..length])
         .map(Some)
-        .map_err(|_| Fault::new(selection.category(), "Selected path is not valid Unicode"))
+        .map_err(|_| Fault::new("RecognitionPicker", "Selected path is not valid Unicode"))
 }
 
-fn selected_path(value: &str, selection: Selection) -> Result<String, Fault> {
+fn selected_path(value: &str) -> Result<String, Fault> {
     let path = Path::new(value);
     if value.len() > MAX_PATH_BYTES
         || value.chars().any(char::is_control)
@@ -154,37 +101,22 @@ fn selected_path(value: &str, selection: Selection) -> Result<String, Fault> {
         || !path
             .extension()
             .and_then(|part| part.to_str())
-            .is_some_and(|part| part.eq_ignore_ascii_case(selection.extension()))
+            .is_some_and(|part| part.eq_ignore_ascii_case("png"))
     {
         return Err(Fault::new(
-            selection.category(),
+            "RecognitionPicker",
             "Select a bounded absolute path with the required extension",
         ));
     }
-    let io = |error: std::io::Error| Fault::new(selection.category(), error.to_string());
+    let io = |error: std::io::Error| Fault::new("RecognitionPicker", error.to_string());
     let metadata = std::fs::symlink_metadata(path).map_err(io)?;
     if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Fault::new(
-            selection.category(),
+            "RecognitionPicker",
             "Selected file must be regular, not a reparse point",
         ));
     }
-    if matches!(selection, Selection::Executable) {
-        for ancestor in path.ancestors().skip(1) {
-            if std::fs::symlink_metadata(ancestor)
-                .map_err(io)?
-                .file_attributes()
-                & FILE_ATTRIBUTE_REPARSE_POINT
-                != 0
-            {
-                return Err(Fault::new(
-                    selection.category(),
-                    "Executable path crosses a reparse point",
-                ));
-            }
-        }
-    }
-    // The PNG loader and native target resolver independently revalidate identity at use time.
+    // The PNG loader independently revalidates identity at use time.
     Ok(value.to_owned())
 }
 
@@ -300,42 +232,6 @@ pub fn copy_text(text: &str) -> Result<(), Fault> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn executable_selection_rejects_relative_wrong_extension_and_control_paths() {
-        for path in [
-            "game.exe",
-            "C:game.exe",
-            "C:\\game.cmd",
-            "C:\\game.exe\n",
-            "C:\\game.exe\0",
-        ] {
-            assert_eq!(
-                selected_path(path, Selection::Executable)
-                    .unwrap_err()
-                    .category,
-                "AuthoringExecutable"
-            );
-        }
-    }
-
-    #[test]
-    fn executable_selection_preserves_literal_unicode_and_shell_metacharacters() {
-        let root =
-            std::env::temp_dir().join(format!("mado-windows-path-{}", xid::try_new().unwrap()));
-        std::fs::create_dir(&root).unwrap();
-        let path = root.join("ゲーム & literal.exe");
-        std::fs::write(
-            &path,
-            b"selection does not launch or authorize an executable",
-        )
-        .unwrap();
-        let text = path.to_str().unwrap();
-        let result = selected_path(text, Selection::Executable);
-        std::fs::remove_file(&path).unwrap();
-        std::fs::remove_dir(&root).unwrap();
-        assert_eq!(result.unwrap(), text);
-    }
 
     #[test]
     fn clipboard_refuses_oversized_or_embedded_nul_before_touching_system_clipboard() {

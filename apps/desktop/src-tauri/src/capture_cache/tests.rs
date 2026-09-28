@@ -25,7 +25,7 @@ fn png(value: u8) -> images::EncodedImage {
 }
 
 #[test]
-fn originals_publish_without_overwriting_and_size_is_remeasured_on_request() {
+fn refresh_replaces_only_its_original_and_size_is_remeasured_on_request() {
     let directory = Directory::new();
     let cache = directory.cache();
     assert_eq!(cache.info().bytes, Some(0));
@@ -36,12 +36,48 @@ fn originals_publish_without_overwriting_and_size_is_remeasured_on_request() {
     assert!(published.cached && published.error.is_none());
     let path = cache.image_path("package", &id).unwrap();
     assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
-    let replacement = cache.persist("package", &id, png(42).as_bytes());
-    assert!(!replacement.cached && replacement.error.is_some());
-    assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
-    assert_eq!(cache.info().bytes, Some(original.as_bytes().len() as u64));
+    let other_id = crate::storage::new_id().unwrap();
+    assert!(
+        cache
+            .persist("package", &other_id, original.as_bytes())
+            .cached
+    );
+    let next = png(42);
+    let replacement = cache.persist("package", &id, next.as_bytes());
+    assert!(replacement.cached && replacement.error.is_none());
+    assert_eq!(fs::read(&path).unwrap(), next.as_bytes());
+    assert_eq!(
+        fs::read(cache.image_path("package", &other_id).unwrap()).unwrap(),
+        original.as_bytes()
+    );
+    assert!(!path.with_extension("pending").exists());
+    assert_eq!(
+        cache.info().bytes,
+        Some((original.as_bytes().len() + next.as_bytes().len()) as u64)
+    );
     fs::remove_file(path).unwrap();
-    assert_eq!(cache.info().bytes, Some(0));
+    assert_eq!(cache.info().bytes, Some(original.as_bytes().len() as u64));
+}
+
+#[test]
+fn failed_refresh_keeps_complete_previous_cache_and_can_be_retried() {
+    let directory = Directory::new();
+    let cache = directory.cache();
+    let id = crate::storage::new_id().unwrap();
+    let original = png(17);
+    assert!(cache.persist("package", &id, original.as_bytes()).cached);
+    let path = cache.image_path("package", &id).unwrap();
+    let pending = path.with_extension("pending");
+    fs::write(&pending, b"another writer").unwrap();
+    let replacement = png(42);
+    let refused = cache.persist("package", &id, replacement.as_bytes());
+    assert!(!refused.cached && refused.error.is_some());
+    assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+    assert_eq!(fs::read(&pending).unwrap(), b"another writer");
+    fs::remove_file(&pending).unwrap();
+    let retried = cache.persist("package", &id, replacement.as_bytes());
+    assert!(retried.cached && retried.error.is_none());
+    assert_eq!(fs::read(&path).unwrap(), replacement.as_bytes());
 }
 
 #[test]

@@ -13,10 +13,11 @@ real SDK operations, not the controlled sink. A submitted receipt still does not
 prove application effect. Both-OS workload and lifecycle evidence remain required.
 
 The pinned facade exposes `Session::commit_frame`, which orders acceptance of
-the exact acquired frame against capture-terminal state. The authoring consumer
-uses it before clean session close, then requires clean child reaping and current
-owner/revision/cancellation checks before publication. Controlled consuming
-regressions are not per-OS native qualification. The broader R6/runtime-adoption
+the exact acquired frame against capture-terminal state. Authoring requires clean
+per-frame session close and current owner/revision/cancellation checks before
+publication. Its original Engine/TargetId stays in one owned worker across explicit
+captures until Preview closes or cancellation/owner exit requires child reaping.
+Controlled consuming regressions are not per-OS native qualification. The broader R6/runtime-adoption
 matrix remains separate; neither this API nor an extra capture/status probe
 establishes full native Script acceptance.
 

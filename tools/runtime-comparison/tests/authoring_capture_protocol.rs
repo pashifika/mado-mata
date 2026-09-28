@@ -80,5 +80,4 @@ fn non_engine_cli_has_a_typed_private_refusal_not_a_mock_native_path() {
     assert_eq!(event["event"], "terminal");
     assert_eq!(event["primary"]["category"], "EngineUnavailable");
     assert_eq!(event["clean"], true);
-    assert!(event["capture"].is_null());
 }

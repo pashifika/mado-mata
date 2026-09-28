@@ -211,6 +211,7 @@ fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
             confirmed.document_revision,
             &["zone0".into()],
             &current_capture(editor.app()),
+            &BTreeMap::from([("zone0".into(), frame_id.clone())]),
         )
         .unwrap();
     let new_revision = saved.mutation.committed_revision;
@@ -409,6 +410,7 @@ fn failed_replacement_has_no_frame_and_stale_metadata_cannot_overwrite_newer_edi
                 failed.document_revision,
                 &["retained".into()],
                 &current_capture(editor.app()),
+                &BTreeMap::from([("retained".into(), frame_id.clone())]),
             )
             .is_err(),
         "a confirmed basis cannot substitute for crop pixels"
@@ -421,6 +423,7 @@ fn failed_replacement_has_no_frame_and_stale_metadata_cannot_overwrite_newer_edi
             failed.document_revision,
             &[],
             &current_capture(editor.app()),
+            &BTreeMap::new(),
         )
         .unwrap()
         .recognition
@@ -469,6 +472,7 @@ fn scene_images_reuse_confirmed_setup_and_definitions_across_save_and_reopen() {
             confirmed.document_revision,
             &[],
             &current_capture(editor.app()),
+            &BTreeMap::new(),
         )
         .unwrap();
     let revision = saved.mutation.committed_revision;
@@ -544,12 +548,35 @@ fn scene_images_reuse_confirmed_setup_and_definitions_across_save_and_reopen() {
         .is_err()
     );
     assert!(
+        app.recognition_confirm(
+            &reopened.owner,
+            &reopened.revision,
+            &next.frame.as_ref().unwrap().id,
+            next.document_revision,
+            &current_capture(editor.app()),
+        )
+        .is_err()
+    );
+    let mut resized_basis = next.document.clone().unwrap();
+    resized_basis.basis.frame_width = 40;
+    let next = app
+        .recognition_update(
+            &reopened.owner,
+            &reopened.revision,
+            resized_basis,
+            Some(&next.frame.as_ref().unwrap().id),
+            next.document_revision,
+            &current_capture(editor.app()),
+        )
+        .unwrap();
+    assert!(
         app.recognition_save(
             &reopened.owner,
             &reopened.revision,
             next.document_revision,
             &[],
             &current_capture(editor.app()),
+            &BTreeMap::new(),
         )
         .is_err()
     );
@@ -623,6 +650,7 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
             confirmed.document_revision,
             &["saved".into()],
             &current_capture(editor.app()),
+            &BTreeMap::from([("saved".into(), frame_id.clone())]),
         )
         .unwrap();
     let revision = saved.mutation.committed_revision;
@@ -638,15 +666,17 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
     assert_eq!((replaced_frame.width, replaced_frame.height), (16, 12));
     assert!(!replaced_frame.confirmed);
     let mut draft = loaded.document.unwrap();
-    assert_eq!(
-        draft.basis.content,
-        PixelRect {
+    assert_eq!(draft.basis, saved_document.basis);
+    draft.basis = GeometryBasis {
+        frame_width: 16,
+        frame_height: 12,
+        content: PixelRect {
             x: 0,
             y: 0,
             width: 16,
-            height: 12
-        }
-    );
+            height: 12,
+        },
+    };
     draft.definitions[0].name = "unsaved replacement".into();
     draft.definitions[0].revision += 1;
     draft.definitions.push(zone("unsaved"));
@@ -705,12 +735,43 @@ fn discard_restores_saved_metadata_and_clears_a_different_dimension_frame() {
     let frame = loaded.frame.as_ref().unwrap();
     assert_ne!(frame.id, replaced_id);
     assert!(!frame.confirmed);
+    assert!(matches!(
+        app.recognition_confirm(
+            &editor.view.owner,
+            &revision,
+            &frame.id,
+            loaded.document_revision,
+            &current_capture(app),
+        ),
+        Err(error) if error.category == "StaleRecognition"
+    ));
+    let mut rebased = loaded.document.clone().unwrap();
+    rebased.basis = GeometryBasis {
+        frame_width: frame.width,
+        frame_height: frame.height,
+        content: PixelRect {
+            x: 0,
+            y: 0,
+            width: frame.width,
+            height: frame.height,
+        },
+    };
+    let updated = app
+        .recognition_update(
+            &editor.view.owner,
+            &revision,
+            rebased,
+            Some(&frame.id),
+            loaded.document_revision,
+            &current_capture(app),
+        )
+        .unwrap();
     let confirmed = app
         .recognition_confirm(
             &editor.view.owner,
             &revision,
             &frame.id,
-            loaded.document_revision,
+            updated.document_revision,
             &current_capture(editor.app()),
         )
         .unwrap();
@@ -995,6 +1056,7 @@ fn template_copy_accepts_a_hand_restored_saved_definition_without_reusing_its_re
             updated.document_revision,
             &["pattern".into()],
             &current_capture(editor.app()),
+            &BTreeMap::from([("pattern".into(), frame_id.clone())]),
         )
         .unwrap();
     let revision = saved.mutation.committed_revision;
@@ -1088,6 +1150,7 @@ fn reaped_child_with_incomplete_cleanup_stays_failed_without_refusing_save_or_ex
             updated.document_revision,
             &[],
             &current_capture(editor.app()),
+            &BTreeMap::new(),
         )
         .unwrap();
     app.authoring_save(
@@ -1227,6 +1290,7 @@ fn saved_images_add_select_save_and_reopen_independent_capture_namespaces() {
             a.document_revision,
             &["r1".into()],
             &a_id,
+            &BTreeMap::from([("r1".into(), a.frame.as_ref().unwrap().id.clone())]),
         )
         .unwrap();
     let revision = a_saved.mutation.committed_revision;
@@ -1286,7 +1350,14 @@ fn saved_images_add_select_save_and_reopen_independent_capture_namespaces() {
         )
     };
     let b_saved = app
-        .recognition_save(owner, &revision, b.document_revision, &["r1".into()], &b_id)
+        .recognition_save(
+            owner,
+            &revision,
+            b.document_revision,
+            &["r1".into()],
+            &b_id,
+            &BTreeMap::from([("r1".into(), b.frame.as_ref().unwrap().id.clone())]),
+        )
         .unwrap();
     let revision = b_saved.mutation.committed_revision;
     let b = b_saved.recognition.unwrap();
@@ -1313,10 +1384,17 @@ fn saved_images_add_select_save_and_reopen_independent_capture_namespaces() {
         "StaleRecognition"
     );
     assert_eq!(
-        app.recognition_save(owner, &revision, b.document_revision, &[], &a_id)
-            .err()
-            .unwrap()
-            .category,
+        app.recognition_save(
+            owner,
+            &revision,
+            b.document_revision,
+            &[],
+            &a_id,
+            &BTreeMap::new()
+        )
+        .err()
+        .unwrap()
+        .category,
         "StaleRecognition"
     );
     assert_eq!(
@@ -1403,7 +1481,14 @@ fn saved_images_add_select_save_and_reopen_independent_capture_namespaces() {
         )
         .unwrap();
     let saved = app
-        .recognition_save(owner, &revision, selected.document_revision, &[], &a_id)
+        .recognition_save(
+            owner,
+            &revision,
+            selected.document_revision,
+            &[],
+            &a_id,
+            &BTreeMap::new(),
+        )
         .unwrap();
     let revision = saved.mutation.committed_revision;
     let saved = saved.recognition.unwrap();
@@ -1488,11 +1573,19 @@ fn accepted_image_seam_rejects_stale_publication_and_clipboard_after_selection()
     let owner = &editor.view.owner;
     let empty = app.recognition_view(owner, &editor.view.revision).unwrap();
     let prepared = app
-        .recognition_prepare_capture(owner, &editor.view.revision, None, empty.document_revision)
+        .recognition_prepare_capture(
+            owner,
+            &editor.view.revision,
+            None,
+            empty.document_revision,
+            true,
+            &[],
+            &BTreeMap::new(),
+        )
         .unwrap();
     let image = DecodedImage::from_rgba(2, 2, vec![30; 16]).unwrap();
     let a = app
-        .recognition_install_capture(owner, &editor.view.revision, None, prepared, image)
+        .recognition_install_capture(owner, &editor.view.revision, None, prepared, image, true)
         .unwrap();
     let a_id = a.capture_id.clone().unwrap();
     assert!(!a.frame.as_ref().unwrap().confirmed);
@@ -1521,14 +1614,24 @@ fn accepted_image_seam_rejects_stale_publication_and_clipboard_after_selection()
             &editor.view.revision,
             Some(&a_id),
             a.document_revision,
+            true,
+            &[],
+            &BTreeMap::new(),
         )
         .unwrap();
     let stale_image = DecodedImage::from_rgba(2, 2, vec![40; 16]).unwrap();
     assert_eq!(
-        app.recognition_install_capture(owner, &editor.view.revision, None, prepared, stale_image)
-            .err()
-            .unwrap()
-            .category,
+        app.recognition_install_capture(
+            owner,
+            &editor.view.revision,
+            None,
+            prepared,
+            stale_image,
+            true
+        )
+        .err()
+        .unwrap()
+        .category,
         "StaleRecognition"
     );
     let b = app
@@ -1538,6 +1641,7 @@ fn accepted_image_seam_rejects_stale_publication_and_clipboard_after_selection()
             Some(&a_id),
             next,
             DecodedImage::from_rgba(2, 2, vec![50; 16]).unwrap(),
+            true,
         )
         .unwrap();
     assert_ne!(
@@ -1557,85 +1661,592 @@ fn accepted_image_seam_rejects_stale_publication_and_clipboard_after_selection()
     );
 }
 
+fn refresh_frame(
+    editor: &Editor,
+    view: &RecognitionView,
+    acquire: impl FnOnce() -> DecodedImage,
+    new_capture: bool,
+    sources: &BTreeMap<String, String>,
+) -> Result<RecognitionView, Fault> {
+    let ids = sources.keys().cloned().collect::<Vec<_>>();
+    let prepared = editor.app().recognition_prepare_capture(
+        &editor.view.owner,
+        &view.revision,
+        view.capture_id.as_deref(),
+        view.document_revision,
+        new_capture,
+        &ids,
+        sources,
+    )?;
+    editor.app().recognition_install_capture(
+        &editor.view.owner,
+        &view.revision,
+        view.capture_id.as_deref(),
+        prepared,
+        acquire(),
+        new_capture,
+    )
+}
+
+fn draft_zone(editor: &Editor) -> RecognitionView {
+    let loaded = editor.load();
+    let mut document = loaded.document.clone().unwrap();
+    document.definitions.push(zone("pending"));
+    editor
+        .app()
+        .recognition_update(
+            &editor.view.owner,
+            &editor.view.revision,
+            document,
+            Some(&loaded.frame.as_ref().unwrap().id),
+            loaded.document_revision,
+            loaded.capture_id.as_deref().unwrap(),
+        )
+        .unwrap()
+}
+
 #[test]
-fn unconfirmed_capture_cannot_lose_its_only_pixels_before_confirmation() {
+fn native_refresh_retains_draft_and_invalidates_evidence_without_confirming_edits() {
     let editor = Editor::new();
     let app = editor.app();
     let owner = &editor.view.owner;
-    let revision = &editor.view.revision;
-    let saved_image = editor.load();
-    let b_id = saved_image.capture_id.unwrap();
+    let view = draft_zone(&editor);
+    let capture_id = view.capture_id.as_deref().unwrap();
+    retain_observed_trial(app, owner, &view.revision, &view, &["pending"]);
+    let copy = app
+        .recognition_copy(
+            owner,
+            &view.revision,
+            view.document_revision,
+            &[],
+            SnippetKind::GameContent,
+            capture_id,
+        )
+        .unwrap();
+    let updated = refresh_frame(
+        &editor,
+        &view,
+        || DecodedImage::from_rgba(32, 24, vec![80; 32 * 24 * 4]).unwrap(),
+        false,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(updated.capture_id, view.capture_id);
+    assert_eq!(updated.document, view.document);
+    assert_eq!(updated.saved_document, view.saved_document);
+    assert!(updated.frame.as_ref().unwrap().confirmed);
+    assert_ne!(
+        updated.frame.as_ref().unwrap().id,
+        view.frame.as_ref().unwrap().id
+    );
+    assert!(updated.trial.as_ref().unwrap().stale);
+    let copied = std::cell::Cell::new(false);
+    assert!(
+        app.recognition_publish_copy(owner, &view.revision, copy, |_| {
+            copied.set(true);
+            Ok(())
+        })
+        .is_err()
+    );
+    assert!(!copied.get());
+
+    let mut changed = updated.document.clone().unwrap();
+    changed.basis.content.x = 2;
+    changed.basis.content.width = 30;
+    let unconfirmed = app
+        .recognition_update(
+            owner,
+            &updated.revision,
+            changed.clone(),
+            Some(&updated.frame.as_ref().unwrap().id),
+            updated.document_revision,
+            capture_id,
+        )
+        .unwrap();
+    let refreshed = refresh_frame(
+        &editor,
+        &unconfirmed,
+        || DecodedImage::from_rgba(32, 24, vec![90; 32 * 24 * 4]).unwrap(),
+        false,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(refreshed.capture_id, view.capture_id);
+    assert_eq!(refreshed.document, Some(changed.clone()));
+    assert!(!refreshed.basis_confirmed);
+    assert!(!refreshed.frame.as_ref().unwrap().confirmed);
+    let next = refresh_frame(
+        &editor,
+        &refreshed,
+        || DecodedImage::from_rgba(32, 24, vec![100; 32 * 24 * 4]).unwrap(),
+        true,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_ne!(next.capture_id, view.capture_id);
+    assert!(next.document.as_ref().unwrap().definitions.is_empty());
+    assert_eq!(
+        next.captures
+            .iter()
+            .find(|capture| capture.capture_id == capture_id)
+            .unwrap()
+            .document,
+        changed,
+    );
+}
+
+#[test]
+fn pending_crop_saves_original_pixels_after_later_frames_and_failed_acquisition() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let view = draft_zone(&editor);
+    let capture_id = view.capture_id.as_deref().unwrap();
+    let sources = BTreeMap::from([("pending".into(), view.frame.as_ref().unwrap().id.clone())]);
+    let old_pixels = {
+        let state = lock(&app.workspaces);
+        Arc::downgrade(
+            &state
+                .authoring
+                .as_ref()
+                .unwrap()
+                .recognition
+                .frame
+                .as_ref()
+                .unwrap()
+                .image,
+        )
+    };
+    let later = refresh_frame(
+        &editor,
+        &view,
+        || DecodedImage::from_rgba(32, 24, vec![80; 32 * 24 * 4]).unwrap(),
+        false,
+        &sources,
+    )
+    .unwrap();
+    assert!(
+        old_pixels.upgrade().is_none(),
+        "only encoded selections retain old pixels"
+    );
+    assert_eq!(later.staged_crop_ids, ["pending"]);
+    assert_eq!(later.document, view.document);
+    let later = refresh_frame(
+        &editor,
+        &later,
+        || DecodedImage::from_rgba(32, 24, vec![90; 32 * 24 * 4]).unwrap(),
+        false,
+        &sources,
+    )
+    .unwrap();
+    assert!(
+        app.publisher
+            .open(Path::new(&editor.view.package_path))
+            .unwrap()
+            .recognition()
+            .unwrap()
+            .is_none(),
+        "capture never publishes crops"
+    );
     let prepared = app
-        .recognition_prepare_capture(owner, revision, Some(&b_id), saved_image.document_revision)
-        .unwrap();
-    let captured = app
-        .recognition_install_capture(
-            owner,
-            revision,
-            Some(&b_id),
-            prepared,
-            DecodedImage::from_rgba(2, 2, vec![30; 16]).unwrap(),
+        .recognition_prepare_capture(
+            &editor.view.owner,
+            &later.revision,
+            Some(capture_id),
+            later.document_revision,
+            false,
+            &["pending".into()],
+            &sources,
         )
         .unwrap();
-    let a_id = captured.capture_id.clone().unwrap();
-    let frame_id = captured.frame.as_ref().unwrap().id.clone();
-    assert!(
-        app.recognition_select(
-            owner,
-            revision,
-            Some(&a_id),
-            captured.document_revision,
-            &b_id
+    // An acquisition that fails or is cancelled never calls installation.
+    let failed = app
+        .recognition_view(&editor.view.owner, &later.revision)
+        .unwrap();
+    assert_eq!(failed.document_revision, prepared);
+    assert_eq!(failed.document, view.document);
+    assert!(failed.frame.is_none());
+    assert_eq!(failed.staged_crop_ids, ["pending"]);
+    let source_path = Path::new(&editor.view.package_path).join("main.ts");
+    let source_before = fs::read(&source_path).unwrap();
+    fs::write(&source_path, b"export const externalChange = 1;").unwrap();
+    let refused = app
+        .recognition_save(
+            &editor.view.owner,
+            &failed.revision,
+            failed.document_revision,
+            &["pending".into()],
+            capture_id,
+            &sources,
         )
-        .is_err(),
-        "switching must not strand unconfirmed native geometry without its original"
-    );
+        .err()
+        .unwrap();
+    assert_eq!(refused.category, "AuthoringConflict");
+    let retained = app
+        .recognition_view(&editor.view.owner, &failed.revision)
+        .unwrap();
+    assert_eq!(retained.document_revision, failed.document_revision);
+    assert_eq!(retained.document, failed.document);
+    assert_eq!(retained.staged_crop_ids, ["pending"]);
+    fs::write(&source_path, source_before).unwrap();
+    let saved = app
+        .recognition_save(
+            &editor.view.owner,
+            &failed.revision,
+            failed.document_revision,
+            &["pending".into()],
+            capture_id,
+            &sources,
+        )
+        .unwrap();
+    assert!(saved.recognition.unwrap().staged_crop_ids.is_empty());
+    let candidate = app
+        .publisher
+        .open(Path::new(&editor.view.package_path))
+        .unwrap();
+    let png = candidate
+        .recognition_crop(capture_id, "pending")
+        .unwrap()
+        .unwrap();
+    let crop = images::decode_png(&png, ImageKind::Crop).unwrap();
+    assert_eq!((crop.width, crop.height), (16, 12));
+    for y in 0..12usize {
+        for x in 0..16usize {
+            assert_eq!(
+                &crop.rgba[(y * 16 + x) * 4..(y * 16 + x + 1) * 4],
+                &[(x + 8) as u8, (y + 6) as u8, 17, 255],
+            );
+        }
+    }
+}
+
+#[test]
+fn staged_crop_changes_refuse_old_sources_and_reselection_uses_new_pixels() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let view = draft_zone(&editor);
+    let capture_id = view.capture_id.as_deref().unwrap();
+    let sources = BTreeMap::from([("pending".into(), view.frame.as_ref().unwrap().id.clone())]);
+    let later = refresh_frame(
+        &editor,
+        &view,
+        || DecodedImage::from_rgba(32, 24, vec![80; 32 * 24 * 4]).unwrap(),
+        false,
+        &sources,
+    )
+    .unwrap();
+    let mut changed = later.document.clone().unwrap();
+    changed.definitions[0].revision += 1;
+    changed.definitions[0].region.u0 = 0.0;
+    let changed = app
+        .recognition_update(
+            &editor.view.owner,
+            &later.revision,
+            changed,
+            Some(&later.frame.as_ref().unwrap().id),
+            later.document_revision,
+            capture_id,
+        )
+        .unwrap();
+    assert_eq!(changed.stale_crop_ids, ["pending"]);
     assert!(
-        app.recognition_prepare_capture(owner, revision, Some(&a_id), captured.document_revision)
-            .is_err()
-    );
-    assert!(
-        app.recognition_load(
-            owner,
-            revision,
-            &editor.source,
-            Some(&a_id),
-            captured.document_revision,
-            true,
+        app.recognition_save(
+            &editor.view.owner,
+            &changed.revision,
+            changed.document_revision,
+            &["pending".into()],
+            capture_id,
+            &sources,
         )
         .is_err()
     );
-    let retained = app.recognition_view(owner, revision).unwrap();
-    assert_eq!(retained.capture_id.as_deref(), Some(a_id.as_str()));
-    assert_eq!(retained.frame.unwrap().id, frame_id);
-    assert_eq!(retained.document_revision, captured.document_revision);
-    let confirmed = app
+    assert!(
+        app.recognition_prepare_capture(
+            &editor.view.owner,
+            &changed.revision,
+            Some(capture_id),
+            changed.document_revision,
+            false,
+            &["pending".into()],
+            &sources,
+        )
+        .is_err()
+    );
+    let retained = app
+        .recognition_view(&editor.view.owner, &changed.revision)
+        .unwrap();
+    assert_eq!(retained.document, changed.document);
+    assert_eq!(retained.document_revision, changed.document_revision);
+    assert_eq!(
+        retained.frame.as_ref().unwrap().id,
+        changed.frame.as_ref().unwrap().id
+    );
+    let reselected =
+        BTreeMap::from([("pending".into(), changed.frame.as_ref().unwrap().id.clone())]);
+    let newer = refresh_frame(
+        &editor,
+        &changed,
+        || DecodedImage::from_rgba(32, 24, vec![90; 32 * 24 * 4]).unwrap(),
+        false,
+        &reselected,
+    )
+    .unwrap();
+    app.recognition_save(
+        &editor.view.owner,
+        &newer.revision,
+        newer.document_revision,
+        &["pending".into()],
+        capture_id,
+        &reselected,
+    )
+    .unwrap();
+    let candidate = app
+        .publisher
+        .open(Path::new(&editor.view.package_path))
+        .unwrap();
+    let png = candidate
+        .recognition_crop(capture_id, "pending")
+        .unwrap()
+        .unwrap();
+    let crop = images::decode_png(&png, ImageKind::Crop).unwrap();
+    assert_eq!((crop.width, crop.height), (24, 12));
+    assert!(crop.rgba.iter().all(|pixel| *pixel == 80));
+}
+
+#[test]
+fn resized_refresh_keeps_old_geometry_and_pending_pixels_until_explicit_rebase() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let view = draft_zone(&editor);
+    let capture_id = view.capture_id.as_deref().unwrap();
+    let sources = BTreeMap::from([("pending".into(), view.frame.as_ref().unwrap().id.clone())]);
+    let resized = refresh_frame(
+        &editor,
+        &view,
+        || DecodedImage::from_rgba(16, 12, vec![90; 16 * 12 * 4]).unwrap(),
+        false,
+        &sources,
+    )
+    .unwrap();
+    assert_eq!(resized.document, view.document);
+    assert!(!resized.frame.as_ref().unwrap().confirmed);
+    assert!(!resized.basis_confirmed);
+    assert!(
+        app.recognition_confirm(
+            &editor.view.owner,
+            &resized.revision,
+            &resized.frame.as_ref().unwrap().id,
+            resized.document_revision,
+            capture_id,
+        )
+        .is_err()
+    );
+    let saved = app
+        .recognition_save(
+            &editor.view.owner,
+            &resized.revision,
+            resized.document_revision,
+            &["pending".into()],
+            capture_id,
+            &sources,
+        )
+        .unwrap();
+    assert_eq!(
+        saved.recognition.unwrap().saved_document.unwrap().basis,
+        view.document.unwrap().basis,
+    );
+    let candidate = app
+        .publisher
+        .open(Path::new(&editor.view.package_path))
+        .unwrap();
+    let png = candidate
+        .recognition_crop(capture_id, "pending")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        &images::decode_png(&png, ImageKind::Crop).unwrap().rgba[..4],
+        &[8, 6, 17, 255],
+    );
+}
+
+#[test]
+fn aggregate_pending_pixel_limit_refuses_refresh_before_releasing_original() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let empty = app
+        .recognition_view(&editor.view.owner, &editor.view.revision)
+        .unwrap();
+    let capture = refresh_frame(
+        &editor,
+        &empty,
+        || DecodedImage::from_rgba(2048, 2048, vec![17; 2048 * 2048 * 4]).unwrap(),
+        true,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let capture_id = capture.capture_id.as_deref().unwrap();
+    let capture = app
         .recognition_confirm(
-            owner,
-            revision,
-            &frame_id,
-            captured.document_revision,
-            &a_id,
+            &editor.view.owner,
+            &capture.revision,
+            &capture.frame.as_ref().unwrap().id,
+            capture.document_revision,
+            capture_id,
+        )
+        .unwrap();
+    let mut document = capture.document.clone().unwrap();
+    document.definitions = (0..9)
+        .map(|id| {
+            let mut definition = zone(&format!("region{id}"));
+            definition.region = NormalizedRect {
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+            };
+            definition
+        })
+        .collect();
+    let sources = document
+        .definitions
+        .iter()
+        .map(|definition| {
+            (
+                definition.id.clone(),
+                capture.frame.as_ref().unwrap().id.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let view = app
+        .recognition_update(
+            &editor.view.owner,
+            &capture.revision,
+            document,
+            Some(&capture.frame.as_ref().unwrap().id),
+            capture.document_revision,
+            capture_id,
+        )
+        .unwrap();
+    let ids = sources.keys().cloned().collect::<Vec<_>>();
+    assert!(
+        app.recognition_prepare_capture(
+            &editor.view.owner,
+            &view.revision,
+            Some(capture_id),
+            view.document_revision,
+            false,
+            &ids,
+            &sources,
+        )
+        .is_err()
+    );
+    let retained = app
+        .recognition_view(&editor.view.owner, &view.revision)
+        .unwrap();
+    assert_eq!(retained.document_revision, view.document_revision);
+    assert_eq!(retained.document, view.document);
+    assert_eq!(
+        retained.frame.as_ref().unwrap().id,
+        view.frame.as_ref().unwrap().id
+    );
+    assert!(retained.staged_crop_ids.is_empty());
+}
+
+#[test]
+fn new_capture_keeps_old_pending_selection_and_never_overwrites_saved_crop() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let view = draft_zone(&editor);
+    let capture_id = view.capture_id.clone().unwrap();
+    let sources = BTreeMap::from([("pending".into(), view.frame.as_ref().unwrap().id.clone())]);
+    let saved = app
+        .recognition_save(
+            &editor.view.owner,
+            &view.revision,
+            view.document_revision,
+            &["pending".into()],
+            &capture_id,
+            &sources,
+        )
+        .unwrap()
+        .recognition
+        .unwrap();
+    let candidate = app
+        .publisher
+        .open(Path::new(&editor.view.package_path))
+        .unwrap();
+    let original = candidate
+        .recognition_crop(&capture_id, "pending")
+        .unwrap()
+        .unwrap();
+    let refreshed = refresh_frame(
+        &editor,
+        &saved,
+        || DecodedImage::from_rgba(32, 24, vec![80; 32 * 24 * 4]).unwrap(),
+        false,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let pending = BTreeMap::from([(
+        "pending".into(),
+        refreshed.frame.as_ref().unwrap().id.clone(),
+    )]);
+    let next = refresh_frame(
+        &editor,
+        &refreshed,
+        || DecodedImage::from_rgba(32, 24, vec![90; 32 * 24 * 4]).unwrap(),
+        true,
+        &pending,
+    )
+    .unwrap();
+    assert_ne!(next.capture_id.as_deref(), Some(capture_id.as_str()));
+    let candidate = app
+        .publisher
+        .open(Path::new(&editor.view.package_path))
+        .unwrap();
+    assert_eq!(
+        candidate
+            .recognition_crop(&capture_id, "pending")
+            .unwrap()
+            .unwrap(),
+        original,
+    );
+    let next = app
+        .recognition_confirm(
+            &editor.view.owner,
+            &next.revision,
+            &next.frame.as_ref().unwrap().id,
+            next.document_revision,
+            next.capture_id.as_deref().unwrap(),
         )
         .unwrap();
     let selected = app
         .recognition_select(
-            owner,
-            revision,
-            Some(&a_id),
-            confirmed.document_revision,
-            &b_id,
+            &editor.view.owner,
+            &next.revision,
+            next.capture_id.as_deref(),
+            next.document_revision,
+            &capture_id,
         )
         .unwrap();
-    let saved = app
-        .recognition_save(owner, revision, selected.document_revision, &[], &b_id)
+    assert!(selected.frame.is_none());
+    assert_eq!(selected.staged_crop_ids, ["pending"]);
+    app.recognition_save(
+        &editor.view.owner,
+        &selected.revision,
+        selected.document_revision,
+        &["pending".into()],
+        &capture_id,
+        &pending,
+    )
+    .unwrap();
+    let candidate = app
+        .publisher
+        .open(Path::new(&editor.view.package_path))
         .unwrap();
-    assert!(
-        saved
-            .recognition
-            .unwrap()
-            .captures
-            .iter()
-            .any(|capture| capture.capture_id == a_id)
-    );
+    let png = candidate
+        .recognition_crop(&capture_id, "pending")
+        .unwrap()
+        .unwrap();
+    let crop = images::decode_png(&png, ImageKind::Crop).unwrap();
+    assert!(crop.rgba.iter().all(|pixel| *pixel == 80));
 }

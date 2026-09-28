@@ -38,7 +38,15 @@ impl PublicationFixture {
             )
             .unwrap();
         let document_revision = app
-            .recognition_prepare_capture(&editor.owner, &editor.revision, None, 0)
+            .recognition_prepare_capture(
+                &editor.owner,
+                &editor.revision,
+                None,
+                0,
+                true,
+                &[],
+                &std::collections::BTreeMap::new(),
+            )
             .unwrap();
         let state = lock(&app.workspaces);
         let package = state
@@ -92,6 +100,7 @@ impl PublicationFixture {
         native.active = true;
         native.cancelled = self.cancelled.clone();
         lock(&app.authoring_stop).as_mut().unwrap().native = Some(NativeControl {
+            generation: 1,
             cancelled: self.cancelled.clone(),
             worker: None,
             authority: Some(self.authority.clone()),
@@ -144,6 +153,7 @@ impl PublicationFixture {
                 None,
                 self.document_revision,
                 self.capture(),
+                true,
             )
             .unwrap()
     }
@@ -230,12 +240,12 @@ fn stop_after_native_publication_preserves_committed_historical_pixels() {
     )
     .unwrap();
     assert_eq!(decoded.rgba, [12, 34, 56, 255]);
-    state.authoring.as_mut().unwrap().native.retire("consumed");
+    state.authoring.as_mut().unwrap().native.retire("cancelled");
     lock(&app.authoring_stop).as_mut().unwrap().native = None;
 }
 
 #[test]
-fn changed_package_after_reap_discards_prepared_pixels_and_metadata() {
+fn changed_package_during_detached_preparation_discards_pixels_and_metadata() {
     let fixture = PublicationFixture::new();
     let app = fixture.sources.app();
     let mut state = lock(&app.workspaces);
@@ -253,7 +263,7 @@ fn changed_package_after_reap_discards_prepared_pixels_and_metadata() {
 
 #[cfg(unix)]
 #[test]
-fn changed_saved_binding_after_reap_discards_prepared_pixels_and_metadata() {
+fn changed_saved_binding_during_detached_preparation_discards_pixels_and_metadata() {
     let metadata = crate::target::tests::MetadataFixture::new();
     let executable = metadata.executable("game");
     let mut fixture = PublicationFixture::new();
@@ -303,4 +313,168 @@ fn changed_saved_binding_after_reap_discards_prepared_pixels_and_metadata() {
     });
     assert_eq!(result.unwrap_err().category, "StaleNativeSelection");
     fixture.assert_unpublished(&mut state);
+}
+
+#[cfg(unix)]
+#[test]
+fn reset_target_preserves_detached_recognition_and_refuses_incomplete_cleanup() {
+    let metadata = crate::target::tests::MetadataFixture::new();
+    let executable = metadata.executable("game");
+    let fixture = PublicationFixture::new();
+    let app = fixture.sources.app();
+    let mut state = lock(&app.workspaces);
+    app.publish_native_frame(&mut state, fixture.publication(), |state| {
+        Ok(fixture.prepare(state))
+    })
+    .unwrap();
+    state.authoring.as_mut().unwrap().native.active = false;
+    lock(&app.authoring_stop).as_mut().unwrap().native = None;
+    let before = app
+        .recognition_snapshot(&mut state, &fixture.owner, fixture.package.revision())
+        .unwrap();
+    drop(state);
+    let Source::Macos {
+        internal_name,
+        record,
+        declaration,
+        ..
+    } = &fixture.source
+    else {
+        unreachable!()
+    };
+    let mut configuration = crate::target::tests::configuration(executable.to_str().unwrap());
+    configuration.input = None;
+    let saved = lock(&app.store)
+        .save_target(
+            internal_name,
+            fixture.package.package_id(),
+            declaration,
+            &record.expectation(),
+            configuration,
+            None,
+        )
+        .unwrap()
+        .0;
+    let manifest = std::fs::read(fixture.package.root().join("package.json")).unwrap();
+    {
+        let mut state = lock(&app.workspaces);
+        state.authoring.as_mut().unwrap().containment = Some(Fault::new(
+            "NativeCaptureCleanup",
+            "test boundary: child is not reaped",
+        ));
+    }
+    assert_eq!(
+        app.native_reset_target(&fixture.owner, fixture.package.revision())
+            .unwrap_err()
+            .category,
+        "NativeCaptureCleanup"
+    );
+    assert_eq!(
+        lock(&app.store)
+            .read_target(internal_name, fixture.package.package_id())
+            .unwrap(),
+        saved
+    );
+    lock(&app.workspaces)
+        .authoring
+        .as_mut()
+        .unwrap()
+        .containment = None;
+    let selection = app
+        .native_reset_target(&fixture.owner, fixture.package.revision())
+        .unwrap();
+    assert!(!selection.has_saved_target);
+    assert!(!selection.occupied);
+    assert!(
+        lock(&app.store)
+            .read_target(internal_name, fixture.package.package_id())
+            .unwrap()
+            .binding
+            .is_none()
+    );
+    let after = app
+        .recognition_view(&fixture.owner, fixture.package.revision())
+        .unwrap();
+    assert_eq!(after.capture_id, before.capture_id);
+    assert_eq!(
+        after.frame.as_ref().unwrap().id,
+        before.frame.as_ref().unwrap().id
+    );
+    assert_eq!(after.document_revision, before.document_revision);
+    assert_eq!(
+        serde_json::to_value(&after.document).unwrap(),
+        serde_json::to_value(&before.document).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(fixture.package.root().join("package.json")).unwrap(),
+        manifest
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn package_revision_rebase_requires_the_same_target_declaration_and_binding() {
+    let metadata = crate::target::tests::MetadataFixture::new();
+    let executable = metadata.executable("game");
+    let mut fixture = PublicationFixture::new();
+    let declaration = crate::target::tests::declaration();
+    let Source::Macos {
+        internal_name,
+        record,
+        ..
+    } = &mut fixture.source
+    else {
+        unreachable!()
+    };
+    *record = lock(&fixture.sources.app().store)
+        .save_target(
+            internal_name,
+            fixture.package.package_id(),
+            &declaration,
+            &record.expectation(),
+            crate::target::tests::configuration(executable.to_str().unwrap()),
+            None,
+        )
+        .unwrap()
+        .0;
+    fixture
+        .source
+        .check_target(fixture.package.package_id(), Some(&declaration))
+        .unwrap();
+    let mut changed = declaration.clone();
+    changed.window_title = Some("Another target window".into());
+    assert_eq!(
+        fixture
+            .source
+            .check_target(fixture.package.package_id(), Some(&changed))
+            .unwrap_err()
+            .category,
+        "StaleNativeSelection"
+    );
+    assert_eq!(
+        fixture
+            .source
+            .check_target(fixture.package.package_id(), None)
+            .unwrap_err()
+            .category,
+        "StaleNativeSelection"
+    );
+    assert_eq!(
+        fixture
+            .source
+            .check_target("another-package", Some(&declaration))
+            .unwrap_err()
+            .category,
+        "StaleNativeSelection"
+    );
+    lock(&fixture.sources.app().workspaces)
+        .authoring
+        .as_mut()
+        .unwrap()
+        .native
+        .active = false;
+    lock(&fixture.sources.app().authoring_stop)
+        .as_mut()
+        .unwrap()
+        .native = None;
 }

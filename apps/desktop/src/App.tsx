@@ -166,7 +166,11 @@ export default function App() {
   const authoringWorker = useRef<Promise<unknown> | null>(null);
   const capabilityOwner = useRef<string | null>(null);
   const previewConnected = useRef(false);
-  const previewBridge = useRef({ready: () => {}, edit: (_message: recognition.PreviewEditMessage) => {}});
+  const previewPublication = useRef(0);
+  const previewBridge = useRef({ready: () => {}, edit: (_message: recognition.PreviewEditMessage) => {},
+    action: (_message: recognition.PreviewActionMessage) => {}});
+  const nativeSelectionRef = useRef<NativeSelectionView|null>(null);
+  nativeSelectionRef.current = nativeSelection;
   const knownOcrEnvironment = useRef<Settings['ocr_environment']>(null);
   const recognitionConfigurationDirty = useRef(false);
   const captureTransition = useRef(false);
@@ -200,7 +204,7 @@ export default function App() {
   const derived = useMemo(() => Object.fromEntries(workspaces.filter(isBound).map(workspace => [workspace.id, deriveBound(workspace.bound, savedEnvironment, locale)])) as Record<string, Derived>, [workspaces, savedEnvironment, locale]);
   const authoringWorkerPending = authoring?.pending?.kind === 'recognition_trial' || authoring?.pending?.kind === 'validate';
   const nativeOccupied = nativeSelection?.occupied === true;
-  const active = starting !== null || busy(view.state) || authoringWorkerPending || nativeOccupied;
+  const active = starting !== null || busy(view.state) || authoringWorkerPending || nativeSelection?.busy === true;
   const selected = nav.kind === 'workspace' ? workspaces.find(workspace => workspace.id === nav.id) : undefined;
   const closedSelected = nav.kind === 'closed' ? closed.find(item => item.id === nav.id) : undefined;
   const noSelection = nav.kind === 'none' || (nav.kind === 'workspace' && !selected);
@@ -301,6 +305,13 @@ export default function App() {
     cancelApplicationRequest(ownerId);
     setWorkspaces(list => updateWorkspace(list, ownerId, item => item.bound
       ? updateBound(item, bound => ({...bound, target:invalidateApplicationPicker(invalidateRunningApplication(bound.target))}))
+      : item));
+  }
+  function markNativeTargetChanged(workspace:WorkspaceRef) {
+    cancelApplicationRequest(workspace.workspace_id);
+    const origin = {id:workspace.workspace_id, revision:workspace.revision};
+    setWorkspaces(list => applyIfCurrent(list, origin, item => item.bound
+      ? updateBound(item, bound => ({...bound, target:{...invalidateApplicationPicker(invalidateRunningApplication(bound.target)), loaded:false}}))
       : item));
   }
   function invalidateAllTargets() {
@@ -1140,38 +1151,71 @@ export default function App() {
     }
   }
 
-  async function discoverNativeCapture(path?:string|null) {
+  async function selectNativeCapture() {
     await recognitionCommand('readingRecognition', async session => {
-      const next = path === undefined
-        ? await invoke<NativeSelectionView>('native_discover', {owner:session.owner, revision:session.revision})
-        : await invoke<NativeSelectionView|null>('choose_authoring_executable', {owner:session.owner, revision:session.revision, path});
+      const selected = nativeSelectionRef.current;
+      if (selected?.occupied && sameAuthoringRef(selected.owner, session.owner)) {
+        const released = await invoke<NativeSelectionView>('native_release_selection', {
+          owner:session.owner, revision:session.revision, generation:selected.selection_generation,
+        });
+        acceptNativeSelection(session.owner, released);
+      }
+      const discovered = await invoke<NativeSelectionView>('native_discover', {owner:session.owner, revision:session.revision});
+      acceptNativeSelection(session.owner, discovered);
+      const next = await invoke<NativeSelectionView|null>('native_pick_window', {owner:session.owner, revision:session.revision});
+      if (next) {
+        acceptNativeSelection(session.owner, next);
+        if (next.status === 'selected') {
+          markNativeTargetChanged(session.owner.workspace);
+          setNativeCache(null);
+        }
+      }
+    });
+  }
+
+  async function startNativeCapture() {
+    await recognitionCommand('readingRecognition', async session => {
+      const next = await invoke<NativeSelectionView>('native_start', {owner:session.owner, revision:session.revision});
       acceptNativeSelection(session.owner, next);
     });
   }
 
-  async function selectNativeCapture(candidateId?:string) {
+  async function resetNativeTarget() {
     await recognitionCommand('readingRecognition', async session => {
-      const next = candidateId === undefined
-        ? await invoke<NativeSelectionView|null>('native_pick_window', {owner:session.owner, revision:session.revision})
-        : await invoke<NativeSelectionView>('native_select_candidate', {owner:session.owner, revision:session.revision,
-          generation:nativeSelection?.selection_generation, candidateId});
+      const next = await invoke<NativeSelectionView>('native_reset_target', {owner:session.owner, revision:session.revision});
       acceptNativeSelection(session.owner, next);
+      setNativeCache(null);
+      markNativeTargetChanged(session.owner.workspace);
     });
   }
 
-  async function captureNative(cacheOriginal:boolean) {
+  async function releaseNativeCapture() {
+    const session = authoringStore.current;
+    const selected = nativeSelection;
+    if (!session || !selected || !sameAuthoringRef(session.owner, selected.owner) || session.revision !== selected.revision) return;
+    try {
+      const next = await invoke<NativeSelectionView>('native_release_selection', {
+        owner:session.owner, revision:session.revision, generation:selected.selection_generation,
+      });
+      acceptNativeSelection(session.owner, next);
+    } catch (cause) {
+      recognitionFailed(session.owner.token, cause);
+    }
+  }
+
+  async function captureNative(newCapture:boolean) {
     await recognitionCommand('loadingRecognition', async initial => {
       captureTransition.current = true;
       try {
         const {session, state} = await synchronizeRecognition(initial.owner);
-        if (state.cropIds.length > 0 || !nativeSelection || !sameAuthoringRef(nativeSelection.owner, session.owner)
-          || nativeSelection.revision !== session.revision || nativeSelection.status !== 'selected') {
+        const selection = nativeSelection;
+        if (!selection || !sameAuthoringRef(selection.owner, session.owner)
+          || selection.revision !== session.revision || selection.status !== 'selected') {
           throw new LocalFault({key:'recognitionDraftChanged'});
         }
         const expected = {owner:session.owner, revision:session.revision, captureId:state.view.capture_id,
-          documentRevision:state.view.document_revision, generation:nativeSelection.selection_generation, cacheOriginal};
-        updateRecognition(session.owner.token, current => recognition.applyView(current, {...current.view, frame:null}));
-        await publishRecognitionPreview();
+          documentRevision:state.view.document_revision, generation:selection.selection_generation,
+          newCapture, cropIds:state.cropIds, cropSources:state.cropSources};
         try {
           const result = await invoke<{recognition:recognition.RecognitionView; selection:NativeSelectionView; cache:CaptureCacheReceipt|null}>('native_capture', expected);
           acceptRecognitionView(session.owner, result.recognition);
@@ -1261,6 +1305,7 @@ export default function App() {
       }
       const result = await invoke<{mutation: AuthoringMutation; recognition: recognition.RecognitionView | null}>('recognition_save', {
         owner: session.owner, revision: session.revision, captureId: ticket.capture_id, documentRevision: ticket.document_revision, cropIds: ticket.crop_ids,
+        cropSources: ticket.crop_sources,
       });
       updateAuthoring(latest => {
         const next = applyRecognitionMutation(latest, result.mutation);
@@ -1324,9 +1369,15 @@ export default function App() {
     const editable = !captureTransition.current && !closing && choice === null && !choiceRunning.current && !leaseLost && session?.pending?.kind !== 'exit' && session?.pending?.kind !== 'duplicate';
     const running = session?.pending?.kind === 'recognition_trial' || session?.pending?.kind === 'validate'
       || (busy(view.state) && (view.operation === 'authoring_validate' || view.operation?.startsWith('recognition_') === true));
-    const snapshot = session?.recognition ? recognition.previewSnapshot(session.recognition, locale, editable, editable ? null : ui.authoring.block('pending'), running) : null;
-    try {await emitTo(recognition.PREVIEW_LABEL, recognition.PREVIEW_STATE, snapshot);}
+    const selection = session && nativeSelection && sameAuthoringRef(nativeSelection.owner, session.owner) && nativeSelection.revision === session.revision ? nativeSelection : null;
+    const cache = session && nativeCache && sameAuthoringRef(nativeCache.owner, session.owner) && nativeCache.captureId === session.recognition?.view.capture_id ? nativeCache.result : null;
+    const snapshot = session?.recognition ? recognition.previewSnapshot(session.recognition, locale, editable, editable ? null : ui.authoring.block('pending'),
+      running, selection, cache, session.pending !== null || authoringBusy !== null || captureTransition.current || closing || leaseLost || choice !== null) : null;
+    const publication = ++previewPublication.current;
+    try {await emitTo(recognition.PREVIEW_LABEL, recognition.PREVIEW_STATE,
+      {publication, snapshot} satisfies recognition.PreviewStateMessage);}
     catch {
+      if (publication !== previewPublication.current) return;
       previewConnected.current = false;
       if (session) updateAuthoring(current => current?.owner.token === session.owner.token
         ? {...current, error: new LocalFault({key: 'recognitionPreviewFailed'})} : current);
@@ -1341,6 +1392,30 @@ export default function App() {
       updateRecognition(session.owner.token, state => recognition.applyPreviewEdit(state, message, ui.recognition.defaultName));
       void publishRecognitionPreview();
     },
+    action: message => {
+      const session = authoringStore.current;
+      const state = session?.recognition;
+      const observed = nativeSelectionRef.current;
+      if (!session || !state || message.token !== session.owner.token || message.revision !== session.revision) return;
+      const selection = observed && sameAuthoringRef(observed.owner, session.owner) && observed.revision === session.revision ? observed : null;
+      const stale = message.capture_id !== state.view.capture_id || message.documentRevision !== state.view.document_revision
+        || message.localRevision !== state.localRevision || message.generation !== (selection?.selection_generation ?? 0);
+      if (stale) {
+        updateRecognition(session.owner.token, current => ({...current, notice: 'staleEdit'}));
+        return;
+      }
+      if (closing || leaseLost || choiceRunning.current || choice !== null) return;
+      switch (message.action) {
+        case 'select': void ownAuthoringWorker(selectNativeCapture); break;
+        case 'start': void ownAuthoringWorker(startNativeCapture); break;
+        case 'capture': void ownAuthoringWorker(() => captureNative(false)); break;
+        case 'newCapture': void ownAuthoringWorker(() => captureNative(true)); break;
+        case 'cancel':
+          if (selection?.busy) void stopValidation();
+          else void ownAuthoringWorker(releaseNativeCapture);
+          break;
+      }
+    },
   };
   useEffect(() => {
     let alive = true;
@@ -1353,14 +1428,38 @@ export default function App() {
     };
     register(listen(recognition.PREVIEW_READY, () => previewBridge.current.ready()));
     register(listen<recognition.PreviewEditMessage>(recognition.PREVIEW_EDIT, event => previewBridge.current.edit(event.payload)));
-    register(listen('recognition-preview-closed', () => {previewConnected.current = false;}));
+    register(listen<recognition.PreviewActionMessage>(recognition.PREVIEW_ACTION, event => previewBridge.current.action(event.payload)));
+    register(listen<recognition.PreviewCloseMessage>('recognition-preview-closed', event => {
+      const session = authoringStore.current;
+      const selection = nativeSelectionRef.current;
+      const close = event.payload;
+      if (session && sameAuthoringRef(session.owner, close.owner) && session.revision === close.revision
+        && (!selection || !sameAuthoringRef(selection.owner, session.owner) || selection.selection_generation === close.generation)) {
+        previewConnected.current = false;
+      }
+    }));
+    register(listen<recognition.PreviewCloseFailure>('recognition-preview-close-failed', event => {
+      const session = authoringStore.current;
+      const selection = nativeSelectionRef.current;
+      if (session && sameAuthoringRef(session.owner, event.payload.owner) && session.revision === event.payload.revision
+        && (!selection || !sameAuthoringRef(selection.owner, session.owner) || selection.selection_generation === event.payload.generation)) {
+        recognitionFailed(session.owner.token, event.payload.error);
+      }
+    }));
     return () => {alive = false; for (const stop of stops) stop();};
   }, []);
-  useEffect(() => {void publishRecognitionPreview();}, [authoring?.recognition, authoring?.pending?.kind, view.state, view.operation, locale, closing, leaseLost, choice, choiceBusy]);
+  useEffect(() => {void publishRecognitionPreview();}, [authoring?.recognition, authoring?.pending?.kind, authoringBusy, nativeSelection, nativeCache, view.state, view.operation, locale, closing, leaseLost, choice, choiceBusy]);
   useEffect(() => {
     const owner = authoring?.owner;
+    const revision = authoring?.revision;
     return () => {
-      if (owner) void invoke<void>('recognition_close_preview', {owner}).catch(() => {});
+      if (!owner || !revision) return;
+      const selection = nativeSelectionRef.current;
+      const generation = selection && sameAuthoringRef(selection.owner, owner) ? selection.selection_generation : 0;
+      void invoke<void>('recognition_close_preview', {owner, revision, generation}).catch(cause => {
+        const session = authoringStore.current;
+        if (session && sameAuthoringRef(session.owner, owner)) recognitionFailed(owner.token, cause);
+      });
     };
   }, [authoring?.owner.token]);
 
@@ -1512,8 +1611,9 @@ export default function App() {
       }
       const session = authoringStore.current;
       if (session) {
+        const selected = nativeSelectionRef.current;
         const released = await authoringCall('readingRecognition', () => invoke<NativeSelectionView>('native_release_selection', {
-          owner:session.owner, revision:session.revision,
+          owner:session.owner, revision:session.revision, generation:selected && sameAuthoringRef(selected.owner, session.owner) ? selected.selection_generation : 0,
         }));
         acceptNativeSelection(session.owner, released);
       }
@@ -1585,7 +1685,8 @@ export default function App() {
   const envDirty = Object.keys(envParsed.errors).length > 0 || !sameEnvironment(envParsed.environment, savedEnvironment);
   const parsedSettings = useMemo(() => readSettingsDraft(settingsDraft, locale), [settingsDraft, locale]);
   const dialogDirty = settings === null || settingsDraft.locale !== settings.locale || settingsDraft.logLimit.trim() !== String(settings.gui_log_limit)
-    || !sameNotifications(settingsDraft.notifications, settings.notifications) || settingsDraft.backupDirectory.trim() !== (settings.backup_directory ?? '')
+    || !sameNotifications(settingsDraft.notifications, settings.notifications) || settingsDraft.captureCacheEnabled !== settings.capture_cache_enabled
+    || settingsDraft.backupDirectory.trim() !== (settings.backup_directory ?? '')
     || settingsDraft.packagesRoot.trim() !== (settings.packages_root ?? '') || envDirty;
   // Check binds the workspace visible when the dialog opened; an unbound Tab is never passed as a package association.
   const checkTarget: CheckTarget = selected?.bound
@@ -1902,8 +2003,8 @@ export default function App() {
     {nativeOccupied && <OperationStrip idPrefix={`${idPrefix}-native`} owner={labelOf(nativeSelection.owner.workspace.workspace_id)}
       kind={ui.nativeCapture.heading} phase={nativeSelection.status === 'capturing' || nativeSelection.status === 'discovering' ? 'running' : 'idle'}
       run={null} message={{text:ui.nativeCapture.status[nativeSelection.status], error:nativeSelection.error !== null}}
-      stopDisabled={stopping || closing} onStop={() => void stopValidation()}/>}
-    {active && !nativeOccupied && <OperationStrip idPrefix={idPrefix} owner={owner === null ? t.applicationOwner : labelOf(owner)} kind={stripKind} phase={phase} run={starting || awaitingAuthoringWorker ? null : view.run}
+      stopDisabled={stopping || closing} onStop={() => void (nativeSelection.busy ? stopValidation() : ownAuthoringWorker(releaseNativeCapture))}/>}
+    {active && (!nativeOccupied || authoringWorkerPending || busy(view.state)) && <OperationStrip idPrefix={idPrefix} owner={owner === null ? t.applicationOwner : labelOf(owner)} kind={stripKind} phase={phase} run={starting || awaitingAuthoringWorker ? null : view.run}
       message={stripMessage && {text: renderMessage(locale, stripMessage.text), error: stripMessage.error}}
       stopDisabled={stopping || closing || (!authoringWorkerPending && (!view.run || !busy(view.state) || view.state === 'stopping' || starting !== null))}
       onStop={() => void (authoringWorkerPending || validationActive || recognitionActive ? stopValidation() : stopRun())}/>}
@@ -2015,17 +2116,13 @@ export default function App() {
               lockReason={commandReason ?? (closing ? t.applicationClosing : authoring.pending !== null ? ui.authoring.block('pending') : null)}
               leaseLost={leaseLost} trialActive={recognitionActive}
               nativeSelection={nativeSelection && sameAuthoringRef(nativeSelection.owner, authoring.owner) && nativeSelection.revision === authoring.revision ? nativeSelection : null}
-              nativeCache={nativeCache && sameAuthoringRef(nativeCache.owner, authoring.owner) && nativeCache.captureId === authoring.recognition.view.capture_id ? nativeCache.result : null}
               onState={update => {
                 if (!captureTransition.current && !closing && choice === null && !choiceRunning.current && !leaseLost) updateRecognition(authoring.owner.token, update);
               }}
               handlers={{
                 load: newCapture => void changeRecognitionCapture({newCapture}), selectCapture: captureId => void changeRecognitionCapture({captureId}),
-                reloadCached: () => void changeRecognitionCapture({cached:true}), selectNative: () => void ownAuthoringWorker(() => selectNativeCapture()),
-                discoverNative: () => void ownAuthoringWorker(() => discoverNativeCapture()),
-                executableNative: path => void ownAuthoringWorker(() => discoverNativeCapture(path)),
-                candidateNative: id => void ownAuthoringWorker(() => selectNativeCapture(id)),
-                captureNative: cacheOriginal => void ownAuthoringWorker(() => captureNative(cacheOriginal)),
+                reloadCached: () => void changeRecognitionCapture({cached:true}),
+                resetNative: () => void ownAuthoringWorker(resetNativeTarget),
                 confirm: () => void confirmRecognition(),
                 trial: (kind, ids) => void ownAuthoringWorker(() => trialRecognition(kind, ids)), stop: () => void stopValidation(),
                 save: () => void saveRecognition(), copy: (ids, mode) => void copyRecognition(ids, mode),

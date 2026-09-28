@@ -17,25 +17,30 @@ authority in its discovery instance; it cannot transfer it to a replacement chil
 Use the public `mado-pilot` revision
 `4b4f3296838a9eecdcb00e9d2bb3121a25cdc240`, including retained window metadata,
 required geometry and image-payload limits, and `Session::commit_frame`.
-One application-owned child keeps the original engine and target through discovery,
-explicit selection and one acquisition. Discovery is bounded to 5 seconds and
-64 matching processes / 64 eligible windows. Selection expires after 120 seconds
-without an idle capture session or extension on selection changes.
+One application-owned child keeps the original Engine and TargetId for the Preview
+lifetime. Discovery is bounded to 5 seconds and 64 matching processes / 64 eligible
+windows. First selection requires no prior Run-page binding; the verified
+application/window locator is synchronized to that workspace/package without
+inventing an input policy. Saved locators require fresh verification and exactly
+one matching window on explicit Start. They never persist native authority.
 
-Capture consumes the selection. Refresh means fresh discovery and explicit
-selection, followed by a separate Capture. Retaining an idle capture session or
-silently rediscovering the former window would violate ownership or cleanup;
-neither is a compatibility path. The visual picker is metadata-only, consumes its
-own input, and removes its overlays before capture admission.
+Retaining the Engine is distinct from retaining a capture session. Each explicit
+Capture opens one bounded session, commits at most one frame within 10 seconds,
+and requires clean session close before publication. The worker remains idle
+between frames; no continuous sampling or silent rediscovery is permitted.
+This replaces the earlier consumed-selection/120-second-expiry decision: the
+public API can reopen the original TargetId while independently closing each
+session. Replay protection retains at most 4096 capture identities per Engine;
+exhaustion requires explicit restart.
 
-One request acquires at most one frame within 10 seconds. The SDK orders the
-exact frame commitment against terminal capture state. The host separately
-requires clean session close, successful non-forced child reaping, current
-package/binding/installation correspondence, and owner/revision/cancellation
-fences. Stop must not wait for image allocation or metadata validation. Cleanup
-and containment remain separate 1-second and 2-second obligations; only the
-application-owned child may be terminated. A detached accepted frame is historical:
-subsequent target exit does not invalidate its pixels or grant live authority.
+The SDK orders frame commitment against terminal capture state. The host checks
+current package/binding/installation correspondence and owner/revision/cancellation
+fences. Unchanged target constraints and fresh source proof permit package-revision
+rebasing after metadata/crop Save without changing Engine/TargetId. Done, Preview
+close/destruction, cancellation and owner exit stop/reap only the owned worker.
+Stop does not wait for image allocation or metadata validation. Cleanup and
+containment remain separate 1-second and 2-second obligations, with incomplete
+outcomes preserved. A detached frame remains historical after target exit.
 
 Reuse the existing shared image budget. Native producer, detached and mapped
 payloads share a 256 MiB ceiling; observable padding is charged before accepted
@@ -47,30 +52,39 @@ payload policy; no downsampling or guessed physical-copy multiplier is used.
 Recognition JSON version 2 wraps existing single-image documents in stable XID
 capture namespaces. Local Region IDs, asset identities, aliases, paths, basis
 and rounding remain intact. Legacy metadata migrates only on explicit Save.
-Limits and Undo are aggregate; exactly one original is decoded. Leaving an
-unsaved, unconfirmed basis requires confirmation or explicit discard before its
-only pixels can be lost. Package publication remains the existing recoverable
-transaction, not a new persistence framework.
+Limits and Undo are aggregate; exactly one original is decoded. Capture refresh
+retains its namespace, Regions and draft; New capture creates a separate document.
+Pending crop pixels are staged with source-frame and geometry fingerprints under
+the shared budget before replacement. Save cannot substitute newer pixels.
+Same-size refresh retains confirmed Game content; resized frames require explicit
+rebase/confirmation. Saved crops change only on explicit Save. Publication uses
+the existing recoverable transaction, not a second persistence framework.
 
-Optional original PNG caching is OFF by default. Only accepted images may be
-written beneath the platform application cache. Cache failure does not erase the
-accepted frame. Explicit reload restores historical pixels with fresh runtime
-revisions, never native authority. Cache files and native identities are excluded
-from packages, profiles, backups and routine logs.
+Original PNG caching is persisted and OFF by default in App settings, alongside
+size/path/folder management. Only accepted images enter the platform application
+cache; refresh replaces only its capture's original. Cache failure does not erase
+an accepted frame. Explicit reload restores historical pixels with fresh runtime
+revisions, never native authority. Image bytes/native identities remain excluded
+from packages, profiles, backups and routine logs; the preference may be backed up.
 
 ## Boundaries and evidence
 
-macOS uses fresh saved-bundle/signature/architecture/process correspondence.
-The host passes only freshly verified PID/lifetime/executable tuples to discovery.
-The SDK's retained process provenance must match a complete tuple. Mounted runtime
-paths need not equal the installed bundle path; requiring that extra equality
-incorrectly rejected signed correspondence in the actual macOS WebView. Installation
-validation remains separate, and this does not prove original-copy attribution.
-Windows selection is transient and retains process-lifetime evidence plus the
-selected non-reparse executable's file identity and read handles denying new
-write/delete opens. This disk-file guard does not prove byte equality with an
-image mapped before selection or revoke an existing writable mapping. Access or
-identity failures remain refusals, not reasons to elevate or choose another target.
+macOS uses fresh bundle/signature/architecture/process correspondence, including
+validation of a first-use candidate against the installed application. The SDK's
+retained process provenance must match the complete verified tuple. Mounted
+runtime paths need not equal the installed bundle path; that extra equality
+incorrectly rejected signed correspondence in the actual WebView. Installation
+validation remains separate and does not prove original-copy attribution.
+Windows saves an executable locator, not process/window authority, and retains
+process-lifetime evidence plus the non-reparse executable's file identity/read
+handles denying new write/delete opens. This guard does not prove byte equality
+with an already mapped image or revoke existing writable mappings. Identity/access
+failures remain refusals, never reasons to elevate or choose another target.
+
+The public window geometry does not guarantee an OS-title-bar-free macOS content
+rectangle. Deeper element inspection would introduce an Accessibility permission
+route outside this Change. Keep manual Game content, reusable across same-size
+refreshes, rather than guess title insets.
 
 Portable lifecycle, namespace and publication regressions, real child-protocol
 smokes, and hosted shell builds are distinct from native acceptance. Windows GUI,

@@ -357,41 +357,50 @@ separate work.
 
 ## Acquire a native historical frame
 
-Use **Recognition** inside an owned Edit session. On macOS, first save a
-compatible application-bundle binding in the workspace's target settings.
-Discovery freshly verifies the installed application and running process.
-On Windows, choose the actual game's absolute `.exe`, either through the picker
-or literal field; this transient selection does not create a launch/input profile.
-Access-denied, replaced/reparse paths, ambiguous or unverifiable correspondence,
-and incompatible platform declarations refuse selection. Do not elevate or
-substitute a launcher to bypass refusal.
+Open **Recognition → Open preview** inside an owned Edit session. No prior
+Run-page target configuration is required. **Select window** verifies the chosen
+application and window, then saves a locator only for this workspace/package.
+Existing launch/input settings are preserved; a new capture-only binding has no
+input policy. Access-denied, replaced/reparse paths, incompatible declarations and
+unverifiable correspondence remain refusals. Do not elevate or substitute a
+launcher to bypass them.
 
-1. Explicitly discover candidates. Discovery has a 5-second bound and accepts
-   at most 64 matching processes and 64 eligible windows. Opening controls alone
-   performs no capture or OCR initialization.
-2. Choose a verified candidate with the keyboard-operable list, or enter the
-   visual picker. Its outline represents the intended capture area, not an
-   assumed decorated window. Click selects; Escape cancels. Picker cancellation
-   preserves the previous selection and frozen image. Overlays must be removed
-   before Capture, and picker input is not forwarded to the game.
-3. Choose **Capture** explicitly. One request acquires at most one frame under
-   a 10-second bound. The original retained engine/window authority is used;
-   a changed lifetime or geometry requires fresh selection. There is no
-   full-display fallback, target focus/resize, retry, or liveness capture.
-4. The session must close cleanly and the owned child must be reaped without
-   forced containment before pixels become usable. **Cancel / Stop** remains
-   independent of native work. Cleanup has a 1-second bound and containment a
-   2-second bound; a logical timeout or Stop receipt is not cleanup proof.
-5. The accepted image is historical, not a live connection or readiness result.
-   Later target exit does not change frozen pixels. Trials run on those pixels
-   without another live capture. Native Script Start remains unavailable.
+The fused capture control sits directly left of **Done**. Its left SVG target
+icon selects a window; after selection it becomes the stacked-frame **New capture**
+icon. The main segment shows **Start capture** for a saved locator, **Capture**
+when ready, and **Stop** during native work. There is no separate capture panel;
+only active progress and failures appear below the toolbar.
 
-Selection retains one metadata-only worker for at most 120 seconds, without an
-idle capture session or deadline extension. Capture consumes that selection.
-**Refresh** therefore starts fresh discovery and requires explicit selection
-and Capture; it never reconstructs authority from a PID, title, or window number.
-Other authoring children wait for selection-worker settlement, not an implicit
-queue. Ordinary Start and independent OCR Check remain excluded throughout Edit.
+1. With no saved target, choose the target icon (**Select window**). Discovery is metadata-only,
+   bounded to 5 seconds and 64 matching processes / 64 eligible windows. The
+   visual picker outlines the intended capture area; click selects and Escape
+   cancels without forwarding input to the game. Its overlays leave before
+   capture. Opening Preview alone acquires no pixels and initializes no OCR.
+2. With a saved target, **Start capture** freshly verifies the locator and selects
+   exactly one matching live window. Missing or ambiguous matches require
+   explicit reselection; saved PIDs, window numbers and authority are never reused.
+3. **Capture** refreshes the current Capture ID, Regions and unsaved draft.
+   **New capture** creates a separate capture. Each explicit request acquires at
+   most one frame within 10 seconds using the original retained Engine/TargetId.
+   Changed lifetime or geometry requires reselection; there is no display
+   fallback, target focus/resize, automatic retry or continuous sampling.
+4. Each frame requires terminal-aware commitment and clean capture-session close.
+   The same owned worker remains idle between captures, with no capture session.
+   An idle Engine permits metadata edits and historical-image trials; active
+   capture/picker work excludes another authoring operation.
+5. **Done**, Preview close/destruction, cancellation and Edit exit release the
+   owned Engine. Cleanup and containment retain separate 1-second / 2-second
+   bounds; a Stop receipt is not cleanup proof. Incomplete cleanup stays visible.
+6. The accepted image is historical, not a live connection or readiness result.
+   Later target exit does not invalidate it. Ordinary Start and independent OCR
+   Check remain excluded throughout Edit; native Script Start remains unavailable.
+
+The retained Engine has no idle expiry. Replay protection is bounded to 4096
+capture identities per Engine; exhaustion refuses with `NativeCaptureLimit`
+until an explicit restart. Save may advance the package revision without replacing
+the Engine only after unchanged target constraints, binding and source proof are
+revalidated. **Reset target** in Edit first settles the Engine, then removes only
+the local binding; Recognition work and the package's target declaration remain.
 
 The responsible capture executable is the fixed engine runner, not the WebView.
 Missing permission is a refusal; the application does not request a permission
@@ -401,7 +410,7 @@ mixed-DPI and negative-origin acceptance remain distinct from CI.
 
 ### Captures, migration and private originals
 
-Each accepted new acquisition or **Add capture from PNG** gets a checked XID.
+**New capture** and **Add capture from PNG** allocate a checked XID.
 Recognition JSON version 2 contains `captures: [{capture_id, document}]`; each
 inner document retains the existing basis, rounding and local `r1`/`r2` IDs.
 The package-wide definition key is `(capture_id, region_id)`, not a filename.
@@ -409,11 +418,14 @@ Legacy single-image metadata is read without writing; explicit Save wraps it
 without changing existing Region IDs, asset IDs, paths, aliases or pasted code.
 Unknown versions and invalid data are refused rather than repaired.
 
-Only one original is decoded at a time. Switching preserves other capture
-metadata and assets, but releases the previous original before loading another.
-Resolve pending pixel crops explicitly, and confirm an unsaved basis or discard
-its changes before losing its only pixels. A failed replacement leaves no active
-image; it never relabels old pixels as the new capture. Switching, reopening,
+Only one original is decoded at a time. Capture refresh preserves metadata and
+stages checked unsaved crop pixels from their original frame before releasing it;
+Save never silently substitutes a later frame. Changed geometry/definitions
+invalidate incompatible staged crops. Same-size refresh reuses confirmed Game
+content; resized pixels require explicit geometry adjustment and confirmation.
+Saved PNG crops change only through explicit Save. Switching captures preserves
+their metadata/assets but requires resolving pending pixel crops. A failed
+replacement leaves no active image, not old pixels relabeled as a new capture.
 Undo, trials, previews, Copy and Save retain capture/revision fences.
 
 Limits remain aggregate: 256 definitions, 256 KiB metadata, 64 Undo actions /
@@ -423,20 +435,22 @@ PNGs are bounded to 32 MiB. Native accounted image storage is limited to
 256 MiB, including retained mapping copies and observable padding. These are
 payload limits, not total RSS or opaque GPU/driver allocation guarantees.
 
-**Cache new native captures on this machine** is OFF by default. When enabled,
-only accepted, cleanly detached originals are written under the platform-resolved
-application cache: `captures/<package_id>/<capture_id>.png`.
+**Cache new native captures on this machine** in **App settings** is persisted
+and OFF by default. When enabled, accepted originals are written under the
+platform application cache: `captures/<package_id>/<capture_id>.png`.
+Refreshing replaces only that capture's cached original, never saved package crops.
 Cache failure is reported separately and does not discard a usable accepted
 frame. **Load cached original** is explicit, retains the capture ID, and creates
 fresh runtime revisions; it restores no native authority. Missing/corrupt files
 leave saved metadata, crops and templates intact. Nothing auto-loads on reopen.
 
-**Manage image cache** measures regular-file bytes when opened and displays the
-managed folder. Incomplete/failed measurement is not displayed as a successful
-total. **Open folder** uses Finder/Explorer and reports launch failure. Unsafe
-links/reparse paths are refused. There is no polling, quota, eviction, cleanup
-daemon, custom location or cache database. Originals and cache paths stay outside
-package duplication/export, profiles, configuration backups and routine logs.
+**Manage image cache** in **App settings** measures regular-file bytes when opened
+and displays the managed folder. Incomplete/failed measurement is not displayed
+as a successful total. **Open folder** uses Finder/Explorer and reports launch
+failure. Unsafe links/reparse paths are refused. There is no polling, quota,
+eviction, cleanup daemon, custom location or cache database. The preference may
+participate in configuration backup; original images and cache paths stay outside
+packages, profiles, configuration backups and routine logs.
 
 ## Author saved-image Recognition
 
@@ -758,7 +772,7 @@ placeholders. See [ADR 0004](adr/0004-desktop-localization-resources.md).
 
 ## Local target configuration
 
-The **Target** section on a bound workspace's Run page stores macOS configuration
+The **Target** section on a bound workspace's Run page stores local configuration
 for that **Tab and package only**. The package must declare portable target intent
 as described in [the manifest contract](runtime-comparison.md#optional-portable-target-declaration).
 A targetless package still runs existing controlled/replay workflows; a missing,
@@ -774,10 +788,11 @@ invalid, or incompatible local target is not an execution prerequisite.
    arguments; spaces and shell syntax are literal, never split or expanded.
    Optionally enter an absolute working directory. Supply an exact window title
    when the package leaves it local; a package-required title is read-only.
-3. Explicitly select the future input policy. Process-directed input requires a
-   pointer mode: Core Graphics permits either focus policy; AppKit background
-   requires preserved focus. System input requires an already focused target
-   and has no process-pointer mode. Click hold is **0–1000 ms**.
+3. Leave all input fields blank for capture-only use. To configure future input,
+   explicitly select a complete policy. Process-directed input requires a pointer
+   mode: Core Graphics permits either focus policy; AppKit background requires
+   preserved focus. System input requires an already focused target and no
+   process-pointer mode. Click hold is **0–1000 ms**. None grants execution authority.
 4. **Check configuration** examines the current unsaved draft without writing.
    **Save binding** repeats validation and metadata resolution before an atomic
    write. Both inspect only filesystem metadata: executable accessibility,

@@ -24,14 +24,14 @@ export interface OcrEnvironment {
 export interface NotificationPreferences {visible_count:number; timeout_seconds:number; show_success:boolean}
 export interface Settings {
   version:number; gui_log_limit:number; package_path:string|null; ocr_environment:OcrEnvironment|null;
-  notifications:NotificationPreferences; locale:Locale;
+  notifications:NotificationPreferences; locale:Locale; capture_cache_enabled:boolean;
   // Absent or null means the default `<root>/backups` destination.
   backup_directory:string|null;
   // Null keeps the default `<application data-dir>/sources` collection.
   packages_root:string|null;
 }
 // The only settings the dialog may write; version and package hint stay host-owned.
-export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvironment|null; notifications:NotificationPreferences; locale:Locale; backup_directory:string|null; packages_root:string|null}
+export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvironment|null; notifications:NotificationPreferences; locale:Locale; capture_cache_enabled:boolean; backup_directory:string|null; packages_root:string|null}
 // Host-issued session identity; revisions increment on reinspect and ids are never reused.
 export interface WorkspaceRef {workspace_id:string; revision:number}
 export interface ProfileCatalog {profiles:Profile[]; profiles_error:Fault|null}
@@ -105,11 +105,11 @@ export interface StartRequest {
 // Host-issued Edit lease: the token is bound to one application generation, Workspace session and package source.
 export interface AuthoringRef {workspace:WorkspaceRef; token:string}
 export interface NativeCandidateView {id:string; application_label:string; window_label:string}
-export type NativeSelectionStatus = 'unselected'|'discovering'|'selecting'|'selected'|'capturing'|'consumed'|'expired'|'cancelling'|'cancelled'|'failed';
+export type NativeSelectionStatus = 'unselected'|'discovering'|'selecting'|'selected'|'capturing'|'expired'|'cancelling'|'cancelled'|'failed';
 export interface NativeSelectionView {
   owner:AuthoringRef; revision:string; selection_generation:number; selected_id:string|null;
   candidates:NativeCandidateView[]; status:NativeSelectionStatus; platform:'macos'|'windows'|'unsupported';
-  occupied:boolean; error:Fault|null;
+  occupied:boolean; busy:boolean; has_saved_target:boolean; error:Fault|null;
 }
 export interface CaptureCacheReceipt {cached:boolean; error:Fault|null}
 export type AuthoringFileKind = 'manifest'|'source'|'schema'|'profile'|'asset'|'source_map';
@@ -135,8 +135,8 @@ export interface TargetInputPolicy {
   pointer_mode:'core_graphics'|'appkit_background'|null; click_hold_ms:number;
 }
 export interface TargetConfiguration {
-  platform:'macos'; game:TargetLocation; launcher:TargetLocation|null; arguments:string[];
-  working_directory:string|null; window_title:string; input:TargetInputPolicy;
+  platform:'macos'|'windows'; game:TargetLocation; launcher:TargetLocation|null; arguments:string[];
+  working_directory:string|null; window_title:string; input:TargetInputPolicy|null;
 }
 export interface ResolvedLocation {path:string; executable:string}
 export interface TargetResolution {game:ResolvedLocation; launcher:ResolvedLocation|null; working_directory:string|null}

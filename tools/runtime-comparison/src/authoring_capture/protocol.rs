@@ -3,9 +3,9 @@ use serde::de::DeserializeOwned;
 use std::path::PathBuf;
 
 pub const DISCOVERY_LIMIT: Duration = Duration::from_secs(5);
-pub const SELECTION_LIMIT: Duration = Duration::from_secs(120);
 pub const CANDIDATE_LIMIT: usize = 64;
 pub const NATIVE_STORAGE_BYTES: usize = 256 * 1024 * 1024;
+pub(super) const CAPTURE_REQUEST_LIMIT: usize = 4096;
 const METADATA_BYTES: usize = 256 * 1024;
 pub(super) const COMMAND_BYTES: usize = 16 * 1024;
 
@@ -14,7 +14,7 @@ pub(super) const COMMAND_BYTES: usize = 16 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryRequest {
     pub identity: CaptureIdentity,
-    pub executable_or_bundle: PathBuf,
+    pub executable_or_bundle: Option<PathBuf>,
     pub exact_window_title: Option<String>,
     pub verified_processes: Vec<ProcessCorrespondence>,
     pub timeout: Duration,
@@ -36,12 +36,14 @@ impl DiscoveryRequest {
         {
             return Err(protocol_fault());
         }
-        if !self.executable_or_bundle.is_absolute()
-            || self.executable_or_bundle.as_os_str().len() > 4096
+        if self
+            .executable_or_bundle
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute() || path.as_os_str().len() > 4096)
             || self
                 .exact_window_title
                 .as_ref()
-                .is_some_and(|title| title.is_empty() || title.len() > 1024)
+                .is_some_and(|title| title.len() > 1024)
         {
             return Err(protocol_fault());
         }
@@ -59,7 +61,7 @@ pub struct ProcessCorrespondence {
 }
 
 impl ProcessCorrespondence {
-    #[cfg(any(all(feature = "engine", target_os = "macos"), test))]
+    #[cfg(any(feature = "engine", test))]
     pub(super) fn matches(
         &self,
         process_id: u32,
@@ -123,6 +125,7 @@ impl Candidate {
             || self.key.len() > 128
             || self.label.len() > 1024
             || self.process_id == 0
+            || self.process_lifetime == 0
             || !self.executable_path.is_absolute()
             || self.executable_path.as_os_str().len() > 4096
             || self
@@ -143,9 +146,40 @@ pub(super) fn same_selection(left: &CaptureIdentity, right: &CaptureIdentity) ->
         && left.selection_generation == right.selection_generation
 }
 
+pub(super) fn same_package_rebase(current: &CaptureIdentity, next: &CaptureIdentity) -> bool {
+    current.owner == next.owner
+        && current.binding_revision == next.binding_revision
+        && current.selection_generation == next.selection_generation
+        && current.request_id == next.request_id
+}
+
+pub(super) fn admit_request(
+    requests: &mut std::collections::BTreeSet<String>,
+    request_id: &str,
+) -> Result<(), Fault> {
+    if requests.contains(request_id) {
+        return Err(stale());
+    }
+    if requests.len() >= CAPTURE_REQUEST_LIMIT {
+        return Err(capture_limit());
+    }
+    requests.insert(request_id.into());
+    Ok(())
+}
+
+pub(super) fn capture_limit() -> Fault {
+    Fault::new(
+        "NativeCaptureLimit",
+        "The retained Engine reached its capture limit; explicitly close and start capture again",
+    )
+}
+
 pub(super) fn validate_candidates(candidates: &[Candidate]) -> Result<(), Fault> {
     if candidates.len() > CANDIDATE_LIMIT {
         return Err(candidate_overflow());
+    }
+    if candidates.is_empty() {
+        return Err(protocol_fault());
     }
     let mut keys = std::collections::BTreeSet::new();
     let mut processes = std::collections::BTreeSet::new();
@@ -167,6 +201,10 @@ pub(super) fn validate_candidates(candidates: &[Candidate]) -> Result<(), Fault>
 pub(super) enum Command {
     Select {
         key: String,
+        binding_revision: String,
+    },
+    RebasePackage {
+        identity: CaptureIdentity,
     },
     Capture {
         identity: CaptureIdentity,
@@ -192,12 +230,22 @@ pub(super) enum Event {
         candidates: Vec<Candidate>,
     },
     Selected {
+        identity: CaptureIdentity,
         candidate: Candidate,
+    },
+    PackageRebased {
+        identity: CaptureIdentity,
+    },
+    Frame {
+        capture: CaptureDescriptor,
+    },
+    Captured {
+        identity: CaptureIdentity,
+        session_clean: bool,
     },
     Terminal {
         primary: Option<Fault>,
         clean: bool,
-        capture: Option<CaptureDescriptor>,
     },
 }
 
@@ -237,21 +285,20 @@ pub(super) fn write_event(output: &mut impl Write, event: &Event) -> Result<(), 
 
 pub(super) enum Received {
     Discovered(CaptureIdentity, Vec<Candidate>),
-    Selected(Candidate),
-    Terminal {
-        primary: Option<Fault>,
-        clean: bool,
-        pending: Option<PendingCapture>,
-    },
+    Selected(CaptureIdentity, Candidate),
+    PackageRebased(CaptureIdentity),
+    Captured(PendingCapture),
+    Terminal { primary: Option<Fault>, clean: bool },
 }
 
-/// Exactly one discovery result and one terminal; a successful terminal is followed
-/// by exactly one bounded PNG transfer and EOF. No log lines share this pipe.
+/// One discovery and retained selection, then explicitly requested bounded frames.
+/// Each frame carries a clean session receipt; only Terminal requires pipe EOF.
 pub(super) fn read_events(
     input: &mut impl Read,
     send: &std::sync::mpsc::SyncSender<Result<Received, Fault>>,
 ) -> Result<(), Fault> {
     let mut discovered = false;
+    let mut selection: Option<(CaptureIdentity, Candidate)> = None;
     loop {
         match read_message::<Event>(input, METADATA_BYTES)? {
             Event::Discovered {
@@ -268,44 +315,65 @@ pub(super) fn read_events(
                 send.try_send(Ok(Received::Discovered(identity, candidates)))
                     .map_err(|_| protocol_fault())?;
             }
-            Event::Selected { candidate } => {
+            Event::Selected {
+                identity,
+                candidate,
+            } => {
                 if !discovered {
                     return Err(protocol_fault());
                 }
+                identity.validate()?;
                 candidate.validate()?;
-                send.try_send(Ok(Received::Selected(candidate)))
-                    .map_err(|_| protocol_fault())?;
-            }
-            Event::Terminal {
-                primary,
-                clean,
-                capture,
-            } => {
-                if capture.is_some() && (!discovered || primary.is_some() || !clean) {
+                if selection
+                    .as_ref()
+                    .is_some_and(|(bound, selected)| bound != &identity || selected != &candidate)
+                {
                     return Err(protocol_fault());
                 }
-                let pending = match capture {
-                    Some(descriptor) => Some(PendingCapture::read_private(
-                        input,
-                        &descriptor.identity,
-                        &descriptor.geometry,
-                    )?),
-                    None => {
-                        let mut extra = [0];
-                        if input.read(&mut extra).map_err(|_| protocol_fault())? != 0 {
-                            return Err(protocol_fault());
-                        }
-                        None
-                    }
-                };
-                send.try_send(Ok(Received::Terminal {
-                    primary,
-                    clean,
-                    pending,
-                }))
-                .map_err(|_| protocol_fault())?;
+                selection = Some((identity.clone(), candidate.clone()));
+                send.try_send(Ok(Received::Selected(identity, candidate)))
+                    .map_err(|_| protocol_fault())?;
+            }
+            Event::PackageRebased { identity } => {
+                identity.validate()?;
+                let (current, _) = selection.as_mut().ok_or_else(protocol_fault)?;
+                if !same_package_rebase(current, &identity) {
+                    return Err(protocol_fault());
+                }
+                *current = identity.clone();
+                send.try_send(Ok(Received::PackageRebased(identity)))
+                    .map_err(|_| protocol_fault())?;
+            }
+            Event::Frame { capture } => {
+                if selection.as_ref().is_none_or(|(identity, selected)| {
+                    selected.geometry != capture.geometry
+                        || !same_selection(identity, &capture.identity)
+                }) {
+                    return Err(protocol_fault());
+                }
+                let pending =
+                    PendingCapture::read_private(input, &capture.identity, &capture.geometry)?;
+                // The worker drops its PNG before this receipt. Keep the parent's
+                // worker reservation until both pixels and clean completion arrive.
+                if !matches!(
+                    read_message::<Event>(input, METADATA_BYTES)?,
+                    Event::Captured { identity, session_clean: true } if identity == capture.identity
+                ) {
+                    return Err(protocol_fault());
+                }
+                send.try_send(Ok(Received::Captured(pending)))
+                    .map_err(|_| protocol_fault())?;
+            }
+            Event::Terminal { primary, clean } => {
+                let mut extra = [0];
+                if input.read(&mut extra).map_err(|_| protocol_fault())? != 0 {
+                    return Err(protocol_fault());
+                }
+                send.try_send(Ok(Received::Terminal { primary, clean }))
+                    .map_err(|_| protocol_fault())?;
                 return Ok(());
             }
+            Event::Captured { .. } => return Err(protocol_fault()),
         }
     }
 }
@@ -328,6 +396,6 @@ pub(super) fn cancelled() -> Fault {
 pub(super) fn expired() -> Fault {
     Fault::new(
         "NativeSelectionExpired",
-        "The retained selection expired; explicitly discover and select again",
+        "The retained Engine is no longer available; explicitly start capture again",
     )
 }

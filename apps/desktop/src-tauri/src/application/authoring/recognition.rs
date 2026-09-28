@@ -14,7 +14,7 @@ use mado_runtime_comparison::recognition_trial::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::Read;
 use std::path::Path;
@@ -41,6 +41,8 @@ pub(super) struct RecognitionState {
     run: Option<RecognitionRun>,
     preview_payload: Option<PayloadReservation>,
     preview_generation: u64,
+    staged_crops: Vec<StagedCrop>,
+    prepared_capture: Option<(u64, bool)>,
 }
 
 /// A child started by this lease. `collect` settles it in the critical section that
@@ -88,8 +90,39 @@ struct Frame {
     confirmed: bool,
 }
 
+/// Only selected regions survive an original's release, as bounded encoded pixels.
+/// The input fingerprint excludes the later frame: these pixels belong to their selection.
+struct StagedCrop {
+    capture_id: String,
+    definition_id: String,
+    frame_id: String,
+    fingerprint: String,
+    png: images::PayloadBytes,
+    decoded_bytes: usize,
+}
+
+fn crop_fingerprint(document: &RecognitionDocument, id: &str) -> Result<String, Fault> {
+    identity(&(document.basis, document.definition(id)?))
+}
+
+fn check_crop_sources<'a>(
+    crop_ids: &'a [String],
+    crop_sources: &BTreeMap<String, String>,
+) -> Result<BTreeSet<&'a String>, Fault> {
+    let distinct: BTreeSet<_> = crop_ids.iter().collect();
+    if distinct.len() != crop_ids.len()
+        || crop_sources.len() != distinct.len()
+        || crop_sources.keys().any(|id| !distinct.contains(id))
+    {
+        return Err(invalid(
+            "Crop selection must have exactly one original frame per ID",
+        ));
+    }
+    Ok(distinct)
+}
+
 /// Owns unpublished pixels/metadata, then the replaced values after the commit swap.
-struct PreparedNewCapture {
+struct PreparedImage {
     capture: Option<CaptureDocument>,
     capture_id: Option<String>,
     document: Option<RecognitionDocument>,
@@ -98,7 +131,7 @@ struct PreparedNewCapture {
 }
 
 pub(super) struct PreparedNativeFrame {
-    image: PreparedNewCapture,
+    image: PreparedImage,
     revision: u64,
     pub(super) png: mado_runtime_comparison::images::PayloadBytes,
 }
@@ -136,6 +169,9 @@ pub struct RecognitionView {
     pub basis_confirmed: bool,
     pub other_bases_confirmed: bool,
     pub frame: Option<RecognitionFrame>,
+    pub staged_crop_ids: Vec<String>,
+    pub stale_crop_ids: Vec<String>,
+    pub staged_crop_sources: BTreeMap<String, String>,
     pub capabilities: Value,
     pub configuration_revision: String,
     pub trial: Option<RecognitionTrial>,
@@ -311,12 +347,108 @@ impl RecognitionState {
         Ok(())
     }
 
+    fn stage_crops(
+        &mut self,
+        crop_ids: &[String],
+        crop_sources: &BTreeMap<String, String>,
+    ) -> Result<(), Fault> {
+        let distinct = check_crop_sources(crop_ids, crop_sources)?;
+        if crop_ids.is_empty() {
+            self.staged_crops
+                .retain(|crop| Some(&crop.capture_id) != self.capture_id.as_ref());
+            return Ok(());
+        }
+        let capture_id = self.capture_id.as_deref().ok_or_else(stale)?;
+        let document = self.document.as_ref().ok_or_else(stale)?;
+        let mut bytes = 0usize;
+        let mut decoded = 0usize;
+        for crop in self
+            .staged_crops
+            .iter()
+            .filter(|crop| crop.capture_id != capture_id)
+        {
+            bytes = bytes.checked_add(crop.png.len()).ok_or_else(stale)?;
+            decoded = decoded.checked_add(crop.decoded_bytes).ok_or_else(stale)?;
+        }
+        let mut planned = Vec::new();
+        for id in crop_ids {
+            let fingerprint = crop_fingerprint(document, id)?;
+            let source = &crop_sources[id];
+            if let Some(staged) = self.staged_crops.iter().find(|crop| {
+                crop.capture_id == capture_id
+                    && crop.definition_id == *id
+                    && crop.frame_id == *source
+            }) {
+                if staged.fingerprint != fingerprint {
+                    return Err(invalid(
+                        "Pending crop inputs changed; discard that selection before choosing newer pixels",
+                    ));
+                }
+                bytes = bytes.checked_add(staged.png.len()).ok_or_else(stale)?;
+                decoded = decoded
+                    .checked_add(staged.decoded_bytes)
+                    .ok_or_else(stale)?;
+            } else {
+                let frame = self.confirmed_frame()?;
+                if frame.id != *source {
+                    return Err(invalid("Selected crop original is no longer available"));
+                }
+                let rect = document
+                    .definition(id)?
+                    .region
+                    .map_to_pixels(&document.basis)?;
+                let pixels = rect.width as usize * rect.height as usize;
+                if pixels > images::CROP_MAX_PIXELS {
+                    return Err(invalid("Pending crop exceeds the crop pixel policy"));
+                }
+                decoded = decoded.checked_add(pixels * 4).ok_or_else(stale)?;
+                planned.push((id, source, fingerprint, rect));
+            }
+            if decoded > images::PACKAGE_DECODED_BYTES || bytes > images::PACKAGE_IMAGE_BYTES {
+                return Err(invalid("Pending crops exceed the aggregate image policy"));
+            }
+        }
+        // Validate every source and aggregate pixel bound before allocating any new PNG.
+        // Publication of the staged set happens only after every encode succeeds.
+        let mut additions = Vec::with_capacity(planned.len());
+        for (id, source, fingerprint, rect) in planned {
+            let encoded = images::encode_crop(
+                &self.confirmed_frame()?.image,
+                [rect.x, rect.y, rect.width, rect.height],
+            )?;
+            bytes = bytes
+                .checked_add(encoded.as_bytes().len())
+                .ok_or_else(stale)?;
+            if bytes > images::PACKAGE_IMAGE_BYTES {
+                return Err(invalid("Pending crops exceed the aggregate image policy"));
+            }
+            let (png, reservation) = encoded.into_parts();
+            additions.push(StagedCrop {
+                capture_id: capture_id.to_owned(),
+                definition_id: id.clone(),
+                frame_id: source.clone(),
+                fingerprint,
+                png: images::PayloadBytes::from_reserved(png, reservation)?,
+                decoded_bytes: rect.width as usize * rect.height as usize * 4,
+            });
+        }
+        self.staged_crops.retain(|crop| {
+            crop.capture_id != capture_id
+                || (distinct.contains(&crop.definition_id)
+                    && !additions
+                        .iter()
+                        .any(|new| new.definition_id == crop.definition_id))
+        });
+        self.staged_crops.extend(additions);
+        Ok(())
+    }
+
     fn prepare_new_capture(
         &mut self,
         owner: &AuthoringRef,
         image: DecodedImage,
         confirmed: bool,
-    ) -> Result<PreparedNewCapture, Fault> {
+    ) -> Result<PreparedImage, Fault> {
         let frame_revision = self
             .next_frame
             .checked_add(1)
@@ -352,7 +484,7 @@ impl RecognitionState {
         let capture = self.package.captures.pop().expect("staged capture");
         validation?;
         let saved_document = self.saved_package.document(&capture_id).ok().cloned();
-        Ok(PreparedNewCapture {
+        Ok(PreparedImage {
             capture: Some(capture),
             capture_id: Some(capture_id),
             document: Some(document),
@@ -367,21 +499,62 @@ impl RecognitionState {
         })
     }
 
-    fn commit_new_capture(&mut self, prepared: &mut PreparedNewCapture) {
-        let capture = prepared.capture.take().expect("unpublished capture");
+    fn commit_image(&mut self, prepared: &mut PreparedImage) {
         let frame = prepared.frame.as_ref().expect("unpublished frame");
-        if frame.confirmed {
-            self.confirmed_captures.insert(capture.capture_id.clone());
-        } else {
-            self.confirmed_captures.remove(&capture.capture_id);
+        if let Some(capture) = prepared.capture.take() {
+            if frame.confirmed {
+                self.confirmed_captures.insert(capture.capture_id.clone());
+            }
+            self.package.captures.push(capture);
+            std::mem::swap(&mut self.capture_id, &mut prepared.capture_id);
+            std::mem::swap(&mut self.document, &mut prepared.document);
+            std::mem::swap(&mut self.saved_document, &mut prepared.saved_document);
         }
+        // Historical basis confirmation still describes staged pixels after a resize.
+        // Only the new raster needs reconfirmation; edits to the basis revoke both.
         self.next_frame = frame.revision;
         self.basis_confirmed = frame.confirmed;
-        self.package.captures.push(capture);
-        std::mem::swap(&mut self.capture_id, &mut prepared.capture_id);
-        std::mem::swap(&mut self.document, &mut prepared.document);
-        std::mem::swap(&mut self.saved_document, &mut prepared.saved_document);
+        self.prepared_capture = None;
         std::mem::swap(&mut self.frame, &mut prepared.frame);
+    }
+
+    fn prepare_image(
+        &mut self,
+        owner: &AuthoringRef,
+        image: DecodedImage,
+        new_capture: bool,
+        confirm_default: bool,
+    ) -> Result<PreparedImage, Fault> {
+        if new_capture || self.capture_id.is_none() {
+            return self.prepare_new_capture(owner, image, confirm_default);
+        }
+        let frame_revision = self
+            .next_frame
+            .checked_add(1)
+            .filter(|value| *value <= MAX_SESSION_COUNTER)
+            .ok_or_else(stale)?;
+        let document = self.document.as_ref().ok_or_else(stale)?;
+        let confirmed = self
+            .capture_id
+            .as_ref()
+            .is_some_and(|id| self.confirmed_captures.contains(id))
+            && document.basis.frame_width == image.width
+            && document.basis.frame_height == image.height;
+        // A changed raster cannot silently scale regions or repair user geometry.
+        // Keep the old basis until an explicit edit and confirmation against this frame.
+        Ok(PreparedImage {
+            capture: None,
+            capture_id: None,
+            document: None,
+            saved_document: None,
+            frame: Some(Frame {
+                id: format!("{}-frame-{frame_revision}", owner.token),
+                revision: frame_revision,
+                image: Arc::new(image),
+                confirmed,
+                native: None,
+            }),
+        })
     }
 
     fn install_image(
@@ -391,53 +564,8 @@ impl RecognitionState {
         new_capture: bool,
         confirm_default: bool,
     ) -> Result<(), Fault> {
-        if new_capture || self.capture_id.is_none() {
-            let mut prepared = self.prepare_new_capture(owner, image, confirm_default)?;
-            self.commit_new_capture(&mut prepared);
-            return Ok(());
-        }
-        let frame_revision = self
-            .next_frame
-            .checked_add(1)
-            .filter(|value| *value <= MAX_SESSION_COUNTER)
-            .ok_or_else(stale)?;
-        let full = PixelRect {
-            x: 0,
-            y: 0,
-            width: image.width,
-            height: image.height,
-        };
-        let capture_id = self.capture_id.clone().ok_or_else(stale)?;
-        let mut document = self.document.clone().ok_or_else(stale)?;
-        let confirmed = self.basis_confirmed
-            && document.basis.frame_width == image.width
-            && document.basis.frame_height == image.height;
-        document.basis.frame_width = image.width;
-        document.basis.frame_height = image.height;
-        if document
-            .basis
-            .content
-            .validate_in(image.width, image.height)
-            .is_err()
-        {
-            document.basis.content = full;
-        }
-        self.replace_document(document)?;
-        if confirmed {
-            self.confirmed_captures.insert(capture_id.clone());
-        } else {
-            self.confirmed_captures.remove(&capture_id);
-        }
-        self.capture_id = Some(capture_id);
-        self.select_document();
-        self.next_frame = frame_revision;
-        self.frame = Some(Frame {
-            id: format!("{}-frame-{frame_revision}", owner.token),
-            revision: frame_revision,
-            image: Arc::new(image),
-            confirmed,
-            native: None,
-        });
+        let mut prepared = self.prepare_image(owner, image, new_capture, confirm_default)?;
+        self.commit_image(&mut prepared);
         Ok(())
     }
 
@@ -647,6 +775,25 @@ impl Application {
                 || trial.revision != revision
                 || trial.document_revision != recognition.revision;
         }
+        let mut staged_crop_ids = Vec::new();
+        let mut stale_crop_ids = Vec::new();
+        let mut staged_crop_sources = BTreeMap::new();
+        for crop in recognition
+            .staged_crops
+            .iter()
+            .filter(|crop| Some(&crop.capture_id) == recognition.capture_id.as_ref())
+        {
+            staged_crop_sources.insert(crop.definition_id.clone(), crop.frame_id.clone());
+            let valid = recognition.document.as_ref().is_some_and(|document| {
+                crop_fingerprint(document, &crop.definition_id)
+                    .is_ok_and(|fingerprint| fingerprint == crop.fingerprint)
+            });
+            if valid {
+                staged_crop_ids.push(crop.definition_id.clone());
+            } else {
+                stale_crop_ids.push(crop.definition_id.clone());
+            }
+        }
         Ok(RecognitionView {
             owner: owner.clone(),
             capture_id: recognition.capture_id.clone(),
@@ -658,6 +805,9 @@ impl Application {
             saved_document: recognition.saved_document.clone(),
             document_revision: recognition.revision,
             basis_confirmed: recognition.basis_confirmed,
+            staged_crop_ids,
+            stale_crop_ids,
+            staged_crop_sources,
             other_bases_confirmed: recognition
                 .package
                 .captures
@@ -712,6 +862,8 @@ impl Application {
         document.validate()?;
         let (_command, mut state) = self.command_state()?;
         let candidate = state.authoring_revision(owner, revision)?;
+        self.collect(&mut state);
+        state.work_idle()?;
         let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
         recognition.initialize(&candidate)?;
         recognition.check(document_revision, frame_id)?;
@@ -751,6 +903,8 @@ impl Application {
     ) -> Result<RecognitionView, Fault> {
         let (_command, mut state) = self.command_state()?;
         state.authoring_revision(owner, revision)?;
+        self.collect(&mut state);
+        state.work_idle()?;
         let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
         recognition.check(document_revision, Some(frame_id))?;
         recognition.check_capture(Some(capture_id))?;
@@ -777,6 +931,8 @@ impl Application {
     ) -> Result<RecognitionView, Fault> {
         let (_command, mut state) = self.command_state()?;
         let candidate = state.authoring_revision(owner, revision)?;
+        self.collect(&mut state);
+        state.work_idle()?;
         let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
         recognition.initialize(&candidate)?;
         recognition.check_capture(capture_id)?;
@@ -786,6 +942,7 @@ impl Application {
         )?;
         recognition.advance()?;
         recognition.package = recognition.saved_package.clone();
+        recognition.staged_crops.clear();
         recognition.confirmed_captures = recognition
             .package
             .captures
@@ -846,7 +1003,6 @@ impl Application {
                 self.collect(&mut state);
             }
         }
-        state = self.settle_native_selection(owner, state)?;
         state.work_idle()?;
         Ok(state)
     }
@@ -963,6 +1119,9 @@ impl Application {
         revision: &str,
         capture_id: Option<&str>,
         document_revision: u64,
+        new_capture: bool,
+        crop_ids: &[String],
+        crop_sources: &BTreeMap<String, String>,
     ) -> Result<u64, Fault> {
         let (_command, mut state) = self.command_state()?;
         let candidate = state.authoring_revision(owner, revision)?;
@@ -975,10 +1134,19 @@ impl Application {
             }
         }
         state = self.settle_before_image(owner, state)?;
-        self.prepare_native_frame(&mut state, owner, revision, capture_id, document_revision)
+        self.prepare_native_frame(
+            &mut state,
+            owner,
+            revision,
+            capture_id,
+            document_revision,
+            new_capture,
+            crop_ids,
+            crop_sources,
+        )
     }
 
-    /// Installs only an already accepted, detached original as a new namespace.
+    /// Installs an accepted detached original, refreshing unless a new namespace was requested.
     /// No acquisition, cache read or native authority is implied by this operation.
     pub fn recognition_install_capture(
         &self,
@@ -987,6 +1155,7 @@ impl Application {
         capture_id: Option<&str>,
         document_revision: u64,
         image: DecodedImage,
+        new_capture: bool,
     ) -> Result<RecognitionView, Fault> {
         let (_command, mut state) = self.command_state()?;
         state.authoring_revision(owner, revision)?;
@@ -995,8 +1164,12 @@ impl Application {
         let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
         recognition.check_capture(capture_id)?;
         recognition.check(document_revision, None)?;
+        if recognition.prepared_capture != Some((document_revision, new_capture)) {
+            return Err(stale());
+        }
+        let mut prepared = recognition.prepare_image(owner, image, new_capture, false)?;
         recognition.advance()?;
-        recognition.install_image(owner, image, true, false)?;
+        recognition.commit_image(&mut prepared);
         self.recognition_snapshot(&mut state, owner, revision)
     }
 
@@ -1007,6 +1180,9 @@ impl Application {
         revision: &str,
         capture_id: Option<&str>,
         document_revision: u64,
+        new_capture: bool,
+        crop_ids: &[String],
+        crop_sources: &BTreeMap<String, String>,
     ) -> Result<u64, Fault> {
         let candidate = state.authoring_revision(owner, revision)?;
         let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
@@ -1015,7 +1191,21 @@ impl Application {
         if recognition.revision != document_revision {
             return Err(stale());
         }
-        recognition.release_frame(true)?;
+        if recognition.revision >= MAX_SESSION_COUNTER {
+            return Err(invalid("Recognition revision exhausted"));
+        }
+        let generation = recognition
+            .preview_generation
+            .checked_add(1)
+            .ok_or_else(stale)?;
+        recognition.stage_crops(crop_ids, crop_sources)?;
+        // Refresh is not an assertion that user-defined content geometry is correct.
+        // Once staged, no old full raster survives external acquisition or its failure.
+        recognition.advance()?;
+        recognition.frame = None;
+        recognition.preview_payload = None;
+        recognition.preview_generation = generation;
+        recognition.prepared_capture = Some((recognition.revision, new_capture));
         Ok(recognition.revision)
     }
 
@@ -1027,17 +1217,21 @@ impl Application {
         capture_id: Option<&str>,
         document_revision: u64,
         capture: mado_runtime_comparison::authoring_capture::DetachedCapture,
+        new_capture: bool,
     ) -> Result<PreparedNativeFrame, Fault> {
         state.authoring_revision(owner, revision)?;
         let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
         recognition.check_capture(capture_id)?;
         recognition.check(document_revision, None)?;
+        if recognition.prepared_capture != Some((document_revision, new_capture)) {
+            return Err(stale());
+        }
         let next_revision = recognition
             .revision
             .checked_add(1)
             .filter(|value| *value <= MAX_SESSION_COUNTER)
             .ok_or_else(|| invalid("Recognition revision exhausted"))?;
-        let mut image = recognition.prepare_new_capture(owner, capture.image, false)?;
+        let mut image = recognition.prepare_image(owner, capture.image, new_capture, false)?;
         image.frame.as_mut().expect("prepared frame").native = Some(NativeFrameOrigin {
             _geometry: capture.geometry,
             _request: capture.identity,
@@ -1067,7 +1261,7 @@ impl Application {
         if let Some(trial) = &mut recognition.trial {
             trial.stale = true;
         }
-        recognition.commit_new_capture(&mut prepared.image);
+        recognition.commit_image(&mut prepared.image);
     }
 
     pub fn recognition_preview(
@@ -1339,6 +1533,7 @@ impl Application {
         document_revision: u64,
         crop_ids: &[String],
         capture_id: &str,
+        crop_sources: &BTreeMap<String, String>,
     ) -> Result<RecognitionSaved, Fault> {
         let (_command, mut state) = self.command_state()?;
         let candidate = state.authoring_revision(owner, revision)?;
@@ -1368,29 +1563,54 @@ impl Application {
         {
             return Err(invalid("Confirm changed content geometry before saving"));
         }
-        let distinct: BTreeSet<_> = crop_ids.iter().collect();
-        if distinct.len() != crop_ids.len() {
-            return Err(invalid("Crop selection contains duplicates"));
+        check_crop_sources(crop_ids, crop_sources)?;
+        let mut selected = Vec::with_capacity(crop_ids.len());
+        let mut frame = None;
+        for id in crop_ids {
+            let source = &crop_sources[id];
+            let staged = recognition.staged_crops.iter().find(|crop| {
+                crop.capture_id == capture_id
+                    && crop.definition_id == *id
+                    && crop.frame_id == *source
+            });
+            let png = if let Some(staged) = staged {
+                if staged.fingerprint != crop_fingerprint(&document, id)? {
+                    return Err(invalid(
+                        "Pending crop inputs changed; select its pixels again before saving",
+                    ));
+                }
+                Some(staged.png.clone())
+            } else {
+                let current = recognition.confirmed_frame()?;
+                if current.id != *source {
+                    return Err(invalid("Selected crop original is no longer available"));
+                }
+                if frame.is_none() {
+                    frame = Some(current.image.clone());
+                }
+                None
+            };
+            selected.push((id, png));
         }
-        let frame = if crop_ids.is_empty() {
-            None
-        } else {
-            Some(recognition.confirmed_frame()?.image.clone())
-        };
         let package = recognition.package.clone();
         drop(state);
         let mut crops = Vec::with_capacity(crop_ids.len());
-        for id in crop_ids {
-            let definition = document.definition(id)?;
-            let rect = definition.region.map_to_pixels(&document.basis)?;
-            let encoded = images::encode_crop(
-                frame.as_deref().ok_or_else(stale)?,
-                [rect.x, rect.y, rect.width, rect.height],
-            )?;
-            let (png, reservation) = encoded.into_parts();
+        for (id, png) in selected {
+            let png = if let Some(png) = png {
+                png
+            } else {
+                let definition = document.definition(id)?;
+                let rect = definition.region.map_to_pixels(&document.basis)?;
+                let encoded = images::encode_crop(
+                    frame.as_deref().ok_or_else(stale)?,
+                    [rect.x, rect.y, rect.width, rect.height],
+                )?;
+                let (png, reservation) = encoded.into_parts();
+                images::PayloadBytes::from_reserved(png, reservation)?
+            };
             crops.push(SelectedCrop {
                 definition_id: id.clone(),
-                png: images::PayloadBytes::from_reserved(png, reservation)?,
+                png,
             });
         }
         let committed = self.publisher.publish_recognition(
@@ -1407,6 +1627,10 @@ impl Application {
         lease.revision = committed.committed_revision.clone();
         lease.recognition.initialized = false;
         lease.recognition.revision += 1;
+        lease
+            .recognition
+            .staged_crops
+            .retain(|crop| crop.capture_id != capture_id);
         if let Some(trial) = &mut lease.recognition.trial {
             trial.stale = true;
         }

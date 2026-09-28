@@ -206,13 +206,14 @@ export const TIMEOUT_SECONDS: readonly number[] = [5, 8, 12];
 export const DEFAULT_NOTIFICATIONS: NotificationPreferences = {visible_count: 2, timeout_seconds: 8, show_success: true};
 
 // `backupDirectory` is a text draft; blank means the default destination, and an unsaved edit is never used by Back up now.
-export interface SettingsDraft {locale:Locale; logLimit:string; notifications:NotificationPreferences; environment:EnvironmentDraft; backupDirectory:string; packagesRoot:string}
+export interface SettingsDraft {locale:Locale; logLimit:string; notifications:NotificationPreferences; captureCacheEnabled:boolean; environment:EnvironmentDraft; backupDirectory:string; packagesRoot:string}
 
 export function settingsDraftFrom(settings: Settings | null): SettingsDraft {
   return {
     locale: settings?.locale ?? 'en',
     logLimit: String(settings?.gui_log_limit ?? 1000),
     notifications: {...(settings?.notifications ?? DEFAULT_NOTIFICATIONS)},
+    captureCacheEnabled: settings?.capture_cache_enabled ?? false,
     environment: environmentDraft(settings?.ocr_environment ?? null),
     backupDirectory: settings?.backup_directory ?? '',
     packagesRoot: settings?.packages_root ?? '',
@@ -243,7 +244,7 @@ export function readSettingsDraft(draft:SettingsDraft, locale:Locale = 'en'):{se
   Object.assign(errors, environment.errors);
   if (Object.keys(errors).length > 0) return {settings: null, errors};
   const destination = draft.backupDirectory.trim();
-  return {settings: {locale:draft.locale, gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications}, backup_directory: destination === '' ? null : destination, packages_root: packagesRoot === '' ? null : packagesRoot}, errors};
+  return {settings: {locale:draft.locale, gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications}, capture_cache_enabled:draft.captureCacheEnabled, backup_directory: destination === '' ? null : destination, packages_root: packagesRoot === '' ? null : packagesRoot}, errors};
 }
 
 export function portableComponent(value:string):boolean {

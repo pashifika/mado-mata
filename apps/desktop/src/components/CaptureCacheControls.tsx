@@ -8,13 +8,11 @@ import {fault, FaultMessage} from './ResultPanel.tsx';
 interface CacheInfo {folder:string; bytes:number|null; error:Fault|null}
 export interface CaptureCacheControlsProps {
   disabled:boolean;
-  hasCapture:boolean;
-  cacheOriginal:boolean;
-  onCacheOriginal:(enabled:boolean) => void;
-  onReload:() => void;
+  enabled:boolean;
+  onEnabled:(enabled:boolean) => void;
 }
 
-export default function CaptureCacheControls({disabled, hasCapture, cacheOriginal, onCacheOriginal, onReload}:CaptureCacheControlsProps) {
+export default function CaptureCacheControls({disabled, enabled, onEnabled}:CaptureCacheControlsProps) {
   const locale = useLocale();
   const copy = messages[locale].ui.captureCache;
   const [expanded, setExpanded] = useState(false);
@@ -59,11 +57,10 @@ export default function CaptureCacheControls({disabled, hasCapture, cacheOrigina
   }
 
   return <section className="recognition-cache">
-    <label><input type="checkbox" checked={cacheOriginal} disabled={disabled}
-      onChange={event => onCacheOriginal(event.target.checked)} />{copy.enable}</label>
+    <label><input type="checkbox" checked={enabled} disabled={disabled}
+      onChange={event => onEnabled(event.target.checked)} />{copy.enable}</label>
     <p className="muted">{copy.privacy}</p>
     <div className="actions">
-      <button type="button" disabled={disabled || !hasCapture} onClick={onReload}>{copy.reload}</button>
       <button type="button" aria-expanded={expanded} onClick={() => void toggle()}>{expanded ? copy.close : copy.manage}</button>
     </div>
     {expanded && <div>

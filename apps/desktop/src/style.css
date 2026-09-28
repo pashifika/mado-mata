@@ -343,7 +343,7 @@ details[open] > summary { font-weight: 600; }
 .dialog-header p { font-size: 11px; color: var(--text-muted); margin: 5px 0 0; }
 .settings-dialog .operation-strip { border-bottom: 1px solid var(--border); }
 .dialog-layout { display: grid; grid-template-columns: 160px minmax(0, 1fr); min-height: 340px; }
-.settings-nav { padding: 18px 12px; background: var(--surface-alt); border-right: 1px solid var(--border); }
+.settings-nav { padding: 18px 12px; background: var(--surface-alt); border-right: 1px solid var(--border); max-height: calc(100vh - 260px); overflow: auto; }
 .settings-nav button { display: block; width: 100%; border: 0; background: transparent; text-align: left; font-size: 12px; font-weight: 500; padding: 9px 10px; margin-bottom: 3px; border-radius: 6px; }
 .settings-nav button[aria-selected="true"] { background: #e4e9ef; font-weight: 600; }
 .settings-content { padding: 22px 24px; max-height: calc(100vh - 260px); overflow: auto; }

@@ -5,6 +5,10 @@ use mado_mata_desktop::application::{
 use mado_runtime_comparison::model::Fault;
 use mado_runtime_comparison::recognition::{RecognitionDocument, SnippetKind};
 use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tauri::{Emitter, Manager};
 
 #[tauri::command]
@@ -14,7 +18,27 @@ pub async fn native_discover(
     state: tauri::State<'_, Backend>,
 ) -> Result<mado_mata_desktop::application::NativeSelectionView, Fault> {
     let application = state.bootstrap.application()?;
-    background(move || application.native_discover(&owner, &revision, None)).await
+    background(move || application.native_discover(&owner, &revision)).await
+}
+
+#[tauri::command]
+pub async fn native_start(
+    owner: AuthoringRef,
+    revision: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<mado_mata_desktop::application::NativeSelectionView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.native_start(&owner, &revision)).await
+}
+
+#[tauri::command]
+pub async fn native_reset_target(
+    owner: AuthoringRef,
+    revision: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<mado_mata_desktop::application::NativeSelectionView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.native_reset_target(&owner, &revision)).await
 }
 
 #[tauri::command]
@@ -39,20 +63,29 @@ pub async fn native_capture(
     generation: u64,
     capture_id: Option<String>,
     document_revision: u64,
-    cache_original: bool,
+    new_capture: bool,
+    crop_ids: Vec<String>,
+    crop_sources: std::collections::BTreeMap<String, String>,
     app: tauri::AppHandle,
     state: tauri::State<'_, Backend>,
 ) -> Result<mado_mata_desktop::application::NativeCaptureResult, Fault> {
     let application = state.bootstrap.application()?;
-    // Cache availability cannot fail image acceptance. Never resolve it when OFF.
-    let cache = cache_original.then(|| crate::cache_commands::cache(&app));
     background(move || {
+        // The host setting is sampled at command admission, never supplied by the renderer.
+        // Cache availability cannot fail image acceptance. Never resolve it when OFF.
+        let cache = application
+            .settings()?
+            .capture_cache_enabled
+            .then(|| crate::cache_commands::cache(&app));
         application.native_capture(
             &owner,
             &revision,
             generation,
             capture_id.as_deref(),
             document_revision,
+            new_capture,
+            &crop_ids,
+            &crop_sources,
             cache,
         )
     })
@@ -63,10 +96,11 @@ pub async fn native_capture(
 pub async fn native_release_selection(
     owner: AuthoringRef,
     revision: String,
+    generation: u64,
     state: tauri::State<'_, Backend>,
 ) -> Result<mado_mata_desktop::application::NativeSelectionView, Fault> {
     let application = state.bootstrap.application()?;
-    background(move || application.native_release_selection(&owner, &revision)).await
+    background(move || application.native_release_selection(&owner, &revision, generation)).await
 }
 
 pub const PREVIEW_WINDOW: &str = "recognition-preview";
@@ -288,11 +322,19 @@ pub async fn recognition_save(
     document_revision: u64,
     crop_ids: Vec<String>,
     capture_id: String,
+    crop_sources: std::collections::BTreeMap<String, String>,
     state: tauri::State<'_, Backend>,
 ) -> Result<RecognitionSaved, Fault> {
     let application = state.bootstrap.application()?;
     background(move || {
-        application.recognition_save(&owner, &revision, document_revision, &crop_ids, &capture_id)
+        application.recognition_save(
+            &owner,
+            &revision,
+            document_revision,
+            &crop_ids,
+            &capture_id,
+            &crop_sources,
+        )
     })
     .await
 }
@@ -406,6 +448,13 @@ async fn publish_clipboard(
     ))
 }
 
+pub(super) struct PreviewSession {
+    owner: AuthoringRef,
+    closing: AtomicBool,
+    settled: AtomicBool,
+    fence: std::sync::Mutex<(String, u64)>,
+}
+
 #[tauri::command]
 pub async fn recognition_open_preview(
     owner: AuthoringRef,
@@ -415,21 +464,78 @@ pub async fn recognition_open_preview(
 ) -> Result<(), Fault> {
     let application = state.bootstrap.application()?;
     let expected_owner = owner.clone();
-    background(move || application.recognition_view(&owner, &revision)).await?;
-    {
+    let session = {
         let mut held = state
             .preview_owner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if held.as_ref().is_some_and(|held| *held != expected_owner) {
+        if let Some(session) = held.as_ref() {
+            if session.owner != owner || session.closing.load(Ordering::Acquire) {
+                return Err(Fault::new(
+                    "StaleRecognition",
+                    "Wait for the previous preview to close",
+                ));
+            }
+            session.clone()
+        } else {
+            let session = Arc::new(PreviewSession {
+                owner: owner.clone(),
+                closing: AtomicBool::new(false),
+                settled: AtomicBool::new(false),
+                fence: std::sync::Mutex::new((revision.clone(), 0)),
+            });
+            *held = Some(session.clone());
+            session
+        }
+    };
+    let worker = application.clone();
+    let admission = app.clone();
+    let admitted_session = session.clone();
+    let opened = async {
+        let fence = background(move || {
+            worker.recognition_view(&owner, &revision)?;
+            let backend = admission.state::<Backend>();
+            let held = backend
+                .preview_owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !held
+                .as_ref()
+                .is_some_and(|held| Arc::ptr_eq(held, &admitted_session))
+                || admitted_session.closing.load(Ordering::Acquire)
+            {
+                return Err(Fault::new(
+                    "StaleRecognition",
+                    "Preview ownership changed while opening",
+                ));
+            }
+            worker.native_open_preview(&owner, &revision)?;
+            worker.native_preview_fence(&owner)
+        })
+        .await?;
+        *session
+            .fence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = fence;
+        let held = state
+            .preview_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !held
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, &session))
+        {
             return Err(Fault::new(
                 "StaleRecognition",
-                "Close the previous owner's preview before opening this one",
+                "Preview ownership changed while opening",
             ));
         }
-        *held = Some(expected_owner);
-    }
-    let opened = (|| {
+        if session.closing.load(Ordering::Acquire) {
+            return Err(Fault::new(
+                "NativeCaptureBusy",
+                "Preview cleanup is in progress",
+            ));
+        }
         if let Some(window) = app.get_webview_window(PREVIEW_WINDOW) {
             window.show().map_err(preview_fault)?;
             window.set_focus().map_err(preview_fault)?;
@@ -437,7 +543,7 @@ pub async fn recognition_open_preview(
                 .map_err(preview_fault)?;
             return Ok(());
         }
-        tauri::WebviewWindowBuilder::new(
+        let window = tauri::WebviewWindowBuilder::new(
             &app,
             PREVIEW_WINDOW,
             tauri::WebviewUrl::App("index.html?surface=recognition-preview".into()),
@@ -448,39 +554,238 @@ pub async fn recognition_open_preview(
         .min_inner_size(480.0, 320.0)
         .build()
         .map_err(preview_fault)?;
+        let events = app.clone();
+        let held = session.clone();
+        let window_application = application.clone();
+        window.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                let app = events.clone();
+                let session = held.clone();
+                tauri::async_runtime::spawn(async move {
+                    let backend = app.state::<Backend>();
+                    let result = match backend.bootstrap.running_application() {
+                        Ok(application) => match application.native_preview_fence(&session.owner) {
+                            Ok((revision, generation)) => {
+                                close_preview(&app, &session, &revision, generation).await
+                            }
+                            Err(_) => {
+                                let fence = session
+                                    .fence
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .clone();
+                                close_preview(&app, &session, &fence.0, fence.1).await
+                            }
+                        },
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        preview_close_failed(&app, &session, &error);
+                    }
+                });
+            }
+            tauri::WindowEvent::Destroyed => preview_destroyed(&events, &held, &window_application),
+            _ => {}
+        });
         Ok(())
-    })();
+    }
+    .await;
     if opened.is_err() && app.get_webview_window(PREVIEW_WINDOW).is_none() {
-        *state
-            .preview_owner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let fence = {
+            let held = state
+                .preview_owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !held
+                .as_ref()
+                .is_some_and(|held| Arc::ptr_eq(held, &session))
+            {
+                return opened;
+            }
+            session.closing.store(true, Ordering::Release);
+            application.native_begin_preview_close(&expected_owner).ok()
+        };
+        if let Some((_, generation)) = fence {
+            let cleanup = application.clone();
+            let owner = expected_owner.clone();
+            background(move || cleanup.native_finish_preview_close(&owner, generation)).await?;
+        }
+        application.recognition_release_preview(&expected_owner);
+        clear_preview_session(&app, &session);
     }
     opened
 }
 
+fn clear_preview_session(app: &tauri::AppHandle, session: &Arc<PreviewSession>) {
+    session.settled.store(true, Ordering::Release);
+    let backend = app.state::<Backend>();
+    let mut held = backend
+        .preview_owner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.as_ref().is_some_and(|held| Arc::ptr_eq(held, session)) {
+        *held = None;
+        let fence = session
+            .fence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = app.emit_to(
+            "main",
+            "recognition-preview-closed",
+            serde_json::json!({
+                "owner": session.owner, "revision": fence.0, "generation": fence.1,
+            }),
+        );
+    }
+}
+
+fn preview_close_failed(app: &tauri::AppHandle, session: &Arc<PreviewSession>, error: &Fault) {
+    let fence = session
+        .fence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let payload = serde_json::json!({
+        "owner": session.owner, "revision": fence.0, "generation": fence.1, "error": error,
+    });
+    let _ = app.emit_to(PREVIEW_WINDOW, "recognition-preview-close-failed", &payload);
+    let _ = app.emit_to("main", "recognition-preview-close-failed", &payload);
+}
+
+fn preview_destroyed(
+    app: &tauri::AppHandle,
+    session: &Arc<PreviewSession>,
+    application: &Arc<mado_mata_desktop::application::Application>,
+) {
+    // Never take the shell mutex on the UI callback: an opening window may be
+    // waiting for a UI dispatch while holding it. Completed old instances do not
+    // touch current native admission or discover a replacement generation.
+    session.closing.store(true, Ordering::Release);
+    let fence = if session.settled.load(Ordering::Acquire) {
+        None
+    } else {
+        let fence = application.native_begin_preview_close(&session.owner);
+        if let Ok(fence) = &fence {
+            *session
+                .fence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = fence.clone();
+        }
+        application.recognition_release_preview(&session.owner);
+        Some(fence)
+    };
+    let app = app.clone();
+    let session = session.clone();
+    let application = application.clone();
+    tauri::async_runtime::spawn(async move {
+        let owner = session.owner.clone();
+        let worker = application.clone();
+        let result = match fence {
+            Some(Ok((_, generation))) => {
+                background(move || worker.native_finish_preview_close(&owner, generation))
+                    .await
+                    .map(Some)
+            }
+            Some(Err(error)) => Err(error),
+            None => Ok(None),
+        };
+        match result {
+            Ok(Some(selection)) => {
+                *session
+                    .fence
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    (selection.revision, selection.selection_generation);
+            }
+            Err(error) if application.native_preview_fence(&session.owner).is_ok() => {
+                preview_close_failed(&app, &session, &error);
+                return;
+            }
+            _ => {}
+        }
+        clear_preview_session(&app, &session);
+    });
+}
+
+async fn close_preview(
+    app: &tauri::AppHandle,
+    session: &Arc<PreviewSession>,
+    revision: &str,
+    generation: u64,
+) -> Result<(), Fault> {
+    {
+        let backend = app.state::<Backend>();
+        let held = backend
+            .preview_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !held.as_ref().is_some_and(|held| Arc::ptr_eq(held, session)) {
+            return Err(Fault::new(
+                "StaleRecognition",
+                "Preview belongs to another Edit owner",
+            ));
+        }
+        if session.closing.swap(true, Ordering::AcqRel) {
+            return Err(Fault::new(
+                "NativeCaptureBusy",
+                "Preview cleanup is already in progress",
+            ));
+        }
+    }
+    *session
+        .fence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = (revision.into(), generation);
+    let application = match app.state::<Backend>().bootstrap.application() {
+        Ok(application) => application,
+        Err(error) => {
+            session.closing.store(false, Ordering::Release);
+            return Err(error);
+        }
+    };
+    let worker = application.clone();
+    let owner = session.owner.clone();
+    let revision = revision.to_owned();
+    let result =
+        background(move || worker.native_close_preview(&owner, &revision, generation)).await;
+    if let Err(error) = result {
+        // An exited Edit owner has already settled its worker. Never substitute
+        // the new owner's generation when closing that old preview surface.
+        if application.native_preview_fence(&session.owner).is_ok() {
+            session.closing.store(false, Ordering::Release);
+            return Err(error);
+        }
+    }
+    application.recognition_release_preview(&session.owner);
+    session.settled.store(true, Ordering::Release);
+    if let Some(window) = app.get_webview_window(PREVIEW_WINDOW) {
+        if let Err(error) = window.destroy() {
+            session.settled.store(false, Ordering::Release);
+            session.closing.store(false, Ordering::Release);
+            return Err(preview_fault(error));
+        }
+    }
+    clear_preview_session(app, session);
+    Ok(())
+}
+
 #[tauri::command]
-pub fn recognition_close_preview(
+pub async fn recognition_close_preview(
     owner: AuthoringRef,
+    revision: String,
+    generation: u64,
     app: tauri::AppHandle,
     state: tauri::State<'_, Backend>,
 ) -> Result<(), Fault> {
-    if state
+    let session = state
         .preview_owner
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
-        != Some(&owner)
-    {
-        return Err(Fault::new(
-            "StaleRecognition",
-            "Preview belongs to another Edit owner",
-        ));
-    }
-    if let Some(window) = app.get_webview_window(PREVIEW_WINDOW) {
-        window.close().map_err(preview_fault)?;
-    }
-    Ok(())
+        .filter(|session| session.owner == owner)
+        .cloned()
+        .ok_or_else(|| Fault::new("StaleRecognition", "Preview belongs to another Edit owner"))?;
+    close_preview(&app, &session, &revision, generation).await
 }
 
 fn preview_fault(error: tauri::Error) -> Fault {

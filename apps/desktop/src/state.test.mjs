@@ -184,17 +184,30 @@ test('a completed settings Save preserves later locale and invalid input edits',
   assert.ok(parsed.errors.logLimit);
 });
 
-const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(checkedEnvironment),backupDirectory:'',packagesRoot:''};
+const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},captureCacheEnabled:false,environment:environmentDraft(checkedEnvironment),backupDirectory:'',packagesRoot:''};
 test('a complete settings draft becomes one editable settings object without version or package hint',()=>{
   const parsed=readSettingsDraft(validSettingsDraft);
   assert.deepEqual(parsed.errors,{});
-  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true},backup_directory:null,packages_root:null});
+  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true},capture_cache_enabled:false,backup_directory:null,packages_root:null});
   assert.equal(readSettingsDraft({...validSettingsDraft,environment:environmentDraft(null)}).settings.ocr_environment,null);
+});
+test('cache preference persists through a saved settings draft without overriding a later edit',()=>{
+  const initial=settingsDraftFrom(null);
+  assert.equal(initial.captureCacheEnabled,false);
+  const submitted={...initial,captureCacheEnabled:true};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  assert.equal(saved.capture_cache_enabled,true);
+  assert.equal(settingsDraftAfterSave(submitted,submitted,saved).captureCacheEnabled,true);
+  const later={...submitted,captureCacheEnabled:false};
+  assert.equal(settingsDraftAfterSave(later,submitted,saved).captureCacheEnabled,false);
 });
 
 test('the backup directory draft is blank for the default destination and otherwise saved as typed without padding',()=>{
   assert.equal(settingsDraftFrom(null).backupDirectory,'');
   assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,notifications:DEFAULT_NOTIFICATIONS,locale:'en',backup_directory:'/private/backups'}).backupDirectory,'/private/backups');
+  assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,
+    notifications:DEFAULT_NOTIFICATIONS,locale:'en',backup_directory:null}).captureCacheEnabled,false,
+    'older saved settings without the flag default to opt-out');
   assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:'   '}).settings.backup_directory,null);
   assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:' /private/backups '}).settings.backup_directory,'/private/backups');
 });

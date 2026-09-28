@@ -15,6 +15,7 @@ struct Port {
     stream: StreamState,
     producer: ControlledProducer,
     acquisitions: AtomicUsize,
+    commits: AtomicUsize,
     closes: AtomicUsize,
     close_fails: bool,
     cancel_on_open: Option<mp::CancellationToken>,
@@ -33,6 +34,7 @@ impl CaptureSession for Port {
         self.stream.frame(request, operation)
     }
     fn commit_frame(&self, frame: &mp::Frame, operation: &mp::OperationContext) -> mp::Result<()> {
+        self.commits.fetch_add(1, Ordering::Relaxed);
         self.stream.commit_frame(frame, operation)
     }
     fn close(&self, operation: &mp::OperationContext) -> mp::Result<()> {
@@ -111,12 +113,12 @@ fn identity() -> CaptureIdentity {
         request_id: "request-a".into(),
     }
 }
-fn fixture(
+fn port(
+    issuer: &mado_pilot_core::IdentityIssuer,
+    target: mp::TargetId,
     close_fails: bool,
     cancel_on_open: Option<mp::CancellationToken>,
-) -> (mp::Engine, Arc<Port>) {
-    let issuer = mado_pilot_core::IdentityIssuer::new();
-    let target = issuer.issue_target(PROVIDER).unwrap();
+) -> Arc<Port> {
     let stream = issuer.issue_stream().unwrap();
     let extent = mp::PixelExtent::new(4, 3);
     let port = Arc::new(Port {
@@ -131,6 +133,7 @@ fn fixture(
         stream: StreamState::new(stream),
         producer: ControlledProducer::new(extent, mp::PixelFormat::Bgra8, 1, 1).unwrap(),
         acquisitions: AtomicUsize::new(0),
+        commits: AtomicUsize::new(0),
         closes: AtomicUsize::new(0),
         close_fails,
         cancel_on_open,
@@ -151,6 +154,16 @@ fn fixture(
                 .unwrap(),
         )
         .unwrap();
+    port
+}
+
+fn fixture(
+    close_fails: bool,
+    cancel_on_open: Option<mp::CancellationToken>,
+) -> (mp::Engine, Arc<Port>) {
+    let issuer = mado_pilot_core::IdentityIssuer::new();
+    let target = issuer.issue_target(PROVIDER).unwrap();
+    let port = port(&issuer, target, close_fails, cancel_on_open);
     let engine = mp::Engine::new(EngineWiring {
         engine: issuer.engine(),
         capture: Arc::new(Provider(port.clone())),
@@ -310,17 +323,6 @@ fn interrupted_native_open_rolls_back_without_claiming_a_public_cleanup_receipt(
     }
 }
 
-#[cfg(unix)]
-fn successful_exit() -> std::process::ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    std::process::ExitStatus::from_raw(0)
-}
-#[cfg(windows)]
-fn successful_exit() -> std::process::ExitStatus {
-    use std::os::windows::process::ExitStatusExt;
-    std::process::ExitStatus::from_raw(0)
-}
-
 #[test]
 fn detached_pixels_remain_historical_and_one_authority_cannot_recapture() {
     let (engine, port) = fixture(false, None);
@@ -336,13 +338,15 @@ fn detached_pixels_remain_historical_and_one_authority_cannot_recapture() {
         &operation(),
         || Ok(()),
     );
+    assert!(matches!(result.cleanup, CaptureCleanup::Clean));
+    assert_eq!(port.closes.load(Ordering::Relaxed), 1);
     let transfer = result.transfer.unwrap();
     port.stream.terminate(mp::CaptureFault::TargetLost);
     let mut wire = Vec::new();
     transfer.write_private(&mut wire).unwrap();
     let accepted = PendingCapture::read_private(&mut wire.as_slice(), &id, &geometry())
         .unwrap()
-        .accept_after_reap(ChildSettlement::Reaped(successful_exit()), &authority, &id)
+        .accept_after_session_close(&authority, &id)
         .unwrap();
     assert_eq!((accepted.image.width, accepted.image.height), (4, 3));
     assert_eq!(accepted.image.rgba, vec![0x39; 48]);
@@ -354,7 +358,7 @@ fn detached_pixels_remain_historical_and_one_authority_cannot_recapture() {
     );
     let duplicate = PendingCapture::read_private(&mut wire.as_slice(), &id, &geometry())
         .unwrap()
-        .accept_after_reap(ChildSettlement::Reaped(successful_exit()), &authority, &id);
+        .accept_after_session_close(&authority, &id);
     assert!(matches!(duplicate, Err(error) if error.category == "CaptureConsumed"));
     let second = acquire(
         &engine,
@@ -419,7 +423,7 @@ fn original_operation_cancellation_and_deadline_win_after_full_preparation() {
 }
 
 #[test]
-fn forced_exit_late_cancellation_and_extra_pipe_output_refuse_publication() {
+fn cancellation_after_clean_session_close_still_refuses_publication() {
     let (engine, port) = fixture(false, None);
     let id = identity();
     let authority = CaptureAuthority::new(id.clone()).unwrap();
@@ -437,17 +441,105 @@ fn forced_exit_late_cancellation_and_extra_pipe_output_refuse_publication() {
     .unwrap();
     let mut wire = Vec::new();
     transfer.write_private(&mut wire).unwrap();
-    let forced = PendingCapture::read_private(&mut wire.as_slice(), &id, &geometry())
-        .unwrap()
-        .accept_after_reap(ChildSettlement::Forced(successful_exit()), &authority, &id);
-    assert!(matches!(forced, Err(error) if error.category == "CaptureCleanup"));
     authority.cancel();
     let cancelled = PendingCapture::read_private(&mut wire.as_slice(), &id, &geometry())
         .unwrap()
-        .accept_after_reap(ChildSettlement::Reaped(successful_exit()), &authority, &id);
+        .accept_after_session_close(&authority, &id);
     assert!(matches!(cancelled, Err(error) if error.category == "Cancelled"));
-    wire.push(0);
-    assert!(
-        matches!(PendingCapture::read_private(&mut wire.as_slice(), &id, &geometry()), Err(error) if error.category == "CaptureTransport")
-    );
+}
+
+#[derive(Debug)]
+struct ReusableProvider {
+    ports: [Arc<Port>; 2],
+    opens: AtomicUsize,
+    discoveries: AtomicUsize,
+}
+
+impl CaptureProvider for ReusableProvider {
+    fn provider(&self) -> mp::ProviderId {
+        PROVIDER
+    }
+
+    fn discover(&self, operation: &mp::OperationContext) -> mp::Result<Vec<mp::TargetDescription>> {
+        self.discoveries.fetch_add(1, Ordering::Relaxed);
+        Provider(self.ports[0].clone()).discover(operation)
+    }
+
+    fn open(
+        &self,
+        target: mp::TargetId,
+        _: &mp::OpenRequest,
+        _: &mp::OperationContext,
+    ) -> mp::Result<Arc<dyn CaptureSession>> {
+        if target != self.ports[0].target {
+            return Err(mp::Error::new(
+                mp::Status::TargetLost,
+                "foreign retained target",
+            ));
+        }
+        let index = self.opens.fetch_add(1, Ordering::Relaxed);
+        self.ports
+            .get(index)
+            .map(|port| port.clone() as Arc<dyn CaptureSession>)
+            .ok_or_else(|| mp::Error::new(mp::Status::TargetLost, "unexpected repeated open"))
+    }
+}
+
+#[test]
+fn one_engine_reopens_only_the_original_target_and_closes_each_frame_session() {
+    let issuer = mado_pilot_core::IdentityIssuer::new();
+    let target = issuer.issue_target(PROVIDER).unwrap();
+    let provider = Arc::new(ReusableProvider {
+        ports: [
+            port(&issuer, target, false, None),
+            port(&issuer, target, false, None),
+        ],
+        opens: AtomicUsize::new(0),
+        discoveries: AtomicUsize::new(0),
+    });
+    let engine = mp::Engine::new(EngineWiring {
+        engine: issuer.engine(),
+        capture: provider.clone(),
+        matcher: Matcher::new(Arc::new(ControlledMatcher::new(mp::PixelFormat::Rgba8))),
+        loader: PackageLoader::new(),
+        ocr: None,
+        input: None,
+        permission: None,
+    })
+    .unwrap();
+    let mut frame_ids = Vec::new();
+    for index in 0..2 {
+        let mut id = identity();
+        id.request_id = format!("request-{index}");
+        let authority = CaptureAuthority::new(id.clone()).unwrap();
+        let outcome = acquire(
+            &engine,
+            target,
+            geometry(),
+            window_geometry(),
+            &id,
+            &authority,
+            &operation(),
+            || Ok(()),
+        );
+        assert!(outcome.primary.is_none());
+        assert!(matches!(outcome.cleanup, CaptureCleanup::Clean));
+        let port = &provider.ports[index];
+        assert_eq!(port.acquisitions.load(Ordering::Relaxed), 1);
+        assert_eq!(port.producer.conversions(), 1);
+        assert_eq!(port.commits.load(Ordering::Relaxed), 1);
+        assert_eq!(port.closes.load(Ordering::Relaxed), 1);
+        let mut wire = Vec::new();
+        outcome.transfer.unwrap().write_private(&mut wire).unwrap();
+        let accepted = PendingCapture::read_private(&mut wire.as_slice(), &id, &geometry())
+            .unwrap()
+            .accept_after_session_close(&authority, &id)
+            .unwrap();
+        assert_eq!(accepted.identity.request_id, id.request_id);
+        assert_eq!(accepted.image.rgba, vec![0x39; 48]);
+        frame_ids.push(accepted.frame_identity);
+    }
+    assert_ne!(frame_ids[0], frame_ids[1]);
+    assert_eq!(provider.opens.load(Ordering::Relaxed), 2);
+    assert_eq!(provider.discoveries.load(Ordering::Relaxed), 0);
 }

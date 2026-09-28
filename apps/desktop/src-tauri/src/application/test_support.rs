@@ -122,6 +122,7 @@ pub(super) fn preferences() -> EditableSettings {
         notifications: settings.notifications,
         backup_directory: settings.backup_directory,
         packages_root: settings.packages_root,
+        capture_cache_enabled: settings.capture_cache_enabled,
     }
 }
 

@@ -31,7 +31,7 @@ struct Backend {
     closing: AtomicBool,
     exiting: AtomicBool,
     shutdown_finished: AtomicBool,
-    preview_owner: std::sync::Mutex<Option<AuthoringRef>>,
+    preview_owner: std::sync::Mutex<Option<Arc<recognition_commands::PreviewSession>>>,
 }
 
 async fn background<T: Send + 'static>(
@@ -315,44 +315,6 @@ async fn choose_target_application(
         Err(Fault::new(
             "TargetPlatform",
             "Application selection requires macOS",
-        ))
-    }
-}
-
-#[tauri::command]
-async fn choose_authoring_executable(
-    owner: AuthoringRef,
-    revision: String,
-    path: Option<String>,
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, Backend>,
-) -> Result<Option<mado_mata_desktop::application::NativeSelectionView>, Fault> {
-    #[cfg(windows)]
-    {
-        let application = state.bootstrap.application()?;
-        let worker = application.clone();
-        let expected_owner = owner.clone();
-        let expected_revision = revision.clone();
-        let guard = background(move || {
-            worker.begin_recognition_picker(&expected_owner, &expected_revision)
-        })
-        .await?;
-        let selected = windows_shell::choose_executable(window, guard, path).await?;
-        match selected {
-            Some(path) => background(move || {
-                application.native_discover(&owner, &revision, Some(std::path::Path::new(&path)))
-            })
-            .await
-            .map(Some),
-            None => Ok(None),
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (owner, revision, path, window, state);
-        Err(Fault::new(
-            "AuthoringPlatform",
-            "Executable selection is available only for Windows authoring",
         ))
     }
 }
@@ -693,12 +655,13 @@ fn main() {
             save_target,
             remove_target,
             choose_target_application,
-            choose_authoring_executable,
             visual_picker::native_pick_window,
             recognition_commands::native_discover,
             recognition_commands::native_select_candidate,
             recognition_commands::native_capture,
             recognition_commands::native_release_selection,
+            recognition_commands::native_start,
+            recognition_commands::native_reset_target,
             reserve_running_application,
             check_running_application,
             cancel_running_application,
@@ -741,22 +704,6 @@ fn main() {
         ])
         .on_window_event(|window, event| {
             if window.label() == recognition_commands::PREVIEW_WINDOW {
-                if let tauri::WindowEvent::Destroyed = event {
-                    let backend = window.app_handle().state::<Backend>();
-                    let owner = backend
-                        .preview_owner
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take();
-                    if let (Some(owner), Ok(application)) =
-                        (owner, backend.bootstrap.running_application())
-                    {
-                        application.recognition_release_preview(&owner);
-                    }
-                    let _ = window
-                        .app_handle()
-                        .emit_to("main", "recognition-preview-closed", ());
-                }
                 return;
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

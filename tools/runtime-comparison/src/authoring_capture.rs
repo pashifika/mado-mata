@@ -160,7 +160,8 @@ impl CaptureGeometry {
 /// The required SDK ceiling includes producer, detached and mapped image payload
 /// (and observed row padding), not driver/GPU allocations or total process RSS.
 /// In addition, charge the packed original, PNG and bounded encoder scratch.
-/// Hold this reservation until physical reap; incoming PNG owns a separate charge.
+/// Hold this reservation until clean per-frame completion or physical reap on failure;
+/// incoming PNG owns a separate charge.
 pub fn reserve_worker_payload(
     geometry: &CaptureGeometry,
     native_storage_ceiling: usize,
@@ -190,8 +191,8 @@ struct Header {
     png_bytes: usize,
 }
 
-/// Cleanly closed inside the worker, but NOT yet accepted by the host. There is no
-/// public pixel accessor until the owned process has exited successfully and reaped.
+/// Cleanly closed inside the worker, but NOT yet accepted by the host. Publication
+/// requires the correlated per-frame session-close receipt, not Engine termination.
 pub struct CaptureTransfer {
     header: Vec<u8>,
     png: EncodedImage,
@@ -210,8 +211,8 @@ impl CaptureTransfer {
     }
 }
 
-/// A pipe result without a process-settlement receipt remains unusable image data.
-pub struct PendingCapture {
+/// Pipe data remains unusable until its clean session receipt is verified.
+struct PendingCapture {
     header: Header,
     png: Vec<u8>,
     reservation: PayloadReservation,
@@ -228,14 +229,8 @@ pub struct DetachedCapture {
     pub png: images::PayloadBytes,
 }
 
-/// A forced exit cannot satisfy clean detachment, even if its exit code is zero.
-pub enum ChildSettlement {
-    Reaped(std::process::ExitStatus),
-    Forced(std::process::ExitStatus),
-}
-
 impl PendingCapture {
-    pub fn read_private(
+    fn read_private(
         input: &mut impl Read,
         expected: &CaptureIdentity,
         geometry: &CaptureGeometry,
@@ -271,11 +266,6 @@ impl PendingCapture {
             .map_err(|_| invalid("capture transfer allocation failed"))?;
         png.resize(header.png_bytes, 0);
         input.read_exact(&mut png).map_err(|_| transport())?;
-        // EOF is part of the private protocol. Extra output cannot be a second frame.
-        let mut extra = [0u8; 1];
-        if input.read(&mut extra).map_err(|_| transport())? != 0 {
-            return Err(transport());
-        }
         Ok(Self {
             header,
             png,
@@ -283,20 +273,13 @@ impl PendingCapture {
         })
     }
 
-    /// Call only from the worker owner after wait/try_wait returned the actual
-    /// exit status. Cancellation and exact host correlation are checked AGAIN.
-    pub fn accept_after_reap(
+    /// Only the worker owner may accept a correlated clean session completion.
+    /// Cancellation and exact host correlation are checked again before publication.
+    fn accept_after_session_close(
         self,
-        settlement: ChildSettlement,
         authority: &CaptureAuthority,
         expected: &CaptureIdentity,
     ) -> Result<DetachedCapture, Fault> {
-        if !matches!(settlement, ChildSettlement::Reaped(status) if status.success()) {
-            return Err(Fault::new(
-                "CaptureCleanup",
-                "Capture worker did not detach and exit cleanly",
-            ));
-        }
         authority.check(expected)?;
         if self.header.identity != *expected {
             return Err(stale());
@@ -344,7 +327,7 @@ mod protocol;
 mod worker;
 pub use protocol::{
     CANDIDATE_LIMIT, Candidate, CaptureArea, DISCOVERY_LIMIT, DiscoveryRequest,
-    NATIVE_STORAGE_BYTES, NativeWindow, ProcessCorrespondence, SELECTION_LIMIT,
+    NATIVE_STORAGE_BYTES, NativeWindow, ProcessCorrespondence,
 };
 pub use worker::{AuthoringCaptureWorker, WorkerCancel, WorkerCaptureResult, WorkerSettlement};
 
@@ -368,7 +351,6 @@ pub fn authoring_capture_child() -> Result<bool, Fault> {
             &protocol::Event::Terminal {
                 primary: Some(error),
                 clean: true,
-                capture: None,
             },
         )?;
         Ok(true)

@@ -32,6 +32,7 @@ fn legacy_settings_load_without_rewrite_and_preferences_preserve_current_hint() 
     assert_eq!(loaded.locale, Locale::English);
     assert!(loaded.backup_directory.is_none());
     assert!(loaded.packages_root.is_none());
+    assert!(!loaded.capture_cache_enabled);
     assert_eq!(store.packages_root().unwrap(), directory.0.join("sources"));
     assert!(!directory.0.join("sources").exists());
     assert!(!directory.0.join("pkgs").exists());
@@ -39,6 +40,7 @@ fn legacy_settings_load_without_rewrite_and_preferences_preserve_current_hint() 
     let draft = EditableSettings {
         locale: Locale::Japanese,
         backup_directory: Some(directory.0.join("archives").to_str().unwrap().into()),
+        capture_cache_enabled: true,
         ..preferences()
     };
     put(
@@ -56,6 +58,9 @@ fn legacy_settings_load_without_rewrite_and_preferences_preserve_current_hint() 
         saved.backup_directory
     );
     assert!(!directory.0.join("archives").exists());
+    assert!(directory.store().settings().unwrap().capture_cache_enabled);
+    store.save_preferences(preferences()).unwrap();
+    assert!(!directory.store().settings().unwrap().capture_cache_enabled);
 }
 
 #[test]
@@ -72,6 +77,8 @@ fn malformed_settings_never_become_defaults_or_accept_replacements() {
         br#"{"version":1,"gui_log_limit":12,"locale":"invalid","locale":"ja"}"#.as_slice(),
         br#"{"version":1,"gui_log_limit":12,"notifications":{"visible_count":1,"visible_count":2,"timeout_seconds":8,"show_success":true}}"#.as_slice(),
         br#"{"version":1,"gui_log_limit":12,"future":true}"#.as_slice(),
+        br#"{"version":1,"gui_log_limit":12,"capture_cache_enabled":"true"}"#.as_slice(),
+        br#"{"version":1,"gui_log_limit":12,"capture_cache_enabled":null}"#.as_slice(),
         b"not JSON".as_slice(),
         br#"[1,12,"path"]"#.as_slice(),
     ] {

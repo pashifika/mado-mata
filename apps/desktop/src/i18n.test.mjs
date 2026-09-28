@@ -198,7 +198,7 @@ for (const {scenario,input,value,invalid} of [
 }
 
 test('draft locale and validation presentation do not implicitly change each other',()=>{
-  const draft={locale:'ja',logLimit:'invalid',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(null),backupDirectory:'',packagesRoot:''};
+  const draft={locale:'ja',logLimit:'invalid',notifications:{...DEFAULT_NOTIFICATIONS},captureCacheEnabled:false,environment:environmentDraft(null),backupDirectory:'',packagesRoot:''};
   const original=structuredClone(draft);
   const en=readSettingsDraft(draft,'en');
   const ja=readSettingsDraft(draft,'ja');

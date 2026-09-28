@@ -23,9 +23,11 @@ pub async fn native_pick_window(
     let worker = application.clone();
     let expected_owner = owner.clone();
     let expected_revision = revision.clone();
-    let snapshot =
-        background(move || worker.native_picker_snapshot(&expected_owner, &expected_revision))
-            .await?;
+    let snapshot = background(move || {
+        worker.native_prepare_picker(&expected_owner, &expected_revision)?;
+        worker.native_picker_snapshot(&expected_owner, &expected_revision)
+    })
+    .await?;
     let generation = snapshot.selection_generation;
     let reservation = Reservation {
         application: application.clone(),

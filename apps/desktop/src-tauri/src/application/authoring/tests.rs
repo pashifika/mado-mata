@@ -46,13 +46,21 @@ fn forged_native_selection_preserves_historical_pixels_and_owner_fences() {
         .authoring_open(&workspace_ref(&workspace), &sources.package)
         .unwrap();
     let prepared = app
-        .recognition_prepare_capture(&editor.owner, &editor.revision, None, 0)
+        .recognition_prepare_capture(
+            &editor.owner,
+            &editor.revision,
+            None,
+            0,
+            true,
+            &[],
+            &std::collections::BTreeMap::new(),
+        )
         .unwrap();
     let image =
         mado_runtime_comparison::images::DecodedImage::from_rgba(1, 1, vec![12, 34, 56, 255])
             .unwrap();
     let before = app
-        .recognition_install_capture(&editor.owner, &editor.revision, None, prepared, image)
+        .recognition_install_capture(&editor.owner, &editor.revision, None, prepared, image, true)
         .unwrap();
     assert!(
         matches!(app.native_picker_snapshot(&editor.owner, &editor.revision),
@@ -64,7 +72,8 @@ fn forged_native_selection_preserves_historical_pixels_and_owner_fences() {
     );
     assert!(
         matches!(app.native_capture(&editor.owner, &editor.revision, 1,
-        before.capture_id.as_deref(), before.document_revision, None),
+        before.capture_id.as_deref(), before.document_revision, false, &[],
+        &std::collections::BTreeMap::new(), None),
         Err(error) if error.category == "StaleNativeSelection")
     );
     assert!(

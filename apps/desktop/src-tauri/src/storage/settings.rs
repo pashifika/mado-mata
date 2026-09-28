@@ -73,6 +73,8 @@ pub struct EditableSettings {
     pub backup_directory: Option<String>,
     #[serde(default)]
     pub packages_root: Option<String>,
+    #[serde(default)]
+    pub capture_cache_enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -91,6 +93,8 @@ pub struct Settings {
     pub backup_directory: Option<String>,
     #[serde(default)]
     pub packages_root: Option<String>,
+    #[serde(default)]
+    pub capture_cache_enabled: bool,
 }
 
 impl Default for Settings {
@@ -104,6 +108,7 @@ impl Default for Settings {
             notifications: NotificationPreferences::default(),
             backup_directory: None,
             packages_root: None,
+            capture_cache_enabled: false,
         }
     }
 }
@@ -137,6 +142,7 @@ impl Store {
             notifications: preferences.notifications,
             backup_directory: preferences.backup_directory,
             packages_root: preferences.packages_root,
+            capture_cache_enabled: preferences.capture_cache_enabled,
             ..Settings::default()
         };
         validate_settings(&settings)?;
@@ -170,6 +176,7 @@ impl Store {
         settings.notifications = preferences.notifications;
         settings.backup_directory = preferences.backup_directory;
         settings.packages_root = preferences.packages_root;
+        settings.capture_cache_enabled = preferences.capture_cache_enabled;
         validate_settings(&settings)?;
         self.check_packages_root(&settings)?;
         self.write_settings(&settings)?;

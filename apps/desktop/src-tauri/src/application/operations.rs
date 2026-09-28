@@ -30,11 +30,11 @@ impl Workspaces {
         if self
             .authoring
             .as_ref()
-            .is_some_and(|lease| lease.native.occupied())
+            .is_some_and(|lease| lease.native.operation_active())
         {
             return Err(Fault::new(
                 "NativeCaptureBusy",
-                "Cancel native selection and wait for its worker before other authoring work",
+                "Wait for the active native operation or picker to settle",
             ));
         }
         Ok(())
@@ -330,6 +330,7 @@ impl Application {
     pub fn poll(&self) -> Poll {
         let mut state = lock(&self.workspaces);
         self.collect(&mut state);
+        self.refresh_native_target(&mut state);
         Poll {
             authoring: state.authoring.as_ref().map(|lease| lease.owner.clone()),
             controller: state.controller.clone(),

@@ -9,7 +9,7 @@ use super::{
 };
 use mado_runtime_comparison::model::Fault;
 use objc2::rc::autoreleasepool;
-use objc2_app_kit::NSRunningApplication;
+use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 use objc2_core_foundation::{
     CFBundle, CFDictionary, CFString, CFType, CFURL, kCFBundleExecutableKey, kCFBundleIdentifierKey,
 };
@@ -480,6 +480,58 @@ pub(super) fn observe(
         deadline,
         None,
     )
+}
+
+pub(super) fn selected_application(
+    candidate: &mado_runtime_comparison::authoring_capture::Candidate,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<PathBuf, Fault> {
+    let guard = Guard {
+        cancelled,
+        deadline,
+    };
+    let result = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
+        autoreleasepool(|_| {
+            let pid =
+                i32::try_from(candidate.process_id).map_err(|_| unavailable("process_lifetime"))?;
+            let app = guard
+                .call(|| NSRunningApplication::runningApplicationWithProcessIdentifier(pid))?
+                .ok_or_else(|| unavailable("process_lifetime"))?;
+            let before = candidate_snapshot(&app, &guard)?;
+            let launch = guard
+                .call(|| app.launchDate())?
+                .ok_or_else(|| unavailable("process_lifetime"))?;
+            let launch = guard.call(|| launch.timeIntervalSinceReferenceDate())?;
+            let runtime_bundle = guard
+                .call(|| app.bundleURL())?
+                .ok_or_else(|| unavailable("runtime_bundle"))?;
+            let runtime_bundle = guard.call(|| url_path(&runtime_bundle))??;
+            if !launch.is_finite()
+                || launch <= 0.0
+                || launch.to_bits() != candidate.process_lifetime
+                || Path::new(&before.executable) != candidate.executable_path
+                || candidate.application_bundle_path.as_deref() != Some(Path::new(&runtime_bundle))
+            {
+                return Err(unavailable("process_changed"));
+            }
+            // Launch Services supplies an installed locator, not authority. The caller
+            // must prove it against the retained candidate using existing signed,
+            // architecture and process correspondence before persistence.
+            let workspace = guard.call(NSWorkspace::sharedWorkspace)?;
+            let identifier = NSString::from_str(&before.bundle_id);
+            let installed = guard
+                .call(|| workspace.URLForApplicationWithBundleIdentifier(&identifier))?
+                .ok_or_else(|| unavailable("installed_application"))?;
+            let installed = guard.call(|| url_path(&installed))??;
+            if candidate_snapshot(&app, &guard)? != before {
+                return Err(unavailable("process_changed"));
+            }
+            Ok(PathBuf::from(installed))
+        })
+    }));
+    guard.check()?;
+    result.map_err(|_| unavailable("platform_exception"))?
 }
 
 pub(super) fn authoring_application(

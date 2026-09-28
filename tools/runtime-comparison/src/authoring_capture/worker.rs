@@ -17,7 +17,8 @@ pub struct WorkerSettlement {
 pub struct WorkerCaptureResult {
     pub capture: Option<DetachedCapture>,
     pub primary: Option<Fault>,
-    pub settlement: WorkerSettlement,
+    pub session_clean: bool,
+    pub settlement: Option<WorkerSettlement>,
 }
 
 struct Shared {
@@ -46,7 +47,11 @@ impl WorkerCancel {
 }
 
 enum Request {
-    Select(String),
+    Select {
+        identity: CaptureIdentity,
+        candidate: Candidate,
+    },
+    RebasePackage(CaptureIdentity),
     Capture {
         command: Command,
         authority: Arc<CaptureAuthority>,
@@ -57,15 +62,18 @@ enum Request {
 enum Reply {
     Discovered(Vec<Candidate>),
     Selected(Candidate),
+    PackageRebased(CaptureIdentity),
+    Captured(WorkerCaptureResult),
     Finished(WorkerCaptureResult),
 }
 
-/// One retained provider/target namespace. Capture consumes it, including on failure.
-/// The background owner keeps its reservation even when native containment is late.
+/// One retained provider/target namespace, with a separately closed session per frame.
+/// The background owner holds failed-operation reservations until physical reap.
 pub struct AuthoringCaptureWorker {
     identity: CaptureIdentity,
     candidates: Vec<Candidate>,
     selected: Option<Candidate>,
+    request_ids: std::collections::BTreeSet<String>,
     requests: mpsc::SyncSender<Request>,
     replies: mpsc::Receiver<Reply>,
     cancel: WorkerCancel,
@@ -91,14 +99,13 @@ impl AuthoringCaptureWorker {
                 "The owned authoring engine could not start",
             )
         })?;
-        Self::from_child(child, request, started, SELECTION_LIMIT)
+        Self::from_child(child, request, started)
     }
 
     fn from_child(
         child: OwnedChild,
         request: DiscoveryRequest,
         started: Instant,
-        selection_limit: Duration,
     ) -> Result<Self, Fault> {
         let identity = request.identity.clone();
         let (requests, receive) = mpsc::sync_channel(1);
@@ -111,17 +118,7 @@ impl AuthoringCaptureWorker {
         let shared = cancel.clone();
         thread::Builder::new()
             .name("authoring-capture-owner".into())
-            .spawn(move || {
-                supervise(
-                    child,
-                    request,
-                    receive,
-                    send,
-                    shared,
-                    started,
-                    selection_limit,
-                )
-            })
+            .spawn(move || supervise(child, request, receive, send, shared, started))
             .map_err(|_| {
                 Fault::new(
                     "ChildStartup",
@@ -132,6 +129,7 @@ impl AuthoringCaptureWorker {
             identity,
             candidates: Vec::new(),
             selected: None,
+            request_ids: std::collections::BTreeSet::new(),
             requests,
             replies,
             cancel,
@@ -163,9 +161,11 @@ impl AuthoringCaptureWorker {
             }
             Reply::Finished(result) => Err(result
                 .primary
-                .or(result.settlement.primary)
+                .or_else(|| result.settlement.and_then(|settlement| settlement.primary))
                 .unwrap_or_else(protocol::protocol_fault)),
-            Reply::Selected(_) => Err(protocol::protocol_fault()),
+            Reply::Selected(_) | Reply::PackageRebased(_) | Reply::Captured(_) => {
+                Err(protocol::protocol_fault())
+            }
         }
     }
 
@@ -173,7 +173,7 @@ impl AuthoringCaptureWorker {
         &self.candidates
     }
 
-    pub fn select(&mut self, key: &str) -> Result<Candidate, Fault> {
+    pub fn select(&mut self, key: &str, binding_revision: &str) -> Result<Candidate, Fault> {
         if self.cancel.0.cancelled.load(Ordering::Acquire) {
             return Err(protocol::cancelled());
         }
@@ -186,8 +186,21 @@ impl AuthoringCaptureWorker {
             .find(|candidate| candidate.key == key)
             .ok_or_else(stale)?
             .clone();
+        let mut identity = self.identity.clone();
+        identity.binding_revision = binding_revision.into();
+        identity.validate()?;
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|selected| selected != &candidate || self.identity != identity)
+        {
+            return Err(stale());
+        }
         self.requests
-            .try_send(Request::Select(key.into()))
+            .try_send(Request::Select {
+                identity: identity.clone(),
+                candidate: candidate.clone(),
+            })
             .map_err(|_| protocol::protocol_fault())?;
         match self
             .replies
@@ -195,19 +208,59 @@ impl AuthoringCaptureWorker {
             .map_err(|_| protocol::protocol_fault())?
         {
             Reply::Selected(current) if current == candidate => {
+                self.identity = identity;
                 self.selected = Some(current.clone());
                 Ok(current)
             }
             Reply::Finished(result) => Err(result
                 .primary
-                .or(result.settlement.primary)
+                .or_else(|| result.settlement.and_then(|settlement| settlement.primary))
                 .unwrap_or_else(protocol::protocol_fault)),
             _ => Err(stale()),
         }
     }
 
+    /// The host must first prove that the saved package still names the same
+    /// application binding. This changes correlation, never native target authority.
+    pub fn rebase_package(&mut self, package_revision: &str) -> Result<(), Fault> {
+        if self.cancel.0.cancelled.load(Ordering::Acquire) {
+            return Err(protocol::cancelled());
+        }
+        if self.cancel.is_finished() {
+            return Err(protocol::expired());
+        }
+        self.selected.as_ref().ok_or_else(stale)?;
+        let mut identity = self.identity.clone();
+        identity.package_revision = package_revision.into();
+        identity.validate()?;
+        if identity == self.identity {
+            return Ok(());
+        }
+        self.requests
+            .try_send(Request::RebasePackage(identity.clone()))
+            .map_err(|_| protocol::protocol_fault())?;
+        match self
+            .replies
+            .recv()
+            .map_err(|_| protocol::protocol_fault())?
+        {
+            Reply::PackageRebased(current) if current == identity => {
+                self.identity = current;
+                Ok(())
+            }
+            Reply::Finished(result) => Err(result
+                .primary
+                .or_else(|| result.settlement.and_then(|settlement| settlement.primary))
+                .unwrap_or_else(protocol::protocol_fault)),
+            _ => {
+                self.cancel.cancel();
+                Err(stale())
+            }
+        }
+    }
+
     pub fn capture(
-        self,
+        &mut self,
         identity: CaptureIdentity,
         authority: Arc<CaptureAuthority>,
         timeout: Duration,
@@ -219,6 +272,7 @@ impl AuthoringCaptureWorker {
             if !protocol::same_selection(&self.identity, &identity) {
                 return Err(stale());
             }
+            protocol::admit_request(&mut self.request_ids, &identity.request_id)?;
             if timeout.is_zero() || timeout > ACQUISITION_LIMIT {
                 return Err(protocol::protocol_fault());
             }
@@ -247,19 +301,39 @@ impl AuthoringCaptureWorker {
             result.capture = None;
             return result;
         }
-        self.wait_finished()
+        self.wait_capture()
     }
 
     pub fn settle(self) -> WorkerSettlement {
         self.cancel.cancel();
-        self.wait_finished().settlement
+        self.wait_finished().settlement.unwrap_or(WorkerSettlement {
+            child_reaped: false,
+            clean: false,
+            forced: false,
+            primary: Some(protocol::protocol_fault()),
+        })
+    }
+
+    fn wait_capture(&self) -> WorkerCaptureResult {
+        match self.replies.recv() {
+            Ok(Reply::Captured(result) | Reply::Finished(result)) => result,
+            _ => {
+                self.cancel.cancel();
+                self.wait_finished()
+            }
+        }
     }
 
     fn wait_finished(&self) -> WorkerCaptureResult {
         loop {
             match self.replies.recv() {
                 Ok(Reply::Finished(result)) => return result,
-                Ok(Reply::Discovered(_) | Reply::Selected(_)) => {}
+                Ok(
+                    Reply::Discovered(_)
+                    | Reply::Selected(_)
+                    | Reply::PackageRebased(_)
+                    | Reply::Captured(_),
+                ) => {}
                 Err(_) => {
                     let settlement = self.cancel.try_settlement().unwrap_or(WorkerSettlement {
                         child_reaped: false,
@@ -270,7 +344,8 @@ impl AuthoringCaptureWorker {
                     return WorkerCaptureResult {
                         capture: None,
                         primary: settlement.primary.clone(),
-                        settlement,
+                        session_clean: false,
+                        settlement: Some(settlement),
                     };
                 }
             }
@@ -299,20 +374,13 @@ fn supervise(
     replies: mpsc::SyncSender<Reply>,
     cancel: WorkerCancel,
     started: Instant,
-    selection_limit: Duration,
 ) {
-    let result = supervise_inner(
-        &mut child,
-        &request,
-        requests,
-        &replies,
-        &cancel,
-        started,
-        selection_limit,
-    );
+    let result = supervise_inner(&mut child, &request, requests, &replies, &cancel, started);
     match result {
         Ok(result) => {
-            retain_settlement(&cancel, &result.settlement);
+            if let Some(settlement) = &result.settlement {
+                retain_settlement(&cancel, settlement);
+            }
             let _ = replies.send(Reply::Finished(result));
         }
         Err(error) => {
@@ -330,10 +398,156 @@ fn supervise(
             let _ = replies.send(Reply::Finished(WorkerCaptureResult {
                 capture: None,
                 primary: Some(error),
-                settlement,
+                session_clean: false,
+                settlement: Some(settlement),
             }));
         }
     }
+}
+
+struct ActiveCapture {
+    identity: CaptureIdentity,
+    geometry: CaptureGeometry,
+    authority: Arc<CaptureAuthority>,
+    reservation: PayloadReservation,
+}
+
+struct SupervisorState {
+    deadline: Option<Instant>,
+    discovered: bool,
+    candidates: Vec<Candidate>,
+    selecting: Option<(CaptureIdentity, Candidate)>,
+    selected: Option<(CaptureIdentity, Candidate)>,
+    rebasing: Option<CaptureIdentity>,
+    active: Option<ActiveCapture>,
+    frame_ids: std::collections::BTreeSet<String>,
+    terminal: Option<(Option<Fault>, bool)>,
+}
+
+impl SupervisorState {
+    fn accept(
+        &mut self,
+        event: Received,
+        request: &DiscoveryRequest,
+        replies: &mpsc::SyncSender<Reply>,
+        cancel: &WorkerCancel,
+        stopping: bool,
+    ) -> Result<(), Fault> {
+        if let Received::Terminal { primary, clean } = event {
+            if self.terminal.is_some() {
+                return Err(protocol::protocol_fault());
+            }
+            self.terminal = Some((primary, clean));
+            self.deadline = Some(Instant::now() + CLEANUP_LIMIT);
+            return Ok(());
+        }
+        if stopping || self.terminal.is_some() || cancel.0.cancelled.load(Ordering::Acquire) {
+            return Err(protocol::cancelled());
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(operation_expired());
+        }
+        match event {
+            Received::Discovered(identity, candidates)
+                if !self.discovered && identity == request.identity =>
+            {
+                self.discovered = true;
+                self.deadline = None;
+                self.candidates = candidates.clone();
+                replies
+                    .try_send(Reply::Discovered(candidates))
+                    .map_err(|_| protocol::cancelled())?;
+            }
+            Received::Selected(identity, candidate) => {
+                if self
+                    .selecting
+                    .as_ref()
+                    .is_none_or(|(bound, selected)| bound != &identity || selected != &candidate)
+                {
+                    return Err(stale());
+                }
+                self.selecting = None;
+                self.selected = Some((identity, candidate.clone()));
+                self.deadline = None;
+                replies
+                    .try_send(Reply::Selected(candidate))
+                    .map_err(|_| protocol::cancelled())?;
+            }
+            Received::PackageRebased(identity) => {
+                if self.rebasing.as_ref() != Some(&identity) {
+                    return Err(stale());
+                }
+                let (bound, _) = self.selected.as_mut().ok_or_else(stale)?;
+                if !protocol::same_package_rebase(bound, &identity) {
+                    return Err(stale());
+                }
+                *bound = identity.clone();
+                self.rebasing = None;
+                self.deadline = None;
+                replies
+                    .try_send(Reply::PackageRebased(identity))
+                    .map_err(|_| protocol::cancelled())?;
+            }
+            Received::Captured(pending) => {
+                let active = self.active.as_ref().ok_or_else(protocol::protocol_fault)?;
+                if self.frame_ids.len() >= protocol::CAPTURE_REQUEST_LIMIT {
+                    return Err(protocol::capture_limit());
+                }
+                if pending.header.identity != active.identity
+                    || pending.header.geometry != active.geometry
+                    || !self.frame_ids.insert(pending.header.frame_identity.clone())
+                {
+                    return Err(stale());
+                }
+                active.authority.check(&active.identity)?;
+                // The correlated event can only be emitted after SDK close succeeds.
+                // Release the worker's per-frame charge before host decoding.
+                let active = self.active.take().ok_or_else(protocol::protocol_fault)?;
+                drop(active.reservation);
+                let capture =
+                    match pending.accept_after_session_close(&active.authority, &active.identity) {
+                        Ok(capture) => capture,
+                        Err(error) => {
+                            active.authority.cancel();
+                            return Err(error);
+                        }
+                    };
+                if cancel.0.cancelled.load(Ordering::Acquire)
+                    || self
+                        .deadline
+                        .is_none_or(|deadline| Instant::now() >= deadline)
+                {
+                    active.authority.cancel();
+                    return Err(if cancel.0.cancelled.load(Ordering::Acquire) {
+                        protocol::cancelled()
+                    } else {
+                        operation_expired()
+                    });
+                }
+                self.deadline = None;
+                replies
+                    .try_send(Reply::Captured(WorkerCaptureResult {
+                        capture: Some(capture),
+                        primary: None,
+                        session_clean: true,
+                        settlement: None,
+                    }))
+                    .map_err(|_| protocol::cancelled())?;
+            }
+            _ => return Err(protocol::protocol_fault()),
+        }
+        Ok(())
+    }
+}
+
+fn operation_expired() -> Fault {
+    Fault::new(
+        "DeadlineExceeded",
+        "Authoring worker operation deadline expired",
+    )
 }
 
 fn supervise_inner(
@@ -343,7 +557,6 @@ fn supervise_inner(
     replies: &mpsc::SyncSender<Reply>,
     cancel: &WorkerCancel,
     started: Instant,
-    selection_limit: Duration,
 ) -> Result<WorkerCaptureResult, Fault> {
     let mut input = child.stdin.take().ok_or_else(protocol::protocol_fault)?;
     let mut output = child.stdout.take().ok_or_else(protocol::protocol_fault)?;
@@ -375,121 +588,139 @@ fn supervise_inner(
             }
         })
         .map_err(|_| protocol::protocol_fault())?;
-    let mut deadline = started + request.timeout;
-    let mut discovered = false;
-    let mut expected: Option<(CaptureIdentity, CaptureGeometry, Arc<CaptureAuthority>)> = None;
-    let mut selecting: Option<(String, Instant)> = None;
-    let mut reservation = None;
-    let mut terminal = None;
+    let mut state = SupervisorState {
+        deadline: Some(started + request.timeout),
+        discovered: false,
+        candidates: Vec::new(),
+        selecting: None,
+        selected: None,
+        rebasing: None,
+        active: None,
+        frame_ids: std::collections::BTreeSet::new(),
+        terminal: None,
+    };
     let mut primary = None;
     let mut stop = None;
     let mut forced = false;
     let mut reported_unreaped = false;
     let mut write = Some(write);
-    let mut accept = |event: Result<Received, Fault>,
-                      deadline: &mut Instant,
-                      primary: &mut Option<Fault>,
-                      selecting: &mut Option<(String, Instant)>,
-                      discovered: &mut bool| {
-        match event {
-            Ok(Received::Discovered(identity, candidates))
-                if !*discovered
-                    && identity == request.identity
-                    && Instant::now() < *deadline
-                    && !cancel.0.cancelled.load(Ordering::Acquire) =>
-            {
-                *discovered = true;
-                *deadline = Instant::now() + selection_limit;
-                if replies.try_send(Reply::Discovered(candidates)).is_err() {
-                    primary.get_or_insert_with(protocol::cancelled);
-                }
-            }
-            Ok(Received::Selected(candidate))
-                if selecting.as_ref().is_some_and(|(key, until)| {
-                    *key == candidate.key && Instant::now() < *until
-                }) =>
-            {
-                *selecting = None;
-                if replies.try_send(Reply::Selected(candidate)).is_err() {
-                    primary.get_or_insert_with(protocol::cancelled);
-                }
-            }
-            Ok(Received::Terminal {
-                primary: error,
-                clean,
-                pending,
-            }) if terminal.is_none() => {
-                terminal = Some((error, clean, pending));
-            }
-            Ok(_) => {
-                primary.get_or_insert_with(|| {
-                    if *discovered && Instant::now() >= *deadline {
-                        protocol::expired()
-                    } else {
-                        protocol::protocol_fault()
-                    }
-                });
-            }
-            Err(error) => {
+    let exit = loop {
+        for event in events.try_iter() {
+            if let Err(error) = event.and_then(|event| {
+                state.accept(
+                    event,
+                    request,
+                    replies,
+                    cancel,
+                    stop.is_some() || primary.is_some(),
+                )
+            }) {
                 primary.get_or_insert(error);
             }
         }
-    };
-    let exit = loop {
-        for event in events.try_iter() {
-            accept(
-                event,
-                &mut deadline,
-                &mut primary,
-                &mut selecting,
-                &mut discovered,
-            );
-        }
-        if let Ok(incoming) = requests.try_recv() {
-            if expected.is_some()
-                || selecting.is_some()
-                || stop.is_some()
-                || Instant::now() >= deadline
-                || cancel.0.cancelled.load(Ordering::Acquire)
-            {
-                primary.get_or_insert_with(protocol::expired);
-                if let Request::Capture { authority, .. } = incoming {
-                    authority.cancel();
-                }
-            } else {
-                let command = match incoming {
-                    Request::Select(key) => {
-                        selecting =
-                            Some((key.clone(), deadline.min(Instant::now() + DISCOVERY_LIMIT)));
-                        Command::Select { key }
+        match requests.try_recv() {
+            Ok(incoming) => {
+                let command = (|| {
+                    if !state.discovered
+                        || state.active.is_some()
+                        || state.selecting.is_some()
+                        || state.rebasing.is_some()
+                        || stop.is_some()
+                        || primary.is_some()
+                        || state.terminal.is_some()
+                        || cancel.0.cancelled.load(Ordering::Acquire)
+                    {
+                        if let Request::Capture { authority, .. } = incoming {
+                            authority.cancel();
+                        }
+                        return Err(protocol::protocol_fault());
                     }
-                    Request::Capture {
-                        mut command,
-                        authority,
-                        reservation: held,
-                        deadline: until,
-                    } => {
-                        if let Command::Capture {
+                    match incoming {
+                        Request::Select {
                             identity,
                             candidate,
-                            timeout,
-                        } = &mut command
-                        {
-                            deadline = until;
-                            *timeout = until.saturating_duration_since(Instant::now());
-                            expected = Some((identity.clone(), candidate.geometry, authority));
-                            reservation = Some(held);
+                        } => {
+                            let mut bound = state.selected.as_ref().map_or_else(
+                                || request.identity.clone(),
+                                |(bound, _)| bound.clone(),
+                            );
+                            bound.binding_revision = identity.binding_revision.clone();
+                            if identity != bound
+                                || !state.candidates.contains(&candidate)
+                                || state.selected.as_ref().is_some_and(|(bound, selected)| {
+                                    bound != &identity || selected != &candidate
+                                })
+                            {
+                                return Err(stale());
+                            }
+                            let command = Command::Select {
+                                key: candidate.key.clone(),
+                                binding_revision: identity.binding_revision.clone(),
+                            };
+                            state.selecting = Some((identity, candidate));
+                            state.deadline = Some(Instant::now() + DISCOVERY_LIMIT);
+                            Ok(command)
                         }
-                        command
+                        Request::RebasePackage(identity) => {
+                            identity.validate()?;
+                            let (bound, _) = state.selected.as_ref().ok_or_else(stale)?;
+                            if !protocol::same_package_rebase(bound, &identity) {
+                                return Err(stale());
+                            }
+                            state.rebasing = Some(identity.clone());
+                            state.deadline = Some(Instant::now() + DISCOVERY_LIMIT);
+                            Ok(Command::RebasePackage { identity })
+                        }
+                        Request::Capture {
+                            mut command,
+                            authority,
+                            reservation,
+                            deadline,
+                        } => {
+                            let Command::Capture {
+                                identity,
+                                candidate,
+                                timeout,
+                            } = &mut command
+                            else {
+                                return Err(protocol::protocol_fault());
+                            };
+                            if state.selected.as_ref().is_none_or(|(bound, selected)| {
+                                !protocol::same_selection(bound, identity) || selected != candidate
+                            }) {
+                                authority.cancel();
+                                return Err(stale());
+                            }
+                            *timeout = deadline.saturating_duration_since(Instant::now());
+                            if timeout.is_zero() {
+                                authority.cancel();
+                                return Err(operation_expired());
+                            }
+                            state.deadline = Some(deadline);
+                            state.active = Some(ActiveCapture {
+                                identity: identity.clone(),
+                                geometry: candidate.geometry,
+                                authority,
+                                reservation,
+                            });
+                            Ok(command)
+                        }
                     }
-                };
-                if write
-                    .as_ref()
-                    .is_none_or(|send| send.try_send(command).is_err())
-                {
-                    primary.get_or_insert_with(protocol::protocol_fault);
+                })();
+                if let Err(error) = command.and_then(|command| {
+                    write
+                        .as_ref()
+                        .ok_or_else(protocol::protocol_fault)?
+                        .try_send(command)
+                        .map_err(|_| protocol::protocol_fault())
+                }) {
+                    primary.get_or_insert(error);
                 }
             }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                primary.get_or_insert_with(protocol::cancelled);
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
         }
         match child.try_wait() {
             Ok(Some(exit)) => break exit,
@@ -503,30 +734,24 @@ fn supervise_inner(
         if stop.is_none() {
             let reason = if cancel.0.cancelled.load(Ordering::Acquire) {
                 Some(protocol::cancelled())
-            } else if Instant::now() >= deadline {
-                Some(if expected.is_none() && discovered {
-                    protocol::expired()
-                } else {
-                    Fault::new(
-                        "DeadlineExceeded",
-                        "Authoring worker operation deadline expired",
-                    )
-                })
-            } else if selecting
-                .as_ref()
-                .is_some_and(|(_, until)| Instant::now() >= *until)
+            } else if state
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
             {
-                Some(Fault::new(
-                    "DeadlineExceeded",
-                    "Retained window selection revalidation expired",
-                ))
+                Some(operation_expired())
+            } else if let Some(active) = &state.active {
+                active
+                    .authority
+                    .check(&active.identity)
+                    .err()
+                    .or_else(|| primary.clone())
             } else {
                 primary.clone()
             };
             if let Some(reason) = reason {
                 primary.get_or_insert(reason);
-                if let Some((_, _, authority)) = &expected {
-                    authority.cancel();
+                if let Some(active) = &state.active {
+                    active.authority.cancel();
                 }
                 stop = Some(Instant::now());
                 if let Some(send) = write.take() {
@@ -554,7 +779,8 @@ fn supervise_inner(
                 let _ = replies.try_send(Reply::Finished(WorkerCaptureResult {
                     capture: None,
                     primary: primary.clone(),
-                    settlement,
+                    session_clean: false,
+                    settlement: Some(settlement),
                 }));
                 // Continue owning child and payload; no successor may use this slot.
             }
@@ -567,17 +793,15 @@ fn supervise_inner(
         primary.get_or_insert_with(protocol::protocol_fault);
     }
     for event in events.try_iter() {
-        accept(
-            event,
-            &mut deadline,
-            &mut primary,
-            &mut selecting,
-            &mut discovered,
-        );
+        if let Err(error) =
+            event.and_then(|event| state.accept(event, request, replies, cancel, true))
+        {
+            primary.get_or_insert(error);
+        }
     }
-    drop(accept);
-    let (child_primary, child_clean, pending) =
-        terminal.unwrap_or_else(|| (Some(protocol::protocol_fault()), false, None));
+    let (child_primary, child_clean) = state
+        .terminal
+        .unwrap_or_else(|| (Some(protocol::protocol_fault()), false));
     if primary.is_none() {
         primary = child_primary;
     }
@@ -585,72 +809,22 @@ fn supervise_inner(
         primary.get_or_insert_with(protocol::protocol_fault);
     }
     if cancel.0.cancelled.load(Ordering::Acquire) {
-        if let Some((_, _, authority)) = &expected {
-            authority.cancel();
-        }
         primary.get_or_insert_with(protocol::cancelled);
+    }
+    if let Some(active) = state.active {
+        active.authority.cancel();
+        primary.get_or_insert_with(protocol::protocol_fault);
     }
     forced |= exit.code() == Some(124);
     let clean = child_clean && exit.success() && !forced;
-    if !clean && primary.is_none() {
-        primary = Some(Fault::new(
-            "CaptureCleanup",
-            "Capture worker did not detach and exit cleanly",
-        ));
-    }
-    if expected.is_some() && Instant::now() >= deadline {
-        if let Some((_, _, authority)) = &expected {
-            authority.cancel();
-        }
+    if !clean {
         primary.get_or_insert_with(|| {
-            Fault::new("DeadlineExceeded", "Capture publication deadline expired")
+            Fault::new(
+                "CaptureCleanup",
+                "Native cleanup or owned worker containment was incomplete",
+            )
         });
     }
-    // Once reaped, child image reservations can be released before host decoding.
-    drop(reservation);
-    let capture = match (pending, expected) {
-        (Some(pending), Some((identity, geometry, authority))) if primary.is_none() && clean => {
-            if pending.header.geometry != geometry {
-                primary = Some(stale());
-                None
-            } else {
-                match pending.accept_after_reap(
-                    ChildSettlement::Reaped(exit),
-                    &authority,
-                    &identity,
-                ) {
-                    Ok(capture)
-                        if Instant::now() < deadline
-                            && !cancel.0.cancelled.load(Ordering::Acquire) =>
-                    {
-                        Some(capture)
-                    }
-                    Ok(_) => {
-                        authority.cancel();
-                        primary = Some(if cancel.0.cancelled.load(Ordering::Acquire) {
-                            protocol::cancelled()
-                        } else {
-                            Fault::new("DeadlineExceeded", "Capture publication deadline expired")
-                        });
-                        None
-                    }
-                    Err(error) => {
-                        primary = Some(error);
-                        None
-                    }
-                }
-            }
-        }
-        (None, Some(_)) if primary.is_none() => {
-            primary = Some(protocol::protocol_fault());
-            None
-        }
-        (Some(_), _) => {
-            primary.get_or_insert_with(protocol::protocol_fault);
-            None
-        }
-        _ => None,
-    };
     let settlement = WorkerSettlement {
         child_reaped: true,
         clean,
@@ -665,9 +839,10 @@ fn supervise_inner(
         },
     };
     Ok(WorkerCaptureResult {
-        capture,
+        capture: None,
         primary,
-        settlement,
+        session_clean: false,
+        settlement: Some(settlement),
     })
 }
 

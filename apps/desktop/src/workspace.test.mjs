@@ -562,6 +562,30 @@ for (const {scenario,update,field} of [
   });
 }
 
+test('a selected capture-only target stays input-free when its saved Windows locator is edited',()=>{
+  const config={platform:'windows',game:{kind:'executable',path:'C:\\Games\\example.exe'},launcher:null,
+    arguments:[],working_directory:null,window_title:'Game window',input:null};
+  const state=loadedTarget('a',config);
+  assert.equal(targetDirty(state),false);
+  assert.deepEqual(readTargetDraft(state.draft).configuration,config);
+  assert.equal(readTargetDraft({...state.draft,windowTitle:'Other window'}).configuration.input,null);
+  assert.equal(readTargetDraft({...state.draft,route:'system'}).configuration,null);
+});
+test('host-synchronized window binding updates clean target forms but preserves unsaved target edits',()=>{
+  const old=loadedTarget('a',targetConfiguration());
+  const selected={...targetConfiguration('/metadata/Other.app'),window_title:'Other window',input:null};
+  const view=targetView(old,{revision:2,configuration:selected,id:'selected-window'});
+  const clean=readTarget(old,view);
+  assert.equal(targetDirty(clean),false);
+  assert.equal(clean.draft.windowTitle,'Other window');
+  assert.equal(clean.draft.route,'');
+  const dirty=editTarget(old,{...old.draft,arguments:['my unsaved launch option']});
+  const merged=readTarget(dirty,view);
+  assert.deepEqual(merged.draft.arguments,['my unsaved launch option']);
+  assert.equal(targetDirty(merged),true);
+});
+
+
 test('system input explicitly selected with focused-only policy carries no process-pointer mode',()=>{
   const state=loadedTarget();
   const parsed=readTargetDraft({...state.draft,route:'system',focus:'require_focused'});

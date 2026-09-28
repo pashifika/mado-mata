@@ -74,6 +74,7 @@ impl CaptureCache {
         Ok(path)
     }
 
+    /// Atomically replaces this capture's private original; never publishes a partial PNG.
     /// No image copy or second encoding; the caller retains its payload reservation.
     pub fn persist(&self, package_id: &str, capture_id: &str, png: &[u8]) -> CacheWrite {
         let mut cached = false;
@@ -86,9 +87,6 @@ impl CaptureCache {
             let destination = self.image_path(package_id, capture_id)?;
             let directory = destination.parent().expect("cache image has a parent");
             ensure_directories(directory)?;
-            if optional_metadata(&destination)?.is_some() {
-                return Err(refused("an original already exists for this capture"));
-            }
             let pending = destination.with_extension("pending");
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);
@@ -104,14 +102,22 @@ impl CaptureCache {
                     .map_err(|error| io_fault("sync cache image", error))?;
                 drop(file);
                 check_ancestors(directory)?;
-                // Same-directory hard linking atomically publishes without replacing another file.
-                fs::hard_link(&pending, &destination)
+                if let Some(metadata) = optional_metadata(&destination)? {
+                    check_regular(&metadata)?;
+                }
+                // The temporary is complete and synced before same-directory replacement.
+                // Only this private cache key may be replaced; package assets are unrelated.
+                fs::rename(&pending, &destination)
                     .map_err(|error| io_fault("publish cache image", error))?;
                 cached = true;
                 Ok(())
             })();
-            let cleanup = fs::remove_file(&pending)
-                .map_err(|error| io_fault("remove own cache temporary", error));
+            let cleanup = if cached {
+                Ok(())
+            } else {
+                fs::remove_file(&pending)
+                    .map_err(|error| io_fault("remove own cache temporary", error))
+            };
             match (publication, cleanup) {
                 (Err(mut primary), Err(cleanup)) => {
                     primary.context["cleanup"] = serde_json::json!(cleanup);
