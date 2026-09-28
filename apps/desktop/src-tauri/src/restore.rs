@@ -80,15 +80,6 @@ fn validate_set(capture: &Capture, allow_legacy: bool, unassigned: bool) -> Resu
                         invalid("orphaned package configuration has no supported Tab record")
                     })?;
                     validate_package_id(parts[2])?;
-                    if !tab
-                        .packages
-                        .iter()
-                        .any(|reference| reference.package_id == parts[2])
-                    {
-                        return Err(invalid(
-                            "package configuration is not owned by a saved Tab reference",
-                        ));
-                    }
                     if parts[3] == "target.config" {
                         if bytes.len() > MAX_TARGET_BYTES {
                             return Err(invalid("target configuration exceeds its byte bound"));
@@ -103,6 +94,15 @@ fn validate_set(capture: &Capture, allow_legacy: bool, unassigned: bool) -> Resu
                         // Target has its own per-file limit; Capture enforces the shared
                         // file/byte budget without consuming a portable-profile slot.
                         return Ok(());
+                    }
+                    if !tab
+                        .packages
+                        .iter()
+                        .any(|reference| reference.package_id == parts[2])
+                    {
+                        return Err(invalid(
+                            "package configuration is not owned by a saved Tab reference",
+                        ));
                     }
                     let mut profile: Profile = decode(bytes).map_err(|_| {
                         invalid("unsupported or malformed package configuration owner")
@@ -1544,6 +1544,44 @@ pub(crate) mod tests {
             fs::read(destination.0.join("logs/retained.log")).unwrap(),
             b"unrelated"
         );
+    }
+
+    #[test]
+    fn target_only_snapshot_restores_before_inspection_but_refuses_unbound_profiles() {
+        let source = Root::new();
+        source.put("settings.json", &settings(200));
+        let mut owner: TabRecord = decode(&tab("Owner", true)).unwrap();
+        owner.packages.clear();
+        owner.selected_package_id = None;
+        source.put(
+            "tabs/Owner/tab.config",
+            &serde_json::to_vec(&owner).unwrap(),
+        );
+        let record = target_record();
+        source.put(
+            "tabs/Owner/pkg/target.config",
+            &serde_json::to_vec(&record).unwrap(),
+        );
+        let snapshot = capture(&source.0).unwrap();
+        validate(&snapshot).unwrap();
+
+        let destination = Root::new();
+        destination.put("settings.json", &settings(100));
+        let before = capture(&destination.0).unwrap();
+        let generation = before.generation.clone();
+        let plan = prepare(snapshot.clone(), before, Some(&generation)).unwrap();
+        install(&destination.0, plan).unwrap();
+        let restored = Store::new(destination.0.clone()).unwrap();
+        assert_eq!(restored.read_target("Owner", "pkg").unwrap(), record);
+        assert_eq!(restored.tab("Owner").unwrap(), owner);
+        assert!(matches!(
+            restored.profile_store("Owner", "pkg"),
+            Err(fault) if fault.category == "ProfileIdentity"
+        ));
+
+        let mut files = snapshot.files;
+        files.insert(format!("tabs/Owner/pkg/{}.config", profile_id()), profile());
+        assert!(validate(&Capture::from_files(files, true).unwrap()).is_err());
     }
 
     #[test]

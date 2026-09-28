@@ -388,6 +388,8 @@ a later failure can appear again.
    This also works before **Inspect/Reinspect**. The verified target configuration
    belongs to the open workspace and package ID; saving it does not register a
    Run source, create profiles, or inspect the package.
+   Configuration snapshots can restore this target before Run inspection;
+   restoring ordinary profiles still requires their saved package reference.
 2. With a saved target, **Capture** freshly verifies the locator and selects
    exactly one matching live window. Missing or ambiguous matches require
    explicit reselection; saved PIDs, window numbers and authority are never reused.
