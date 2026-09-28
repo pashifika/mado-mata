@@ -1297,9 +1297,13 @@ impl Application {
         let preview = images::preview(&image)?;
         let encoded = images::encode_crop(&preview, [0, 0, preview.width, preview.height])?;
         let (bytes, encoded_reservation) = encoded.into_parts();
+        // Display raster + one candidate canvas + its ImageData readback. The client
+        // borrows the displayed image and drops both scratch buffers after each scan.
         let display_bytes = preview
             .rgba
             .len()
+            .checked_mul(3)
+            .ok_or_else(stale)?
             .checked_add(bytes.len().checked_mul(2).ok_or_else(stale)?)
             .ok_or_else(stale)?;
         let display = images::reserve_payload(display_bytes)?;

@@ -1,7 +1,7 @@
 import {useEffect, useRef, useState} from 'react';
 import type {KeyboardEvent, PointerEvent} from 'react';
 import {clientToFrame, dragEdges, edgesRect, hitHandle, hitRegion, mapRegion, rectEdges, regionFromEdges, spanEdges} from '../recognition.ts';
-import type {Edges, GeometryBasis, Handle, Point, PreviewDefinition, PreviewEdit, PreviewObservation, PreviewTool} from '../recognition.ts';
+import type {Edges, GeometryBasis, Handle, PixelRect, Point, PreviewDefinition, PreviewEdit, PreviewObservation, PreviewTool} from '../recognition.ts';
 
 // CSS pixels around an edge that grab it; converted to frame pixels by the rendered scale.
 const HIT_PX = 6;
@@ -34,6 +34,9 @@ interface Props {
   // Identity of the latest snapshot; a new one supersedes locally shown pending edits.
   generation: unknown;
   labels: CanvasLabels;
+  // A reviewed-before-apply proposal; it never changes the saved basis or hit testing.
+  contentCandidate?: PixelRect | null;
+  onContentEditStart?: () => void;
   onEdit: (edit: PreviewEdit) => void;
 }
 
@@ -50,7 +53,7 @@ function handlePoints(edges: Edges): [Handle, number, number][] {
 // Original-pixel image surface with the content rectangle and recognition regions. All geometry is in frame pixels;
 // the SVG viewBox is the frame, so display scale changes only the rendered size. Pointer positions map through the
 // rendered client rectangle (zoom, scroll and letterboxing included); device-pixel ratio is not applied again.
-export default function RecognitionCanvas({width, height, basis, definitions, selected, observations, image, scale, tool, editable, generation, labels, onEdit}: Props) {
+export default function RecognitionCanvas({width, height, basis, definitions, selected, observations, image, scale, tool, editable, generation, labels, contentCandidate, onContentEditStart, onEdit}: Props) {
   const surface = useRef<HTMLDivElement>(null);
   const dragRef = useRef<Drag | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -114,6 +117,7 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
     event.currentTarget.setPointerCapture(event.pointerId);
     event.preventDefault();
     if (tool === 'content') {
+      onContentEditStart?.();
       const handle = hitHandle(content, point, tolerance);
       update({kind: 'content', handle, start: content, origin: point, client, current: handle ? content : null, bounds: frame});
       return;
@@ -170,6 +174,7 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
     if (tool === 'content') {
       const next = dragEdges(content, 'move', offset[0], offset[1], frame);
       if (sameEdges(next, content)) return;
+      onContentEditStart?.();
       setPending({key: 'content', edges: next});
       onEdit({kind: 'content', content: edgesRect(next)});
       return;
@@ -223,6 +228,8 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
       {editable && tool === 'content' && handles(bars, 'recognition-handle content')}
       {editable && chosenSearch && handles(chosenSearch, 'recognition-handle search')}
       {editable && chosenRegion && handles(chosenRegion, 'recognition-handle')}
+      {tool === 'content' && contentCandidate && <rect className="recognition-content-candidate"
+        x={contentCandidate.x} y={contentCandidate.y} width={contentCandidate.width} height={contentCandidate.height} style={stroke}/>}
     </svg>
   </div>;
 }

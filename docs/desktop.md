@@ -425,6 +425,55 @@ prompt to make an attempt succeed. Authorize each real target, environment and
 operation separately. Both-OS GUI, permission, target-loss, overlapping-window,
 mixed-DPI and negative-origin acceptance remain distinct from CI.
 
+### Game content candidates (experimental)
+
+In Preview, select **Game content**, choose **Auto**, **16:9**, **16:10** or
+**4:3**, then **Detect**. Auto compares the three ratios. A selected ratio
+restricts detection; it never creates a centered crop just to match that ratio.
+Detection only proposes the cyan dashed rectangle. **Apply** uses the existing
+content edit, Undo, draft/confirmation and crop-staleness paths; review and confirm
+the geometry in the ordinary workflow. **Full** is also a proposal, not an
+implicit confirmation. Cancel, beginning a manual content drag, a frame/basis or
+owner change, a native action, and Done invalidate pending proposals. No
+successful detection automatically overwrites a previously confirmed basis.
+
+The detector checks sampled, nearly flat exterior scanlines and continuous
+adjacent boundaries, including light/dark title bars, thin frames and letterboxes.
+It searches at most the outer quarter on each side and bounds the number of
+candidates. It needs visible interior variation; uniform/loading images and
+similarly ranked alternatives produce no applied edit. These heuristics cannot
+prove that a flat game UI panel is OS chrome. Custom ratios, arbitrary non-flat
+borders and original-pixel refinement of downsampled previews remain manual.
+
+The already displayed, owner-scoped raster is borrowed locally; no additional
+capture, full-original decode, OCR, new permission or native input is requested.
+A raster is bounded to 4,194,304 pixels. The host reserves the display raster,
+one temporary canvas and one ImageData readback before publishing its preview.
+The canvas is released on success or failure. This is payload accounting, not a
+bound on browser/driver allocations or process RSS. Coordinates use the raster's
+natural size and half-open edges, never CSS Fit or devicePixelRatio. When the
+host has downsampled a large original, the candidate is explicitly labeled
+approximate: mapped coordinates do not claim single-original-pixel accuracy.
+The original PNG and package assets are unchanged. In Game content mode, the
+compact ratio/Detect/Full/Apply/Cancel group replaces the toolbar's Undo/Delete
+buttons; Regions mode retains those buttons. Candidate status stays in the
+fixed-height bottom rail. There is no Detection limits panel. Controls remain
+outside the image viewport; candidate changes do not remount the image stage.
+In automatic mode, the compact zoom selector shows the actual percentage without
+a **Fit** prefix. The separate Fit button still indicates the active mode.
+
+The bounded regression command from the repository root is:
+
+```sh
+node --experimental-strip-types --test apps/desktop/src/contentDetection.test.mjs
+```
+
+These tests are also registered in the desktop `npm test` command used by CI.
+They cover synthetic pixel geometry and readback cleanup, not interactive native
+acceptance. Before acceptance, test both real WebViews: Apply/Undo/Confirm,
+Cancel during pending detection, manual drag, same-size Capture, A -> B -> A,
+owner changes, Done, Fit/scroll stability, and EN/JA at narrow viewport widths.
+
 ### Captures, migration and private originals
 
 **New capture** and **Add capture from PNG** allocate a checked XID.

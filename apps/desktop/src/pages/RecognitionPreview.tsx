@@ -3,19 +3,27 @@ import type {KeyboardEvent} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {emitTo, listen} from '@tauri-apps/api/event';
 import RecognitionCanvas from '../components/RecognitionCanvas.tsx';
+import ContentTrial from '../components/ContentTrial.tsx';
 import NativeCaptureControls from '../components/NativeCaptureControls.tsx';
 import Select from '../components/Select.tsx';
 import {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import {messages} from '../i18n.ts';
 import {LocaleContext} from '../locale.tsx';
 import {PREVIEW_ACTION, PREVIEW_EDIT, PREVIEW_READY, PREVIEW_STATE, ZOOM_LEVELS, displayScale, stepZoom} from '../recognition.ts';
-import type {PreviewAction, PreviewActionMessage, PreviewCloseFailure, PreviewDisplay, PreviewEdit, PreviewEditMessage, PreviewSnapshot, PreviewStateMessage} from '../recognition.ts';
+import type {PixelRect, PreviewAction, PreviewActionMessage, PreviewCloseFailure, PreviewDisplay, PreviewEdit, PreviewEditMessage, PreviewSnapshot, PreviewStateMessage} from '../recognition.ts';
 import type {Fault} from '../types.ts';
 
 // The main window's label in tauri.conf.json; it owns the Edit session and applies every relayed edit.
 const MAIN_LABEL = 'main';
 
-interface Raster {captureId: string; frameId: string; url: string}
+interface Raster {token: string; captureId: string; frameId: string; frameRevision: number; url: string}
+
+function contentIdentity(snapshot: PreviewSnapshot | null): string {
+  return JSON.stringify(snapshot && [snapshot.owner.token, snapshot.revision, snapshot.capture_id, snapshot.frame?.id,
+    snapshot.frame?.revision, snapshot.frame?.width, snapshot.frame?.height, snapshot.basisRevision,
+    snapshot.editable, snapshot.lockReason, snapshot.commandBusy, snapshot.running, snapshot.frameGeometryReady,
+    snapshot.nativeSelection?.busy, snapshot.display.tool]);
+}
 
 // Root of the detached preview window: the frame image, zoom, content selection and on-image region editing.
 // It holds no authoritative metadata. The main window emits snapshots; edits are relayed back and apply only there.
@@ -31,6 +39,8 @@ export default function RecognitionPreview() {
   const [dismissedNativeError, setDismissedNativeError] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [trialEpoch, setTrialEpoch] = useState(0);
+  const trialEpochRef = useRef(0);
   const helpButton = useRef<HTMLButtonElement>(null);
   const [display, setDisplay] = useState<PreviewDisplay>({zoom: 'fit', tool: 'zones'});
   const [viewport, setViewport] = useState({width: 0, height: 0});
@@ -42,12 +52,17 @@ export default function RecognitionPreview() {
   const r = messages[locale].ui.recognition;
   const native = messages[locale].ui.nativeCapture;
 
+  function invalidateContent() { setTrialEpoch(++trialEpochRef.current); }
+
   useEffect(() => {
     let alive = true;
     let stop: (() => void) | null = null;
     void listen<PreviewStateMessage>(PREVIEW_STATE, event => {
       if (event.payload.publication <= publication.current) return;
       publication.current = event.payload.publication;
+      // Count every identity transition, even if React batches A → B → A into one render.
+      if (contentIdentity(snapshotRef.current) !== contentIdentity(event.payload.snapshot)) invalidateContent();
+      snapshotRef.current = event.payload.snapshot;
       setSnapshot(event.payload.snapshot);
       setReceived(true);
     }).then(unlisten => {
@@ -83,7 +98,11 @@ export default function RecognitionPreview() {
   // The raster is read once per frame through the owner-scoped host command; no image data crosses windows.
   const token = snapshot?.owner.token ?? null;
   const frameId = snapshot?.frame?.id ?? null;
+  const frameRevision = snapshot?.frame?.revision ?? null;
   const captureId = snapshot?.capture_id ?? null;
+  const image = raster?.token === token && raster?.captureId === captureId && raster?.frameId === frameId
+    && raster?.frameRevision === frameRevision ? raster.url : null;
+  const trialKey = JSON.stringify([trialEpoch, contentIdentity(snapshot), closing, display.tool, image]);
   const nativeError = snapshot?.nativeSelection?.error ?? null;
   const nativeErrorKey = nativeError === null ? null
     : JSON.stringify([token, snapshot?.nativeSelection?.selection_generation, nativeError]);
@@ -104,18 +123,20 @@ export default function RecognitionPreview() {
     invoke<ArrayBuffer>('recognition_preview', {owner: snapshot.owner, frameId, captureId}).then(bytes => {
       if (!alive) return;
       url = URL.createObjectURL(new Blob([bytes], {type: 'image/png'}));
-      setRaster({captureId, frameId, url});
+      setRaster({token: snapshot.owner.token, captureId, frameId, frameRevision: snapshot.frame!.revision, url});
     }).catch(cause => {if (alive) {setRaster(null); setRasterError(fault(cause));}});
     return () => {
       alive = false;
       if (url !== null) URL.revokeObjectURL(url);
     };
-  }, [token, captureId, frameId]);
+  }, [token, captureId, frameId, frameRevision]);
 
   useEffect(() => {
     const element = stage.current;
     if (!element) return;
-    const observer = new ResizeObserver(() => setViewport({width: element.clientWidth, height: element.clientHeight}));
+    const measure = () => setViewport({width: element.clientWidth, height: element.clientHeight});
+    measure();
+    const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
@@ -129,11 +150,13 @@ export default function RecognitionPreview() {
   }
 
   function changeDisplay(next: PreviewDisplay) {
+    if (next.tool !== display.tool) invalidateContent();
     setDisplay(next);
     send({kind: 'display', display: next});
   }
   function action(next:PreviewAction) {
     if (snapshot === null) return;
+    invalidateContent();
     const message:PreviewActionMessage = {token:snapshot.owner.token, revision:snapshot.revision,
       capture_id:snapshot.capture_id, documentRevision:snapshot.documentRevision, localRevision:snapshot.localRevision,
       generation:snapshot.nativeSelection?.selection_generation ?? 0, action:next};
@@ -144,6 +167,7 @@ export default function RecognitionPreview() {
 
   async function done() {
     if (!snapshot || closing) return;
+    invalidateContent();
     setClosing(true);
     setCloseError(null);
     try {
@@ -158,7 +182,8 @@ export default function RecognitionPreview() {
 
   const frame = snapshot?.frame ?? null;
   const basis = snapshot?.basis ?? null;
-  const editable = snapshot?.editable ?? false;
+  const editable = Boolean(snapshot?.editable && !snapshot.commandBusy && !snapshot.running && !closing);
+  const trialDisabled = !editable || !snapshot?.frameGeometryReady || Boolean(snapshot?.lockReason || snapshot?.nativeSelection?.busy);
   const scale = frame ? displayScale(display.zoom, frame.width, frame.height, viewport) : 1;
   const percent = Math.round(scale * 100);
   const selected = snapshot?.definitions.find(item => item.id === snapshot.selected) ?? null;
@@ -174,7 +199,7 @@ export default function RecognitionPreview() {
       helpButton.current?.focus();
       return;
     }
-    if (target.closest('.preview-feedback, button') || !snapshot || !editable) return;
+    if (target.closest('.preview-feedback, .content-trial, button') || !snapshot || !editable) return;
     if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
       event.preventDefault();
       if (snapshot.canUndo) send({kind: 'undo', localRevision: snapshot.localRevision});
@@ -184,19 +209,21 @@ export default function RecognitionPreview() {
     }
   }
 
-  const body = !received
+  const body = (candidate: PixelRect | null, clearCandidate: () => void) => !received
     ? <p className="preview-message muted">{r.previewWaiting}</p>
     : snapshot === null
       ? <p className="preview-message">{r.previewNoOwner}</p>
       : !frame || !basis
         ? <p className="preview-message">{r.previewNoFrame}</p>
         : !snapshot.frameGeometryReady
-          ? raster?.captureId === snapshot.capture_id && raster?.frameId === frame.id
-            ? <img src={raster.url} width={frame.width} height={frame.height} alt=""/>
+          ? image
+            ? <img src={image} width={frame.width} height={frame.height} alt=""/>
             : null
           : <RecognitionCanvas width={frame.width} height={frame.height} basis={basis} definitions={snapshot.definitions} selected={snapshot.selected}
-            observations={snapshot.observations} image={raster?.captureId === snapshot.capture_id && raster?.frameId === frame.id ? raster.url : null} scale={scale} tool={display.tool}
-            editable={editable} generation={snapshot} labels={{surface: r.surfaceLabel, search: r.searchLabel, observed: r.observed}} onEdit={send}/>;
+            observations={snapshot.observations} image={image} scale={scale} tool={display.tool}
+            editable={editable} generation={snapshot} labels={{surface: r.surfaceLabel, search: r.searchLabel, observed: r.observed}}
+            contentCandidate={candidate} onContentEditStart={clearCandidate}
+            onEdit={edit => {if (edit.kind === 'content') clearCandidate(); send(edit);}}/>;
 
   const hasFeedback = Boolean((nativeError && !nativeErrorHidden && !duplicateNativeError) || snapshot?.nativeCache?.error
     || (frame && snapshot && !snapshot.frameGeometryReady) || stopError || closeError
@@ -209,6 +236,14 @@ export default function RecognitionPreview() {
 
   return <LocaleContext value={locale}>
     <div className="preview-app" onKeyDown={keyDown}>
+      <ContentTrial identity={trialKey} active={display.tool === 'content'} disabled={trialDisabled}
+        width={frame?.width ?? 0} height={frame?.height ?? 0} content={basis?.content ?? null} image={image}
+        getImage={() => stage.current?.querySelector<HTMLImageElement>('.recognition-surface img') ?? null}
+        isCurrent={() => trialEpochRef.current === trialEpoch && contentIdentity(snapshotRef.current) === contentIdentity(snapshot)}
+        onApply={content => {
+          if (trialEpochRef.current === trialEpoch && contentIdentity(snapshotRef.current) === contentIdentity(snapshot)) send({kind: 'content', content});
+        }}>
+      {(candidate, clearCandidate, controls, feedback) => <>
       <header className="preview-toolbar">
         <div className="segmented preview-tools" role="group" aria-label={r.toolLabel}>
           <button id="preview-tool-zones" type="button" aria-pressed={display.tool === 'zones'} disabled={!frame}
@@ -223,17 +258,17 @@ export default function RecognitionPreview() {
             onClick={() => changeDisplay({...display, zoom: stepZoom(scale, -1)})}>−</button>
           <Select id="preview-zoom" className="preview-zoom-select" aria-label={r.zoomLabel} value={display.zoom === 'fit' ? 'fit' : String(display.zoom)} disabled={!frame}
             onChange={value => changeDisplay({...display, zoom: value === 'fit' ? 'fit' : Number(value)})}
-            options={[{value: 'fit', label: display.zoom === 'fit' ? `${r.fit} · ${r.percent(percent)}` : r.fit},
+            options={[{value: 'fit', label: display.zoom === 'fit' ? r.percent(percent) : r.fit},
               ...ZOOM_LEVELS.map(level => ({value: String(level), label: r.percent(level)}))]}/>
           <button id="preview-zoom-in" type="button" aria-label={r.zoomIn} title={r.zoomIn} disabled={!frame || percent >= ZOOM_LEVELS[ZOOM_LEVELS.length - 1]}
             onClick={() => changeDisplay({...display, zoom: stepZoom(scale, 1)})}>+</button>
         </div>
-        <div className="button-row preview-edit-actions">
+        {display.tool === 'content' ? controls : <div className="button-row preview-edit-actions">
           <button id="preview-undo" type="button" disabled={!editable || !snapshot?.canUndo}
             onClick={() => snapshot && send({kind: 'undo', localRevision: snapshot.localRevision})}>{r.undo}</button>
           <button id="preview-delete" type="button" className="danger-text" disabled={!editable || !selected}
             onClick={() => selected && send({kind: 'delete', id: selected.id, revision: selected.revision})}>{r.delete}</button>
-        </div>
+        </div>}
         <div className="preview-actions">
           <button id="preview-stop" type="button" className="stop-button" disabled={!snapshot?.running}
             style={{visibility: snapshot?.running ? 'visible' : 'hidden'}} onClick={() => {
@@ -252,7 +287,7 @@ export default function RecognitionPreview() {
       <main className="preview-viewport">
         <div ref={stage} id="preview-image-viewport"
           className={`recognition-stage${frame && !snapshot?.frameGeometryReady ? ' preview-raw' : display.zoom === 'fit' ? ' fit' : ''}`}>
-          {body}
+          {body(candidate, clearCandidate)}
         </div>
         {(helpOpen || hasFeedback) && <aside id="preview-feedback" className="preview-feedback" aria-label={r.previewFeedback} tabIndex={0}>
           {helpOpen && <section id="preview-help" aria-labelledby="preview-help-toggle" tabIndex={0}>
@@ -278,12 +313,15 @@ export default function RecognitionPreview() {
       </main>
       <footer className="preview-status-rail">
         <span id="native-capture-status" className="preview-capture-status muted" role="status" title={status}>{status}</span>
+        {feedback}
         <span id="preview-scale" className="muted mono" title={frame ? r.scale(frame.width, frame.height, percent) : undefined}>
           {frame && r.scale(frame.width, frame.height, percent)}
         </span>
         <button ref={helpButton} id="preview-help-toggle" type="button" aria-expanded={helpOpen} aria-controls="preview-help"
           onClick={() => setHelpOpen(value => !value)}>{r.previewHelpButton}</button>
       </footer>
+      </>}
+      </ContentTrial>
     </div>
   </LocaleContext>;
 }

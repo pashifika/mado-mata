@@ -35,7 +35,7 @@
 .preview-toolbar button { flex-shrink: 0; font-size: 12px; padding: 4px 10px; white-space: nowrap; }
 .preview-tools { grid-area: tools; }
 .preview-zoom-controls { grid-area: zoom; }
-.preview-toolbar > .preview-edit-actions { grid-area: edit; justify-self: end; flex-wrap: nowrap; margin: 0; }
+.preview-toolbar > .preview-edit-actions, .preview-toolbar > .content-trial { grid-area: edit; justify-self: end; flex-wrap: nowrap; margin: 0; }
 .preview-actions { grid-area: actions; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .preview-actions > button { min-height: 30px; }
 .preview-actions > #preview-stop { margin-inline-end: auto; }
@@ -44,7 +44,7 @@
   .preview-toolbar { grid-template-areas: "tools zoom edit" "actions actions actions"; grid-template-columns: auto auto 1fr; grid-template-rows: repeat(2, 32px); }
 }
 @media (max-width: 760px) {
-  .preview-toolbar { grid-template-areas: "tools edit" "zoom zoom" "actions actions"; grid-template-columns: 1fr auto; grid-template-rows: repeat(3, 32px); }
+  .preview-toolbar { grid-template-areas: "tools zoom" "edit edit" "actions actions"; grid-template-columns: auto 1fr; grid-template-rows: repeat(3, 32px); }
 }
 .preview-capture-button { display: inline-flex; align-items: stretch; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); }
 .preview-capture-button > button { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; border: 0; border-radius: 0; background: transparent; color: #fff; }
@@ -74,8 +74,12 @@
 /* The zoom Select matches the toolbar buttons; recognition.css precedes the base Select rules, hence the scoping. */
 .preview-toolbar .select-trigger { min-height: 0; gap: 8px; border-color: #c9d2dd; }
 .preview-toolbar .select-trigger:disabled { background: var(--surface); color: inherit; }
-.preview-toolbar .preview-zoom-select { width: 120px; min-width: 120px; max-width: 120px; }
+.preview-toolbar .preview-zoom-select { width: 92px; min-width: 92px; max-width: 92px; }
 .preview-message { margin: 24px; }
+/* Candidate controls occupy the toolbar, never the image. Feedback stays in the fixed-height rail. */
+.content-trial { display: flex; align-items: center; gap: 8px; }
+.preview-toolbar .content-trial .select { width: 80px; min-width: 80px; }
+.content-trial-status { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-muted); }
 /* Lift the focused segment so its outline paints over its neighbours. */
 .segmented { display: inline-flex; align-items: center; gap: 0; }
 .segmented > button, .segmented > .select { border-radius: 0; }
@@ -104,6 +108,7 @@
 .recognition-observation { fill: none; stroke: #52c41a; stroke-width: 1.5; }
 .recognition-observation.stale { stroke: #faad14; stroke-dasharray: 4 3; }
 .recognition-draft { fill: #fff; fill-opacity: .1; stroke: #fff; stroke-width: 1.5; stroke-dasharray: 4 3; }
+.recognition-content-candidate { fill: none; stroke: #43e6ef; stroke-width: 2.5; stroke-dasharray: 10 5; pointer-events: none; }
 .recognition-handle { fill: #fff; stroke: #4c9aff; stroke-width: 1.5; }
 .recognition-handle.search { stroke: #b37feb; }
 .recognition-handle.content { stroke: #f6c343; }
