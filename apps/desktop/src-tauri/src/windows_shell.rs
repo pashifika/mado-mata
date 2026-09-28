@@ -321,10 +321,8 @@ mod tests {
 
     #[test]
     fn executable_selection_preserves_literal_unicode_and_shell_metacharacters() {
-        let root = std::env::temp_dir().join(format!(
-            "mado-windows-path-{}",
-            mado_mata_desktop::storage::new_id().unwrap()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("mado-windows-path-{}", xid::try_new().unwrap()));
         std::fs::create_dir(&root).unwrap();
         let path = root.join("ゲーム & literal.exe");
         std::fs::write(
