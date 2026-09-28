@@ -1303,7 +1303,6 @@
   "nativeCapture": {
     "heading": "ウィンドウの静止画キャプチャ",
     "select": "ウィンドウを選択",
-    "start": "キャプチャを開始",
     "capture": "キャプチャ",
     "newCapture": "新規キャプチャ",
     "reset": "対象をリセット",

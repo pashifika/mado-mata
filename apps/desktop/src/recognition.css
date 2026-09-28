@@ -39,7 +39,7 @@
 .preview-actions { grid-area: actions; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .preview-actions > button { min-height: 30px; }
 .preview-actions > #preview-stop { margin-inline-end: auto; }
-.preview-toolbar .capture-main-button { box-sizing: border-box; width: 140px; }
+.preview-toolbar .capture-main-button { box-sizing: border-box; width: 96px; }
 @media (max-width: 1000px) {
   .preview-toolbar { grid-template-areas: "tools zoom edit" "actions actions actions"; grid-template-columns: auto auto 1fr; grid-template-rows: repeat(2, 32px); }
 }

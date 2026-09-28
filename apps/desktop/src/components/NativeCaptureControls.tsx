@@ -36,9 +36,9 @@ export default function NativeCaptureControls({disabled, cancelDisabled, selecti
     </button>
     <button id={operation ? 'native-cancel' : 'native-capture'} className="capture-main-button" type="button"
       disabled={operation ? cancelDisabled : unavailable || primary === 'select'}
-      title={operation ? copy.cancel : primary === 'start' ? copy.start : copy.capture}
+      title={operation ? copy.cancel : copy.capture}
       onClick={operation ? onCancel : primary === 'start' ? onStart : () => onCapture(false)}>
-      {operation ? messages[locale].ui.recognition.stop : primary === 'start' ? copy.start : copy.capture}
+      {operation ? messages[locale].ui.recognition.stop : copy.capture}
     </button>
   </div>;
 }

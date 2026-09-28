@@ -368,8 +368,8 @@ launcher to bypass them.
 
 The fused capture control sits directly left of **Done**. Its left SVG target
 icon selects a window; after selection it becomes the stacked-frame **New capture**
-icon. The main segment shows **Start capture** for a saved locator, **Capture**
-when ready, and **Stop** during native work. There is no separate capture panel.
+icon. The compact main segment shows **Capture** for both a saved locator and a
+selected window, and **Stop** during native work. There is no separate capture panel.
 Progress uses the fixed-height bottom status bar. **Help** opens the interaction
 guide; help and scrollable errors/warnings overlay the image without resizing its
 viewport or changing Fit scale. Help closes with its button or Escape. Toolbar
@@ -385,7 +385,7 @@ a later failure can appear again.
    visual picker outlines the intended capture area; click selects and Escape
    cancels without forwarding input to the game. Its overlays leave before
    capture. Opening Preview alone acquires no pixels and initializes no OCR.
-2. With a saved target, **Start capture** freshly verifies the locator and selects
+2. With a saved target, **Capture** freshly verifies the locator and selects
    exactly one matching live window. Missing or ambiguous matches require
    explicit reselection; saved PIDs, window numbers and authority are never reused.
 3. **Capture** refreshes the current Capture ID, Regions and unsaved draft.

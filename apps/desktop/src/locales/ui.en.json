@@ -1303,7 +1303,6 @@
   "nativeCapture": {
     "heading": "Frozen window capture",
     "select": "Select window",
-    "start": "Start capture",
     "capture": "Capture",
     "newCapture": "New capture",
     "reset": "Reset target",
