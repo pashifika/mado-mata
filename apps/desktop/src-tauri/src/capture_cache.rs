@@ -3,14 +3,14 @@ use crate::storage::{validate_id, validate_package_id};
 use mado_runtime_comparison::images::INPUT_MAX_BYTES;
 use mado_runtime_comparison::model::Fault;
 use serde::Serialize;
-use std::fs::{self, Metadata, OpenOptions};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 
 pub struct CaptureCache {
     folder: PathBuf,
@@ -54,23 +54,31 @@ impl CaptureCache {
         }
     }
 
+    /// Creates missing managed folders and validates the path before shell dispatch.
+    /// No file contents are accessed here; the shell resolves the pathname separately.
     pub fn folder_for_open(&self) -> Result<PathBuf, Fault> {
         ensure_directories(&self.folder)?;
         check_ancestors(&self.folder)?;
         Ok(self.folder.clone())
     }
 
-    /// Missing files pass through to the ordinary bounded PNG loader.
-    pub fn image_path(&self, package_id: &str, capture_id: &str) -> Result<PathBuf, Fault> {
-        validate_package_id(package_id)?;
+    /// Opens this capture's managed original as a verified handle; `None` when absent.
+    /// The package directory is reached without following links and the entry is opened
+    /// relative to that retained identity; the handle is what the caller reads.
+    pub fn open_image(&self, package_id: &str, capture_id: &str) -> Result<Option<File>, Fault> {
         validate_id(capture_id)?;
-        let directory = self.folder.join(package_id);
-        check_ancestors(&directory)?;
-        let path = directory.join(format!("{capture_id}.png"));
-        if let Some(metadata) = optional_metadata(&path)? {
-            check_regular(&metadata)?;
-        }
-        Ok(path)
+        let Some(directory) = self.package_directory(package_id)? else {
+            return Ok(None);
+        };
+        let Some(file) = directory.open_image(&format!("{capture_id}.png"))? else {
+            return Ok(None);
+        };
+        check_regular(
+            &file
+                .metadata()
+                .map_err(|error| io_fault("inspect cache image", error))?,
+        )?;
+        Ok(Some(file))
     }
 
     /// Atomically replaces this capture's private original; never publishes a partial PNG.
@@ -83,39 +91,26 @@ impl CaptureCache {
                     "cache PNG exceeds the image bound or has an invalid signature",
                 ));
             }
-            let destination = self.image_path(package_id, capture_id)?;
-            let directory = destination.parent().expect("cache image has a parent");
-            ensure_directories(directory)?;
-            let pending = destination.with_extension("pending");
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            options.mode(0o600);
-            let mut file = options
-                .open(&pending)
-                .map_err(|error| io_fault("create cache write", error))?;
+            validate_id(capture_id)?;
+            let directory = self.create_package_directory(package_id)?;
+            let pending = format!("{capture_id}.pending");
+            let mut file = directory.create_pending(&pending)?;
             let publication: Result<(), Fault> = (|| {
                 file.write_all(png)
                     .map_err(|error| io_fault("write cache image", error))?;
                 file.sync_all()
                     .map_err(|error| io_fault("sync cache image", error))?;
                 drop(file);
-                check_ancestors(directory)?;
-                if let Some(metadata) = optional_metadata(&destination)? {
-                    check_regular(&metadata)?;
-                }
                 // The temporary is complete and synced before same-directory replacement.
                 // Only this private cache key may be replaced; package assets are unrelated.
-                fs::rename(&pending, &destination)
-                    .map_err(|error| io_fault("publish cache image", error))?;
+                directory.publish(&pending, &format!("{capture_id}.png"))?;
                 cached = true;
                 Ok(())
             })();
             let cleanup = if cached {
                 Ok(())
             } else {
-                fs::remove_file(&pending)
-                    .map_err(|error| io_fault("remove own cache temporary", error))
+                directory.remove(&pending)
             };
             match (publication, cleanup) {
                 (Err(mut primary), Err(cleanup)) => {
@@ -132,6 +127,25 @@ impl CaptureCache {
         }
     }
 
+    fn package_directory(&self, package_id: &str) -> Result<Option<PackageDirectory>, Fault> {
+        validate_package_id(package_id)?;
+        let directory = self.folder.join(package_id);
+        check_ancestors(&directory)?;
+        if optional_metadata(&directory)?.is_none() {
+            return Ok(None);
+        }
+        PackageDirectory::open(&directory).map(Some)
+    }
+
+    fn create_package_directory(&self, package_id: &str) -> Result<PackageDirectory, Fault> {
+        validate_package_id(package_id)?;
+        let directory = self.folder.join(package_id);
+        ensure_directories(&directory)?;
+        PackageDirectory::open(&directory)
+    }
+
+    /// A refused entry or an observed folder change fails the whole measurement; no
+    /// partial total is ever reported as complete.
     fn measure(&self) -> Result<u64, Fault> {
         check_ancestors(&self.folder)?;
         if optional_metadata(&self.folder)?.is_none() {
@@ -147,7 +161,9 @@ impl CaptureCache {
                 fs::read_dir(&directory).map_err(|error| io_fault("measure cache folder", error))?
             {
                 let entry = entry.map_err(|error| io_fault("read cache entry", error))?;
-                let metadata = fs::symlink_metadata(entry.path())
+                // Entry metadata comes from the opened directory, not a re-resolved pathname.
+                let metadata = entry
+                    .metadata()
                     .map_err(|error| io_fault("inspect cache entry", error))?;
                 check_not_link(&metadata)?;
                 if metadata.is_dir() {
@@ -166,11 +182,243 @@ impl CaptureCache {
                 return Err(refused("cache folder changed during measurement"));
             }
             #[cfg(unix)]
-            if before.dev() != after.dev() || before.ino() != after.ino() {
+            let replaced = before.dev() != after.dev() || before.ino() != after.ino();
+            // Windows exposes no stable directory identity in std; creation time is the
+            // strongest observable property beside the modification check above.
+            #[cfg(windows)]
+            let replaced = before.creation_time() != after.creation_time();
+            if replaced {
                 return Err(refused("cache folder was replaced during measurement"));
             }
         }
         Ok(total)
+    }
+}
+
+/// A `caches/<package_id>` directory reached without following any link and retained
+/// for the duration of one entry operation, so a pathname substituted afterwards cannot
+/// redirect that operation outside the managed cache.
+struct PackageDirectory {
+    /// The leaf descriptor; every entry operation is relative to it.
+    #[cfg(unix)]
+    handle: File,
+    /// Root first, then descendants, each held without delete sharing so no pinned level
+    /// can be renamed or replaced while the pathname operations below use it.
+    #[cfg(windows)]
+    _pinned: Vec<File>,
+    #[cfg(windows)]
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl PackageDirectory {
+    /// Walks every component from `/` with directory-only, no-follow opens.
+    fn open(path: &Path) -> Result<Self, Fault> {
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC);
+        let mut handle = options
+            .open("/")
+            .map_err(|error| io_fault("open filesystem root", error))?;
+        for component in path.components() {
+            match component {
+                Component::RootDir => {}
+                Component::Normal(name) => {
+                    handle = at::open(&handle, name, libc::O_RDONLY | libc::O_DIRECTORY, 0)
+                        .map_err(|error| io_fault("open cache folder", error))?;
+                }
+                Component::Prefix(_) | Component::CurDir | Component::ParentDir => {
+                    return Err(refused("cache path is not normalized"));
+                }
+            }
+        }
+        Ok(Self { handle })
+    }
+
+    fn open_image(&self, name: &str) -> Result<Option<File>, Fault> {
+        match at::open(
+            &self.handle,
+            name.as_ref(),
+            libc::O_RDONLY | libc::O_NONBLOCK,
+            0,
+        ) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(io_fault("open cache image", error)),
+        }
+    }
+
+    fn create_pending(&self, name: &str) -> Result<File, Fault> {
+        at::open(
+            &self.handle,
+            name.as_ref(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        )
+        .map_err(|error| io_fault("create cache write", error))
+    }
+
+    fn publish(&self, pending: &str, destination: &str) -> Result<(), Fault> {
+        at::rename(&self.handle, pending.as_ref(), destination.as_ref())
+            .map_err(|error| io_fault("publish cache image", error))
+    }
+
+    fn remove(&self, name: &str) -> Result<(), Fault> {
+        at::unlink(&self.handle, name.as_ref())
+            .map_err(|error| io_fault("remove own cache temporary", error))
+    }
+}
+
+#[cfg(windows)]
+impl PackageDirectory {
+    /// Pins every directory below the drive root, each opened on its own reparse point.
+    fn open(path: &Path) -> Result<Self, Fault> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        let mut pinned = Vec::new();
+        let mut current = PathBuf::with_capacity(path.as_os_str().len());
+        for component in path.components() {
+            current.push(component.as_os_str());
+            match component {
+                Component::Prefix(_) | Component::RootDir => {}
+                Component::Normal(_) => {
+                    let handle = OpenOptions::new()
+                        .read(true)
+                        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                        .open(&current)
+                        .map_err(|error| io_fault("open cache folder", error))?;
+                    let metadata = handle
+                        .metadata()
+                        .map_err(|error| io_fault("inspect cache folder", error))?;
+                    check_not_link(&metadata)?;
+                    if !metadata.is_dir() {
+                        return Err(refused("cache ancestor is not a directory"));
+                    }
+                    pinned.push(handle);
+                }
+                Component::CurDir | Component::ParentDir => {
+                    return Err(refused("cache path is not normalized"));
+                }
+            }
+        }
+        Ok(Self {
+            _pinned: pinned,
+            path: current,
+        })
+    }
+
+    fn open_image(&self, name: &str) -> Result<Option<File>, Fault> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        };
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        match options.open(self.path.join(name)) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(io_fault("open cache image", error)),
+        }
+    }
+
+    fn create_pending(&self, name: &str) -> Result<File, Fault> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.path.join(name))
+            .map_err(|error| io_fault("create cache write", error))
+    }
+
+    fn publish(&self, pending: &str, destination: &str) -> Result<(), Fault> {
+        fs::rename(self.path.join(pending), self.path.join(destination))
+            .map_err(|error| io_fault("publish cache image", error))
+    }
+
+    fn remove(&self, name: &str) -> Result<(), Fault> {
+        fs::remove_file(self.path.join(name))
+            .map_err(|error| io_fault("remove own cache temporary", error))
+    }
+}
+
+/// Directory-relative entry operations; each name is one validated component.
+#[cfg(unix)]
+mod at {
+    use std::ffi::{CString, OsStr, c_int, c_uint};
+    use std::fs::File;
+    use std::io;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    fn component(name: &OsStr) -> io::Result<CString> {
+        CString::new(name.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+    }
+
+    /// Opens `name` inside `directory`; a link entry is refused, never followed.
+    #[expect(
+        unsafe_code,
+        reason = "audited directory-relative open of one validated entry"
+    )]
+    pub fn open(directory: &File, name: &OsStr, flags: c_int, mode: c_uint) -> io::Result<File> {
+        let name = component(name)?;
+        // SAFETY: The directory descriptor stays open for this borrow and the name is a
+        // live NUL-terminated string consumed synchronously; mode is only read with O_CREAT.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                mode,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: openat just created this descriptor and nothing else owns it.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    #[expect(
+        unsafe_code,
+        reason = "audited directory-relative rename between two validated entries"
+    )]
+    pub fn rename(directory: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        let from = component(from)?;
+        let to = component(to)?;
+        // SAFETY: Both names are live NUL-terminated strings and the descriptor stays
+        // open for this synchronous call.
+        let result = unsafe {
+            libc::renameat(
+                directory.as_raw_fd(),
+                from.as_ptr(),
+                directory.as_raw_fd(),
+                to.as_ptr(),
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[expect(
+        unsafe_code,
+        reason = "audited directory-relative unlink of one validated entry"
+    )]
+    pub fn unlink(directory: &File, name: &OsStr) -> io::Result<()> {
+        let name = component(name)?;
+        // SAFETY: The name is a live NUL-terminated string and the descriptor stays open
+        // for this synchronous call; zero flags unlink a non-directory entry.
+        let result = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 }
 

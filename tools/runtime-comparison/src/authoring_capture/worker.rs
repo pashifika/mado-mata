@@ -51,7 +51,7 @@ enum Request {
         identity: CaptureIdentity,
         candidate: Candidate,
     },
-    RebasePackage(CaptureIdentity),
+    RebaseSource(CaptureIdentity),
     Capture {
         command: Command,
         authority: Arc<CaptureAuthority>,
@@ -62,7 +62,7 @@ enum Request {
 enum Reply {
     Discovered(Vec<Candidate>),
     Selected(Candidate),
-    PackageRebased(CaptureIdentity),
+    SourceRebased(CaptureIdentity),
     Captured(WorkerCaptureResult),
     Finished(WorkerCaptureResult),
 }
@@ -163,7 +163,7 @@ impl AuthoringCaptureWorker {
                 .primary
                 .or_else(|| result.settlement.and_then(|settlement| settlement.primary))
                 .unwrap_or_else(protocol::protocol_fault)),
-            Reply::Selected(_) | Reply::PackageRebased(_) | Reply::Captured(_) => {
+            Reply::Selected(_) | Reply::SourceRebased(_) | Reply::Captured(_) => {
                 Err(protocol::protocol_fault())
             }
         }
@@ -173,7 +173,7 @@ impl AuthoringCaptureWorker {
         &self.candidates
     }
 
-    pub fn select(&mut self, key: &str, binding_revision: &str) -> Result<Candidate, Fault> {
+    pub fn select(&mut self, key: &str) -> Result<Candidate, Fault> {
         if self.cancel.0.cancelled.load(Ordering::Acquire) {
             return Err(protocol::cancelled());
         }
@@ -186,19 +186,16 @@ impl AuthoringCaptureWorker {
             .find(|candidate| candidate.key == key)
             .ok_or_else(stale)?
             .clone();
-        let mut identity = self.identity.clone();
-        identity.binding_revision = binding_revision.into();
-        identity.validate()?;
         if self
             .selected
             .as_ref()
-            .is_some_and(|selected| selected != &candidate || self.identity != identity)
+            .is_some_and(|selected| selected != &candidate)
         {
             return Err(stale());
         }
         self.requests
             .try_send(Request::Select {
-                identity: identity.clone(),
+                identity: self.identity.clone(),
                 candidate: candidate.clone(),
             })
             .map_err(|_| protocol::protocol_fault())?;
@@ -208,7 +205,6 @@ impl AuthoringCaptureWorker {
             .map_err(|_| protocol::protocol_fault())?
         {
             Reply::Selected(current) if current == candidate => {
-                self.identity = identity;
                 self.selected = Some(current.clone());
                 Ok(current)
             }
@@ -220,9 +216,13 @@ impl AuthoringCaptureWorker {
         }
     }
 
-    /// The host must first prove that the saved package still names the same
-    /// application binding. This changes correlation, never native target authority.
-    pub fn rebase_package(&mut self, package_revision: &str) -> Result<(), Fault> {
+    /// The host proves the same retained application before changing correlation.
+    /// A newly saved binding can be correlated only before the first capture.
+    pub fn rebase_source(
+        &mut self,
+        package_revision: &str,
+        binding_revision: &str,
+    ) -> Result<(), Fault> {
         if self.cancel.0.cancelled.load(Ordering::Acquire) {
             return Err(protocol::cancelled());
         }
@@ -230,21 +230,31 @@ impl AuthoringCaptureWorker {
             return Err(protocol::expired());
         }
         self.selected.as_ref().ok_or_else(stale)?;
-        let mut identity = self.identity.clone();
-        identity.package_revision = package_revision.into();
-        identity.validate()?;
-        if identity == self.identity {
+        if self.identity.package_revision == package_revision
+            && self.identity.binding_revision == binding_revision
+        {
             return Ok(());
         }
+        let identity = CaptureIdentity {
+            owner: self.identity.owner.clone(),
+            package_revision: package_revision.into(),
+            binding_revision: binding_revision.into(),
+            selection_generation: self.identity.selection_generation,
+            request_id: self.identity.request_id.clone(),
+        };
+        if !protocol::same_source_rebase(&self.identity, &identity, self.request_ids.is_empty()) {
+            return Err(stale());
+        }
+        identity.validate()?;
         self.requests
-            .try_send(Request::RebasePackage(identity.clone()))
+            .try_send(Request::RebaseSource(identity.clone()))
             .map_err(|_| protocol::protocol_fault())?;
         match self
             .replies
             .recv()
             .map_err(|_| protocol::protocol_fault())?
         {
-            Reply::PackageRebased(current) if current == identity => {
+            Reply::SourceRebased(current) if current == identity => {
                 self.identity = current;
                 Ok(())
             }
@@ -331,7 +341,7 @@ impl AuthoringCaptureWorker {
                 Ok(
                     Reply::Discovered(_)
                     | Reply::Selected(_)
-                    | Reply::PackageRebased(_)
+                    | Reply::SourceRebased(_)
                     | Reply::Captured(_),
                 ) => {}
                 Err(_) => {
@@ -476,19 +486,19 @@ impl SupervisorState {
                     .try_send(Reply::Selected(candidate))
                     .map_err(|_| protocol::cancelled())?;
             }
-            Received::PackageRebased(identity) => {
+            Received::SourceRebased(identity) => {
                 if self.rebasing.as_ref() != Some(&identity) {
                     return Err(stale());
                 }
                 let (bound, _) = self.selected.as_mut().ok_or_else(stale)?;
-                if !protocol::same_package_rebase(bound, &identity) {
+                if !protocol::same_source_rebase(bound, &identity, self.frame_ids.is_empty()) {
                     return Err(stale());
                 }
                 *bound = identity.clone();
                 self.rebasing = None;
                 self.deadline = None;
                 replies
-                    .try_send(Reply::PackageRebased(identity))
+                    .try_send(Reply::SourceRebased(identity))
                     .map_err(|_| protocol::cancelled())?;
             }
             Received::Captured(pending) => {
@@ -640,36 +650,39 @@ fn supervise_inner(
                             identity,
                             candidate,
                         } => {
-                            let mut bound = state.selected.as_ref().map_or_else(
-                                || request.identity.clone(),
-                                |(bound, _)| bound.clone(),
-                            );
-                            bound.binding_revision = identity.binding_revision.clone();
-                            if identity != bound
+                            let bound = state
+                                .selected
+                                .as_ref()
+                                .map_or(&request.identity, |(bound, _)| bound);
+                            if &identity != bound
                                 || !state.candidates.contains(&candidate)
-                                || state.selected.as_ref().is_some_and(|(bound, selected)| {
-                                    bound != &identity || selected != &candidate
-                                })
+                                || state
+                                    .selected
+                                    .as_ref()
+                                    .is_some_and(|(_, selected)| selected != &candidate)
                             {
                                 return Err(stale());
                             }
                             let command = Command::Select {
                                 key: candidate.key.clone(),
-                                binding_revision: identity.binding_revision.clone(),
                             };
                             state.selecting = Some((identity, candidate));
                             state.deadline = Some(Instant::now() + DISCOVERY_LIMIT);
                             Ok(command)
                         }
-                        Request::RebasePackage(identity) => {
+                        Request::RebaseSource(identity) => {
                             identity.validate()?;
                             let (bound, _) = state.selected.as_ref().ok_or_else(stale)?;
-                            if !protocol::same_package_rebase(bound, &identity) {
+                            if !protocol::same_source_rebase(
+                                bound,
+                                &identity,
+                                state.frame_ids.is_empty(),
+                            ) {
                                 return Err(stale());
                             }
                             state.rebasing = Some(identity.clone());
                             state.deadline = Some(Instant::now() + DISCOVERY_LIMIT);
-                            Ok(Command::RebasePackage { identity })
+                            Ok(Command::RebaseSource { identity })
                         }
                         Request::Capture {
                             mut command,

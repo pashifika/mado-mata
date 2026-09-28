@@ -43,7 +43,8 @@ export interface CaptureDocument {capture_id:string; document:RecognitionDocumen
 export type SnippetKind = 'game_content' | 'ocr_recognize' | 'template_recognize';
 
 // Owner-scoped frame descriptor; pixels stay in the host. Compatible frames reuse confirmed content setup.
-export interface RecognitionFrame {id:string; width:number; height:number; revision:number; confirmed:boolean; historical_capture_at_ms:number|null}
+// `historical` marks frozen earlier pixels (native or cached reload) independently of any acquisition time.
+export interface RecognitionFrame {id:string; width:number; height:number; revision:number; confirmed:boolean; historical:boolean; historical_capture_at_ms:number|null}
 // Read-only host image policy.
 export interface ImagePolicy {
   input_bytes:number; input_pixels:number; crop_bytes:number; crop_pixels:number; package_image_bytes:number;
@@ -129,7 +130,7 @@ export interface PreviewDisplay {zoom:Zoom; tool:PreviewTool}
 export type RecognitionNotice = 'definitionLimit' | 'documentLimit' | 'expectedLimit' | 'nameLimit' | 'invalidGeometry' | 'staleEdit' | 'confirmBeforeReplace';
 export type RecognitionBlock =
   | 'noDocument' | 'noFrame' | 'unconfirmed' | 'confirmed' | 'running' | 'noCapability' | 'empty' | 'overLimit' | 'mixedKinds'
-  | 'templateSingle' | 'noSample' | 'invalid' | 'noChanges' | 'rights' | 'cropFrame' | 'kind' | 'templateUnsaved';
+  | 'templateSingle' | 'noSample' | 'invalid' | 'noChanges' | 'otherCapture' | 'rights' | 'cropFrame' | 'kind' | 'templateUnsaved';
 export type DefinitionIssue = 'name' | 'region' | 'search' | 'searchSmall';
 export type Freshness = 'fresh' | 'stale' | 'historical';
 export type CopyFreshness = 'current' | 'obsolete' | 'failed';
@@ -926,7 +927,8 @@ export function saveBlock(state:RecognitionState):RecognitionBlock|null {
   if (state.cropIds.some(id => !staged(id)) && !geometryConfirmed(state)) return 'unconfirmed';
   if (!state.view.other_bases_confirmed || (!basisReusable(state)
     && !(state.cropIds.length > 0 && state.cropIds.every(staged)))) return 'unconfirmed';
-  if (state.cropIds.length === 0 && !metadataDirty(state)) return 'noChanges';
+  // Save is per capture: pixels pending on an inactive capture need that capture selected, not a global Save.
+  if (state.cropIds.length === 0 && !metadataDirty(state)) return hasOtherPendingCrops(state) ? 'otherCapture' : 'noChanges';
   const savedTemplate = document.definitions.some(item => item.kind === 'template' && (item.saved !== null || state.cropIds.includes(item.id)));
   if (savedTemplate && !rightsValid(document.template_rights)) return 'rights';
   return null;

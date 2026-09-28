@@ -478,3 +478,436 @@ fn package_revision_rebase_requires_the_same_target_declaration_and_binding() {
         .unwrap()
         .native = None;
 }
+
+thread_local! {
+    static SELECTION_PROOF: std::cell::RefCell<Option<(PathBuf, crate::target::AuthoringApplication)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn selected_application(
+    candidate: &Candidate,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<PathBuf, Fault> {
+    if let Some(path) =
+        SELECTION_PROOF.with(|proof| proof.borrow().as_ref().map(|(path, _)| path.clone()))
+    {
+        return Ok(path);
+    }
+    crate::target::selected_application(candidate, cancelled, deadline)
+}
+
+pub(super) fn authoring_application(
+    configuration: &crate::target::TargetConfiguration,
+    declaration: &TargetDeclaration,
+    resolution: &crate::target::TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<crate::target::AuthoringApplication, Fault> {
+    if let Some(proof) =
+        SELECTION_PROOF.with(|proof| proof.borrow().as_ref().map(|(_, proof)| proof.clone()))
+    {
+        return Ok(proof);
+    }
+    crate::target::authoring_application(
+        configuration,
+        declaration,
+        resolution,
+        cancelled,
+        deadline,
+    )
+}
+
+#[cfg(target_os = "macos")]
+struct SelectionProof(Option<(PathBuf, crate::target::AuthoringApplication)>);
+
+#[cfg(target_os = "macos")]
+impl SelectionProof {
+    fn install(path: PathBuf, candidate: &Candidate) -> Self {
+        let proof = crate::target::AuthoringApplication {
+            processes: vec![crate::target::AuthoringProcess {
+                pid: candidate.process_id,
+                lifetime: candidate.process_lifetime,
+                architecture: 1,
+                started: (1, 0),
+                executable: candidate.executable_path.clone(),
+            }],
+            installation: "controlled-installation".into(),
+        };
+        Self(SELECTION_PROOF.with(|slot| slot.replace(Some((path, proof)))))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SelectionProof {
+    fn drop(&mut self) {
+        SELECTION_PROOF.with(|slot| slot.replace(self.0.take()));
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct SelectionFixture {
+    sources: super::super::tests::Sources,
+    _metadata: crate::target::tests::MetadataFixture,
+    owner: AuthoringRef,
+    revision: String,
+    internal_name: String,
+    package_id: String,
+    prior: crate::target::TargetRecord,
+    external: crate::target::TargetRecord,
+    candidate: Candidate,
+    bundle: PathBuf,
+    cancel: WorkerCancel,
+}
+
+#[cfg(target_os = "macos")]
+impl SelectionFixture {
+    fn new(mode: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let sources = super::super::tests::Sources::new();
+        let app = sources.app();
+        let workspace = app.create_workspace("selection", "Selection").unwrap();
+        let editor = app
+            .authoring_create(
+                &crate::application::test_support::view_ref(&workspace),
+                "selection",
+            )
+            .unwrap();
+        let workspace = app.authoring_exit(&editor.owner).unwrap();
+        let root = Path::new(&editor.package_path);
+        crate::application::test_support::declare_target(root, Some("selection-game"));
+        let editor = app
+            .authoring_open(
+                &crate::application::test_support::view_ref(&workspace),
+                root,
+            )
+            .unwrap();
+        let mut state = lock(&app.workspaces);
+        let package = state
+            .authoring_revision(&editor.owner, &editor.revision)
+            .unwrap();
+        let declaration = package.validate().unwrap().target().unwrap().unwrap();
+        let internal_name = state
+            .resolve_workspace(&editor.owner.workspace)
+            .unwrap()
+            .internal_name
+            .clone();
+        let metadata = crate::target::tests::MetadataFixture::new();
+        let prior_executable = metadata.executable("prior-game");
+        let record = lock(&app.store)
+            .read_target(&internal_name, package.package_id())
+            .unwrap();
+        let prior = lock(&app.store)
+            .save_target(
+                &internal_name,
+                package.package_id(),
+                &declaration,
+                &record.expectation(),
+                crate::target::tests::configuration(prior_executable.to_str().unwrap()),
+                None,
+            )
+            .unwrap()
+            .0;
+        let mut external = prior.clone();
+        external.revision += 1;
+        external
+            .binding
+            .as_mut()
+            .unwrap()
+            .configuration
+            .window_title = "External binding update".into();
+        let target_path = lock(&app.store)
+            .root()
+            .join("tabs")
+            .join(&internal_name)
+            .join(package.package_id())
+            .join("target.config");
+        let bundle = metadata.bundle(false).canonicalize().unwrap();
+        let candidate = Candidate {
+            key: "retained-window".into(),
+            label: "Chosen window".into(),
+            process_id: 42,
+            process_lifetime: 777,
+            executable_path: bundle.join("Contents/MacOS/Game"),
+            application_bundle_path: Some(bundle.clone()),
+            native_window: NativeWindow::Macos(73),
+            area: CaptureArea::MacosWindow,
+            geometry: CaptureGeometry {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                pixels_per_unit_x: 1.0,
+                pixels_per_unit_y: 1.0,
+                pixel_width: 1,
+                pixel_height: 1,
+                unit: CoordinateUnit::MacosGlobalPoints,
+            },
+        };
+        let correlation = CaptureIdentity {
+            owner: editor.owner.token.clone(),
+            package_revision: editor.revision.clone(),
+            binding_revision: "unbound-1".into(),
+            selection_generation: 1,
+            request_id: "controlled-selection".into(),
+        };
+        // Real owned transport; only native OS proof and the SDK child are substituted.
+        // Python is a documented repository check prerequisite. No executable game is run.
+        let child = metadata.0.join("selection-child");
+        std::fs::write(
+            child.with_extension("json"),
+            serde_json::to_vec(&serde_json::json!({
+                "mode": mode,
+                "candidate": candidate,
+                "external": external,
+                "target_path": target_path,
+                "engine_revision": mado_runtime_comparison::model::ENGINE_REVISION,
+                "rejected": Fault::new("StaleCapture", "Retained window exited"),
+                "cancelled": Fault::new("Cancelled", "Controlled worker cancelled"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&child, r#"#!/usr/bin/env python3
+import json, pathlib, struct, sys
+fixture = json.loads(pathlib.Path(sys.argv[0]).with_suffix(".json").read_text())
+def read():
+    size = sys.stdin.buffer.read(4)
+    return json.loads(sys.stdin.buffer.read(struct.unpack("<I", size)[0])) if size else {"command": "cancel"}
+def send(value):
+    data = json.dumps(value, separators=(",", ":")).encode()
+    sys.stdout.buffer.write(struct.pack("<I", len(data)) + data)
+    sys.stdout.buffer.flush()
+def finish(fault):
+    send({"event": "terminal", "primary": fixture[fault], "clean": True})
+    sys.exit(0)
+request = read()
+send({"event": "discovered", "identity": request["identity"], "engine_revision": fixture["engine_revision"], "candidates": [fixture["candidate"]]})
+while True:
+    command = read()
+    if command["command"] == "cancel":
+        finish("cancelled")
+    assert command["command"] == "select", "selection must not acquire pixels"
+    if fixture["mode"] == "external-reject":
+        pathlib.Path(fixture["target_path"]).write_text(json.dumps(fixture["external"]))
+        finish("rejected")
+    if fixture["mode"] == "reject":
+        finish("rejected")
+    if fixture["mode"] == "timeout":
+        assert read()["command"] == "cancel"
+        finish("cancelled")
+    selected = fixture["candidate"]
+    if fixture["mode"] == "stale":
+        selected["geometry"]["x"] += 1
+    send({"event": "selected", "identity": request["identity"], "candidate": selected})
+"#).unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut worker = AuthoringCaptureWorker::spawn(
+            &child,
+            DiscoveryRequest {
+                identity: correlation.clone(),
+                executable_or_bundle: None,
+                exact_window_title: None,
+                verified_processes: Vec::new(),
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .unwrap();
+        let candidates = worker.discover().unwrap();
+        let cancel = worker.cancel_handle();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        state.authoring.as_mut().unwrap().native = NativeState {
+            generation: 1,
+            worker: Some(worker),
+            cancel: Some(cancel.clone()),
+            cancelled: cancelled.clone(),
+            correlation: Some(correlation),
+            candidates,
+            has_saved_target: true,
+            preview_closed: false,
+            ..NativeState::default()
+        };
+        lock(&app.authoring_stop).as_mut().unwrap().native = Some(NativeControl {
+            generation: 1,
+            cancelled,
+            worker: Some(cancel.clone()),
+            authority: None,
+        });
+        drop(state);
+        Self {
+            sources,
+            _metadata: metadata,
+            owner: editor.owner,
+            revision: editor.revision,
+            internal_name,
+            package_id: package.package_id().into(),
+            prior,
+            external,
+            candidate,
+            bundle,
+            cancel,
+        }
+    }
+
+    fn select(&self) -> Result<NativeSelectionView, Fault> {
+        let _proof = SelectionProof::install(self.bundle.clone(), &self.candidate);
+        self.sources.app().native_select_candidate(
+            &self.owner,
+            &self.revision,
+            1,
+            &self.candidate.key,
+        )
+    }
+
+    fn assert_failed(&self, category: &str) {
+        assert_eq!(self.select().unwrap_err().category, category);
+        let settlement = self.cancel.try_settlement().unwrap();
+        assert!(settlement.child_reaped && settlement.clean && !settlement.forced);
+        let app = self.sources.app();
+        let retained = lock(&app.store)
+            .read_target(&self.internal_name, &self.package_id)
+            .unwrap();
+        assert_eq!(
+            retained, self.prior,
+            "a rejected retained window must not replace the saved locator"
+        );
+        assert!(
+            !lock(&app.workspaces)
+                .authoring
+                .as_ref()
+                .unwrap()
+                .native
+                .occupied()
+        );
+        assert!(matches!(
+            app.native_capture(
+                &self.owner, &self.revision, 1, None, 0, true, &[],
+                &std::collections::BTreeMap::new(), None,
+            ),
+            Err(error) if error.category == "StaleNativeSelection"
+        ));
+    }
+
+    fn target_path(&self) -> PathBuf {
+        lock(&self.sources.app().store)
+            .root()
+            .join("tabs")
+            .join(&self.internal_name)
+            .join(&self.package_id)
+            .join("target.config")
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rejected_native_selection_preserves_durable_binding_and_revision() {
+    SelectionFixture::new("reject").assert_failed("StaleCapture");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn stale_native_selection_preserves_durable_binding_and_revision() {
+    SelectionFixture::new("stale").assert_failed("StaleCapture");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn timed_out_native_selection_preserves_durable_binding_and_revision() {
+    SelectionFixture::new("timeout").assert_failed("DeadlineExceeded");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_selection_persistence_failure_admits_no_capture() {
+    use std::os::unix::fs::PermissionsExt;
+    struct RestorePermissions(PathBuf, std::fs::Permissions);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+        }
+    }
+    let fixture = SelectionFixture::new("accept");
+    let path = fixture.target_path();
+    let before = std::fs::read(&path).unwrap();
+    let directory = path.parent().unwrap();
+    let restore = RestorePermissions(
+        directory.into(),
+        std::fs::metadata(directory).unwrap().permissions(),
+    );
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+    // Private readable originals pass validation; creating target.pending must fail.
+    let probe = std::fs::write(directory.join("permission-probe"), b"");
+    assert_eq!(
+        probe.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "this regression requires an unprivileged filesystem owner"
+    );
+    fixture.assert_failed("Storage");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!path.with_extension("pending").exists());
+    drop(restore);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn acknowledged_native_selection_saves_once_and_late_stop_preserves_binding() {
+    let fixture = SelectionFixture::new("accept");
+    let selected = fixture.select().unwrap();
+    assert_eq!(
+        selected.selected_id.as_deref(),
+        Some(fixture.candidate.key.as_str())
+    );
+    let app = fixture.sources.app();
+    let committed = lock(&app.store)
+        .read_target(&fixture.internal_name, &fixture.package_id)
+        .unwrap();
+    assert_eq!(committed.revision, fixture.prior.revision + 1);
+    assert_eq!(
+        committed.binding.as_ref().unwrap().configuration.game.path,
+        fixture.bundle.to_str().unwrap()
+    );
+    {
+        let state = lock(&app.workspaces);
+        let native = &state.authoring.as_ref().unwrap().native;
+        let source = native.source.as_ref().unwrap();
+        let Source::Macos { record, .. } = source else {
+            unreachable!()
+        };
+        assert_eq!(record, &committed);
+        assert_eq!(
+            native.correlation.as_ref().unwrap().binding_revision,
+            source.binding_revision().unwrap()
+        );
+    }
+    assert!(app.authoring_stop(&fixture.owner).unwrap());
+    assert!(matches!(
+        app.native_capture(
+            &fixture.owner, &fixture.revision, 1, None, 0, true, &[],
+            &std::collections::BTreeMap::new(), None,
+        ),
+        Err(error) if matches!(error.category.as_str(), "StaleNativeSelection" | "NativeCaptureBusy")
+    ));
+    app.native_release_selection(&fixture.owner, &fixture.revision, 1)
+        .unwrap();
+    assert_eq!(
+        lock(&app.store)
+            .read_target(&fixture.internal_name, &fixture.package_id)
+            .unwrap(),
+        committed
+    );
+    let settlement = fixture.cancel.try_settlement().unwrap();
+    assert!(settlement.child_reaped && settlement.clean && !settlement.forced);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rejected_native_selection_does_not_roll_back_an_external_binding_update() {
+    let fixture = SelectionFixture::new("external-reject");
+    assert_eq!(fixture.select().unwrap_err().category, "StaleCapture");
+    let retained = lock(&fixture.sources.app().store)
+        .read_target(&fixture.internal_name, &fixture.package_id)
+        .unwrap();
+    assert_eq!(retained, fixture.external);
+    let settlement = fixture.cancel.try_settlement().unwrap();
+    assert!(settlement.child_reaped && settlement.clean && !settlement.forced);
+}

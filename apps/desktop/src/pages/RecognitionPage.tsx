@@ -197,8 +197,8 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
       </dl>
     </div>
     <p className="field-help">{frame ? confirmed ? r.previewHelp : r.confirmHelp : document ? r.noFrameSaved : r.noFrame}</p>
-    {frame?.historical_capture_at_ms != null && <p id="recognition-historical" className="field-help">
-      {messages[locale].ui.nativeCapture.historical} {new Date(frame.historical_capture_at_ms).toLocaleString(locale)}
+    {frame?.historical && <p id="recognition-historical" className="field-help">
+      {messages[locale].ui.nativeCapture.historical}{frame.historical_capture_at_ms != null && ` ${new Date(frame.historical_capture_at_ms).toLocaleString(locale)}`}
     </p>}
     <p className="field-help">{r.limits(Math.round(policy.input_bytes / MIB), policy.input_pixels.toLocaleString(locale), Math.round(policy.crop_bytes / MIB),
       policy.crop_pixels.toLocaleString(locale))}</p>

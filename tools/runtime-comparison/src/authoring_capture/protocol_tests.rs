@@ -247,11 +247,12 @@ fn stale_binding_and_unsolicited_frames_are_refused() {
 }
 
 #[test]
-fn package_rebase_preserves_selection_scope_and_refuses_the_old_package() {
+fn source_rebase_preserves_selection_scope_and_refuses_the_old_package() {
     for field in 0..5 {
         let mut bytes = Vec::new();
         protocol::write_event(&mut bytes, &discovered()).unwrap();
         protocol::write_event(&mut bytes, &selected()).unwrap();
+        completed(&mut bytes, identity());
         let mut rebased = identity();
         rebased.package_revision = "saved-package".into();
         match field {
@@ -263,7 +264,7 @@ fn package_rebase_preserves_selection_scope_and_refuses_the_old_package() {
         }
         protocol::write_event(
             &mut bytes,
-            &Event::PackageRebased {
+            &Event::SourceRebased {
                 identity: rebased.clone(),
             },
         )

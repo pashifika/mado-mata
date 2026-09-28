@@ -19,10 +19,14 @@ Use the public `mado-pilot` revision
 required geometry and image-payload limits, and `Session::commit_frame`.
 One application-owned child keeps the original Engine and TargetId for the Preview
 lifetime. Discovery is bounded to 5 seconds and 64 matching processes / 64 eligible
-windows. First selection requires no prior Run-page binding; the verified
-application/window locator is synchronized to that workspace/package without
-inventing an input policy. Saved locators require fresh verification and exactly
-one matching window on explicit Start. They never persist native authority.
+windows. First selection requires no prior Run-page binding. The child must
+acknowledge the exact retained candidate before the host verifies and saves its
+application/window locator; rejected selection cannot overwrite a saved locator.
+Before the first Capture, the worker adopts the committed binding revision
+without rediscovery. Later cancellation refuses acquisition but does not undo
+an admitted durable save. No input policy is invented. Saved locators require
+fresh verification and exactly one matching window on explicit Start; they
+never persist native authority.
 
 Retaining the Engine is distinct from retaining a capture session. Each explicit
 Capture opens one bounded session, commits at most one frame within 10 seconds,
@@ -67,10 +71,25 @@ root's `caches/` directory: `~/.config/mado-mata/caches` by default, or
 the former platform cache is neither a fallback nor automatically migrated.
 Refresh replaces only its capture's original. Cache failure does not erase
 an accepted frame. Explicit reload restores historical pixels with fresh runtime
-revisions, never native authority. Configuration snapshots use their existing
-managed-file whitelist, excluding cache bytes despite the shared parent root.
+revisions, never native authority. Historical status is independent of the
+optional native acquisition timestamp. Configuration snapshots use their
+existing managed-file whitelist, excluding cache bytes despite the shared parent root.
 Image bytes/native identities remain excluded from packages, profiles, backups
 and routine logs; the preference may be backed up.
+
+A controlled post-validation file-link substitution previously loaded pixels
+outside the cache. Reads now retain the verified file handle; publication and
+cleanup retain the package-directory identity (directory-relative on Unix/macOS,
+ancestor handles without delete sharing on Windows). Publication may replace a
+link entry without following it. Measurement rejects unsafe/disappearing entries
+and observed directory changes, but is not an atomic filesystem snapshot.
+
+Folder opening creates missing managed directories and validates the pathname
+before external shell dispatch; it reads or writes no file contents. Finder and
+Explorer resolve that pathname independently. Deliberate same-user replacement
+after validation is outside this containment guarantee; dispatch success is not
+proof of the file manager's eventual resolution. This supersedes the earlier
+absolute folder-open guarantee rather than adding a hostile-user sandbox.
 
 PNG encoding precedes `Session::commit_frame` and host acceptance. The cache
 reuses the bounded transfer PNG; it does not encode a second image. Encoding

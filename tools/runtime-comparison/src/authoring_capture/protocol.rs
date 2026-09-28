@@ -146,9 +146,13 @@ pub(super) fn same_selection(left: &CaptureIdentity, right: &CaptureIdentity) ->
         && left.selection_generation == right.selection_generation
 }
 
-pub(super) fn same_package_rebase(current: &CaptureIdentity, next: &CaptureIdentity) -> bool {
+pub(super) fn same_source_rebase(
+    current: &CaptureIdentity,
+    next: &CaptureIdentity,
+    before_capture: bool,
+) -> bool {
     current.owner == next.owner
-        && current.binding_revision == next.binding_revision
+        && (before_capture || current.binding_revision == next.binding_revision)
         && current.selection_generation == next.selection_generation
         && current.request_id == next.request_id
 }
@@ -201,9 +205,8 @@ pub(super) fn validate_candidates(candidates: &[Candidate]) -> Result<(), Fault>
 pub(super) enum Command {
     Select {
         key: String,
-        binding_revision: String,
     },
-    RebasePackage {
+    RebaseSource {
         identity: CaptureIdentity,
     },
     Capture {
@@ -233,7 +236,7 @@ pub(super) enum Event {
         identity: CaptureIdentity,
         candidate: Candidate,
     },
-    PackageRebased {
+    SourceRebased {
         identity: CaptureIdentity,
     },
     Frame {
@@ -286,7 +289,7 @@ pub(super) fn write_event(output: &mut impl Write, event: &Event) -> Result<(), 
 pub(super) enum Received {
     Discovered(CaptureIdentity, Vec<Candidate>),
     Selected(CaptureIdentity, Candidate),
-    PackageRebased(CaptureIdentity),
+    SourceRebased(CaptureIdentity),
     Captured(PendingCapture),
     Terminal { primary: Option<Fault>, clean: bool },
 }
@@ -299,6 +302,7 @@ pub(super) fn read_events(
 ) -> Result<(), Fault> {
     let mut discovered = false;
     let mut selection: Option<(CaptureIdentity, Candidate)> = None;
+    let mut before_capture = true;
     loop {
         match read_message::<Event>(input, METADATA_BYTES)? {
             Event::Discovered {
@@ -334,14 +338,14 @@ pub(super) fn read_events(
                 send.try_send(Ok(Received::Selected(identity, candidate)))
                     .map_err(|_| protocol_fault())?;
             }
-            Event::PackageRebased { identity } => {
+            Event::SourceRebased { identity } => {
                 identity.validate()?;
                 let (current, _) = selection.as_mut().ok_or_else(protocol_fault)?;
-                if !same_package_rebase(current, &identity) {
+                if !same_source_rebase(current, &identity, before_capture) {
                     return Err(protocol_fault());
                 }
                 *current = identity.clone();
-                send.try_send(Ok(Received::PackageRebased(identity)))
+                send.try_send(Ok(Received::SourceRebased(identity)))
                     .map_err(|_| protocol_fault())?;
             }
             Event::Frame { capture } => {
@@ -351,6 +355,7 @@ pub(super) fn read_events(
                 }) {
                     return Err(protocol_fault());
                 }
+                before_capture = false;
                 let pending =
                     PendingCapture::read_private(input, &capture.identity, &capture.geometry)?;
                 // The worker drops its PNG before this receipt. Keep the parent's

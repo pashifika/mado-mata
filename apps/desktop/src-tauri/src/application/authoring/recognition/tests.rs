@@ -2618,3 +2618,199 @@ fn refresh_review_explicit_load_releases_current_stages_even_when_read_fails() {
         assert!(pending_crop_budget(&editor).is_empty());
     }
 }
+
+/// The managed cache refuses linked ancestors, so this editor lives under the resolved temp root.
+fn cached_editor() -> Editor {
+    let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "mado-recognition-cache-{}",
+        crate::storage::new_id().unwrap()
+    ));
+    crate::storage::Store::new(root.clone())
+        .unwrap()
+        .initialize(crate::application::test_support::preferences())
+        .unwrap();
+    let application = Application::new(
+        root.clone(),
+        root.join("runner-must-not-be-launched"),
+        root.join("engine-must-not-be-launched"),
+    )
+    .unwrap();
+    Editor::with_fixture(Fixture { root, application })
+}
+
+fn solid_png(value: u8) -> images::EncodedImage {
+    let image = DecodedImage::from_rgba(32, 24, vec![value; 32 * 24 * 4]).unwrap();
+    images::encode_crop(&image, [0, 0, 32, 24]).unwrap()
+}
+
+fn frame_pixels(app: &Application) -> Option<Vec<u8>> {
+    lock(&app.workspaces)
+        .authoring
+        .as_ref()
+        .unwrap()
+        .recognition
+        .frame
+        .as_ref()
+        .map(|frame| frame.image.rgba.clone())
+}
+
+#[test]
+fn explicit_cached_reload_reports_historical_status_without_a_native_timestamp() {
+    let editor = cached_editor();
+    let app = editor.app();
+    let owner = &editor.view.owner;
+    let loaded = editor.load();
+    let selected = loaded.frame.as_ref().unwrap();
+    assert!(
+        !selected.historical && selected.historical_capture_at_ms.is_none(),
+        "an explicitly selected saved image is not historical evidence"
+    );
+    let capture_id = loaded.capture_id.clone().unwrap();
+    let cache = app.capture_cache().unwrap();
+    assert!(
+        cache
+            .persist(
+                &editor.view.package_id,
+                &capture_id,
+                solid_png(17).as_bytes()
+            )
+            .cached
+    );
+    let saved = app
+        .recognition_save(
+            owner,
+            &editor.view.revision,
+            loaded.document_revision,
+            &[],
+            &capture_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+    assert!(saved.recognition.is_some());
+    let workspace = app.authoring_exit(owner).unwrap();
+    let reopened = app
+        .authoring_open(&view_ref(&workspace), Path::new(&editor.view.package_path))
+        .unwrap();
+    let restored = app
+        .recognition_view(&reopened.owner, &reopened.revision)
+        .unwrap();
+    assert!(restored.frame.is_none());
+    assert_eq!(restored.capture_id.as_deref(), Some(capture_id.as_str()));
+    let reloaded = app
+        .recognition_load_cached(
+            &reopened.owner,
+            &reopened.revision,
+            &cache,
+            &capture_id,
+            restored.document_revision,
+        )
+        .unwrap();
+    assert_eq!(reloaded.capture_id.as_deref(), Some(capture_id.as_str()));
+    let frame = reloaded.frame.as_ref().unwrap();
+    assert_eq!((frame.width, frame.height), (32, 24));
+    assert!(
+        frame.historical,
+        "a cached reload must identify its pixels as historical evidence"
+    );
+    assert_eq!(
+        frame.historical_capture_at_ms, None,
+        "no native acquisition time exists for a cached reload"
+    );
+    assert_eq!(frame_pixels(app).as_deref(), Some(&[17; 32 * 24 * 4][..]));
+    let selected_again = app
+        .recognition_load(
+            &reopened.owner,
+            &reopened.revision,
+            &editor.source,
+            Some(&capture_id),
+            reloaded.document_revision,
+            false,
+        )
+        .unwrap();
+    assert!(
+        !selected_again.frame.as_ref().unwrap().historical,
+        "an explicit saved-image load after a cached reload is not historical"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cached_reload_never_follows_links_substituted_after_managed_validation() {
+    use std::os::unix::fs::symlink;
+    let editor = cached_editor();
+    let app = editor.app();
+    let owner = &editor.view.owner;
+    let revision = &editor.view.revision;
+    let loaded = editor.load();
+    let capture_id = loaded.capture_id.clone().unwrap();
+    let cache = app.capture_cache().unwrap();
+    let managed = solid_png(17);
+    let outside = editor.fixture.root.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let outside_png = outside.join(format!("{capture_id}.png"));
+    fs::write(&outside_png, solid_png(200).as_bytes()).unwrap();
+    let package_dir = editor
+        .fixture
+        .root
+        .join("caches")
+        .join(&editor.view.package_id);
+    let moved = editor.fixture.root.join("caches").join("moved-package");
+    let managed_png = package_dir.join(format!("{capture_id}.png"));
+    for link_directory in [false, true] {
+        assert!(
+            cache
+                .persist(&editor.view.package_id, &capture_id, managed.as_bytes())
+                .cached
+        );
+        let view = app.recognition_view(owner, revision).unwrap();
+        let result = app.load_recognition_source(
+            owner,
+            revision,
+            Some(&capture_id),
+            view.document_revision,
+            false,
+            |candidate| {
+                let opened = cache
+                    .open_image(candidate.package_id(), &capture_id)?
+                    .expect("the managed original was persisted");
+                // Substitution between managed validation and the actual read.
+                if link_directory {
+                    fs::rename(&package_dir, &moved).unwrap();
+                    symlink(&outside, &package_dir).unwrap();
+                } else {
+                    fs::remove_file(&managed_png).unwrap();
+                    symlink(&outside_png, &managed_png).unwrap();
+                }
+                Ok(ImageSource::Cached(opened))
+            },
+        );
+        let pixels = frame_pixels(app);
+        assert!(
+            pixels.as_deref() != Some(&[200; 32 * 24 * 4][..]),
+            "a link substituted after validation must never load outside pixels (directory link: {link_directory})"
+        );
+        assert!(
+            pixels.as_deref() == Some(&[17; 32 * 24 * 4][..]),
+            "the verified managed original is the frame's identity (directory link: {link_directory})"
+        );
+        result.unwrap();
+        // At rest, the substituted layout is refused and leaves no frame.
+        let view = app.recognition_view(owner, revision).unwrap();
+        assert!(
+            app.recognition_load_cached(
+                owner,
+                revision,
+                &cache,
+                &capture_id,
+                view.document_revision
+            )
+            .is_err()
+        );
+        assert!(frame_pixels(app).is_none());
+        if link_directory {
+            fs::remove_file(&package_dir).unwrap();
+            fs::rename(&moved, &package_dir).unwrap();
+        }
+        fs::remove_file(&managed_png).unwrap();
+    }
+}

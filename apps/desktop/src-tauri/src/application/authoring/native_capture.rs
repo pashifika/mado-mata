@@ -651,11 +651,19 @@ impl Application {
             .target()?
             .ok_or_else(|| Fault::new("TargetUndeclared", "Package has no target declaration"))?;
         let record = lock(&self.store).read_target(internal_name, package.package_id())?;
+        #[cfg(not(test))]
+        let resolve_path = crate::target::selected_application;
+        #[cfg(not(test))]
+        let resolve_proof = crate::target::authoring_application;
+        #[cfg(test)]
+        let (resolve_path, resolve_proof) = (
+            publication_tests::selected_application,
+            publication_tests::authoring_application,
+        );
         let (path, kind) = match selected.native_window {
-            NativeWindow::Macos(_) if cfg!(target_os = "macos") => (
-                crate::target::selected_application(selected, cancel, deadline)?,
-                "bundle",
-            ),
+            NativeWindow::Macos(_) if cfg!(target_os = "macos") => {
+                (resolve_path(selected, cancel, deadline)?, "bundle")
+            }
             NativeWindow::Windows(_) if cfg!(windows) && declaration.macos.is_none() => {
                 (selected.executable_path.clone(), "executable")
             }
@@ -676,7 +684,7 @@ impl Application {
         let resolution = configuration.resolve(&declaration)?;
         publication_checkpoint(cancel, deadline)?;
         let proof = if cfg!(target_os = "macos") {
-            Some(crate::target::authoring_application(
+            Some(resolve_proof(
                 &configuration,
                 &declaration,
                 &resolution,
@@ -704,15 +712,23 @@ impl Application {
         if !accepted {
             return Err(reselection());
         }
-        publication_checkpoint(cancel, deadline)?;
-        let (record, _) = lock(&self.store).save_target(
-            internal_name,
-            package.package_id(),
-            &declaration,
-            &record.expectation(),
-            configuration,
-            Some(&resolution),
-        )?;
+        let record = {
+            let store = lock(&self.store);
+            publication_checkpoint(cancel, deadline)?;
+            if self.closing.load(Ordering::Acquire) {
+                return Err(cancelled());
+            }
+            store
+                .save_target(
+                    internal_name,
+                    package.package_id(),
+                    &declaration,
+                    &record.expectation(),
+                    configuration,
+                    Some(&resolution),
+                )?
+                .0
+        };
         self.invalidate_target_observation(None);
         if let Some(proof) = proof {
             Ok(Source::Macos {
@@ -1044,10 +1060,7 @@ impl Application {
             }
             let selected = if saved {
                 let expected = unique_saved_candidate(&candidates)?;
-                let selected = worker
-                    .as_mut()
-                    .ok_or_else(stale)?
-                    .select(&expected.key, &correlation.binding_revision)?;
+                let selected = worker.as_mut().ok_or_else(stale)?.select(&expected.key)?;
                 if selected != *expected {
                     return Err(stale());
                 }
@@ -1379,38 +1392,43 @@ impl Application {
             .ok_or_else(stale)?
             .clone();
         let source = native.source.clone();
+        let mut correlation = native.correlation.clone().ok_or_else(stale)?;
         let cancel = native.cancelled.clone();
         let mut worker = native.worker.take().ok_or_else(stale)?;
         native.active = true;
         drop(state);
         let result = (|| {
             let deadline = Instant::now() + Duration::from_secs(5);
+            let selected = worker.select(candidate_id)?;
+            if selected != expected {
+                return Err(stale());
+            }
+            publication_checkpoint(&cancel, deadline)?;
             let source = match source {
                 Some(source) => {
                     self.revalidate_native_source(&source, &cancel, deadline)?;
+                    if !source.accepts(&selected) {
+                        return Err(stale());
+                    }
                     source
                 }
+                // Selection is acknowledged before this can replace the durable locator.
                 None => self.selected_native_source(
                     &package,
                     &internal_name,
-                    &expected,
+                    &selected,
                     &cancel,
                     deadline,
                 )?,
             };
-            let binding_revision = source.binding_revision()?;
-            let selected = worker.select(candidate_id, &binding_revision)?;
-            if selected != expected || !source.accepts(&selected) {
-                return Err(stale());
-            }
-            publication_checkpoint(&cancel, deadline)?;
-            Ok((source, binding_revision))
+            correlation.binding_revision = source.binding_revision()?;
+            Ok(source)
         })();
         let mut state = lock(&self.workspaces);
         let native = &mut state.authoring.as_mut().ok_or_else(stale)?.native;
         native.worker = Some(worker);
         native.active = false;
-        let (source, binding_revision) = match result {
+        let source = match result {
             Ok(selected) => selected,
             Err(error) => {
                 let error = public_fault(error);
@@ -1420,15 +1438,9 @@ impl Application {
                 return Err(error);
             }
         };
-        if cancel.load(Ordering::Acquire) {
-            return Err(cancelled());
-        }
+        // A late Stop revokes capture admission, not an already committed binding.
         native.source = Some(source);
-        native
-            .correlation
-            .as_mut()
-            .ok_or_else(stale)?
-            .binding_revision = binding_revision;
+        native.correlation = Some(correlation);
         native.has_saved_target = true;
         native.selected = Some(candidate_id.into());
         native.status = "selected";
@@ -1497,8 +1509,7 @@ impl Application {
         )?;
         let native = &mut state.authoring.as_mut().ok_or_else(stale)?.native;
         let mut correlation = native.correlation.clone().ok_or_else(stale)?;
-        let rebase_package = correlation.package_revision != revision;
-        if rebase_package {
+        if correlation.package_revision != revision {
             correlation.package_revision = revision.into();
         }
         correlation.request_id = format!("{}-capture-{generation}-{prepared}", owner.token);
@@ -1522,14 +1533,12 @@ impl Application {
                 if current.revision() != revision {
                     return Err(stale());
                 }
-                if rebase_package {
-                    // Metadata/crop Save may advance package revision, but the target
-                    // declaration and fresh binding proof above must remain identical.
-                    worker
-                        .as_mut()
-                        .ok_or_else(stale)?
-                        .rebase_package(revision)?;
-                }
+                // Correlate the committed binding before the first frame, and any
+                // later package Save, without replacing the retained native target.
+                worker
+                    .as_mut()
+                    .ok_or_else(stale)?
+                    .rebase_source(revision, &correlation.binding_revision)?;
                 Ok(())
             });
         let (capture, primary, session_clean, settlement) = match validation {

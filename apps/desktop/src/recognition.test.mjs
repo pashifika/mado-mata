@@ -504,7 +504,7 @@ test('saving B then A preserves both original sources without reviving the saved
   assert.deepEqual(state.cropSources,{});
   assert.deepEqual(state.pendingCrops[CAPTURE_A].sources,{r1:'f1'});
   assert.equal(recognitionDirty(state),true);
-  assert.equal(saveBlock(state),'noChanges','only the other capture still needs its pixel Save');
+  assert.equal(saveBlock(state),'otherCapture','pending pixels on the inactive capture are a distinct reason, not "nothing to save"');
   const a=state.view.captures.find(capture=>capture.capture_id===CAPTURE_A).document;
   state=applyView(state,captureView(state,CAPTURE_A,a,{staged_crop_ids:['r1'],staged_crop_sources:{r1:'f1'}}));
   const aTicket=saveTicket(state);
@@ -514,6 +514,7 @@ test('saving B then A preserves both original sources without reviving the saved
   state=applySave(state,aTicket,savedView(state,savedA,{revision:'rev-3',document_revision:state.view.document_revision+1,
     staged_crop_ids:[],staged_crop_sources:{}}));
   assert.equal(recognitionDirty(state),false);
+  assert.equal(saveBlock(state),'noChanges','once every capture is saved nothing remains');
   state=applyView(state,captureView(state,CAPTURE_B,b));
   assert.deepEqual(state.cropIds,[]);
   assert.deepEqual(state.cropMarks,{});

@@ -86,8 +86,32 @@ struct Frame {
     id: String,
     revision: u64,
     image: Arc<DecodedImage>,
-    native: Option<NativeFrameOrigin>,
+    source: FrameSource,
     confirmed: bool,
+}
+
+/// Where the single decoded frame came from; transient state, never metadata.
+enum FrameSource {
+    /// An explicitly selected saved image or an accepted detached original.
+    Selected,
+    /// A managed cached original reloaded without native authority.
+    Cached,
+    /// A cleanly detached native capture with its transient provenance.
+    Native(NativeFrameOrigin),
+}
+
+impl FrameSource {
+    /// Frozen pixels from an earlier acquisition, never current target evidence.
+    fn historical(&self) -> bool {
+        !matches!(self, Self::Selected)
+    }
+
+    fn acquired_at_ms(&self) -> Option<u64> {
+        match self {
+            Self::Native(origin) => Some(origin.acquired_at_ms),
+            Self::Selected | Self::Cached => None,
+        }
+    }
 }
 
 /// Only selected regions survive an original's release, as bounded encoded pixels.
@@ -153,6 +177,8 @@ pub struct RecognitionFrame {
     pub height: u32,
     pub revision: u64,
     pub confirmed: bool,
+    /// Frozen earlier pixels (native or cached); independent of any acquisition time.
+    pub historical: bool,
     pub historical_capture_at_ms: Option<u64>,
 }
 
@@ -453,6 +479,7 @@ impl RecognitionState {
         owner: &AuthoringRef,
         image: DecodedImage,
         confirmed: bool,
+        source: FrameSource,
     ) -> Result<PreparedImage, Fault> {
         let frame_revision = self
             .next_frame
@@ -498,8 +525,8 @@ impl RecognitionState {
                 id: format!("{}-frame-{frame_revision}", owner.token),
                 revision: frame_revision,
                 image: Arc::new(image),
+                source,
                 confirmed,
-                native: None,
             }),
         })
     }
@@ -529,9 +556,10 @@ impl RecognitionState {
         image: DecodedImage,
         new_capture: bool,
         confirm_default: bool,
+        source: FrameSource,
     ) -> Result<PreparedImage, Fault> {
         if new_capture || self.capture_id.is_none() {
-            return self.prepare_new_capture(owner, image, confirm_default);
+            return self.prepare_new_capture(owner, image, confirm_default, source);
         }
         let frame_revision = self
             .next_frame
@@ -556,8 +584,8 @@ impl RecognitionState {
                 id: format!("{}-frame-{frame_revision}", owner.token),
                 revision: frame_revision,
                 image: Arc::new(image),
+                source,
                 confirmed,
-                native: None,
             }),
         })
     }
@@ -568,8 +596,10 @@ impl RecognitionState {
         image: DecodedImage,
         new_capture: bool,
         confirm_default: bool,
+        source: FrameSource,
     ) -> Result<(), Fault> {
-        let mut prepared = self.prepare_image(owner, image, new_capture, confirm_default)?;
+        let mut prepared =
+            self.prepare_image(owner, image, new_capture, confirm_default, source)?;
         self.commit_image(&mut prepared);
         Ok(())
     }
@@ -825,7 +855,8 @@ impl Application {
                 height: frame.image.height,
                 revision: frame.revision,
                 confirmed: frame.confirmed,
-                historical_capture_at_ms: frame.native.as_ref().map(|source| source.acquired_at_ms),
+                historical: frame.source.historical(),
+                historical_capture_at_ms: frame.source.acquired_at_ms(),
             }),
             capabilities: json!({
                 "max_ocr_zones":recognition.max_ocr_zones,
@@ -1060,7 +1091,7 @@ impl Application {
             capture_id,
             document_revision,
             new_capture,
-            |_| Ok(path),
+            |_| Ok(ImageSource::Selected(path)),
         )
     }
 
@@ -1078,18 +1109,23 @@ impl Application {
             Some(capture_id),
             document_revision,
             false,
-            |candidate| cache.image_path(candidate.package_id(), capture_id),
+            |candidate| {
+                cache
+                    .open_image(candidate.package_id(), capture_id)?
+                    .map(ImageSource::Cached)
+                    .ok_or_else(|| image_io(std::io::Error::from(std::io::ErrorKind::NotFound)))
+            },
         )
     }
 
-    fn load_recognition_source<P: AsRef<Path>>(
+    fn load_recognition_source<'p>(
         &self,
         owner: &AuthoringRef,
         revision: &str,
         capture_id: Option<&str>,
         document_revision: u64,
         new_capture: bool,
-        resolve: impl FnOnce(&crate::authoring::Candidate) -> Result<P, Fault>,
+        resolve: impl FnOnce(&crate::authoring::Candidate) -> Result<ImageSource<'p>, Fault>,
     ) -> Result<RecognitionView, Fault> {
         let (_command, mut state) = self.command_state()?;
         let candidate = state.authoring_revision(owner, revision)?;
@@ -1106,15 +1142,16 @@ impl Application {
         let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
         recognition.release_frame(new_capture)?;
         let prepared_revision = recognition.revision;
-        let path = resolve(&candidate)?;
+        let source = resolve(&candidate)?;
+        let frame_source = source.frame_source();
         drop(state);
-        let image = read_image(path.as_ref())?;
+        let image = source.read()?;
         let mut state = lock(&self.workspaces);
         state.authoring_revision(owner, revision)?;
         let recognition = &mut state.authoring.as_mut().ok_or_else(stale)?.recognition;
         recognition.check_capture(capture_id)?;
         recognition.check(prepared_revision, None)?;
-        recognition.install_image(owner, image, new_capture, true)?;
+        recognition.install_image(owner, image, new_capture, true, frame_source)?;
         self.recognition_snapshot(&mut state, owner, revision)
     }
 
@@ -1174,7 +1211,8 @@ impl Application {
         if recognition.prepared_capture != Some((document_revision, new_capture)) {
             return Err(stale());
         }
-        let mut prepared = recognition.prepare_image(owner, image, new_capture, false)?;
+        let mut prepared =
+            recognition.prepare_image(owner, image, new_capture, false, FrameSource::Selected)?;
         recognition.advance()?;
         recognition.commit_image(&mut prepared);
         self.recognition_snapshot(&mut state, owner, revision)
@@ -1238,14 +1276,20 @@ impl Application {
             .checked_add(1)
             .filter(|value| *value <= MAX_SESSION_COUNTER)
             .ok_or_else(|| invalid("Recognition revision exhausted"))?;
-        let mut image = recognition.prepare_image(owner, capture.image, new_capture, false)?;
-        image.frame.as_mut().expect("prepared frame").native = Some(NativeFrameOrigin {
+        let origin = NativeFrameOrigin {
             _geometry: capture.geometry,
             _request: capture.identity,
             _source_frame: capture.frame_identity,
             acquired_at_ms: capture.acquired_at_ms,
             _captured_monotonic_us: capture.captured_monotonic_us,
-        });
+        };
+        let image = recognition.prepare_image(
+            owner,
+            capture.image,
+            new_capture,
+            false,
+            FrameSource::Native(origin),
+        )?;
         Ok(PreparedNativeFrame {
             image,
             revision: next_revision,
@@ -2005,6 +2049,32 @@ fn image_io(error: std::io::Error) -> Fault {
     )
     .with_context(json!({"io_kind":format!("{:?}",error.kind())}))
 }
+/// Pixels enter through an explicitly selected pathname or an opened managed original.
+enum ImageSource<'a> {
+    Selected(&'a Path),
+    Cached(File),
+}
+
+impl ImageSource<'_> {
+    fn frame_source(&self) -> FrameSource {
+        match self {
+            Self::Selected(_) => FrameSource::Selected,
+            Self::Cached(_) => FrameSource::Cached,
+        }
+    }
+
+    fn read(self) -> Result<DecodedImage, Fault> {
+        match self {
+            Self::Selected(path) => read_image(path),
+            // The cache verified this handle; nothing beyond the handle is rechecked.
+            Self::Cached(file) => {
+                let before = image_stamp(&file.metadata().map_err(image_io)?)?;
+                decode_image_file(file, &before, || Ok(true))
+            }
+        }
+    }
+}
+
 fn read_image(path: &Path) -> Result<DecodedImage, Fault> {
     if !path.is_absolute()
         || path.as_os_str().len() > 4096
@@ -2017,12 +2087,6 @@ fn read_image(path: &Path) -> Result<DecodedImage, Fault> {
     }
     let resolved = path.canonicalize().map_err(image_io)?;
     let before = image_stamp(&resolved.metadata().map_err(image_io)?)?;
-    let size =
-        usize::try_from(before.length).map_err(|_| invalid("Image byte length overflows"))?;
-    if size == 0 || size > images::INPUT_MAX_BYTES {
-        return Err(invalid("Input PNG exceeds its compressed byte allowance"));
-    }
-    let _compressed = images::reserve_payload(size.checked_add(65536).ok_or_else(stale)?)?;
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -2035,10 +2099,31 @@ fn read_image(path: &Path) -> Result<DecodedImage, Fault> {
         use std::os::windows::fs::OpenOptionsExt;
         options.share_mode(1).custom_flags(0x00200000);
     }
-    let mut file: File = options.open(&resolved).map_err(image_io)?;
-    if image_stamp(&file.metadata().map_err(image_io)?)? != before {
+    let file: File = options.open(&resolved).map_err(image_io)?;
+    decode_image_file(file, &before, || {
+        Ok(
+            image_stamp(&resolved.metadata().map_err(image_io)?)? == before
+                && path.canonicalize().map_err(image_io)? == resolved,
+        )
+    })
+}
+
+/// Bounded read and decode of an opened regular file whose stamp `before` was verified.
+/// `source_unchanged` re-verifies the caller's selection after the bytes are read.
+fn decode_image_file(
+    mut file: File,
+    before: &ImageStamp,
+    source_unchanged: impl FnOnce() -> Result<bool, Fault>,
+) -> Result<DecodedImage, Fault> {
+    if image_stamp(&file.metadata().map_err(image_io)?)? != *before {
         return Err(stale());
     }
+    let size =
+        usize::try_from(before.length).map_err(|_| invalid("Image byte length overflows"))?;
+    if size == 0 || size > images::INPUT_MAX_BYTES {
+        return Err(invalid("Input PNG exceeds its compressed byte allowance"));
+    }
+    let _compressed = images::reserve_payload(size.checked_add(65536).ok_or_else(stale)?)?;
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut bytes = Vec::with_capacity(size);
     let mut buffer = [0u8; 65536];
@@ -2052,9 +2137,8 @@ fn read_image(path: &Path) -> Result<DecodedImage, Fault> {
     }
     let mut trailing = [0; 1];
     if file.read(&mut trailing).map_err(image_io)? != 0
-        || image_stamp(&file.metadata().map_err(image_io)?)? != before
-        || image_stamp(&resolved.metadata().map_err(image_io)?)? != before
-        || path.canonicalize().map_err(image_io)? != resolved
+        || image_stamp(&file.metadata().map_err(image_io)?)? != *before
+        || !source_unchanged()?
     {
         return Err(stale());
     }

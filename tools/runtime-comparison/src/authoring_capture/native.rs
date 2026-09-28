@@ -121,7 +121,7 @@ pub(super) fn child() -> Result<bool, Fault> {
                     Ok(
                         command @ (Command::Capture { .. }
                         | Command::Select { .. }
-                        | Command::RebasePackage { .. }),
+                        | Command::RebaseSource { .. }),
                     ) => {
                         if stop.pending.swap(true, Ordering::AcqRel)
                             || commands.try_send(command).is_err()
@@ -172,18 +172,12 @@ pub(super) fn child() -> Result<bool, Fault> {
             }
         };
         match command {
-            Command::Select {
-                key,
-                binding_revision,
-            } => {
+            Command::Select { key } => {
                 control.deadline(DISCOVERY_LIMIT);
                 let validation = (|| {
-                    let mut bound = request.identity.clone();
-                    bound.binding_revision = binding_revision;
-                    bound.validate()?;
                     if selected_key
                         .as_ref()
-                        .is_some_and(|selected| selected != &key || bound != request.identity)
+                        .is_some_and(|selected| selected != &key)
                     {
                         return Err(stale());
                     }
@@ -194,13 +188,12 @@ pub(super) fn child() -> Result<bool, Fault> {
                         .ok_or_else(stale)?;
                     revalidate(&engine, selected, &request, &operation)?;
                     control.check()?;
-                    Ok((bound, selected.candidate.clone()))
+                    Ok(selected.candidate.clone())
                 })();
-                let (bound, candidate) = match validation {
+                let candidate = match validation {
                     Ok(value) => value,
                     Err(error) => break (Some(error), true),
                 };
-                request.identity = bound;
                 selected_key = Some(key);
                 control.pending.store(false, Ordering::Release);
                 protocol::write_event(
@@ -213,11 +206,15 @@ pub(super) fn child() -> Result<bool, Fault> {
                 control.check()?;
                 control.idle();
             }
-            Command::RebasePackage { identity } => {
+            Command::RebaseSource { identity } => {
                 control.deadline(DISCOVERY_LIMIT);
                 if let Err(error) = identity.validate().and_then(|()| {
                     if selected_key.is_none()
-                        || !protocol::same_package_rebase(&request.identity, &identity)
+                        || !protocol::same_source_rebase(
+                            &request.identity,
+                            &identity,
+                            request_ids.is_empty(),
+                        )
                     {
                         return Err(stale());
                     }
@@ -225,13 +222,13 @@ pub(super) fn child() -> Result<bool, Fault> {
                 }) {
                     break (Some(error), true);
                 }
-                // Fresh application/package proof belongs to the host. No SDK
-                // discovery or native target replacement occurs for this rebase.
+                // The host proves the committed source. This only changes correlation;
+                // the original Engine, TargetId and process/window lifetime stay retained.
                 request.identity = identity;
                 control.pending.store(false, Ordering::Release);
                 protocol::write_event(
                     &mut output,
-                    &Event::PackageRebased {
+                    &Event::SourceRebased {
                         identity: request.identity.clone(),
                     },
                 )?;

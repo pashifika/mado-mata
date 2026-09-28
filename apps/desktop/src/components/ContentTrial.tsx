@@ -74,7 +74,7 @@ export default function ContentTrial({identity, active, disabled, width, height,
     && proposal.rect.width === content.width && proposal.rect.height === content.height;
   const status = busy ? r.contentDetecting : current?.kind === 'none' ? r.contentDetectEmpty
     : current?.kind === 'ambiguous' ? r.contentDetectAmbiguous : current?.kind === 'failed' ? r.contentDetectFailed
-      : proposal ? r.contentCandidate : '';
+      : proposal ? proposal.approximate ? r.contentCandidateApproximate : r.contentCandidate : '';
   const controls = active && <div className="content-trial" role="group" aria-label={r.contentTrialTitle} title={r.contentTrialTitle}
     onKeyDown={event => {if (event.key === 'Escape') {event.preventDefault(); event.stopPropagation(); clear();}}}>
     <div className="segmented">

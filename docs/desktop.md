@@ -493,8 +493,10 @@ new-frame operations, while historical metadata and retained original crops rema
 editable and saveable.
 
 Save publishes the selected capture's crops and retains other captures' pending
-originals; save those captures separately. Save all and Exit-save do not finish
-while other crop choices remain. Discard clears crop choices across captures.
+originals; save captures separately. If only another capture has pending crops,
+the Save explanation directs you to select it and save or explicitly discard.
+Save all and Exit-save do not finish while other crop choices remain. Discard
+clears crop choices across captures.
 Delete/Undo restores selected originals only while their frame or staged pixels
 remain available, never after Save or explicit discard released them. Switching
 captures or loading an image resolves the current crop choices and releases
@@ -520,17 +522,24 @@ The transfer PNG is encoded before capture acceptance and reused for caching.
 Encoding failure refuses acquisition; a later cache write failure is reported
 separately and does not discard a usable accepted frame.
 **Load cached original** is explicit, retains the capture ID, and creates
-fresh runtime revisions; it restores no native authority. Missing/corrupt files
-leave saved metadata, crops and templates intact. Nothing auto-loads on reopen.
+fresh runtime revisions; it restores no native authority. Reloaded originals
+are marked historical even when no native acquisition timestamp is available.
+Missing/corrupt files leave saved metadata, crops and templates intact.
+Nothing auto-loads on reopen.
 
-**Manage image cache** in **App settings** measures regular-file bytes when opened
-and displays the managed folder. Incomplete/failed measurement is not displayed
-as a successful total. **Open folder** uses Finder/Explorer and reports launch
-failure. Unsafe links/reparse paths are refused. There is no polling, quota,
-eviction, cleanup daemon, custom location or cache database. The preference may
-participate in configuration backup; original images and cache paths stay outside
-packages, profiles, configuration backup payloads and routine logs, even though
-the `caches/` directory is inside the selected configuration root.
+Cached image reads use verified file handles. Publication and cleanup retain the
+managed package-directory identity; a link entry may be replaced, never followed.
+**Manage image cache** measures regular-file bytes when opened. Unsafe or missing
+entries and observed directory changes produce an error, not a partial total.
+Measurement is not an atomic snapshot against deliberate same-user interference.
+**Open folder** creates missing managed directories, validates their pathname
+immediately before Finder/Explorer dispatch, and reports dispatch failures.
+Links/reparse points present at validation are refused. The file manager resolves
+the pathname independently; a same-user replacement afterward is not atomically
+contained. This action reads or writes no file contents.
+There is no polling, quota, eviction, cleanup daemon, custom location or cache
+database. The preference may participate in configuration backup; original images
+and cache paths stay outside packages, profiles, backup payloads and routine logs.
 
 ## Author saved-image Recognition
 
