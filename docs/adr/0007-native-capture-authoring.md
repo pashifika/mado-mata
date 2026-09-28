@@ -72,6 +72,15 @@ managed-file whitelist, excluding cache bytes despite the shared parent root.
 Image bytes/native identities remain excluded from packages, profiles, backups
 and routine logs; the preference may be backed up.
 
+PNG encoding precedes `Session::commit_frame` and host acceptance. The cache
+reuses the bounded transfer PNG; it does not encode a second image. Encoding
+failure therefore refuses acquisition, while a cache write/publication failure
+preserves an accepted frame. A valid 4096 x 4096 incompressible RGBA fixture
+reached the real encoder's compressed-byte refusal; a real native capture with
+an occupied cache staging path retained its new frame and prior cached file.
+These observations replace the earlier post-acceptance encoding-failure
+assumption, not the independent cache-write failure guarantee.
+
 Preview feedback must not change the image viewport or its Fit scale. A fixed
 status rail holds progress; help and bounded scrollable errors/warnings overlay
 the image. Toolbar rows depend on window width, not capture/error state. This

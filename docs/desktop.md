@@ -467,8 +467,10 @@ An explicit `--data-dir PATH` uses `PATH/caches/` for writes, reloads, size
 measurement and folder opening. The former platform application cache is no
 longer used; existing files there are not automatically moved or deleted.
 Refreshing replaces only that capture's cached original, never saved package crops.
-Cache failure is reported separately and does not discard a usable accepted
-frame. **Load cached original** is explicit, retains the capture ID, and creates
+The transfer PNG is encoded before capture acceptance and reused for caching.
+Encoding failure refuses acquisition; a later cache write failure is reported
+separately and does not discard a usable accepted frame.
+**Load cached original** is explicit, retains the capture ID, and creates
 fresh runtime revisions; it restores no native authority. Missing/corrupt files
 leave saved metadata, crops and templates intact. Nothing auto-loads on reopen.
 
