@@ -385,6 +385,9 @@ a later failure can appear again.
    visual picker outlines the intended capture area; click selects and Escape
    cancels without forwarding input to the game. Its overlays leave before
    capture. Opening Preview alone acquires no pixels and initializes no OCR.
+   This also works before **Inspect/Reinspect**. The verified target configuration
+   belongs to the open workspace and package ID; saving it does not register a
+   Run source, create profiles, or inspect the package.
 2. With a saved target, **Capture** freshly verifies the locator and selects
    exactly one matching live window. Missing or ambiguous matches require
    explicit reselection; saved PIDs, window numbers and authority are never reused.

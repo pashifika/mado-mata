@@ -1,7 +1,7 @@
-use super::fs::check_alias;
+use super::fs::{check_alias, check_directory};
 use super::{
     Store, check_budget, decode, encode, exists, new_id, private_directory, read_bytes,
-    write_atomic,
+    validate_package_id, write_atomic,
 };
 use crate::target::{
     self, MAX_TARGET_BYTES, TargetBinding, TargetCheck, TargetConfiguration, TargetExpectation,
@@ -152,8 +152,21 @@ impl Store {
     }
 
     fn target_directory(&self, tab: &str, package: &str) -> Result<PathBuf, Fault> {
-        // The same saved Tab/package ownership rule as profiles, without reading profiles.
-        Ok(self.profile_store(tab, package)?.directory())
+        validate_package_id(package)?;
+        if !self.tab(tab)?.open {
+            return Err(Fault::new(
+                "TabClosed",
+                "reopen the Tab before using its target configuration",
+            ));
+        }
+        // Edit owns a package before Run inspection creates a saved source reference.
+        let directory = self.root.join("tabs").join(tab);
+        check_alias(&directory, package)?;
+        let directory = directory.join(package);
+        if exists(&directory)? {
+            check_directory(&directory)?;
+        }
+        Ok(directory)
     }
 
     fn write_target(
