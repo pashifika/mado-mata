@@ -258,7 +258,7 @@ pub(super) fn duplicate(draft: &PackageDraft, id: &str) -> Result<PackageDraft, 
         files.insert(path.clone(), encode(&profile)?);
     }
     if let Some(document) = super::recognition::load(draft)? {
-        super::recognition::synchronize(&document, &mut manifest, &mut files, true)?;
+        super::recognition::synchronize(document.documents(), &mut manifest, &mut files, true)?;
     }
     files.insert("package.json".into(), encode(&manifest)?);
     PackageDraft::from_files(files, &limits()?)

@@ -1,7 +1,7 @@
 # Runtime comparison: replay and native prerequisites
 
 The optional `engine` feature consumes the public `mado-pilot` facade at
-`acc5d98ae8cfc4958970be826a28011bc12185c9`. The harness uses no sibling path
+`4b4f3296838a9eecdcb00e9d2bb3121a25cdc240`. The harness uses no sibling path
 dependency, direct platform calls, fake OCR backend, or substitute input route.
 
 **Native integration is available; native qualification is not complete.** The
@@ -12,13 +12,14 @@ or mismatched provenance is refused. Native capture, OCR, and input receipts are
 real SDK operations, not the controlled sink. A submitted receipt still does not
 prove application effect. Both-OS workload and lifecycle evidence remain required.
 
-The current facade does not expose an atomic capture-terminal publication guard.
-Known native `TargetLost`/closed errors can close host admission, but target loss
-during an already-running recognition call can still race with successful result
-publication. That review finding remains unresolved pending a separately scoped
-upstream API repair and tested pin update. A new capture or input operation is
-not used as a status probe. Do not treat controlled regressions or earlier native
-smokes as qualification of this race.
+The pinned facade exposes `Session::commit_frame`, which orders acceptance of
+the exact acquired frame against capture-terminal state. Authoring requires clean
+per-frame session close and current owner/revision/cancellation checks before
+publication. Its original Engine/TargetId stays in one owned worker across explicit
+captures until Preview closes or cancellation/owner exit requires child reaping.
+Controlled consuming regressions are not per-OS native qualification. The broader R6/runtime-adoption
+matrix remains separate; neither this API nor an extra capture/status probe
+establishes full native Script acceptance.
 
 The optional macOS [desktop replay lane](desktop.md#save-and-check-an-ocr-environment)
 uses the same engine and replay object, with a separate fixed engine artifact.
@@ -26,7 +27,9 @@ Its App settings hold local locations and Rust derives identities; portable
 profiles contain no model/runtime paths. Saved-image
 [Recognition authoring](desktop.md#author-saved-image-recognition) uses that
 artifact for script-free observations over a selected PNG or saved crop.
-Neither operation projects live native authority.
+Neither operation projects live native authority. The separate
+[one-shot authoring path](desktop.md#acquire-a-native-historical-frame) requires
+explicit target/window selection and finite capture authority.
 
 ## Install the engine prerequisites
 
@@ -44,8 +47,8 @@ engine build, acquire the following separately; the harness downloads nothing:
   No `PATH` search, alternate runtime, accelerator preference, or fallback is used.
 - The accepted detector and recognizer below, under one canonical model root.
 
-Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/acc5d98ae8cfc4958970be826a28011bc12185c9/CONTRIBUTING.md#native-development-prerequisites)
-and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/acc5d98ae8cfc4958970be826a28011bc12185c9/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
+Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/CONTRIBUTING.md#native-development-prerequisites)
+and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
 Its `tools/setup-native.py` configures only the command it launches; it installs
 nothing. A separately obtained, revision-pinned public checkout can provide that
 setup tool without becoming the application's dependency source. From this

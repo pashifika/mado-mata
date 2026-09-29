@@ -4,8 +4,7 @@ use crate::host::Host;
 use crate::model::Control;
 use crate::model::{Fault, MAX_TRANSPORT_BYTES, encode_bounded};
 use serde_json::{Value, json};
-use std::io::BufReader;
-use std::process::ChildStdout;
+use std::io::{BufReader, Read};
 use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -233,7 +232,7 @@ pub(super) fn start_evidence(invocation: &Invocation) {
 }
 
 pub(super) fn receive_evidence(
-    stdout: ChildStdout,
+    stdout: impl Read + Send + 'static,
     observer: Option<&Observer>,
     invocation: &Invocation,
 ) -> (mpsc::Receiver<Result<Value, Fault>>, thread::JoinHandle<()>) {
@@ -251,7 +250,7 @@ pub(super) fn receive_evidence(
 }
 
 pub(super) fn receive_frames(
-    stdout: ChildStdout,
+    stdout: impl Read + Send + 'static,
     observer: Option<&Observer>,
     run: &str,
     log_limit: usize,

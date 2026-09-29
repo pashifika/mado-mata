@@ -26,6 +26,21 @@ impl Workspaces {
     }
 
     pub(super) fn work_idle(&self) -> Result<(), Fault> {
+        self.work_idle_except_native()?;
+        if self
+            .authoring
+            .as_ref()
+            .is_some_and(|lease| lease.native.operation_active())
+        {
+            return Err(Fault::new(
+                "NativeCaptureBusy",
+                "Wait for the active native operation or picker to settle",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn work_idle_except_native(&self) -> Result<(), Fault> {
         if let Some(fault) = self
             .authoring
             .as_ref()
@@ -51,6 +66,7 @@ impl Workspaces {
 
 impl Application {
     pub(super) fn collect(&self, state: &mut Workspaces) {
+        self.collect_native(state);
         let Some(owner) = &mut state.owner else {
             return;
         };
@@ -314,9 +330,14 @@ impl Application {
     pub fn poll(&self) -> Poll {
         let mut state = lock(&self.workspaces);
         self.collect(&mut state);
+        self.refresh_native_target(&mut state);
         Poll {
             authoring: state.authoring.as_ref().map(|lease| lease.owner.clone()),
             controller: state.controller.clone(),
+            native_selection: state
+                .authoring
+                .as_ref()
+                .map(|lease| lease.native.view(&lease.owner, &lease.revision)),
             logs: self.logger.drain(),
             workspace_results: state
                 .open
@@ -333,6 +354,7 @@ impl Application {
                 let deadline = std::time::Instant::now() + Duration::from_secs(14);
                 self.closing.store(true, Ordering::Release);
                 self.invalidate_target_observation(None);
+                self.cancel_native();
                 let mut outcome = self.runner.shutdown();
                 // Publication holds command admission, not the Stop/runner lock.
                 // A forced shutdown retains its lease/journal if storage cannot settle.
@@ -343,6 +365,25 @@ impl Application {
                             // The joined worker's evidence settles a just-finished recognition
                             // run here even if no command or poll has collected it yet.
                             self.collect(&mut state);
+                            if state.authoring.as_ref().is_some_and(|lease| lease.native.operation_active()) {
+                                drop(state);
+                                drop(_command);
+                                if std::time::Instant::now() >= deadline {
+                                    outcome = Err(Fault::new("NativeCaptureCleanup", "Native picker cleanup has not settled"));
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                                continue;
+                            }
+                            if let Some(owner) = state.authoring.as_ref().map(|lease| lease.owner.clone()) {
+                                state = match self.settle_native_selection(&owner, state) {
+                                    Ok(state) => state,
+                                    Err(error) => {
+                                        outcome = Err(error);
+                                        break;
+                                    }
+                                };
+                            }
                             let lease = state.authoring.as_ref();
                             if let Some(fault) = lease.and_then(|lease| lease.containment.as_ref()) {
                                 outcome = Err(fault.clone());

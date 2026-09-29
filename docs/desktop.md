@@ -1,20 +1,23 @@
-# macOS desktop: controlled runs and recorded replay
+# Desktop checkout: authoring, controlled runs and recorded replay
 
-MadoMata's trusted Tauri/React WebView provides directory-package authoring,
-saved-image Recognition, inspection, profile editing, run control, App-local OCR
-configuration, and structured logs. Package code runs in the supervised
-QuickJS runner, never in the WebView. Controlled runs need no OCR installation.
-Optional recorded replay uses real engine OCR/template recognition over
-explicitly selected, previously authorized frames. Both desktop execution lanes
-retain the **controlled, non-native input sink**. Saved-image trials execute no
-package code or input. None grants live capture, game launch, focus changes to
-another application, permission prompts, or OS input.
+MadoMata's trusted Tauri/React WebView provides directory-package and Recognition
+authoring, inspection, profiles, run control, App-local OCR settings, and logs.
+Package code runs in the supervised QuickJS runner, never in the WebView.
+Controlled runs need no OCR installation. Recorded replay uses real engine
+OCR/template recognition over explicitly selected, previously authorized frames.
+Both execution lanes retain the **controlled, non-native input sink**.
 
-Only macOS desktop development is supported. Linux and Windows CI check the
-frontend and shell-independent Rust core, not additional desktop platforms.
-Live native qualification, R6, per-game background compatibility, and release
-distribution remain separate work. See the [engine prerequisites](runtime-native.md)
-and [replay boundary decision](adr/0003-desktop-recorded-replay.md).
+Recognition has a separate explicit, read-only native window acquisition path.
+It requires an authorized target and the fixed engine child; opening the editor
+does not capture, initialize OCR, or request permissions. Native Script Start,
+game launch, target activation, OS input, and automatic recovery remain refused.
+
+The checkout includes macOS and Windows shells; Linux checks the frontend and
+shell-independent core. Windows interactive authoring and both-OS native
+qualification are separate acceptance obligations, not claims made by a build.
+Release packaging and full runtime adoption remain unresolved. See the
+[engine prerequisites](runtime-native.md) and
+[capture boundary decision](adr/0007-native-capture-authoring.md).
 
 ## Build and run from the checkout
 
@@ -88,6 +91,24 @@ Rebuild both relevant runner artifacts after runtime changes. Rebuilding only
 the GUI is insufficient. Follow these explicit target directories; do not use a
 cross-compilation target for a local app run. CI may use other directories for
 compilation checks. Moving a binary alone does not supply the fixed paths.
+
+On Windows, use an x64 MSVC developer terminal with the Windows SDK, Node.js
+24.18.0, Rust 1.98.1, and an installed WebView2 runtime for interactive use.
+Preserve the [tracked symlink](development-guidance.md#claude-symlink).
+The same dependency installation, frontend build, and Cargo build commands above
+apply. Launch the checkout artifact with:
+
+```powershell
+.\apps\desktop\src-tauri\target\debug\mado-mata-desktop.exe --data-dir "$env:USERPROFILE\.config\mado-mata-acceptance"
+```
+
+The owned controlled and engine runners use the same directories with `.exe`
+suffixes. Build the optional engine from that terminal using the
+[Windows native setup](runtime-native.md#install-the-engine-prerequisites),
+adding `--target-dir tools/runtime-comparison/target/desktop-engine`.
+Windows CI compiles the shell and runs portable/Windows contract checks; it does
+not launch a GUI or qualify native capture, clipboard interaction, or OCR.
+
 An absent engine artifact or failure before Rust startup remains a typed
 diagnostic in the non-native GUI; controlled execution remains independent.
 
@@ -99,8 +120,9 @@ apps/desktop/src-tauri/target/debug/mado-mata-desktop --data-dir "$HOME/.config/
 ```
 
 `--data-dir PATH` selects the configuration root explicitly and skips historical-root
-discovery. It also supplies the default editable collection at `PATH/sources`; it
-does not select a runner, compiler, package to inspect, or input route. Keep the
+discovery. It supplies the default editable collection at `PATH/sources` and
+the private image cache at `PATH/caches`; it does not select a runner, compiler,
+package to inspect, or input route. Keep the
 root outside an existing package source and public tracked files. Reuse it for
 restart checks; choose another private root to isolate work without deleting data.
 An absent root is not created merely by launching the application.
@@ -329,10 +351,222 @@ Snapshot destinations inside `sources`, `pkgs`, the configured collection, or an
 existing package are refused before creating directories or archives.
 
 Interruption regressions cover process-level failures, not physical power loss.
-Windows core checks do not qualify crash durability or an additional desktop OS;
-directory sync retains the [existing platform limitation](adr/0005-desktop-configuration-recovery.md).
-Custom archives, remote download, native capture/input, and the broader practical
-Edit readiness gate remain separate work.
+Windows directory sync retains the
+[existing platform limitation](adr/0005-desktop-configuration-recovery.md).
+Custom archives, remote download, game input, and native qualification remain
+separate work.
+
+## Acquire a native historical frame
+
+Open **Recognition → Open preview** inside an owned Edit session. No prior
+Run-page target configuration is required. **Select window** verifies the chosen
+application and window, then saves a locator only for this workspace/package.
+Existing launch/input settings are preserved; a new capture-only binding has no
+input policy. Access-denied, replaced/reparse paths, incompatible declarations and
+unverifiable correspondence remain refusals. Do not elevate or substitute a
+launcher to bypass them.
+
+The fused capture control sits directly left of **Done**. Its left SVG target
+icon selects a window; after selection it becomes the stacked-frame **New capture**
+icon. The compact main segment shows **Capture** for both a saved locator and a
+selected window, and **Stop** during native work. There is no separate capture panel.
+Progress uses the fixed-height bottom status bar. **Help** opens the interaction
+guide; help and scrollable errors/warnings overlay the image without resizing its
+viewport or changing Fit scale. Help closes with its button or Escape. Toolbar
+rows change only with window width, not operation state.
+Feedback has no enclosing panel: individual red error, amber warning and blue
+help borders distinguish message types.
+The native-failure notice has a top-right close button. Dismissal hides that
+notice through ordinary updates without changing native refusal or cleanup state;
+a later failure can appear again.
+
+1. With no saved target, choose the target icon (**Select window**). Discovery is metadata-only,
+   bounded to 5 seconds and 64 matching processes / 64 eligible windows. The
+   visual picker outlines the intended capture area; click selects and Escape
+   cancels without forwarding input to the game. Its overlays leave before
+   capture. Opening Preview alone acquires no pixels and initializes no OCR.
+   On Windows, picker overlays belong to Preview rather than the main editor,
+   so selection does not bring the main window above Preview. Preview remains
+   an independent window, not an always-on-top window.
+   This also works before **Inspect/Reinspect**. The verified target configuration
+   belongs to the open workspace and package ID; saving it does not register a
+   Run source, create profiles, or inspect the package.
+   Configuration snapshots can restore this target before Run inspection;
+   restoring ordinary profiles still requires their saved package reference.
+2. With a saved target, **Capture** freshly verifies the locator and selects
+   exactly one matching live window. Missing or ambiguous matches require
+   explicit reselection; saved PIDs, window numbers and authority are never reused.
+3. **Capture** refreshes the current Capture ID, Regions and unsaved draft.
+   **New capture** creates a separate capture. Each explicit request acquires at
+   most one frame within 10 seconds using the original retained Engine/TargetId.
+   Changed lifetime or geometry requires reselection; there is no display
+   fallback, target focus/resize, automatic retry or continuous sampling.
+4. Each frame requires terminal-aware commitment and clean capture-session close.
+   The same owned worker remains idle between captures, with no capture session.
+   An idle Engine permits metadata edits and historical-image trials; active
+   capture/picker work excludes another authoring operation.
+5. **Done**, Preview close/destruction, cancellation and Edit exit release the
+   owned Engine. Cleanup and containment retain separate 1-second / 2-second
+   bounds; a Stop receipt is not cleanup proof. Incomplete cleanup stays visible.
+6. The accepted image is historical, not a live connection or readiness result.
+   Later target exit does not invalidate it. Ordinary Start and independent OCR
+   Check remain excluded throughout Edit; native Script Start remains unavailable.
+
+The retained Engine has no idle expiry. Replay protection is bounded to 4096
+capture identities per Engine; exhaustion refuses with `NativeCaptureLimit`
+until an explicit restart. Save may advance the package revision without replacing
+the Engine only after unchanged target constraints, binding and source proof are
+revalidated. **Reset target** in Edit first settles the Engine, then removes only
+the local binding; Recognition work and the package's target declaration remain.
+
+The responsible capture executable is the fixed engine runner, not the WebView.
+Missing permission is a refusal; the application does not request a permission
+prompt to make an attempt succeed. Authorize each real target, environment and
+operation separately. Both-OS GUI, permission, target-loss, overlapping-window,
+mixed-DPI and negative-origin acceptance remain distinct from CI.
+
+### Game content candidates (experimental)
+
+In Preview, select **Game content**, choose **Auto**, **16:9**, **16:10** or
+**4:3**, then **Detect**. Auto compares the three ratios. A selected ratio
+restricts detection; it never creates a centered crop just to match that ratio.
+Detection only proposes the cyan dashed rectangle. **Apply** uses the existing
+content edit, Undo, draft/confirmation and crop-staleness paths; review and confirm
+the geometry in the ordinary workflow. **Full** is also a proposal, not an
+implicit confirmation. Cancel, beginning a manual content drag, a frame/basis or
+owner change, a native action, and Done invalidate pending proposals. No
+successful detection automatically overwrites a previously confirmed basis.
+
+The detector checks sampled, nearly flat exterior scanlines and continuous
+adjacent boundaries, including light/dark title bars, thin frames and letterboxes.
+It searches at most the outer quarter on each side and bounds the number of
+candidates. It needs visible interior variation; uniform/loading images and
+similarly ranked alternatives produce no applied edit. These heuristics cannot
+prove that a flat game UI panel is OS chrome. Custom ratios, arbitrary non-flat
+borders and original-pixel refinement of downsampled previews remain manual.
+
+The already displayed, owner-scoped raster is borrowed locally; no additional
+capture, full-original decode, OCR, new permission or native input is requested.
+A raster is bounded to 4,194,304 pixels. The host reserves the display raster,
+one temporary canvas and one ImageData readback before publishing its preview.
+The canvas is released on success or failure. This is payload accounting, not a
+bound on browser/driver allocations or process RSS. Coordinates use the raster's
+natural size and half-open edges, never CSS Fit or devicePixelRatio. When the
+host has downsampled a large original, the candidate is explicitly labeled
+approximate: mapped coordinates do not claim single-original-pixel accuracy.
+The original PNG and package assets are unchanged. In Game content mode, the
+compact ratio/Detect/Full/Apply/Cancel group replaces the toolbar's Undo/Delete
+buttons; Regions mode retains those buttons. Candidate status stays in the
+fixed-height bottom rail. There is no Detection limits panel. Controls remain
+outside the image viewport; candidate changes do not remount the image stage.
+In automatic mode, the compact zoom selector shows the actual percentage without
+a **Fit** prefix. The separate Fit button still indicates the active mode.
+
+The bounded regression command from the repository root is:
+
+```sh
+node --experimental-strip-types --test apps/desktop/src/contentDetection.test.mjs
+```
+
+These tests are also registered in the desktop `npm test` command used by CI.
+They cover synthetic pixel geometry and readback cleanup, not interactive native
+acceptance. Before acceptance, test both real WebViews: Apply/Undo/Confirm,
+Cancel during pending detection, manual drag, same-size Capture, A -> B -> A,
+owner changes, Done, Fit/scroll stability, and EN/JA at narrow viewport widths.
+
+### Captures, migration and private originals
+
+**New capture** and **Add capture from PNG** allocate a checked XID.
+Recognition JSON version 2 contains `captures: [{capture_id, document}]`; each
+inner document retains the existing basis, rounding and local `r1`/`r2` IDs.
+The package-wide definition key is `(capture_id, region_id)`, not a filename.
+Legacy single-image metadata is read without writing; explicit Save wraps it
+without changing existing Region IDs, asset IDs, paths, aliases or pasted code.
+Unknown versions and invalid data are refused rather than repaired.
+
+Only one original is decoded at a time. Refresh preserves metadata and stages
+checked unsaved crop pixels before releasing their original; Save never silently
+substitutes a later frame. Crop identity depends on kind, geometry basis and
+region, not names, reference text or metadata revisions. Same-size refresh reuses
+confirmed Game content. Resized pixels require explicit geometry adjustment for
+new-frame operations, while historical metadata and retained original crops remain
+editable and saveable.
+
+Save publishes the selected capture's crops and retains other captures' pending
+originals; save captures separately. If only another capture has pending crops,
+the Save explanation directs you to select it and save or explicitly discard.
+Save all and Exit-save do not finish while other crop choices remain. Discard
+clears crop choices across captures.
+Delete/Undo restores selected originals only while their frame or staged pixels
+remain available, never after Save or explicit discard released them. Switching
+captures or loading an image resolves the current crop choices and releases
+abandoned staged pixels without clearing other captures. Failed replacement leaves
+no active image, not old pixels relabeled as a new capture. Saved PNGs change only
+through explicit Save; trials, previews, Copy and Save retain revision fences.
+
+Limits remain aggregate: 256 definitions, 256 KiB metadata, 64 Undo actions /
+1 MiB, and 512 MiB accounted image payload. Originals are at most 16,384 pixels
+per axis, 16,777,216 pixels / 64 MiB decoded; encoded input, transfer and cache
+PNGs are bounded to 32 MiB. Native accounted image storage is limited to
+256 MiB, including retained mapping copies and observable padding. These are
+payload limits, not total RSS or opaque GPU/driver allocation guarantees.
+
+**Cache new native captures on this machine** in **App settings** is persisted
+and OFF by default. Accepted originals are written to
+`~/.config/mado-mata/caches/<package_id>/<capture_id>.png` when enabled.
+An explicit `--data-dir PATH` uses `PATH/caches/` for writes, reloads, size
+measurement and folder opening. The former platform application cache is no
+longer used; existing files there are not automatically moved or deleted.
+Refreshing replaces only that capture's cached original, never saved package crops.
+The transfer PNG is encoded before capture acceptance and reused for caching.
+Encoding failure refuses acquisition; a later cache write failure is reported
+separately and does not discard a usable accepted frame.
+**Load cached original** is explicit, retains the capture ID, and creates
+fresh runtime revisions; it restores no native authority. Reloaded originals
+are marked historical even when no native acquisition timestamp is available.
+Missing/corrupt files leave saved metadata, crops and templates intact.
+Nothing auto-loads on reopen.
+
+Cached image reads use verified file handles. Publication and cleanup retain the
+managed package-directory identity; a link entry may be replaced, never followed.
+**Manage image cache** measures regular-file bytes when opened. Unsafe or missing
+entries and observed directory changes produce an error, not a partial total.
+Measurement is not an atomic snapshot against deliberate same-user interference.
+**Open folder** creates missing managed directories, validates their pathname
+immediately before Finder/Explorer dispatch, and reports dispatch failures.
+Links/reparse points present at validation are refused. The file manager resolves
+the pathname independently; a same-user replacement afterward is not atomically
+contained. This action reads or writes no file contents.
+There is no polling, quota, eviction, cleanup daemon, custom location or cache
+database. The preference may participate in configuration backup; original images
+and cache paths stay outside packages, profiles, backup payloads and routine logs.
+
+#### Windows filesystem refusal checks
+
+These shell-independent checks use owned disposable PNGs and byte files, not
+game processes, real cache data, capture, OCR or input. Run from the repository
+root in the x64 MSVC developer environment described above. The two ordinary
+Windows sharing tests run in the portable cache subset:
+
+```powershell
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib capture_cache::tests:: -- --nocapture
+```
+
+Only with existing, authorized symbolic-link capability, explicitly include the
+ignored reparse fixture and run the actual cached-loader and target-file checks:
+
+```powershell
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib capture_cache::tests:: -- --include-ignored --nocapture
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib application::authoring::recognition::tests::windows_cached_loader_refuses_reparse_substitution_and_preserves_verified_pixels -- --exact --ignored --nocapture
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib application::authoring::native_capture::windows_file::tests::symbolic_link_leaf_and_ancestor_are_refused_without_following -- --exact --ignored --nocapture
+```
+
+Do not elevate or enable Developer Mode just to run these checks. An ignored or
+zero-test result is not acceptance. The fixtures cover cache-root/package
+junctions, symbolic-link PNGs, actual cached loading, pinned-directory
+rename/delete refusal and release, and sharing-conflict refusal without an I/O
+fallback. They do not qualify the Windows GUI/native workflow or strengthen the
+external file-manager/measurement boundary described above.
 
 ## Author saved-image Recognition
 
@@ -431,8 +665,8 @@ Use this workflow:
    across kind changes. It appears only as escaped author-context comments in
    OCR Copy, never as a recognition filter, wait condition, or trial verdict.
 
-Copy publishes `mado-host-v1` source through the native macOS clipboard only
-after the explicit action. It needs no browser clipboard permission or general
+Copy publishes `mado-host-v1` source through the native macOS or Windows clipboard
+only after the explicit action. It needs no browser clipboard permission or general
 clipboard plugin and never edits package source. Preserve the package's existing
 Readiness/workflow exports when pasting. Relevant edits mark the corresponding
 Copy obsolete; pasted code is never updated automatically.
@@ -476,6 +710,21 @@ Manually restoring saved metadata clears its dirty state without rewinding edit
 revisions. Save refusals identify the actual geometry or template-rights
 requirement; the dirty-choice dialog disables Save and leaves Cancel and Discard
 available.
+
+New crop assets use independent checked XIDs and flat paths
+`recognition/crops/0001.png`, `0002.png`, and onward. Each Save derives the
+greatest numeric PNG basename from the current package inventory, ignores
+custom names and nested directories, and assigns consecutive numbers in the
+submitted crop order. Padding is at least four digits; `9999.png` is followed
+by `10000.png`. Numeric overflow, stale inventory, or a collision refuses Save
+without fallback names or partial publication. There is no persisted counter.
+
+Updating an unshared crop keeps its asset ID and current path. Package editor
+**Rename** preserves that ID and its declared/template references; replacing a
+shared crop instead creates a new independent asset. Renaming or deleting the
+highest numeric filename permits later reuse of that filename, not its asset
+identity. Existing assets, local Region IDs, saved aliases and pasted Script
+are not migrated or automatically refactored.
 
 Deleting a definition does not immediately delete saved pixels. Save reconciles
 owned crop references and generated template assets, preserving shared crops and
@@ -639,7 +888,7 @@ placeholders. See [ADR 0004](adr/0004-desktop-localization-resources.md).
 
 ## Local target configuration
 
-The **Target** section on a bound workspace's Run page stores macOS configuration
+The **Target** section on a bound workspace's Run page stores local configuration
 for that **Tab and package only**. The package must declare portable target intent
 as described in [the manifest contract](runtime-comparison.md#optional-portable-target-declaration).
 A targetless package still runs existing controlled/replay workflows; a missing,
@@ -655,10 +904,11 @@ invalid, or incompatible local target is not an execution prerequisite.
    arguments; spaces and shell syntax are literal, never split or expanded.
    Optionally enter an absolute working directory. Supply an exact window title
    when the package leaves it local; a package-required title is read-only.
-3. Explicitly select the future input policy. Process-directed input requires a
-   pointer mode: Core Graphics permits either focus policy; AppKit background
-   requires preserved focus. System input requires an already focused target
-   and has no process-pointer mode. Click hold is **0–1000 ms**.
+3. Leave all input fields blank for capture-only use. To configure future input,
+   explicitly select a complete policy. Process-directed input requires a pointer
+   mode: Core Graphics permits either focus policy; AppKit background requires
+   preserved focus. System input requires an already focused target and no
+   process-pointer mode. Click hold is **0–1000 ms**. None grants execution authority.
 4. **Check configuration** examines the current unsaved draft without writing.
    **Save binding** repeats validation and metadata resolution before an atomic
    write. Both inspect only filesystem metadata: executable accessibility,

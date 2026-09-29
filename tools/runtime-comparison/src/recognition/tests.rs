@@ -72,7 +72,9 @@ fn template_document() -> (RecognitionDocument, PayloadBytes) {
 
 fn inventory(document: &RecognitionDocument, png: PayloadBytes) -> Inventory {
     let saved = document.definitions[0].saved.as_ref().unwrap();
-    let (maps, engine) = build_template_assets(document, "sample").unwrap().unwrap();
+    let (maps, engine) = build_template_assets(std::iter::once(document), "sample")
+        .unwrap()
+        .unwrap();
     let declarations = json!({
         (AUTHORING_ASSET):{"path":"recognition/authoring.json","format":"json","width":0,"height":0},
         (TEMPLATE_MAPS_ASSET):{"path":"recognition/maps.json","format":"json","width":0,"height":0},
@@ -274,7 +276,7 @@ fn declared_templates_refuse_missing_or_stale_references_and_merge_atomically() 
     let mut inventory = inventory(&document, png);
     assert_eq!(
         validate_inventory(&inventory).unwrap(),
-        Some(document.clone())
+        Some(RecognitionMetadata::Legacy(document.clone()))
     );
     let saved = document.definitions[0].saved.as_ref().unwrap();
     let mut entries = BTreeMap::new();
@@ -310,7 +312,7 @@ fn declared_templates_refuse_missing_or_stale_references_and_merge_atomically() 
     assert!(validate_inventory(&inventory).is_err());
     let mut unreviewed = document;
     unreviewed.template_rights.as_mut().unwrap().reviewed = false;
-    assert!(build_template_assets(&unreviewed, "sample").is_err());
+    assert!(build_template_assets(std::iter::once(&unreviewed), "sample").is_err());
 }
 
 #[test]
@@ -797,4 +799,159 @@ fn copy_validates_the_whole_request_and_engine_limit_before_returning_source() {
     // Invalid geometry anywhere in the document refuses the whole Copy.
     document.definitions[1].region.u1 = 2.0;
     assert!(grouped(&document, &ids[..1], true, Some(2)).is_err());
+}
+
+#[test]
+fn capture_namespaces_preserve_local_regions_and_bound_the_aggregate() {
+    let a = CaptureDocument {
+        capture_id: "00000000000000000000".into(),
+        document: document(),
+    };
+    let mut b = CaptureDocument {
+        capture_id: "0000000000000000000g".into(),
+        document: document(),
+    };
+    b.document.basis.frame_width = 16;
+    b.document.basis.content.x = 4;
+    let mut package = RecognitionPackage {
+        captures: vec![a, b],
+        ..RecognitionPackage::default()
+    };
+    assert_eq!(
+        RecognitionMetadata::from_bytes(&package.to_bytes().unwrap()).unwrap(),
+        RecognitionMetadata::Captures(package.clone())
+    );
+    assert_ne!(
+        package.captures[0].document.basis,
+        package.captures[1].document.basis
+    );
+    assert_eq!(
+        package.captures[0].document.definitions[0].id,
+        package.captures[1].document.definitions[0].id
+    );
+    for capture in &mut package.captures {
+        let definition = capture.document.definitions[0].clone();
+        capture.document.definitions = (0..128)
+            .map(|index| RecognitionDefinition {
+                id: format!("r{index}"),
+                ..definition.clone()
+            })
+            .collect();
+    }
+    package.validate().unwrap();
+    package.captures[1]
+        .document
+        .definitions
+        .push(RecognitionDefinition {
+            id: "overflow".into(),
+            ..document().definitions.remove(0)
+        });
+    assert!(package.validate().is_err());
+    package.captures[1].document.definitions.pop();
+    for capture in &mut package.captures {
+        capture.document.definitions.truncate(40);
+        for definition in &mut capture.document.definitions {
+            definition.expected = Some("x".repeat(MAX_EXPECTED_BYTES));
+        }
+        capture.document.validate().unwrap();
+    }
+    assert!(
+        package.to_bytes().is_err(),
+        "individual document allowances do not multiply"
+    );
+}
+
+#[test]
+fn capture_parser_refuses_invalid_ids_duplicates_and_future_formats_without_migrating_reads() {
+    let legacy = document();
+    let bytes = legacy.to_bytes().unwrap();
+    assert_eq!(
+        RecognitionMetadata::from_bytes(&bytes).unwrap(),
+        RecognitionMetadata::Legacy(legacy.clone())
+    );
+    let mut package = RecognitionPackage {
+        captures: vec![CaptureDocument {
+            capture_id: "00000000000000000000".into(),
+            document: legacy,
+        }],
+        ..RecognitionPackage::default()
+    };
+    package.captures.push(package.captures[0].clone());
+    assert!(package.validate().is_err());
+    package.captures.pop();
+    package.captures[0].capture_id = "../outside".into();
+    assert!(RecognitionMetadata::from_bytes(&serde_json::to_vec(&package).unwrap()).is_err());
+    package.captures[0].capture_id = "00000000000000000001".into();
+    assert!(
+        package.validate().is_err(),
+        "the pinned provider enforces canonical padding"
+    );
+    package.version = 3;
+    assert_eq!(
+        RecognitionMetadata::from_bytes(&serde_json::to_vec(&package).unwrap())
+            .unwrap_err()
+            .category,
+        "RecognitionVersion"
+    );
+}
+
+#[test]
+fn aggregate_template_admission_keeps_aliases_and_requires_only_contributing_rights() {
+    let (template, png) = template_document();
+    let mut inventory = inventory(&template, png);
+    let mut ocr = document();
+    ocr.template_rights = Some(TemplateRights {
+        license: String::new(),
+        created_by: String::new(),
+        created_for: None,
+        reviewed: false,
+    });
+    let mut package = RecognitionPackage {
+        captures: vec![
+            CaptureDocument {
+                capture_id: "00000000000000000000".into(),
+                document: template.clone(),
+            },
+            CaptureDocument {
+                capture_id: "0000000000000000000g".into(),
+                document: ocr,
+            },
+        ],
+        ..RecognitionPackage::default()
+    };
+    inventory.assets.insert(
+        AUTHORING_ASSET.into(),
+        PayloadBytes::new(package.to_bytes().unwrap()).unwrap(),
+    );
+    assert_eq!(
+        validate_inventory(&inventory).unwrap(),
+        Some(RecognitionMetadata::Captures(package.clone()))
+    );
+    let (maps, _) = build_template_assets(package.documents(), "sample")
+        .unwrap()
+        .unwrap();
+    let saved = template.definitions[0].saved.as_ref().unwrap();
+    assert_eq!(
+        maps.templates[&saved.asset],
+        format!("recognition.{}", saved.asset)
+    );
+    package.captures[1].document = template;
+    package.captures[1]
+        .document
+        .template_rights
+        .as_mut()
+        .unwrap()
+        .license = "MIT".into();
+    assert!(build_template_assets(package.documents(), "sample").is_err());
+    package.captures[1].document.template_rights =
+        package.captures[0].document.template_rights.clone();
+    package.captures[1].document.definitions[0]
+        .template
+        .as_mut()
+        .unwrap()
+        .threshold = 0.5;
+    assert!(
+        build_template_assets(package.documents(), "sample").is_err(),
+        "shared crops still require agreeing defaults"
+    );
 }

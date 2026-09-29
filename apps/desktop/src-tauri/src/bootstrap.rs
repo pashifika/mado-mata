@@ -806,6 +806,7 @@ mod tests {
             notifications: NotificationPreferences::default(),
             backup_directory: None,
             packages_root: None,
+            capture_cache_enabled: false,
         }
     }
 

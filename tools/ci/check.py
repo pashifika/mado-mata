@@ -174,10 +174,13 @@ def check_runtime(root, results_directory):
     run([npm, "run", "build", "--prefix", DESKTOP_ROOT], root)
     desktop_manifest = ["--locked", "--manifest-path", DESKTOP_ROOT / "src-tauri/Cargo.toml"]
     run([*cargo, "test", *desktop_manifest, "--no-default-features", "--lib"], root)
-    if platform.system() == "Darwin":
+    if platform.system() in {"Darwin", "Windows"}:
         run([*cargo, "build", *desktop_manifest, "--features", "custom-protocol"], root)
+        if platform.system() == "Windows":
+            run([*cargo, "test", *desktop_manifest, "--features", "custom-protocol",
+                 "--bin", "mado-mata-desktop", "windows_shell::tests"], root)
     else:
-        print("Desktop shell build unexecuted: supported only on macOS; frontend and core checked.", flush=True)
+        print("Desktop shell build unexecuted on this host; macOS/Windows shell, portable frontend and core checks are separate.", flush=True)
 
 
 def main():

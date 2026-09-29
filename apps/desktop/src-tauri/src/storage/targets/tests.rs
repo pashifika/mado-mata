@@ -1,6 +1,120 @@
 use super::super::fixtures::{Directory, inventory, put, stored_target, target_path};
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn target_save_before_inspection_does_not_bind_run_or_enable_profiles() {
+    use crate::target::tests::{MetadataFixture, configuration, declaration};
+
+    let metadata = MetadataFixture::new();
+    let executable = metadata.executable("game");
+    let directory = Directory::new();
+    let store = directory.store();
+    let tab = store.create_tab("Owner", "Authoring").unwrap();
+    store.create_tab("Other", "Other").unwrap();
+    let package = inventory().package_id;
+    let empty = store.read_target("Owner", &package).unwrap();
+    assert_eq!(empty.binding, None);
+    assert!(!target_path(&directory, "Owner").parent().unwrap().exists());
+    let (saved, _) = store
+        .save_target(
+            "Owner",
+            &package,
+            &declaration(),
+            &empty.expectation(),
+            configuration(executable.to_str().unwrap()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        saved.binding.as_ref().unwrap().resolution.game.executable,
+        fs::canonicalize(&executable).unwrap().to_str().unwrap()
+    );
+    let reopened = directory.store();
+    assert_eq!(reopened.read_target("Owner", &package).unwrap(), saved);
+    assert_eq!(reopened.tab("Owner").unwrap(), tab);
+    assert_eq!(
+        reopened.read_target("Other", &package).unwrap().binding,
+        None
+    );
+    assert!(matches!(
+        reopened.profile_store("Owner", &package),
+        Err(fault) if fault.category == "ProfileIdentity"
+    ));
+    assert_eq!(
+        reopened
+            .remove_target("Owner", &package, &empty.expectation())
+            .unwrap_err()
+            .category,
+        "TargetConflict"
+    );
+    let removed = reopened
+        .remove_target("Owner", &package, &saved.expectation())
+        .unwrap();
+    assert_eq!(removed.binding, None);
+    assert_eq!(removed.revision, saved.revision + 1);
+    assert_eq!(reopened.tab("Owner").unwrap(), tab);
+}
+
+#[test]
+fn unbound_target_records_keep_closed_owner_and_package_path_fences() {
+    let directory = Directory::new();
+    let store = directory.store();
+    store.create_tab("Owner", "Authoring").unwrap();
+    let saved = stored_target("Owner");
+    store
+        .write_target(&saved, |from, to| fs::rename(from, to))
+        .unwrap();
+    let bytes = fs::read(target_path(&directory, "Owner")).unwrap();
+    assert!(store.read_target("Owner", "../escape").is_err());
+    assert!(store.read_target("../Owner", &saved.package_id).is_err());
+    store.set_tab_open("Owner", false).unwrap();
+    assert_eq!(
+        store
+            .read_target("Owner", &saved.package_id)
+            .unwrap_err()
+            .category,
+        "TabClosed"
+    );
+    assert_eq!(
+        store
+            .remove_target("Owner", &saved.package_id, &saved.expectation())
+            .unwrap_err()
+            .category,
+        "TabClosed"
+    );
+    assert_eq!(fs::read(target_path(&directory, "Owner")).unwrap(), bytes);
+    store.set_tab_open("Owner", true).unwrap();
+    assert_eq!(
+        store.read_target("Owner", &saved.package_id).unwrap(),
+        saved
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unbound_target_directory_refuses_links_and_filesystem_aliases() {
+    let directory = Directory::new();
+    let external = Directory::new();
+    let store = directory.store();
+    store.create_tab("Owner", "Authoring").unwrap();
+    let package = inventory().package_id;
+    let path = target_path(&directory, "Owner");
+    std::os::unix::fs::symlink(&external.0, path.parent().unwrap()).unwrap();
+    assert_eq!(
+        store.read_target("Owner", &package).unwrap_err().category,
+        "Storage"
+    );
+    assert!(!external.0.join("target.config").exists());
+    fs::remove_file(path.parent().unwrap()).unwrap();
+    private_directory(&directory.0.join("tabs/Owner").join(package.to_uppercase())).unwrap();
+    assert_eq!(
+        store.read_target("Owner", &package).unwrap_err().category,
+        "StorageAlias"
+    );
+    assert!(!path.exists());
+}
+
 #[test]
 fn target_reads_are_lazy_and_removal_retains_revision_against_null_aba() {
     let directory = Directory::new();

@@ -31,6 +31,12 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bitflags"
+version = "1.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
+
+[[package]]
+name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
@@ -62,6 +68,12 @@ dependencies = [
  "memchr",
  "serde_core",
 ]
+
+[[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "cc"
@@ -247,6 +259,17 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "wasi",
+]
+
+[[package]]
+name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
@@ -271,6 +294,17 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+]
+
+[[package]]
+name = "hostname"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c731c3e10504cc8ed35cfe2f1db4c9274c3d35fa486e3b31df46f068ef3e867"
+dependencies = [
+ "libc",
+ "match_cfg",
+ "winapi",
 ]
 
 [[package]]
@@ -304,7 +338,7 @@ version = "0.1.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
 dependencies = [
- "getrandom",
+ "getrandom 0.4.3",
  "libc",
 ]
 
@@ -355,7 +389,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "mado-pilot-adapter-replay",
  "mado-pilot-backend-onnx",
@@ -368,7 +402,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-adapter-replay"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",
@@ -379,7 +413,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-assets"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "flate2",
  "mado-pilot-core",
@@ -394,7 +428,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-backend-onnx"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "libloading",
  "mado-pilot-capture",
@@ -408,7 +442,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-backend-opencv"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",
@@ -419,7 +453,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-capture"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "mado-pilot-core",
 ]
@@ -427,12 +461,12 @@ dependencies = [
 [[package]]
 name = "mado-pilot-core"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 
 [[package]]
 name = "mado-pilot-input"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "mado-pilot-core",
 ]
@@ -440,7 +474,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-ocr"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",
@@ -451,7 +485,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-platform-macos"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "cc",
  "mado-pilot-capture",
@@ -462,7 +496,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-platform-windows"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",
@@ -473,7 +507,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-runtime"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "mado-pilot-assets",
  "mado-pilot-capture",
@@ -484,9 +518,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mado-pilot-testkit"
+version = "0.4.0"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+dependencies = [
+ "mado-pilot-capture",
+ "mado-pilot-core",
+ "mado-pilot-input",
+ "mado-pilot-ocr",
+ "mado-pilot-vision",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "mado-pilot-vision"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=acc5d98ae8cfc4958970be826a28011bc12185c9#acc5d98ae8cfc4958970be826a28011bc12185c9"
+source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",
@@ -498,6 +547,10 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "mado-pilot",
+ "mado-pilot-capture",
+ "mado-pilot-core",
+ "mado-pilot-runtime",
+ "mado-pilot-testkit",
  "mlua",
  "png",
  "rquickjs",
@@ -505,7 +558,15 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sysinfo",
+ "windows-sys",
+ "xid",
 ]
+
+[[package]]
+name = "match_cfg"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffbee8634e0d45d258acb448e7eaab3fce7a0a467395d4d9f228e3c1f01fb2e4"
 
 [[package]]
 name = "matrixmultiply"
@@ -622,7 +683,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
 dependencies = [
- "bitflags",
+ "bitflags 2.13.2",
 ]
 
 [[package]]
@@ -750,7 +811,7 @@ version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
 dependencies = [
- "bitflags",
+ "bitflags 2.13.2",
  "crc32fast",
  "fdeflate",
  "flate2",
@@ -808,7 +869,7 @@ version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
- "bitflags",
+ "bitflags 2.13.2",
 ]
 
 [[package]]
@@ -889,6 +950,15 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "same-file"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+dependencies = [
+ "winapi-util",
+]
 
 [[package]]
 name = "scopeguard"
@@ -1007,6 +1077,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysctl"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "225e483f02d0ad107168dc57381a8a40c3aeea6abe47f37506931f861643cfa8"
+dependencies = [
+ "bitflags 1.3.2",
+ "byteorder",
+ "libc",
+ "thiserror",
+ "walkdir",
+]
+
+[[package]]
 name = "sysinfo"
 version = "0.39.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1018,6 +1101,26 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows",
+]
+
+[[package]]
+name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -1091,6 +1194,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "walkdir"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
+dependencies = [
+ "same-file",
+ "winapi-util",
+]
+
+[[package]]
+name = "wasi"
+version = "0.11.1+wasi-snapshot-preview1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+
+[[package]]
 name = "which"
 version = "8.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1114,6 +1233,15 @@ name = "winapi-i686-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
+name = "winapi-util"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+dependencies = [
+ "windows-sys",
+]
 
 [[package]]
 name = "winapi-x86_64-pc-windows-gnu"
@@ -1223,6 +1351,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
 name = "windows-threading"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1232,10 +1369,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "winreg"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d107f8c6e916235c4c01cabb3e8acf7bea8ef6a63ca2e7fa0527c049badfc48c"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "winsplit"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ab703352da6a72f35c39a533526393725640575bb211f61987a2748323ad956"
+
+[[package]]
+name = "xid"
+version = "1.1.1"
+source = "git+https://github.com/pashifika/xid-rs?rev=bb7de7a0370d051f7fc07f31b87db62549118bfe#bb7de7a0370d051f7fc07f31b87db62549118bfe"
+dependencies = [
+ "crc32fast",
+ "getrandom 0.2.17",
+ "hostname",
+ "once_cell",
+ "sha2 0.10.9",
+ "sysctl",
+ "thiserror",
+ "winreg",
+]
 
 [[package]]
 name = "zip"

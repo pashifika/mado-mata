@@ -18,15 +18,20 @@ use std::sync::{
 };
 use tauri::{Emitter, Manager};
 
+mod cache_commands;
 #[cfg(target_os = "macos")]
 mod picker;
 mod recognition_commands;
+mod visual_picker;
+#[cfg(windows)]
+mod windows_shell;
 
 struct Backend {
     bootstrap: Arc<Bootstrap>,
     closing: AtomicBool,
     exiting: AtomicBool,
-    preview_owner: std::sync::Mutex<Option<AuthoringRef>>,
+    shutdown_finished: AtomicBool,
+    preview_owner: std::sync::Mutex<Option<Arc<recognition_commands::PreviewSession>>>,
 }
 
 async fn background<T: Send + 'static>(
@@ -571,6 +576,10 @@ fn close(app: &tauri::AppHandle) {
         if app
             .run_on_main_thread(move || {
                 if !exit_app.state::<Backend>().exiting.load(Ordering::SeqCst) {
+                    exit_app
+                        .state::<Backend>()
+                        .shutdown_finished
+                        .store(true, Ordering::SeqCst);
                     exit_app.exit(i32::from(outcome.is_err()));
                 }
             })
@@ -591,11 +600,11 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let executable = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../tools/runtime-comparison/target/debug/mado-runtime-comparison");
-    let engine_executable = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../../../tools/runtime-comparison/target/desktop-engine/debug/mado-runtime-comparison",
-    );
+    let runner_name = format!("mado-runtime-comparison{}", std::env::consts::EXE_SUFFIX);
+    let runtime =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../tools/runtime-comparison/target");
+    let executable = runtime.join("debug").join(&runner_name);
+    let engine_executable = runtime.join("desktop-engine/debug").join(&runner_name);
     let builder = tauri::Builder::default()
         .setup(move |app| {
             let home = if data_root.is_some() {
@@ -615,6 +624,7 @@ fn main() {
                 )),
                 closing: AtomicBool::new(false),
                 exiting: AtomicBool::new(false),
+                shutdown_finished: AtomicBool::new(false),
                 preview_owner: std::sync::Mutex::new(None),
             });
             Ok(())
@@ -645,6 +655,13 @@ fn main() {
             save_target,
             remove_target,
             choose_target_application,
+            visual_picker::native_pick_window,
+            recognition_commands::native_discover,
+            recognition_commands::native_select_candidate,
+            recognition_commands::native_capture,
+            recognition_commands::native_release_selection,
+            recognition_commands::native_start,
+            recognition_commands::native_reset_target,
             reserve_running_application,
             check_running_application,
             cancel_running_application,
@@ -668,7 +685,11 @@ fn main() {
             recognition_commands::recognition_view,
             recognition_commands::recognition_capabilities,
             recognition_commands::recognition_pick,
+            recognition_commands::recognition_select,
             recognition_commands::recognition_load,
+            cache_commands::capture_cache_info,
+            cache_commands::capture_cache_open,
+            cache_commands::recognition_load_cached,
             recognition_commands::recognition_preview,
             recognition_commands::recognition_update,
             recognition_commands::recognition_confirm,
@@ -683,22 +704,6 @@ fn main() {
         ])
         .on_window_event(|window, event| {
             if window.label() == recognition_commands::PREVIEW_WINDOW {
-                if let tauri::WindowEvent::Destroyed = event {
-                    let backend = window.app_handle().state::<Backend>();
-                    let owner = backend
-                        .preview_owner
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take();
-                    if let (Some(owner), Ok(application)) =
-                        (owner, backend.bootstrap.running_application())
-                    {
-                        application.recognition_release_preview(&owner);
-                    }
-                    let _ = window
-                        .app_handle()
-                        .emit_to("main", "recognition-preview-closed", ());
-                }
                 return;
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -713,9 +718,12 @@ fn main() {
         .expect("desktop initialization")
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { api, .. } => {
-                if !app.state::<Backend>().closing.load(Ordering::SeqCst) {
+                let backend = app.state::<Backend>();
+                if !backend.shutdown_finished.load(Ordering::SeqCst) {
                     api.prevent_exit();
-                    request_close(app);
+                    if !backend.closing.load(Ordering::SeqCst) {
+                        request_close(app);
+                    }
                 }
             }
             tauri::RunEvent::Exit => {

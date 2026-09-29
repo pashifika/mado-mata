@@ -3,6 +3,7 @@ import type {ReactNode} from 'react';
 import EnvironmentPanel from './EnvironmentPanel.tsx';
 import type {CheckTarget, LastCheck} from './EnvironmentPanel.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
+import CaptureCacheControls from '../components/CaptureCacheControls.tsx';
 import Select from '../components/Select.tsx';
 import type {SnapshotOutcome} from '../bootstrap.ts';
 import {TIMEOUT_SECONDS, VISIBLE_COUNTS} from '../state.ts';
@@ -11,8 +12,8 @@ import type {EditableSettings, Fault, Settings} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
-type Category = 'display' | 'notifications' | 'packages' | 'environment' | 'logs' | 'backups';
-const CATEGORIES: Category[] = ['display', 'notifications', 'packages', 'environment', 'logs', 'backups'];
+type Category = 'display' | 'notifications' | 'packages' | 'environment' | 'captures' | 'logs' | 'backups';
+const CATEGORIES: Category[] = ['display', 'notifications', 'packages', 'environment', 'captures', 'logs', 'backups'];
 // state.ts stays the validation authority; this only maps its error keys to the category whose fields show them.
 const ERROR_CATEGORY: Record<string, Category> = {
   locale: 'display',
@@ -62,7 +63,7 @@ export default function SettingsDialog(props: Props) {
     }
   }, [open]);
   const errors = parsed.errors;
-  const invalidCount: Record<Category, number> = {display: 0, notifications: 0, packages: 0, environment: 0, logs: 0, backups: 0};
+  const invalidCount: Record<Category, number> = {display: 0, notifications: 0, packages: 0, environment: 0, captures: 0, logs: 0, backups: 0};
   for (const key of Object.keys(errors)) {
     const owner = ERROR_CATEGORY[key];
     if (owner) invalidCount[owner] += 1;
@@ -128,6 +129,11 @@ export default function SettingsDialog(props: Props) {
             <button id="packages-root-default" type="button" disabled={saving || !draft.packagesRoot} onClick={() => onDraft({...draft, packagesRoot: ''})}>{t.settings.packagesDefault}</button>
             <dl className="fixed-facts"><dt>{t.settings.packagesDefaultRoot}</dt><dd className="mono">{props.defaultPackagesRoot}</dd>
               <dt>{t.settings.packagesSavedRoot}</dt><dd className="mono">{settings?.packages_root ?? props.defaultPackagesRoot}</dd></dl>
+          </section>}
+          {category === 'captures' && <section aria-labelledby="capture-settings-heading">
+            <h3 id="capture-settings-heading">{t.common.captures}</h3>
+            <CaptureCacheControls disabled={saving} enabled={draft.captureCacheEnabled}
+              onEnabled={captureCacheEnabled => onDraft({...draft, captureCacheEnabled})}/>
           </section>}
           {category === 'logs' && <section aria-labelledby="logs-settings-heading">
             <h3 id="logs-settings-heading">{t.settings.logsHeading}</h3>

@@ -250,6 +250,9 @@ details[open] > summary { font-weight: 600; }
 .fault { margin-bottom: 13px; border: 1px solid var(--danger-border); background: var(--danger-soft); color: #852f2c; padding: 12px 14px; border-radius: 7px; overflow-wrap: anywhere; }
 .fault p { margin: 5px 0 0; white-space: pre-wrap; }
 .fault .diagnostic { background: #f8e8e5; color: #6d332f; max-height: 260px; }
+.dismissible-fault { position: relative; padding-inline-end: 46px; }
+.fault-dismiss { position: absolute; inset-block-start: 5px; inset-inline-end: 6px; width: 28px; height: 28px; padding: 0; border-color: transparent; background: transparent; color: inherit; font-size: 20px; font-weight: 400; line-height: 1; }
+.fault-dismiss:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger-border); }
 .inline-warning { padding: 9px; margin: 8px 0; border-radius: 4px; background: #fff3df; color: #865c24; font-size: 11px; overflow-wrap: anywhere; }
 .inline-warning button { margin: 6px 0 0 6px; font-size: 10px; }
 .field-error { color: #a3322f; font-size: 11px; margin: 4px 0 0; }
@@ -343,7 +346,7 @@ details[open] > summary { font-weight: 600; }
 .dialog-header p { font-size: 11px; color: var(--text-muted); margin: 5px 0 0; }
 .settings-dialog .operation-strip { border-bottom: 1px solid var(--border); }
 .dialog-layout { display: grid; grid-template-columns: 160px minmax(0, 1fr); min-height: 340px; }
-.settings-nav { padding: 18px 12px; background: var(--surface-alt); border-right: 1px solid var(--border); }
+.settings-nav { padding: 18px 12px; background: var(--surface-alt); border-right: 1px solid var(--border); max-height: calc(100vh - 260px); overflow: auto; }
 .settings-nav button { display: block; width: 100%; border: 0; background: transparent; text-align: left; font-size: 12px; font-weight: 500; padding: 9px 10px; margin-bottom: 3px; border-radius: 6px; }
 .settings-nav button[aria-selected="true"] { background: #e4e9ef; font-weight: 600; }
 .settings-content { padding: 22px 24px; max-height: calc(100vh - 260px); overflow: auto; }

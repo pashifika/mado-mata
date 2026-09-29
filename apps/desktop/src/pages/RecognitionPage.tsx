@@ -1,18 +1,24 @@
+import {useState} from 'react';
 import {FaultMessage} from '../components/ResultPanel.tsx';
 import Select from '../components/Select.tsx';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import {record as jsonRecord} from '../state.ts';
 import {
-  MAX_DEFINITIONS, MAX_EXPECTED_BYTES, UNDO_ENTRIES, confirmBlock, copyBlock, copyFreshness, definitionIssue, deleteDefinition, geometryConfirmed,
+  MAX_DEFINITIONS, MAX_EXPECTED_BYTES, UNDO_ENTRIES, aggregateDefinitions, canUndoRecognition, confirmBlock, copyBlock, copyFreshness, definitionIssue, deleteDefinition, discardPixelCrops, geometryConfirmed,
   mapRegion, recognitionDirty, renameDefinition, sameJson, saveBlock, selectDefinition, setExpected, setKind, setRights, toggleCrop, toggleTrial,
-  trialBlock, trialEnvelope, trialFreshness, undoRecognition, utf8Bytes,
+  trialBlock, trialEnvelope, trialFreshness, undoRecognition, utf8Bytes, canReleaseImage,
 } from '../recognition.ts';
 import type {NormalizedRect, RecognitionKind, RecognitionState, SnippetKind, TemplateRights, TrialDiagnostics} from '../recognition.ts';
+import type {NativeSelectionView} from '../types.ts';
 
 export interface RecognitionHandlers {
   // Explicit PNG selection, then `recognition_load`.
-  load: () => void;
+  load: (newCapture:boolean) => void;
+  selectCapture: (captureId:string) => void;
+  // Explicit saved-image operation; cache configuration lives only in App settings.
+  reloadCached: () => void;
+  resetNative: () => void;
   confirm: () => void;
   // Grouped OCR or one template against the loaded frame, or one saved OCR crop sample.
   trial: (kind: 'frame' | 'sample', ids: string[]) => void;
@@ -28,6 +34,7 @@ export interface RecognitionHandlers {
 
 export interface RecognitionPageProps {
   state: RecognitionState;
+  nativeSelection: NativeSelectionView|null;
   // Local metadata edits (pure reducers from recognition.ts) applied to the Edit session's state.
   onState: (update: (state: RecognitionState) => RecognitionState) => void;
   handlers: RecognitionHandlers;
@@ -45,7 +52,7 @@ const MIB = 1_048_576;
 
 // Main-window recognition panel: frame and geometry status, definitions, trials, crop-only Save and one-way Copy.
 // On-image editing happens in the detached preview window, which shares this state through the Edit session.
-export default function RecognitionPage({state, onState, handlers, locked, lockReason, leaseLost, trialActive}: RecognitionPageProps) {
+export default function RecognitionPage({state, nativeSelection, onState, handlers, locked, lockReason, leaseLost, trialActive}: RecognitionPageProps) {
   const locale = useLocale();
   const r = messages[locale].ui.recognition;
   const {document, view} = state;
@@ -59,6 +66,21 @@ export default function RecognitionPage({state, onState, handlers, locked, lockR
   const limit = view.capabilities.max_ocr_zones;
   const policy = view.capabilities.image_policy;
   const number = (value: number) => value.toLocaleString(locale, {maximumFractionDigits: 4});
+  const [pixelChoice, setPixelChoice] = useState<{kind:'load'; newCapture:boolean} | {kind:'select'; captureId:string} | {kind:'cached'} | null>(null);
+  function changeCapture(intent: NonNullable<typeof pixelChoice>) {
+    if (intent.kind === 'load') handlers.load(intent.newCapture);
+    else if (intent.kind === 'cached') handlers.reloadCached();
+    else handlers.selectCapture(intent.captureId);
+  }
+  function requestCapture(intent: NonNullable<typeof pixelChoice>) {
+    const leaving = intent.kind === 'select' || (intent.kind === 'load' && intent.newCapture);
+    if (!canReleaseImage(state, leaving)) {
+      onState(current => ({...current, notice: 'confirmBeforeReplace'}));
+      return;
+    }
+    if (state.cropIds.length > 0) setPixelChoice(intent);
+    else changeCapture(intent);
+  }
 
   function pixels(region: NormalizedRect): string {
     const edges = basis && mapRegion(region, basis);
@@ -124,11 +146,40 @@ export default function RecognitionPage({state, onState, handlers, locked, lockR
     <div className="recognition-header">
       <div><h3 id="recognition-heading">{r.heading}</h3><p className="field-help">{r.intro}</p></div>
       <div className="button-row">
-        <button id="recognition-load" type="button" disabled={commands || running} onClick={handlers.load}>{frame ? r.replaceImage : r.loadImage}</button>
+        <button id="recognition-add-capture" type="button" disabled={commands || running || pixelChoice !== null}
+          onClick={() => requestCapture({kind: 'load', newCapture: true})}>{r.addCapture}</button>
+        <button id="recognition-load" type="button" disabled={commands || running || view.capture_id === null || pixelChoice !== null}
+          onClick={() => requestCapture({kind: 'load', newCapture: false})}>{frame ? r.replaceImage : r.loadImage}</button>
         <button id="recognition-open-preview" type="button" disabled={leaseLost} title={r.previewHelp} onClick={handlers.openPreview}>{r.openPreview}</button>
         <button id="recognition-reload" type="button" disabled={commands} onClick={handlers.reload}>{r.reload}</button>
       </div>
     </div>
+    <div className="field"><label htmlFor="recognition-capture">{r.capture}</label>
+      <Select id="recognition-capture" value={view.capture_id ?? ''} disabled={commands || running || pixelChoice !== null || view.captures.length === 0}
+        options={view.captures.map(capture => ({value: capture.capture_id,
+          label: `${capture.capture_id} · ${capture.document.basis.frame_width} × ${capture.document.basis.frame_height}`}))}
+        onChange={captureId => {if (captureId !== view.capture_id) requestCapture({kind: 'select', captureId});}}/>
+      <p className="field-help">{r.captureHelp}</p>
+      {view.migration_required && <p className="inline-warning">{r.migration}</p>}
+    </div>
+    <div className="button-row">
+      <button id="recognition-load-cached" type="button" disabled={commands || running || view.capture_id === null || pixelChoice !== null}
+        onClick={() => requestCapture({kind:'cached'})}>{messages[locale].ui.captureCache.reload}</button>
+      {nativeSelection?.has_saved_target && <button id="recognition-reset-target" type="button" disabled={commands || nativeSelection.busy}
+        onClick={handlers.resetNative}>{messages[locale].ui.nativeCapture.reset}</button>}
+    </div>
+    {pixelChoice && <div role="alertdialog" aria-modal="false" aria-labelledby="recognition-discard-pixels" className="panel">
+      <h4 id="recognition-discard-pixels">{r.discardPixels}</h4><p>{r.discardPixelsHelp}</p>
+      <div className="button-row">
+        <button type="button" disabled={commands || running} onClick={() => {
+          onState(discardPixelCrops);
+          const intent = pixelChoice;
+          setPixelChoice(null);
+          changeCapture(intent);
+        }}>{r.discardPixelsContinue}</button>
+        <button type="button" onClick={() => setPixelChoice(null)}>{r.cancelCapture}</button>
+      </div>
+    </div>}
     {lockReason && <p className="muted" role="status">{lockReason}</p>}
     {state.notice && <p id="recognition-notice" className="inline-warning" role="status">{r.notice(state.notice)}</p>}
     {state.error && <FaultMessage title={r.actionFailed} value={state.error}/>}
@@ -146,13 +197,16 @@ export default function RecognitionPage({state, onState, handlers, locked, lockR
       </dl>
     </div>
     <p className="field-help">{frame ? confirmed ? r.previewHelp : r.confirmHelp : document ? r.noFrameSaved : r.noFrame}</p>
+    {frame?.historical && <p id="recognition-historical" className="field-help">
+      {messages[locale].ui.nativeCapture.historical}{frame.historical_capture_at_ms != null && ` ${new Date(frame.historical_capture_at_ms).toLocaleString(locale)}`}
+    </p>}
     <p className="field-help">{r.limits(Math.round(policy.input_bytes / MIB), policy.input_pixels.toLocaleString(locale), Math.round(policy.crop_bytes / MIB),
       policy.crop_pixels.toLocaleString(locale))}</p>
 
     <section className="panel recognition-panel" aria-labelledby="recognition-definitions-heading">
       <div className="panel-heading"><h4 id="recognition-definitions-heading">{r.definitionsHeading}</h4>
-        <span className="muted">{r.count(definitions.length, MAX_DEFINITIONS)}</span>
-        <button id="recognition-undo" type="button" disabled={leaseLost || state.undo.length === 0} title={r.undoHelp(state.undo.length, UNDO_ENTRIES)}
+        <span className="muted">{r.count(aggregateDefinitions(state), MAX_DEFINITIONS)}</span>
+        <button id="recognition-undo" type="button" disabled={leaseLost || !canUndoRecognition(state)} title={r.undoHelp(state.undo.length, UNDO_ENTRIES)}
           onClick={() => onState(undoRecognition)}>{r.undo}</button></div>
       <div className="panel-body">
         {definitions.length === 0 ? <p className="muted">{frame ? r.noDefinitions : r.noDefinitionsFrame}</p>
@@ -176,7 +230,7 @@ export default function RecognitionPage({state, onState, handlers, locked, lockR
                   {definition.saved && <span className="tag current">{r.savedCrop}</span>}
                   {trialIds.has(definition.id) && freshnessTag(definition.id)}
                 </span></td>
-                <td><input type="checkbox" checked={state.cropIds.includes(definition.id)} disabled={leaseLost || frame === null}
+                <td><input type="checkbox" checked={state.cropIds.includes(definition.id)} disabled={leaseLost || (frame === null && !state.cropIds.includes(definition.id))}
                   aria-label={r.cropFor(definition.name)} onChange={() => onState(current => toggleCrop(current, definition.id))}/></td>
               </tr>;
             })}</tbody>
