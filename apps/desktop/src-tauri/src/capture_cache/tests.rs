@@ -314,3 +314,125 @@ fn substituted_folders_and_link_entries_refuse_measurement_open_and_reload() {
         png(42).as_bytes()
     );
 }
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires Windows Developer Mode or pre-authorized symbolic-link privilege"]
+fn windows_reparse_substitution_keeps_reads_and_publication_inside_cache() {
+    use std::os::windows::fs::symlink_file;
+    let directory = Directory::new();
+    let outside = Directory::new();
+    fs::create_dir_all(&directory.0).unwrap();
+    fs::create_dir_all(&outside.0).unwrap();
+    let cache = directory.cache();
+    let id = crate::storage::new_id().unwrap();
+    let original = png(17);
+    let replacement = png(42);
+    let outside_png = outside.0.join(format!("{id}.png"));
+    fs::write(&outside_png, original.as_bytes()).unwrap();
+    let untouched = vec![outside_png.file_name().unwrap().to_owned()];
+
+    for junction in [&cache.folder, &cache.folder.join("package")] {
+        let result = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(junction)
+            .arg(&outside.0)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "owned junction creation failed");
+        assert!(cache.open_image("package", &id).is_err());
+        let write = cache.persist("package", &id, replacement.as_bytes());
+        assert!(!write.cached && write.error.is_some());
+        assert_eq!(fs::read(&outside_png).unwrap(), original.as_bytes());
+        let entries: Vec<_> = fs::read_dir(&outside.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, untouched, "publication escaped through a junction");
+        fs::remove_dir(junction).unwrap();
+        fs::create_dir_all(&cache.folder).unwrap();
+    }
+
+    let path = image_path(&directory, &id);
+    ensure_directories(path.parent().unwrap()).unwrap();
+    symlink_file(&outside_png, &path).unwrap();
+    assert!(cache.open_image("package", &id).is_err());
+    let write = cache.persist("package", &id, replacement.as_bytes());
+    assert!(write.cached && write.error.is_none());
+    assert!(!fs::symlink_metadata(&path).unwrap().is_symlink());
+    assert_eq!(
+        read_opened(cache.open_image("package", &id).unwrap()),
+        replacement.as_bytes()
+    );
+    assert_eq!(fs::read(outside_png).unwrap(), original.as_bytes());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_pinned_directories_refuse_replacement_until_publication_finishes() {
+    let directory = Directory::new();
+    let cache = directory.cache();
+    let id = crate::storage::new_id().unwrap();
+    let pinned = cache.create_package_directory("package").unwrap();
+    let package = cache.folder.join("package");
+    // The package is empty: removal cannot fail merely because it contains files.
+    let error = fs::remove_dir(&package).unwrap_err();
+    assert!(matches!(error.raw_os_error(), Some(5 | 32)));
+    for path in [&directory.0, &cache.folder, &package] {
+        let error = fs::rename(path, path.with_extension("moved")).unwrap_err();
+        assert!(matches!(error.raw_os_error(), Some(5 | 32)));
+    }
+    let pending = format!("{id}.pending");
+    let destination = format!("{id}.png");
+    let original = png(17);
+    let mut file = pinned.create_pending(&pending).unwrap();
+    file.write_all(original.as_bytes()).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    pinned.publish(&pending, &destination).unwrap();
+    assert_eq!(
+        read_opened(pinned.open_image(&destination).unwrap()),
+        original.as_bytes()
+    );
+    assert!(!package.join(pending).exists());
+    drop(pinned);
+    // Exactly the attempted mutations become possible after the handles are released.
+    for path in [&package, &cache.folder, &directory.0] {
+        let moved = path.with_extension("moved");
+        fs::rename(path, &moved).unwrap();
+        fs::rename(&moved, path).unwrap();
+    }
+    fs::remove_file(package.join(destination)).unwrap();
+    fs::remove_dir(package).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_sharing_conflict_refuses_cache_io_without_reopening_fallback() {
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    let directory = Directory::new();
+    let cache = directory.cache();
+    let id = crate::storage::new_id().unwrap();
+    let original = png(17);
+    assert!(cache.persist("package", &id, original.as_bytes()).cached);
+    let path = image_path(&directory, &id);
+    let exclusive = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path.parent().unwrap())
+        .unwrap();
+    assert!(cache.open_image("package", &id).is_err());
+    let replacement = png(42);
+    let refused = cache.persist("package", &id, replacement.as_bytes());
+    assert!(!refused.cached && refused.error.is_some());
+    assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+    assert!(!path.with_extension("pending").exists());
+    drop(exclusive);
+    let retried = cache.persist("package", &id, replacement.as_bytes());
+    assert!(retried.cached && retried.error.is_none());
+    assert_eq!(
+        read_opened(cache.open_image("package", &id).unwrap()),
+        replacement.as_bytes()
+    );
+}

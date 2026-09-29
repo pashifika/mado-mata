@@ -2814,3 +2814,81 @@ fn cached_reload_never_follows_links_substituted_after_managed_validation() {
         fs::remove_file(&managed_png).unwrap();
     }
 }
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires Windows Developer Mode or pre-authorized symbolic-link privilege"]
+fn windows_cached_loader_refuses_reparse_substitution_and_preserves_verified_pixels() {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+    let editor = cached_editor();
+    let app = editor.app();
+    let owner = &editor.view.owner;
+    let revision = &editor.view.revision;
+    let loaded = editor.load();
+    let capture_id = loaded.capture_id.clone().unwrap();
+    let cache = app.capture_cache().unwrap();
+    let managed = solid_png(17);
+    let foreign = solid_png(200);
+    let outside = editor.fixture.root.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let outside_png = outside.join(format!("{capture_id}.png"));
+    fs::write(&outside_png, foreign.as_bytes()).unwrap();
+    let cache_dir = editor.fixture.root.join("caches");
+    let package_dir = cache_dir.join(&editor.view.package_id);
+    let managed_png = package_dir.join(format!("{capture_id}.png"));
+    assert!(
+        cache
+            .persist(&editor.view.package_id, &capture_id, managed.as_bytes())
+            .cached
+    );
+    let view = app.recognition_view(owner, revision).unwrap();
+    app.load_recognition_source(
+        owner,
+        revision,
+        Some(&capture_id),
+        view.document_revision,
+        false,
+        |candidate| {
+            let opened = cache
+                .open_image(candidate.package_id(), &capture_id)?
+                .unwrap();
+            let error = fs::remove_file(&managed_png).unwrap_err();
+            assert!(matches!(error.raw_os_error(), Some(5 | 32)));
+            let error = fs::rename(&managed_png, managed_png.with_extension("moved")).unwrap_err();
+            assert!(matches!(error.raw_os_error(), Some(5 | 32)));
+            Ok(ImageSource::Cached(opened))
+        },
+    )
+    .unwrap();
+    assert_eq!(frame_pixels(app).as_deref(), Some(&[17; 32 * 24 * 4][..]));
+
+    // Once the read has released its handles, deliberately substitute each level.
+    for target in [&managed_png, &package_dir, &cache_dir] {
+        let moved = target.with_extension("original");
+        fs::rename(target, &moved).unwrap();
+        let directory = moved.is_dir();
+        if directory {
+            symlink_dir(&outside, target).unwrap();
+        } else {
+            symlink_file(&outside_png, target).unwrap();
+        }
+        let view = app.recognition_view(owner, revision).unwrap();
+        let error = app
+            .recognition_load_cached(owner, revision, &cache, &capture_id, view.document_revision)
+            .err()
+            .expect("cached loading must refuse the substituted reparse point");
+        assert_eq!(error.category, "CaptureCache");
+        assert!(frame_pixels(app).is_none());
+        assert_eq!(fs::read(&outside_png).unwrap(), foreign.as_bytes());
+        if directory {
+            fs::remove_dir(target).unwrap();
+        } else {
+            fs::remove_file(target).unwrap();
+        }
+        fs::rename(&moved, target).unwrap();
+    }
+    let view = app.recognition_view(owner, revision).unwrap();
+    app.recognition_load_cached(owner, revision, &cache, &capture_id, view.document_revision)
+        .unwrap();
+    assert_eq!(frame_pixels(app).as_deref(), Some(&[17; 32 * 24 * 4][..]));
+}

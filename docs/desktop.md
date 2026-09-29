@@ -541,6 +541,33 @@ There is no polling, quota, eviction, cleanup daemon, custom location or cache
 database. The preference may participate in configuration backup; original images
 and cache paths stay outside packages, profiles, backup payloads and routine logs.
 
+#### Windows filesystem refusal checks
+
+These shell-independent checks use owned disposable PNGs and byte files, not
+game processes, real cache data, capture, OCR or input. Run from the repository
+root in the x64 MSVC developer environment described above. The two ordinary
+Windows sharing tests run in the portable cache subset:
+
+```powershell
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib capture_cache::tests:: -- --nocapture
+```
+
+Only with existing, authorized symbolic-link capability, explicitly include the
+ignored reparse fixture and run the actual cached-loader and target-file checks:
+
+```powershell
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib capture_cache::tests:: -- --include-ignored --nocapture
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib application::authoring::recognition::tests::windows_cached_loader_refuses_reparse_substitution_and_preserves_verified_pixels -- --exact --ignored --nocapture
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib application::authoring::native_capture::windows_file::tests::symbolic_link_leaf_and_ancestor_are_refused_without_following -- --exact --ignored --nocapture
+```
+
+Do not elevate or enable Developer Mode just to run these checks. An ignored or
+zero-test result is not acceptance. The fixtures cover cache-root/package
+junctions, symbolic-link PNGs, actual cached loading, pinned-directory
+rename/delete refusal and release, and sharing-conflict refusal without an I/O
+fallback. They do not qualify the Windows GUI/native workflow or strengthen the
+external file-manager/measurement boundary described above.
+
 ## Author saved-image Recognition
 
 Open the viewfinder-icon **Recognition** action in the Edit session's left
