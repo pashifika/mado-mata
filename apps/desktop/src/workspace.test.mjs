@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyInvalidatedViews,applyRecoveryMutation,applyWorkspaceView,bindSelection,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
+import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyInvalidatedViews,applyRecoveryMutation,applyWorkspaceView,approveNative,bindSelection,chooseLane,clearNativeApproval,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,editNativeReview,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
 import {LocalFault} from './i18n.ts';
 import {currentRecoveryDraft,editRecovery,issuePath,readRecoveryDraft,recoveryIssue,recoveryState,recoveryTicket,selectRecovery} from './recovery.ts';
 import {optionPath,readDraft} from './state.ts';
@@ -1385,4 +1385,97 @@ test('a successful explicit retry carries the unrepaired draft and its issue to 
   assert.equal(different.recovery.touched,false);
   const stale=applyRecoveryMutation(different,ticket,mutation({draft:{count:1},issue:unreadable}));
   assert.equal(stale.recovery,different.recovery);
+});
+
+const nativeLimits={duration_ms:30000,max_frames:300,wait_ms:1000,interval_ms:100,max_actions:64,cleanup_ms:1000,containment_ms:2000};
+const nativeEnvironment={profile:'environment-a'};
+function bundleConfiguration(input=targetConfiguration().input) {
+  const configuration=targetConfiguration('/metadata/Game.app');
+  return {...configuration,game:{kind:'bundle',path:'/metadata/Game.app'},input};
+}
+// A native-lane draft reviewed against a compatible saved bundle; `approve` grants both consents for its current request.
+function nativeDraft(target=loadedBundle()) {
+  const tab=bindSelection(workspaceFromView(view('a')),targetSelection('a'));
+  return updateBound(tab,bound=>editNativeReview(editNativeReview(chooseLane({...bound,target},'native'),'operation','Press Confirm once'),'postcondition','Result dialog is shown'));
+}
+function approve(bound,environment=nativeEnvironment,limits=nativeLimits) {
+  return approveNative(approveNative(bound,'capture',true,environment,limits),'input',true,environment,limits);
+}
+function nativeOf(bound,environment=nativeEnvironment,limits=nativeLimits) {
+  return deriveBound(bound,environment,'en',limits).native;
+}
+
+test('a Native intent names the current saved binding only after both separate consents for that exact request',()=>{
+  const bound=nativeDraft().bound;
+  assert.equal(nativeOf(bound).block,'nativeApproval');
+  const captureOnly=approveNative(bound,'capture',true,nativeEnvironment,nativeLimits);
+  assert.equal(nativeOf(captureOnly).block,'nativeApproval');
+  assert.equal(nativeOf(captureOnly).intent,null);
+  const approved=approveNative(captureOnly,'input',true,nativeEnvironment,nativeLimits);
+  const facts=deriveBound(approved,nativeEnvironment,'en',nativeLimits);
+  assert.equal(facts.startBlock,null);
+  assert.deepEqual(facts.native.intent,{target_revision:1,target_binding_id:'binding-1',target_declaration_identity:'declaration-1',
+    capture_approved:true,input_approved:true,operation:'Press Confirm once',visible_postcondition:'Result dialog is shown',limits:nativeLimits});
+  // Consent given for an older request does not combine with consent given after an edit.
+  const edited=approveNative(editDraft(captureOnly,{count:2}),'input',true,nativeEnvironment,nativeLimits);
+  assert.equal(nativeOf(edited).capture,false);
+  assert.equal(nativeOf(edited).intent,null);
+  // Submission spends the approval; the same request needs fresh consent.
+  assert.equal(nativeOf(clearNativeApproval(approved)).intent,null);
+});
+
+test('Native approval is withdrawn by relevant edits and never restored by editing back or returning to the lane',()=>{
+  const approved=approve(nativeDraft().bound);
+  assert.ok(nativeOf(approved).intent);
+  const draftBack=editDraft(editDraft(approved,{count:2}),{count:1});
+  assert.deepEqual(draftBack.draft,approved.draft);
+  assert.equal(nativeOf(draftBack).intent,null);
+  const textBack=editNativeReview(editNativeReview(approved,'operation','Press Cancel'),'operation','Press Confirm once');
+  assert.equal(nativeOf(textBack).intent,null);
+  assert.equal(nativeOf(chooseLane(chooseLane(approved,'controlled'),'native')).intent,null);
+  assert.equal(nativeOf(approved,{profile:'environment-b'}).intent,null);
+  const newer=readTarget(approved.target,targetView(approved.target,{revision:2,configuration:bundleConfiguration()}));
+  assert.equal(nativeOf({...approved,target:newer}).intent,null);
+  const reissued={...approved,target:{...approved.target,context:{...approved.target.context,workspace:{workspace_id:'a',revision:2}}}};
+  assert.equal(nativeOf(reissued).intent,null);
+  const tab=updateBound(nativeDraft(),bound=>approve(selectProfile(bound,'prof-a')));
+  assert.ok(nativeOf(tab.bound).intent);
+  const changed=applyCatalog(tab,{profiles:[profile('prof-a','Saved a',{count:6},'shared')],profiles_error:null});
+  assert.equal(nativeOf(changed.bound).intent,null);
+});
+
+test('Native admission refuses an unsupported platform, unsuitable or unsettled target and missing environment regardless of consent',()=>{
+  const approved=approve(nativeDraft().bound);
+  assert.equal(nativeOf(approve(approved,nativeEnvironment,null),nativeEnvironment,null).block,'nativeUnavailable');
+  assert.equal(nativeOf(approved,null).block,'nativeEnvironment');
+  const bundle=loadedBundle();
+  for (const [scenario,target,block] of [
+    ['an unread target',targetState(targetSelection('a')),'nativeTarget'],
+    ['a failed target read',targetReadFailed(bundle,unreadable),'nativeTarget'],
+    ['a pending target command',beginTarget(bundle,'check'),'nativeTarget'],
+    ['a direct executable binding',loadedTarget(),'nativeBinding'],
+    ['a capture-only bundle binding',loadedTarget('a',bundleConfiguration(null)),'nativeBinding'],
+    ['an incompatible binding',{...bundle,view:{...bundle.view,compatible:false}},'nativeBinding'],
+    ['an unsaved target edit',editTarget(bundle,{...bundle.draft,windowTitle:'Other title'}),'nativeTargetDirty'],
+  ]) {
+    const facts=nativeOf(approve(nativeDraft(target).bound));
+    assert.equal(facts.block,block,scenario);
+    assert.equal(facts.intent,null,scenario);
+  }
+  const multiline=nativeOf(approve(editNativeReview(approved,'postcondition','Result\nshown')));
+  assert.deepEqual([multiline.block,multiline.postconditionError],['nativeText','control']);
+  assert.equal(nativeOf(editNativeReview(approved,'operation','あ'.repeat(1366))).operationError,'long');
+  assert.equal(nativeOf(editNativeReview(approved,'operation','  ')).operationError,'blank');
+  const controlled=deriveBound(chooseLane(approved,'controlled'),null,'en',null);
+  assert.deepEqual([controlled.native,controlled.startBlock],[null,null]);
+});
+
+test('Native target edits cannot restore consent after discard',()=>{
+  const approved=approve(nativeDraft().bound);
+  const edited=editTarget(approved.target,{...approved.target.draft,windowTitle:'Another window'});
+  const restored={...approved,target:discardTarget(edited)};
+  assert.equal(targetDirty(restored.target),false);
+  assert.equal(nativeOf(restored).intent,null);
+  const renewed=approveNative(restored,'capture',true,nativeEnvironment,nativeLimits);
+  assert.equal(nativeOf(renewed).input,false);
 });

@@ -97,9 +97,18 @@ export interface RetainedCheck {
 }
 // `authoring` is the host's single application-wide Edit lease, present in every Workspace view while held.
 export interface Poll {controller:ControllerView; logs:LogBatch; workspace_results:WorkspaceResult[]; last_check:RetainedCheck|null; authoring:AuthoringRef|null; native_selection:NativeSelectionView|null}
+// Host-issued finite Native policy (`native_run_limits`); null there means this platform/build offers no Native lane.
+export interface NativeLimits {
+  duration_ms:number; max_frames:number; wait_ms:number; interval_ms:number; max_actions:number; cleanup_ms:number; containment_ms:number;
+}
+// Bounded per-Start operator intent. It names the reviewed saved target and carries no executable, process or plan.
+export interface NativeIntent {
+  target_revision:number; target_binding_id:string; target_declaration_identity:string;
+  capture_approved:boolean; input_approved:boolean; operation:string; visible_postcondition:string; limits:NativeLimits;
+}
 export interface StartRequest {
   package_path:string; inventory_identity:string; package_id:string; schema_identity:string; profile_id:string;
-  values:Record<string,Json>; lane:string; scenario:string; replay_descriptor_path:string|null;
+  values:Record<string,Json>; lane:string; scenario:string; replay_descriptor_path:string|null; native_intent:NativeIntent|null;
 }
 
 // Host-issued Edit lease: the token is bound to one application generation, Workspace session and package source.

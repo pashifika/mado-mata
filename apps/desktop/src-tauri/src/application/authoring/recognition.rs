@@ -1418,6 +1418,7 @@ impl Application {
             run: run.to_owned(),
             workspace: Some(owner.workspace.clone()),
             check: None,
+            native: false,
             terminal: false,
         });
         if let Some(lease) = state.authoring.as_mut() {

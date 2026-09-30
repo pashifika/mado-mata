@@ -146,6 +146,7 @@ pub(super) fn request(selection: &Selection) -> StartRequest {
         lane: "controlled".into(),
         scenario: "workflow".into(),
         replay_descriptor_path: None,
+        native_intent: None,
     }
 }
 

@@ -1,5 +1,6 @@
 //! One application-owned operation, with independent lifecycle and log queues.
 
+mod native;
 mod operation;
 mod packages;
 mod recognition;
@@ -39,10 +40,75 @@ pub struct StartRequest {
     pub scenario: String,
     #[serde(default)]
     pub replay_descriptor_path: Option<String>,
+    #[serde(default)]
+    pub native_intent: Option<NativeIntent>,
 }
 
 fn workflow() -> String {
     "workflow".into()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntent {
+    pub target_revision: u64,
+    pub target_binding_id: String,
+    pub target_declaration_identity: String,
+    pub capture_approved: bool,
+    pub input_approved: bool,
+    pub operation: String,
+    pub visible_postcondition: String,
+    pub limits: NativeLimits,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeLimits {
+    pub duration_ms: u64,
+    pub max_frames: u64,
+    pub wait_ms: u64,
+    pub interval_ms: u64,
+    pub max_actions: usize,
+    pub cleanup_ms: u64,
+    pub containment_ms: u64,
+}
+
+/// Per-Start defaults and ceilings; containment is the fixed supervisor bound.
+pub fn native_limits() -> NativeLimits {
+    NativeLimits {
+        duration_ms: REPLAY_DURATION_MS,
+        max_frames: 300,
+        wait_ms: 1_000,
+        interval_ms: 100,
+        max_actions: 64,
+        cleanup_ms: 1_000,
+        containment_ms: 2_000,
+    }
+}
+
+/// Saved binding policy, constructed only by the application host.
+#[derive(Debug)]
+pub struct NativeInputPolicy {
+    pub route: String,
+    pub focus: String,
+    pub pointer_mode: Option<String>,
+    pub click_hold_ms: u64,
+}
+
+/// Fresh application correspondence, never accepted from public IPC.
+#[derive(Debug)]
+pub struct NativeTarget {
+    pub executable: PathBuf,
+    pub process_id: u32,
+    pub process_lifetime: String,
+    pub window_title: String,
+    pub input: NativeInputPolicy,
+}
+
+#[derive(Debug, Default)]
+pub struct StartPreparation {
+    pub environment: Option<crate::environment::OcrEnvironment>,
+    pub native: Option<NativeTarget>,
 }
 
 #[derive(Debug, Serialize)]

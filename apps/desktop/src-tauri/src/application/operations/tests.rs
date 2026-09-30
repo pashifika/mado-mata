@@ -81,6 +81,7 @@ fn controlled_start_ignores_unavailable_environment_settings() {
                 lane: "controlled".into(),
                 scenario: "workflow".into(),
                 replay_descriptor_path: None,
+                native_intent: None,
             },
         )
         .unwrap();
@@ -99,6 +100,7 @@ fn terminal_outcomes_keep_severity_and_distinguish_cleanup_without_private_detai
         "cleanup":{"clean":true,"status":"CleanupFinished"},"forced":false,"exit_code":0}});
     let outcome = TerminalOutcome::from_view(&passed);
     assert_eq!(outcome.notice().0, "info");
+    assert!(!outcome.requires_native_reconciliation());
     assert_eq!(
         outcome.fields(&passed["operation"]),
         json!({"action":"run","state":"terminal","status":"PASS","category":null,
@@ -112,6 +114,7 @@ fn terminal_outcomes_keep_severity_and_distinguish_cleanup_without_private_detai
         "cleanup":{"clean":true,"status":"CleanupFinished"}}});
     let outcome = TerminalOutcome::from_view(&clean_failure);
     assert_eq!(outcome.notice().0, "error");
+    assert!(!outcome.requires_native_reconciliation());
     let fields = outcome.fields(&clean_failure["operation"]);
     assert_eq!(fields["status"], "FAIL");
     assert_eq!(fields["category"], "Script");
@@ -125,6 +128,7 @@ fn terminal_outcomes_keep_severity_and_distinguish_cleanup_without_private_detai
         "cleanup":{"clean":false,"status":"IncompleteCleanup","outcome":"ForcedOrIncomplete"}}});
     let outcome = TerminalOutcome::from_view(&forced);
     assert_eq!(outcome.notice().0, "error");
+    assert!(outcome.requires_native_reconciliation());
     let fields = outcome.fields(&forced["operation"]);
     assert_eq!(fields["category"], Value::Null);
     assert_eq!(fields["entry_outcome"], "Returned");
@@ -143,6 +147,7 @@ fn terminal_outcomes_keep_severity_and_distinguish_cleanup_without_private_detai
             "stage":"environment_validation","cleanup":{"clean":true,"child_started":false}}}});
     let outcome = TerminalOutcome::from_view(&pre_child);
     assert_eq!(outcome.notice().0, "error");
+    assert!(!outcome.requires_native_reconciliation());
     assert_eq!(
         outcome.fields(&pre_child["operation"]),
         json!({"action":"environment_check","state":"terminal","status":null,
@@ -156,6 +161,7 @@ fn terminal_outcomes_keep_severity_and_distinguish_cleanup_without_private_detai
         "context":{"child_started":true,"forced":false,"exit_code":1}}});
     let outcome = TerminalOutcome::from_view(&unattested);
     assert_eq!(outcome.notice().0, "error");
+    assert!(outcome.requires_native_reconciliation());
     let fields = outcome.fields(&unattested["operation"]);
     assert_eq!(fields["cleanup_clean"], Value::Null);
     assert_eq!(fields["child_started"], true);
@@ -222,4 +228,153 @@ fn shutdown_during_preparation_persists_a_distinguishable_terminal_record() {
     assert_eq!(record.fields["status"], Value::Null);
     assert_eq!(record.fields["forced"], Value::Null);
     assert!(!persisted.contains(&selection.package_path));
+}
+
+#[cfg(target_os = "macos")]
+fn native_request(selection: &crate::application::Selection) -> StartRequest {
+    let mut request = request(selection);
+    request.lane = "native".into();
+    request.native_intent = Some(mado_runtime_comparison::desktop::NativeIntent {
+        target_revision: 1,
+        target_binding_id: "aaaaaaaaaaaaaaaaaaaa".into(),
+        target_declaration_identity: selection.package.target_identity.clone().unwrap(),
+        capture_approved: true,
+        input_approved: true,
+        operation: "One reviewed click".into(),
+        visible_postcondition: "The reviewed label changes".into(),
+        limits: mado_runtime_comparison::desktop::native_limits(),
+    });
+    request
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_review_cannot_substitute_for_a_saved_current_target() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let package = fixture.package_at("native-package");
+    declare_target(&package, Some("native-target"));
+    let selection = inspect_named(application, "Main", &package).unwrap();
+    let workspace = workspace_ref(&selection);
+    let run = application
+        .start(&workspace, native_request(&selection))
+        .unwrap();
+    let terminal = settled(application);
+    assert_eq!(terminal.run.as_deref(), Some(run.as_str()));
+    let fault = terminal.error.unwrap();
+    assert_eq!(fault.category, "TargetConflict");
+    assert_eq!(
+        fault.context["cleanup"],
+        json!({"clean":true,"child_started":false})
+    );
+    let poll = application.poll();
+    assert_eq!(poll.controller["workspace_id"], workspace.workspace_id);
+    assert!(
+        application
+            .read_target(&workspace)
+            .unwrap()
+            .record
+            .binding
+            .is_none()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn stopped_native_preparation_retains_ownership_until_store_capture_settles() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let package = fixture.package_at("native-package");
+    declare_target(&package, Some("native-target"));
+    let selection = inspect_named(application, "Main", &package).unwrap();
+    let workspace = workspace_ref(&selection);
+    let store = lock(&application.store);
+    let starting = application.clone();
+    let starting_workspace = workspace.clone();
+    let native = native_request(&selection);
+    let starter = std::thread::spawn(move || starting.start(&starting_workspace, native));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let run = loop {
+        let poll = application.poll();
+        if poll.controller["progress"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["stage"] == "input_capture"))
+        {
+            break poll.controller["run"].as_str().unwrap().to_owned();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "native preparation did not reach capture"
+        );
+        std::thread::yield_now();
+    };
+    application.stop(&run).unwrap();
+    assert_eq!(application.poll().controller["state"], "stopping");
+    assert_eq!(
+        application
+            .check_environment(None, None)
+            .unwrap_err()
+            .category,
+        "RunActive"
+    );
+    assert_eq!(
+        application
+            .start(&workspace, request(&selection))
+            .unwrap_err()
+            .category,
+        "RunActive"
+    );
+    drop(store);
+    assert_eq!(starter.join().unwrap().unwrap(), run);
+    let terminal = settled(application);
+    let fault = terminal.error.unwrap();
+    assert_eq!(fault.category, "Cancelled");
+    assert_eq!(
+        fault.context["cleanup"],
+        json!({"clean":true,"child_started":false})
+    );
+    let next = application
+        .start(&workspace, native_request(&selection))
+        .unwrap();
+    assert_ne!(next, run);
+    assert_eq!(
+        settled(application).error.unwrap().category,
+        "TargetConflict"
+    );
+}
+
+#[test]
+fn another_non_native_operation_cannot_clear_required_native_reconciliation() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let selection = inspect_named(application, "Main", &package_path()).unwrap();
+    let workspace = workspace_ref(&selection);
+    lock(&application.workspaces).native_cleanup_required = true;
+    let mut native = request(&selection);
+    native.lane = "native".into();
+    assert_eq!(
+        application
+            .start(&workspace, native.clone())
+            .unwrap_err()
+            .category,
+        "NativeCleanupRequired"
+    );
+    application.start(&workspace, request(&selection)).unwrap();
+    assert_eq!(settled(application).error.unwrap().category, "ChildStartup");
+    assert_eq!(
+        application.start(&workspace, native).unwrap_err().category,
+        "NativeCleanupRequired"
+    );
+}
+
+#[test]
+fn reconstruction_cannot_discard_required_native_reconciliation() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    lock(&application.workspaces).native_cleanup_required = true;
+    assert_eq!(
+        application.prepare_reconstruction().unwrap_err().category,
+        "NativeCleanupRequired"
+    );
+    assert!(!application.closing.load(Ordering::Acquire));
 }

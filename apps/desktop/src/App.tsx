@@ -39,12 +39,12 @@ import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from '.
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {applyCatalogMutation, applyRecognitionMutation, applyRefresh, applySave, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, saveBlock, saveTicket, selectFile, selectRecognition, undoFile, validationTicket} from './authoring.ts';
 import type {AuthoringSession} from './authoring.ts';
-import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, busy, closeWorkspace, commandValues, deriveBound, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
+import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, approveNative, busy, clearNativeApproval, closeWorkspace, commandValues, deriveBound, editNativeReview, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
 import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
 import type {TargetOperation, TargetPickerField, TargetPickerTicket, TargetState} from './target.ts';
 import type {AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, BootstrapStatus, CatalogEdit, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetApplicationResponse, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
-import type {CaptureCacheReceipt, NativeSelectionView} from './types.ts';
+import type {CaptureCacheReceipt, NativeLimits, NativeSelectionView} from './types.ts';
 
 const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0, workspace_id: null, workspace_revision: null};
 const EMPTY_FILTER: LogFilter = {text: '', level: ''};
@@ -119,6 +119,8 @@ export default function App() {
   const [stripMessage, setStripMessage] = useState<{text: Message; error: boolean} | null>(null);
   const [closing, setClosing] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
+  // One host read of the platform's Native policy; until it answers Native stays unavailable.
+  const [nativeCapability, setNativeCapability] = useState<{limits: NativeLimits | null; error: Fault | null}>({limits: null, error: null});
   // Saved settings win once loaded; before that the temporary bootstrap presentation applies and persists nothing.
   const locale = settings?.locale ?? bootstrap.presentation;
   const t = messages[locale].app;
@@ -201,7 +203,7 @@ export default function App() {
   const savedEnvironment = settings?.ocr_environment ?? null;
   const defaultPackagesRoot = status?.default_packages_root ?? '';
   const packagesRoot = settings?.packages_root ?? defaultPackagesRoot;
-  const derived = useMemo(() => Object.fromEntries(workspaces.filter(isBound).map(workspace => [workspace.id, deriveBound(workspace.bound, savedEnvironment, locale)])) as Record<string, Derived>, [workspaces, savedEnvironment, locale]);
+  const derived = useMemo(() => Object.fromEntries(workspaces.filter(isBound).map(workspace => [workspace.id, deriveBound(workspace.bound, savedEnvironment, locale, nativeCapability.limits)])) as Record<string, Derived>, [workspaces, savedEnvironment, locale, nativeCapability.limits]);
   const authoringWorkerPending = authoring?.pending?.kind === 'recognition_trial' || authoring?.pending?.kind === 'validate';
   const nativeOccupied = nativeSelection?.occupied === true;
   const active = starting !== null || busy(view.state) || authoringWorkerPending || nativeSelection?.busy === true;
@@ -285,6 +287,8 @@ export default function App() {
       recognitionConfigurationDirty.current = true;
       updateAuthoring(session => session?.recognition
         ? {...session, recognition: recognition.invalidateConfiguration(session.recognition)} : session);
+      // A Native approval covered the environment it was given for, even if an identical one returns later.
+      setWorkspaces(list => list.map(item => updateBound(item, clearNativeApproval)));
     }
     knownOcrEnvironment.current = saved.ocr_environment;
     setSettings(saved);
@@ -301,10 +305,11 @@ export default function App() {
     void invoke<boolean>('cancel_running_application', {workspace:pending.workspace, requestId:pending.requestId}).catch(() => {});
   }
 
+  // Leaving or reinspecting a Tab withdraws its transient target checks and Native approval.
   function invalidateOwnerTarget(ownerId:string) {
     cancelApplicationRequest(ownerId);
     setWorkspaces(list => updateWorkspace(list, ownerId, item => item.bound
-      ? updateBound(item, bound => ({...bound, target:invalidateApplicationPicker(invalidateRunningApplication(bound.target))}))
+      ? updateBound(item, bound => clearNativeApproval({...bound, target:invalidateApplicationPicker(invalidateRunningApplication(bound.target))}))
       : item));
   }
   function markNativeTargetChanged(workspace:WorkspaceRef) {
@@ -402,6 +407,11 @@ export default function App() {
 
   useEffect(() => {
     void bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), true);
+  }, []);
+  useEffect(() => {
+    invoke<NativeLimits | null>('native_run_limits').then(
+      limits => setNativeCapability({limits: limits ?? null, error: null}),
+      cause => setNativeCapability({limits: null, error: fault(cause)}));
   }, []);
 
   // While the host is still loading its root, re-read the status with one timer at a time; `bootstrapBusy` keeps
@@ -816,6 +826,10 @@ export default function App() {
         }).then(() => bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false));
       },
       reinspect: () => inspectFor(workspace),
+      native: {
+        edit: (field, value) => edit(current => editNativeReview(current, field, value)),
+        approve: (field, value) => edit(current => approveNative(current, field, value, savedEnvironment, nativeCapability.limits)),
+      },
       recovery: recoveryHandlers(workspace),
       start: () => void startRun(workspace),
       stop: () => void stopRun(),
@@ -826,6 +840,8 @@ export default function App() {
     const facts = derived[workspace.id];
     const bound = workspace.bound;
     if (hostCommand.current !== null || pickerRequest.current !== null || active || closing || leaseOwnerNow() !== null || facts.startBlock || facts.descriptorError) return;
+    const nativeIntent = bound.lane === 'native' ? facts.native?.intent ?? null : null;
+    if (bound.lane === 'native' && nativeIntent === null) return;
     let values: Record<string, Json>;
     try {values = valuesForCommand(workspace);} catch (cause) {const error = fault(cause); change(workspace.id, item => ({...item, error})); return;}
     const profile = facts.selectedProfile;
@@ -834,8 +850,8 @@ export default function App() {
     const request: StartRequest = {
       package_path: bound.packagePath, inventory_identity: bound.package.inventory_identity,
       package_id: profile?.package_id ?? bound.package.package_id, schema_identity: profile?.schema_identity ?? bound.package.schema_identity,
-      profile_id: profileId, values, lane: bound.lane, scenario: replay ? 'workflow' : bound.scenario,
-      replay_descriptor_path: replay ? bound.descriptorPath.trim() || null : null,
+      profile_id: profileId, values, lane: bound.lane, scenario: bound.lane === 'controlled' ? bound.scenario : 'workflow',
+      replay_descriptor_path: replay ? bound.descriptorPath.trim() || null : null, native_intent: nativeIntent,
     };
     const profileName = profile && !facts.valuesDirty ? profile.name : bound.name;
     const ref = workspaceRef(workspace);
@@ -844,11 +860,12 @@ export default function App() {
     epoch.current += 1;
     setStarting({workspaceId: workspace.id, kind: 'run'});
     setStripMessage(null);
-    change(workspace.id, item => ({...updateBound(item, current => ({...current, disclosedRun: null})), error: null, notice: null}));
+    // Submission spends the Native approval whatever the host decides; a rerun needs a fresh one.
+    change(workspace.id, item => ({...updateBound(item, current => ({...clearNativeApproval(current), disclosedRun: null})), error: null, notice: null}));
     try {
       const run = await invoke<string>('start', {workspace: ref, request});
       expectedRun.current = run;
-      setOperation({run, kind: 'run', workspace: ref, snapshot: {kind: 'run', run, lane: bound.lane, packageId: request.package_id, profileName, profileId, scenario: request.scenario, descriptorPath: request.replay_descriptor_path, values}});
+      setOperation({run, kind: 'run', workspace: ref, snapshot: {kind: 'run', run, lane: bound.lane, packageId: request.package_id, profileName, profileId, scenario: request.scenario, descriptorPath: request.replay_descriptor_path, values, native: nativeIntent}});
       setView({...idle, run, state: 'preparing', workspace_id: ref.workspace_id, workspace_revision: ref.revision});
     } catch (cause) {
       // A refused Start releases only its own preparation state; nothing else changes. A stale identity means the host
@@ -2131,7 +2148,8 @@ export default function App() {
         {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (isBound(selected)
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)} snapshot={operation?.snapshot ?? null}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
-            savedEnvironment={savedEnvironment} handlers={handlers(selected)} authoring={pageAuthoring(selected)}/>
+            savedEnvironment={savedEnvironment} handlers={handlers(selected)} authoring={pageAuthoring(selected)}
+            nativeLimits={nativeCapability.limits} nativeError={nativeCapability.error}/>
           : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
             recovery={recoveryHandlers(selected)} authoring={pageAuthoring(selected)} packagesRoot={packagesRoot}/>)}

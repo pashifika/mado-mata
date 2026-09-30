@@ -30,6 +30,8 @@ pub use enabled::{Engine, release_runner_resources};
 
 #[cfg(feature = "engine")]
 mod enabled {
+    #[cfg(test)]
+    mod publication_tests;
     use super::*;
     use crate::environment::{Configuration, Placement, ReplayConfig, canonical, validate_replay};
     use crate::host::{Action, HandleBudget, HandlePermit, Managed, PointerButton};
@@ -56,7 +58,7 @@ mod enabled {
         permission_executable: PathBuf,
         capture: CaptureAuthority,
         input: InputAuthority,
-        geometry: Placement,
+        geometry: Option<Placement>,
         recognition_language: String,
         visible_postcondition: String,
         cleanup_ms: u64,
@@ -112,7 +114,11 @@ mod enabled {
         max_actions: usize,
         route: String,
         focus: String,
+        #[serde(default)]
         representative_actions: Vec<Action>,
+        /// Desktop reviews trusted package intent, not a fabricated input sequence.
+        #[serde(default)]
+        reviewed_operation: Option<String>,
         #[serde(default)]
         macos_process_pointer_mode: MacosProcessPointerMode,
         #[serde(default)]
@@ -218,6 +224,7 @@ mod enabled {
         last_capture: Option<Instant>,
         input_events: usize,
         input_cleanup_incomplete: bool,
+        placement: Option<mp::TargetPlacement>,
     }
 
     // Cancellation never acquires the VM, host-work, or engine-work mutex.
@@ -480,6 +487,11 @@ mod enabled {
                 let target = select_native_target(&targets, native)?;
                 let mut input =
                     mp::InputOpenRequest::new().with_requirement(mp::InputRequirement::Required);
+                if native.input.reviewed_operation.is_some() {
+                    input = input
+                        .requiring(mp::InputOperationKind::Pointer, native.route()?)
+                        .requiring(mp::InputOperationKind::Keyboard, native.route()?);
+                }
                 for action in &native.input.representative_actions {
                     let kind = match action {
                         Action::Click { .. } => mp::InputOperationKind::Pointer,
@@ -543,6 +555,7 @@ mod enabled {
                     last_capture: None,
                     input_events: 0,
                     input_cleanup_incomplete: false,
+                    placement: None,
                 }),
                 control,
                 limits: plan.limits.clone(),
@@ -629,6 +642,7 @@ mod enabled {
                     last_capture: None,
                     input_events: 0,
                     input_cleanup_incomplete: false,
+                    placement: None,
                 }),
                 bridge: CancellationBridge::new(Arc::clone(&control), None).expect("bridge"),
                 control,
@@ -658,7 +672,15 @@ mod enabled {
                 }
                 "validate_observation" => {
                     let request: ObservationRequest = decode(args)?;
-                    self.observation(&state, &request.observation)?;
+                    let observation = self.observation(&state, &request.observation)?;
+                    let operation = self.operation(self.limits.wait_ms)?;
+                    state
+                        .session
+                        .as_ref()
+                        .ok_or_else(|| Fault::new("Closed", "session closed"))?
+                        .commit_frame(&observation.frame, &operation)
+                        .map_err(|error| engine_error("input_admission", error))?;
+                    self.check()?;
                     Ok(json!({"valid":true}))
                 }
                 "recognize" => {
@@ -703,8 +725,13 @@ mod enabled {
                     let deadline = Instant::now()
                         .checked_add(Duration::from_millis(self.limits.wait_ms))
                         .ok_or_else(|| argument("query deadline is not representable"))?;
-                    request.observation =
-                        self.retain_observation(&mut state, source, permits.split_one())?;
+                    let operation = self.operation(self.limits.wait_ms)?;
+                    request.observation = self.retain_observation(
+                        &mut state,
+                        source,
+                        permits.split_one(),
+                        &operation,
+                    )?;
                     state.queries.insert(
                         id.clone(),
                         Managed::new(
@@ -768,16 +795,12 @@ mod enabled {
 
         fn check_session(&self, state: &State) -> Result<(), Fault> {
             self.check()?;
-            let session = state
-                .session
-                .as_ref()
-                .ok_or_else(|| Fault::new("Closed", "session closed"))?;
-            // is_closed only proves completed closure in this pin. Capture
-            // Closing/TargetLost is not publicly exposed, so this gate cannot
-            // qualify the mid-recognition terminal race.
-            if session.is_closed() {
-                return Err(Fault::new("Closed", "native session finished closing"));
+            if state.session.is_none() {
+                return Err(Fault::new("Closed", "session closed"));
             }
+            // This is ownership/cancellation only. The public facade orders each
+            // actual result against capture termination; is_closed proves cleanup,
+            // not live admission, and must not replace the original capture fault.
             Ok(())
         }
 
@@ -851,27 +874,33 @@ mod enabled {
                 .map_err(|error| engine_error("capture", error))?;
             state.captured_frames += 1;
             state.last_capture = Some(Instant::now());
-            if let Some(native) = &self.native {
+            let geometry = if let Some(native) = &self.native {
                 let actual = frame.transform().target().ok_or_else(|| {
                     Fault::new(
                         "StaleIdentity",
                         "native frame has no authoritative placement",
                     )
                 })?;
-                let expected = placement(&native.geometry)?;
-                if actual.desktop_origin() != expected.desktop_origin()
-                    || actual.logical_size() != expected.logical_size()
-                    || actual.scale() != expected.scale()
-                {
+                let expected = match state.placement {
+                    Some(placement) => Some(placement),
+                    None => native.geometry.as_ref().map(placement).transpose()?,
+                };
+                if expected.is_some_and(|expected| expected != actual) {
                     return Err(Fault::new(
                         "StaleIdentity",
-                        "native frame geometry differs from approved placement",
+                        "native frame geometry differs from the retained run placement",
                     ));
                 }
-            }
-            self.check_session(state)?;
-            state.latest = Some(frame.stamp());
-            self.retain_observation(state, frame, permit)
+                Some(actual)
+            } else {
+                None
+            };
+            let stamp = frame.stamp();
+            let value = self.retain_observation(state, frame, permit, &operation)?;
+            // Latch only a committed frame; a rejected candidate establishes no baseline.
+            state.placement = geometry;
+            state.latest = Some(stamp);
+            Ok(value)
         }
 
         fn retain_observation(
@@ -879,6 +908,7 @@ mod enabled {
             state: &mut State,
             frame: mp::Frame,
             permit: HandlePermit,
+            operation: &mp::OperationContext,
         ) -> Result<Value, Fault> {
             let stamp = frame.stamp();
             let id = next_id(state, "observation")?;
@@ -888,6 +918,14 @@ mod enabled {
                 "session":format!("{}", stamp.stream()),"geometry":stamp.geometry().value(),
                 "frame":stamp.sequence().value(),"epoch":stamp.epoch().value(),
                 "width":extent.width(),"height":extent.height(),"coordinate_space":"capture-pixels"});
+            self.check_session(state)?;
+            state
+                .session
+                .as_ref()
+                .ok_or_else(|| Fault::new("Closed", "session closed"))?
+                .commit_frame(&frame, operation)
+                .map_err(|error| engine_error("observation_publication", error))?;
+            self.check()?;
             state.observations.insert(
                 id,
                 Managed::new(
@@ -1131,6 +1169,9 @@ mod enabled {
                     {
                         Err(Fault::new("InvalidHandle", "query result was released"))
                     }
+                    Ok(value) => self
+                        .observation(state, &value["observation"])
+                        .map(|_| value.clone()),
                     _ => terminal.clone(),
                 };
                 state.queries.insert(request.id, query);
@@ -1274,16 +1315,17 @@ mod enabled {
                 ));
             }
             for action in &request.actions {
-                let authorized = native.input.representative_actions.iter().any(|allowed| {
-                    matches!(
-                        (action, allowed),
-                        (Action::Click { .. }, Action::Click { .. })
-                            | (
-                                Action::KeyDown { .. } | Action::KeyUp { .. },
-                                Action::KeyDown { .. } | Action::KeyUp { .. }
-                            )
-                    )
-                });
+                let authorized = native.input.reviewed_operation.is_some()
+                    || native.input.representative_actions.iter().any(|allowed| {
+                        matches!(
+                            (action, allowed),
+                            (Action::Click { .. }, Action::Click { .. })
+                                | (
+                                    Action::KeyDown { .. } | Action::KeyUp { .. },
+                                    Action::KeyDown { .. } | Action::KeyUp { .. }
+                                )
+                        )
+                    });
                 if !authorized {
                     return Err(Fault::new(
                         "Authority",
@@ -2347,6 +2389,8 @@ mod enabled {
             || capture.wait_ms == 0
             || capture.wait_ms > plan.limits.wait_ms
             || capture.interval_ms == 0
+            || capture.wait_ms > capture.duration_ms
+            || capture.interval_ms > capture.wait_ms
             || capture.interval_ms > capture.duration_ms
         {
             return Err(blocked(
@@ -2360,7 +2404,7 @@ mod enabled {
             || input.duration_ms > plan.limits.duration_ms
             || input.max_actions == 0
             || input.max_actions > plan.limits.max_actions
-            || input.representative_actions.is_empty()
+            || (input.representative_actions.is_empty() && input.reviewed_operation.is_none())
             || input.representative_actions.len() > input.max_actions
         {
             return Err(blocked(
@@ -2388,14 +2432,37 @@ mod enabled {
                 "cleanup must fit the plan and containment must equal the supervisor's finite bound",
             ));
         }
-        placement(&config.geometry)?;
-        native_sequence(
-            &input.representative_actions,
-            None,
-            input.max_actions,
-            input.click_hold_ms,
-        )
-        .map_err(|fault| blocked("input_authority", &fault.message))?;
+        match &input.reviewed_operation {
+            Some(operation) => {
+                if operation.trim().is_empty()
+                    || operation.len() > 4096
+                    || operation.chars().any(char::is_control)
+                    || !input.representative_actions.is_empty()
+                    || config.geometry.is_some()
+                    || config.operating_system != "macos"
+                {
+                    return Err(blocked(
+                        "input_authority",
+                        "reviewed package intent is exclusive of manual geometry/actions and requires macOS",
+                    ));
+                }
+            }
+            None => {
+                placement(config.geometry.as_ref().ok_or_else(|| {
+                    blocked(
+                        "geometry",
+                        "manual native authority requires explicit placement",
+                    )
+                })?)?;
+                native_sequence(
+                    &input.representative_actions,
+                    None,
+                    input.max_actions,
+                    input.click_hold_ms,
+                )
+                .map_err(|fault| blocked("input_authority", &fault.message))?;
+            }
+        }
         config.route()?;
         config.focus()?;
         Ok(())

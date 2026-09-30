@@ -12,7 +12,8 @@ The trusted WebView renders forms and status. It never evaluates package code.
 The shared Rust `DesktopController` captures package/profile inputs and invokes
 the existing supervised runtime executable. CLI `current_exe` behavior remains
 unchanged. The application supplies a fixed development-build runner path;
-package data and IPC cannot choose the executable or acquire native authority.
+package data and IPC cannot choose the executable. Reviewed macOS Native authority
+is a separate host projection under [ADR 0008](0008-macos-native-run-admission.md).
 The existing application-owned compiler installation remains required. This is
 not a relocatable release bundle or an additional-OS support commitment.
 

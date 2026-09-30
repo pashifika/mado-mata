@@ -227,7 +227,9 @@ cargo +1.98.1 test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --
 That result does not establish full CI, WebView acceptance, replay, or native
 qualification. The [CI guide](../ci.md) owns public checks; the
 [desktop guide](../desktop.md#local-gui-acceptance) owns separate GUI acceptance.
-The supervised runtime, fixed runner paths, non-native input sink, and native
-authority boundaries of [ADR 0002](0002-desktop-runner-boundary.md) and
-[ADR 0003](0003-desktop-recorded-replay.md) remain unchanged. Normal builds must
-not enable the development-only `webdriver` feature.
+The supervised runtime, fixed runner paths and controlled/replay input boundary
+of [ADR 0002](0002-desktop-runner-boundary.md) and
+[ADR 0003](0003-desktop-recorded-replay.md) remain unchanged. Reviewed Native Start
+is added separately by [ADR 0008](0008-macos-native-run-admission.md); unverified
+Native cleanup also blocks in-process reconstruction until application restart.
+Normal builds must not enable the development-only `webdriver` feature.

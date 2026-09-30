@@ -128,10 +128,13 @@ The full check has these responsibilities:
   package quotas, decoded/payload bounds, recognition metadata/maps, and generated
   SDK snippets. These commands do not enable the optional `engine` feature or
   execute real OCR.
+  External CLI plans also refuse Desktop-only native authority; real owned-child
+  regressions distinguish parent deadlines from explicit Stop while preserving
+  submitted receipts and cleanup.
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
   run its state tests (including per-file history, stale saves, source-diagnostic
-  projection, Recognition geometry/Undo, grouped selection, and stale trial/Copy
-  state), and type-check/build its trusted UI.
+  projection, Recognition geometry/Undo, grouped selection, stale trial/Copy
+  state, and per-Start Native consent invalidation), and type-check/build its trusted UI.
 - Test the Rust application core with `--no-default-features --lib`: explicit
   setup/recovery, named Tab ownership, scoped profiles, source-preserving legacy
   imports, bounded snapshots, and journaled restore/rollback are checked alongside
@@ -144,6 +147,11 @@ The full check has these responsibilities:
   the storage boundaries and Windows directory-sync qualification limitation.
   Optional OCR settings, bounded replay projection, admission races, and
   pre-startup failures are checked without loading a real OCR backend.
+  Native intent/unknown-field rejection, saved target expectations, typed
+  projection, preparation cancellation and sticky cleanup refusal are checked
+  without native capture/input. Optional engine-feature publication regressions
+  use public-facade controlled replay and require the separate
+  [native build prerequisites](runtime-native.md#consumer-publication-regressions).
   Directory-authoring regressions cover configured ID-only destinations, source
   ownership, configuration-only preservation of `sources` and `pkgs`, snapshot
   source exclusion, revision conflicts, interrupted publication, global Edit
@@ -375,6 +383,9 @@ tests do not prove those interactions or additional-OS desktop support. A passed
 local setup smoke does not pass the remaining GUI scenarios, full CI, or native
 qualification. Normal builds and release builds have no WebDriver listener; CI
 does not enable the test-only automation feature or launch a GUI session.
+Native review/refusal can be exercised without capture or input. Useful Native
+workflow, actual game effect and normal Native Stop/rerun require the separate
+[authorized Desktop procedure](desktop.md#reviewed-macos-native-start).
 
 Administrative activation requires an observed successful PR check and its
 GitHub Actions app identity; use the

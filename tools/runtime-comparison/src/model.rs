@@ -304,6 +304,22 @@ pub struct Control {
     deadline: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum StopReason {
+    #[serde(rename = "Stop")]
+    Cancelled,
+    Timeout,
+}
+
+impl StopReason {
+    pub(crate) fn fault(self) -> Fault {
+        match self {
+            Self::Cancelled => Fault::new("Cancelled", "attempt cancellation is latched"),
+            Self::Timeout => Fault::new("Timeout", "attempt deadline expired"),
+        }
+    }
+}
+
 impl Control {
     pub fn new(limits: &Limits) -> Self {
         let started = Instant::now();
@@ -320,7 +336,14 @@ impl Control {
     }
 
     pub fn cancel(&self) {
-        self.latch(1);
+        self.stop(StopReason::Cancelled);
+    }
+
+    pub(crate) fn stop(&self, reason: StopReason) {
+        self.latch(match reason {
+            StopReason::Cancelled => 1,
+            StopReason::Timeout => 2,
+        });
     }
 
     fn latch(&self, cause: u8) {
@@ -342,15 +365,20 @@ impl Control {
         );
     }
 
-    pub fn check(&self) -> Result<(), Fault> {
+    pub fn stop_reason(&self) -> Option<StopReason> {
         if self.cause.load(Ordering::Acquire) == 0 && Instant::now() >= self.deadline {
             self.latch(2);
         }
         match self.cause.load(Ordering::Acquire) {
-            2 => Err(Fault::new("Timeout", "attempt deadline expired")),
-            1 => Err(Fault::new("Cancelled", "attempt cancellation is latched")),
-            _ => Ok(()),
+            2 => Some(StopReason::Timeout),
+            1 => Some(StopReason::Cancelled),
+            _ => None,
         }
+    }
+
+    pub fn check(&self) -> Result<(), Fault> {
+        self.stop_reason()
+            .map_or(Ok(()), |reason| Err(reason.fault()))
     }
 
     // Each predecessor permits one successor. Stop and transition admission

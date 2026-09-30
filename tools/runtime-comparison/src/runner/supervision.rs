@@ -2,7 +2,7 @@ use super::RunRecord;
 use super::evidence::{Observer, receive_evidence};
 use super::protocol::{Invocation, Operation, emit, frame};
 use crate::inventory::Inventory;
-use crate::model::{Fault, MAX_TRANSPORT_BYTES, Plan, identity};
+use crate::model::{Fault, MAX_TRANSPORT_BYTES, Plan, StopReason, identity};
 use crate::owned_child::{ChildStdio, Environment, OwnedChild};
 use serde_json::{Value, json};
 use std::io::{BufReader, Read, Write};
@@ -29,14 +29,14 @@ pub fn sample(plan: &Plan, inventory: &Inventory) -> Result<Vec<RunRecord>, Faul
     Ok(records)
 }
 
-/// The optional operator callback must be a nonblocking poll. A true result
-/// requests the same bounded Stop/cleanup path as the existing timed control.
+/// The optional nonblocking poll preserves cancellation versus operation deadline
+/// through the same bounded child Stop/cleanup path.
 pub fn run_once(
     plan: &Plan,
     inventory: &Inventory,
     stop_after_ms: Option<u64>,
     disconnect: bool,
-    operator_stop: Option<&mut dyn FnMut() -> bool>,
+    operator_stop: Option<&mut dyn FnMut() -> Option<StopReason>>,
 ) -> Result<RunRecord, Fault> {
     let executable = std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?;
     supervise(
@@ -57,7 +57,7 @@ pub fn run_once_with_executable(
     executable: &Path,
     plan: &Plan,
     inventory: &Inventory,
-    operator_stop: &mut dyn FnMut() -> bool,
+    operator_stop: &mut dyn FnMut() -> Option<StopReason>,
     observer: &Observer,
 ) -> Result<RunRecord, Fault> {
     supervise(
@@ -78,7 +78,7 @@ pub fn run_environment_check_with_executable(
     executable: &Path,
     plan: &Plan,
     inventory: &Inventory,
-    operator_stop: &mut dyn FnMut() -> bool,
+    operator_stop: &mut dyn FnMut() -> Option<StopReason>,
     observer: &Observer,
 ) -> Result<RunRecord, Fault> {
     supervise(
@@ -240,7 +240,7 @@ fn supervise(
     inventory: &Inventory,
     stop_after_ms: Option<u64>,
     disconnect: bool,
-    mut operator_stop: Option<&mut dyn FnMut() -> bool>,
+    mut operator_stop: Option<&mut dyn FnMut() -> Option<StopReason>>,
     stop_milestone: Option<(&str, u64)>,
     executable: &Path,
     observer: Option<&Observer>,
@@ -265,13 +265,13 @@ fn supervise(
     let bytes = super::payload::header(&mut invocation)?;
     let transfer_assets = invocation.inventory.assets.clone();
     let _image_reservation = super::payload::reserve_child_images(plan, inventory)?;
-    if observer.is_some() && operator_stop.as_mut().is_some_and(|poll| poll()) {
-        return Err(
-            Fault::new("Cancelled", "Stop requested before child startup").with_context(json!({
-                "stage":"child_startup","boundary":"before_spawn","child_started":false,
-                "cleanup":{"clean":true,"child_started":false}
-            })),
-        );
+    if observer.is_some()
+        && let Some(reason) = operator_stop.as_mut().and_then(|poll| poll())
+    {
+        return Err(reason.fault().with_context(json!({
+            "stage":"child_startup","boundary":"before_spawn","child_started":false,
+            "cleanup":{"clean":true,"child_started":false}
+        })));
     }
     let started = Instant::now();
     let mut command = Command::new(executable);
@@ -282,13 +282,11 @@ fn supervise(
             return loader_prerequisite_record(run, plan, inventory, operation, error, started);
         }
     };
-    if operator_stop.as_mut().is_some_and(|poll| poll()) {
-        return Err(
-            Fault::new("Cancelled", "Stop requested before child startup").with_context(json!({
-                "stage":"child_startup","boundary":"before_spawn","child_started":false,
-                "cleanup":{"clean":true,"child_started":false}
-            })),
-        );
+    if let Some(reason) = operator_stop.as_mut().and_then(|poll| poll()) {
+        return Err(reason.fault().with_context(json!({
+            "stage":"child_startup","boundary":"before_spawn","child_started":false,
+            "cleanup":{"clean":true,"child_started":false}
+        })));
     }
     let mut child = OwnedChild::spawn(&mut command, ChildStdio::Piped, Environment::Inherited)?;
     let mut input = child
@@ -392,15 +390,18 @@ fn supervise(
         let elapsed = started.elapsed();
         // The optional operator poll is nonblocking and runs in the supervisor,
         // independently of compilation, VM execution, and native-work locks.
-        let operator_requested =
-            stop_sent_at.is_none() && operator_stop.as_mut().is_some_and(|poll| poll());
+        let operator_requested = if stop_sent_at.is_none() {
+            operator_stop.as_mut().and_then(|poll| poll())
+        } else {
+            None
+        };
         let stop_at = stop_after_ms.unwrap_or(plan.limits.duration_ms);
         let milestone_stop_due = stop_milestone.is_some_and(|(_, delay_ms)| {
             milestone_received_at
                 .is_some_and(|at: Instant| at.elapsed() >= Duration::from_millis(delay_ms))
         });
         if stop_sent_at.is_none()
-            && (operator_requested
+            && (operator_requested.is_some()
                 || elapsed >= Duration::from_millis(stop_at)
                 || protocol_fault.is_some()
                 || milestone_stop_due)
@@ -409,7 +410,16 @@ fn supervise(
             if disconnect {
                 drop(commands.take());
             } else if let Some(sender) = commands.take() {
-                let _ = sender.send(json!({"command":"Stop","run":run,"attempt":1}));
+                let reason = operator_requested.unwrap_or_else(|| {
+                    if stop_after_ms.is_none()
+                        && elapsed >= Duration::from_millis(plan.limits.duration_ms)
+                    {
+                        StopReason::Timeout
+                    } else {
+                        StopReason::Cancelled
+                    }
+                });
+                let _ = sender.send(json!({"command":reason,"run":run,"attempt":1}));
             }
         }
         if stop_sent_at

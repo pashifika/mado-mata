@@ -31,6 +31,13 @@ Neither operation projects live native authority. The separate
 [one-shot authoring path](desktop.md#acquire-a-native-historical-frame) requires
 explicit target/window selection and finite capture authority.
 
+The separate [macOS Native Run lane](desktop.md#reviewed-macos-native-start)
+projects a saved bundle binding and a fresh per-Start review through the fixed
+engine child. The application derives process/lifetime/window authority; IPC
+cannot supply it. External CLI plans cannot select the Desktop-only
+`input.reviewed_operation` form. See [ADR 0008](adr/0008-macos-native-run-admission.md)
+for first-frame placement and result commitment.
+
 ## Install the engine prerequisites
 
 The default controlled build does not need these dependencies. For the optional
@@ -85,6 +92,21 @@ remains in use, including Windows' separate ETW control model. No ambient proces
 environment is mutated after threads start, and no exit exception is suppressed.
 Internal child invocations outside the supervisor must supply the same startup
 environment; they are not a supported shortcut around supervision.
+
+### Consumer publication regressions
+
+After installing the optional engine prerequisites, run the consuming tests in
+the separate Desktop engine target directory:
+
+```sh
+MACOSX_DEPLOYMENT_TARGET=26.5.2 python3 /absolute/pinned-mado-pilot/tools/setup-native.py -- cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml --features engine --target-dir tools/runtime-comparison/target/desktop-engine --lib
+```
+
+These public-facade controlled/replay seams cover terminal commitment, empty
+recognition, grouped queries, newer postconditions, placement and input bounds.
+They neither discover a live target nor capture/send native input, and need no
+game or OCR model installation. They are separate from the ordinary full CI
+command and do not qualify a native OS/workload.
 
 ### Accepted OCR content
 
@@ -304,8 +326,8 @@ Unreturned work requires the runner's containment result, not a clean outcome.
 
 ## Native target selection and finite authority
 
-Use `lane: "native"`, `native_config.replay: null`, and the required prospective
-`native_config.native` record:
+For the standalone CLI, use `lane: "native"`, `native_config.replay: null`, and
+the required prospective `native_config.native` record:
 
 - `executable_or_bundle`: the exact canonical executable or application-bundle
   path. `permission_executable`: the canonical running comparison executable.

@@ -13,7 +13,7 @@ pub(crate) struct HandleBudget {
 }
 
 impl HandleBudget {
-    pub(super) fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: usize) -> Self {
         Self {
             limit,
             live: AtomicUsize::new(0),

@@ -72,7 +72,7 @@ fn preparation_stop_never_attempts_to_launch_the_runner() {
     let result = execute(
         Path::new("runner-must-not-be-launched"),
         &request,
-        None,
+        &StartPreparation::default(),
         requested_plan(&request).unwrap(),
         &control,
         &observer,
@@ -105,7 +105,7 @@ fn reserved_preparation_excludes_check_and_stop_prevents_launch() {
         .start_with_preparation(request(&fixture()), move |_, _| {
             entered.send(()).unwrap();
             wait.recv().unwrap();
-            Ok(None)
+            Ok(StartPreparation::default())
         })
         .unwrap();
     started.recv_timeout(Duration::from_secs(5)).unwrap();

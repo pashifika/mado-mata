@@ -3,7 +3,7 @@ use super::evidence::{
 };
 use super::protocol::{Invocation, Operation, emit, frame};
 use crate::host::{Host, resolve_options, run_rust};
-use crate::model::{Control, Fault, RuntimeMetrics};
+use crate::model::{Control, Fault, RuntimeMetrics, StopReason};
 use serde_json::{Value, json};
 use std::io::BufReader;
 use std::sync::{
@@ -92,19 +92,26 @@ pub fn child() -> Result<bool, Fault> {
     let input_run = run.clone();
     let input_control = control.clone();
     thread::spawn(move || {
-        let reason = match frame(&mut input, 1024) {
+        let (reason, cause) = match frame(&mut input, 1024) {
             Ok(Some(bytes)) => match serde_json::from_slice::<Value>(&bytes) {
                 Ok(value)
-                    if value == json!({"command":"Stop","run":input_run,"attempt":attempt}) =>
+                    if value
+                        == json!({"command":StopReason::Cancelled,"run":input_run,"attempt":attempt}) =>
                 {
-                    "Stop"
+                    ("Stop", StopReason::Cancelled)
                 }
-                _ => "InvalidControl",
+                Ok(value)
+                    if value
+                        == json!({"command":StopReason::Timeout,"run":input_run,"attempt":attempt}) =>
+                {
+                    ("Timeout", StopReason::Timeout)
+                }
+                _ => ("InvalidControl", StopReason::Cancelled),
             },
-            Ok(None) => "ControlLost",
-            Err(_) => "InvalidControl",
+            Ok(None) => ("ControlLost", StopReason::Cancelled),
+            Err(_) => ("InvalidControl", StopReason::Cancelled),
         };
-        input_control.cancel();
+        input_control.stop(cause);
         let _ = emit(
             &json!({"event":"StopRequested","run":input_run,"attempt":attempt,"reason":reason,
             "at_us":input_control.stop_us.load(Ordering::Acquire)}),
