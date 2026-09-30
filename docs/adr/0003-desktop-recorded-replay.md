@@ -4,9 +4,11 @@ Status: Accepted for the macOS development application; not live native qualific
 
 ## Decision
 
-Keep the GUI and controlled runner non-native. Build the optional engine runner
-in a separate fixed checkout target directory. Neither packages, profiles, nor
-IPC can select an executable, supply a complete Plan, or acquire native authority.
+Keep the controlled and recorded-replay lanes non-native. Build the optional
+engine runner in a separate fixed checkout target directory. Neither packages,
+profiles, nor IPC can select an executable, supply a complete Plan, or grant
+native authority to replay. Reviewed Native Start is separate under
+[ADR 0008](0008-macos-native-run-admission.md).
 A missing engine artifact or pre-Rust loader failure must not prevent controlled
 operation or become a successful initialization result.
 

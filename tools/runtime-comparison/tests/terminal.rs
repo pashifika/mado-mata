@@ -1,3 +1,8 @@
+use mado_runtime_comparison::{
+    inventory::Inventory,
+    model::{Control, Plan},
+    runner::{self, Observer},
+};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -172,4 +177,57 @@ fn cleanup_watchdog_retains_already_submitted_receipts() {
     // Whether the watchdog wins before or after Terminal, the same known input
     // receipt must survive. The pre-cleanup snapshot is not a clean acknowledgement.
     assert!(entry.get("cleanup").is_none());
+}
+
+#[test]
+fn parent_deadline_reaches_the_child_without_erasing_receipts_or_cleanup() {
+    let tree = FixtureTree::new(&format!(
+        "{SUBMITTED_INPUT} host.call('wait', {{duration_ms:10000}}); }}"
+    ));
+    let mut plan: Plan =
+        serde_json::from_str(include_str!("../fixtures/controlled-plan.json")).unwrap();
+    plan.limits.duration_ms = 30_000;
+    plan.limits.wait_ms = 10_000;
+    let inventory = Inventory::capture(&tree.0.join("package"), &plan.limits).unwrap();
+    let (progress, events) = std::sync::mpsc::sync_channel::<Value>(32);
+    let (logs, _messages) = std::sync::mpsc::sync_channel(1);
+    let observer = Observer {
+        progress,
+        logs,
+        dropped_logs: std::sync::Arc::new(AtomicU64::new(0)),
+    };
+    let mut expired = None;
+    let mut stop = || {
+        if events
+            .try_iter()
+            .any(|event| event["event"] == "HostWaitEntered")
+        {
+            let mut limits = plan.limits.clone();
+            limits.duration_ms = 0;
+            expired = Some(Control::new(&limits));
+        }
+        expired.as_ref().and_then(Control::stop_reason)
+    };
+    let record = runner::run_once_with_executable(
+        Path::new(env!("CARGO_BIN_EXE_mado-runtime-comparison")),
+        &plan,
+        &inventory,
+        &mut stop,
+        &observer,
+    )
+    .unwrap();
+    assert_eq!(record.primary.as_ref().unwrap().category, "Timeout");
+    assert!(
+        record
+            .milestones
+            .iter()
+            .any(|event| event["event"] == "StopRequested" && event["reason"] == "Timeout")
+    );
+    assert_eq!(record.observations["receipts"][0]["status"], "Submitted");
+    assert_eq!(record.observations["receipts"][0]["submitted"], 1);
+    assert_eq!(record.cleanup["clean"], true);
+    assert_eq!(record.cleanup["release_outcomes"][0]["key"], "A");
+    assert_eq!(record.cleanup["release_outcomes"][0]["released"], true);
+    assert!(!record.forced);
+    assert_eq!(record.exit_code, Some(0));
 }

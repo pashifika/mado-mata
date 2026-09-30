@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState} from 'react';
+import {Fragment, useEffect, useRef, useState} from 'react';
 import ProfileRecovery from '../components/ProfileRecovery.tsx';
 import type {RecoveryHandlers} from '../components/ProfileRecovery.tsx';
 import SchemaForm from '../components/SchemaForm.tsx';
@@ -8,17 +8,17 @@ import type {TargetHandlers} from '../components/TargetPanel.tsx';
 import ResultPanel, {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import {faultSummary, text} from '../state.ts';
 import type {CheckAssociation} from '../state.ts';
-import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, editDraft, hasWorkspaceEdits} from '../workspace.ts';
+import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, chooseLane, editDraft, hasWorkspaceEdits} from '../workspace.ts';
 import type {Bound, BoundWorkspace, Derived} from '../workspace.ts';
 import {AUTHORING_RECOVERY, recoveryPath} from '../authoring.ts';
 import type {PageAuthoring} from './EditPage.tsx';
-import type {ControllerView, Json, OcrEnvironment} from '../types.ts';
+import type {ControllerView, Fault, Json, NativeIntent, NativeLimits, OcrEnvironment} from '../types.ts';
 import {messages, renderMessage} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
 // Immutable facts captured when this frontend submitted the operation; the host view is authoritative.
 export type RunSnapshot =
-  | {kind: 'run'; run: string; lane: string; packageId: string; profileName: string; profileId: string; scenario: string; descriptorPath: string | null; values: Record<string, Json>}
+  | {kind: 'run'; run: string; lane: string; packageId: string; profileName: string; profileId: string; scenario: string; descriptorPath: string | null; values: Record<string, Json>; native: NativeIntent | null}
   | {kind: 'check'; run: string; association: CheckAssociation};
 
 export interface RunView {view: ControllerView; live: boolean; olderRevision: number | null}
@@ -30,6 +30,8 @@ export interface RunHandlers {
   validate: () => void; saveProfile: () => void; renameProfile: () => void; deleteProfile: () => void;
   newDraft: (preset?: string) => void; selectProfile: (id: string) => void;
   reinspect: () => void; inspectPath: (value: string) => void; importLegacy: () => void; start: () => void; stop: () => void;
+  // Native review text edits withdraw consent; consent binds to the request as it is now.
+  native: {edit: (field: 'operation' | 'postcondition', value: string) => void; approve: (field: 'capture' | 'input', value: boolean) => void};
   target: TargetHandlers;
   recovery: RecoveryHandlers;
 }
@@ -38,11 +40,13 @@ interface Props {
   workspace: BoundWorkspace; label: string; derived: Derived; run: RunView; snapshot: RunSnapshot | null;
   locked: boolean; active: boolean; pickerBusy: boolean; starting: boolean; stopping: boolean; closing: boolean;
   savedEnvironment: OcrEnvironment | null; handlers: RunHandlers;
+  // Host-issued Native policy; null when this platform/build offers none. `nativeError` is a failed availability read.
+  nativeLimits: NativeLimits | null; nativeError: Fault | null;
   // While any Tab owns Edit, Start is refused everywhere; the owner additionally waits to exit before reinspecting.
   authoring: PageAuthoring;
 }
 
-export default function RunPage({workspace, label, derived, run, snapshot, locked, active, pickerBusy, starting, stopping, closing, savedEnvironment, handlers, authoring}: Props) {
+export default function RunPage({workspace, label, derived, run, snapshot, locked, active, pickerBusy, starting, stopping, closing, savedEnvironment, handlers, authoring, nativeLimits, nativeError}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const bound = workspace.bound;
@@ -89,6 +93,17 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   const executionCaption = starting ? t.run.submitted : run.live && busy(view.state) ? t.run.owned(view.run) : view.state === 'terminal' ? t.run.settled(view.run) : t.run.noOperations;
   const heading = selectedProfile && !valuesDirty ? selectedProfile.name : bound.name || t.run.untitled;
   const legacy = workspace.legacyImport;
+  const native = derived.native;
+  const nativeBinding = native?.binding ?? null;
+  const nativeInput = nativeBinding?.configuration.input ?? null;
+  // Consent is offered only for a request that is otherwise complete.
+  const approvalOpen = native !== null && (native.block === null || native.block === 'nativeApproval') && !locked;
+  const nativeLimitRows = nativeLimits && [
+    [t.run.nativeDuration, `${nativeLimits.duration_ms} ms`], [t.run.nativeFrames, String(nativeLimits.max_frames)],
+    [t.run.nativeWait, `${nativeLimits.wait_ms} ms`], [t.run.nativeInterval, `${nativeLimits.interval_ms} ms`],
+    [t.run.nativeActions, String(nativeLimits.max_actions)], [t.run.nativeCleanup, `${nativeLimits.cleanup_ms} ms`],
+    [t.run.nativeContainment, `${nativeLimits.containment_ms} ms`],
+  ];
   return <>
     <div className="page-heading"><div><span className="eyebrow">{t.run.heading(label)}</span><h1>{heading}</h1>
       <p>{t.run.introduction}</p></div>
@@ -120,7 +135,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
         <p className={`summary-caption save-status ${dirty ? 'unsaved' : ''}`}>{selectedProfile ? dirty ? t.run.profileChanged : t.run.profileSaved : t.run.profileDraft}</p></div>
       <div className="summary-item"><span className="eyebrow">{t.run.inputRoute}</span>
         <div className="summary-value">{t.lane(bound.lane)}</div>
-        <p className="summary-caption">{bound.lane === 'replay' ? t.run.replaySummary : t.run.controlledSummary}</p></div>
+        <p className="summary-caption">{bound.lane === 'replay' ? t.run.replaySummary : bound.lane === 'native' ? t.run.nativeSummary : t.run.controlledSummary}</p></div>
     </section>
     <div className="run-grid">
       <section className="panel" aria-labelledby="config-heading">
@@ -189,15 +204,48 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           <h3>{t.run.route}</h3>
           <div className="two-col">
             <div className="field"><label htmlFor="lane">{t.run.lane}</label>
-              <Select id="lane" value={bound.lane} disabled={locked} onChange={lane => handlers.change(item => ({...item, lane}))}
+              <Select id="lane" value={bound.lane} disabled={locked} onChange={lane => handlers.change(item => chooseLane(item, lane))}
                 options={[{value: 'controlled', label: t.run.controlled},
                   {value: 'replay', label: t.run.replay},
-                  {value: 'native', label: t.run.native, disabled: true}]}/></div>
+                  {value: 'native', label: nativeLimits ? t.run.native : t.run.nativeUnavailable, disabled: nativeLimits === null}]}/></div>
             <div className="field"><label htmlFor="scenario">{t.run.scenario}</label>
-              <Select id="scenario" value={bound.lane === 'replay' ? 'workflow' : bound.scenario} disabled={locked || bound.lane === 'replay'}
+              <Select id="scenario" value={bound.lane === 'controlled' ? bound.scenario : 'workflow'} disabled={locked || bound.lane !== 'controlled'}
                 onChange={scenario => handlers.change(item => ({...item, scenario}))}
                 options={[{value: 'workflow', label: t.run.workflow}, {value: 'held-work', label: t.run.heldWork}, {value: 'no-match', label: t.run.noMatch}]}/></div>
           </div>
+          {nativeError && <FaultMessage title={t.run.nativeCapabilityError} value={nativeError}/>}
+          {native && <div id="native-review">
+            <h3>{t.run.nativeHeading}</h3>
+            <p className="field-help">{t.run.nativeHelp}</p>
+            <dl className="run-identity" id="native-target">
+              <dt>{t.run.nativePackage}</dt><dd>{bound.package.package_id} / {selectedProfile && !valuesDirty ? `${selectedProfile.name} · ${selectedProfile.id}` : t.run.profileDraft}</dd>
+              <dt>{t.run.nativeApplication}</dt><dd className="mono">{nativeBinding?.configuration.game.path ?? t.common.none}</dd>
+              <dt>{t.target.windowTitle}</dt><dd>{nativeBinding?.configuration.window_title ?? t.common.none}</dd>
+              <dt>{t.target.route}</dt><dd id="native-route">{nativeInput ? nativeInput.route === 'system' ? t.target.system : t.target.processDirected : t.common.none}</dd>
+              <dt>{t.target.focus}</dt><dd id="native-focus">{nativeInput ? nativeInput.focus === 'preserve' ? t.target.preserve : t.target.requireFocused : t.common.none}</dd>
+              <dt>{t.target.pointerMode}</dt><dd id="native-pointer">{nativeInput?.pointer_mode === 'core_graphics' ? t.target.coreGraphics : nativeInput?.pointer_mode === 'appkit_background' ? t.target.appkitBackground : t.common.none}</dd>
+              <dt>{t.target.clickHold}</dt><dd>{nativeInput ? `${nativeInput.click_hold_ms} ms` : t.common.none}</dd>
+              <dt>{t.run.nativeBinding}</dt><dd>{nativeBinding && bound.target.view ? <><code>{nativeBinding.id}</code> · {t.target.revision(bound.target.view.record.revision)}</> : t.common.none}</dd>
+            </dl>
+            {nativeLimitRows && <><span className="eyebrow">{t.run.nativeLimits}</span>
+              <dl className="run-identity" id="native-limits">{nativeLimitRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value}</dd></Fragment>)}</dl></>}
+            <div className="field"><label htmlFor="native-operation">{t.run.nativeOperation}</label>
+              <input id="native-operation" type="text" value={bound.native.operation} disabled={locked} spellCheck={false} aria-invalid={bound.native.operation !== '' && native.operationError !== null}
+                onChange={event => handlers.native.edit('operation', event.target.value)}/>
+              {bound.native.operation !== '' && native.operationError && <p className="field-error">{t.run.nativeTextErrors[native.operationError]}</p>}
+              <p className="field-help">{t.run.nativeOperationHelp}</p></div>
+            <div className="field"><label htmlFor="native-postcondition">{t.run.nativePostcondition}</label>
+              <input id="native-postcondition" type="text" value={bound.native.postcondition} disabled={locked} spellCheck={false} aria-invalid={bound.native.postcondition !== '' && native.postconditionError !== null}
+                onChange={event => handlers.native.edit('postcondition', event.target.value)}/>
+              {bound.native.postcondition !== '' && native.postconditionError && <p className="field-error">{t.run.nativeTextErrors[native.postconditionError]}</p>}
+              <p className="field-help">{t.run.nativePostconditionHelp}</p></div>
+            <div className="field">
+              <label className="checkbox-label"><input id="native-capture-consent" type="checkbox" checked={native.capture} disabled={!approvalOpen}
+                onChange={event => handlers.native.approve('capture', event.target.checked)}/>{t.run.nativeCapture}</label>
+              <label className="checkbox-label"><input id="native-input-consent" type="checkbox" checked={native.input} disabled={!approvalOpen}
+                onChange={event => handlers.native.approve('input', event.target.checked)}/>{t.run.nativeInput}</label>
+              <p className="field-help">{t.run.nativeApprovalHelp}</p></div>
+          </div>}
           <div className="field"><label htmlFor="descriptor-path">{t.run.descriptor}</label>
             <input id="descriptor-path" type="text" value={bound.descriptorPath} disabled={locked} spellCheck={false} aria-invalid={descriptorError !== null}
               placeholder={t.run.descriptorPlaceholder} onChange={event => handlers.change(item => ({...item, descriptorPath: event.target.value}))}/>
@@ -220,11 +268,15 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           <dl className="run-identity"><dt>{t.run.operationId}</dt><dd id="run-id">{view.run ?? t.common.noOperation}</dd>
             <dt>{t.run.kind}</dt><dd id="operation-kind">{view.run ? check ? t.run.checkKind : t.run.runKind(t.lane(snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane) ?? t.common.unknown)) : t.phase('idle')}</dd>
             {snapshot?.kind === 'run' && snapshot.run === view.run && <><dt>{t.run.capturedProfile}</dt><dd>{snapshot.profileName || t.run.untitled} · {snapshot.profileId}</dd><dt>{t.run.packageScenario}</dt><dd>{snapshot.packageId} / {snapshot.scenario}</dd>
-              {snapshot.lane === 'replay' && <><dt>{t.common.descriptor}</dt><dd>{snapshot.descriptorPath}</dd></>}</>}
+              {snapshot.lane === 'replay' && <><dt>{t.common.descriptor}</dt><dd>{snapshot.descriptorPath}</dd></>}
+              {snapshot.native && <><dt>{t.run.nativeOperation}</dt><dd>{snapshot.native.operation}</dd>
+                <dt>{t.run.nativePostcondition}</dt><dd>{snapshot.native.visible_postcondition}</dd>
+                <dt>{t.run.nativeBinding}</dt><dd><code>{snapshot.native.target_binding_id}</code> · {t.target.revision(snapshot.native.target_revision)}</dd></>}</>}
             {snapshot?.kind === 'check' && snapshot.run === view.run && <><dt>{t.run.checkedProfile}</dt><dd>{snapshot.association.environment?.profile ?? t.common.unconfigured}</dd>
               <dt>{t.common.descriptor}</dt><dd>{snapshot.association.descriptorPath ?? t.run.noInitialization}</dd></>}
           </dl>
           {snapshot?.kind === 'run' && snapshot.run === view.run && <details><summary>{t.run.capturedOptions}</summary><pre>{JSON.stringify(snapshot.values, null, 2)}</pre></details>}
+          {snapshot?.kind === 'run' && snapshot.run === view.run && snapshot.native && <details><summary>{t.run.capturedLimits}</summary><pre>{JSON.stringify(snapshot.native.limits, null, 2)}</pre></details>}
           {snapshot?.kind === 'check' && snapshot.run === view.run && <details><summary>{t.run.capturedEnvironment}</summary><pre>{JSON.stringify(snapshot.association.environment, null, 2)}</pre></details>}
           <h3>{t.run.milestones}</h3><ol className="progress-list">{view.progress.map((event, index) => <li key={`${view.run}-${index}`}>
             <details><summary>{String(event.event ?? t.run.milestone)}{text(event.stage) ? ` · ${event.stage}` : ''}{typeof event.at_us === 'number' ? ` · ${(event.at_us / 1000).toFixed(1)} ms` : ''}</summary><pre>{JSON.stringify(event, null, 2)}</pre></details>

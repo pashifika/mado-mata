@@ -25,6 +25,7 @@ pub use authoring::{
     NativePickerCandidate, NativePickerSnapshot, NativeSelectionView, RecognitionCopy,
     RecognitionFrame, RecognitionPickerGuard, RecognitionSaved, RecognitionTrial, RecognitionView,
 };
+mod native_run;
 mod operations;
 mod profiles;
 mod recovery;
@@ -263,6 +264,7 @@ struct OperationOwner {
     run: String,
     workspace: Option<WorkspaceRef>,
     check: Option<CheckInputs>,
+    native: bool,
     terminal: bool,
 }
 
@@ -276,6 +278,7 @@ struct Workspaces {
     target_picker: Option<WorkspaceRef>,
     authoring: Option<authoring::Lease>,
     next_authoring: u64,
+    native_cleanup_required: bool,
 }
 
 pub struct Application {
@@ -381,6 +384,7 @@ impl Application {
             target_picker: None,
             authoring: None,
             next_authoring: 1,
+            native_cleanup_required: false,
         };
         for tab in store.tabs()?.tabs.into_iter().filter(|tab| tab.open) {
             let workspace = workspaces.next_workspace()?;

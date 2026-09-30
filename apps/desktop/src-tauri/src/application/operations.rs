@@ -1,3 +1,4 @@
+use super::native_run::NativeBinding;
 use super::profiles::{
     checked_profile, desktop_options, normalize_editor_numbers, same_json_values,
 };
@@ -6,7 +7,7 @@ use super::{
     Workspaces, lock,
 };
 use crate::logging::LogStatus;
-use mado_runtime_comparison::desktop::StartRequest;
+use mado_runtime_comparison::desktop::{StartPreparation, StartRequest};
 use mado_runtime_comparison::model::Fault;
 use serde_json::{Value, json};
 use std::io::Write;
@@ -14,6 +15,16 @@ use std::sync::{Arc, OnceLock, atomic::Ordering, mpsc};
 use std::time::Duration;
 
 impl Workspaces {
+    fn native_ready(&self) -> Result<(), Fault> {
+        if self.native_cleanup_required {
+            return Err(Fault::new(
+                "NativeCleanupRequired",
+                "Previous native cleanup was incomplete or unverified; reconcile the target and restart the application before another native run",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn idle(&self) -> Result<(), Fault> {
         if let Some(lease) = &self.authoring {
             return Err(Fault::new(
@@ -112,6 +123,9 @@ impl Application {
             if !authoring_operation {
                 let outcome = TerminalOutcome::from_view(&controller);
                 let (level, message) = outcome.notice();
+                if owner.native && outcome.requires_native_reconciliation() {
+                    state.native_cleanup_required = true;
+                }
                 self.logger.emit(
                     "Rust",
                     level,
@@ -166,6 +180,7 @@ impl Application {
             })?;
             self.collect(&mut state);
             state.idle()?;
+            state.native_ready()?;
             self.publisher.recover_pending()?;
             self.closing.store(true, Ordering::Release);
         }
@@ -189,6 +204,10 @@ impl Application {
             let (_command, mut state) = self.command_state()?;
             self.collect(&mut state);
             state.idle()?;
+            let native = request.lane == "native";
+            if native {
+                state.native_ready()?;
+            }
             let selected = state.resolve(workspace)?;
             if request.inventory_identity != selected.inventory.identity
                 || request.package_id != selected.inventory.package_id
@@ -205,43 +224,73 @@ impl Application {
             normalize_editor_numbers(&selected.inventory.schema, &mut request.values);
             desktop_options(&selected.inventory, request.values.clone())?;
             let internal_name = selected.internal_name.clone();
+            let native_package = native.then(|| selected.package.clone());
             let store = self.store.clone();
             let (acquired, ready) = mpsc::sync_channel(1);
             let run = self
                 .runner
                 .start_with_preparation(request, move |request, control| {
-                    let store = lock(&store);
-                    let _ = acquired.send(());
-                    control.check()?;
-                    let environment = if request.lane == "replay" {
-                        store.settings()?.ocr_environment
-                    } else {
-                        None
-                    };
-                    let profiles = store.profile_store(&internal_name, &request.package_id)?;
-                    if request.profile_id != "draft" {
-                        let profile = checked_profile(
-                            &profiles,
-                            &request.package_id,
-                            &request.schema_identity,
-                            &request.profile_id,
-                        )?;
-                        if !same_json_values(&profile.values, &request.values) {
-                            return Err(Fault::new(
-                                "ProfileIdentity",
-                                "Saved profile values changed; select it again",
-                            )
-                            .with_context(json!({"profile_id":profile.id})));
+                    let (environment, binding) = {
+                        let store = lock(&store);
+                        let _ = acquired.send(());
+                        control.check()?;
+                        let environment = if matches!(request.lane.as_str(), "replay" | "native") {
+                            store.settings()?.ocr_environment
+                        } else {
+                            None
+                        };
+                        let profiles = store.profile_store(&internal_name, &request.package_id)?;
+                        if request.profile_id != "draft" {
+                            let profile = checked_profile(
+                                &profiles,
+                                &request.package_id,
+                                &request.schema_identity,
+                                &request.profile_id,
+                            )?;
+                            if !same_json_values(&profile.values, &request.values) {
+                                return Err(Fault::new(
+                                    "ProfileIdentity",
+                                    "Saved profile values changed; select it again",
+                                )
+                                .with_context(json!({"profile_id":profile.id})));
+                            }
                         }
-                    }
+                        let binding = native_package
+                            .map(|package| {
+                                let record =
+                                    store.read_target(&internal_name, &request.package_id)?;
+                                NativeBinding::capture(request, &package, record)
+                            })
+                            .transpose()?;
+                        (environment, binding)
+                    };
                     control.check()?;
-                    Ok(environment)
+                    let native = binding
+                        .map(|binding| {
+                            environment
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    Fault::new(
+                                        "EnvironmentUnset",
+                                        "Save an OCR environment before Native Start",
+                                    )
+                                })?
+                                .validate()?;
+                            binding.resolve(control)
+                        })
+                        .transpose()?;
+                    control.check()?;
+                    Ok(StartPreparation {
+                        environment,
+                        native,
+                    })
                 })?;
             state.owner = Some(OperationOwner {
                 run: run.clone(),
                 workspace: Some(workspace.clone()),
                 check: None,
                 terminal: false,
+                native,
             });
             self.collect(&mut state);
             drop(_command);
@@ -311,6 +360,7 @@ impl Application {
                 run: run.clone(),
                 workspace: workspace.cloned(),
                 check: Some(check),
+                native: false,
                 terminal: false,
             });
             self.collect(&mut state);
@@ -463,6 +513,10 @@ impl<'a> TerminalOutcome<'a> {
                 .or_else(|| boundary["child_started"].as_bool()),
             forced: boundary["forced"].as_bool(),
         }
+    }
+
+    fn requires_native_reconciliation(&self) -> bool {
+        self.cleanup_clean != Some(true) || self.forced == Some(true)
     }
 
     fn notice(&self) -> (&'static str, &'static str) {

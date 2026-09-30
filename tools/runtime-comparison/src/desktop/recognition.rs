@@ -1,4 +1,4 @@
-use super::DesktopController;
+use super::{DesktopController, REPLAY_DURATION_MS};
 use crate::environment::{OcrEnvironment, capture_environment};
 use crate::model::{Control, ENGINE_REVISION, Fault};
 use crate::recognition_trial::{
@@ -12,7 +12,7 @@ impl DesktopController {
     pub fn recognition_capabilities(&self) -> Result<String, Fault> {
         self.reserve(
             "recognition_capabilities",
-            true,
+            Some(REPLAY_DURATION_MS),
             |run, control, observer, _, engine| {
                 run_capabilities(engine, run, control, observer)
                     .map_err(|error| preparation_fault(error, Value::Null))
@@ -29,7 +29,7 @@ impl DesktopController {
     ) -> Result<String, Fault> {
         self.reserve(
             "recognition_trial",
-            true,
+            Some(REPLAY_DURATION_MS),
             move |run, control, observer, _, engine| {
                 let captured = json!(identity);
                 let request = (|| {
@@ -208,12 +208,16 @@ mod tests {
         let (started, ready) = std::sync::mpsc::sync_channel(1);
         let (release, wait) = std::sync::mpsc::sync_channel(1);
         let run = controller
-            .reserve("recognition_trial", true, move |_, control, _, _, _| {
-                started.send(()).unwrap();
-                wait.recv().unwrap();
-                control.check()?;
-                Ok(Value::Null)
-            })
+            .reserve(
+                "recognition_trial",
+                Some(REPLAY_DURATION_MS),
+                move |_, control, _, _, _| {
+                    started.send(()).unwrap();
+                    wait.recv().unwrap();
+                    control.check()?;
+                    Ok(Value::Null)
+                },
+            )
             .unwrap();
         ready
             .recv_timeout(std::time::Duration::from_secs(2))

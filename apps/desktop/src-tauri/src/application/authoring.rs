@@ -358,6 +358,7 @@ impl Application {
             run: run.clone(),
             workspace: Some(owner.workspace.clone()),
             check: None,
+            native: false,
             terminal: false,
         });
         cancellation

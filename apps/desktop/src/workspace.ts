@@ -3,9 +3,9 @@ import type {Locale, Message} from './i18n.ts';
 import {defaultDraft, readDraft} from './state.ts';
 import {mutatedRecovery, recoveryState, retriedRecovery, sameRecoveryContext, upsertOutcomes} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
-import {targetDirty, targetState} from './target.ts';
+import {targetDirty, targetExpectation, targetState} from './target.ts';
 import type {TargetState} from './target.ts';
-import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, NativeIntent, NativeLimits, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, TargetBinding, WorkspaceRef, WorkspaceView} from './types.ts';
 
 export const WORKSPACE_LIMIT = 8;
 export const SAVED_LIMIT = 64;
@@ -14,6 +14,8 @@ export const INTERNAL_NAME_LIMIT = 64;
 export const DISPLAY_NAME_LIMIT = 80;
 // The host caps a retained check descriptor; refuse longer paths inline instead of after a round trip.
 export const DESCRIPTOR_LIMIT = 4096;
+// The host's bound for each reviewed Native text: trimmed non-empty, at most 4096 UTF-8 bytes, no control characters.
+const NATIVE_TEXT_LIMIT = 4096;
 // The host's category for a saved custom-archive reference; every other source fault is an unavailable directory.
 export const UNSUPPORTED_SOURCE = 'UnsupportedPackageSource';
 const BUSY_PHASES: Record<string, true> = {preparing: true, running: true, stopping: true};
@@ -40,7 +42,13 @@ export interface Bound {
   // True once the operator changed profile/draft state; a pristine default draft closes without confirmation.
   touched:boolean;
   target:TargetState;
+  // Transient per-Start Native review; never persisted, restored or inferred from settings, profiles or targets.
+  native:NativeReview;
 }
+
+// Operator-authored intent plus separate capture/input consent. `key` names the exact request the consent approved:
+// consent granted for any other key is not approval.
+export interface NativeReview {operation:string; postcondition:string; capture:boolean; input:boolean; key:string|null}
 
 // Session-local UI state for one open named Tab. The host persists names and package references; nothing here is.
 export interface Workspace {
@@ -106,6 +114,7 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
     draftRevision: (previous?.draftRevision ?? 0) + 1, validation: null,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
     disclosedRun: null, touched: false, target: targetState(selection),
+    native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', capture: false, input: false, key: null},
   };
 }
 
@@ -323,11 +332,89 @@ export interface Derived {
   parsed:{values:Record<string,Json>; errors:Record<string,string>};
   numericErrors:boolean; valuesDirty:boolean; dirty:boolean; bound:boolean;
   selectedProfile:Profile|undefined; startBlock:string|null; descriptorError:string|null;
+  // Present only on the Native lane.
+  native:NativeFacts|null;
 }
 
 const encoder = new TextEncoder();
 
-export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en'):Derived {
+export type NativeTextError = 'blank'|'long'|'control';
+export type NativeBlock = 'nativeUnavailable'|'nativeTarget'|'nativeBinding'|'nativeTargetDirty'|'nativeEnvironment'|'nativeText'|'nativeApproval';
+export interface NativeFacts {
+  binding:TargetBinding|null; capture:boolean; input:boolean;
+  operationError:NativeTextError|null; postconditionError:NativeTextError|null;
+  block:NativeBlock|null; intent:NativeIntent|null;
+}
+
+// Mirrors the host rule; the original text is submitted unchanged.
+function nativeTextError(value:string):NativeTextError|null {
+  if (value.trim() === '') return 'blank';
+  if (encoder.encode(value).length > NATIVE_TEXT_LIMIT) return 'long';
+  return CONTROL.test(value) ? 'control' : null;
+}
+
+// The saved binding a Native Start names: a compatible macOS application bundle with an explicit input policy.
+function nativeBinding(target:TargetState):TargetBinding|null {
+  const binding = target.view?.compatible ? target.view.record.binding : null;
+  return binding && binding.configuration.platform === 'macos' && binding.configuration.game.kind === 'bundle'
+    && binding.configuration.input !== null && target.context.declaration_identity !== null ? binding : null;
+}
+
+// Everything the consent covers. Revisions are monotonic, so an edited-back draft or reissued selection stays stale.
+function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null):string {
+  const target = bound.target;
+  return JSON.stringify([target.context, target.draftRevision, target.view?.record.revision ?? null, target.view?.record.binding ?? null,
+    bound.packagePath, bound.package.inventory_identity, bound.package.schema_identity, bound.lane, bound.draftRevision,
+    bound.profiles.find(profile => profile.id === bound.selectedId) ?? null, environment, limits,
+    bound.native.operation, bound.native.postcondition]);
+}
+
+// Consent given for another request starts over rather than carrying the other consent forward.
+export function approveNative(bound:Bound, field:'capture'|'input', value:boolean, environment:OcrEnvironment|null, limits:NativeLimits|null):Bound {
+  const key = nativeKey(bound, environment, limits);
+  const review = bound.native.key === key ? bound.native : {...bound.native, capture: false, input: false};
+  return {...bound, native: {...review, [field]: value, key}};
+}
+
+export function clearNativeApproval(bound:Bound):Bound {
+  const review = bound.native;
+  return review.key === null && !review.capture && !review.input ? bound : {...bound, native: {...review, capture: false, input: false, key: null}};
+}
+
+export function editNativeReview(bound:Bound, field:'operation'|'postcondition', value:string):Bound {
+  return clearNativeApproval({...bound, native: {...bound.native, [field]: value}});
+}
+
+// Leaving a lane withdraws its consent; returning never restores it.
+export function chooseLane(bound:Bound, lane:string):Bound {
+  return clearNativeApproval({...bound, lane});
+}
+
+export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null):NativeFacts {
+  const target = bound.target;
+  const binding = nativeBinding(target);
+  const review = bound.native;
+  const current = review.key !== null && review.key === nativeKey(bound, environment, limits);
+  const capture = current && review.capture;
+  const input = current && review.input;
+  const operationError = nativeTextError(review.operation);
+  const postconditionError = nativeTextError(review.postcondition);
+  const block:NativeBlock|null = limits === null ? 'nativeUnavailable'
+    : targetExpectation(target) === null || target.operation !== null || target.review !== null ? 'nativeTarget'
+    : binding === null ? 'nativeBinding'
+    : targetDirty(target) ? 'nativeTargetDirty'
+    : environment === null ? 'nativeEnvironment'
+    : operationError !== null || postconditionError !== null ? 'nativeText'
+    : !capture || !input ? 'nativeApproval' : null;
+  const declaration = target.context.declaration_identity;
+  const intent = block === null && binding && limits && target.view && declaration !== null ? {
+    target_revision: target.view.record.revision, target_binding_id: binding.id, target_declaration_identity: declaration,
+    capture_approved: capture, input_approved: input, operation: review.operation, visible_postcondition: review.postcondition, limits,
+  } : null;
+  return {binding, capture, input, operationError, postconditionError, block, intent};
+}
+
+export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en', nativeLimits:NativeLimits|null = null):Derived {
   const t = messages[locale].app;
   const parsed = readDraft(bound.package.schema, bound.draft, locale);
   const numericErrors = Object.keys(parsed.errors).length > 0;
@@ -336,10 +423,12 @@ export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, l
   const dirty = valuesDirty || bound.name !== selectedProfile?.name;
   const profileBound = !selectedProfile || (selectedProfile.package_id === bound.package.package_id && selectedProfile.schema_identity === bound.package.schema_identity);
   const descriptor = bound.descriptorPath.trim();
+  const native = bound.lane === 'native' ? nativeFacts(bound, savedEnvironment, nativeLimits) : null;
   const startBlock = bound.lane === 'replay' && !descriptor ? t.replayDescriptor
-    : bound.lane === 'replay' && !savedEnvironment ? t.replayEnvironment : null;
+    : bound.lane === 'replay' && !savedEnvironment ? t.replayEnvironment
+    : native?.block ? t[native.block] : null;
   const descriptorError = encoder.encode(descriptor).length > DESCRIPTOR_LIMIT ? t.descriptorLimit(DESCRIPTOR_LIMIT) : null;
-  return {parsed, numericErrors, valuesDirty, dirty, bound: profileBound, selectedProfile, startBlock, descriptorError};
+  return {parsed, numericErrors, valuesDirty, dirty, bound: profileBound, selectedProfile, startBlock, descriptorError, native};
 }
 
 export function hasWorkspaceEdits(workspace:Workspace, facts:Derived|undefined):boolean {

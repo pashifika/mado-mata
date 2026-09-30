@@ -1,7 +1,7 @@
 use mado_runtime_comparison::{
     desktop::{DesktopController, StartRequest},
     inventory::Inventory,
-    model::Plan,
+    model::{Plan, StopReason},
     runner,
 };
 use serde_json::Value;
@@ -62,9 +62,12 @@ fn run_separately(
         dropped_logs: Arc::new(AtomicU64::new(0)),
     };
     let mut stop = || {
-        events.try_iter().any(|event| {
-            stop_event.is_some_and(|expected| event["event"].as_str() == Some(expected))
-        })
+        events
+            .try_iter()
+            .any(|event| {
+                stop_event.is_some_and(|expected| event["event"].as_str() == Some(expected))
+            })
+            .then_some(StopReason::Cancelled)
     };
     runner::run_once_with_executable(
         Path::new(env!("CARGO_BIN_EXE_mado-runtime-comparison")),
@@ -93,24 +96,30 @@ fn pre_spawn_stop_retains_known_no_child_cleanup() {
         dropped_logs: Arc::new(AtomicU64::new(0)),
     };
     // Both public supervisor paths must distinguish no child from unknown cleanup.
-    let faults = [
-        runner::run_once(&plan, &inventory, None, false, Some(&mut || true)).unwrap_err(),
-        runner::run_once_with_executable(
-            Path::new(env!("CARGO_BIN_EXE_mado-runtime-comparison")),
-            &plan,
-            &inventory,
-            &mut || true,
-            &observer,
-        )
-        .unwrap_err(),
-    ];
-    for fault in faults {
-        assert_eq!(fault.category, "Cancelled");
-        assert_eq!(fault.context["stage"], "child_startup");
-        assert_eq!(fault.context["boundary"], "before_spawn");
-        assert_eq!(fault.context["child_started"], false);
-        assert_eq!(fault.context["cleanup"]["clean"], true);
-        assert_eq!(fault.context["cleanup"]["child_started"], false);
+    for (reason, category) in [
+        (StopReason::Cancelled, "Cancelled"),
+        (StopReason::Timeout, "Timeout"),
+    ] {
+        let faults = [
+            runner::run_once(&plan, &inventory, None, false, Some(&mut || Some(reason)))
+                .unwrap_err(),
+            runner::run_once_with_executable(
+                Path::new(env!("CARGO_BIN_EXE_mado-runtime-comparison")),
+                &plan,
+                &inventory,
+                &mut || Some(reason),
+                &observer,
+            )
+            .unwrap_err(),
+        ];
+        for fault in faults {
+            assert_eq!(fault.category, category);
+            assert_eq!(fault.context["stage"], "child_startup");
+            assert_eq!(fault.context["boundary"], "before_spawn");
+            assert_eq!(fault.context["child_started"], false);
+            assert_eq!(fault.context["cleanup"]["clean"], true);
+            assert_eq!(fault.context["cleanup"]["child_started"], false);
+        }
     }
 }
 
@@ -210,7 +219,7 @@ fn child_exit_before_rust_startup_is_not_a_successful_check() {
         Path::new("/usr/bin/true"),
         &plan,
         &inventory,
-        &mut || false,
+        &mut || None,
         &observer,
     )
     .unwrap();
@@ -248,6 +257,7 @@ fn inspected_package_starts_controlled_without_requiring_an_engine() {
                 lane: "controlled".into(),
                 scenario: "workflow".into(),
                 replay_descriptor_path: None,
+                native_intent: None,
             },
             None,
         )
@@ -295,4 +305,43 @@ fn missing_replay_environment_retains_a_blocked_cli_record_without_a_child() {
     assert!(record["build"].is_null());
     assert!(record["metrics"]["runtime"].is_null());
     assert!(record["metrics"]["workflow_us"].is_null());
+}
+
+#[test]
+fn external_cli_plans_cannot_claim_desktop_reviewed_authority() {
+    let mut plan: Plan =
+        serde_json::from_str(include_str!("../fixtures/controlled-plan.json")).unwrap();
+    plan.lane = "native".into();
+    plan.scenario = "workflow".into();
+    plan.native_config = Some(serde_json::json!({
+        "native": {
+            "geometry": null,
+            "input": {
+                "reviewed_operation": "Press the reviewed key",
+                "representative_actions": []
+            }
+        }
+    }));
+    let file = PlanFile::new(&plan);
+    let missing_package = file.0.with_extension("missing-package");
+    let output_path = file.0.with_extension("result");
+    for command in ["run", "manual"] {
+        let mut invocation = Command::new(env!("CARGO_BIN_EXE_mado-runtime-comparison"));
+        invocation.arg(command).arg(&file.0).arg(&missing_package);
+        if command == "manual" {
+            invocation.arg(&output_path);
+        }
+        let output = invocation.output().unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).starts_with("NativeRefused:"),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        assert!(
+            !output_path.exists(),
+            "refusal must precede output reservation"
+        );
+    }
 }

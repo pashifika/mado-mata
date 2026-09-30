@@ -1,7 +1,8 @@
 use super::packages::{runtime, select_profile};
 use super::{
     Active, ControllerView, DesktopController, LOG_CAPACITY, NEXT_RUN, PROGRESS_CAPACITY,
-    REPLAY_DURATION_MS, REQUEST_BYTES, SHUTDOWN_MS, StartRequest, State, manual_plan,
+    REPLAY_DURATION_MS, REQUEST_BYTES, SHUTDOWN_MS, StartPreparation, StartRequest, State,
+    manual_plan,
 };
 use crate::environment::{OcrEnvironment, capture_environment, capture_replay};
 use crate::inventory::Inventory;
@@ -123,20 +124,39 @@ impl DesktopController {
         request: StartRequest,
         environment: Option<OcrEnvironment>,
     ) -> Result<String, Fault> {
-        self.start_with_preparation(request, move |_, _| Ok(environment))
+        self.start_with_preparation(request, move |_, _| {
+            Ok(StartPreparation {
+                environment,
+                native: None,
+            })
+        })
     }
 
     /// Application-owned profile checks share the reservation with resource capture.
     pub fn start_with_preparation(
         &self,
         mut request: StartRequest,
-        prepare: impl FnOnce(&mut StartRequest, &Control) -> Result<Option<OcrEnvironment>, Fault>
+        prepare: impl FnOnce(&mut StartRequest, &Control) -> Result<StartPreparation, Fault>
         + Send
         + 'static,
     ) -> Result<String, Fault> {
+        let duration_ms =
+            match request.lane.as_str() {
+                "native" => Some(request.native_intent.as_ref().map_or(
+                    REPLAY_DURATION_MS,
+                    |intent| {
+                        match intent.limits.duration_ms {
+                            duration @ 1..=REPLAY_DURATION_MS => duration,
+                            _ => REPLAY_DURATION_MS, // Invalid authority is refused inside the reservation.
+                        }
+                    },
+                )),
+                "replay" => Some(REPLAY_DURATION_MS),
+                _ => None,
+            };
         self.reserve(
             "run",
-            request.lane == "replay",
+            duration_ms,
             move |app_run, control, observer, controlled, engine| {
                 let mut evidence = Evidence::new(
                     "run",
@@ -155,15 +175,23 @@ impl DesktopController {
                     let plan = requested_plan(&request)?;
                     evidence.complete();
                     evidence.stage("input_capture", observer);
-                    let environment = prepare(&mut request, control)?;
+                    let preparation = prepare(&mut request, control)?;
                     evidence.fields["selection_identity"] =
-                        json!(environment.as_ref().map(identity).transpose()?);
+                        json!(preparation.environment.as_ref().map(identity).transpose()?);
                     control.check()?;
-                    Ok((plan, environment))
+                    if request.lane == "native" {
+                        super::native::validate_target(preparation.native.as_ref())?;
+                    } else if preparation.native.is_some() {
+                        return Err(Fault::new(
+                            "NativeRefused",
+                            "Non-native lanes reject native target proof",
+                        ));
+                    }
+                    Ok((plan, preparation))
                 })();
-                let (plan, environment) = prepared.map_err(|error| evidence.fault(error, true))?;
+                let (plan, preparation) = prepared.map_err(|error| evidence.fault(error, true))?;
                 evidence.complete();
-                let executable = if request.lane == "replay" {
+                let executable = if matches!(request.lane.as_str(), "replay" | "native") {
                     engine
                 } else {
                     controlled
@@ -171,7 +199,7 @@ impl DesktopController {
                 execute(
                     executable,
                     &request,
-                    environment.as_ref(),
+                    &preparation,
                     plan,
                     control,
                     observer,
@@ -200,7 +228,7 @@ impl DesktopController {
     ) -> Result<String, Fault> {
         self.reserve(
             "environment_check",
-            true,
+            Some(REPLAY_DURATION_MS),
             move |app_run, control, observer, _, engine| {
                 let mut evidence = Evidence::new(
                     "environment_check",
@@ -235,7 +263,7 @@ impl DesktopController {
         &self,
         capture: impl FnOnce(&Control) -> Result<Inventory, Fault> + Send + 'static,
     ) -> Result<String, Fault> {
-        self.reserve("authoring_validate", false, move |_, control, _, _, _| {
+        self.reserve("authoring_validate", None, move |_, control, _, _, _| {
             let outcome = (|| {
                 control.check()?;
                 let inventory = capture(control)?;
@@ -270,7 +298,7 @@ impl DesktopController {
     pub(super) fn reserve(
         &self,
         operation: &'static str,
-        replay: bool,
+        duration_ms: Option<u64>,
         work: impl FnOnce(&str, &Arc<Control>, &Observer, &Path, &Path) -> Result<Value, Fault>
         + Send
         + 'static,
@@ -300,8 +328,8 @@ impl DesktopController {
             NEXT_RUN.fetch_add(1, Ordering::Relaxed)
         );
         let mut limits = manual_plan()?.limits;
-        if replay {
-            limits.duration_ms = REPLAY_DURATION_MS;
+        if let Some(duration_ms) = duration_ms {
+            limits.duration_ms = duration_ms;
         }
         let control = Arc::new(Control::new(&limits));
         let (progress_send, progress) = mpsc::sync_channel(PROGRESS_CAPACITY);
@@ -407,21 +435,40 @@ impl DesktopController {
     }
 }
 
-fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
+pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
     match request.lane.as_str() {
-        "controlled" | "replay" => {}
+        "controlled" | "replay" => {
+            if request.native_intent.is_some() {
+                return Err(Fault::new(
+                    "NativeRefused",
+                    "Non-native lanes reject native approval",
+                ));
+            }
+        }
         "native" => {
-            return Err(Fault::new(
-                "NativeRefused",
-                "desktop grants no live capture, target, or input authority",
-            ));
+            let intent = request.native_intent.as_ref().ok_or_else(|| {
+                Fault::new("NativeRefused", "Native requires explicit per-Start review")
+            })?;
+            super::native::validate_intent(intent)?;
+            if !cfg!(target_os = "macos") {
+                return Err(Fault::new(
+                    "NativeRefused",
+                    "Desktop Native is available only on macOS",
+                ));
+            }
+            if request.replay_descriptor_path.is_some() {
+                return Err(Fault::new(
+                    "NativeRefused",
+                    "Native rejects recorded replay sources",
+                ));
+            }
         }
         _ => return Err(Fault::new("InvalidPlan", "unknown desktop execution lane")),
     }
-    if request.lane == "replay" && request.scenario != "workflow" {
+    if request.lane != "controlled" && request.scenario != "workflow" {
         return Err(Fault::new(
             "InvalidPlan",
-            "recorded replay accepts only the package workflow, not controlled fixture scenarios",
+            "Engine lanes accept only the package workflow, not controlled fixture scenarios",
         ));
     }
     if request.package_path.is_empty() || request.package_path.len() > 4096 {
@@ -435,6 +482,15 @@ fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
     plan.lane = request.lane.clone();
     if plan.lane == "replay" {
         plan.limits.duration_ms = REPLAY_DURATION_MS;
+    }
+    if let Some(intent) = &request.native_intent {
+        let limits = &intent.limits;
+        plan.limits.duration_ms = limits.duration_ms;
+        plan.limits.readiness_ms = plan.limits.readiness_ms.min(limits.duration_ms);
+        plan.limits.wait_ms = limits.wait_ms;
+        plan.limits.max_actions = limits.max_actions;
+        plan.limits.cleanup_ms = limits.cleanup_ms;
+        plan.limits.containment_ms = limits.containment_ms;
     }
     plan.native_config = None;
     plan.samples = 1;
@@ -513,7 +569,7 @@ impl Evidence {
     }
 }
 
-fn replay_configuration(
+fn engine_configuration(
     environment: Option<&OcrEnvironment>,
     control: &Control,
     observer: &Observer,
@@ -524,7 +580,7 @@ fn replay_configuration(
     let environment = environment.ok_or_else(|| {
         Fault::new(
             "EnvironmentUnset",
-            "Save an OCR environment before checking or replaying",
+            "Save an OCR environment before checking or running an engine lane",
         )
     })?;
     let snapshot = capture_environment(environment, control)?;
@@ -582,7 +638,7 @@ fn engine_available(executable: &Path) -> Result<(), Fault> {
 fn execute(
     executable: &Path,
     request: &StartRequest,
-    environment: Option<&OcrEnvironment>,
+    preparation: &StartPreparation,
     mut plan: Plan,
     control: &Control,
     observer: &Observer,
@@ -597,11 +653,18 @@ fn execute(
             Some(&control.cancelled),
         )?;
         control.check()?;
+        evidence.complete();
+        evidence.stage("profile_validation", observer);
+        select_profile(&mut inventory, request)?;
         plan.candidate = runtime(&inventory)?;
         evidence.complete();
         if plan.lane == "replay" {
-            let configuration =
-                replay_configuration(environment, control, observer, &mut evidence)?;
+            let configuration = engine_configuration(
+                preparation.environment.as_ref(),
+                control,
+                observer,
+                &mut evidence,
+            )?;
             project_replay(
                 &mut plan,
                 configuration,
@@ -615,15 +678,35 @@ fn execute(
             engine_available(executable)?;
             evidence.complete();
         }
-        evidence.stage("profile_validation", observer);
-        select_profile(&mut inventory, request)?;
-        evidence.complete();
+        if plan.lane == "native" {
+            let target = super::native::validate_target(preparation.native.as_ref())?;
+            let configuration = engine_configuration(
+                preparation.environment.as_ref(),
+                control,
+                observer,
+                &mut evidence,
+            )?;
+            evidence.stage("engine_availability", observer);
+            engine_available(executable)?;
+            evidence.complete();
+            evidence.stage("native_projection", observer);
+            super::native::project(
+                &mut plan,
+                request,
+                target,
+                executable,
+                &inventory,
+                configuration,
+            )?;
+            evidence.fields["native_intent_identity"] = json!(identity(&request.native_intent)?);
+            evidence.complete();
+        }
         control.check()?;
         Ok(inventory)
     })();
     let inventory = prepared.map_err(|error| evidence.fault(error, true))?;
     evidence.stage("execution", observer);
-    let mut poll_stop = || control.check().is_err();
+    let mut poll_stop = || control.stop_reason();
     let record = run_once_with_executable(executable, &plan, &inventory, &mut poll_stop, observer)
         .map_err(|error| evidence.fault(error, false))?;
     let mut result = serde_json::to_value(record)
@@ -650,7 +733,7 @@ fn execute_check(
         plan.samples = 1;
         plan.warmups = 0;
         plan.repetitions = 1;
-        let configuration = replay_configuration(environment, control, observer, &mut evidence)?;
+        let configuration = engine_configuration(environment, control, observer, &mut evidence)?;
         evidence.stage("corpus_validation", observer);
         let (path, expected) = package.ok_or_else(|| {
             Fault::new(
@@ -693,7 +776,7 @@ fn execute_check(
     })();
     let (plan, inventory) = prepared.map_err(|error| evidence.fault(error, true))?;
     evidence.stage("child_startup", observer);
-    let mut poll_stop = || control.check().is_err();
+    let mut poll_stop = || control.stop_reason();
     let record = run_environment_check_with_executable(
         executable,
         &plan,

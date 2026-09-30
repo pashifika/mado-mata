@@ -613,6 +613,7 @@ fn stale_saved_values_are_refused_before_runner_startup() {
                 lane: "controlled".into(),
                 scenario: "workflow".into(),
                 replay_descriptor_path: None,
+                native_intent: None,
             },
         )
         .unwrap();
@@ -651,6 +652,7 @@ fn admission_reserves_before_store_io_and_owns_the_profile_snapshot() {
         lane: "controlled".into(),
         scenario: "workflow".into(),
         replay_descriptor_path: None,
+        native_intent: None,
     };
     let store = lock(&application.store);
     let (admitted, admission) = mpsc::sync_channel(1);
@@ -812,6 +814,7 @@ fn unsafe_stored_numbers_remain_preserved_and_unavailable_to_commands() {
                 lane: "controlled".into(),
                 scenario: "workflow".into(),
                 replay_descriptor_path: None,
+                native_intent: None,
             },
         )
         .unwrap();
@@ -877,6 +880,7 @@ fn floating_profiles_survive_webview_normalization_save_reopen_and_start() {
                 lane: "controlled".into(),
                 scenario: "workflow".into(),
                 replay_descriptor_path: None,
+                native_intent: None,
             },
         )
         .unwrap();

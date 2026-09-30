@@ -1,4 +1,4 @@
-# Desktop checkout: authoring, controlled runs and recorded replay
+# Desktop checkout: authoring, controlled/replay and macOS Native runs
 
 MadoMata's trusted Tauri/React WebView provides directory-package and Recognition
 authoring, inspection, profiles, run control, App-local OCR settings, and logs.
@@ -9,15 +9,18 @@ Both execution lanes retain the **controlled, non-native input sink**.
 
 Recognition has a separate explicit, read-only native window acquisition path.
 It requires an authorized target and the fixed engine child; opening the editor
-does not capture, initialize OCR, or request permissions. Native Script Start,
-game launch, target activation, OS input, and automatic recovery remain refused.
+does not capture, initialize OCR, or request permissions. Separately reviewed
+macOS **Native** Start attaches to an already-running saved application through
+the fixed engine child. Game launch, activation, automatic recovery and Windows
+Native Start remain refused.
 
 The checkout includes macOS and Windows shells; Linux checks the frontend and
 shell-independent core. Windows interactive authoring and both-OS native
 qualification are separate acceptance obligations, not claims made by a build.
 Release packaging and full runtime adoption remain unresolved. See the
-[engine prerequisites](runtime-native.md) and
-[capture boundary decision](adr/0007-native-capture-authoring.md).
+[engine prerequisites](runtime-native.md),
+[capture boundary](adr/0007-native-capture-authoring.md), and
+[Native Run admission](adr/0008-macos-native-run-admission.md).
 
 ## Build and run from the checkout
 
@@ -223,7 +226,7 @@ The shell-independent core retains its public root namespaces:
 
 | Root | Private children |
 | --- | --- |
-| `application.rs` | `workspaces` owns Tab/session transitions; `authoring` owns the global Edit lease and validation/close lifecycle; `profiles` owns ordinary profile commands and desktop value checks; `recovery` owns schema reconciliation, repair/reset authority, and explicit binding retry; `targets` owns target commands; `operations` owns execution, collection, and shutdown |
+| `application.rs` | `workspaces` owns Tab/session transitions; `authoring` owns the global Edit lease and validation/close lifecycle; `profiles` owns ordinary profile commands and desktop value checks; `recovery` owns schema reconciliation, repair/reset authority, and explicit binding retry; `targets` owns target commands; `native_run` captures and resolves reviewed bundle correspondence; `operations` owns execution, collection, and shutdown |
 | `storage.rs` | `settings`, `tabs`, `profiles`, and `targets` own their records and persistence; `fs` owns bounded reads, safe paths, and atomic file publication |
 | `authoring.rs` | `catalog` owns prospective declarations; `publication` owns source revisions, changed-file staging, and interrupted-publication recovery |
 
@@ -409,8 +412,8 @@ a later failure can appear again.
    owned Engine. Cleanup and containment retain separate 1-second / 2-second
    bounds; a Stop receipt is not cleanup proof. Incomplete cleanup stays visible.
 6. The accepted image is historical, not a live connection or readiness result.
-   Later target exit does not invalidate it. Ordinary Start and independent OCR
-   Check remain excluded throughout Edit; native Script Start remains unavailable.
+   Later target exit does not invalidate it. Every Script Start and independent
+   OCR Check remain excluded throughout Edit; leaving Edit grants no Native authority.
 
 The retained Engine has no idle expiry. Replay protection is bounded to 4096
 capture identities per Engine; exhaustion refuses with `NativeCaptureLimit`
@@ -1438,8 +1441,8 @@ Detailed check diagnostics require explicit private disclosure.
 
 **Start** submits the current explicit draft. Choose **Controlled** for the
 shipped fixtures, or **Recorded replay** with a saved environment and selected
-descriptor. Replay accepts only the package workflow, never controlled fault
-injection scenarios. The native lane remains refused.
+descriptor. **Native** requires the separate macOS review below. Replay and Native
+accept only the package workflow, never controlled fault-injection scenarios.
 
 Unmodified saved values retain the saved profile ID; edits run as a draft until
 saved. The worker reserves the single preparing/running/stopping slot before
@@ -1471,9 +1474,11 @@ Run build metadata comes from the actual owned runtime child, not the desktop
 executable. If startup identity is unavailable, it remains unknown (`null`) rather
 than being substituted with supervisor metadata.
 
-Controlled execution has a **10 s** operation deadline; replay, Check, and
-saved-image trials use **30 s**, including input preparation. Repeated parent/child
-resource verification is not skipped to fit the controlled-only deadline.
+Controlled execution has a **10 s** operation deadline; replay, Check,
+saved-image trials and the Native host policy use **30 s**, including input
+preparation. Whole-operation timeout remains distinct from explicit Stop.
+Repeated parent/child resource verification is not skipped to fit the
+controlled-only deadline.
 Cleanup remains **1 s** and containment **2 s**. Controller shutdown waits at most
 **14 s** for its owned worker. Ordinary window closure requests shutdown off the
 UI thread. Native macOS Quit can bypass that request callback, so the final exit
@@ -1485,6 +1490,56 @@ An expired deadline remains unverified/incomplete, not a clean acknowledgement.
 The log bridge polls every **50 ms** and is joined during shutdown; that interval
 is not a join timeout. File-log shutdown follows below and never determines the
 run result.
+
+## Reviewed macOS Native Start
+
+Native is attach-only and requires a current, explicitly authorized target,
+environment and operation. An installed engine or successful Check is not
+permission, native qualification, or proof of game effect.
+
+1. Build the fixed engine artifact above and save the reviewed App OCR environment.
+   Save/Validate the authored package, exit Edit, then Inspect it. Recognition
+   definitions and template aliases come from declared package assets; do not
+   paste local engine paths or a native Plan into the package.
+2. Save a compatible macOS application-bundle Target with an exact window title
+   and explicit route/focus/pointer policy. The application must already be
+   running. Start freshly verifies bundle/runtime-copy correspondence, requires
+   one process and one eligible window, and binds the same process lifetime.
+   Check running application remains historical information, not an attachment.
+3. Select **Native**. Review package/profile, target binding/revision and policy;
+   enter the intended operation and what a newer frame must show. This text records
+   the human review; the package must implement its recognition and postcondition.
+   It is not a script sandbox or an automatic assertion generated from prose.
+4. Review the host limits: **30 s** including preparation, **300** acquired frames,
+   **1 s** waits, **100 ms** pacing, **64** input events across the whole run,
+   **1 s** cleanup and **2 s** containment. A click consumes three events, or four
+   with a hold; key press/release each consume one. Producer frames and restricted
+   cleanup releases are not ordinary acquisition/input budget entries.
+5. Approve capture and input separately, then Start. Every submission consumes
+   approval, even a refusal. Relevant edits, target edit/discard, environment
+   changes and leaving the workspace withdraw it. Unrelated settings changes do
+   not change the reviewed environment. Native never launches, activates, obtains
+   focus, prompts for permissions, substitutes a route or retries uncertain input.
+6. Observe the separate receipt, entry, postcondition and cleanup results.
+   Postconditions require a strictly newer compatible frame; input submission or
+   a newer frame alone does not establish the expected effect. Independently
+   confirm the authorized visible effect. First-frame placement is authoritative;
+   later geometry changes are refused, not silently rescaled.
+
+Stop remains available through navigation and App settings. Wait for owned
+worker/child settlement before a fresh review. Forced/incomplete/unverified
+Native cleanup leaves `NativeCleanupRequired`: reconcile the target manually
+and restart the application. Controlled/replay work and configuration
+reconstruction cannot clear that refusal.
+
+For local acceptance, complete one authored recognition/input/postcondition
+workflow on an ordinary fixed-position/size target, exercise normal Stop during
+finite work, then approve and complete a new run. Record exact build/resources,
+receipt, independent visible effect and cleanup privately. Missing authority or
+prerequisites leaves this acceptance open. Do not kill, move or resize the game
+to manufacture target loss; disruptive cases need separate approval. Controlled
+target-loss regressions do not replace native evidence or the independent
+Windows/M0/R6 obligations.
 
 ## Logs and retention
 
@@ -1832,7 +1887,7 @@ Keep package presets valid when changing the schema; do not edit tracked fixture
    requirement probe must be refused; do not launch, restart, terminate, change
    protections, or use game input to manufacture the result.
 5. Repeat an existing controlled workflow and applicable recorded replay; target
-   inspection must not gate either. Native Start must remain refused. Keep
+   inspection must not gate either. Unreviewed Native Start must remain refused. Keep
    process paths, IDs, signing values, screenshots, and raw observations private.
    Report missing authorization/replay prerequisites as unexecuted. These checks
    do not satisfy native acceptance, R6, or initial both-OS qualification.
@@ -1881,8 +1936,8 @@ Keep package presets valid when changing the schema; do not edit tracked fixture
 8. Verify Run, Logs, the Application menu, and App settings at 1440, 1024, and
    900 CSS-pixel widths, including keyboard navigation and modal Stop.
    Verify the compact aggregate counters, conditional Errors count, shared
-   selectors, and combined level/text log-search field. Check disabled Native
-   selection, Replay's scenario lock, preset/profile round trips, empty enum
+   selectors, and combined level/text log-search field. Check Native review/refusal
+   on macOS (disabled elsewhere), Replay's scenario lock, preset/profile round trips, empty enum
    values, long-list keyboard navigation, and popup placement near viewport edges.
    Leave a selector open across operation completion and verify it stays anchored
    when the operation strip disappears.
