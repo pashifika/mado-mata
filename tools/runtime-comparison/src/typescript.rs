@@ -1,7 +1,7 @@
 use crate::inventory::Inventory;
 use crate::model::{Control, Fault, Limits};
 use crate::owned_child::{ChildStdio, Environment, OwnedChild};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -42,8 +42,20 @@ struct Reply {
     fault: Option<Fault>,
 }
 
+fn worker_deadline_fault(
+    deadline: Instant,
+    control: Option<&Control>,
+    message: &'static str,
+) -> Fault {
+    // Only the shared operation deadline can inherit the supervisor's Stop.
+    control
+        .filter(|control| control.deadline() == deadline)
+        .and_then(|control| control.check().err())
+        .unwrap_or_else(|| Fault::new("Timeout", message))
+}
+
 fn transport(
-    request: &Value,
+    request: &impl Serialize,
     limit: usize,
     deadline: Instant,
     control: Option<&Control>,
@@ -60,7 +72,11 @@ fn transport(
         ));
     }
     if Instant::now() >= deadline {
-        return Err(Fault::new("Timeout", "compiler worker deadline expired"));
+        return Err(worker_deadline_fault(
+            deadline,
+            control,
+            "compiler worker deadline expired",
+        ));
     }
     if !std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -182,8 +198,9 @@ fn transport(
             break;
         }
         if Instant::now() >= deadline {
-            failure = Some(Fault::new(
-                "Timeout",
+            failure = Some(worker_deadline_fault(
+                deadline,
+                control,
                 "compiler worker exceeded its deadline",
             ));
             break;
@@ -300,6 +317,39 @@ pub(crate) fn node_from_path() -> Result<std::path::PathBuf, Fault> {
     ))
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedModules {
+    inventory_identity: String,
+    parser: Value,
+}
+
+impl PreparedModules {
+    pub(crate) fn capture(
+        inventory: &Arc<Inventory>,
+        limits: &Limits,
+        control: &Arc<Control>,
+    ) -> Result<Self, Fault> {
+        let parser = validate_javascript_modules(inventory, limits, control)?;
+        Ok(Self {
+            inventory_identity: inventory.identity.clone(),
+            parser,
+        })
+    }
+
+    pub(crate) fn parser(&self, inventory: &Inventory) -> Result<&Value, Fault> {
+        if inventory.identity != self.inventory_identity
+            || inventory.metadata["runtime"] != "javascript"
+        {
+            return Err(Fault::new(
+                "StaleIdentity",
+                "prepared modules do not match the captured executable inventory",
+            ));
+        }
+        Ok(&self.parser)
+    }
+}
+
 /// Inspect JavaScript with the pinned parser without type checking or emitting.
 /// The worker shares the attempt's remaining deadline and cancellation latch.
 pub(crate) fn validate_javascript_imports(
@@ -326,11 +376,7 @@ fn inspect_javascript(
     link: bool,
 ) -> Result<Value, Fault> {
     control.check()?;
-    let remaining_us = limits
-        .duration_ms
-        .saturating_mul(1000)
-        .saturating_sub(control.elapsed_us());
-    let deadline = Instant::now() + Duration::from_micros(remaining_us);
+    let deadline = control.deadline();
     let limit = limits
         .snapshot_bytes
         .saturating_mul(8)
@@ -434,11 +480,7 @@ pub(crate) fn compile_with_control(
     control.check()?;
     inventory.validate()?;
     limits.validate()?;
-    let remaining = limits
-        .duration_ms
-        .saturating_mul(1000)
-        .saturating_sub(control.elapsed_us());
-    let deadline = Instant::now() + Duration::from_micros(remaining);
+    let deadline = control.deadline();
     let limit = limits
         .snapshot_bytes
         .saturating_mul(8)
@@ -713,4 +755,41 @@ pub fn map_fault(inventory: &Inventory, mut fault: Fault) -> Fault {
         "frames": frames,
     });
     fault
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Plan;
+
+    struct StopDuringEncoding<'a>(&'a Control);
+
+    impl Serialize for StopDuringEncoding<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            assert!(Instant::now() < self.0.deadline());
+            self.0.cancel();
+            // Expire the real deadline during encoding, before any worker spawn.
+            thread::sleep(self.0.deadline().saturating_duration_since(Instant::now()));
+            while Instant::now() < self.0.deadline() {
+                std::hint::spin_loop();
+            }
+            serializer.serialize_unit()
+        }
+    }
+
+    #[test]
+    fn stop_during_encoding_wins_over_the_shared_worker_deadline() {
+        let plan: Plan =
+            serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+        let control = Control::with_deadline(&plan.limits, Instant::now() + Duration::from_secs(5));
+        let fault = transport(
+            &StopDuringEncoding(&control),
+            64,
+            control.deadline(),
+            Some(&control),
+        )
+        .unwrap_err();
+        assert_eq!(fault.category, "Cancelled");
+        assert_eq!(control.admit_launch().unwrap_err().category, "Cancelled");
+    }
 }

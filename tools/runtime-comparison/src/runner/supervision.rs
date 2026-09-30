@@ -1,4 +1,5 @@
 use super::RunRecord;
+use super::clock::SharedDeadline;
 use super::evidence::{Observer, receive_evidence};
 use super::protocol::{Invocation, Operation, emit, frame};
 use crate::inventory::Inventory;
@@ -49,6 +50,7 @@ pub fn run_once(
         &executable,
         None,
         Operation::Run,
+        None,
     )
 }
 
@@ -70,6 +72,29 @@ pub fn run_once_with_executable(
         executable,
         Some(observer),
         Operation::Run,
+        None,
+    )
+}
+
+pub(crate) fn run_prepared_with_executable(
+    executable: &Path,
+    plan: &Plan,
+    inventory: &Inventory,
+    preparation: super::PreparedExecution<'_>,
+    observer: &Observer,
+) -> Result<RunRecord, Fault> {
+    let mut poll = || preparation.control.stop_reason();
+    supervise(
+        plan,
+        inventory,
+        None,
+        false,
+        Some(&mut poll),
+        None,
+        executable,
+        Some(observer),
+        Operation::Run,
+        Some(&preparation),
     )
 }
 
@@ -91,6 +116,7 @@ pub fn run_environment_check_with_executable(
         executable,
         Some(observer),
         Operation::EnvironmentCheck,
+        None,
     )
 }
 
@@ -112,6 +138,7 @@ pub(crate) fn run_once_after_milestone(
         &executable,
         None,
         Operation::Run,
+        None,
     )
 }
 
@@ -245,26 +272,24 @@ fn supervise(
     executable: &Path,
     observer: Option<&Observer>,
     operation: Operation,
+    preparation: Option<&super::PreparedExecution<'_>>,
 ) -> Result<RunRecord, Fault> {
     plan.validate()?;
     inventory.validate()?;
     operation.validate(plan)?;
+    if let Some(modules) = preparation.and_then(|prepared| prepared.modules) {
+        modules.parser(inventory)?;
+    }
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| Fault::new("Clock", e.to_string()))?
         .as_nanos();
     let run = format!("{}-{}-{nonce}", plan.id, std::process::id());
-    let mut invocation = Invocation {
-        run: run.clone(),
-        attempt: 1,
-        operation,
-        plan: plan.clone(),
-        inventory: inventory.clone(),
-        observe_logs: observer.is_some(),
+    let _image_reservation = if preparation.is_some_and(|prepared| prepared.images.is_some()) {
+        None
+    } else {
+        Some(super::payload::reserve_child_images(plan, inventory)?)
     };
-    let bytes = super::payload::header(&mut invocation)?;
-    let transfer_assets = invocation.inventory.assets.clone();
-    let _image_reservation = super::payload::reserve_child_images(plan, inventory)?;
     if observer.is_some()
         && let Some(reason) = operator_stop.as_mut().and_then(|poll| poll())
     {
@@ -274,6 +299,24 @@ fn supervise(
         })));
     }
     let started = Instant::now();
+    // One original bound for both processes: the child reads this absolute
+    // deadline on the shared clock, so transfer time is never refunded.
+    let deadline = preparation.map_or_else(
+        || started + Duration::from_millis(plan.limits.duration_ms),
+        |prepared| prepared.control.deadline(),
+    );
+    let mut invocation = Invocation {
+        run: run.clone(),
+        attempt: 1,
+        operation,
+        plan: plan.clone(),
+        inventory: inventory.clone(),
+        observe_logs: observer.is_some(),
+        prepared_modules: preparation.and_then(|prepared| prepared.modules.cloned()),
+        deadline: SharedDeadline::from_instant(deadline)?,
+    };
+    let bytes = super::payload::header(&mut invocation)?;
+    let transfer_assets = invocation.inventory.assets.clone();
     let mut command = Command::new(executable);
     command.arg("child");
     let loader_environment = match child_loader_environment(&mut command, plan) {
@@ -395,14 +438,17 @@ fn supervise(
         } else {
             None
         };
-        let stop_at = stop_after_ms.unwrap_or(plan.limits.duration_ms);
+        let stop_due = stop_after_ms.map_or_else(
+            || Instant::now() >= deadline,
+            |millis| elapsed >= Duration::from_millis(millis),
+        );
         let milestone_stop_due = stop_milestone.is_some_and(|(_, delay_ms)| {
             milestone_received_at
                 .is_some_and(|at: Instant| at.elapsed() >= Duration::from_millis(delay_ms))
         });
         if stop_sent_at.is_none()
             && (operator_requested.is_some()
-                || elapsed >= Duration::from_millis(stop_at)
+                || stop_due
                 || protocol_fault.is_some()
                 || milestone_stop_due)
         {
@@ -411,9 +457,7 @@ fn supervise(
                 drop(commands.take());
             } else if let Some(sender) = commands.take() {
                 let reason = operator_requested.unwrap_or_else(|| {
-                    if stop_after_ms.is_none()
-                        && elapsed >= Duration::from_millis(plan.limits.duration_ms)
-                    {
+                    if stop_after_ms.is_none() && Instant::now() >= deadline {
                         StopReason::Timeout
                     } else {
                         StopReason::Cancelled
@@ -424,8 +468,7 @@ fn supervise(
         }
         if stop_sent_at
             .is_some_and(|stop| stop.elapsed() >= Duration::from_millis(plan.limits.cleanup_ms))
-            || elapsed
-                >= Duration::from_millis(plan.limits.duration_ms + plan.limits.containment_ms)
+            || Instant::now() >= deadline + Duration::from_millis(plan.limits.containment_ms)
         {
             forced = true;
             child
@@ -776,6 +819,10 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
         plan: plan.clone(),
         inventory: inventory.clone(),
         observe_logs: false,
+        prepared_modules: None,
+        deadline: SharedDeadline::from_instant(
+            Instant::now() + Duration::from_millis(plan.limits.duration_ms),
+        )?,
     };
     let executable = std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?;
     let mut target = OwnedChild::spawn(
@@ -877,6 +924,10 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         plan: plan.clone(),
         inventory: inventory.clone(),
         observe_logs: false,
+        prepared_modules: None,
+        deadline: SharedDeadline::from_instant(
+            Instant::now() + Duration::from_millis(plan.limits.duration_ms),
+        )?,
     };
     let mut target = OwnedChild::spawn(
         Command::new(&executable).arg("target-probe"),

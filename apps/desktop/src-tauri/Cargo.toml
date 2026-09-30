@@ -17,6 +17,7 @@ path = "src/main.rs"
 required-features = ["desktop"]
 
 [dependencies]
+mado-application-launch = { path = "../../../crates/application-launch" }
 mado-runtime-comparison = { path = "../../../tools/runtime-comparison" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.145", features = ["float_roundtrip"] }

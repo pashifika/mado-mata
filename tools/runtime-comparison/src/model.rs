@@ -54,6 +54,8 @@ pub struct Fault {
     pub category: String,
     pub message: String,
     pub context: Value,
+    #[serde(skip)]
+    provisional_timeout: bool,
 }
 
 impl Fault {
@@ -62,12 +64,17 @@ impl Fault {
             category: category.into(),
             message: message.into(),
             context: Value::Null,
+            provisional_timeout: false,
         }
     }
 
     pub fn with_context(mut self, context: Value) -> Self {
         self.context = context;
         self
+    }
+
+    pub(crate) fn is_provisional_timeout(&self) -> bool {
+        self.provisional_timeout
     }
 
     /// Diagnostic detail cannot displace the primary category or the separate
@@ -291,6 +298,13 @@ fn portable_label(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
 
+// `cause` bits: 1 Cancelled, 2 Timeout, 4 launch admitted. DERIVED marks a
+// Timeout this process inferred from its own deadline reading rather than
+// received as an explicit Stop; SUPERSEDED records that the supervisor's
+// verdict replaced such a Timeout.
+const DERIVED: u8 = 8;
+const SUPERSEDED: u8 = 16;
+
 #[derive(Debug)]
 pub struct Control {
     pub cancelled: AtomicBool,
@@ -340,16 +354,55 @@ impl Control {
     }
 
     pub(crate) fn stop(&self, reason: StopReason) {
-        self.latch(match reason {
-            StopReason::Cancelled => 1,
-            StopReason::Timeout => 2,
+        self.latch(Self::cause_bits(reason));
+    }
+
+    /// The supervising process accepted this Stop for the same operation. Its
+    /// verdict supersedes only a Timeout this process derived from its own
+    /// deadline reading, never an explicit stop already latched here, so a Stop
+    /// accepted before the deadline keeps its attribution even when this
+    /// process could not observe anything until after that deadline.
+    pub(crate) fn inherit_stop(&self, reason: StopReason) {
+        let cause = Self::cause_bits(reason);
+        self.settle(|state| {
+            if state & 3 == 0 {
+                Some(state | cause)
+            } else if state & DERIVED != 0 {
+                Some((state & !(3 | DERIVED)) | cause | SUPERSEDED)
+            } else {
+                None
+            }
         });
     }
 
+    /// The supervisor verdict that superseded a Timeout derived here, if any.
+    pub(crate) fn superseding_verdict(&self) -> Option<StopReason> {
+        let state = self.cause.load(Ordering::Acquire);
+        (state & SUPERSEDED != 0).then(|| {
+            if state & 3 == 1 {
+                StopReason::Cancelled
+            } else {
+                StopReason::Timeout
+            }
+        })
+    }
+
+    fn cause_bits(reason: StopReason) -> u8 {
+        match reason {
+            StopReason::Cancelled => 1,
+            StopReason::Timeout => 2,
+        }
+    }
+
     fn latch(&self, cause: u8) {
+        self.settle(|state| (state & 3 == 0).then_some(state | cause));
+    }
+
+    fn settle(&self, cause: impl FnMut(u8) -> Option<u8>) {
+        // Launch admission and the first stop cause share one linearization point.
         let _ = self
             .cause
-            .compare_exchange(0, cause, Ordering::AcqRel, Ordering::Acquire);
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, cause);
         self.transition.store(3, Ordering::Release);
         let now = self.elapsed_us().max(1);
         let _ = self
@@ -365,11 +418,15 @@ impl Control {
         );
     }
 
-    pub fn stop_reason(&self) -> Option<StopReason> {
-        if self.cause.load(Ordering::Acquire) == 0 && Instant::now() >= self.deadline {
-            self.latch(2);
+    fn stop_state(&self) -> u8 {
+        if self.cause.load(Ordering::Acquire) & 3 == 0 && Instant::now() >= self.deadline {
+            self.latch(2 | DERIVED);
         }
-        match self.cause.load(Ordering::Acquire) {
+        self.cause.load(Ordering::Acquire)
+    }
+
+    pub fn stop_reason(&self) -> Option<StopReason> {
+        match self.stop_state() & 3 {
             2 => Some(StopReason::Timeout),
             1 => Some(StopReason::Cancelled),
             _ => None,
@@ -377,8 +434,41 @@ impl Control {
     }
 
     pub fn check(&self) -> Result<(), Fault> {
-        self.stop_reason()
-            .map_or(Ok(()), |reason| Err(reason.fault()))
+        let state = self.stop_state();
+        let reason = match state & 3 {
+            2 => StopReason::Timeout,
+            1 => StopReason::Cancelled,
+            _ => return Ok(()),
+        };
+        let mut fault = reason.fault();
+        fault.provisional_timeout = state & DERIVED != 0;
+        Err(fault)
+    }
+
+    /// Admit one external launch. A later Stop cannot revoke this admission.
+    pub fn admit_launch(&self) -> Result<(), Fault> {
+        self.check()?;
+        self.cause
+            .compare_exchange(0, 4, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| {
+                self.check().err().unwrap_or_else(|| {
+                    Fault::new(
+                        "NativeLaunchRefused",
+                        "launch was already admitted for this operation",
+                    )
+                })
+            })
+    }
+
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    pub(crate) fn with_deadline(limits: &Limits, deadline: Instant) -> Self {
+        let mut control = Self::new(limits);
+        control.deadline = control.deadline.min(deadline);
+        control
     }
 
     // Each predecessor permits one successor. Stop and transition admission
@@ -440,6 +530,124 @@ pub fn identity<T: Serialize>(value: &T) -> Result<String, Fault> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn launch_control() -> Control {
+        let plan: Plan =
+            serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+        Control::new(&plan.limits)
+    }
+
+    #[test]
+    fn launch_admission_is_one_shot_and_stop_cannot_be_undone() {
+        let stopped = launch_control();
+        stopped.cancel();
+        assert_eq!(stopped.admit_launch().unwrap_err().category, "Cancelled");
+        let admitted = launch_control();
+        admitted.admit_launch().unwrap();
+        assert_eq!(
+            admitted.admit_launch().unwrap_err().category,
+            "NativeLaunchRefused"
+        );
+        admitted.cancel();
+        assert_eq!(admitted.admit_launch().unwrap_err().category, "Cancelled");
+        assert_eq!(admitted.stop_reason(), Some(StopReason::Cancelled));
+    }
+
+    #[test]
+    fn concurrent_launch_and_stop_share_the_same_linearization_point() {
+        use std::sync::{Arc, Barrier};
+        for _ in 0..64 {
+            let control = Arc::new(launch_control());
+            let barrier = Arc::new(Barrier::new(2));
+            let launch_control = control.clone();
+            let launch_barrier = barrier.clone();
+            let launch = std::thread::spawn(move || {
+                launch_barrier.wait();
+                launch_control.admit_launch()
+            });
+            barrier.wait();
+            control.cancel();
+            let accepted = launch.join().unwrap().is_ok();
+            assert_eq!(control.cause.load(Ordering::Acquire) & 4 != 0, accepted);
+            assert_eq!(control.stop_reason(), Some(StopReason::Cancelled));
+            assert_eq!(control.admit_launch().unwrap_err().category, "Cancelled");
+        }
+    }
+
+    #[test]
+    fn concurrent_launches_cannot_both_obtain_admission() {
+        let control = launch_control();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let contender = scope.spawn(|| {
+                barrier.wait();
+                control.admit_launch()
+            });
+            barrier.wait();
+            let first = control.admit_launch();
+            let second = contender.join().unwrap();
+            assert_ne!(first.is_ok(), second.is_ok());
+            let refusal = first.err().or_else(|| second.err()).unwrap();
+            assert_eq!(refusal.category, "NativeLaunchRefused");
+        });
+    }
+
+    #[test]
+    fn expired_operation_cannot_admit_launch_or_regrant_its_deadline() {
+        let plan: Plan =
+            serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+        let deadline = Instant::now() - Duration::from_millis(1);
+        let control = Control::with_deadline(&plan.limits, deadline);
+        assert_eq!(control.deadline(), deadline);
+        assert_eq!(control.admit_launch().unwrap_err().category, "Timeout");
+        control.cancel();
+        assert_eq!(control.stop_reason(), Some(StopReason::Timeout));
+    }
+
+    #[test]
+    fn inherited_stop_supersedes_only_this_process_derived_timeout() {
+        let plan: Plan =
+            serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+        let expired =
+            || Control::with_deadline(&plan.limits, Instant::now() - Duration::from_millis(1));
+        // Derived Timeout, then the supervisor's earlier-accepted Stop.
+        let late = expired();
+        assert_eq!(late.stop_reason(), Some(StopReason::Timeout));
+        assert_eq!(late.superseding_verdict(), None);
+        late.inherit_stop(StopReason::Cancelled);
+        assert_eq!(late.stop_reason(), Some(StopReason::Cancelled));
+        assert_eq!(late.check().unwrap_err().category, "Cancelled");
+        assert_eq!(late.superseding_verdict(), Some(StopReason::Cancelled));
+        // An explicit local Stop after a derived Timeout still does not flip it,
+        // and leaves the Timeout awaiting the supervisor's verdict.
+        let shown = expired();
+        assert_eq!(shown.stop_reason(), Some(StopReason::Timeout));
+        shown.cancel();
+        assert_eq!(shown.stop_reason(), Some(StopReason::Timeout));
+        assert_eq!(shown.superseding_verdict(), None);
+        // Inheritance never displaces an explicit cause latched here.
+        let settled = Control::new(&plan.limits);
+        settled.cancel();
+        settled.inherit_stop(StopReason::Timeout);
+        assert_eq!(settled.stop_reason(), Some(StopReason::Cancelled));
+        assert_eq!(settled.superseding_verdict(), None);
+        let relayed = expired();
+        relayed.inherit_stop(StopReason::Timeout);
+        relayed.inherit_stop(StopReason::Cancelled);
+        assert_eq!(relayed.stop_reason(), Some(StopReason::Timeout));
+        // A verdict adopted as the first cause supersedes nothing.
+        let prompt = Control::new(&plan.limits);
+        prompt.inherit_stop(StopReason::Cancelled);
+        assert_eq!(prompt.stop_reason(), Some(StopReason::Cancelled));
+        assert_eq!(prompt.superseding_verdict(), None);
+        // An admitted launch survives the reattribution.
+        let launched = Control::new(&plan.limits);
+        launched.admit_launch().unwrap();
+        launched.inherit_stop(StopReason::Cancelled);
+        assert_eq!(launched.cause.load(Ordering::Acquire) & 4, 4);
+        assert_eq!(launched.stop_reason(), Some(StopReason::Cancelled));
+        assert_eq!(launched.admit_launch().unwrap_err().category, "Cancelled");
+    }
 
     #[test]
     fn oversized_diagnostics_preserve_classification_and_native_cleanup_obligation() {

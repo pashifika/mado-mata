@@ -1,3 +1,4 @@
+use super::clock::SharedDeadline;
 use crate::inventory::Inventory;
 use crate::model::{Fault, MAX_TRANSPORT_BYTES, Plan, encode_bounded};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -58,6 +59,10 @@ pub(super) struct Invocation {
     pub(super) inventory: Inventory,
     #[serde(default)]
     pub(super) observe_logs: bool,
+    #[serde(default)]
+    pub(super) prepared_modules: Option<crate::typescript::PreparedModules>,
+    /// The supervisor's absolute deadline; the child derives no budget of its own.
+    pub(super) deadline: SharedDeadline,
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path, bound: usize) -> Result<T, Fault> {

@@ -1,6 +1,6 @@
 import {messages} from './i18n.ts';
 import type {Locale} from './i18n.ts';
-import type {ControllerView, EditableSettings, Fault, LogEntry, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Settings, Json, WorkspaceRef} from './types.ts';
+import type {ControllerView, EditableSettings, Fault, LogEntry, NativePhase, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Settings, Json, WorkspaceRef} from './types.ts';
 
 export const DISCLOSURE_LIMIT = 512 * 1024;
 
@@ -10,8 +10,35 @@ export function faultSummary(value:Fault|Record<string,Json>, includeMessage = f
     includeMessage ? text(value.message) : null,
   ].filter(Boolean).join(' · '), 1024).text;
 }
+// A poll answer for another operation is ignored, and one for this operation never regresses local Stop or settled
+// truth. A later same-run Stopping answer still replaces the view, so an OS launch that completes after Stop remains
+// visible without reviving the operation.
 export function acceptController(current:ControllerView, incoming:ControllerView, expectedRun:string|null):ControllerView {
-  return expectedRun !== null && incoming.run !== expectedRun ? current : incoming;
+  if (expectedRun !== null && incoming.run !== expectedRun) return current;
+  if (incoming.run !== current.run) return incoming;
+  if (current.state === 'stopping' && (incoming.state === 'preparing' || incoming.state === 'running')) return current;
+  return current.state === 'terminal' && incoming.state === 'terminal' ? current : incoming;
+}
+
+export type NativeCause = 'missing'|'ambiguous'|'unverifiable';
+export type NativeLaunchOutcome = 'accepted'|'acceptedStopped'|'uncertain'|'rejected';
+export interface NativeOutcome {failure:NativePhase|null; cause:NativeCause|null; launch:NativeLaunchOutcome|null}
+const NATIVE_CAUSES:Record<string, NativeCause> = {NativeTargetMissing: 'missing', NativeTargetAmbiguous: 'ambiguous', NativeTargetUnverifiable: 'unverifiable'};
+
+// What a settled Native operation leaves the operator to act on, from the host's typed preparation state and primary
+// category, never log wording: the failed stage, a known discovery cause, and a launch whose OS effect can outlive the
+// operation. Stop is not a stage failure, and a launch the host did not submit needs no notice.
+export function nativeOutcome(view:ControllerView):NativeOutcome|null {
+  const preparation = view.native_preparation;
+  if (view.state !== 'terminal' || !preparation) return null;
+  const primary = view.error ?? (view.result?.primary ? record(view.result.primary) : null);
+  const category = primary === null ? null : text(primary.category);
+  const stopped = category === 'Cancelled';
+  const failed = primary !== null && !stopped;
+  const launch = preparation.launch === 'accepted' ? primary === null ? null : stopped ? 'acceptedStopped' : 'accepted'
+    : preparation.launch === 'not_requested' ? null : preparation.launch;
+  const cause = failed && category !== null && Object.hasOwn(NATIVE_CAUSES, category) ? NATIVE_CAUSES[category] : null;
+  return {failure: failed ? preparation.phase : null, cause, launch};
 }
 
 export function record(value:Json|undefined):Record<string,Json> {

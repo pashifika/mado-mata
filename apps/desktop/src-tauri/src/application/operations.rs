@@ -227,9 +227,9 @@ impl Application {
             let native_package = native.then(|| selected.package.clone());
             let store = self.store.clone();
             let (acquired, ready) = mpsc::sync_channel(1);
-            let run = self
-                .runner
-                .start_with_preparation(request, move |request, control| {
+            let run = self.runner.start_with_preparation(
+                request,
+                move |request, control| {
                     let (environment, binding) = {
                         let store = lock(&store);
                         let _ = acquired.send(());
@@ -265,26 +265,17 @@ impl Application {
                         (environment, binding)
                     };
                     control.check()?;
-                    let native = binding
-                        .map(|binding| {
-                            environment
-                                .as_ref()
-                                .ok_or_else(|| {
-                                    Fault::new(
-                                        "EnvironmentUnset",
-                                        "Save an OCR environment before Native Start",
-                                    )
-                                })?
-                                .validate()?;
-                            binding.resolve(control)
-                        })
-                        .transpose()?;
-                    control.check()?;
                     Ok(StartPreparation {
                         environment,
-                        native,
+                        native: binding,
                     })
-                })?;
+                },
+                |binding, control, report, verify_resources| {
+                    binding
+                        .map(|binding| binding.resolve(control, report, verify_resources))
+                        .transpose()
+                },
+            )?;
             state.owner = Some(OperationOwner {
                 run: run.clone(),
                 workspace: Some(workspace.clone()),

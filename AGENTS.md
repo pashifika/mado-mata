@@ -4,9 +4,10 @@
 
 MadoMata contains a desktop authoring application and the standalone M0 runtime
 comparison. Controlled/replay use the supervised QuickJS/TypeScript runner with
-a non-native input sink. Separately reviewed macOS Native Start can attach to an
-already-running saved application through the fixed engine child; it does not
-launch or activate targets. Follow [the desktop guide](docs/desktop.md)
+a non-native input sink. Separately reviewed macOS Native Start can attach to a
+verified saved application or launch its saved recipe once when absence is
+confirmed and launch is separately approved. It does not request activation.
+Follow [the desktop guide](docs/desktop.md)
 for checkout build/run commands and [the comparison guide](docs/runtime-comparison.md)
 for the independent CLI. Native qualification, R6, runtime adoption, release
 packaging, and additional-OS desktop support remain unresolved. Do not invent

@@ -16,6 +16,7 @@ RUST_VERSION = "1.98.1"
 NODE_VERSION = "24.18.0"
 RUNTIME_ROOT = Path("tools/runtime-comparison")
 DESKTOP_ROOT = Path("apps/desktop")
+LAUNCH_ROOT = Path("crates/application-launch")
 RUNTIME_RESULTS = Path(".cache/repository-ci/runtime-results")
 FAILURE_ROW_LIMIT = 10
 FIELD_TEXT_LIMIT = 240
@@ -165,6 +166,7 @@ def check_runtime(root, results_directory):
     run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], compiler)
     run([node, "compile.mjs", "--self-check"], compiler)
     cargo = ["cargo", f"+{RUST_VERSION}"]
+    run([*cargo, "test", "--locked", "--manifest-path", LAUNCH_ROOT / "Cargo.toml"], root)
     manifest = ["--locked", "--manifest-path", RUNTIME_ROOT / "Cargo.toml"]
     run([*cargo, "build", *manifest], root)
     run([*cargo, "test", *manifest], root)

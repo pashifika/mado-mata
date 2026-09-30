@@ -6,10 +6,10 @@ import Select from '../components/Select.tsx';
 import TargetPanel from '../components/TargetPanel.tsx';
 import type {TargetHandlers} from '../components/TargetPanel.tsx';
 import ResultPanel, {FaultMessage, fault} from '../components/ResultPanel.tsx';
-import {faultSummary, text} from '../state.ts';
+import {faultSummary, nativeOutcome, text} from '../state.ts';
 import type {CheckAssociation} from '../state.ts';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, chooseLane, editDraft, hasWorkspaceEdits} from '../workspace.ts';
-import type {Bound, BoundWorkspace, Derived} from '../workspace.ts';
+import type {Bound, BoundWorkspace, Derived, NativeConsent} from '../workspace.ts';
 import {AUTHORING_RECOVERY, recoveryPath} from '../authoring.ts';
 import type {PageAuthoring} from './EditPage.tsx';
 import type {ControllerView, Fault, Json, NativeIntent, NativeLimits, OcrEnvironment} from '../types.ts';
@@ -31,7 +31,7 @@ export interface RunHandlers {
   newDraft: (preset?: string) => void; selectProfile: (id: string) => void;
   reinspect: () => void; inspectPath: (value: string) => void; importLegacy: () => void; start: () => void; stop: () => void;
   // Native review text edits withdraw consent; consent binds to the request as it is now.
-  native: {edit: (field: 'operation' | 'postcondition', value: string) => void; approve: (field: 'capture' | 'input', value: boolean) => void};
+  native: {edit: (field: 'operation' | 'postcondition', value: string) => void; approve: (field: NativeConsent, value: boolean) => void};
   target: TargetHandlers;
   recovery: RecoveryHandlers;
 }
@@ -96,8 +96,10 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   const native = derived.native;
   const nativeBinding = native?.binding ?? null;
   const nativeInput = nativeBinding?.configuration.input ?? null;
-  // Consent is offered only for a request that is otherwise complete.
+  const recipe = native?.recipe ?? null;
+  // Launch recipe validity is conditional on host-confirmed absence, not a gate on attaching.
   const approvalOpen = native !== null && (native.block === null || native.block === 'nativeApproval') && !locked;
+  const outcome = nativeOutcome(run.view);
   const nativeLimitRows = nativeLimits && [
     [t.run.nativeDuration, `${nativeLimits.duration_ms} ms`], [t.run.nativeFrames, String(nativeLimits.max_frames)],
     [t.run.nativeWait, `${nativeLimits.wait_ms} ms`], [t.run.nativeInterval, `${nativeLimits.interval_ms} ms`],
@@ -122,6 +124,8 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
         ? <section className="fault" role="alert"><strong>{check ? t.run.checkError : t.run.runError} · {faultSummary(primary, !privatePrimary)}</strong>
             <p>{t.run.diagnosticHelp}</p></section>
         : <FaultMessage title={t.run.runError} value={primary}/>)}
+      {outcome?.failure && <p className="inline-warning" id="native-failure">{outcome.cause ? t.run.nativeCauses[outcome.cause] : t.run.nativeFailures[outcome.failure]}</p>}
+      {outcome?.launch && <p className="inline-warning" id="native-launch-outcome">{t.run.nativeLaunchOutcomes[outcome.launch]}</p>}
     </div>
     <div className="operation-status" role="status">{renderMessage(locale, workspace.busy ?? workspace.notice) || (startBlock ?? '')}</div>
     {editReason && <p id="start-authoring-block" className="inline-warning">{editReason}
@@ -227,6 +231,16 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
               <dt>{t.target.clickHold}</dt><dd>{nativeInput ? `${nativeInput.click_hold_ms} ms` : t.common.none}</dd>
               <dt>{t.run.nativeBinding}</dt><dd>{nativeBinding && bound.target.view ? <><code>{nativeBinding.id}</code> · {t.target.revision(bound.target.view.record.revision)}</> : t.common.none}</dd>
             </dl>
+            {recipe && <><span className="eyebrow">{t.run.nativeRecipe}</span>
+              <dl className="run-identity" id="native-recipe">
+                <dt>{t.run.nativeRecipient}</dt><dd id="native-recipient">{recipe.recipient === 'game' ? t.run.nativeRecipientGame
+                  : <>{t.run.nativeRecipientLauncher} · {recipe.location.kind === 'bundle' ? t.target.bundle : t.target.executable} · <span className="mono">{recipe.location.path}</span></>}</dd>
+                <dt>{t.run.nativeArguments}</dt><dd>{recipe.arguments.length === 0 ? t.run.nativeNoArguments
+                  : <ol id="native-arguments" className="native-arguments">{recipe.arguments.map((value, index) => <li key={index}><code>{JSON.stringify(value)}</code></li>)}</ol>}</dd>
+                <dt>{t.run.nativeDirectory}</dt><dd id="native-directory" className={recipe.directory === 'refused' ? 'field-error' : undefined}>
+                  {recipe.workingDirectory !== null && <><code>{recipe.workingDirectory}</code> · </>}{t.run.nativeDirectories[recipe.directory]}</dd>
+              </dl>
+              {recipe.recipient === 'launcher' && <p className="field-help">{t.run.nativeForwarding}</p>}</>}
             {nativeLimitRows && <><span className="eyebrow">{t.run.nativeLimits}</span>
               <dl className="run-identity" id="native-limits">{nativeLimitRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value}</dd></Fragment>)}</dl></>}
             <div className="field"><label htmlFor="native-operation">{t.run.nativeOperation}</label>
@@ -244,6 +258,9 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                 onChange={event => handlers.native.approve('capture', event.target.checked)}/>{t.run.nativeCapture}</label>
               <label className="checkbox-label"><input id="native-input-consent" type="checkbox" checked={native.input} disabled={!approvalOpen}
                 onChange={event => handlers.native.approve('input', event.target.checked)}/>{t.run.nativeInput}</label>
+              <label className="checkbox-label"><input id="native-launch-consent" type="checkbox" checked={native.launch} disabled={!approvalOpen}
+                onChange={event => handlers.native.approve('launch', event.target.checked)}/>{t.run.nativeLaunch}</label>
+              <p className="field-help" id="native-launch-help">{t.run.nativeLaunchHelp}</p>
               <p className="field-help">{t.run.nativeApprovalHelp}</p></div>
           </div>}
           <div className="field"><label htmlFor="descriptor-path">{t.run.descriptor}</label>
@@ -267,11 +284,14 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           <p className="authority-note">{t.run.authority}</p>
           <dl className="run-identity"><dt>{t.run.operationId}</dt><dd id="run-id">{view.run ?? t.common.noOperation}</dd>
             <dt>{t.run.kind}</dt><dd id="operation-kind">{view.run ? check ? t.run.checkKind : t.run.runKind(t.lane(snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane) ?? t.common.unknown)) : t.phase('idle')}</dd>
+            {view.native_preparation && <><dt>{t.run.nativeStage}</dt><dd id="native-stage">{t.run.nativePhases[view.native_preparation.phase]}</dd>
+              <dt>{t.run.nativeLaunchRequest}</dt><dd id="native-launch">{t.run.launchDispositions[view.native_preparation.launch]}</dd></>}
             {snapshot?.kind === 'run' && snapshot.run === view.run && <><dt>{t.run.capturedProfile}</dt><dd>{snapshot.profileName || t.run.untitled} · {snapshot.profileId}</dd><dt>{t.run.packageScenario}</dt><dd>{snapshot.packageId} / {snapshot.scenario}</dd>
               {snapshot.lane === 'replay' && <><dt>{t.common.descriptor}</dt><dd>{snapshot.descriptorPath}</dd></>}
               {snapshot.native && <><dt>{t.run.nativeOperation}</dt><dd>{snapshot.native.operation}</dd>
                 <dt>{t.run.nativePostcondition}</dt><dd>{snapshot.native.visible_postcondition}</dd>
-                <dt>{t.run.nativeBinding}</dt><dd><code>{snapshot.native.target_binding_id}</code> · {t.target.revision(snapshot.native.target_revision)}</dd></>}</>}
+                <dt>{t.run.nativeBinding}</dt><dd><code>{snapshot.native.target_binding_id}</code> · {t.target.revision(snapshot.native.target_revision)}</dd>
+                <dt>{t.run.nativeLaunchApproval}</dt><dd>{snapshot.native.launch_approved ? t.run.nativeLaunchApproved : t.run.nativeLaunchNotApproved}</dd></>}</>}
             {snapshot?.kind === 'check' && snapshot.run === view.run && <><dt>{t.run.checkedProfile}</dt><dd>{snapshot.association.environment?.profile ?? t.common.unconfigured}</dd>
               <dt>{t.common.descriptor}</dt><dd>{snapshot.association.descriptorPath ?? t.run.noInitialization}</dd></>}
           </dl>

@@ -240,6 +240,12 @@ impl Host {
             state.phase = Phase::Readiness;
             state.readiness_started = Some(Instant::now());
         }
+        if self.inner.plan.lane == "native" {
+            crate::runner::emit_native_preparation(
+                &self.inner.control,
+                crate::desktop::NativePhase::Readiness,
+            );
+        }
         // Establish an eligible current observation before entering package readiness.
         let observation = self.call("observe", json!({}))?;
         self.call("release", json!({"id":observation["id"]}))?;
@@ -261,6 +267,12 @@ impl Host {
         if let Err(error) = self.check() {
             self.close_admission();
             return Err(error);
+        }
+        if self.inner.plan.lane == "native" {
+            crate::runner::emit_native_preparation(
+                &self.inner.control,
+                crate::desktop::NativePhase::Workflow,
+            );
         }
         Ok(())
     }

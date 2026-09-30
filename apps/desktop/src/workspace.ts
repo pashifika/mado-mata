@@ -5,7 +5,7 @@ import {mutatedRecovery, recoveryState, retriedRecovery, sameRecoveryContext, up
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {targetDirty, targetExpectation, targetState} from './target.ts';
 import type {TargetState} from './target.ts';
-import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, NativeIntent, NativeLimits, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, TargetBinding, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, NativeIntent, NativeLimits, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, TargetBinding, TargetLocation, WorkspaceRef, WorkspaceView} from './types.ts';
 
 export const WORKSPACE_LIMIT = 8;
 export const SAVED_LIMIT = 64;
@@ -46,9 +46,10 @@ export interface Bound {
   native:NativeReview;
 }
 
-// Operator-authored intent plus separate capture/input consent. `key` names the exact request the consent approved:
-// consent granted for any other key is not approval.
-export interface NativeReview {operation:string; postcondition:string; capture:boolean; input:boolean; key:string|null}
+// Operator-authored intent plus separate capture, input and launch-if-absent consent. `key` names the exact request the
+// consent approved: consent granted for any other key is not approval.
+export interface NativeReview {operation:string; postcondition:string; capture:boolean; input:boolean; launch:boolean; key:string|null}
+export type NativeConsent = 'capture'|'input'|'launch';
 
 // Session-local UI state for one open named Tab. The host persists names and package references; nothing here is.
 export interface Workspace {
@@ -114,7 +115,7 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
     draftRevision: (previous?.draftRevision ?? 0) + 1, validation: null,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
     disclosedRun: null, touched: false, target: targetState(selection),
-    native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', capture: false, input: false, key: null},
+    native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', capture: false, input: false, launch: false, key: null},
   };
 }
 
@@ -340,8 +341,15 @@ const encoder = new TextEncoder();
 
 export type NativeTextError = 'blank'|'long'|'control';
 export type NativeBlock = 'nativeUnavailable'|'nativeTarget'|'nativeBinding'|'nativeTargetDirty'|'nativeEnvironment'|'nativeText'|'nativeApproval';
+// The working directory a launch would give its recipient: macOS defines it for bundles, where an explicit directory is
+// refused rather than ignored; an executable launcher gets the explicit directory or its own parent folder.
+export type NativeDirectory = 'os'|'refused'|'explicit'|'parent';
+// The saved recipe one approved launch would submit; it is review material only and never executed from here.
+export interface NativeRecipe {
+  recipient:'game'|'launcher'; location:TargetLocation; arguments:string[]; directory:NativeDirectory; workingDirectory:string|null;
+}
 export interface NativeFacts {
-  binding:TargetBinding|null; capture:boolean; input:boolean;
+  binding:TargetBinding|null; recipe:NativeRecipe|null; capture:boolean; input:boolean; launch:boolean;
   operationError:NativeTextError|null; postconditionError:NativeTextError|null;
   block:NativeBlock|null; intent:NativeIntent|null;
 }
@@ -360,6 +368,16 @@ function nativeBinding(target:TargetState):TargetBinding|null {
     && binding.configuration.input !== null && target.context.declaration_identity !== null ? binding : null;
 }
 
+// Mirrors the host recipe rule: the separate launcher when present, otherwise the game bundle itself.
+function nativeRecipe(binding:TargetBinding):NativeRecipe {
+  const configuration = binding.configuration;
+  const location = configuration.launcher ?? configuration.game;
+  const workingDirectory = configuration.working_directory;
+  const directory:NativeDirectory = location.kind === 'bundle' ? workingDirectory === null ? 'os' : 'refused'
+    : workingDirectory === null ? 'parent' : 'explicit';
+  return {recipient: configuration.launcher ? 'launcher' : 'game', location, arguments: configuration.arguments, directory, workingDirectory};
+}
+
 // Everything the consent covers. Revisions are monotonic, so an edited-back draft or reissued selection stays stale.
 function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null):string {
   const target = bound.target;
@@ -370,15 +388,16 @@ function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLi
 }
 
 // Consent given for another request starts over rather than carrying the other consent forward.
-export function approveNative(bound:Bound, field:'capture'|'input', value:boolean, environment:OcrEnvironment|null, limits:NativeLimits|null):Bound {
+export function approveNative(bound:Bound, field:NativeConsent, value:boolean, environment:OcrEnvironment|null, limits:NativeLimits|null):Bound {
   const key = nativeKey(bound, environment, limits);
-  const review = bound.native.key === key ? bound.native : {...bound.native, capture: false, input: false};
+  const review = bound.native.key === key ? bound.native : {...bound.native, capture: false, input: false, launch: false};
   return {...bound, native: {...review, [field]: value, key}};
 }
 
 export function clearNativeApproval(bound:Bound):Bound {
   const review = bound.native;
-  return review.key === null && !review.capture && !review.input ? bound : {...bound, native: {...review, capture: false, input: false, key: null}};
+  return review.key === null && !review.capture && !review.input && !review.launch ? bound
+    : {...bound, native: {...review, capture: false, input: false, launch: false, key: null}};
 }
 
 export function editNativeReview(bound:Bound, field:'operation'|'postcondition', value:string):Bound {
@@ -393,10 +412,12 @@ export function chooseLane(bound:Bound, lane:string):Bound {
 export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null):NativeFacts {
   const target = bound.target;
   const binding = nativeBinding(target);
+  const recipe = binding && nativeRecipe(binding);
   const review = bound.native;
   const current = review.key !== null && review.key === nativeKey(bound, environment, limits);
   const capture = current && review.capture;
   const input = current && review.input;
+  const launch = current && review.launch;
   const operationError = nativeTextError(review.operation);
   const postconditionError = nativeTextError(review.postcondition);
   const block:NativeBlock|null = limits === null ? 'nativeUnavailable'
@@ -409,9 +430,10 @@ export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, limits
   const declaration = target.context.declaration_identity;
   const intent = block === null && binding && limits && target.view && declaration !== null ? {
     target_revision: target.view.record.revision, target_binding_id: binding.id, target_declaration_identity: declaration,
-    capture_approved: capture, input_approved: input, operation: review.operation, visible_postcondition: review.postcondition, limits,
+    capture_approved: capture, input_approved: input, launch_approved: launch,
+    operation: review.operation, visible_postcondition: review.postcondition, limits,
   } : null;
-  return {binding, capture, input, operationError, postconditionError, block, intent};
+  return {binding, recipe, capture, input, launch, operationError, postconditionError, block, intent};
 }
 
 export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en', nativeLimits:NativeLimits|null = null):Derived {

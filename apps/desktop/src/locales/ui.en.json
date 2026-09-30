@@ -582,7 +582,7 @@
     "descriptor": "Recorded corpus descriptor",
     "descriptorPlaceholder": "Absolute path to a replay descriptor JSON",
     "nativeHeading": "Native review · this Start only",
-    "nativeHelp": "Native attaches only to the already-running saved application and runs this package's workflow under the finite host limits below. Approval is not saved; relevant edits, leaving this workspace and every Start withdraw it. Native never launches, activates or focuses the game, changes its route or requests permissions.",
+    "nativeHelp": "Native attaches to the saved game when it is already running. Only with the separate launch approval below does it submit the saved launch recipe, at most once, when preflight has passed and the game is confirmed absent. It then runs this package's workflow under the finite host limits below. Approval is not saved; relevant edits, leaving this workspace and every Start withdraw it. Native never requests activation or focus, changes its route or requests permissions, and sends no input outside the package workflow.",
     "nativeCapabilityError": "Native availability could not be read",
     "nativePackage": "Package / profile",
     "nativeApplication": "Saved application",
@@ -607,6 +607,64 @@
     "nativeCapture": "Approve live capture of the saved application's window for this Start",
     "nativeInput": "Approve ordered input by the saved route and focus policy for this Start",
     "nativeApprovalHelp": "Approval becomes available once everything above is ready, and applies only to the request shown here.",
+    "nativeRecipe": "Saved launch recipe · used only when launch is approved and the game is absent",
+    "nativeRecipient": "Launch recipient",
+    "nativeRecipientGame": "The saved game bundle itself",
+    "nativeRecipientLauncher": "Separate launcher",
+    "nativeArguments": "Arguments · literal, in order",
+    "nativeNoArguments": "None",
+    "nativeDirectory": "Working directory",
+    "nativeDirectories": {
+      "os": "Defined by macOS for an application-bundle launch",
+      "refused": "Refused for launch: macOS defines the working directory of an application-bundle launch. Remove this directory from the saved target, or leave launch unapproved.",
+      "explicit": "Applied to the launcher executable",
+      "parent": "The launcher executable's folder · host default"
+    },
+    "nativeForwarding": "The separate launcher decides which arguments and working directory reach the game. Native still waits for and verifies the actual saved game, never the launcher.",
+    "nativeLaunch": "Approve launching the saved recipe once for this Start if the game is confirmed absent",
+    "nativeLaunchHelp": "Without this approval an absent game is refused, and a running game is attached either way without new arguments. After macOS accepts a launch, the game can finish opening after Stop, timeout or failure; Native does not close it or launch again. The launched game can bring itself to the front or take focus; Native never requests activation. A freshly launched game may wait on a start screen that Native does not click for you.",
+    "nativeLaunchApproval": "Launch if absent",
+    "nativeLaunchApproved": "Approved for this Start",
+    "nativeLaunchNotApproved": "Not approved · attach only",
+    "nativeStage": "Native stage",
+    "nativeLaunchRequest": "Launch request",
+    "nativePhases": {
+      "preflight": "Preflight",
+      "target_discovery": "Target discovery",
+      "launch_submission": "Launch submission",
+      "waiting_for_process": "Waiting for the game process",
+      "waiting_for_window": "Waiting for the game window",
+      "native_initialization": "Native initialization",
+      "readiness": "Readiness",
+      "workflow": "Workflow"
+    },
+    "launchDispositions": {
+      "not_requested": "Not submitted",
+      "accepted": "Accepted by macOS",
+      "rejected": "Rejected by macOS",
+      "uncertain": "Outcome not confirmed"
+    },
+    "nativeFailures": {
+      "preflight": "Preflight stopped before target discovery or launch. Check the reported cause and approvals, then review the request before another Start.",
+      "target_discovery": "The saved game could not be attached and nothing was launched. Check the saved target, then review and Start again.",
+      "launch_submission": "The launch stage did not complete; no retry was made. See the separate launch outcome and check whether the game opened before reviewing another Start.",
+      "waiting_for_process": "The actual game process could not be verified. Nothing was launched again. Check the reported cause and running copies before reviewing another Start.",
+      "waiting_for_window": "The selected game's exact window could not be bound. Nothing was launched again. Check the reported cause and window before reviewing another Start.",
+      "native_initialization": "Native initialization did not complete for the selected game. Check the reported cause, window and input policy before reviewing another Start.",
+      "readiness": "The package's Readiness did not confirm the game state. If the game shows a start or idle screen, dismiss it yourself; Native does not click it for you. Then review and Start again.",
+      "workflow": "The workflow failed after Readiness. Input already sent is not rolled back; check the game state before you review and Start again."
+    },
+    "nativeCauses": {
+      "missing": "The saved game is not running and launch was not approved. Start the game yourself, or approve launch if absent, then review and Start again.",
+      "ambiguous": "More than one running copy matches the saved installation, so none was chosen. Close the extra copies, then review and Start again.",
+      "unverifiable": "A running copy could not be verified against the saved installation, so it was not attached. Check the saved installation or restart the game, then review and Start again."
+    },
+    "nativeLaunchOutcomes": {
+      "accepted": "macOS accepted this Start's launch request. The game may still be opening or running; this failure did not close it and nothing was launched again.",
+      "acceptedStopped": "macOS accepted the launch request before Stop took effect. The game may still finish opening; Stop ended automation only and did not close it.",
+      "uncertain": "macOS did not confirm whether the launch request was accepted. The game may still open; nothing was submitted again.",
+      "rejected": "macOS rejected the launch request. Nothing was submitted again."
+    },
     "capturedLimits": "Captured finite limits · unchanged by later edits",
     "immutable": "Immutable operation",
     "environmentCheck": "Environment check",

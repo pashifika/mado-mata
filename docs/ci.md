@@ -66,6 +66,9 @@ The version and integrity sources are:
 | Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Desktop persisted identifiers | Public `pashifika/xid-rs` Git dependency at the immutable `rev` in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml), repeated in its [lockfile](../apps/desktop/src-tauri/Cargo.lock); default features disabled | The public checkout fetches the Fork directly; no maintenance checkout or local path override is required |
 | macOS application metadata, picker, and clipboard | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Application launch library | libc 0.2.189 on Unix; objc2 0.6.4, block2 0.6.2 and objc2-foundation/objc2-app-kit 0.3.2 on macOS | [Library manifest](../crates/application-launch/Cargo.toml) and [lockfile](../crates/application-launch/Cargo.lock); no Desktop or runtime dependency |
+| Shared supervisor/child monotonic deadline | libc 0.2.189 on Unix; windows-sys 0.61.2 with `Win32_System_Performance` on Windows | Default target-scoped dependencies in the [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock); absolute boot-clock transport does not refund child startup |
+| macOS engine startup lifetime guard | objc2 0.6.4, objc2-foundation/objc2-app-kit 0.3.2; shared Unix libc pin above | Optional Objective-C `engine` dependencies in the [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock); read-only selected-process checks, not a capture/input implementation |
 | GitHub Actions | Full commit SHAs | [Workflow](../.github/workflows/ci.yml) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
@@ -122,6 +125,9 @@ The full check has these responsibilities:
 - Exercise accepted/refused branch routes, malformed metadata, repository-policy
   failures, and gate outcomes through behavioral tests.
 - Install and check the trusted TypeScript compiler with package scripts disabled.
+- Test the independent [application-launch library](../crates/application-launch/Cargo.toml)
+  and its literal argument/cwd, refusal and external-child ownership contracts.
+  These checks do not launch a game or authorize bundle/native acceptance.
 - Build and test the locked Rust comparison executable, then execute its
   controlled `check` suite for direct Rust, JavaScript, TypeScript, and Lua.
   Image regressions cover full PNG validation, original-pixel crops, split
@@ -150,10 +156,11 @@ The full check has these responsibilities:
   the storage boundaries and Windows directory-sync qualification limitation.
   Optional OCR settings, bounded replay projection, admission races, and
   pre-startup failures are checked without loading a real OCR backend.
-  Native intent/unknown-field rejection, saved target expectations, typed
-  projection, preparation cancellation and sticky cleanup refusal are checked
-  without native capture/input. Optional engine-feature publication regressions
-  use public-facade controlled replay and require the separate
+  Native intent/unknown-field rejection, separate launch approval, saved target
+  expectations, immutable prelaunch preflight, typed discovery/progress,
+  launch-admission cancellation and sticky cleanup refusal are checked without
+  game launch or native capture/input. Optional engine-feature publication and
+  exact-lifetime/window-wait regressions require the separate
   [native build prerequisites](runtime-native.md#consumer-publication-regressions).
   Directory-authoring regressions cover configured ID-only destinations, source
   ownership, configuration-only preservation of `sources` and `pkgs`, snapshot

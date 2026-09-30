@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,packageDestination,portableComponent,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
+import {acceptController,nativeOutcome,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,packageDestination,portableComponent,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
 import {messages} from './i18n.ts';
 
 test('late predecessor result cannot replace the successor or its preparing state',()=>{
@@ -9,6 +9,56 @@ test('late predecessor result cannot replace the successor or its preparing stat
   const running={run:'next',state:'running',result:null};
   assert.equal(acceptController(current,running,'next'),running);
 });
+
+test('an OS launch completing after Stop is shown while stale and foreign preparation answers are ignored',()=>{
+  const stopping={run:'owned',state:'stopping',result:null,native_preparation:{phase:'launch_submission',launch:'not_requested'}};
+  const late={...stopping,native_preparation:{phase:'launch_submission',launch:'accepted'}};
+  assert.equal(acceptController(stopping,late,'owned'),late);
+  // An answer read before Stop cannot revive the operation or rewind its stage.
+  const stale={...stopping,state:'preparing',native_preparation:{phase:'target_discovery',launch:'not_requested'}};
+  assert.equal(acceptController(late,stale,'owned'),late);
+  // Another operation's progress never updates the owned one.
+  const foreign={run:'other',state:'preparing',result:null,native_preparation:{phase:'waiting_for_window',launch:'accepted'}};
+  assert.equal(acceptController(late,foreign,'owned'),late);
+  const settled={...late,state:'terminal',error:{category:'Cancelled',message:'attempt cancellation is latched',context:null}};
+  assert.equal(acceptController(settled,{...settled,native_preparation:{phase:'waiting_for_window',launch:'accepted'}},'owned'),settled);
+});
+
+const cancelled={category:'Cancelled',message:'attempt cancellation is latched',context:null};
+function fault(category) {
+  return {category,message:`${category} fixture`,context:null};
+}
+function settledNative(preparation,{error=null,result=null,state='terminal'}={}) {
+  return {run:'owned',state,operation:'run',result,error,progress:[],dropped_logs:0,workspace_id:'a',workspace_revision:1,native_preparation:preparation};
+}
+for (const {scenario, view, expected} of [
+  {scenario:'Stop after an accepted launch is no stage failure but warns that the game can still open',
+    view:settledNative({phase:'waiting_for_process',launch:'accepted'},{error:cancelled}),expected:{failure:null,cause:null,launch:'acceptedStopped'}},
+  {scenario:'a window timeout after an accepted launch names the stage and the still-open game',
+    view:settledNative({phase:'waiting_for_window',launch:'accepted'},{error:fault('Timeout')}),expected:{failure:'waiting_for_window',cause:null,launch:'accepted'}},
+  {scenario:'a launch-stage timeout retains an independently accepted OS request',
+    view:settledNative({phase:'launch_submission',launch:'accepted'},{error:fault('Timeout')}),expected:{failure:'launch_submission',cause:null,launch:'accepted'}},
+  {scenario:'an unconfirmed submission names the launch stage without claiming acceptance',
+    view:settledNative({phase:'launch_submission',launch:'uncertain'},{error:fault('NativeLaunchUncertain')}),expected:{failure:'launch_submission',cause:null,launch:'uncertain'}},
+  {scenario:'a launch rejected after Stop keeps both the Stop and the rejection',
+    view:settledNative({phase:'launch_submission',launch:'rejected'},{error:cancelled}),expected:{failure:null,cause:null,launch:'rejected'}},
+  {scenario:'an absent game without launch approval names the missing-target remedy',
+    view:settledNative({phase:'target_discovery',launch:'not_requested'},{error:fault('NativeTargetMissing')}),expected:{failure:'target_discovery',cause:'missing',launch:null}},
+  {scenario:'several matching running copies name the ambiguity remedy',
+    view:settledNative({phase:'target_discovery',launch:'not_requested'},{error:fault('NativeTargetAmbiguous')}),expected:{failure:'target_discovery',cause:'ambiguous',launch:null}},
+  {scenario:'a workflow failure in the settled result keeps the accepted launch visible',
+    view:settledNative({phase:'workflow',launch:'accepted'},{result:{status:'FAIL',primary:fault('Script')}}),expected:{failure:'workflow',cause:null,launch:'accepted'}},
+  {scenario:'a successful launched run leaves nothing to act on',
+    view:settledNative({phase:'workflow',launch:'accepted'},{result:{status:'PASS',primary:null}}),expected:{failure:null,cause:null,launch:null}},
+  {scenario:'a still-stopping operation has no settled projection yet',
+    view:settledNative({phase:'launch_submission',launch:'accepted'},{state:'stopping'}),expected:null},
+  {scenario:'an operation without Native preparation has no projection',
+    view:settledNative(null,{error:cancelled}),expected:null},
+]) {
+  test(scenario,()=>{
+    assert.deepEqual(nativeOutcome(view),expected);
+  });
+}
 
 test('retention keeps newest items and trims immediately without mutating old state',()=>{
   const initial={items:[{sequence:1},{sequence:2},{sequence:3}],evicted:0};

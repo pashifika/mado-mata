@@ -7,7 +7,7 @@ use crate::model::{Control, Fault, RuntimeMetrics, StopReason};
 use serde_json::{Value, json};
 use std::io::BufReader;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread;
@@ -58,14 +58,87 @@ fn process_metrics() -> Value {
     })
 }
 
+/// The supervisor's verdict for this attempt, read from the control frame that
+/// follows the payload. A typed command is the cause the supervisor itself
+/// accepted and supersedes only a Timeout this process derived meanwhile; a
+/// lost or invalid control channel is this process's own Stop and supersedes
+/// nothing. Returns the evidence label for `StopRequested`.
+fn adopt_stop(
+    control: &Control,
+    frame: Result<Option<Vec<u8>>, Fault>,
+    run: &str,
+    attempt: u64,
+) -> &'static str {
+    let command = |reason: StopReason| json!({"command":reason,"run":run,"attempt":attempt});
+    match frame {
+        Ok(Some(bytes)) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) if value == command(StopReason::Cancelled) => {
+                control.inherit_stop(StopReason::Cancelled);
+                "Stop"
+            }
+            Ok(value) if value == command(StopReason::Timeout) => {
+                control.inherit_stop(StopReason::Timeout);
+                "Timeout"
+            }
+            _ => {
+                control.cancel();
+                "InvalidControl"
+            }
+        },
+        Ok(None) => {
+            control.cancel();
+            "ControlLost"
+        }
+        Err(_) => {
+            control.cancel();
+            "InvalidControl"
+        }
+    }
+}
+
+/// Resolve only a captured operation-deadline fault, never an earned stage failure.
+/// The receipt barrier also applies when inheritance already cleared DERIVED.
+/// The independent watchdog and parent containment bound this wait.
+fn settled_primary(control: &Control, verdict: &OnceLock<()>, fault: Fault) -> Fault {
+    if !fault.is_provisional_timeout() {
+        return fault;
+    }
+    verdict.wait();
+    if control.superseding_verdict() != Some(StopReason::Cancelled) {
+        return fault;
+    }
+    let mut context = match fault.context {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(context) => context,
+        other => serde_json::Map::from_iter([("cause".into(), other)]),
+    };
+    context.insert("superseded_timeout".into(), Value::String(fault.message));
+    StopReason::Cancelled
+        .fault()
+        .with_context(Value::Object(context))
+}
+
 pub fn child() -> Result<bool, Fault> {
     let mut input = BufReader::new(std::io::stdin());
     let invocation = super::payload::read(&mut input)?;
     invocation.plan.validate()?;
     invocation.inventory.validate()?;
     invocation.operation.validate(&invocation.plan)?;
-    let control = Arc::new(Control::new(&invocation.plan.limits));
+    if let Some(modules) = &invocation.prepared_modules {
+        modules.parser(&invocation.inventory)?;
+    }
+    // The supervisor's deadline is absolute on the shared clock: spawn, payload
+    // transfer and validation above are already charged, and no Host or native
+    // work starts before this bound exists.
+    let control = Arc::new(Control::with_deadline(
+        &invocation.plan.limits,
+        invocation.deadline.instant()?,
+    ));
     let finished = Arc::new(AtomicBool::new(false));
+    // Set once the supervisor's verdict for this attempt has been adopted and
+    // its receipts emitted; `settled_primary` waits on it before publishing a
+    // provisional Timeout.
+    let verdict = Arc::new(OnceLock::new());
     let run = invocation.run.clone();
     let attempt = invocation.attempt;
 
@@ -80,7 +153,7 @@ pub fn child() -> Result<bool, Fault> {
             if watch_finished.load(Ordering::Acquire) {
                 return;
             }
-            let _ = watch_control.check();
+            let _ = watch_control.stop_reason();
             let stop = watch_control.stop_us.load(Ordering::Acquire);
             if stop != 0 && watch_control.elapsed_us().saturating_sub(stop) > cleanup_ms * 1000 {
                 // The observer records the exit; this is never a clean acknowledgement.
@@ -91,27 +164,9 @@ pub fn child() -> Result<bool, Fault> {
     });
     let input_run = run.clone();
     let input_control = control.clone();
+    let adopted = verdict.clone();
     thread::spawn(move || {
-        let (reason, cause) = match frame(&mut input, 1024) {
-            Ok(Some(bytes)) => match serde_json::from_slice::<Value>(&bytes) {
-                Ok(value)
-                    if value
-                        == json!({"command":StopReason::Cancelled,"run":input_run,"attempt":attempt}) =>
-                {
-                    ("Stop", StopReason::Cancelled)
-                }
-                Ok(value)
-                    if value
-                        == json!({"command":StopReason::Timeout,"run":input_run,"attempt":attempt}) =>
-                {
-                    ("Timeout", StopReason::Timeout)
-                }
-                _ => ("InvalidControl", StopReason::Cancelled),
-            },
-            Ok(None) => ("ControlLost", StopReason::Cancelled),
-            Err(_) => ("InvalidControl", StopReason::Cancelled),
-        };
-        input_control.stop(cause);
+        let reason = adopt_stop(&input_control, frame(&mut input, 1024), &input_run, attempt);
         let _ = emit(
             &json!({"event":"StopRequested","run":input_run,"attempt":attempt,"reason":reason,
             "at_us":input_control.stop_us.load(Ordering::Acquire)}),
@@ -120,6 +175,7 @@ pub fn child() -> Result<bool, Fault> {
             &json!({"event":"AdmissionClosed","run":input_run,"attempt":attempt,
             "at_us":input_control.closed_us.load(Ordering::Acquire)}),
         );
+        let _ = adopted.set(());
     });
     emit(
         &json!({"event":"ChildStarted","run":run,"attempt":attempt,"pid":std::process::id(),
@@ -182,6 +238,7 @@ pub fn child() -> Result<bool, Fault> {
             } else {
                 "NotStarted"
             };
+            let mut error = settled_primary(&control, &verdict, error);
             error.bound_diagnostics();
             let entry_emission = emit_settlement(
                 json!({"event":"EntrySettled","run":invocation.run,"attempt":attempt,
@@ -201,27 +258,40 @@ pub fn child() -> Result<bool, Fault> {
         }
     };
     if checking {
-        return finish_environment_check(host, &invocation, &control, &finished, preflight_start);
+        return finish_environment_check(
+            host,
+            &invocation,
+            &control,
+            &verdict,
+            &finished,
+            preflight_start,
+        );
     }
     let mut inventory = invocation.inventory;
-    let compilation = if invocation.plan.candidate == "typescript" {
-        crate::typescript::compile(&inventory, &invocation.plan.limits)
-            .map(|compiled| inventory = compiled)
-    } else {
-        Ok(())
-    };
+    let compilation =
+        if invocation.plan.candidate == "typescript" && invocation.prepared_modules.is_none() {
+            crate::typescript::compile_with_control(&inventory, &invocation.plan.limits, &control)
+                .map(|compiled| inventory = compiled)
+        } else {
+            Ok(())
+        };
     let preflight_us = preflight_start.elapsed().as_micros();
     let started = Instant::now();
     let inventory = Arc::new(inventory);
     let runtime = compilation.and_then(|()| match invocation.plan.candidate.as_str() {
         "rust" if invocation.plan.scenario == "held-work" => held_work(&host, &invocation.run),
         "rust" => run_rust(&host),
-        "javascript" | "typescript" => crate::javascript::run(inventory.clone(), host.clone()),
+        "javascript" | "typescript" => match invocation.prepared_modules.as_ref() {
+            Some(modules) => {
+                crate::javascript::run_prepared(inventory.clone(), host.clone(), modules)
+            }
+            None => crate::javascript::run(inventory.clone(), host.clone()),
+        },
         "lua" => crate::lua::run(inventory.clone(), host.clone()),
         _ => Err(Fault::new("InvalidPlan", "unknown candidate")),
     });
     let workflow_us = started.elapsed().as_micros();
-    let (metrics, mut primary) = match runtime {
+    let (metrics, primary) = match runtime {
         Ok(metrics) => (Some(metrics), host.failure()),
         Err(error) => {
             // Adapters retain the host-owned primary and enrich it at the live
@@ -234,6 +304,7 @@ pub fn child() -> Result<bool, Fault> {
             (None::<RuntimeMetrics>, Some(error))
         }
     };
+    let mut primary = primary.map(|fault| settled_primary(&control, &verdict, fault));
     if let Some(primary) = primary.as_mut() {
         primary.bound_diagnostics();
     }
@@ -285,10 +356,14 @@ fn finish_environment_check(
     host: Host,
     invocation: &Invocation,
     control: &Control,
+    verdict: &OnceLock<()>,
     finished: &AtomicBool,
     started: Instant,
 ) -> Result<bool, Fault> {
-    let primary = control.check().err();
+    let primary = control
+        .check()
+        .err()
+        .map(|fault| settled_primary(control, verdict, fault));
     let initialization_us = started.elapsed().as_micros();
     let mut observations = host.snapshot();
     observations["operation"] = json!("environment_check");

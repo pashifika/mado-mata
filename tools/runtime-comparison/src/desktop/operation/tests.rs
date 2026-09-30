@@ -71,10 +71,13 @@ fn preparation_stop_never_attempts_to_launch_the_runner() {
     };
     let result = execute(
         Path::new("runner-must-not-be-launched"),
-        &request,
-        &StartPreparation::default(),
+        &fixture(),
         requested_plan(&request).unwrap(),
-        &control,
+        crate::runner::PreparedExecution {
+            control: &control,
+            modules: None,
+            images: None,
+        },
         &observer,
         Evidence::new("run", "cancelled-before-capture", None, None).unwrap(),
     );
@@ -102,11 +105,15 @@ fn reserved_preparation_excludes_check_and_stop_prevents_launch() {
     let (entered, started) = mpsc::sync_channel(1);
     let (release, wait) = mpsc::sync_channel(1);
     let run = controller
-        .start_with_preparation(request(&fixture()), move |_, _| {
-            entered.send(()).unwrap();
-            wait.recv().unwrap();
-            Ok(StartPreparation::default())
-        })
+        .start_with_preparation(
+            request(&fixture()),
+            move |_, _| {
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+                Ok(StartPreparation::<()>::default())
+            },
+            |(), _, _, _| panic!("cancelled capture must not reach target resolution"),
+        )
         .unwrap();
     started.recv_timeout(Duration::from_secs(5)).unwrap();
     let refusal = controller.check_environment(None, None, None).unwrap_err();

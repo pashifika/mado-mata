@@ -1,6 +1,6 @@
 use super::{NativeIntent, NativeTarget, StartRequest, native_limits};
 use crate::inventory::Inventory;
-use crate::model::{Fault, Plan};
+use crate::model::{Fault, Limits, Plan};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -89,21 +89,16 @@ pub(super) fn validate_target(target: Option<&NativeTarget>) -> Result<&NativeTa
     Ok(target)
 }
 
-pub(super) fn project(
-    plan: &mut Plan,
-    request: &StartRequest,
-    target: &NativeTarget,
-    engine: &Path,
+pub(super) struct Templates {
+    package_entries: BTreeMap<String, String>,
+    templates: BTreeMap<String, String>,
+    images: crate::images::PayloadReservation,
+}
+
+pub(super) fn prepare_templates(
     inventory: &Inventory,
-    mut configuration: Value,
-) -> Result<(), Fault> {
-    let intent = request
-        .native_intent
-        .as_ref()
-        .ok_or_else(|| refused("Native review is missing"))?;
-    validate_intent(intent)?;
-    validate_target(Some(target))?;
-    // Reuse the saved-package policy before constructing any native engine configuration.
+    limits: &Limits,
+) -> Result<Templates, Fault> {
     inventory.validate()?;
     let mut package_entries = BTreeMap::new();
     let mut templates = BTreeMap::new();
@@ -112,12 +107,39 @@ pub(super) fn project(
         &mut package_entries,
         &mut templates,
     )?;
-    if package_entries.len() > plan.limits.snapshot_files || templates.len() > plan.limits.handles {
+    if package_entries.len() > limits.snapshot_files || templates.len() > limits.handles {
         return Err(Fault::new(
             "LimitExceeded",
             "Native template mappings exceed the captured package bounds",
         ));
     }
+    let images = crate::runner::reserve_native_images(inventory, &package_entries, &templates)?;
+    Ok(Templates {
+        package_entries,
+        templates,
+        images,
+    })
+}
+
+pub(super) fn project(
+    plan: &mut Plan,
+    request: &StartRequest,
+    target: &NativeTarget,
+    engine: &Path,
+    templates: Templates,
+    mut configuration: Value,
+) -> Result<crate::images::PayloadReservation, Fault> {
+    let intent = request
+        .native_intent
+        .as_ref()
+        .ok_or_else(|| refused("Native review is missing"))?;
+    validate_intent(intent)?;
+    validate_target(Some(target))?;
+    let Templates {
+        package_entries,
+        templates,
+        images,
+    } = templates;
     let executable = target
         .executable
         .canonicalize()
@@ -152,7 +174,8 @@ pub(super) fn project(
         "package_entries":package_entries,"templates":templates
     });
     plan.native_config = Some(configuration);
-    plan.validate()
+    plan.validate()?;
+    Ok(images)
 }
 
 #[cfg(test)]

@@ -232,6 +232,7 @@ details[open] > summary { font-weight: 600; }
 .run-identity { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 6px 9px; font-size: 11px; margin: 0; }
 .run-identity dt { color: #6b7c90; }
 .run-identity dd { margin: 0; overflow-wrap: anywhere; }
+.run-identity .native-arguments { margin: 0; padding-left: 18px; }
 #run-id { font-family: var(--mono); font-size: 10px; }
 .progress-list { padding-left: 22px; font-size: 11px; color: #4f6580; }
 .progress-list li::marker { color: #8a9ab0; }

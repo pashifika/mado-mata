@@ -2,7 +2,9 @@
 
 The optional `engine` feature consumes the public `mado-pilot` facade at
 `4b4f3296838a9eecdcb00e9d2bb3121a25cdc240`. The harness uses no sibling path
-dependency, direct platform calls, fake OCR backend, or substitute input route.
+dependency, fake OCR backend, or substitute input route. macOS startup adds
+read-only Foundation/libproc lifetime checks while waiting for the selected
+process's first eligible window; capture and input still use the public facade.
 
 **Native integration is available; native qualification is not complete.** The
 facade now exposes optional retained-process provenance. The harness requires an
@@ -33,10 +35,14 @@ explicit target/window selection and finite capture authority.
 
 The separate [macOS Native Run lane](desktop.md#reviewed-macos-native-start)
 projects a saved bundle binding and a fresh per-Start review through the fixed
-engine child. The application derives process/lifetime/window authority; IPC
-cannot supply it. External CLI plans cannot select the Desktop-only
-`input.reviewed_operation` form. See [ADR 0008](adr/0008-macos-native-run-admission.md)
-for first-frame placement and result commitment.
+engine child. A unique running game is reused. Confirmed absence can submit the
+saved recipe once through the independent application-launch library, only with
+separate ephemeral launch approval and completed target-independent preflight.
+The application derives process/lifetime/window authority; IPC cannot supply it.
+Window waiting never launches a duplicate or selects a replacement lifetime.
+External CLI plans cannot select the Desktop-only `input.reviewed_operation`
+form. See [ADR 0008](adr/0008-macos-native-run-admission.md) for recipe semantics,
+startup bounds, first-frame placement and result commitment.
 
 ## Install the engine prerequisites
 

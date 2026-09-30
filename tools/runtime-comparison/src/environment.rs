@@ -86,6 +86,15 @@ pub struct EnvironmentSnapshot {
     pub identity: String,
 }
 
+impl EnvironmentSnapshot {
+    pub(crate) fn verify(&self, control: &Control) -> Result<(), Fault> {
+        let configuration: Configuration<Value> =
+            serde_json::from_value(self.configuration.clone())
+                .map_err(|error| blocked("configuration_validation", &error.to_string()))?;
+        validate_ocr(&configuration, control)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ReplaySnapshot {
     pub configuration: Value,
@@ -312,7 +321,6 @@ fn validate_tuple(
     Ok(())
 }
 
-#[cfg(feature = "engine")]
 pub(crate) fn validate_ocr<N>(config: &Configuration<N>, control: &Control) -> Result<(), Fault> {
     let ocr = &config.ocr;
     validate_tuple(
@@ -535,6 +543,35 @@ fn capture_library(path: &Path, control: &Control, stage: &str) -> Result<Librar
         sha256: format!("{:x}", hash.finalize()),
         bytes,
     })
+}
+
+pub(crate) fn capture_executable(path: &Path, control: &Control) -> Result<Library, Fault> {
+    let stage = "engine_artifact";
+    control.check()?;
+    let path = path
+        .canonicalize()
+        .map_err(|error| io_fault(stage, error))?;
+    executable_permissions(&path, stage)?;
+    capture_library(&path, control, stage)
+}
+
+fn executable_permissions(path: &Path, stage: &str) -> Result<(), Fault> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = path.metadata().map_err(|error| io_fault(stage, error))?;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(blocked(stage, "engine artifact is not executable"));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, stage);
+    Ok(())
+}
+
+pub(crate) fn verify_executable(library: &Library, control: &Control) -> Result<(), Fault> {
+    executable_permissions(&library.path, "engine_artifact")?;
+    verify_file(library, control, "engine_artifact")
 }
 
 fn verify_file(library: &Library, control: &Control, stage: &str) -> Result<(), Fault> {

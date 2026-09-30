@@ -31,6 +31,8 @@ pub use enabled::{Engine, release_runner_resources};
 #[cfg(feature = "engine")]
 mod enabled {
     #[cfg(test)]
+    mod native_wait_tests;
+    #[cfg(test)]
     mod publication_tests;
     use super::*;
     use crate::environment::{Configuration, Placement, ReplayConfig, canonical, validate_replay};
@@ -247,7 +249,7 @@ mod enabled {
                         if native_duration_ms
                             .is_some_and(|bound| control.elapsed_us() / 1_000 >= bound)
                         {
-                            control.cancel();
+                            control.stop(crate::model::StopReason::Timeout);
                         }
                         if control.check().is_err()
                             || control.closed_us.load(Ordering::Acquire) != 0
@@ -342,6 +344,12 @@ mod enabled {
                     ));
                 }
             }
+            if config.native.is_some() {
+                crate::runner::emit_native_preparation(
+                    &control,
+                    crate::desktop::NativePhase::NativeInitialization,
+                );
+            }
             let bridge = CancellationBridge::new(
                 Arc::clone(&control),
                 config
@@ -349,7 +357,10 @@ mod enabled {
                     .as_ref()
                     .map(|native| native.capture.duration_ms),
             )?;
-            let operation = operation(&bridge.token, plan.limits.duration_ms)?;
+            let operation = mp::OperationContext::new()
+                .with_cancellation(bridge.token.clone())
+                .with_timeout(control.deadline().saturating_duration_since(Instant::now()))
+                .map_err(|error| engine_error("operation_context", error))?;
             let model = validate_ocr(&config, &control)?;
             let mut digest = Sha256::new();
             digest.update(REVISION.as_bytes());
@@ -468,23 +479,14 @@ mod enabled {
             };
             drop(cache);
             control.check()?;
-            let operation = if let Some(native) = &config.native {
-                let open_bound = native.capture.wait_ms.min(
-                    native
-                        .capture
-                        .duration_ms
-                        .saturating_sub(control.elapsed_us() / 1_000),
-                );
-                self::operation(&bridge.token, open_bound)?
-            } else {
-                operation
-            };
-            let targets = resources
-                .engine
-                .discover(&operation)
-                .map_err(|error| engine_error("target_discovery", error))?;
             let (target, request, process_lifetime) = if let Some(native) = &config.native {
-                let target = select_native_target(&targets, native)?;
+                let target =
+                    discover_native_target(&resources.engine, native, &control, &operation)?;
+                control.check()?;
+                crate::runner::emit_native_preparation(
+                    &control,
+                    crate::desktop::NativePhase::NativeInitialization,
+                );
                 let mut input =
                     mp::InputOpenRequest::new().with_requirement(mp::InputRequirement::Required);
                 if native.input.reviewed_operation.is_some() {
@@ -502,7 +504,7 @@ mod enabled {
                     input = input.requiring(kind, native.route()?);
                 }
                 (
-                    target.id(),
+                    target,
                     mp::SessionRequest::new()
                         .capturing(
                             mp::OpenRequest::new().with_capture_pacing(
@@ -513,15 +515,13 @@ mod enabled {
                             ),
                         )
                         .requesting_input(input),
-                    format!(
-                        "{:016x}",
-                        target
-                            .process_identity()
-                            .ok_or_else(|| internal("selected target provenance missing"))?
-                            .lifetime()
-                    ),
+                    native.process_lifetime.clone(),
                 )
             } else {
+                let targets = resources
+                    .engine
+                    .discover(&operation)
+                    .map_err(|error| engine_error("target_discovery", error))?;
                 if targets.len() != 1 {
                     return Err(blocked(
                         "replay_target",
@@ -533,6 +533,18 @@ mod enabled {
                     mp::SessionRequest::new().capturing(mp::OpenRequest::new()),
                     attempt_id.to_owned(),
                 )
+            };
+            control.check()?;
+            let operation = if let Some(native) = &config.native {
+                let open_bound = native.capture.wait_ms.min(
+                    native
+                        .capture
+                        .duration_ms
+                        .saturating_sub(control.elapsed_us() / 1_000),
+                );
+                self::operation(&bridge.token, open_bound)?
+            } else {
+                operation
             };
             let session = resources
                 .engine
@@ -1625,30 +1637,320 @@ mod enabled {
         }
     }
 
-    fn select_native_target<'a>(
-        targets: &'a [mp::TargetDescription],
-        config: &NativeConfig,
-    ) -> Result<&'a mp::TargetDescription, Fault> {
-        let lifetime = u64::from_str_radix(&config.process_lifetime, 16).map_err(|_| {
+    const NATIVE_WINDOW_CANDIDATE_LIMIT: usize = 64;
+
+    fn native_lifetime(config: &NativeConfig) -> Result<u64, Fault> {
+        u64::from_str_radix(&config.process_lifetime, 16).map_err(|_| {
             blocked(
                 "native_authority_validation",
                 "invalid opaque process lifetime",
             )
-        })?;
+        })
+    }
+
+    fn selected_process_lost() -> Fault {
+        Fault::new(
+            "TargetLost",
+            "the approved process lifetime ended or changed",
+        )
+        .with_context(json!({"stage":"target_identity_mismatch","engine_revision":REVISION}))
+    }
+
+    fn require_selected_lifetime(
+        process_id: u32,
+        lifetime: u64,
+        config: &NativeConfig,
+        expected_lifetime: u64,
+    ) -> Result<(), Fault> {
+        if process_id != config.process_id || lifetime != expected_lifetime {
+            return Err(selected_process_lost());
+        }
+        Ok(())
+    }
+
+    fn discover_native_target(
+        engine: &mp::Engine,
+        config: &NativeConfig,
+        control: &Control,
+        operation: &mp::OperationContext,
+    ) -> Result<mp::TargetId, Fault> {
+        let lifetime = native_lifetime(config)?;
+        #[cfg(target_os = "macos")]
+        {
+            let mut process_started = None;
+            let target = wait_for_native_target(
+                config,
+                control,
+                || {
+                    engine
+                        .discover(operation)
+                        .map_err(|error| engine_error("target_discovery", error))
+                },
+                || check_native_process(config, lifetime, control, &mut process_started),
+                || {
+                    thread::park_timeout(
+                        Duration::from_millis(50)
+                            .min(control.deadline().saturating_duration_since(Instant::now())),
+                    );
+                    Ok(())
+                },
+            )?;
+            // Revalidate the retained target, never rediscover a replacement.
+            let current = engine
+                .describe_window(target, operation)
+                .map_err(|error| engine_error("target_revalidation", error))?;
+            control.check()?;
+            validate_retained_native_target(target, &current, config, lifetime)?;
+            check_native_process(config, lifetime, control, &mut process_started)?;
+            Ok(target)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Windowless startup is macOS-only; retain the existing other-OS refusal.
+            control.check()?;
+            let targets = engine
+                .discover(operation)
+                .map_err(|error| engine_error("target_discovery", error))?;
+            control.check()?;
+            select_native_target(&targets, config, lifetime)?
+                .map(mp::TargetDescription::id)
+                .ok_or_else(|| {
+                    blocked(
+                        "target_identity_mismatch",
+                        "no window matches the exact name, canonical path, PID and lifetime",
+                    )
+                })
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn validate_retained_native_target(
+        target: mp::TargetId,
+        current: &mp::TargetDescription,
+        config: &NativeConfig,
+        lifetime: u64,
+    ) -> Result<(), Fault> {
+        if select_native_target(std::slice::from_ref(current), config, lifetime)?
+            .is_none_or(|selected| selected.id() != target)
+        {
+            return Err(selected_process_lost());
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn wait_for_native_target(
+        config: &NativeConfig,
+        control: &Control,
+        mut discover: impl FnMut() -> Result<Vec<mp::TargetDescription>, Fault>,
+        mut check_process: impl FnMut() -> Result<(), Fault>,
+        mut pause: impl FnMut() -> Result<(), Fault>,
+    ) -> Result<mp::TargetId, Fault> {
+        let lifetime = native_lifetime(config)?;
+        let mut reported_wait = false;
+        let checkpoint = || {
+            control.check().map_err(|fault| {
+                fault.with_context(json!({"stage":"waiting_for_window","engine_revision":REVISION}))
+            })
+        };
+        loop {
+            checkpoint()?;
+            check_process()?;
+            checkpoint()?;
+            let targets = discover();
+            checkpoint()?;
+            let targets = targets?;
+            check_process()?;
+            checkpoint()?;
+            let selected = select_native_target(&targets, config, lifetime)?;
+            checkpoint()?;
+            if let Some(target) = selected {
+                return Ok(target.id());
+            }
+            if !reported_wait {
+                crate::runner::emit_native_preparation(
+                    control,
+                    crate::desktop::NativePhase::WaitingForWindow,
+                );
+                reported_wait = true;
+            }
+            pause()?;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn check_native_process(
+        config: &NativeConfig,
+        lifetime: u64,
+        control: &Control,
+        started: &mut Option<(u64, u64)>,
+    ) -> Result<(), Fault> {
+        use objc2::rc::autoreleasepool;
+        use objc2_app_kit::NSRunningApplication;
+
+        control.check()?;
+        let pid = i32::try_from(config.process_id).map_err(|_| selected_process_lost())?;
+        let before = native_process_started(pid)?;
+        if started.is_some_and(|expected| before != expected) {
+            return Err(selected_process_lost());
+        }
+        let result = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
+            autoreleasepool(|_| {
+                let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+                    .ok_or_else(selected_process_lost)?;
+                if app.isTerminated() {
+                    return Err(selected_process_lost());
+                }
+                let launch = app.launchDate().ok_or_else(|| {
+                    blocked(
+                        "target_identity_unavailable",
+                        "process launch identity is unavailable",
+                    )
+                })?;
+                let launch = launch.timeIntervalSinceReferenceDate();
+                if !launch.is_finite() || launch <= 0.0 {
+                    return Err(blocked(
+                        "target_identity_unavailable",
+                        "process launch identity is unverifiable",
+                    ));
+                }
+                require_selected_lifetime(
+                    u32::try_from(app.processIdentifier()).map_err(|_| selected_process_lost())?,
+                    launch.to_bits(),
+                    config,
+                    lifetime,
+                )?;
+                let url = if config.executable_or_bundle.is_dir() {
+                    app.bundleURL()
+                } else {
+                    app.executableURL()
+                }
+                .ok_or_else(|| {
+                    blocked("target_identity_unavailable", "process path is unavailable")
+                })?;
+                if !url.isFileURL() {
+                    return Err(blocked(
+                        "target_identity_unavailable",
+                        "process URL is not a file",
+                    ));
+                }
+                let path = url.path().ok_or_else(|| {
+                    blocked("target_identity_unavailable", "process path is unavailable")
+                })?;
+                if path.length() > 4096 {
+                    return Err(blocked(
+                        "target_identity_unavailable",
+                        "process path exceeds its bound",
+                    ));
+                }
+                let path = PathBuf::from(path.to_string())
+                    .canonicalize()
+                    .map_err(|_| {
+                        blocked(
+                            "target_identity_unavailable",
+                            "process path cannot be resolved",
+                        )
+                    })?;
+                if path != config.executable_or_bundle {
+                    return Err(selected_process_lost());
+                }
+                Ok(())
+            })
+        }));
+        control.check()?;
+        result.map_err(|_| {
+            blocked(
+                "target_identity_unavailable",
+                "process description raised a platform exception",
+            )
+        })??;
+        // AppKit caches time-varying properties until its main run loop turns.
+        // Kernel lifetime checks remain live in this non-AppKit engine child.
+        if native_process_started(pid)? != before {
+            return Err(selected_process_lost());
+        }
+        control.check()?;
+        *started = Some(before);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn native_process_started(pid: i32) -> Result<(u64, u64), Fault> {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+            .map_err(|_| internal("process description size is not representable"))?;
+        // SAFETY: the SDK writes synchronously into aligned storage of exactly size bytes.
+        #[expect(unsafe_code, reason = "audited libproc output buffer and SDK layout")]
+        let returned = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if returned != size {
+            if returned <= 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return Err(selected_process_lost());
+            }
+            return Err(blocked(
+                "target_identity_unavailable",
+                "selected process is absent or its kernel lifetime cannot be read",
+            ));
+        }
+        // SAFETY: libproc reported that the entire proc_bsdinfo was initialized.
+        #[expect(
+            unsafe_code,
+            reason = "complete libproc output checked before initialization"
+        )]
+        let info = unsafe { info.assume_init() };
+        if info.pbi_pid != pid as u32
+            || info.pbi_status == libc::SZOMB
+            || info.pbi_start_tvsec == 0
+            || info.pbi_start_tvusec >= 1_000_000
+        {
+            return Err(selected_process_lost());
+        }
+        Ok((info.pbi_start_tvsec, info.pbi_start_tvusec))
+    }
+
+    fn select_native_target<'a>(
+        targets: &'a [mp::TargetDescription],
+        config: &NativeConfig,
+        lifetime: u64,
+    ) -> Result<Option<&'a mp::TargetDescription>, Fault> {
         let mut selected = None;
-        for target in targets.iter().filter(|target| {
-            target.capability().kind() == Some(mp::TargetKind::Window)
-                && target.name() == config.window_rule
-        }) {
+        for (index, target) in targets
+            .iter()
+            .filter(|target| {
+                target.capability().kind() == Some(mp::TargetKind::Window)
+                    && target.name() == config.window_rule
+            })
+            .enumerate()
+        {
+            if index >= NATIVE_WINDOW_CANDIDATE_LIMIT {
+                return Err(blocked(
+                    "target_candidate_limit",
+                    "exact-name window candidates exceed the finite discovery bound",
+                ));
+            }
             let identity = target.process_identity().ok_or_else(|| {
                 blocked(
                     "target_identity_unavailable",
                     "an exact-name window lacks verified process provenance",
                 )
             })?;
-            if identity.process_id().get() != config.process_id || identity.lifetime() != lifetime {
+            if identity.process_id().get() != config.process_id {
                 continue;
             }
+            require_selected_lifetime(
+                identity.process_id().get(),
+                identity.lifetime(),
+                config,
+                lifetime,
+            )?;
             let path = if config.executable_or_bundle.is_dir() {
                 identity.application_bundle_path()
             } else {
@@ -1667,7 +1969,7 @@ mod enabled {
                 )
             })?;
             if canonical != config.executable_or_bundle {
-                continue;
+                return Err(selected_process_lost());
             }
             if selected.replace(target).is_some() {
                 return Err(blocked(
@@ -1676,12 +1978,7 @@ mod enabled {
                 ));
             }
         }
-        selected.ok_or_else(|| {
-            blocked(
-                "target_identity_mismatch",
-                "no window matches the exact name, canonical path, PID and lifetime",
-            )
-        })
+        Ok(selected)
     }
 
     fn native_key(value: &str) -> Result<mp::Key, Fault> {

@@ -1415,7 +1415,7 @@ test('a Native intent names the current saved binding only after both separate c
   const facts=deriveBound(approved,nativeEnvironment,'en',nativeLimits);
   assert.equal(facts.startBlock,null);
   assert.deepEqual(facts.native.intent,{target_revision:1,target_binding_id:'binding-1',target_declaration_identity:'declaration-1',
-    capture_approved:true,input_approved:true,operation:'Press Confirm once',visible_postcondition:'Result dialog is shown',limits:nativeLimits});
+    capture_approved:true,input_approved:true,launch_approved:false,operation:'Press Confirm once',visible_postcondition:'Result dialog is shown',limits:nativeLimits});
   // Consent given for an older request does not combine with consent given after an edit.
   const edited=approveNative(editDraft(captureOnly,{count:2}),'input',true,nativeEnvironment,nativeLimits);
   assert.equal(nativeOf(edited).capture,false);
@@ -1479,3 +1479,62 @@ test('Native target edits cannot restore consent after discard',()=>{
   const renewed=approveNative(restored,'capture',true,nativeEnvironment,nativeLimits);
   assert.equal(nativeOf(renewed).input,false);
 });
+
+test('launch-if-absent approval neither substitutes for capture/input consent nor is required to attach',()=>{
+  const bound=nativeDraft().bound;
+  const launchOnly=nativeOf(approveNative(bound,'launch',true,nativeEnvironment,nativeLimits));
+  assert.deepEqual([launchOnly.launch,launchOnly.capture,launchOnly.input,launchOnly.block,launchOnly.intent],[true,false,false,'nativeApproval',null]);
+  assert.equal(nativeOf(approve(bound)).intent.launch_approved,false);
+  const all=approve(approveNative(bound,'launch',true,nativeEnvironment,nativeLimits));
+  assert.equal(nativeOf(all).intent.launch_approved,true);
+  // Withdrawing launch alone leaves the attach-only request with its separate consents.
+  const attachOnly=nativeOf(approveNative(all,'launch',false,nativeEnvironment,nativeLimits)).intent;
+  assert.deepEqual([attachOnly.capture_approved,attachOnly.input_approved,attachOnly.launch_approved],[true,true,false]);
+});
+
+for (const {scenario, change, environment=nativeEnvironment} of [
+  {scenario:'a submitted Start spends launch approval even when the host refuses it',change:bound=>clearNativeApproval(bound)},
+  {scenario:'a newer saved recipe with other arguments needs fresh launch approval',
+    change:bound=>({...bound,target:readTarget(bound.target,targetView(bound.target,{revision:2,configuration:{...bundleConfiguration(),arguments:['--other']}}))})},
+  {scenario:'a reissued owner needs fresh launch approval',
+    change:bound=>({...bound,target:{...bound.target,context:{...bound.target.context,workspace:{workspace_id:'a',revision:2}}}})},
+  {scenario:'an edited profile draft needs fresh launch approval',change:bound=>editDraft(bound,{count:2})},
+  {scenario:'another saved OCR environment needs fresh launch approval',change:bound=>bound,environment:{profile:'environment-b'}},
+]) {
+  test(scenario,()=>{
+    const approved=approve(approveNative(nativeDraft().bound,'launch',true,nativeEnvironment,nativeLimits));
+    assert.equal(nativeOf(approved).intent.launch_approved,true);
+    // Renewing only capture and input must not revive the spent or stale launch consent.
+    const renewed=nativeOf(approve(change(approved),environment),environment);
+    assert.equal(renewed.launch,false);
+    assert.equal(renewed.intent.launch_approved,false);
+  });
+}
+
+const gameBundle={kind:'bundle',path:'/metadata/Game.app'};
+for (const {scenario, launcher, workingDirectory, recipient, location, directory} of [
+  {scenario:'the game bundle itself uses the macOS-defined launch directory',launcher:null,workingDirectory:null,
+    recipient:'game',location:gameBundle,directory:'os'},
+  {scenario:'an unsupported game bundle directory does not block attaching',launcher:null,workingDirectory:'/private/work',
+    recipient:'game',location:gameBundle,directory:'refused'},
+  {scenario:'an unsupported separate bundle launcher directory does not block attaching',launcher:{kind:'bundle',path:'/metadata/Launcher.app'},workingDirectory:'/private/work',
+    recipient:'launcher',location:{kind:'bundle',path:'/metadata/Launcher.app'},directory:'refused'},
+  {scenario:'an executable launcher receives its explicit directory',launcher:{kind:'executable',path:'/metadata/launch'},workingDirectory:'/private/work',
+    recipient:'launcher',location:{kind:'executable',path:'/metadata/launch'},directory:'explicit'},
+  {scenario:'an executable launcher without a directory uses its own folder',launcher:{kind:'executable',path:'/metadata/launch'},workingDirectory:null,
+    recipient:'launcher',location:{kind:'executable',path:'/metadata/launch'},directory:'parent'},
+]) {
+  test(scenario,()=>{
+    const configuration={...bundleConfiguration(),launcher,working_directory:workingDirectory};
+    const approved=approve(nativeDraft(loadedTarget('a',configuration)).bound);
+    const attach=nativeOf(approved);
+    assert.equal(attach.recipe.recipient,recipient);
+    assert.deepEqual(attach.recipe.location,location);
+    assert.equal(attach.recipe.directory,directory);
+    // The host may attach without submitting a recipe, even with conditional launch consent.
+    assert.equal(attach.block,null);
+    const launch=nativeOf(approveNative(approved,'launch',true,nativeEnvironment,nativeLimits));
+    assert.equal(launch.block,null);
+    assert.equal(launch.intent.launch_approved,true);
+  });
+}
