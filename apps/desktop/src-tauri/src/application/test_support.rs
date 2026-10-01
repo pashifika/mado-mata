@@ -8,6 +8,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
+impl Application {
+    pub(crate) fn finish_log_output(&self) -> crate::logging::LogStatus {
+        crate::logging::tests::finish_file_output(&self.logger)
+    }
+}
+
 pub(super) struct Fixture {
     pub(super) root: PathBuf,
     pub(super) application: Arc<Application>,

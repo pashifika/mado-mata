@@ -1104,6 +1104,11 @@ mod tests {
                 .category,
             "DiscardRequired"
         );
+        // Receipt semantics require settled file I/O, not a 500 ms disk-latency bet.
+        let logs = bootstrap.application().unwrap().finish_log_output();
+        assert!(logs.shutdown_complete);
+        assert!(!logs.shutdown_timed_out);
+        assert_eq!(logs.file_errors, 0);
         let restored = bootstrap
             .restore_snapshot(archive, Some(&current.generation), true, true)
             .unwrap();

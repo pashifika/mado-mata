@@ -742,7 +742,7 @@ fn writer_loop(output: &Output, writer: io::Result<RotatingFile>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -789,7 +789,7 @@ mod tests {
         );
     }
 
-    fn finish_file_output(logger: &Logger) -> LogStatus {
+    pub(crate) fn finish_file_output(logger: &Logger) -> LogStatus {
         // Content assertions wait for real I/O, not the production shutdown deadline.
         logger.layer.output.close();
         let mut worker = lock(&logger.worker).take().unwrap();
