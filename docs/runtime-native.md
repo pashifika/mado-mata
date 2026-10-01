@@ -34,15 +34,24 @@ Neither operation projects live native authority. The separate
 explicit target/window selection and finite capture authority.
 
 The separate [macOS Native Run lane](desktop.md#reviewed-macos-native-start)
-projects a saved bundle binding and a fresh per-Start review through the fixed
-engine child. A unique running game is reused. Confirmed absence can submit the
-saved recipe once through the independent application-launch library, only with
-separate ephemeral launch approval and completed target-independent preflight.
-The application derives process/lifetime/window authority; IPC cannot supply it.
-Window waiting never launches a duplicate or selects a replacement lifetime.
-External CLI plans cannot select the Desktop-only `input.reviewed_operation`
-form. See [ADR 0008](adr/0008-macos-native-run-admission.md) for recipe semantics,
-startup bounds, first-frame placement and result commitment.
+captures a saved bundle binding and fresh per-Start review for the fixed engine
+child. After non-executing preflight, its existing `readiness()` explicitly
+requests `target_start` and polls `target_status` before capture/recognition.
+Without a startup request, no target is acquired. A unique running game is reused.
+Confirmed absence permits one saved-recipe submission through the independent
+launch library, with separate launch approval and final resource, cancellation
+and discovery checks.
+The application derives process/lifetime/window authority; neither IPC nor Script
+can supply replacements. Script status probes drive bounded window preparation,
+never a duplicate launch or replacement lifetime. Reviewed budgets are
+60 s Startup, 30 s Readiness after capture availability and 30 s Workflow after
+explicit `Ready`, beneath an outer deadline fixed from their sum.
+
+The independent CLI retains explicit `native_config` and its existing preparation
+contract. External `run`/`manual` plans cannot select Desktop-only `native_budgets`
+or `input.reviewed_operation`; the new startup calls do not grant CLI authority.
+See [ADR 0008](adr/0008-macos-native-run-admission.md) for recipe semantics,
+deadline/ownership rules, first-frame placement and result commitment.
 
 ## Install the engine prerequisites
 

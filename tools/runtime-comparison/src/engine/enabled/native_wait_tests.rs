@@ -55,28 +55,32 @@ fn window(
 }
 
 #[test]
-fn a_windowless_selected_process_waits_then_binds_only_its_first_exact_window() {
+fn window_probes_return_pending_without_discovering_until_the_next_poll() {
     let config = config();
     let control = control();
     let issuer = IdentityIssuer::new();
-    let unrelated = window(&issuer, &config, Some((99, 7)));
     let selected = window(&issuer, &config, Some((42, 7)));
     let selected_id = selected.id();
-    let mut snapshots = [vec![unrelated], vec![selected]].into_iter();
-    let pauses = Cell::new(0);
-    let target = wait_for_native_target(
-        &config,
-        &control,
-        || Ok(snapshots.next().expect("no rediscovery after selection")),
-        || require_selected_lifetime(42, 7, &config, 7),
-        || {
-            pauses.set(pauses.get() + 1);
-            Ok(())
-        },
-    )
-    .unwrap();
-    assert_eq!(target, selected_id);
-    assert_eq!(pauses.get(), 1);
+    let mut snapshots = [
+        vec![window(&issuer, &config, Some((99, 7)))],
+        vec![selected],
+    ]
+    .into_iter();
+    let discoveries = Cell::new(0);
+    let mut discover = || {
+        discoveries.set(discoveries.get() + 1);
+        Ok(snapshots.next().expect("one discovery per Script poll"))
+    };
+    assert_eq!(
+        probe_native_target(&config, &control, &mut discover, || Ok(())).unwrap(),
+        None
+    );
+    assert_eq!(discoveries.get(), 1);
+    assert_eq!(
+        probe_native_target(&config, &control, &mut discover, || Ok(())).unwrap(),
+        Some(selected_id)
+    );
+    assert_eq!(discoveries.get(), 2);
 }
 
 #[test]
@@ -86,15 +90,14 @@ fn an_already_present_window_needs_no_startup_wait() {
     let selected = window(&IdentityIssuer::new(), &config, Some((42, 7)));
     let selected_id = selected.id();
     let mut snapshot = Some(vec![selected]);
-    let target = wait_for_native_target(
+    let target = probe_native_target(
         &config,
         &control,
         || Ok(snapshot.take().expect("one discovery")),
         || Ok(()),
-        || panic!("an eligible window must not wait or reselect"),
     )
     .unwrap();
-    assert_eq!(target, selected_id);
+    assert_eq!(target, Some(selected_id));
 }
 
 #[test]
@@ -122,12 +125,11 @@ fn ambiguous_unverifiable_and_recycled_pid_windows_are_not_retried() {
         ),
     ] {
         let mut candidates = Some(candidates);
-        let fault = wait_for_native_target(
+        let fault = probe_native_target(
             &config,
             &control(),
             || Ok(candidates.take().expect("refusal must not rediscover")),
             || Ok(()),
-            || panic!("only missing windows permit waiting"),
         )
         .unwrap_err();
         assert_eq!(fault.category, category);
@@ -151,32 +153,28 @@ fn overflowing_window_candidates_never_become_a_truncated_unique_match() {
 fn windowless_process_loss_or_replacement_refuses_before_discovering_a_successor() {
     let config = config();
     for replacement in [None, Some((42, 8)), Some((43, 7))] {
-        let original_alive = Cell::new(true);
-        let discoveries = Cell::new(0);
-        let fault = wait_for_native_target(
+        let control = control();
+        assert_eq!(
+            probe_native_target(
+                &config,
+                &control,
+                || Ok(Vec::new()),
+                || { require_selected_lifetime(42, 7, &config, 7) }
+            )
+            .unwrap(),
+            None
+        );
+        let fault = probe_native_target(
             &config,
-            &control(),
+            &control,
+            || panic!("a successor must not be discovered"),
             || {
-                discoveries.set(discoveries.get() + 1);
-                assert!(original_alive.get(), "a successor must not be discovered");
-                Ok(Vec::new())
-            },
-            || {
-                if original_alive.get() {
-                    require_selected_lifetime(42, 7, &config, 7)
-                } else {
-                    let (pid, lifetime) = replacement.ok_or_else(selected_process_lost)?;
-                    require_selected_lifetime(pid, lifetime, &config, 7)
-                }
-            },
-            || {
-                original_alive.set(false);
-                Ok(())
+                let (pid, lifetime) = replacement.ok_or_else(selected_process_lost)?;
+                require_selected_lifetime(pid, lifetime, &config, 7)
             },
         )
         .unwrap_err();
         assert_eq!(fault.category, "TargetLost");
-        assert_eq!(discoveries.get(), 1);
     }
 }
 
@@ -186,7 +184,7 @@ fn process_loss_during_discovery_cannot_publish_a_late_window() {
     let alive = Cell::new(true);
     let selected = window(&IdentityIssuer::new(), &config, Some((42, 7)));
     let mut snapshot = Some(vec![selected]);
-    let fault = wait_for_native_target(
+    let fault = probe_native_target(
         &config,
         &control(),
         || {
@@ -200,39 +198,30 @@ fn process_loss_during_discovery_cannot_publish_a_late_window() {
                 Err(selected_process_lost())
             }
         },
-        || panic!("a lost selected lifetime must not wait"),
     )
     .unwrap_err();
     assert_eq!(fault.category, "TargetLost");
 }
 
 #[test]
-fn cancellation_and_timeout_end_the_existing_wait_without_another_discovery() {
+fn cancellation_and_timeout_between_polls_never_admit_another_discovery() {
     let config = config();
-    for (reason, category) in [
-        (StopReason::Cancelled, "Cancelled"),
-        (StopReason::Timeout, "Timeout"),
-    ] {
+    for reason in [StopReason::Cancelled, StopReason::Timeout] {
         let control = control();
-        let discoveries = Cell::new(0);
-        let fault = wait_for_native_target(
+        assert_eq!(
+            probe_native_target(&config, &control, || Ok(Vec::new()), || Ok(())).unwrap(),
+            None
+        );
+        control.stop(reason);
+        let fault = probe_native_target(
             &config,
             &control,
-            || {
-                discoveries.set(discoveries.get() + 1);
-                Ok(Vec::new())
-            },
-            || Ok(()),
-            || {
-                control.stop(reason);
-                Ok(())
-            },
+            || panic!("Stop forbids a later Script probe"),
+            || panic!("Stop forbids process checks"),
         )
         .unwrap_err();
-        assert_eq!(fault.category, category);
+        assert_eq!(fault.category, reason.fault().category);
         assert_eq!(fault.context["stage"], "waiting_for_window");
-        assert_eq!(discoveries.get(), 1);
-        assert_eq!(control.check().unwrap_err().category, category);
     }
 }
 
@@ -242,7 +231,7 @@ fn a_window_returned_after_stop_never_becomes_target_authority() {
     for reason in [StopReason::Cancelled, StopReason::Timeout] {
         let control = control();
         let mut snapshot = Some(vec![window(&IdentityIssuer::new(), &config, Some((42, 7)))]);
-        let fault = wait_for_native_target(
+        let fault = probe_native_target(
             &config,
             &control,
             || {
@@ -250,7 +239,6 @@ fn a_window_returned_after_stop_never_becomes_target_authority() {
                 Ok(snapshot.take().unwrap())
             },
             || Ok(()),
-            || panic!("late window results must not restart waiting"),
         )
         .unwrap_err();
         assert_eq!(fault.category, reason.fault().category);
@@ -264,12 +252,11 @@ fn an_expired_supplied_budget_never_starts_window_or_process_discovery() {
         serde_json::from_str(include_str!("../../../fixtures/manual-plan.json")).unwrap();
     plan.limits.duration_ms = 0;
     let control = Control::new(&plan.limits);
-    let fault = wait_for_native_target(
+    let fault = probe_native_target(
         &config,
         &control,
         || panic!("window discovery must not receive a renewed deadline"),
         || panic!("process discovery must not receive a renewed deadline"),
-        || panic!("an expired operation cannot start a wait"),
     )
     .unwrap_err();
     assert_eq!(fault.category, "Timeout");
@@ -281,18 +268,12 @@ fn os_failure_and_unavailable_process_evidence_are_not_window_absence() {
     let config = config();
     let failure = Fault::new("PermissionDenied", "discovery denied")
         .with_context(json!({"stage":"target_discovery"}));
-    let fault = wait_for_native_target(
-        &config,
-        &control(),
-        || Err(failure.clone()),
-        || Ok(()),
-        || panic!("failed discovery cannot be retried as absence"),
-    )
-    .unwrap_err();
+    let fault =
+        probe_native_target(&config, &control(), || Err(failure.clone()), || Ok(())).unwrap_err();
     assert_eq!(fault.category, failure.category);
     assert_eq!(fault.context, failure.context);
 
-    let fault = wait_for_native_target(
+    let fault = probe_native_target(
         &config,
         &control(),
         || panic!("unverifiable process must refuse before window discovery"),
@@ -302,7 +283,6 @@ fn os_failure_and_unavailable_process_evidence_are_not_window_absence() {
                 "unavailable process evidence",
             ))
         },
-        || panic!("unverifiable process cannot be waited on"),
     )
     .unwrap_err();
     assert_eq!(fault.context["stage"], "target_identity_unavailable");
@@ -342,7 +322,7 @@ fn a_selected_window_is_not_replaced_by_matching_metadata_or_a_new_title() {
 fn cancellation_during_process_validation_does_not_begin_window_discovery() {
     let config = config();
     let control = control();
-    let fault = wait_for_native_target(
+    let fault = probe_native_target(
         &config,
         &control,
         || panic!("late process validation cannot start window discovery"),
@@ -350,7 +330,6 @@ fn cancellation_during_process_validation_does_not_begin_window_discovery() {
             control.cancel();
             Ok(())
         },
-        || panic!("cancellation cannot start a new wait"),
     )
     .unwrap_err();
     assert_eq!(fault.category, "Cancelled");

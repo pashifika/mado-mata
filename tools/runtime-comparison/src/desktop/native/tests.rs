@@ -60,7 +60,9 @@ fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
         );
     }
     for field in [
-        "duration_ms",
+        "startup_ms",
+        "readiness_ms",
+        "workflow_ms",
         "max_frames",
         "wait_ms",
         "interval_ms",
@@ -92,7 +94,7 @@ fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
             ..native_limits()
         },
         NativeLimits {
-            duration_ms: 999,
+            startup_ms: 999,
             ..native_limits()
         },
         NativeLimits {
@@ -254,7 +256,9 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
     let mut target = target();
     let mut plan = crate::desktop::manual_plan().unwrap();
     plan.lane = "native".into();
-    plan.limits.duration_ms = native_limits().duration_ms;
+    plan.native_budgets = Some(native_limits().budgets());
+    plan.limits.duration_ms = native_limits().budgets().total_ms().unwrap();
+    plan.limits.readiness_ms = native_limits().readiness_ms;
     let environment = json!({"version":1,"ocr":{"language":crate::environment::LANGUAGE},"native_libraries":[],"replay":null,"native":null});
     let templates = prepare_templates(&inventory, &plan.limits).unwrap();
     project(
@@ -262,7 +266,7 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
         &request,
         &target,
         &target.executable,
-        templates,
+        &templates,
         environment,
     )
     .unwrap();
@@ -337,7 +341,7 @@ fn native_stop_during_host_preparation_retains_the_slot_and_prevents_child_launc
                     native: (),
                 })
             },
-            |(), _, _, _| panic!("cancelled capture must not reach target resolution"),
+            |_, _, _, _| panic!("cancelled capture must not reach target resolution"),
         )
         .unwrap();
     started.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -367,7 +371,6 @@ fn native_scenarios_and_replay_descriptors_cannot_change_the_admitted_workflow()
     if cfg!(target_os = "macos") {
         let plan = normal.unwrap();
         assert_eq!(plan.lane, "native");
-        assert_eq!(plan.limits.duration_ms, 30_000);
         request.scenario = "partial".into();
         assert_eq!(
             crate::desktop::operation::requested_plan(&request)

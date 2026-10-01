@@ -21,9 +21,10 @@ identity, executable, environment override, or native configuration.
 Reserve Preparing before slow work. Capture saved profile, target record and App
 environment under existing serialization, then release command/Store locks.
 Complete immutable package/profile/asset validation, static compilation/import
-linking, required OCR resource capture and engine-artifact preflight before
-launch admission. No package module is evaluated and no capture/input is acquired
-to establish launch prerequisites. Reuse those captured inputs after launch.
+linking, required OCR resource capture and engine-artifact preflight without
+evaluating package code or acquiring native capture/input. Then run the existing
+`readiness()` in the existing supervised QuickJS runner, before target attachment.
+Reuse those captured inputs throughout the operation.
 
 Typed discovery separates confirmed absence, a unique verified process,
 ambiguity, unverifiable candidates and OS failure. Only approved absence permits
@@ -31,13 +32,35 @@ one submission after recipe preparation/revalidation, a captured-resource
 checkpoint and the final correspondence recheck, in that order. A newly appearing
 unique game is attached instead. A missing window never means an absent game.
 Preserve candidate limits, signature/architecture and signed-relocated-copy safeguards.
-Give the child the
-actual runtime executable, PID/lifetime, exact window title and saved input policy,
-not the launcher's identity or an OS receipt. Wait for the first exact eligible
-window under the original deadline. Read-only Foundation/libproc checks retain
-the selected lifetime while windowless; the public SDK independently binds its
-window. Process loss/replacement refuses the attempt, not a new target selection.
-Readiness must precede ordinary workflow input.
+Give the child the actual runtime executable, PID/lifetime, exact window title
+and saved input policy, not the launcher's identity or an OS receipt. Script
+status probes drive bounded preparation for the first exact eligible window.
+Read-only Foundation/libproc checks retain the selected lifetime while windowless;
+the public SDK independently binds its window. Process loss/replacement refuses
+the attempt, not a new target selection.
+
+## Script-requested startup
+
+Only Desktop Native Readiness can call `host.call("target_start", {})` and
+`host.call("target_status", {})`. Both require an exact empty object; neither
+accepts a path, target, recipe, process, input policy or authority override.
+No request means no target acquisition or launch. One start request returns
+`pending` promptly without waiting for a process/window; duplicates refuse.
+Status polling drives bounded work, with at most one preparation step in flight,
+not an unbounded queue or a host-owned game-readiness loop.
+
+The result separates target `status` (`not_requested`, `pending`, `capture_ready`),
+preparation `phase` and launch disposition. Confirmed process/window absence is
+pending only within the admitted attempt. Ambiguity, unverifiable/lost targets,
+permissions, OS failure and rejected/uncertain submission remain typed faults,
+never a request to retry. Acquisition and early `"Ready"` refuse until capture
+is available. The Script supplies its waits and real image/template/OCR criteria;
+`capture_ready` alone is not game readiness. Ordinary input opens only in Workflow
+after Readiness explicitly returns `"Ready"`.
+
+Module evaluation, Workflow, Controlled and Replay cannot use these calls.
+The independent M0 CLI keeps its explicitly supplied `native_config`; it cannot
+select Desktop-only phase budgets or acquire this preparation authority.
 
 ## Launch library and OS semantics
 
@@ -92,17 +115,28 @@ fault does not revoke historical results or turn them into current input authori
 
 ## Bounds and termination
 
-The host policy is 30 s including preflight, launch, process/window waiting,
-native initialization, Readiness and Workflow. Stage changes never renew it.
-The supervisor transfers an absolute shared-OS-monotonic deadline to its child;
-spawn, payload transfer and validation consume that same budget. Conservative
-conversion never grants a fresh duration, and an expired bound refuses before
-Host/native work.
-Other bounds remain 300 acquired frames, 1 s waits,
-100 ms pacing, and 64 cumulative expanded input events. A click consumes three
-events, or four with a hold; each key press/release consumes one. Uncertain
-submission does not refund authority. Cleanup releases use the separate restricted
-path, with 1 s cleanup and 2 s containment bounds.
+The reviewed host tuple has positive defaults/ceilings of **60 s Startup**,
+**30 s Readiness** and **30 s Workflow**. Smaller valid tuples are accepted;
+invalid tuples refuse, without clamping. Startup begins at reservation and
+includes preflight, Script work before capture availability, launch, bounded
+process/window preparation and native initialization. Readiness starts once at
+`capture_ready`; Workflow starts once after `"Ready"`. No phase borrows unused
+time or renews its own budget.
+
+At reservation the host fixes an absolute outer deadline from the sum
+(**120 s** for the default tuple). The supervisor transfers shared-OS-monotonic
+deadlines conservatively; spawn, payload transfer, validation and later phase
+transitions cannot extend that outer bound. The former shared 30-second policy
+expired during native initialization in an observed cold start, before Script
+entry. Desktop Native no longer inherits the generic hidden 2-second Readiness
+bound. The pinned SDK accepts the finite operation duration; its separate
+2-second maximum for an individual macOS native wait is unchanged.
+
+Other bounds remain 300 acquired frames, 1 s waits, 100 ms pacing, and 64
+cumulative expanded input events. A click consumes three events, or four with a
+hold; each key press/release consumes one. Uncertain submission does not refund
+authority. Cleanup releases use the separate restricted path, with 1 s cleanup
+and 2 s containment bounds.
 
 Preserve explicit cancellation versus whole-operation timeout through the typed
 supervisor verdict. The child closes admission at its deadline, but keeps its own
@@ -114,14 +148,21 @@ entry outcome or cleanup. Retain worker and
 child ownership until physical settlement/reaping. Forced or unverified Native
 cleanup blocks another Native run and in-process configuration reconstruction;
 the operator must reconcile the target and restart the application.
+Native initialization evidence starts at SDK initializer admission, not Host
+construction or worker scheduling. A later unverified acquisition/rollback or
+worker panic remains a sticky cleanup obligation even when a Script fault or Stop
+is already primary. Execution/containment errors retain the callback's final
+launch disposition after physical settlement; they cannot restore an earlier
+"not submitted" state.
 
 Launch admission and cancellation share a linearization fence. If Stop wins,
 no request is submitted. After admission the OS can finish opening the app after
 Stop or timeout; the pending callback remains owned until physical completion,
-but its late result cannot start capture/input or package execution. Stop never
-terminates the game/launcher or claims to undo launch. Retain typed preparation
-phase and launch disposition independently of primary outcome, input receipts,
-visible effect and cleanup, including accepted-launch-then-timeout.
+but its late result cannot resume Script work, start capture/input or enter
+Workflow. Script return/throw and app close retain the same ownership obligations.
+Stop never terminates the game/launcher or claims to undo launch. Retain target
+status, typed preparation phase and launch disposition independently of primary
+outcome, input receipts, visible effect and cleanup, including accepted-launch-then-timeout.
 
 ## Acceptance boundary
 

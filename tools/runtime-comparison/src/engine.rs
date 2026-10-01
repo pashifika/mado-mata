@@ -222,6 +222,8 @@ mod enabled {
         serial: u64,
         cleanup: Option<Value>,
         process_lifetime: String,
+        // Preserve the independent OS process-start check across Script polls.
+        native_process_started: Option<(u64, u64)>,
         captured_frames: u64,
         last_capture: Option<Instant>,
         input_events: usize,
@@ -311,6 +313,49 @@ mod enabled {
             attempt: u64,
             handle_budget: Arc<HandleBudget>,
         ) -> Result<Self, Fault> {
+            Self::initialize(
+                plan,
+                assets,
+                control,
+                attempt_id,
+                attempt,
+                handle_budget,
+                None,
+            )
+        }
+
+        pub(crate) fn probe_native(
+            plan: &Plan,
+            assets: &BTreeMap<String, crate::images::PayloadBytes>,
+            control: Arc<Control>,
+            attempt_id: &str,
+            attempt: u64,
+            handle_budget: Arc<HandleBudget>,
+            initialization_started: &AtomicBool,
+        ) -> Result<Self, Fault> {
+            if plan.lane != "native" || plan.native_budgets.is_none() {
+                return Err(internal("capture probe requires Desktop Native authority"));
+            }
+            Self::initialize(
+                plan,
+                assets,
+                control,
+                attempt_id,
+                attempt,
+                handle_budget,
+                Some(initialization_started),
+            )
+        }
+
+        fn initialize(
+            plan: &Plan,
+            assets: &BTreeMap<String, crate::images::PayloadBytes>,
+            control: Arc<Control>,
+            attempt_id: &str,
+            attempt: u64,
+            handle_budget: Arc<HandleBudget>,
+            deferred_startup: Option<&AtomicBool>,
+        ) -> Result<Self, Fault> {
             let raw = plan.native_config.as_ref().ok_or_else(|| {
                 blocked(
                     "configuration_unset",
@@ -344,7 +389,7 @@ mod enabled {
                     ));
                 }
             }
-            if config.native.is_some() {
+            if config.native.is_some() && deferred_startup.is_none() {
                 crate::runner::emit_native_preparation(
                     &control,
                     crate::desktop::NativePhase::NativeInitialization,
@@ -420,6 +465,8 @@ mod enabled {
                             .ok_or_else(|| internal("native authority missing"))?,
                         &ocr,
                         &operation,
+                        &control,
+                        deferred_startup,
                     )?
                 };
                 // Recheck externally stored resources after initialization, before publication.
@@ -479,14 +526,105 @@ mod enabled {
             };
             drop(cache);
             control.check()?;
-            let (target, request, process_lifetime) = if let Some(native) = &config.native {
-                let target =
-                    discover_native_target(&resources.engine, native, &control, &operation)?;
+            let process_lifetime = config.native.as_ref().map_or_else(
+                || attempt_id.to_owned(),
+                |native| native.process_lifetime.clone(),
+            );
+            let mut native_process_started = None;
+            let session = if deferred_startup.is_none() {
+                Some(
+                    Self::open_target_session(
+                        &resources,
+                        config.native.as_ref(),
+                        &control,
+                        &bridge,
+                        &operation,
+                        true,
+                        &mut native_process_started,
+                    )?
+                    .ok_or_else(|| internal("blocking session initialization returned pending"))?,
+                )
+            } else {
+                None
+            };
+            Ok(Self {
+                resources,
+                state: Mutex::new(State {
+                    attempt_id: attempt_id.to_owned(),
+                    session,
+                    observations: BTreeMap::new(),
+                    results: BTreeMap::new(),
+                    queries: BTreeMap::new(),
+                    active_queries: 0,
+                    latest: None,
+                    serial: 0,
+                    cleanup: None,
+                    process_lifetime,
+                    native_process_started,
+                    captured_frames: 0,
+                    last_capture: None,
+                    input_events: 0,
+                    input_cleanup_incomplete: false,
+                    placement: None,
+                }),
+                control,
+                limits: plan.limits.clone(),
+                run: plan.id.clone(),
+                attempt,
+                bridge,
+                closing: AtomicBool::new(false),
+                in_flight: AtomicUsize::new(0),
+                handles: AtomicUsize::new(0),
+                handle_budget,
+                native: config.native,
+            })
+        }
+
+        /// Retain initialized resources across Script polls. Only exact target
+        /// discovery/session opening repeats, never OCR/package initialization.
+        pub(crate) fn prepare_capture(&self) -> Result<bool, Fault> {
+            self.check()?;
+            let _active = self.active();
+            let mut state = self.lock()?;
+            if state.session.is_some() {
+                return Ok(true);
+            }
+            let operation = self.operation(self.limits.wait_ms)?;
+            let session = Self::open_target_session(
+                &self.resources,
+                self.native.as_ref(),
+                &self.control,
+                &self.bridge,
+                &operation,
+                false,
+                &mut state.native_process_started,
+            )?;
+            state.session = session;
+            Ok(state.session.is_some())
+        }
+
+        fn open_target_session(
+            resources: &Resources,
+            native: Option<&NativeConfig>,
+            control: &Control,
+            bridge: &CancellationBridge,
+            operation: &mp::OperationContext,
+            wait: bool,
+            process_started: &mut Option<(u64, u64)>,
+        ) -> Result<Option<mp::Session>, Fault> {
+            let (target, request) = if let Some(native) = native {
+                let Some(target) = discover_native_target(
+                    &resources.engine,
+                    native,
+                    control,
+                    operation,
+                    wait,
+                    process_started,
+                )?
+                else {
+                    return Ok(None);
+                };
                 control.check()?;
-                crate::runner::emit_native_preparation(
-                    &control,
-                    crate::desktop::NativePhase::NativeInitialization,
-                );
                 let mut input =
                     mp::InputOpenRequest::new().with_requirement(mp::InputRequirement::Required);
                 if native.input.reviewed_operation.is_some() {
@@ -515,12 +653,11 @@ mod enabled {
                             ),
                         )
                         .requesting_input(input),
-                    native.process_lifetime.clone(),
                 )
             } else {
                 let targets = resources
                     .engine
-                    .discover(&operation)
+                    .discover(operation)
                     .map_err(|error| engine_error("target_discovery", error))?;
                 if targets.len() != 1 {
                     return Err(blocked(
@@ -531,55 +668,27 @@ mod enabled {
                 (
                     targets[0].id(),
                     mp::SessionRequest::new().capturing(mp::OpenRequest::new()),
-                    attempt_id.to_owned(),
                 )
             };
             control.check()?;
-            let operation = if let Some(native) = &config.native {
-                let open_bound = native.capture.wait_ms.min(
-                    native
-                        .capture
-                        .duration_ms
-                        .saturating_sub(control.elapsed_us() / 1_000),
-                );
-                self::operation(&bridge.token, open_bound)?
-            } else {
-                operation
-            };
-            let session = resources
+            let open_operation = native
+                .map(|native| {
+                    let remaining = control
+                        .deadline()
+                        .saturating_duration_since(Instant::now())
+                        .as_millis() as u64;
+                    self::operation(&bridge.token, native.capture.wait_ms.min(remaining))
+                })
+                .transpose()?;
+            resources
                 .engine
-                .open_session(target, &request, &operation)
-                .map_err(|error| session_open_error(config.native.is_some(), error))?;
-            Ok(Self {
-                resources,
-                state: Mutex::new(State {
-                    attempt_id: attempt_id.to_owned(),
-                    session: Some(session),
-                    observations: BTreeMap::new(),
-                    results: BTreeMap::new(),
-                    queries: BTreeMap::new(),
-                    active_queries: 0,
-                    latest: None,
-                    serial: 0,
-                    cleanup: None,
-                    process_lifetime,
-                    captured_frames: 0,
-                    last_capture: None,
-                    input_events: 0,
-                    input_cleanup_incomplete: false,
-                    placement: None,
-                }),
-                control,
-                limits: plan.limits.clone(),
-                run: plan.id.clone(),
-                attempt,
-                bridge,
-                closing: AtomicBool::new(false),
-                in_flight: AtomicUsize::new(0),
-                handles: AtomicUsize::new(0),
-                handle_budget,
-                native: config.native,
-            })
+                .open_session(
+                    target,
+                    &request,
+                    open_operation.as_ref().unwrap_or(operation),
+                )
+                .map(Some)
+                .map_err(|error| session_open_error(native.is_some(), error))
         }
 
         #[cfg(test)]
@@ -650,6 +759,7 @@ mod enabled {
                     serial: 0,
                     cleanup: None,
                     process_lifetime: attempt_id.into(),
+                    native_process_started: None,
                     captured_frames: 0,
                     last_capture: None,
                     input_events: 0,
@@ -831,7 +941,12 @@ mod enabled {
                 .map_or(self.limits.duration_ms, |native| {
                     native.capture.duration_ms.min(self.limits.duration_ms)
                 });
-            let remaining = duration.saturating_sub(elapsed);
+            let remaining = duration.saturating_sub(elapsed).min(
+                self.control
+                    .deadline()
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u64,
+            );
             if remaining == 0 {
                 return Err(Fault::new("Timeout", "engine attempt deadline expired"));
             }
@@ -1605,6 +1720,8 @@ mod enabled {
         native: &NativeConfig,
         ocr: &mp::OcrProviderConfig,
         operation: &mp::OperationContext,
+        control: &Control,
+        initialization_started: Option<&AtomicBool>,
     ) -> Result<mp::Engine, Fault> {
         let request = mp::NativeEngineRequest::new().with_capture_pacing(
             mp::CapturePacingRequest::required(Duration::from_millis(native.capture.interval_ms))
@@ -1619,6 +1736,19 @@ mod enabled {
                 }
             },
         ));
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            control.check()?;
+            if control.closed_us.load(Ordering::Acquire) != 0 {
+                return Err(Fault::new(
+                    "AdmissionClosed",
+                    "Native initialization admission is closed",
+                ));
+            }
+            if let Some(started) = initialization_started {
+                started.store(true, Ordering::Release);
+            }
+        }
         #[cfg(target_os = "macos")]
         let result = mp::macos_engine_with_ocr_provider(request, ocr, operation);
         #[cfg(windows)]
@@ -1629,7 +1759,7 @@ mod enabled {
         }
         #[cfg(not(any(target_os = "macos", windows)))]
         {
-            let _ = (request, ocr, operation);
+            let _ = (request, ocr, operation, control, initialization_started);
             Err(blocked(
                 "native_platform_unsupported",
                 "native engine requires macOS or Windows",
@@ -1673,53 +1803,64 @@ mod enabled {
         config: &NativeConfig,
         control: &Control,
         operation: &mp::OperationContext,
-    ) -> Result<mp::TargetId, Fault> {
+        wait: bool,
+        process_started: &mut Option<(u64, u64)>,
+    ) -> Result<Option<mp::TargetId>, Fault> {
         let lifetime = native_lifetime(config)?;
         #[cfg(target_os = "macos")]
         {
-            let mut process_started = None;
-            let target = wait_for_native_target(
-                config,
-                control,
-                || {
-                    engine
-                        .discover(operation)
-                        .map_err(|error| engine_error("target_discovery", error))
-                },
-                || check_native_process(config, lifetime, control, &mut process_started),
-                || {
-                    thread::park_timeout(
-                        Duration::from_millis(50)
-                            .min(control.deadline().saturating_duration_since(Instant::now())),
-                    );
-                    Ok(())
-                },
-            )?;
+            let target = loop {
+                let target = probe_native_target(
+                    config,
+                    control,
+                    || {
+                        engine
+                            .discover(operation)
+                            .map_err(|error| engine_error("target_discovery", error))
+                    },
+                    || check_native_process(config, lifetime, control, process_started),
+                )?;
+                if let Some(target) = target {
+                    break target;
+                }
+                if !wait {
+                    return Ok(None);
+                }
+                crate::runner::emit_native_preparation(
+                    control,
+                    crate::desktop::NativePhase::WaitingForWindow,
+                );
+                thread::park_timeout(
+                    Duration::from_millis(50)
+                        .min(control.deadline().saturating_duration_since(Instant::now())),
+                );
+            };
             // Revalidate the retained target, never rediscover a replacement.
             let current = engine
                 .describe_window(target, operation)
                 .map_err(|error| engine_error("target_revalidation", error))?;
             control.check()?;
             validate_retained_native_target(target, &current, config, lifetime)?;
-            check_native_process(config, lifetime, control, &mut process_started)?;
-            Ok(target)
+            check_native_process(config, lifetime, control, process_started)?;
+            Ok(Some(target))
         }
         #[cfg(not(target_os = "macos"))]
         {
-            // Windowless startup is macOS-only; retain the existing other-OS refusal.
+            let _ = process_started;
             control.check()?;
             let targets = engine
                 .discover(operation)
                 .map_err(|error| engine_error("target_discovery", error))?;
             control.check()?;
-            select_native_target(&targets, config, lifetime)?
-                .map(mp::TargetDescription::id)
-                .ok_or_else(|| {
-                    blocked(
-                        "target_identity_mismatch",
-                        "no window matches the exact name, canonical path, PID and lifetime",
-                    )
-                })
+            let target =
+                select_native_target(&targets, config, lifetime)?.map(mp::TargetDescription::id);
+            if target.is_none() && wait {
+                return Err(blocked(
+                    "target_identity_mismatch",
+                    "no window matches the exact name, canonical path, PID and lifetime",
+                ));
+            }
+            Ok(target)
         }
     }
 
@@ -1739,43 +1880,29 @@ mod enabled {
     }
 
     #[cfg(any(target_os = "macos", test))]
-    fn wait_for_native_target(
+    fn probe_native_target(
         config: &NativeConfig,
         control: &Control,
         mut discover: impl FnMut() -> Result<Vec<mp::TargetDescription>, Fault>,
         mut check_process: impl FnMut() -> Result<(), Fault>,
-        mut pause: impl FnMut() -> Result<(), Fault>,
-    ) -> Result<mp::TargetId, Fault> {
+    ) -> Result<Option<mp::TargetId>, Fault> {
         let lifetime = native_lifetime(config)?;
-        let mut reported_wait = false;
         let checkpoint = || {
             control.check().map_err(|fault| {
                 fault.with_context(json!({"stage":"waiting_for_window","engine_revision":REVISION}))
             })
         };
-        loop {
-            checkpoint()?;
-            check_process()?;
-            checkpoint()?;
-            let targets = discover();
-            checkpoint()?;
-            let targets = targets?;
-            check_process()?;
-            checkpoint()?;
-            let selected = select_native_target(&targets, config, lifetime)?;
-            checkpoint()?;
-            if let Some(target) = selected {
-                return Ok(target.id());
-            }
-            if !reported_wait {
-                crate::runner::emit_native_preparation(
-                    control,
-                    crate::desktop::NativePhase::WaitingForWindow,
-                );
-                reported_wait = true;
-            }
-            pause()?;
-        }
+        checkpoint()?;
+        check_process()?;
+        checkpoint()?;
+        let targets = discover();
+        checkpoint()?;
+        let targets = targets?;
+        check_process()?;
+        checkpoint()?;
+        let selected = select_native_target(&targets, config, lifetime)?;
+        checkpoint()?;
+        Ok(selected.map(mp::TargetDescription::id))
     }
 
     #[cfg(target_os = "macos")]

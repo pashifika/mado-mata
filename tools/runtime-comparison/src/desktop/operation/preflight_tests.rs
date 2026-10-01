@@ -78,7 +78,7 @@ fn refused_before_resolve(
                     native: (),
                 })
             },
-            move |(), _, _, _| {
+            move |_, _, _, _| {
                 called.store(true, Ordering::Release);
                 Err(Fault::new(
                     "UnexpectedResolution",
@@ -92,6 +92,7 @@ fn refused_before_resolve(
     assert_eq!(
         view.native_preparation,
         Some(NativeProgress {
+            status: NativeTargetStatus::NotRequested,
             phase: NativePhase::Preflight,
             launch: LaunchDisposition::NotRequested,
         })
@@ -283,6 +284,7 @@ fn late_launch_settlement_keeps_owner_and_disposition_despite_stop_and_full_prog
                 }
                 evidence.native_progress(
                     NativeProgress {
+                        status: NativeTargetStatus::Pending,
                         phase: NativePhase::LaunchSubmission,
                         launch: LaunchDisposition::Accepted,
                     },
@@ -307,6 +309,7 @@ fn late_launch_settlement_keeps_owner_and_disposition_despite_stop_and_full_prog
     release.send(()).unwrap();
     let terminal = settled(&controller);
     let accepted = NativeProgress {
+        status: NativeTargetStatus::Pending,
         phase: NativePhase::LaunchSubmission,
         launch: LaunchDisposition::Accepted,
     };
@@ -321,38 +324,46 @@ fn late_launch_settlement_keeps_owner_and_disposition_despite_stop_and_full_prog
     let next = controller.check_environment(None, None, None).unwrap();
     let mut state = controller.state();
     state.progress(
-        json!({"event":"NativePreparation","app_run":run,"phase":"workflow","launch":"accepted"}),
+        json!({"event":"NativePreparation","app_run":run,"status":"capture_ready","phase":"workflow","launch":"accepted"}),
     );
     assert_eq!(state.run.as_deref(), Some(next.as_str()));
     assert_eq!(state.native_preparation, None);
 }
 
 #[test]
-fn phase_only_child_progress_preserves_the_accepted_launch() {
+fn late_child_progress_cannot_erase_capture_readiness_or_the_launch_disposition() {
     let mut state = State::new();
     state.run = Some("owner".into());
-    state.native_preparation = Some(NativeProgress {
+    let pending = NativeProgress {
+        status: NativeTargetStatus::Pending,
         phase: NativePhase::WaitingForWindow,
         launch: LaunchDisposition::Accepted,
-    });
-    for phase in [
-        NativePhase::NativeInitialization,
-        NativePhase::Readiness,
-        NativePhase::Workflow,
-    ] {
-        state.progress(json!({"event":"NativePreparation","run":"child","phase":phase}));
-        assert_eq!(
-            state.native_preparation,
-            Some(NativeProgress {
-                phase,
-                launch: LaunchDisposition::Accepted
-            })
-        );
-        let event = state.progress.last().unwrap();
-        assert_eq!(event["run"], "owner");
-        assert_eq!(event["child_run"], "child");
-        assert_eq!(event["launch"], "accepted");
-    }
+    };
+    state.native_preparation = Some(pending);
+    state.progress(
+        json!({"event":"NativePreparation","run":"child","status":"not_requested",
+        "phase":"readiness","launch":"not_requested"}),
+    );
+    assert_eq!(state.native_preparation, Some(pending));
+    state.progress(
+        json!({"event":"NativePreparation","run":"child","status":"capture_ready",
+        "phase":"workflow","launch":"not_requested"}),
+    );
+    let ready = NativeProgress {
+        status: NativeTargetStatus::CaptureReady,
+        phase: NativePhase::Workflow,
+        launch: LaunchDisposition::Accepted,
+    };
+    assert_eq!(state.native_preparation, Some(ready));
+    state.progress(
+        json!({"event":"NativePreparation","run":"child","status":"pending",
+        "phase":"native_initialization","launch":"not_requested"}),
+    );
+    assert_eq!(state.native_preparation, Some(ready));
+    let event = state.progress.last().unwrap();
+    assert_eq!(event["status"], "capture_ready");
+    assert_eq!(event["phase"], "workflow");
+    assert_eq!(event["launch"], "accepted");
 }
 
 #[test]
@@ -374,6 +385,7 @@ fn spent_preparation_budget_cannot_be_restarted_by_the_supervisor() {
             control: &control,
             modules: None,
             images: None,
+            startup: None,
         },
         &observer,
     )

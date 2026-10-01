@@ -55,6 +55,7 @@ pub fn plan(candidate: &str, scenario: &str, profile: &str) -> Plan {
         .map(|(k, v)| (k.into(), v))
         .collect(),
         native_config: None,
+        native_budgets: None,
     }
 }
 

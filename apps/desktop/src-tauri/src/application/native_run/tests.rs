@@ -6,6 +6,7 @@ use crate::target::{
 use mado_runtime_comparison::desktop::{NativeIntent, native_limits};
 use mado_runtime_comparison::model::{Plan, identity};
 use serde_json::json;
+use std::time::Duration;
 
 fn inputs() -> (StartRequest, PackageInfo, TargetRecord) {
     let declaration = TargetDeclaration {
@@ -179,7 +180,7 @@ fn only_unique_fresh_correspondence_selects_the_runtime_copy() {
         (vec![process(1), process(2)], "NativeTargetAmbiguous"),
     ] {
         let (request, package, record) = inputs();
-        let binding = NativeBinding::capture(&request, &package, record).unwrap();
+        let mut binding = NativeBinding::capture(&request, &package, record).unwrap();
         let proof = AuthoringApplication {
             processes,
             installation: "verified".into(),
@@ -187,7 +188,7 @@ fn only_unique_fresh_correspondence_selects_the_runtime_copy() {
         assert_eq!(binding.project(proof).unwrap_err().category, category);
     }
     let (request, package, record) = inputs();
-    let binding = NativeBinding::capture(&request, &package, record).unwrap();
+    let mut binding = NativeBinding::capture(&request, &package, record).unwrap();
     let target = binding
         .project(AuthoringApplication {
             processes: vec![process(7)],
@@ -238,12 +239,10 @@ struct ScriptedPreparation {
     discoveries: std::collections::VecDeque<Result<NativeDiscovery, Fault>>,
     recipes: usize,
     launches: usize,
-    waits: usize,
     recipe_fault: Option<Fault>,
     prepare_action: Option<Box<dyn FnOnce(&Control) -> Result<(), Fault> + Send>>,
     discovery_after_prepare: Option<Result<NativeDiscovery, Fault>>,
     launch_fault: Option<LaunchFailure>,
-    cancel_on_wait: bool,
     callback_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 
@@ -253,12 +252,10 @@ impl ScriptedPreparation {
             discoveries: discoveries.into_iter().collect(),
             recipes: 0,
             launches: 0,
-            waits: 0,
             recipe_fault: None,
             prepare_action: None,
             discovery_after_prepare: None,
             launch_fault: None,
-            cancel_on_wait: false,
             callback_gate: None,
         }
     }
@@ -301,14 +298,6 @@ impl PreparationPlatform for ScriptedPreparation {
             .take()
             .map_or(Ok(LaunchDisposition::Accepted), Err)
     }
-
-    fn wait(&mut self, control: &Control) -> Result<(), Fault> {
-        self.waits += 1;
-        if self.cancel_on_wait {
-            control.cancel();
-        }
-        control.check()
-    }
 }
 
 fn control() -> Control {
@@ -342,12 +331,12 @@ fn an_existing_game_or_external_launch_never_submits_the_recipe() {
         let mut platform = ScriptedPreparation::new(discoveries);
         let target = binding(true)
             .resolve_with(&control(), &|_| {}, &|| Ok(()), &mut platform)
+            .unwrap()
             .unwrap();
         assert_eq!(target.process_id, 7);
         assert_eq!(target.process_lifetime, "4123abcdef010203");
         assert_eq!(platform.recipes, expected_recipes);
         assert_eq!(platform.launches, 0);
-        assert_eq!(platform.waits, 0);
     }
 }
 
@@ -359,10 +348,10 @@ fn game_appearing_during_recipe_preparation_attaches_without_admission() {
     let control = control();
     let target = binding(true)
         .resolve_with(&control, &|_| {}, &|| Ok(()), &mut platform)
+        .unwrap()
         .unwrap();
     assert_eq!(target.process_id, 17);
     assert_eq!(platform.launches, 0);
-    assert_eq!(platform.waits, 0);
     control
         .admit_launch()
         .expect("attachment must not spend launch admission");
@@ -400,7 +389,6 @@ fn resource_changed_during_recipe_preparation_refuses_without_admission() {
         "not_requested"
     );
     assert_eq!(platform.launches, 0);
-    assert_eq!(platform.waits, 0);
     control
         .admit_launch()
         .expect("resource refusal must precede admission");
@@ -457,12 +445,11 @@ fn stop_after_recipe_preparation_or_at_admission_prevents_submission() {
             "not_requested"
         );
         assert_eq!(platform.launches, 0);
-        assert_eq!(platform.waits, 0);
     }
 }
 
 #[test]
-fn accepted_launch_waits_for_the_actual_game_without_resubmission() {
+fn accepted_launch_only_probes_again_when_requested_and_never_resubmits() {
     let mut platform = ScriptedPreparation::new([
         Ok(NativeDiscovery::Absent),
         Ok(NativeDiscovery::Absent),
@@ -470,23 +457,53 @@ fn accepted_launch_waits_for_the_actual_game_without_resubmission() {
         unique(9),
     ]);
     let progress = std::cell::RefCell::new(Vec::new());
-    let target = binding(true)
-        .resolve_with(
-            &control(),
-            &|value| progress.borrow_mut().push(value),
-            &|| Ok(()),
-            &mut platform,
-        )
+    let report = |value| progress.borrow_mut().push(value);
+    let mut binding = binding(true);
+    let control = control();
+    assert!(
+        binding
+            .resolve_with(&control, &report, &|| Ok(()), &mut platform)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(platform.launches, 1);
+    assert_eq!(
+        progress.borrow().last().unwrap().phase,
+        NativePhase::WaitingForProcess
+    );
+    assert_eq!(
+        progress.borrow().last().unwrap().status,
+        NativeTargetStatus::Pending
+    );
+    assert!(
+        binding
+            .resolve_with(&control, &report, &|| Ok(()), &mut platform)
+            .unwrap()
+            .is_none()
+    );
+    let target = binding
+        .resolve_with(&control, &report, &|| Ok(()), &mut platform)
+        .unwrap()
         .unwrap();
     assert_eq!(target.process_id, 9);
+    assert_eq!(target.process_lifetime, "4123abcdef010203");
     assert_eq!(platform.launches, 1);
-    assert_eq!(platform.waits, 1);
-    let progress = progress.into_inner();
+    assert_eq!(platform.recipes, 1);
     assert_eq!(
-        progress.last().unwrap().phase,
+        progress.borrow().last().unwrap().phase,
         NativePhase::WaitingForWindow
     );
-    assert_eq!(progress.last().unwrap().launch, LaunchDisposition::Accepted);
+    assert_eq!(
+        progress.borrow().last().unwrap().launch,
+        LaunchDisposition::Accepted
+    );
+    assert_eq!(
+        binding
+            .resolve_with(&control, &report, &|| Ok(()), &mut platform)
+            .unwrap_err()
+            .category,
+        "NativeTargetClosed"
+    );
 }
 
 #[test]
@@ -570,20 +587,24 @@ fn rejected_or_uncertain_launch_preserves_disposition_without_retry() {
             "launch_submission"
         );
         assert_eq!(platform.launches, 1);
-        assert_eq!(platform.waits, 0);
     }
 }
 
 #[test]
 fn stop_during_process_wait_retains_accepted_launch_and_admits_no_target() {
-    let mut platform = ScriptedPreparation::new([
-        Ok(NativeDiscovery::Absent),
-        Ok(NativeDiscovery::Absent),
-        Ok(NativeDiscovery::Absent),
-    ]);
-    platform.cancel_on_wait = true;
-    let fault = binding(true)
-        .resolve_with(&control(), &|_| {}, &|| Ok(()), &mut platform)
+    let mut platform =
+        ScriptedPreparation::new([Ok(NativeDiscovery::Absent), Ok(NativeDiscovery::Absent)]);
+    let mut binding = binding(true);
+    let control = control();
+    assert!(
+        binding
+            .resolve_with(&control, &|_| {}, &|| Ok(()), &mut platform)
+            .unwrap()
+            .is_none()
+    );
+    control.cancel();
+    let fault = binding
+        .resolve_with(&control, &|_| {}, &|| Ok(()), &mut platform)
         .unwrap_err();
     assert_eq!(fault.category, "Cancelled");
     assert_eq!(
@@ -621,4 +642,50 @@ fn a_callback_settling_after_stop_cannot_admit_native_execution() {
         fault.context["native_preparation"]["phase"],
         "launch_submission"
     );
+}
+
+#[test]
+fn failed_process_probe_after_launch_is_terminal_not_pending_or_retried() {
+    for (discovery, category) in [
+        (Ok(NativeDiscovery::Ambiguous), "NativeTargetAmbiguous"),
+        (
+            Ok(NativeDiscovery::Unverifiable),
+            "NativeTargetUnverifiable",
+        ),
+        (
+            Err(Fault::new("LookupFailed", "OS lookup failed")),
+            "LookupFailed",
+        ),
+    ] {
+        let mut platform = ScriptedPreparation::new([
+            Ok(NativeDiscovery::Absent),
+            Ok(NativeDiscovery::Absent),
+            discovery,
+        ]);
+        let mut binding = binding(true);
+        let control = control();
+        assert!(
+            binding
+                .resolve_with(&control, &|_| {}, &|| Ok(()), &mut platform)
+                .unwrap()
+                .is_none()
+        );
+        let fault = binding
+            .resolve_with(&control, &|_| {}, &|| Ok(()), &mut platform)
+            .unwrap_err();
+        assert_eq!(fault.category, category);
+        assert_eq!(fault.context["native_preparation"]["launch"], "accepted");
+        assert_eq!(
+            fault.context["native_preparation"]["phase"],
+            "waiting_for_process"
+        );
+        assert_eq!(
+            binding
+                .resolve_with(&control, &|_| {}, &|| Ok(()), &mut platform)
+                .unwrap_err()
+                .category,
+            "NativeTargetClosed"
+        );
+        assert_eq!(platform.launches, 1);
+    }
 }

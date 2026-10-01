@@ -43,6 +43,7 @@ pub(super) fn make_host(scenario: &str, selected_profile: &str) -> Host {
         repetitions: 1,
         budgets: BTreeMap::new(),
         native_config: None,
+        native_budgets: None,
     };
     let options = resolve_options(&schema(), &profile(selected_profile), "m0-workload")
         .expect("resolved fixture");

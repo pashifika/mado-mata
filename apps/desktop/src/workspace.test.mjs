@@ -1387,7 +1387,7 @@ test('a successful explicit retry carries the unrepaired draft and its issue to 
   assert.equal(stale.recovery,different.recovery);
 });
 
-const nativeLimits={duration_ms:30000,max_frames:300,wait_ms:1000,interval_ms:100,max_actions:64,cleanup_ms:1000,containment_ms:2000};
+const nativeLimits={startup_ms:60000,readiness_ms:30000,workflow_ms:30000,max_frames:300,wait_ms:1000,interval_ms:100,max_actions:64,cleanup_ms:1000,containment_ms:2000};
 const nativeEnvironment={profile:'environment-a'};
 function bundleConfiguration(input=targetConfiguration().input) {
   const configuration=targetConfiguration('/metadata/Game.app');
@@ -1492,7 +1492,7 @@ test('launch-if-absent approval neither substitutes for capture/input consent no
   assert.deepEqual([attachOnly.capture_approved,attachOnly.input_approved,attachOnly.launch_approved],[true,true,false]);
 });
 
-for (const {scenario, change, environment=nativeEnvironment} of [
+for (const {scenario, change, environment=nativeEnvironment, limits=nativeLimits} of [
   {scenario:'a submitted Start spends launch approval even when the host refuses it',change:bound=>clearNativeApproval(bound)},
   {scenario:'a newer saved recipe with other arguments needs fresh launch approval',
     change:bound=>({...bound,target:readTarget(bound.target,targetView(bound.target,{revision:2,configuration:{...bundleConfiguration(),arguments:['--other']}}))})},
@@ -1500,14 +1500,21 @@ for (const {scenario, change, environment=nativeEnvironment} of [
     change:bound=>({...bound,target:{...bound.target,context:{...bound.target.context,workspace:{workspace_id:'a',revision:2}}}})},
   {scenario:'an edited profile draft needs fresh launch approval',change:bound=>editDraft(bound,{count:2})},
   {scenario:'another saved OCR environment needs fresh launch approval',change:bound=>bound,environment:{profile:'environment-b'}},
+  {scenario:'a different host startup budget needs fresh launch approval',change:bound=>bound,limits:{...nativeLimits,startup_ms:45000}},
+  {scenario:'a different host readiness budget needs fresh launch approval',change:bound=>bound,limits:{...nativeLimits,readiness_ms:20000}},
+  {scenario:'a different host workflow budget needs fresh launch approval',change:bound=>bound,limits:{...nativeLimits,workflow_ms:20000}},
 ]) {
   test(scenario,()=>{
     const approved=approve(approveNative(nativeDraft().bound,'launch',true,nativeEnvironment,nativeLimits));
     assert.equal(nativeOf(approved).intent.launch_approved,true);
+    // Consent given for one request is not approval of another, and a request without fresh capture/input has no intent.
+    assert.equal(nativeOf(change(approved),environment,limits).intent,null);
     // Renewing only capture and input must not revive the spent or stale launch consent.
-    const renewed=nativeOf(approve(change(approved),environment),environment);
+    const renewed=nativeOf(approve(change(approved),environment,limits),environment,limits);
     assert.equal(renewed.launch,false);
     assert.equal(renewed.intent.launch_approved,false);
+    // The submitted intent carries exactly the tuple the renewed consent reviewed.
+    assert.deepEqual(renewed.intent.limits,limits);
   });
 }
 

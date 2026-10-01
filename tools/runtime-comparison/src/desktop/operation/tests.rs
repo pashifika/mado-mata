@@ -77,6 +77,7 @@ fn preparation_stop_never_attempts_to_launch_the_runner() {
             control: &control,
             modules: None,
             images: None,
+            startup: None,
         },
         &observer,
         Evidence::new("run", "cancelled-before-capture", None, None).unwrap(),
@@ -112,7 +113,7 @@ fn reserved_preparation_excludes_check_and_stop_prevents_launch() {
                 wait.recv().unwrap();
                 Ok(StartPreparation::<()>::default())
             },
-            |(), _, _, _| panic!("cancelled capture must not reach target resolution"),
+            |_, _, _, _| panic!("cancelled capture must not reach target resolution"),
         )
         .unwrap();
     started.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -164,4 +165,76 @@ fn replay_without_environment_never_falls_back_to_controlled() {
             .iter()
             .any(|event| event["event"] == "ChildStarted")
     );
+}
+
+#[test]
+fn execution_error_retains_late_launch_and_unverified_callback_cleanup() {
+    let inventory = fixture();
+    let plan = requested_plan(&request(&inventory)).unwrap();
+    let control = Arc::new(Control::new(&plan.limits));
+    let (entered, arrival) = mpsc::sync_channel(1);
+    let (release, wait) = mpsc::sync_channel(1);
+    let startup =
+        crate::runner::NativePreparation::new(Arc::clone(&control), move |control, report| {
+            control.admit_launch()?;
+            entered.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            report(NativeProgress {
+                status: NativeTargetStatus::Pending,
+                phase: NativePhase::LaunchSubmission,
+                launch: LaunchDisposition::Accepted,
+            });
+            panic!("callback cleanup is unknown after late acceptance");
+        });
+    startup.request().unwrap();
+    arrival.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (progress, events) = mpsc::sync_channel(PROGRESS_CAPACITY);
+    let (logs, _) = mpsc::sync_channel(LOG_CAPACITY);
+    let observer = Observer {
+        progress,
+        logs,
+        dropped_logs: Arc::new(AtomicU64::new(0)),
+    };
+    let evidence = Evidence::new("run", "late-native-callback", None, None).unwrap();
+    evidence.native_progress(
+        NativeProgress {
+            status: NativeTargetStatus::NotRequested,
+            phase: NativePhase::Preflight,
+            launch: LaunchDisposition::NotRequested,
+        },
+        &observer,
+    );
+    let worker = thread::spawn(move || {
+        let result = execute(
+            Path::new("missing-owned-runner"),
+            &inventory,
+            plan,
+            crate::runner::PreparedExecution {
+                control: &control,
+                modules: None,
+                images: None,
+                startup: Some(&startup),
+            },
+            &observer,
+            evidence,
+        );
+        drop(startup);
+        result.unwrap_err()
+    });
+    loop {
+        let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+        if event["event"] == "PreparationStage" && event["stage"] == "execution" {
+            break;
+        }
+    }
+    release.send(()).unwrap();
+    let fault = worker.join().unwrap();
+    assert_ne!(fault.category, "Controller");
+    assert_eq!(fault.context["native_preparation"]["launch"], "accepted");
+    assert_eq!(
+        fault.context["native_preparation_fault"]["category"],
+        "Controller"
+    );
+    assert_eq!(fault.context["native_cleanup"], "unverified");
+    assert_eq!(fault.context["cleanup"]["clean"], false);
 }

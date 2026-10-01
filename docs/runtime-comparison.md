@@ -212,9 +212,13 @@ and package-identity mismatches fail before execution.
 Both named entry exports must be callable. Guarded module instantiation permits
 no ordinary observation/input work. Readiness has its own finite bound and must
 return the literal string `Ready`; truthy alternatives do not start workflow.
-The host establishes an eligible observation before readiness. The selected
-workflow performs observation, template/OCR recognition, priority choice, ordered
-submission, receipt handling, and an independent strictly newer-frame condition.
+Controlled, Replay and the independent explicit-plan native CLI establish an
+eligible observation before readiness. Reviewed Desktop Native instead runs
+Readiness before attachment: its Script must request startup, poll for capture
+availability and establish its own recognition criteria before returning `Ready`.
+The selected workflow performs observation, template/OCR recognition, priority
+choice, ordered submission, receipt handling, and an independent strictly
+newer-frame condition.
 
 `host.call(method, arguments)` exposes compact JSON values and managed identities,
 not native payloads. Operations include `asset`, `observe`, `recognize`,
@@ -225,6 +229,18 @@ returns explicit per-zone `no_match`; query exhaustion is a typed timeout.
 No uncertain action is automatically replayed. Release remains available after
 admission closes. The controlled-only `fixture` operation injects declared state
 transitions; it is not native authority.
+
+Desktop Native Readiness additionally permits `target_start` and `target_status`,
+each with exactly `{}`. They use only the host's immutable saved binding and
+reviewed authority. Start is single-use and returns pending without waiting for
+a window; status separates `not_requested`, `pending` and `capture_ready` from
+preparation phase and launch disposition. Pending is not an error retry, and
+capture availability is not game readiness. Without a startup request, the host
+acquires no target.
+These calls refuse in every other lane/stage, including the independent native
+CLI. External `run`/`manual` plans cannot select Desktop-only `native_budgets`.
+See the [Desktop startup contract](desktop.md#reviewed-macos-native-start) for
+phase budgets, polling and cleanup ownership.
 
 `scan_ocr_zones` performs one public engine grouped scan of a retained observation:
 

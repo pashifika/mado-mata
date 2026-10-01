@@ -1,5 +1,7 @@
 // mado-host-v1: JSON values only; native resources remain owned by Rust.
 export const methods = Object.freeze({
+  target_start: ["Record<string, never>", "MadoNativeProgress"],
+  target_status: ["Record<string, never>", "MadoNativeProgress"],
   observe: ["Record<string, never>", "MadoObservation"],
   asset: ["{ id: string }", "{ readonly id: string; readonly bytes: number }"],
   recognize: ["MadoRecognitionRequest", "MadoRecognition | null"],
@@ -35,6 +37,12 @@ function optionType(node, depth = 0) {
 export function definitions(schema) {
   return `// Generated from the captured schema and application-owned mado-host-v1 contract.
 type MadoOptions = ${optionType(schema)};
+// Desktop Native Readiness only. Exact empty payloads; no target or launch overrides.
+interface MadoNativeProgress {
+  readonly status: "not_requested" | "pending" | "capture_ready";
+  readonly phase: "preflight" | "target_discovery" | "launch_submission" | "waiting_for_process" | "waiting_for_window" | "native_initialization" | "readiness" | "workflow";
+  readonly launch: "not_requested" | "accepted" | "rejected" | "uncertain";
+}
 interface MadoRegion { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
 interface MadoObservation {
   readonly id: string; readonly run: string; readonly attempt: number;

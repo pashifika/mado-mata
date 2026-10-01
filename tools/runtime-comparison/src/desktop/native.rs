@@ -29,7 +29,9 @@ pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
     let limits = &intent.limits;
     let ceiling = native_limits();
     for (value, maximum) in [
-        (limits.duration_ms, ceiling.duration_ms),
+        (limits.startup_ms, ceiling.startup_ms),
+        (limits.readiness_ms, ceiling.readiness_ms),
+        (limits.workflow_ms, ceiling.workflow_ms),
         (limits.max_frames, ceiling.max_frames),
         (limits.wait_ms, ceiling.wait_ms),
         (limits.interval_ms, ceiling.interval_ms),
@@ -45,13 +47,16 @@ pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
         || limits.max_actions > ceiling.max_actions
         || limits.containment_ms != ceiling.containment_ms
         || limits.wait_ms < limits.interval_ms
-        || limits.duration_ms < limits.wait_ms
+        || limits.startup_ms < limits.wait_ms
+        || limits.readiness_ms < limits.wait_ms
+        || limits.workflow_ms < limits.wait_ms
         || limits.cleanup_ms > limits.containment_ms
     {
         return Err(refused(
             "Native stage limits exceed their enclosing bound or fixed containment policy",
         ));
     }
+    limits.budgets().total_ms()?;
     Ok(())
 }
 
@@ -92,7 +97,7 @@ pub(super) fn validate_target(target: Option<&NativeTarget>) -> Result<&NativeTa
 pub(super) struct Templates {
     package_entries: BTreeMap<String, String>,
     templates: BTreeMap<String, String>,
-    images: crate::images::PayloadReservation,
+    pub(super) images: crate::images::PayloadReservation,
 }
 
 pub(super) fn prepare_templates(
@@ -126,9 +131,9 @@ pub(super) fn project(
     request: &StartRequest,
     target: &NativeTarget,
     engine: &Path,
-    templates: Templates,
+    templates: &Templates,
     mut configuration: Value,
-) -> Result<crate::images::PayloadReservation, Fault> {
+) -> Result<(), Fault> {
     let intent = request
         .native_intent
         .as_ref()
@@ -138,7 +143,7 @@ pub(super) fn project(
     let Templates {
         package_entries,
         templates,
-        images,
+        ..
     } = templates;
     let executable = target
         .executable
@@ -162,9 +167,9 @@ pub(super) fn project(
         "process_id":target.process_id,"process_lifetime":target.process_lifetime,
         "window_rule":target.window_title,"operating_system":"macos",
         "hardware":std::env::consts::ARCH,"permission_executable":permission_executable,
-        "capture":{"approved":true,"duration_ms":limits.duration_ms,
+        "capture":{"approved":true,"duration_ms":limits.budgets().total_ms()?,
             "max_frames":limits.max_frames,"wait_ms":limits.wait_ms,"interval_ms":limits.interval_ms},
-        "input":{"approved":true,"duration_ms":limits.duration_ms,"max_actions":limits.max_actions,
+        "input":{"approved":true,"duration_ms":limits.budgets().total_ms()?,"max_actions":limits.max_actions,
             "route":target.input.route,"focus":target.input.focus,
             "macos_process_pointer_mode":target.input.pointer_mode.as_deref().unwrap_or("core_graphics"),
             "click_hold_ms":target.input.click_hold_ms,"reviewed_operation":intent.operation},
@@ -175,7 +180,7 @@ pub(super) fn project(
     });
     plan.native_config = Some(configuration);
     plan.validate()?;
-    Ok(images)
+    Ok(())
 }
 
 #[cfg(test)]

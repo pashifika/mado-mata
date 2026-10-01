@@ -66,7 +66,9 @@ pub struct NativeIntent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeLimits {
-    pub duration_ms: u64,
+    pub startup_ms: u64,
+    pub readiness_ms: u64,
+    pub workflow_ms: u64,
     pub max_frames: u64,
     pub wait_ms: u64,
     pub interval_ms: u64,
@@ -75,10 +77,22 @@ pub struct NativeLimits {
     pub containment_ms: u64,
 }
 
+impl NativeLimits {
+    pub fn budgets(&self) -> crate::model::NativeBudgets {
+        crate::model::NativeBudgets {
+            startup_ms: self.startup_ms,
+            readiness_ms: self.readiness_ms,
+            workflow_ms: self.workflow_ms,
+        }
+    }
+}
+
 /// Per-Start defaults and ceilings; containment is the fixed supervisor bound.
 pub fn native_limits() -> NativeLimits {
     NativeLimits {
-        duration_ms: REPLAY_DURATION_MS,
+        startup_ms: 60_000,
+        readiness_ms: 30_000,
+        workflow_ms: 30_000,
         max_frames: 300,
         wait_ms: 1_000,
         interval_ms: 100,
@@ -136,7 +150,16 @@ pub enum LaunchDisposition {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeTargetStatus {
+    NotRequested,
+    Pending,
+    CaptureReady,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeProgress {
+    pub status: NativeTargetStatus,
     pub phase: NativePhase,
     pub launch: LaunchDisposition,
 }

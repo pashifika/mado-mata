@@ -263,6 +263,13 @@ mod engine {
     }
 
     fn replay_host() -> (Host, Arc<ScanBackend>) {
+        let (host, backend) = replay_host_before_entries();
+        host.begin_readiness().unwrap();
+        host.begin_workflow().unwrap();
+        (host, backend)
+    }
+
+    fn replay_host_before_entries() -> (Host, Arc<ScanBackend>) {
         let mut host = make_host("success", "template-first");
         let inner = Arc::get_mut(&mut host.inner).unwrap();
         inner.plan.lane = "replay".into();
@@ -284,7 +291,7 @@ mod engine {
             control: Arc::clone(&inner.control),
             mapped: Mutex::new(None),
         });
-        inner.engine = Some(crate::engine::Engine::replay_with_ocr_for_test(
+        inner.engine = OnceLock::from(crate::engine::Engine::replay_with_ocr_for_test(
             &inner.plan,
             Arc::clone(&inner.control),
             &inner.lifetime,
@@ -292,8 +299,6 @@ mod engine {
             Arc::clone(&inner.handle_budget),
             Some(backend.clone()),
         ));
-        host.begin_readiness().unwrap();
-        host.begin_workflow().unwrap();
         (host, backend)
     }
 
@@ -305,7 +310,7 @@ mod engine {
 
     fn assert_only_observation(host: &Host) {
         assert_eq!(host.snapshot()["live_handles"], 1);
-        let engine = host.inner.engine.as_ref().unwrap();
+        let engine = host.inner.engine.get().unwrap();
         assert_eq!(engine.snapshot()["script_handles"], 1);
         assert_eq!(engine.snapshot()["in_flight"], 0);
     }
@@ -504,6 +509,77 @@ mod engine {
         host.call("release", json!({"id":observation["id"]}))
             .unwrap();
         assert_eq!(host.snapshot()["live_handles"], 0);
+        assert_eq!(host.finish()["clean"], true);
+    }
+    #[test]
+    fn native_readiness_keeps_ocr_no_match_script_controlled_until_explicit_ready() {
+        // Public replay supplies the open capture session, pixels and OCR. This
+        // exercises Native phase policy without claiming OS target acquisition.
+        let (mut host, backend) = replay_host_before_entries();
+        let budgets = crate::model::NativeBudgets {
+            startup_ms: 1_000,
+            readiness_ms: 2_000,
+            workflow_ms: 2_000,
+        };
+        let inner = Arc::get_mut(&mut host.inner).unwrap();
+        inner.plan.lane = "native".into();
+        inner.plan.native_budgets = Some(budgets);
+        inner.plan.limits.readiness_ms = budgets.readiness_ms;
+        inner.control.start_native(budgets, None).unwrap();
+        let (link, requests) = crate::runner::StartupLink::new();
+        host.connect_startup(link).unwrap();
+        host.begin_readiness().unwrap();
+        host.call("target_start", json!({})).unwrap();
+        assert_eq!(requests.recv().unwrap(), 1);
+        host.control().native_transition(1, None).unwrap();
+        {
+            let mut startup = lock(&host.inner.startup);
+            startup.progress.status = crate::desktop::NativeTargetStatus::CaptureReady;
+            startup.progress.phase = crate::desktop::NativePhase::Readiness;
+        }
+        backend.candidates.store(0, Ordering::Release);
+        let first = observe(&host);
+        assert_eq!(
+            host.call("scan_ocr_zones", content_request(&first))
+                .unwrap()["zones"][0]["outcome"],
+            "no_match"
+        );
+        assert_eq!(
+            host.call(
+                "submit",
+                json!({"observation":first,"actions":[{"kind":"key_down","key":"A"}]})
+            )
+            .unwrap_err()
+            .category,
+            "AdmissionClosed"
+        );
+        host.call("release", json!({"id":first["id"]})).unwrap();
+        assert!(host.failure().is_none());
+        assert_eq!(host.snapshot()["dispatches"], 0);
+        assert!(!host.control().admission.load(Ordering::Acquire));
+
+        backend.candidates.store(1, Ordering::Release);
+        *lock(&backend.text) = Some("game-ready".into());
+        let next = observe(&host);
+        let recognized = host.call("scan_ocr_zones", content_request(&next)).unwrap();
+        assert_eq!(recognized["zones"][0]["regions"][0]["text"], "game-ready");
+        assert!(
+            !host.control().admission.load(Ordering::Acquire),
+            "recognition is not Ready"
+        );
+        host.call("release", json!({"id":next["id"]})).unwrap();
+        host.begin_workflow().unwrap();
+        assert!(host.control().admission.load(Ordering::Acquire));
+        assert_eq!(host.snapshot()["native_phase"], "workflow");
+        assert_eq!(
+            host.call("target_start", json!({})).unwrap_err().category,
+            "Authority"
+        );
+        assert_eq!(
+            host.call("target_status", json!({})).unwrap_err().category,
+            "Authority"
+        );
+        assert_eq!(backend.calls.load(Ordering::Acquire), 2);
         assert_eq!(host.finish()["clean"], true);
     }
 }

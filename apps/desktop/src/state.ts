@@ -1,6 +1,6 @@
 import {messages} from './i18n.ts';
 import type {Locale} from './i18n.ts';
-import type {ControllerView, EditableSettings, Fault, LogEntry, NativePhase, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Settings, Json, WorkspaceRef} from './types.ts';
+import type {ControllerView, EditableSettings, Fault, LogEntry, NativePhase, NativeProgress, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Settings, Json, WorkspaceRef} from './types.ts';
 
 export const DISCLOSURE_LIMIT = 512 * 1024;
 
@@ -22,12 +22,23 @@ export function acceptController(current:ControllerView, incoming:ControllerView
 
 export type NativeCause = 'missing'|'ambiguous'|'unverifiable';
 export type NativeLaunchOutcome = 'accepted'|'acceptedStopped'|'uncertain'|'rejected';
-export interface NativeOutcome {failure:NativePhase|null; cause:NativeCause|null; launch:NativeLaunchOutcome|null}
+// The failed stage, refined by target status where the remedy differs: a Script that never requested startup, a
+// Readiness that ended while startup was pending, and Readiness criteria that did not hold once capture was available.
+export type NativeFailure = Exclude<NativePhase, 'readiness'>|'unrequested'|'readinessPending'|'readinessCriteria';
+export interface NativeOutcome {failure:NativeFailure|null; cause:NativeCause|null; launch:NativeLaunchOutcome|null}
 const NATIVE_CAUSES:Record<string, NativeCause> = {NativeTargetMissing: 'missing', NativeTargetAmbiguous: 'ambiguous', NativeTargetUnverifiable: 'unverifiable'};
+const READINESS_REFUSALS:Record<string, true> = {Script:true, ReadinessContract:true, TargetNotReady:true, NativeStartRefused:true, Authority:true, Argument:true};
+
+function nativeFailure({phase, status}:NativeProgress, category:string|null):NativeFailure {
+  if (phase === 'preflight') return phase;
+  if (status === 'not_requested') return 'unrequested';
+  if (status === 'pending' && category !== null && Object.hasOwn(READINESS_REFUSALS, category)) return 'readinessPending';
+  return phase === 'readiness' ? 'readinessCriteria' : phase;
+}
 
 // What a settled Native operation leaves the operator to act on, from the host's typed preparation state and primary
-// category, never log wording: the failed stage, a known discovery cause, and a launch whose OS effect can outlive the
-// operation. Stop is not a stage failure, and a launch the host did not submit needs no notice.
+// category, never log wording: the failed stage and target status, a known discovery cause, and a launch whose OS effect
+// can outlive the operation. Stop is not a stage failure, and a launch the host did not submit needs no notice.
 export function nativeOutcome(view:ControllerView):NativeOutcome|null {
   const preparation = view.native_preparation;
   if (view.state !== 'terminal' || !preparation) return null;
@@ -38,7 +49,7 @@ export function nativeOutcome(view:ControllerView):NativeOutcome|null {
   const launch = preparation.launch === 'accepted' ? primary === null ? null : stopped ? 'acceptedStopped' : 'accepted'
     : preparation.launch === 'not_requested' ? null : preparation.launch;
   const cause = failed && category !== null && Object.hasOwn(NATIVE_CAUSES, category) ? NATIVE_CAUSES[category] : null;
-  return {failure: failed ? preparation.phase : null, cause, launch};
+  return {failure: failed ? nativeFailure(preparation, category) : null, cause, launch};
 }
 
 export function record(value:Json|undefined):Record<string,Json> {

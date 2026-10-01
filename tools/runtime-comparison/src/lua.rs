@@ -499,15 +499,18 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
             {
                 crate::runner::emit_vm_hook_reached(&hook_host);
             }
-            let fault = control.check().err().or_else(|| {
-                if control.elapsed_us() >= interrupt_deadline.load(Ordering::Acquire) {
-                    Some(Fault::new("Timeout", "Runtime stage deadline expired"))
-                } else if interrupt_halted.load(Ordering::Acquire) {
-                    Some(Fault::new("RuntimeTerminated", "Host failure is latched"))
-                } else {
-                    None
-                }
-            });
+            let fault = hook_host
+                .failure()
+                .or_else(|| control.check().err())
+                .or_else(|| {
+                    if control.elapsed_us() >= interrupt_deadline.load(Ordering::Acquire) {
+                        Some(Fault::new("Timeout", "Runtime stage deadline expired"))
+                    } else if interrupt_halted.load(Ordering::Acquire) {
+                        Some(Fault::new("RuntimeTerminated", "Host failure is latched"))
+                    } else {
+                        None
+                    }
+                });
             if let Some(mut fault) = fault {
                 fault.context =
                     json!({"module":debug.source().source.as_deref(),"line":debug.current_line()});
@@ -675,12 +678,14 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
             return Err(fault);
         }
         host.begin_readiness()?;
-        deadline.store(
-            host.control()
-                .elapsed_us()
-                .saturating_add(limits.readiness_ms.saturating_mul(1000)),
-            Ordering::Release,
-        );
+        if !host.script_startup() {
+            deadline.store(
+                host.control()
+                    .elapsed_us()
+                    .saturating_add(limits.readiness_ms.saturating_mul(1000)),
+                Ordering::Release,
+            );
+        }
         let ready: Value = entries[0].call(()).map_err(|error| {
             script_fault(
                 error,

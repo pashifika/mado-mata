@@ -2009,7 +2009,7 @@ export default function App() {
     : starting ? ui.operation(starting.kind === 'check' ? 'environment_check' : 'run') : ui.operation(view.operation);
   // The host's typed preparation state of the shown operation; nothing here is read from log or milestone wording.
   const preparation = starting || awaitingAuthoringWorker ? null : view.native_preparation ?? null;
-  const stripDetail = preparation && `${ui.run.nativePhases[preparation.phase]}${preparation.launch === 'not_requested' ? '' : ` · ${ui.run.launchDispositions[preparation.launch]}`}`;
+  const stripDetail = preparation && `${ui.run.nativeStatuses[preparation.status]} · ${ui.run.nativePhases[preparation.phase]}${preparation.launch === 'not_requested' ? '' : ` · ${ui.run.launchDispositions[preparation.launch]}`}`;
   const editVisible = selected !== undefined && selected.id === leaseOwnerId && selected.page === 'edit' && authoring !== null;
   // Every surface, dialogs included, keeps the operation's Stop and the Edit owner's Return to Edit reachable.
   const strip = (idPrefix: string, onReturn: () => void = returnToEdit): ReactNode => <>

@@ -63,6 +63,10 @@ pub(super) struct Invocation {
     pub(super) prepared_modules: Option<crate::typescript::PreparedModules>,
     /// The supervisor's absolute deadline; the child derives no budget of its own.
     pub(super) deadline: SharedDeadline,
+    #[serde(default)]
+    pub(super) startup_deadline: Option<SharedDeadline>,
+    #[serde(default)]
+    pub(super) prepare_target: bool,
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path, bound: usize) -> Result<T, Fault> {

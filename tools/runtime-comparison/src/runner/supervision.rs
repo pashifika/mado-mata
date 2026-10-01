@@ -3,7 +3,7 @@ use super::clock::SharedDeadline;
 use super::evidence::{Observer, receive_evidence};
 use super::protocol::{Invocation, Operation, emit, frame};
 use crate::inventory::Inventory;
-use crate::model::{Fault, MAX_TRANSPORT_BYTES, Plan, StopReason, identity};
+use crate::model::{Control, Fault, MAX_TRANSPORT_BYTES, Plan, StopReason, identity};
 use crate::owned_child::{ChildStdio, Environment, OwnedChild};
 use serde_json::{Value, json};
 use std::io::{BufReader, Read, Write};
@@ -299,12 +299,17 @@ fn supervise(
         })));
     }
     let started = Instant::now();
+    let standalone_control = Control::new(&plan.limits);
+    let owner_control = preparation.map_or(&standalone_control, |prepared| prepared.control);
+    if preparation.is_none()
+        && let Some(budgets) = plan.native_budgets
+    {
+        owner_control.start_native(budgets, None)?;
+    }
+    let startup = preparation.and_then(|prepared| prepared.startup);
     // One original bound for both processes: the child reads this absolute
     // deadline on the shared clock, so transfer time is never refunded.
-    let deadline = preparation.map_or_else(
-        || started + Duration::from_millis(plan.limits.duration_ms),
-        |prepared| prepared.control.deadline(),
-    );
+    let deadline = owner_control.outer_deadline();
     let mut invocation = Invocation {
         run: run.clone(),
         attempt: 1,
@@ -314,6 +319,11 @@ fn supervise(
         observe_logs: observer.is_some(),
         prepared_modules: preparation.and_then(|prepared| prepared.modules.cloned()),
         deadline: SharedDeadline::from_instant(deadline)?,
+        startup_deadline: plan
+            .native_budgets
+            .map(|_| SharedDeadline::from_instant(owner_control.deadline()))
+            .transpose()?,
+        prepare_target: startup.is_some(),
     };
     let bytes = super::payload::header(&mut invocation)?;
     let transfer_assets = invocation.inventory.assets.clone();
@@ -336,7 +346,7 @@ fn supervise(
         .stdin
         .take()
         .ok_or_else(|| Fault::new("Transport", "child stdin unavailable"))?;
-    let (commands, command_receive) = mpsc::sync_channel::<Value>(1);
+    let (commands, command_receive) = mpsc::sync_channel::<Value>(2);
     let mut commands = Some(commands);
     // A child stuck before reading cannot stall the supervisor's deadline.
     let writer = thread::spawn(move || -> Result<(), Fault> {
@@ -348,8 +358,11 @@ fn supervise(
                 .write_all(asset)
                 .map_err(|e| Fault::new("Startup", e.to_string()))?;
         }
-        if let Ok(command) = command_receive.recv() {
+        while let Ok(command) = command_receive.recv() {
             writeln!(input, "{command}").map_err(|e| Fault::new("Transport", e.to_string()))?;
+            if command["command"] != "TargetPrepared" {
+                break;
+            }
         }
         Ok(())
     });
@@ -389,11 +402,66 @@ fn supervise(
     let mut sampled_child_rss = 0u64;
     let mut sampled_parent_rss = 0u64;
     let mut metric_samples = 0usize;
+    let mut probe_sequence = 0u64;
+    let mut pending_probe = None;
+    let mut entry_settled = false;
     let exit;
     loop {
         while let Ok(message) = receiver.try_recv() {
             match message {
                 Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
+                    if value["event"] == "TargetProbe" {
+                        let result = (|| {
+                            if entry_settled
+                                || pending_probe.is_some()
+                                || value["sequence"].as_u64() != probe_sequence.checked_add(1)
+                            {
+                                return Err(Fault::new(
+                                    "Transport",
+                                    "invalid startup request sequence",
+                                ));
+                            }
+                            let startup = startup.ok_or_else(|| {
+                                Fault::new("Authority", "target preparation was not admitted")
+                            })?;
+                            startup.request()?;
+                            probe_sequence += 1;
+                            pending_probe = Some(probe_sequence);
+                            Ok(())
+                        })();
+                        if let Err(fault) = result {
+                            protocol_fault = Some(fault);
+                        }
+                        continue;
+                    }
+                    if value["event"] == "NativeTransition" {
+                        let result = (|| {
+                            if plan.lane != "native" || entry_settled {
+                                return Err(Fault::new(
+                                    "Authority",
+                                    "Native transition outside admitted operation",
+                                ));
+                            }
+                            let phase = value["phase"]
+                                .as_u64()
+                                .and_then(|phase| u8::try_from(phase).ok())
+                                .ok_or_else(|| Fault::new("Transport", "invalid Native phase"))?;
+                            let deadline: SharedDeadline =
+                                serde_json::from_value(value["deadline"].clone())
+                                    .map_err(|error| Fault::new("Transport", error.to_string()))?;
+                            owner_control.native_transition(phase, Some(deadline.instant()?))?;
+                            Ok(())
+                        })();
+                        if let Err(fault) = result {
+                            protocol_fault = Some(fault);
+                        }
+                    }
+                    if value["event"] == "EntrySettled" || value["event"] == "Terminal" {
+                        entry_settled = true;
+                        if pending_probe.is_some() {
+                            owner_control.cancel();
+                        }
+                    }
                     if value["event"] == "ChildStarted" {
                         if let Err(error) = retain_child_build(&value, child.id(), &mut child_build)
                         {
@@ -423,6 +491,24 @@ fn supervise(
                 Err(error) => protocol_fault = Some(error),
             }
         }
+        if let Some(startup) = startup
+            && let Some(sequence) = pending_probe
+            && let Some(reply) = startup.poll()
+        {
+            pending_probe = None;
+            if !entry_settled && stop_sent_at.is_none() {
+                if let Some(sender) = &commands {
+                    if sender
+                        .try_send(json!({"command":"TargetPrepared","run":run,"attempt":1,
+                        "sequence":sequence,"reply":reply}))
+                        .is_err()
+                    {
+                        protocol_fault =
+                            Some(Fault::new("Transport", "startup reply channel unavailable"));
+                    }
+                }
+            }
+        }
         if let Some(status) = child
             .try_wait()
             .map_err(|e| Fault::new("Containment", e.to_string()))?
@@ -434,7 +520,10 @@ fn supervise(
         // The optional operator poll is nonblocking and runs in the supervisor,
         // independently of compilation, VM execution, and native-work locks.
         let operator_requested = if stop_sent_at.is_none() {
-            operator_stop.as_mut().and_then(|poll| poll())
+            operator_stop
+                .as_mut()
+                .and_then(|poll| poll())
+                .or_else(|| owner_control.stop_reason())
         } else {
             None
         };
@@ -463,7 +552,8 @@ fn supervise(
                         StopReason::Cancelled
                     }
                 });
-                let _ = sender.send(json!({"command":reason,"run":run,"attempt":1}));
+                owner_control.stop(reason);
+                let _ = sender.try_send(json!({"command":reason,"run":run,"attempt":1}));
             }
         }
         if stop_sent_at
@@ -495,6 +585,9 @@ fn supervise(
     }
     let exit_us = started.elapsed().as_micros() as u64;
     drop(commands);
+    // A reaped child does not settle a parent-owned launch callback or probe.
+    // Retain this supervisor (and the Desktop reservation) until physical return.
+    let preparation_fault = startup.and_then(super::NativePreparation::settle);
     if let Ok(Err(error)) = writer.join() {
         protocol_fault.get_or_insert(error);
     }
@@ -502,6 +595,9 @@ fn supervise(
     while let Ok(message) = receiver.try_recv() {
         match message {
             Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
+                if value["event"] == "TargetProbe" {
+                    continue;
+                }
                 if value["event"] == "ChildStarted" {
                     if let Err(error) = retain_child_build(&value, child.id(), &mut child_build) {
                         protocol_fault = Some(error);
@@ -552,9 +648,16 @@ fn supervise(
             protocol_fault.as_ref(),
             forced || exit.code() == Some(124),
         )
+        .or_else(|| preparation_fault.clone())
     };
-    let clean =
-        child_build.is_some() && terminal["cleanup"]["clean"] == true && exit.success() && !forced;
+    let preparation_clean = preparation_fault
+        .as_ref()
+        .is_none_or(|fault| fault.context["native_cleanup"] != "unverified");
+    let clean = preparation_clean
+        && child_build.is_some()
+        && terminal["cleanup"]["clean"] == true
+        && exit.success()
+        && !forced;
     let status = if primary.as_ref().is_some_and(|e| e.category == "Blocked") {
         "BLOCKED"
     } else if clean && primary.is_none() {
@@ -562,12 +665,18 @@ fn supervise(
     } else {
         "FAIL"
     };
-    let cleanup = if child_build.is_some() && terminal.get("cleanup").is_some() {
+    let mut cleanup = if child_build.is_some() && terminal.get("cleanup").is_some() {
         terminal["cleanup"].clone()
     } else {
         json!({"clean":false,"status":"IncompleteCleanup","outcome":"ForcedOrIncomplete","cleanup_finished_us":null,
             "external_effects":"unknown; no automatic continuation"})
     };
+    if !preparation_clean {
+        cleanup["clean"] = json!(false);
+        cleanup["status"] = json!("IncompleteCleanup");
+        cleanup["cleanup_finished_us"] = Value::Null;
+        cleanup["native_preparation_cleanup"] = json!("unverified");
+    }
     let reason = primary.as_ref().map_or_else(
         || {
             if clean {
@@ -608,6 +717,9 @@ fn supervise(
         .cloned()
         .unwrap_or_default();
     observations.insert("operation".into(), json!(operation.name()));
+    if let Some(fault) = preparation_fault {
+        observations.insert("native_preparation_fault".into(), json!(fault));
+    }
     if operation == Operation::EnvironmentCheck && !observations.contains_key("stage") {
         observations.insert(
             "stage".into(),
@@ -823,6 +935,8 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
         deadline: SharedDeadline::from_instant(
             Instant::now() + Duration::from_millis(plan.limits.duration_ms),
         )?,
+        startup_deadline: None,
+        prepare_target: false,
     };
     let executable = std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?;
     let mut target = OwnedChild::spawn(
@@ -928,6 +1042,8 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         deadline: SharedDeadline::from_instant(
             Instant::now() + Duration::from_millis(plan.limits.duration_ms),
         )?,
+        startup_deadline: None,
+        prepare_target: false,
     };
     let mut target = OwnedChild::spawn(
         Command::new(&executable).arg("target-probe"),

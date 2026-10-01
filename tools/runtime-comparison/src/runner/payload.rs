@@ -274,6 +274,8 @@ mod tests {
             observe_logs: false,
             prepared_modules: None,
             deadline: SharedDeadline::from_instant(Instant::now()).unwrap(),
+            startup_deadline: None,
+            prepare_target: false,
         }
     }
 

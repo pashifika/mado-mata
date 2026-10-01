@@ -134,6 +134,22 @@ pub fn child() -> Result<bool, Fault> {
         &invocation.plan.limits,
         invocation.deadline.instant()?,
     ));
+    if let Some(budgets) = invocation.plan.native_budgets {
+        let deadline = invocation
+            .startup_deadline
+            .ok_or_else(|| Fault::new("Transport", "Native startup deadline missing"))?;
+        control.start_native(budgets, Some(deadline.instant()?))?;
+    }
+    if invocation.prepare_target
+        && (invocation.plan.lane != "native" || invocation.plan.native_budgets.is_none())
+    {
+        return Err(Fault::new(
+            "Authority",
+            "target preparation requires Desktop Native phase authority",
+        ));
+    }
+    let startup = invocation.prepare_target.then(super::StartupLink::new);
+    let startup_link = startup.as_ref().map(|(link, _)| Arc::clone(link));
     let finished = Arc::new(AtomicBool::new(false));
     // Set once the supervisor's verdict for this attempt has been adopted and
     // its receipts emitted; `settled_primary` waits on it before publishing a
@@ -165,8 +181,38 @@ pub fn child() -> Result<bool, Fault> {
     let input_run = run.clone();
     let input_control = control.clone();
     let adopted = verdict.clone();
+    let input_startup = startup_link.clone();
     thread::spawn(move || {
-        let reason = adopt_stop(&input_control, frame(&mut input, 1024), &input_run, attempt);
+        let reason = loop {
+            let incoming = frame(&mut input, crate::model::MAX_TRANSPORT_BYTES);
+            if let Ok(Some(bytes)) = &incoming
+                && let Ok(mut value) = serde_json::from_slice::<Value>(bytes)
+                && value["command"] == "TargetPrepared"
+                && value["run"] == input_run
+                && value["attempt"] == attempt
+            {
+                let received = value["sequence"]
+                    .as_u64()
+                    .ok_or_else(|| Fault::new("Transport", "startup sequence missing"))
+                    .and_then(|sequence| {
+                        let reply: super::StartupReply =
+                            serde_json::from_value(value["reply"].take())
+                                .map_err(|error| Fault::new("Transport", error.to_string()))?;
+                        input_startup
+                            .as_ref()
+                            .ok_or_else(|| {
+                                Fault::new("Authority", "startup reply was not admitted")
+                            })?
+                            .receive(sequence, reply)
+                    });
+                if received.is_ok() {
+                    continue;
+                }
+                input_control.cancel();
+                break "InvalidControl";
+            }
+            break adopt_stop(&input_control, incoming, &input_run, attempt);
+        };
         let _ = emit(
             &json!({"event":"StopRequested","run":input_run,"attempt":attempt,"reason":reason,
             "at_us":input_control.stop_us.load(Ordering::Acquire)}),
@@ -182,6 +228,22 @@ pub fn child() -> Result<bool, Fault> {
             "build":crate::report::build_identity(),"operation":invocation.operation.name(),"at_us":control.elapsed_us()}),
     )?;
     start_evidence(&invocation);
+    if let Some((_, startup_requests)) = startup {
+        super::startup::identify(&run, attempt);
+        let probe_run = run.clone();
+        let probe_control = Arc::clone(&control);
+        thread::spawn(move || {
+            for sequence in startup_requests {
+                if probe_control.check().is_err() {
+                    return;
+                }
+                if emit(&json!({"event":"TargetProbe","run":probe_run,"attempt":attempt,"sequence":sequence})).is_err() {
+                    probe_control.cancel();
+                    return;
+                }
+            }
+        });
+    }
 
     let preflight_start = Instant::now();
     let checking = invocation.operation == Operation::EnvironmentCheck;
@@ -257,6 +319,9 @@ pub fn child() -> Result<bool, Fault> {
             return complete_child(cleanup["clean"] == true, &finished, emission);
         }
     };
+    if let Some(startup_link) = startup_link {
+        host.connect_startup(startup_link)?;
+    }
     if checking {
         return finish_environment_check(
             host,

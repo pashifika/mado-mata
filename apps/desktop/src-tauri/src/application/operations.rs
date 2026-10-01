@@ -270,10 +270,9 @@ impl Application {
                         native: binding,
                     })
                 },
-                |binding, control, report, verify_resources| {
-                    binding
-                        .map(|binding| binding.resolve(control, report, verify_resources))
-                        .transpose()
+                |binding, control, report, verify_resources| match binding.as_mut() {
+                    Some(binding) => binding.resolve(control, report, verify_resources),
+                    None => Ok(None),
                 },
             )?;
             state.owner = Some(OperationOwner {

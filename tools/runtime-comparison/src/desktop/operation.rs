@@ -1,8 +1,9 @@
 use super::packages::{runtime, select_profile};
 use super::{
     Active, ControllerView, DesktopController, LOG_CAPACITY, LaunchDisposition, NEXT_RUN,
-    NativePhase, NativeProgress, NativeTarget, PROGRESS_CAPACITY, REPLAY_DURATION_MS,
-    REQUEST_BYTES, SHUTDOWN_MS, StartPreparation, StartRequest, State, manual_plan,
+    NativePhase, NativeProgress, NativeTarget, NativeTargetStatus, PROGRESS_CAPACITY,
+    REPLAY_DURATION_MS, REQUEST_BYTES, SHUTDOWN_MS, StartPreparation, StartRequest, State,
+    manual_plan,
 };
 use crate::environment::{
     EnvironmentSnapshot, Library, OcrEnvironment, capture_environment, capture_replay,
@@ -30,12 +31,32 @@ impl State {
             {
                 return;
             }
-            if let Ok(phase) = serde_json::from_value(value["phase"].clone()) {
-                let launch = serde_json::from_value(value["launch"].clone())
-                    .ok()
-                    .or_else(|| self.native_preparation.map(|progress| progress.launch))
-                    .unwrap_or(LaunchDisposition::NotRequested);
-                self.native_preparation = Some(NativeProgress { phase, launch });
+            if let (Ok(mut phase), Ok(mut status), Ok(incoming_launch)) = (
+                serde_json::from_value(value["phase"].clone()),
+                serde_json::from_value(value["status"].clone()),
+                serde_json::from_value(value["launch"].clone()),
+            ) {
+                let previous = self.native_preparation;
+                let launch = previous
+                    .map(|progress| progress.launch)
+                    .filter(|launch| *launch != LaunchDisposition::NotRequested)
+                    .unwrap_or(incoming_launch);
+                if let Some(previous) = previous
+                    && ((previous.status == NativeTargetStatus::CaptureReady
+                        && status != NativeTargetStatus::CaptureReady)
+                        || (previous.status == NativeTargetStatus::Pending
+                            && status == NativeTargetStatus::NotRequested))
+                {
+                    status = previous.status;
+                    phase = previous.phase;
+                }
+                self.native_preparation = Some(NativeProgress {
+                    status,
+                    phase,
+                    launch,
+                });
+                value["status"] = json!(status);
+                value["phase"] = json!(phase);
                 value["launch"] = json!(launch);
             }
         }
@@ -167,22 +188,21 @@ impl DesktopController {
                     native: (),
                 })
             },
-            |(), _, _, _| Ok(None),
+            |_, _, _, _| Ok(None),
         )
     }
 
-    /// Capture immutable application inputs under the reservation. Resolve the
-    /// native target only after non-evaluating, target-independent preflight.
-    /// The resolver must check the borrowed resource snapshot after recipe
-    /// preparation, before final discovery and launch admission.
+    /// Capture immutable application inputs under the reservation. Each Native
+    /// Script probe calls the resolver at most once; None means still pending.
+    /// The resolver must check the resource snapshot before launch admission.
     pub fn start_with_preparation<P: Send + 'static>(
         &self,
         mut request: StartRequest,
         capture: impl FnOnce(&mut StartRequest, &Control) -> Result<StartPreparation<P>, Fault>
         + Send
         + 'static,
-        resolve: impl FnOnce(
-            P,
+        mut resolve: impl FnMut(
+            &mut P,
             &Control,
             &dyn Fn(NativeProgress),
             &dyn Fn() -> Result<(), Fault>,
@@ -190,20 +210,17 @@ impl DesktopController {
         + Send
         + 'static,
     ) -> Result<String, Fault> {
-        let duration_ms =
-            match request.lane.as_str() {
-                "native" => Some(request.native_intent.as_ref().map_or(
-                    REPLAY_DURATION_MS,
-                    |intent| {
-                        match intent.limits.duration_ms {
-                            duration @ 1..=REPLAY_DURATION_MS => duration,
-                            _ => REPLAY_DURATION_MS, // Invalid authority is refused inside the reservation.
-                        }
-                    },
-                )),
-                "replay" => Some(REPLAY_DURATION_MS),
-                _ => None,
-            };
+        let duration_ms = match request.lane.as_str() {
+            "native" => Some(
+                request
+                    .native_intent
+                    .as_ref()
+                    .and_then(|intent| intent.limits.budgets().total_ms().ok())
+                    .unwrap_or(120_000),
+            ),
+            "replay" => Some(REPLAY_DURATION_MS),
+            _ => None,
+        };
         self.reserve(
             "run",
             duration_ms,
@@ -217,6 +234,7 @@ impl DesktopController {
                 if request.lane == "native" {
                     evidence.native_progress(
                         NativeProgress {
+                            status: NativeTargetStatus::NotRequested,
                             phase: NativePhase::Preflight,
                             launch: LaunchDisposition::NotRequested,
                         },
@@ -232,6 +250,10 @@ impl DesktopController {
                     evidence.fields["schema_identity"] = json!(request.schema_identity);
                     evidence.fields["profile_id"] = json!(request.profile_id);
                     let plan = requested_plan(&request)?;
+                    if let Some(budgets) = plan.native_budgets {
+                        control.start_native(budgets, None)?;
+                        control.check()?;
+                    }
                     evidence.complete();
                     evidence.stage("input_capture", observer);
                     let preparation = capture(&mut request, control)?;
@@ -264,69 +286,52 @@ impl DesktopController {
                     control,
                 )
                 .map_err(|error| evidence.fault(error, true))?;
-                let PreparedRun {
-                    inventory,
-                    environment,
-                    engine,
-                    templates,
-                    modules,
-                } = prepared;
-                let executable = engine
-                    .as_ref()
-                    .map_or(executable, |artifact| artifact.path.as_path());
-                let report = |progress| evidence.native_progress(progress, observer);
-                let verify = || verify_resources(environment.as_ref(), engine.as_ref(), control);
-                let target = resolve(preparation.native, control, &report, &verify)
-                    .map_err(|error| evidence.fault(error, true))?;
-                control
-                    .check()
-                    .map_err(|error| evidence.fault(error, true))?;
-                let images = if plan.lane == "native" {
-                    let target = super::native::validate_target(target.as_ref())
-                        .map_err(|error| evidence.fault(error, true))?;
-                    evidence.stage("native_projection", observer);
-                    let images = super::native::project(
-                        &mut plan,
-                        &request,
-                        target,
-                        executable,
-                        templates.expect("native preflight prepares templates"),
-                        environment
-                            .as_ref()
-                            .expect("native preflight captures environment")
-                            .configuration
-                            .clone(),
-                    )
-                    .map_err(|error| evidence.fault(error, true))?;
-                    evidence.fields["native_intent_identity"] =
-                        json!(identity(&request.native_intent)?);
-                    evidence.complete();
-                    Some(images)
+                let PreparedRun { inventory, environment, engine, templates, modules } = prepared;
+                let executable = engine.as_ref().map_or(executable, |artifact| artifact.path.as_path()).to_owned();
+                let templates = templates.map(Arc::new);
+                let startup = if plan.lane == "native" {
+                    plan.native_config = Some(environment.as_ref()
+                        .expect("native preflight captures environment").configuration.clone());
+                    evidence.fields["native_intent_identity"] = json!(identity(&request.native_intent)?);
+                    let mut native = preparation.native;
+                    let mut projected = plan.clone();
+                    let probe_templates = Arc::clone(templates.as_ref().expect("native templates"));
+                    let probe_executable = executable.clone();
+                    let progress_observer = observer.clone();
+                    let owner = app_run.to_owned();
+                    Some(crate::runner::NativePreparation::new(Arc::clone(control), move |control, report| {
+                        let report = |progress: NativeProgress| {
+                            report(progress);
+                            let _ = progress_observer.progress.try_send(json!({
+                                "event":"NativePreparation", "app_run":owner,
+                                "status":progress.status,"phase":progress.phase,"launch":progress.launch,
+                            }));
+                        };
+                        let verify = || verify_resources(environment.as_ref(), engine.as_ref(), control);
+                        let target = resolve(&mut native, control, &report, &verify)?;
+                        control.check()?;
+                        let Some(target) = target else { return Ok(None); };
+                        super::native::validate_target(Some(&target))?;
+                        verify()?;
+                        super::native::project(
+                            &mut projected, &request, &target, &probe_executable, &probe_templates,
+                            environment.as_ref().expect("native environment").configuration.clone(),
+                        )?;
+                        verify()?;
+                        Ok(projected.native_config.take())
+                    }))
                 } else {
-                    if target.is_some() {
-                        return Err(evidence.fault(
-                            Fault::new(
-                                "NativeRefused",
-                                "Non-native lanes reject native target proof",
-                            ),
-                            true,
-                        ));
-                    }
                     None
                 };
-                verify_resources(environment.as_ref(), engine.as_ref(), control)
-                    .map_err(|error| evidence.fault(error, true))?;
                 execute(
-                    executable,
-                    &inventory,
-                    plan,
+                    &executable, &inventory, plan,
                     crate::runner::PreparedExecution {
                         control,
                         modules: modules.as_ref(),
-                        images: images.as_ref(),
+                        images: templates.as_ref().map(|templates| &templates.images),
+                        startup: startup.as_ref(),
                     },
-                    observer,
-                    evidence,
+                    observer, evidence,
                 )
             },
         )
@@ -610,8 +615,9 @@ pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
     }
     if let Some(intent) = &request.native_intent {
         let limits = &intent.limits;
-        plan.limits.duration_ms = limits.duration_ms;
-        plan.limits.readiness_ms = plan.limits.readiness_ms.min(limits.duration_ms);
+        plan.native_budgets = Some(limits.budgets());
+        plan.limits.duration_ms = limits.budgets().total_ms()?;
+        plan.limits.readiness_ms = limits.readiness_ms;
         plan.limits.wait_ms = limits.wait_ms;
         plan.limits.max_actions = limits.max_actions;
         plan.limits.cleanup_ms = limits.cleanup_ms;
@@ -662,7 +668,7 @@ impl Evidence {
         self.native.set(Some(progress));
         let _ = observer.progress.try_send(json!({
             "event":"NativePreparation","app_run":self.fields["app_run"],
-            "phase":progress.phase,"launch":progress.launch,
+            "status":progress.status,"phase":progress.phase,"launch":progress.launch,
         }));
     }
     fn stage(&mut self, stage: &'static str, observer: &Observer) {
@@ -899,18 +905,50 @@ fn execute(
         .control
         .check()
         .map_err(|error| evidence.fault(error, true))?;
-    let record = run_prepared_with_executable(executable, &plan, inventory, preparation, observer)
-        .map_err(|error| evidence.fault(error, false))?;
+    let startup = preparation.startup;
+    let mut record =
+        run_prepared_with_executable(executable, &plan, inventory, preparation, observer);
+    if let Some(startup) = startup {
+        // An OS callback can report acceptance while an execution failure settles.
+        if let Err(error) = &mut record
+            && let Some(mut late) = startup.settle()
+        {
+            let unverified = late.context["native_cleanup"] == "unverified";
+            late.bound_diagnostics();
+            if !error.context.is_object() {
+                error.context = json!({"cause":std::mem::take(&mut error.context)});
+            }
+            error.context["native_preparation_fault"] = json!(late);
+            if unverified {
+                error.context["native_cleanup"] = json!("unverified");
+                if !error.context["cleanup"].is_object() {
+                    error.context["cleanup"] = json!({});
+                }
+                error.context["cleanup"]["clean"] = json!(false);
+            }
+        }
+        let progress = startup.progress();
+        if progress.status != NativeTargetStatus::NotRequested {
+            evidence.native.set(Some(progress));
+        }
+    }
+    let record = record.map_err(|error| evidence.fault(error, false))?;
     if let Some(mut progress) = evidence.native.get() {
         for milestone in &record.milestones {
             if milestone["event"] == "NativePreparation"
                 && let Ok(phase) = serde_json::from_value(milestone["phase"].clone())
             {
                 progress.phase = phase;
+                if let Ok(status) = serde_json::from_value(milestone["status"].clone()) {
+                    progress.status = status;
+                }
             }
         }
         if let Ok(phase) = serde_json::from_value(record.observations["native_phase"].clone()) {
             progress.phase = phase;
+        }
+        if let Ok(status) = serde_json::from_value(record.observations["native_status"].clone()) {
+            progress.status = status;
         }
         evidence.native.set(Some(progress));
     }

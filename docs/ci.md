@@ -134,9 +134,11 @@ The full check has these responsibilities:
   package quotas, decoded/payload bounds, recognition metadata/maps, and generated
   SDK snippets. These commands do not enable the optional `engine` feature or
   execute real OCR.
-  External CLI plans also refuse Desktop-only native authority; real owned-child
-  regressions distinguish parent deadlines from explicit Stop while preserving
-  submitted receipts and cleanup.
+  External CLI plans refuse Desktop-only reviewed input authority and phase
+  budgets before package/output I/O. Real owned-child regressions cover
+  Script-requested startup, no-request cleanup, one-shot/polled preparation,
+  typed startup failures, and independent phase deadlines versus explicit Stop.
+  Submitted receipts and physical cleanup ownership remain separate outcomes.
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
   run its state tests (including per-file history, stale saves, source-diagnostic
   projection, Recognition geometry/Undo, grouped selection, stale trial/Copy
@@ -160,9 +162,10 @@ The full check has these responsibilities:
   pre-startup failures are checked without loading a real OCR backend.
   Native intent/unknown-field rejection, separate launch approval, saved target
   expectations, immutable prelaunch preflight, typed discovery/progress,
-  launch-admission cancellation and sticky cleanup refusal are checked without
-  game launch or native capture/input. Optional engine-feature publication and
-  exact-lifetime/window-wait regressions require the separate
+  one-launch status probes, launch-admission cancellation and sticky cleanup
+  refusal are checked without game launch or native capture/input. Optional
+  engine-feature publication, exact-lifetime/window probes and Readiness input
+  gating regressions require the separate
   [native build prerequisites](runtime-native.md#consumer-publication-regressions).
   Directory-authoring regressions cover configured ID-only destinations, source
   ownership, configuration-only preservation of `sources` and `pkgs`, snapshot

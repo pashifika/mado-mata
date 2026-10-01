@@ -66,11 +66,12 @@ fn help() {
 fn read_external_plan(path: &Path) -> Result<Plan, Fault> {
     let plan: Plan = runner::read_json(path, 65_536)?;
     plan.validate()?;
-    if plan
-        .native_config
-        .as_ref()
-        .and_then(|configuration| configuration.pointer("/native/input/reviewed_operation"))
-        .is_some_and(|operation| !operation.is_null())
+    if plan.native_budgets.is_some()
+        || plan
+            .native_config
+            .as_ref()
+            .and_then(|configuration| configuration.pointer("/native/input/reviewed_operation"))
+            .is_some_and(|operation| !operation.is_null())
     {
         return Err(Fault::new(
             "NativeRefused",

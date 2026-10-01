@@ -3,18 +3,19 @@ use crate::target::{
     TargetBinding, TargetExpectation, TargetRecord,
 };
 use mado_runtime_comparison::desktop::{
-    LaunchDisposition, NativeInputPolicy, NativePhase, NativeProgress, NativeTarget, PackageInfo,
-    StartRequest,
+    LaunchDisposition, NativeInputPolicy, NativePhase, NativeProgress, NativeTarget,
+    NativeTargetStatus, PackageInfo, StartRequest,
 };
 use mado_runtime_comparison::inventory::TargetDeclaration;
 use mado_runtime_comparison::model::{Control, Fault};
-use std::time::Duration;
 
 #[derive(Debug)]
 pub(super) struct NativeBinding {
     binding: TargetBinding,
     declaration: TargetDeclaration,
     launch_approved: bool,
+    progress: NativeProgress,
+    finished: bool,
 }
 
 impl NativeBinding {
@@ -76,36 +77,46 @@ impl NativeBinding {
             binding,
             declaration: declaration.clone(),
             launch_approved: intent.launch_approved,
+            progress: NativeProgress {
+                phase: NativePhase::TargetDiscovery,
+                launch: LaunchDisposition::NotRequested,
+                status: NativeTargetStatus::Pending,
+            },
+            finished: false,
         })
     }
 
     pub(super) fn resolve(
-        self,
+        &mut self,
         control: &Control,
         report: &dyn Fn(NativeProgress),
         verify_resources: &dyn Fn() -> Result<(), Fault>,
-    ) -> Result<NativeTarget, Fault> {
+    ) -> Result<Option<NativeTarget>, Fault> {
         self.resolve_with(control, report, verify_resources, &mut MacosPreparation)
     }
 
     fn resolve_with(
-        self,
+        &mut self,
         control: &Control,
         report: &dyn Fn(NativeProgress),
         verify_resources: &dyn Fn() -> Result<(), Fault>,
         platform: &mut impl PreparationPlatform,
-    ) -> Result<NativeTarget, Fault> {
-        let mut progress = NativeProgress {
-            phase: NativePhase::TargetDiscovery,
-            launch: LaunchDisposition::NotRequested,
-        };
+    ) -> Result<Option<NativeTarget>, Fault> {
+        let mut progress = self.progress;
         let result = (|| {
             control.check()?;
+            if self.finished {
+                return Err(Fault::new(
+                    "NativeTargetClosed",
+                    "Target preparation already settled for this operation",
+                ));
+            }
             report(progress);
-            let first = platform.discover(&self, control);
+            let first = platform.discover(self, control);
             control.check()?;
             let proof = match verified(first?)? {
                 Some(proof) => proof,
+                None if progress.launch == LaunchDisposition::Accepted => return Ok(None),
                 None => {
                     if !self.launch_approved {
                         return Err(Fault::new(
@@ -113,14 +124,14 @@ impl NativeBinding {
                             "No verified running application; launch was not approved",
                         ));
                     }
-                    let recipe = platform.recipe(&self)?;
+                    let recipe = platform.recipe(self)?;
                     control.check()?;
                     let prepared = platform.prepare(recipe, control);
                     control.check()?;
                     let prepared = prepared?;
                     verify_resources()?;
                     control.check()?;
-                    let final_check = platform.discover(&self, control);
+                    let final_check = platform.discover(self, control);
                     control.check()?;
                     match verified(final_check?)? {
                         Some(proof) => proof,
@@ -136,7 +147,7 @@ impl NativeBinding {
                                     return Err(control.check().err().unwrap_or(failure.fault));
                                 }
                             }
-                            // Keep the receipt even when Stop wins before the callback returns.
+                            // Preserve the receipt even if Stop precedes callback settlement.
                             report(progress);
                             control.check()?;
                             if progress.launch != LaunchDisposition::Accepted {
@@ -147,15 +158,8 @@ impl NativeBinding {
                             }
                             progress.phase = NativePhase::WaitingForProcess;
                             report(progress);
-                            loop {
-                                control.check()?;
-                                let discovered = platform.discover(&self, control);
-                                control.check()?;
-                                if let Some(proof) = verified(discovered?)? {
-                                    break proof;
-                                }
-                                platform.wait(control)?;
-                            }
+                            // The next Script status probe, not a host loop, discovers arrival.
+                            return Ok(None);
                         }
                     }
                 }
@@ -165,8 +169,10 @@ impl NativeBinding {
             progress.phase = NativePhase::WaitingForWindow;
             report(progress);
             control.check()?;
-            Ok(target)
+            Ok(Some(target))
         })();
+        self.progress = progress;
+        self.finished = !matches!(&result, Ok(None));
         result.map_err(|mut fault: Fault| {
             if !fault.context.is_object() {
                 fault.context = serde_json::json!({"cause": fault.context});
@@ -176,7 +182,7 @@ impl NativeBinding {
         })
     }
 
-    fn project(self, mut proof: AuthoringApplication) -> Result<NativeTarget, Fault> {
+    fn project(&mut self, mut proof: AuthoringApplication) -> Result<NativeTarget, Fault> {
         if proof.processes.len() > 1 {
             return Err(Fault::new(
                 "NativeTargetAmbiguous",
@@ -193,12 +199,13 @@ impl NativeBinding {
             .binding
             .configuration
             .input
+            .take()
             .ok_or_else(|| Fault::new("NativeTargetUnset", "Native input policy is missing"))?;
         Ok(NativeTarget {
             executable: process.executable,
             process_id: process.pid,
             process_lifetime: format!("{:016x}", process.lifetime),
-            window_title: self.binding.configuration.window_title,
+            window_title: std::mem::take(&mut self.binding.configuration.window_title),
             input: NativeInputPolicy {
                 route: input.route,
                 focus: input.focus,
@@ -237,7 +244,6 @@ trait PreparationPlatform {
     fn prepare(&mut self, recipe: Self::Recipe, control: &Control)
     -> Result<Self::Prepared, Fault>;
     fn submit(&mut self, prepared: Self::Prepared) -> Result<LaunchDisposition, LaunchFailure>;
-    fn wait(&mut self, control: &Control) -> Result<(), Fault>;
 }
 
 struct MacosPreparation;
@@ -278,17 +284,6 @@ impl PreparationPlatform for MacosPreparation {
 
     fn submit(&mut self, prepared: PreparedLaunch) -> Result<LaunchDisposition, LaunchFailure> {
         prepared.submit()
-    }
-
-    fn wait(&mut self, control: &Control) -> Result<(), Fault> {
-        control.check()?;
-        std::thread::sleep(
-            control
-                .deadline()
-                .saturating_duration_since(std::time::Instant::now())
-                .min(Duration::from_millis(50)),
-        );
-        control.check()
     }
 }
 

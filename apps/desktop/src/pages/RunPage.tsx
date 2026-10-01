@@ -100,8 +100,12 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   // Launch recipe validity is conditional on host-confirmed absence, not a gate on attaching.
   const approvalOpen = native !== null && (native.block === null || native.block === 'nativeApproval') && !locked;
   const outcome = nativeOutcome(run.view);
+  // Phase budgets are reviewed apart from the unchanged per-run limits; every value is the host-issued tuple consent binds.
+  const nativeBudgetRows = nativeLimits && [
+    [t.run.nativeStartup, nativeLimits.startup_ms], [t.run.nativeReadiness, nativeLimits.readiness_ms], [t.run.nativeWorkflow, nativeLimits.workflow_ms],
+  ] as const;
   const nativeLimitRows = nativeLimits && [
-    [t.run.nativeDuration, `${nativeLimits.duration_ms} ms`], [t.run.nativeFrames, String(nativeLimits.max_frames)],
+    [t.run.nativeFrames, String(nativeLimits.max_frames)],
     [t.run.nativeWait, `${nativeLimits.wait_ms} ms`], [t.run.nativeInterval, `${nativeLimits.interval_ms} ms`],
     [t.run.nativeActions, String(nativeLimits.max_actions)], [t.run.nativeCleanup, `${nativeLimits.cleanup_ms} ms`],
     [t.run.nativeContainment, `${nativeLimits.containment_ms} ms`],
@@ -241,6 +245,10 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                   {recipe.workingDirectory !== null && <><code>{recipe.workingDirectory}</code> · </>}{t.run.nativeDirectories[recipe.directory]}</dd>
               </dl>
               {recipe.recipient === 'launcher' && <p className="field-help">{t.run.nativeForwarding}</p>}</>}
+            {nativeBudgetRows && <><span className="eyebrow">{t.run.nativeBudgets}</span>
+              <dl className="run-identity" id="native-budgets">{nativeBudgetRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value} ms</dd></Fragment>)}</dl>
+              <p className="field-help" id="native-budget-help">{t.run.nativeBudgetHelp}</p>
+              <p className="field-help" id="native-startup-help">{t.run.nativeStartupHelp}</p></>}
             {nativeLimitRows && <><span className="eyebrow">{t.run.nativeLimits}</span>
               <dl className="run-identity" id="native-limits">{nativeLimitRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value}</dd></Fragment>)}</dl></>}
             <div className="field"><label htmlFor="native-operation">{t.run.nativeOperation}</label>
@@ -284,14 +292,16 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           <p className="authority-note">{t.run.authority}</p>
           <dl className="run-identity"><dt>{t.run.operationId}</dt><dd id="run-id">{view.run ?? t.common.noOperation}</dd>
             <dt>{t.run.kind}</dt><dd id="operation-kind">{view.run ? check ? t.run.checkKind : t.run.runKind(t.lane(snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane) ?? t.common.unknown)) : t.phase('idle')}</dd>
-            {view.native_preparation && <><dt>{t.run.nativeStage}</dt><dd id="native-stage">{t.run.nativePhases[view.native_preparation.phase]}</dd>
+            {view.native_preparation && <><dt>{t.run.nativeTargetStatus}</dt><dd id="native-target-status">{t.run.nativeStatuses[view.native_preparation.status]}</dd>
+              <dt>{t.run.nativeStage}</dt><dd id="native-stage">{t.run.nativePhases[view.native_preparation.phase]}</dd>
               <dt>{t.run.nativeLaunchRequest}</dt><dd id="native-launch">{t.run.launchDispositions[view.native_preparation.launch]}</dd></>}
             {snapshot?.kind === 'run' && snapshot.run === view.run && <><dt>{t.run.capturedProfile}</dt><dd>{snapshot.profileName || t.run.untitled} · {snapshot.profileId}</dd><dt>{t.run.packageScenario}</dt><dd>{snapshot.packageId} / {snapshot.scenario}</dd>
               {snapshot.lane === 'replay' && <><dt>{t.common.descriptor}</dt><dd>{snapshot.descriptorPath}</dd></>}
               {snapshot.native && <><dt>{t.run.nativeOperation}</dt><dd>{snapshot.native.operation}</dd>
                 <dt>{t.run.nativePostcondition}</dt><dd>{snapshot.native.visible_postcondition}</dd>
                 <dt>{t.run.nativeBinding}</dt><dd><code>{snapshot.native.target_binding_id}</code> · {t.target.revision(snapshot.native.target_revision)}</dd>
-                <dt>{t.run.nativeLaunchApproval}</dt><dd>{snapshot.native.launch_approved ? t.run.nativeLaunchApproved : t.run.nativeLaunchNotApproved}</dd></>}</>}
+                <dt>{t.run.nativeLaunchApproval}</dt><dd>{snapshot.native.launch_approved ? t.run.nativeLaunchApproved : t.run.nativeLaunchNotApproved}</dd>
+                <dt>{t.run.capturedBudgets}</dt><dd id="captured-native-budgets">{t.run.nativeStartup} {snapshot.native.limits.startup_ms} ms · {t.run.nativeReadiness} {snapshot.native.limits.readiness_ms} ms · {t.run.nativeWorkflow} {snapshot.native.limits.workflow_ms} ms</dd></>}</>}
             {snapshot?.kind === 'check' && snapshot.run === view.run && <><dt>{t.run.checkedProfile}</dt><dd>{snapshot.association.environment?.profile ?? t.common.unconfigured}</dd>
               <dt>{t.common.descriptor}</dt><dd>{snapshot.association.descriptorPath ?? t.run.noInitialization}</dd></>}
           </dl>

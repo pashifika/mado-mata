@@ -454,6 +454,7 @@ fn run_with_parser(
             crate::runner::emit_vm_hook_reached(&hook_host);
         }
         interrupt_halted.load(Ordering::Acquire)
+            || (hook_host.script_startup() && hook_host.failure().is_some())
             || control.check().is_err()
             || control.elapsed_us() >= interrupt_deadline.load(Ordering::Acquire)
     })));
@@ -576,7 +577,9 @@ fn run_with_parser(
         }
         check(&host, &deadline)?;
         host.begin_readiness()?;
-        deadline.store(host.control().elapsed_us().saturating_add(limits.readiness_ms.saturating_mul(1000)), Ordering::Release);
+        if !host.script_startup() {
+            deadline.store(host.control().elapsed_us().saturating_add(limits.readiness_ms.saturating_mul(1000)), Ordering::Release);
+        }
         let ready: Value = entries[0].call(()).map_err(|error| exception_fault(&ctx, error, &inventory, &inventory.entries.readiness.module, "readiness"))?;
         let ready = settle(&ctx, ready, &host, &deadline, &mut jobs).map_err(|fault| {
             if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &inventory.entries.readiness.module, "readiness") } else { fault }
