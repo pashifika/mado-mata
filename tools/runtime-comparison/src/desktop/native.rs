@@ -1,6 +1,6 @@
 use super::{NativeIntent, NativeTarget, StartRequest, native_limits};
 use crate::inventory::Inventory;
-use crate::model::{Fault, Plan};
+use crate::model::{Fault, Limits, Plan};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -29,7 +29,9 @@ pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
     let limits = &intent.limits;
     let ceiling = native_limits();
     for (value, maximum) in [
-        (limits.duration_ms, ceiling.duration_ms),
+        (limits.startup_ms, ceiling.startup_ms),
+        (limits.readiness_ms, ceiling.readiness_ms),
+        (limits.workflow_ms, ceiling.workflow_ms),
         (limits.max_frames, ceiling.max_frames),
         (limits.wait_ms, ceiling.wait_ms),
         (limits.interval_ms, ceiling.interval_ms),
@@ -45,13 +47,16 @@ pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
         || limits.max_actions > ceiling.max_actions
         || limits.containment_ms != ceiling.containment_ms
         || limits.wait_ms < limits.interval_ms
-        || limits.duration_ms < limits.wait_ms
+        || limits.startup_ms < limits.wait_ms
+        || limits.readiness_ms < limits.wait_ms
+        || limits.workflow_ms < limits.wait_ms
         || limits.cleanup_ms > limits.containment_ms
     {
         return Err(refused(
             "Native stage limits exceed their enclosing bound or fixed containment policy",
         ));
     }
+    limits.budgets().total_ms()?;
     Ok(())
 }
 
@@ -89,21 +94,16 @@ pub(super) fn validate_target(target: Option<&NativeTarget>) -> Result<&NativeTa
     Ok(target)
 }
 
-pub(super) fn project(
-    plan: &mut Plan,
-    request: &StartRequest,
-    target: &NativeTarget,
-    engine: &Path,
+pub(super) struct Templates {
+    package_entries: BTreeMap<String, String>,
+    templates: BTreeMap<String, String>,
+    pub(super) images: crate::images::PayloadReservation,
+}
+
+pub(super) fn prepare_templates(
     inventory: &Inventory,
-    mut configuration: Value,
-) -> Result<(), Fault> {
-    let intent = request
-        .native_intent
-        .as_ref()
-        .ok_or_else(|| refused("Native review is missing"))?;
-    validate_intent(intent)?;
-    validate_target(Some(target))?;
-    // Reuse the saved-package policy before constructing any native engine configuration.
+    limits: &Limits,
+) -> Result<Templates, Fault> {
     inventory.validate()?;
     let mut package_entries = BTreeMap::new();
     let mut templates = BTreeMap::new();
@@ -112,12 +112,39 @@ pub(super) fn project(
         &mut package_entries,
         &mut templates,
     )?;
-    if package_entries.len() > plan.limits.snapshot_files || templates.len() > plan.limits.handles {
+    if package_entries.len() > limits.snapshot_files || templates.len() > limits.handles {
         return Err(Fault::new(
             "LimitExceeded",
             "Native template mappings exceed the captured package bounds",
         ));
     }
+    let images = crate::runner::reserve_native_images(inventory, &package_entries, &templates)?;
+    Ok(Templates {
+        package_entries,
+        templates,
+        images,
+    })
+}
+
+pub(super) fn project(
+    plan: &mut Plan,
+    request: &StartRequest,
+    target: &NativeTarget,
+    engine: &Path,
+    templates: &Templates,
+    mut configuration: Value,
+) -> Result<(), Fault> {
+    let intent = request
+        .native_intent
+        .as_ref()
+        .ok_or_else(|| refused("Native review is missing"))?;
+    validate_intent(intent)?;
+    validate_target(Some(target))?;
+    let Templates {
+        package_entries,
+        templates,
+        ..
+    } = templates;
     let executable = target
         .executable
         .canonicalize()
@@ -140,9 +167,9 @@ pub(super) fn project(
         "process_id":target.process_id,"process_lifetime":target.process_lifetime,
         "window_rule":target.window_title,"operating_system":"macos",
         "hardware":std::env::consts::ARCH,"permission_executable":permission_executable,
-        "capture":{"approved":true,"duration_ms":limits.duration_ms,
+        "capture":{"approved":true,"duration_ms":limits.budgets().total_ms()?,
             "max_frames":limits.max_frames,"wait_ms":limits.wait_ms,"interval_ms":limits.interval_ms},
-        "input":{"approved":true,"duration_ms":limits.duration_ms,"max_actions":limits.max_actions,
+        "input":{"approved":true,"duration_ms":limits.budgets().total_ms()?,"max_actions":limits.max_actions,
             "route":target.input.route,"focus":target.input.focus,
             "macos_process_pointer_mode":target.input.pointer_mode.as_deref().unwrap_or("core_graphics"),
             "click_hold_ms":target.input.click_hold_ms,"reviewed_operation":intent.operation},
@@ -152,7 +179,8 @@ pub(super) fn project(
         "package_entries":package_entries,"templates":templates
     });
     plan.native_config = Some(configuration);
-    plan.validate()
+    plan.validate()?;
+    Ok(())
 }
 
 #[cfg(test)]

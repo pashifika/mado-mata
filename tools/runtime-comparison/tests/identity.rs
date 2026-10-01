@@ -309,39 +309,48 @@ fn missing_replay_environment_retains_a_blocked_cli_record_without_a_child() {
 
 #[test]
 fn external_cli_plans_cannot_claim_desktop_reviewed_authority() {
-    let mut plan: Plan =
-        serde_json::from_str(include_str!("../fixtures/controlled-plan.json")).unwrap();
-    plan.lane = "native".into();
-    plan.scenario = "workflow".into();
-    plan.native_config = Some(serde_json::json!({
-        "native": {
-            "geometry": null,
-            "input": {
-                "reviewed_operation": "Press the reviewed key",
-                "representative_actions": []
+    for form in ["reviewed_operation", "native_budgets"] {
+        let mut plan: Plan =
+            serde_json::from_str(include_str!("../fixtures/controlled-plan.json")).unwrap();
+        plan.lane = "native".into();
+        plan.scenario = "workflow".into();
+        if form == "reviewed_operation" {
+            plan.native_config = Some(serde_json::json!({
+                "native": {"geometry":null,"input":{
+                    "reviewed_operation":"Press the reviewed key","representative_actions":[]
+                }}
+            }));
+        } else {
+            let budgets = mado_runtime_comparison::model::NativeBudgets {
+                startup_ms: 60_000,
+                readiness_ms: 30_000,
+                workflow_ms: 30_000,
+            };
+            plan.limits.duration_ms = budgets.total_ms().unwrap();
+            plan.limits.readiness_ms = budgets.readiness_ms;
+            plan.native_budgets = Some(budgets);
+        }
+        let file = PlanFile::new(&plan);
+        let missing_package = file.0.with_extension("missing-package");
+        let output_path = file.0.with_extension("result");
+        for command in ["run", "manual"] {
+            let mut invocation = Command::new(env!("CARGO_BIN_EXE_mado-runtime-comparison"));
+            invocation.arg(command).arg(&file.0).arg(&missing_package);
+            if command == "manual" {
+                invocation.arg(&output_path);
             }
+            let output = invocation.output().unwrap();
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).starts_with("NativeRefused:"),
+                "{form}/{command}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stdout.is_empty());
+            assert!(
+                !output_path.exists(),
+                "refusal must precede output reservation"
+            );
         }
-    }));
-    let file = PlanFile::new(&plan);
-    let missing_package = file.0.with_extension("missing-package");
-    let output_path = file.0.with_extension("result");
-    for command in ["run", "manual"] {
-        let mut invocation = Command::new(env!("CARGO_BIN_EXE_mado-runtime-comparison"));
-        invocation.arg(command).arg(&file.0).arg(&missing_package);
-        if command == "manual" {
-            invocation.arg(&output_path);
-        }
-        let output = invocation.output().unwrap();
-        assert!(!output.status.success());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).starts_with("NativeRefused:"),
-            "{command}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(output.stdout.is_empty());
-        assert!(
-            !output_path.exists(),
-            "refusal must precede output reservation"
-        );
     }
 }

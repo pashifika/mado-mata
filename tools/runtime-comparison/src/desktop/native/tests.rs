@@ -16,6 +16,7 @@ fn intent() -> NativeIntent {
         target_declaration_identity: "reviewed-declaration".into(),
         capture_approved: true,
         input_approved: true,
+        launch_approved: false,
         operation: "Submit the reviewed package action once".into(),
         visible_postcondition: "The selected result is visible".into(),
         limits: native_limits(),
@@ -59,7 +60,9 @@ fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
         );
     }
     for field in [
-        "duration_ms",
+        "startup_ms",
+        "readiness_ms",
+        "workflow_ms",
         "max_frames",
         "wait_ms",
         "interval_ms",
@@ -91,7 +94,7 @@ fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
             ..native_limits()
         },
         NativeLimits {
-            duration_ms: 999,
+            startup_ms: 999,
             ..native_limits()
         },
         NativeLimits {
@@ -253,14 +256,17 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
     let mut target = target();
     let mut plan = crate::desktop::manual_plan().unwrap();
     plan.lane = "native".into();
-    plan.limits.duration_ms = native_limits().duration_ms;
+    plan.native_budgets = Some(native_limits().budgets());
+    plan.limits.duration_ms = native_limits().budgets().total_ms().unwrap();
+    plan.limits.readiness_ms = native_limits().readiness_ms;
     let environment = json!({"version":1,"ocr":{"language":crate::environment::LANGUAGE},"native_libraries":[],"replay":null,"native":null});
+    let templates = prepare_templates(&inventory, &plan.limits).unwrap();
     project(
         &mut plan,
         &request,
         &target,
         &target.executable,
-        &inventory,
+        &templates,
         environment,
     )
     .unwrap();
@@ -307,21 +313,9 @@ fn native_projection_rejects_invalid_saved_maps_before_child_activity() {
         recognition::TEMPLATE_MAPS_ASSET.into(),
         PayloadBytes::new(serde_json::to_vec(&raw).unwrap()).unwrap(),
     );
-    let mut request = request(&inventory);
-    request.native_intent = Some(intent());
-    let mut plan = crate::desktop::manual_plan().unwrap();
-    let target = target();
-    let error = project(
-        &mut plan,
-        &request,
-        &target,
-        &target.executable,
-        &inventory,
-        json!({}),
-    )
-    .unwrap_err();
+    let plan = crate::desktop::manual_plan().unwrap();
+    let error = prepare_templates(&inventory, &plan.limits).err().unwrap();
     assert_eq!(error.category, "RecognitionMetadata");
-    assert!(plan.native_config.is_none());
 }
 
 #[cfg(target_os = "macos")]
@@ -336,15 +330,19 @@ fn native_stop_during_host_preparation_retains_the_slot_and_prevents_child_launc
     let (entered, started) = mpsc::sync_channel(1);
     let (release, wait) = mpsc::sync_channel(1);
     let run = controller
-        .start_with_preparation(request, move |_, control: &Control| {
-            entered.send(()).unwrap();
-            wait.recv().unwrap();
-            assert!(control.check().is_err());
-            Ok(StartPreparation {
-                environment: None,
-                native: Some(target()),
-            })
-        })
+        .start_with_preparation(
+            request,
+            move |_, control: &Control| {
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+                assert!(control.check().is_err());
+                Ok(StartPreparation {
+                    environment: None,
+                    native: (),
+                })
+            },
+            |_, _, _, _| panic!("cancelled capture must not reach target resolution"),
+        )
         .unwrap();
     started.recv_timeout(Duration::from_secs(5)).unwrap();
     controller.stop(&run).unwrap();
@@ -373,7 +371,6 @@ fn native_scenarios_and_replay_descriptors_cannot_change_the_admitted_workflow()
     if cfg!(target_os = "macos") {
         let plan = normal.unwrap();
         assert_eq!(plan.lane, "native");
-        assert_eq!(plan.limits.duration_ms, 30_000);
         request.scenario = "partial".into();
         assert_eq!(
             crate::desktop::operation::requested_plan(&request)

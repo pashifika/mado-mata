@@ -169,6 +169,28 @@ pub(super) fn reserve_child_images(
         } else {
             return images::reserve_payload(bytes);
         };
+    reserve_template_images(inventory, bytes, &entries, &aliases)
+}
+
+pub(crate) fn reserve_native_images(
+    inventory: &Inventory,
+    entries: &BTreeMap<String, String>,
+    aliases: &BTreeMap<String, String>,
+) -> Result<PayloadReservation, Fault> {
+    let bytes = inventory
+        .assets
+        .values()
+        .try_fold(0usize, |sum, value| add(sum, value.len()))?;
+    let bytes = add(bytes, inventory.png_validation_scratch_bytes()?)?;
+    reserve_template_images(inventory, bytes, entries, aliases)
+}
+
+fn reserve_template_images(
+    inventory: &Inventory,
+    mut bytes: usize,
+    entries: &BTreeMap<String, String>,
+    aliases: &BTreeMap<String, String>,
+) -> Result<PayloadReservation, Fault> {
     for asset in entries.values() {
         let payload = inventory.assets.get(asset).ok_or_else(|| {
             Fault::new(
@@ -228,9 +250,11 @@ fn overflow() -> Fault {
 
 #[cfg(test)]
 mod tests {
+    use super::super::clock::SharedDeadline;
     use super::super::protocol::Operation;
     use super::*;
     use std::io::Cursor;
+    use std::time::Instant;
 
     fn invocation() -> Invocation {
         let mut plan: Plan =
@@ -248,6 +272,10 @@ mod tests {
             plan,
             inventory,
             observe_logs: false,
+            prepared_modules: None,
+            deadline: SharedDeadline::from_instant(Instant::now()).unwrap(),
+            startup_deadline: None,
+            prepare_target: false,
         }
     }
 

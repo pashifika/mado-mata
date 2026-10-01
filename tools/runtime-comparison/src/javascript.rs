@@ -405,6 +405,31 @@ fn host_call<'js>(
 
 pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Fault> {
     inventory.validate()?;
+    let parser =
+        crate::typescript::validate_javascript_imports(&inventory, &host.limits(), &host.control())
+            .map_err(|fault| {
+                let fault = annotate(fault, &inventory, "<loader>", "loading", None);
+                host.fail(fault.clone());
+                fault
+            })?;
+    run_with_parser(inventory, host, parser)
+}
+
+pub(crate) fn run_prepared(
+    inventory: Arc<Inventory>,
+    host: Host,
+    prepared: &crate::typescript::PreparedModules,
+) -> Result<RuntimeMetrics, Fault> {
+    inventory.validate()?;
+    let parser = prepared.parser(&inventory)?.clone();
+    run_with_parser(inventory, host, parser)
+}
+
+fn run_with_parser(
+    inventory: Arc<Inventory>,
+    host: Host,
+    parser: serde_json::Value,
+) -> Result<RuntimeMetrics, Fault> {
     let limits = host.limits();
     if limits.vm_bytes == 0 || limits.max_actions == 0 {
         return Err(Fault::new(
@@ -412,16 +437,6 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
             "VM memory and job limits must be positive",
         ));
     }
-    // COMPILE_ONLY resolves static declarations, but not literal import() calls.
-    // Inspect every captured JS module (including transitive/runtime-loaded ones)
-    // before any package evaluation, using the same immutable inventory resolver.
-    let parser =
-        crate::typescript::validate_javascript_imports(&inventory, &limits, &host.control())
-            .map_err(|fault| {
-                let fault = annotate(fault, &inventory, "<loader>", "loading", None);
-                host.fail(fault.clone());
-                fault
-            })?;
     let runtime = Runtime::new().map_err(|error| Fault::new("Runtime", error.to_string()))?;
     // Requires the default QuickJS allocator, not rquickjs's rust-alloc feature.
     runtime.set_memory_limit(limits.vm_bytes);
@@ -439,6 +454,7 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
             crate::runner::emit_vm_hook_reached(&hook_host);
         }
         interrupt_halted.load(Ordering::Acquire)
+            || (hook_host.script_startup() && hook_host.failure().is_some())
             || control.check().is_err()
             || control.elapsed_us() >= interrupt_deadline.load(Ordering::Acquire)
     })));
@@ -561,7 +577,9 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
         }
         check(&host, &deadline)?;
         host.begin_readiness()?;
-        deadline.store(host.control().elapsed_us().saturating_add(limits.readiness_ms.saturating_mul(1000)), Ordering::Release);
+        if !host.script_startup() {
+            deadline.store(host.control().elapsed_us().saturating_add(limits.readiness_ms.saturating_mul(1000)), Ordering::Release);
+        }
         let ready: Value = entries[0].call(()).map_err(|error| exception_fault(&ctx, error, &inventory, &inventory.entries.readiness.module, "readiness"))?;
         let ready = settle(&ctx, ready, &host, &deadline, &mut jobs).map_err(|fault| {
             if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &inventory.entries.readiness.module, "readiness") } else { fault }

@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Write;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -54,6 +55,8 @@ pub struct Fault {
     pub category: String,
     pub message: String,
     pub context: Value,
+    #[serde(skip)]
+    provisional_timeout: bool,
 }
 
 impl Fault {
@@ -62,12 +65,17 @@ impl Fault {
             category: category.into(),
             message: message.into(),
             context: Value::Null,
+            provisional_timeout: false,
         }
     }
 
     pub fn with_context(mut self, context: Value) -> Self {
         self.context = context;
         self
+    }
+
+    pub(crate) fn is_provisional_timeout(&self) -> bool {
+        self.provisional_timeout
     }
 
     /// Diagnostic detail cannot displace the primary category or the separate
@@ -179,6 +187,35 @@ impl Limits {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeBudgets {
+    pub startup_ms: u64,
+    pub readiness_ms: u64,
+    pub workflow_ms: u64,
+}
+
+impl NativeBudgets {
+    pub fn total_ms(self) -> Result<u64, Fault> {
+        for (value, ceiling) in [
+            (self.startup_ms, 60_000),
+            (self.readiness_ms, 30_000),
+            (self.workflow_ms, 30_000),
+        ] {
+            if value == 0 || value > ceiling {
+                return Err(Fault::new(
+                    "NativeRefused",
+                    "Native phase budgets exceed host policy",
+                ));
+            }
+        }
+        self.startup_ms
+            .checked_add(self.readiness_ms)
+            .and_then(|sum| sum.checked_add(self.workflow_ms))
+            .ok_or_else(|| Fault::new("NativeRefused", "Native budget sum overflows"))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Plan {
@@ -194,6 +231,8 @@ pub struct Plan {
     pub repetitions: usize,
     pub budgets: BTreeMap<String, f64>,
     pub native_config: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_budgets: Option<NativeBudgets>,
 }
 
 impl Plan {
@@ -232,6 +271,17 @@ impl Plan {
             return Err(Fault::new("InvalidPlan", "unknown controlled scenario"));
         }
         self.limits.validate()?;
+        if let Some(budgets) = self.native_budgets {
+            if self.lane != "native"
+                || budgets.total_ms()? != self.limits.duration_ms
+                || budgets.readiness_ms != self.limits.readiness_ms
+            {
+                return Err(Fault::new(
+                    "InvalidPlan",
+                    "Native phase budgets do not match the plan",
+                ));
+            }
+        }
         if !(1..=1000).contains(&self.samples)
             || self.warmups > 100
             || !(1..=1000).contains(&self.repetitions)
@@ -291,6 +341,14 @@ fn portable_label(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
 
+// `cause` bits: 1 Cancelled, 2 Timeout, 4 launch admitted. DERIVED marks a
+// Timeout this process inferred from its own deadline reading rather than
+// received as an explicit Stop; SUPERSEDED records that the supervisor's
+// verdict replaced such a Timeout.
+const DERIVED: u8 = 8;
+const SUPERSEDED: u8 = 16;
+const PHASE_TIMEOUT: u8 = 32;
+
 #[derive(Debug)]
 pub struct Control {
     pub cancelled: AtomicBool,
@@ -301,6 +359,14 @@ pub struct Control {
     // One outgoing successor: unscheduled, queued, admitted, or closed.
     transition: AtomicU8,
     started: Instant,
+    deadline: Instant,
+    native_clock: Mutex<Option<NativeClock>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NativeClock {
+    budgets: NativeBudgets,
+    phase: u8,
     deadline: Instant,
 }
 
@@ -332,6 +398,7 @@ impl Control {
             transition: AtomicU8::new(0),
             started,
             deadline: started + Duration::from_millis(limits.duration_ms),
+            native_clock: Mutex::new(None),
         }
     }
 
@@ -340,16 +407,55 @@ impl Control {
     }
 
     pub(crate) fn stop(&self, reason: StopReason) {
-        self.latch(match reason {
-            StopReason::Cancelled => 1,
-            StopReason::Timeout => 2,
+        self.latch(Self::cause_bits(reason));
+    }
+
+    /// The supervising process accepted this Stop for the same operation. Its
+    /// verdict supersedes only a Timeout this process derived from its own
+    /// deadline reading, never an explicit stop already latched here, so a Stop
+    /// accepted before the deadline keeps its attribution even when this
+    /// process could not observe anything until after that deadline.
+    pub(crate) fn inherit_stop(&self, reason: StopReason) {
+        let cause = Self::cause_bits(reason);
+        self.settle(|state| {
+            if state & 3 == 0 {
+                Some(state | cause)
+            } else if state & DERIVED != 0 {
+                Some((state & !(3 | DERIVED)) | cause | SUPERSEDED)
+            } else {
+                None
+            }
         });
     }
 
+    /// The supervisor verdict that superseded a Timeout derived here, if any.
+    pub(crate) fn superseding_verdict(&self) -> Option<StopReason> {
+        let state = self.cause.load(Ordering::Acquire);
+        (state & SUPERSEDED != 0).then(|| {
+            if state & 3 == 1 {
+                StopReason::Cancelled
+            } else {
+                StopReason::Timeout
+            }
+        })
+    }
+
+    fn cause_bits(reason: StopReason) -> u8 {
+        match reason {
+            StopReason::Cancelled => 1,
+            StopReason::Timeout => 2,
+        }
+    }
+
     fn latch(&self, cause: u8) {
+        self.settle(|state| (state & 3 == 0).then_some(state | cause));
+    }
+
+    fn settle(&self, cause: impl FnMut(u8) -> Option<u8>) {
+        // Launch admission and the first stop cause share one linearization point.
         let _ = self
             .cause
-            .compare_exchange(0, cause, Ordering::AcqRel, Ordering::Acquire);
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, cause);
         self.transition.store(3, Ordering::Release);
         let now = self.elapsed_us().max(1);
         let _ = self
@@ -365,11 +471,23 @@ impl Control {
         );
     }
 
-    pub fn stop_reason(&self) -> Option<StopReason> {
-        if self.cause.load(Ordering::Acquire) == 0 && Instant::now() >= self.deadline {
-            self.latch(2);
+    fn stop_state(&self) -> u8 {
+        if self.cause.load(Ordering::Acquire) & 3 == 0 {
+            let clock = self.native_clock.lock().unwrap_or_else(|e| e.into_inner());
+            if clock.is_some_and(|clock| Instant::now() >= clock.deadline) {
+                // A phase deadline is an independently earned failure.
+                self.latch(2 | PHASE_TIMEOUT);
+            }
         }
-        match self.cause.load(Ordering::Acquire) {
+        if self.cause.load(Ordering::Acquire) & 3 == 0 && Instant::now() >= self.deadline {
+            // The absolute deadline is provisional until the supervisor verdict.
+            self.latch(2 | DERIVED);
+        }
+        self.cause.load(Ordering::Acquire)
+    }
+
+    pub fn stop_reason(&self) -> Option<StopReason> {
+        match self.stop_state() & 3 {
             2 => Some(StopReason::Timeout),
             1 => Some(StopReason::Cancelled),
             _ => None,
@@ -377,8 +495,123 @@ impl Control {
     }
 
     pub fn check(&self) -> Result<(), Fault> {
-        self.stop_reason()
-            .map_or(Ok(()), |reason| Err(reason.fault()))
+        let state = self.stop_state();
+        let reason = match state & 3 {
+            2 => StopReason::Timeout,
+            1 => StopReason::Cancelled,
+            _ => return Ok(()),
+        };
+        let mut fault = reason.fault();
+        fault.provisional_timeout = state & DERIVED != 0;
+        if state & PHASE_TIMEOUT != 0 {
+            let clock = self.native_clock.lock().unwrap_or_else(|e| e.into_inner());
+            let phase = clock.map_or("startup", |clock| match clock.phase {
+                0 => "startup",
+                1 => "readiness",
+                _ => "workflow",
+            });
+            fault.message = format!("{phase} deadline expired");
+            fault.context = serde_json::json!({"stage":phase});
+        }
+        Err(fault)
+    }
+
+    /// Admit one external launch. A later Stop cannot revoke this admission.
+    pub fn admit_launch(&self) -> Result<(), Fault> {
+        self.check()?;
+        self.cause
+            .compare_exchange(0, 4, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| {
+                self.check().err().unwrap_or_else(|| {
+                    Fault::new(
+                        "NativeLaunchRefused",
+                        "launch was already admitted for this operation",
+                    )
+                })
+            })
+    }
+
+    pub fn deadline(&self) -> Instant {
+        self.native_clock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map_or(self.deadline, |clock| clock.deadline.min(self.deadline))
+    }
+
+    pub(crate) fn outer_deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    pub(crate) fn with_deadline(limits: &Limits, deadline: Instant) -> Self {
+        let mut control = Self::new(limits);
+        control.deadline = control.deadline.min(deadline);
+        control
+    }
+
+    pub(crate) fn start_native(
+        &self,
+        budgets: NativeBudgets,
+        inherited: Option<Instant>,
+    ) -> Result<(), Fault> {
+        budgets.total_ms()?;
+        let mut clock = self.native_clock.lock().unwrap_or_else(|e| e.into_inner());
+        if clock.is_some() {
+            return Err(Fault::new(
+                "ReadinessContract",
+                "Native clock already started",
+            ));
+        }
+        let deadline = self
+            .started
+            .checked_add(Duration::from_millis(budgets.startup_ms))
+            .ok_or_else(|| Fault::new("Clock", "startup deadline overflows"))?
+            .min(self.deadline);
+        *clock = Some(NativeClock {
+            budgets,
+            phase: 0,
+            deadline: inherited.map_or(deadline, |at| at.min(deadline)),
+        });
+        Ok(())
+    }
+
+    /// Transition once, with a conservative absolute deadline from the child
+    /// when called by its supervisor. No preceding stage's unused time is lent.
+    pub(crate) fn native_transition(
+        &self,
+        phase: u8,
+        inherited: Option<Instant>,
+    ) -> Result<Instant, Fault> {
+        self.check()?;
+        let mut guard = self.native_clock.lock().unwrap_or_else(|e| e.into_inner());
+        let clock = guard
+            .as_mut()
+            .ok_or_else(|| Fault::new("ReadinessContract", "Native clock missing"))?;
+        if Instant::now() >= clock.deadline {
+            self.latch(2 | PHASE_TIMEOUT);
+        }
+        if self.cause.load(Ordering::Acquire) & 3 != 0 {
+            drop(guard);
+            return Err(self.check().expect_err("latched stop cannot reopen"));
+        }
+        if phase != clock.phase + 1 || phase > 2 {
+            return Err(Fault::new(
+                "ReadinessContract",
+                "Native phase transition is not a successor",
+            ));
+        }
+        let budget = if phase == 1 {
+            clock.budgets.readiness_ms
+        } else {
+            clock.budgets.workflow_ms
+        };
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(budget))
+            .ok_or_else(|| Fault::new("Clock", "phase deadline overflows"))?
+            .min(self.deadline);
+        clock.phase = phase;
+        clock.deadline = inherited.map_or(deadline, |at| at.min(deadline));
+        Ok(clock.deadline)
     }
 
     // Each predecessor permits one successor. Stop and transition admission
@@ -440,6 +673,198 @@ pub fn identity<T: Serialize>(value: &T) -> Result<String, Fault> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn launch_control() -> Control {
+        let plan: Plan =
+            serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+        Control::new(&plan.limits)
+    }
+
+    fn native_control(budgets: NativeBudgets) -> Control {
+        let mut plan: Plan =
+            serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+        plan.limits.duration_ms = budgets.total_ms().unwrap();
+        Control::new(&plan.limits)
+    }
+
+    #[test]
+    fn native_stage_transitions_never_renew_or_borrow_unused_budgets() {
+        let budgets = NativeBudgets {
+            startup_ms: 60_000,
+            readiness_ms: 1_000,
+            workflow_ms: 2_000,
+        };
+        let control = native_control(budgets);
+        let outer = control.outer_deadline();
+        control.start_native(budgets, None).unwrap();
+        let startup = control.deadline();
+        assert!(control.start_native(budgets, None).is_err());
+        assert_eq!(control.deadline(), startup);
+        let before = Instant::now();
+        let ready = control.native_transition(1, None).unwrap();
+        assert!(ready >= before + Duration::from_millis(1_000));
+        assert!(ready <= Instant::now() + Duration::from_millis(1_000));
+        assert!(ready < startup);
+        assert!(control.native_transition(1, None).is_err());
+        assert_eq!(control.deadline(), ready);
+        let workflow = control.native_transition(2, None).unwrap();
+        assert!(workflow <= Instant::now() + Duration::from_millis(2_000));
+        assert!(control.native_transition(2, None).is_err());
+        assert_eq!(control.deadline(), workflow);
+        assert_eq!(control.outer_deadline(), outer);
+    }
+
+    #[test]
+    fn native_startup_charges_reservation_time_and_phase_timeout_is_not_provisional() {
+        let budgets = NativeBudgets {
+            startup_ms: 100,
+            readiness_ms: 1_000,
+            workflow_ms: 1_000,
+        };
+        let mut control = native_control(budgets);
+        control.started -= Duration::from_millis(101);
+        control.start_native(budgets, None).unwrap();
+        let fault = control.admit_launch().unwrap_err();
+        assert_eq!(fault.category, "Timeout");
+        assert_eq!(fault.context["stage"], "startup");
+        assert!(!fault.is_provisional_timeout());
+        control.inherit_stop(StopReason::Cancelled);
+        assert_eq!(control.check().unwrap_err().context["stage"], "startup");
+        assert!(control.native_transition(1, None).is_err());
+    }
+
+    #[test]
+    fn transferred_phase_deadlines_can_only_shorten_the_admitted_phase() {
+        let budgets = NativeBudgets {
+            startup_ms: 1_000,
+            readiness_ms: 1_000,
+            workflow_ms: 1_000,
+        };
+        let control = native_control(budgets);
+        let outer = control.outer_deadline();
+        control.start_native(budgets, None).unwrap();
+        let inherited = Instant::now() - Duration::from_millis(1);
+        assert_eq!(
+            control.native_transition(1, Some(inherited)).unwrap(),
+            inherited
+        );
+        let fault = control.check().unwrap_err();
+        assert_eq!(fault.context["stage"], "readiness");
+        assert!(!fault.is_provisional_timeout());
+        assert_eq!(control.outer_deadline(), outer);
+    }
+
+    #[test]
+    fn launch_admission_is_one_shot_and_stop_cannot_be_undone() {
+        let stopped = launch_control();
+        stopped.cancel();
+        assert_eq!(stopped.admit_launch().unwrap_err().category, "Cancelled");
+        let admitted = launch_control();
+        admitted.admit_launch().unwrap();
+        assert_eq!(
+            admitted.admit_launch().unwrap_err().category,
+            "NativeLaunchRefused"
+        );
+        admitted.cancel();
+        assert_eq!(admitted.admit_launch().unwrap_err().category, "Cancelled");
+        assert_eq!(admitted.stop_reason(), Some(StopReason::Cancelled));
+    }
+
+    #[test]
+    fn concurrent_launch_and_stop_share_the_same_linearization_point() {
+        use std::sync::{Arc, Barrier};
+        for _ in 0..64 {
+            let control = Arc::new(launch_control());
+            let barrier = Arc::new(Barrier::new(2));
+            let launch_control = control.clone();
+            let launch_barrier = barrier.clone();
+            let launch = std::thread::spawn(move || {
+                launch_barrier.wait();
+                launch_control.admit_launch()
+            });
+            barrier.wait();
+            control.cancel();
+            let accepted = launch.join().unwrap().is_ok();
+            assert_eq!(control.cause.load(Ordering::Acquire) & 4 != 0, accepted);
+            assert_eq!(control.stop_reason(), Some(StopReason::Cancelled));
+            assert_eq!(control.admit_launch().unwrap_err().category, "Cancelled");
+        }
+    }
+
+    #[test]
+    fn concurrent_launches_cannot_both_obtain_admission() {
+        let control = launch_control();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let contender = scope.spawn(|| {
+                barrier.wait();
+                control.admit_launch()
+            });
+            barrier.wait();
+            let first = control.admit_launch();
+            let second = contender.join().unwrap();
+            assert_ne!(first.is_ok(), second.is_ok());
+            let refusal = first.err().or_else(|| second.err()).unwrap();
+            assert_eq!(refusal.category, "NativeLaunchRefused");
+        });
+    }
+
+    #[test]
+    fn expired_operation_cannot_admit_launch_or_regrant_its_deadline() {
+        let plan: Plan =
+            serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+        let deadline = Instant::now() - Duration::from_millis(1);
+        let control = Control::with_deadline(&plan.limits, deadline);
+        assert_eq!(control.deadline(), deadline);
+        assert_eq!(control.admit_launch().unwrap_err().category, "Timeout");
+        control.cancel();
+        assert_eq!(control.stop_reason(), Some(StopReason::Timeout));
+    }
+
+    #[test]
+    fn inherited_stop_supersedes_only_this_process_derived_timeout() {
+        let plan: Plan =
+            serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+        let expired =
+            || Control::with_deadline(&plan.limits, Instant::now() - Duration::from_millis(1));
+        // Derived Timeout, then the supervisor's earlier-accepted Stop.
+        let late = expired();
+        assert_eq!(late.stop_reason(), Some(StopReason::Timeout));
+        assert_eq!(late.superseding_verdict(), None);
+        late.inherit_stop(StopReason::Cancelled);
+        assert_eq!(late.stop_reason(), Some(StopReason::Cancelled));
+        assert_eq!(late.check().unwrap_err().category, "Cancelled");
+        assert_eq!(late.superseding_verdict(), Some(StopReason::Cancelled));
+        // An explicit local Stop after a derived Timeout still does not flip it,
+        // and leaves the Timeout awaiting the supervisor's verdict.
+        let shown = expired();
+        assert_eq!(shown.stop_reason(), Some(StopReason::Timeout));
+        shown.cancel();
+        assert_eq!(shown.stop_reason(), Some(StopReason::Timeout));
+        assert_eq!(shown.superseding_verdict(), None);
+        // Inheritance never displaces an explicit cause latched here.
+        let settled = Control::new(&plan.limits);
+        settled.cancel();
+        settled.inherit_stop(StopReason::Timeout);
+        assert_eq!(settled.stop_reason(), Some(StopReason::Cancelled));
+        assert_eq!(settled.superseding_verdict(), None);
+        let relayed = expired();
+        relayed.inherit_stop(StopReason::Timeout);
+        relayed.inherit_stop(StopReason::Cancelled);
+        assert_eq!(relayed.stop_reason(), Some(StopReason::Timeout));
+        // A verdict adopted as the first cause supersedes nothing.
+        let prompt = Control::new(&plan.limits);
+        prompt.inherit_stop(StopReason::Cancelled);
+        assert_eq!(prompt.stop_reason(), Some(StopReason::Cancelled));
+        assert_eq!(prompt.superseding_verdict(), None);
+        // An admitted launch survives the reattribution.
+        let launched = Control::new(&plan.limits);
+        launched.admit_launch().unwrap();
+        launched.inherit_stop(StopReason::Cancelled);
+        assert_eq!(launched.cause.load(Ordering::Acquire) & 4, 4);
+        assert_eq!(launched.stop_reason(), Some(StopReason::Cancelled));
+        assert_eq!(launched.admit_launch().unwrap_err().category, "Cancelled");
+    }
 
     #[test]
     fn oversized_diagnostics_preserve_classification_and_native_cleanup_obligation() {

@@ -1,6 +1,7 @@
 mod admission;
 mod options;
 mod sequence;
+mod startup;
 
 pub(crate) use admission::{HandleBudget, HandlePermit, Managed};
 pub use options::{option_path, resolve_options};
@@ -16,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -236,7 +237,7 @@ struct Worker {
     thread: JoinHandle<()>,
 }
 
-const OPERATIONS: [&str; 14] = [
+const OPERATIONS: [&str; 16] = [
     "asset",
     "observe",
     "recognize",
@@ -250,6 +251,8 @@ const OPERATIONS: [&str; 14] = [
     "wait",
     "log",
     "fixture",
+    "target_start",
+    "target_status",
     "unknown",
 ];
 
@@ -270,6 +273,8 @@ struct Inner {
     lifetime: String,
     state: Mutex<State>,
     failure: Mutex<Option<Fault>>,
+    native_cleanup_unverified: AtomicBool,
+    native_initialization_started: AtomicBool,
     dispatch: Mutex<()>,
     workers: Mutex<Vec<Worker>>,
     physical: Arc<AtomicUsize>,
@@ -278,7 +283,9 @@ struct Inner {
     terminating: AtomicBool,
     metrics: [OperationMetrics; OPERATIONS.len()],
     #[cfg(feature = "engine")]
-    engine: Option<crate::engine::Engine>,
+    engine: OnceLock<crate::engine::Engine>,
+    startup: Mutex<startup::Startup>,
+    startup_link: OnceLock<Arc<crate::runner::StartupLink>>,
 }
 
 #[derive(Clone)]
@@ -312,20 +319,20 @@ impl Host {
         let lifetime = format!("controlled-{}-{nonce}-{attempt}", std::process::id());
         let handle_budget = Arc::new(HandleBudget::new(plan.limits.handles));
         #[cfg(feature = "engine")]
-        let engine = if plan.lane == "controlled" {
-            None
-        } else {
-            Some(crate::engine::Engine::new(
+        let engine = OnceLock::new();
+        #[cfg(feature = "engine")]
+        if plan.lane == "replay" || (plan.lane == "native" && plan.native_budgets.is_none()) {
+            let _ = engine.set(crate::engine::Engine::new(
                 &plan,
                 &assets,
                 Arc::clone(&control),
                 &lifetime,
                 attempt,
                 Arc::clone(&handle_budget),
-            )?)
-        };
+            )?);
+        }
         #[cfg(not(feature = "engine"))]
-        if plan.lane != "controlled" {
+        if plan.lane == "replay" || (plan.lane == "native" && plan.native_budgets.is_none()) {
             return Err(Fault::new(
                 "Blocked",
                 "replay/native requires the engine feature and explicit configuration",
@@ -378,6 +385,8 @@ impl Host {
                     cleanup: None,
                 }),
                 failure: Mutex::new(None),
+                native_cleanup_unverified: AtomicBool::new(false),
+                native_initialization_started: AtomicBool::new(false),
                 dispatch: Mutex::new(()),
                 workers: Mutex::new(Vec::new()),
                 physical: Arc::new(AtomicUsize::new(0)),
@@ -387,6 +396,8 @@ impl Host {
                 metrics: std::array::from_fn(|_| OperationMetrics::default()),
                 #[cfg(feature = "engine")]
                 engine,
+                startup: Mutex::new(startup::Startup::new()),
+                startup_link: OnceLock::new(),
             }),
         })
     }
@@ -401,7 +412,26 @@ impl Host {
         self.inner.plan.limits.clone()
     }
 
+    pub(crate) fn script_startup(&self) -> bool {
+        self.inner.plan.lane == "native" && self.inner.plan.native_budgets.is_some()
+    }
+
+    pub(crate) fn connect_startup(
+        &self,
+        link: Arc<crate::runner::StartupLink>,
+    ) -> Result<(), Fault> {
+        self.inner
+            .startup_link
+            .set(link)
+            .map_err(|_| Fault::new("Transport", "startup link already installed"))
+    }
+
     pub fn fail(&self, failure: Fault) {
+        if failure.context["native_cleanup"] == "unverified" {
+            self.inner
+                .native_cleanup_unverified
+                .store(true, Ordering::Release);
+        }
         self.close_admission();
         let mut first = lock(&self.inner.failure);
         if first.is_none() {
@@ -410,7 +440,19 @@ impl Host {
     }
 
     pub fn failure(&self) -> Option<Fault> {
-        lock(&self.inner.failure).clone()
+        let failure = lock(&self.inner.failure).clone();
+        if failure.is_some() {
+            return failure;
+        }
+        let failure = self
+            .inner
+            .startup_link
+            .get()
+            .and_then(|link| link.failure());
+        if let Some(failure) = &failure {
+            self.fail(failure.clone());
+        }
+        failure
     }
 
     pub fn set_failure_stack(&self, stack: Option<String>) {
@@ -474,8 +516,28 @@ impl Host {
                 "host work is unavailable during module instantiation",
             ));
         }
+        if matches!(method, "target_start" | "target_status") {
+            return self.target_call(method, &args);
+        }
+        if self.script_startup()
+            && !self.capture_ready()
+            && matches!(
+                method,
+                "observe"
+                    | "recognize"
+                    | "scan_ocr_zones"
+                    | "query"
+                    | "query_wait"
+                    | "postcondition"
+            )
+        {
+            return Err(Fault::new(
+                "TargetNotReady",
+                "Native capture requires capture_ready",
+            ));
+        }
         #[cfg(feature = "engine")]
-        if let Some(engine) = &self.inner.engine {
+        if let Some(engine) = self.inner.engine.get() {
             if matches!(
                 method,
                 "observe"
@@ -1072,6 +1134,23 @@ impl Host {
             });
         }
         drop(state);
+        if self.script_startup() {
+            let startup = lock(&self.inner.startup);
+            let progress = self
+                .inner
+                .startup_link
+                .get()
+                .and_then(|link| link.progress())
+                .unwrap_or(startup.progress);
+            value["native_status"] = json!(progress.status);
+            value["native_phase"] = json!(progress.phase);
+            value["native_launch"] = json!(progress.launch);
+            value["native_initialization_started"] = json!(
+                self.inner
+                    .native_initialization_started
+                    .load(Ordering::Acquire)
+            );
+        }
         value["failure"] = json!(self.failure());
         value["operation_metrics"] = Value::Object(
             OPERATIONS
@@ -1091,7 +1170,7 @@ impl Host {
                 .collect(),
         );
         #[cfg(feature = "engine")]
-        if let Some(engine) = &self.inner.engine {
+        if let Some(engine) = self.inner.engine.get() {
             let engine = engine.snapshot();
             value["attempt_owners"] = json!(
                 value["attempt_owners"].as_u64().unwrap_or(0)
@@ -1206,7 +1285,7 @@ mod tests {
         inner.plan.lane = "replay".into();
         inner.plan.limits.handles = limit;
         inner.handle_budget = Arc::new(HandleBudget::new(limit));
-        inner.engine = Some(crate::engine::Engine::replay_for_test(
+        inner.engine = OnceLock::from(crate::engine::Engine::replay_for_test(
             &inner.plan,
             Arc::clone(&inner.control),
             &inner.lifetime,

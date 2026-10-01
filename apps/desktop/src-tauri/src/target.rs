@@ -1,4 +1,4 @@
-//! Machine-local metadata and read-only observations; never native authority.
+//! Machine-local metadata, verified discovery, and private reviewed launch recipes.
 use crate::storage::{MAX_PATH_BYTES, validate_id, validate_internal_name, validate_package_id};
 use mado_runtime_comparison::inventory::TargetDeclaration;
 use mado_runtime_comparison::model::{Fault, identity};
@@ -18,6 +18,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+
+mod launch;
+pub(crate) use launch::{LaunchFailure, LaunchRecipe, PreparedLaunch};
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -144,6 +147,35 @@ pub(crate) struct AuthoringProcess {
     pub architecture: i32,
     pub started: (u64, u64),
     pub executable: PathBuf,
+}
+
+/// Fresh process correspondence; absence never follows from a missing window.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NativeDiscovery {
+    Absent,
+    Unique(AuthoringApplication),
+    Ambiguous,
+    Unverifiable,
+}
+
+pub(crate) fn discover_native(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    resolution: &TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<NativeDiscovery, Fault> {
+    observation_checkpoint(cancelled, deadline)?;
+    #[cfg(target_os = "macos")]
+    return macos::discover_native(configuration, declaration, resolution, cancelled, deadline);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (configuration, declaration, resolution);
+        Err(Fault::new(
+            "TargetPlatform",
+            "Native application discovery requires macOS",
+        ))
+    }
 }
 
 /// Resolves OS installation metadata only for the retained SDK process lifetime.

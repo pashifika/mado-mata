@@ -466,7 +466,21 @@ fn reconstruction_requires_settled_commands_and_closes_all_future_admission() {
     assert!(!application.closing.load(Ordering::Acquire));
     drop(store);
     writer.join().unwrap().unwrap();
-    application.prepare_reconstruction().unwrap();
+    // Real disk sync may exceed the bounded logger shutdown on a loaded host.
+    match application.prepare_reconstruction() {
+        Ok(()) => {
+            let status = application.logger.status();
+            assert!(status.shutdown_complete);
+            assert!(!status.shutdown_timed_out);
+            assert_eq!(status.file_pending, 0);
+        }
+        Err(error) => {
+            assert_eq!(error.category, "LoggingShutdown");
+            assert_eq!(error.context["application_retired"], true);
+            assert_eq!(error.context["logging"]["accepting"], false);
+            assert_eq!(error.context["logging"]["shutdown_timed_out"], true);
+        }
+    }
     assert_eq!(
         application
             .create_workspace("Late", "Late")

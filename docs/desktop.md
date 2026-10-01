@@ -10,8 +10,10 @@ Both execution lanes retain the **controlled, non-native input sink**.
 Recognition has a separate explicit, read-only native window acquisition path.
 It requires an authorized target and the fixed engine child; opening the editor
 does not capture, initialize OCR, or request permissions. Separately reviewed
-macOS **Native** Start attaches to an already-running saved application through
-the fixed engine child. Game launch, activation, automatic recovery and Windows
+macOS **Native** Start runs the authored `readiness()` before target attachment.
+Its explicit startup request can attach to a verified saved application through
+the fixed engine child, or submit its saved recipe once when absence is confirmed
+and launch is separately approved. Activation, automatic recovery and Windows
 Native Start remain refused.
 
 The checkout includes macOS and Windows shells; Linux checks the frontend and
@@ -905,8 +907,11 @@ invalid, or incompatible local target is not an execution prerequisite.
    identify or replace the game.
 2. Add arguments as ordered individual fields. Empty fields remain empty
    arguments; spaces and shell syntax are literal, never split or expanded.
-   Optionally enter an absolute working directory. Supply an exact window title
-   when the package leaves it local; a package-required title is read-only.
+   A direct-executable launcher uses an explicit absolute working directory or
+   its executable's parent directory. Bundle launch uses the OS-defined working
+   directory; an explicit directory for a bundle recipient is refused before
+   launch, not ignored. Supply an exact window title when the package leaves it
+   local; a package-required title is read-only.
 3. Leave all input fields blank for capture-only use. To configure future input,
    explicitly select a complete policy. Process-directed input requires a pointer
    mode: Core Graphics permits either focus policy; AppKit background requires
@@ -1026,9 +1031,9 @@ details remain transient private diagnostics: they do not enter `target.config`,
 profiles, snapshots, or routine logs. Routine check outcomes retain only workspace
 attribution, action, bounded status, host stage (`admission`, `observation`, or
 `publication`), and fault category; they do not copy private diagnostics or fault
-text. Runtime relocation never rewrites the saved installation. Native Start
-remains refused; Windows target work is deferred, and initial both-OS qualification
-and R6 remain unresolved.
+text. Runtime relocation never rewrites the saved installation. This observation
+grants no Native Start authority; Windows target work is deferred, and initial
+both-OS qualification and R6 remain unresolved.
 
 
 ## Inspect, edit, and save profiles
@@ -1474,11 +1479,12 @@ Run build metadata comes from the actual owned runtime child, not the desktop
 executable. If startup identity is unavailable, it remains unknown (`null`) rather
 than being substituted with supervisor metadata.
 
-Controlled execution has a **10 s** operation deadline; replay, Check,
-saved-image trials and the Native host policy use **30 s**, including input
-preparation. Whole-operation timeout remains distinct from explicit Stop.
-Repeated parent/child resource verification is not skipped to fit the
-controlled-only deadline.
+Controlled execution has a **10 s** operation deadline; replay, Check and
+saved-image trials use **30 s**, including input preparation. Desktop Native
+instead reviews separate **60 s Startup**, **30 s Readiness** and **30 s Workflow**
+budgets, under an outer deadline fixed at reservation. Timeout remains distinct
+from explicit Stop. Repeated parent/child resource verification is not skipped
+to fit an execution budget.
 Cleanup remains **1 s** and containment **2 s**. Controller shutdown waits at most
 **14 s** for its owned worker. Ordinary window closure requests shutdown off the
 UI thread. Native macOS Quit can bypass that request callback, so the final exit
@@ -1493,50 +1499,106 @@ run result.
 
 ## Reviewed macOS Native Start
 
-Native is attach-only and requires a current, explicitly authorized target,
-environment and operation. An installed engine or successful Check is not
-permission, native qualification, or proof of game effect.
+Native requires a current, explicitly authorized target, environment and operation.
+Without separate launch approval it is attach-only. An installed engine or
+successful Check is not permission, native qualification, or proof of game effect.
 
 1. Build the fixed engine artifact above and save the reviewed App OCR environment.
    Save/Validate the authored package, exit Edit, then Inspect it. Recognition
    definitions and template aliases come from declared package assets; do not
    paste local engine paths or a native Plan into the package.
 2. Save a compatible macOS application-bundle Target with an exact window title
-   and explicit route/focus/pointer policy. The application must already be
-   running. Start freshly verifies bundle/runtime-copy correspondence, requires
-   one process and one eligible window, and binds the same process lifetime.
-   Check running application remains historical information, not an attachment.
+   and explicit route/focus/pointer policy. The Script's startup request freshly
+   verifies bundle/runtime correspondence and reuses a unique running game without
+   changing its arguments. If the game is confirmed absent, only separate launch
+   approval permits one saved-recipe submission after a final discovery recheck.
+   Missing windows, ambiguity, overflow or unverifiable candidates never authorize
+   launch. Script status probes drive bounded preparation for the selected
+   lifetime's exact eligible window; loss or replacement fails rather than
+   attaching a successor. Check running application remains historical information.
 3. Select **Native**. Review package/profile, target binding/revision and policy;
    enter the intended operation and what a newer frame must show. This text records
    the human review; the package must implement its recognition and postcondition.
    It is not a script sandbox or an automatic assertion generated from prose.
-4. Review the host limits: **30 s** including preparation, **300** acquired frames,
-   **1 s** waits, **100 ms** pacing, **64** input events across the whole run,
-   **1 s** cleanup and **2 s** containment. A click consumes three events, or four
-   with a hold; key press/release each consume one. Producer frames and restricted
-   cleanup releases are not ordinary acquisition/input budget entries.
-5. Approve capture and input separately, then Start. Every submission consumes
-   approval, even a refusal. Relevant edits, target edit/discard, environment
-   changes and leaving the workspace withdraw it. Unrelated settings changes do
-   not change the reviewed environment. Native never launches, activates, obtains
-   focus, prompts for permissions, substitutes a route or retries uncertain input.
-6. Observe the separate receipt, entry, postcondition and cleanup results.
+4. Review the host phase budgets: **60 s Startup** from reservation,
+   **30 s Readiness** from capture availability, and **30 s Workflow** after
+   `"Ready"`. These are defaults and ceilings; invalid tuples refuse rather than
+   clamp. Each phase starts once, cannot borrow unused time, and cannot extend
+   the absolute outer deadline fixed from the reviewed sum (**120 s** by default).
+   Other limits remain **300** acquired frames, **1 s** waits, **100 ms** pacing,
+   **64** input events across the run, **1 s** cleanup and **2 s** containment.
+   A click consumes three events, or four with a hold; key press/release each
+   consume one. Producer frames and restricted cleanup releases are not ordinary
+   acquisition/input budget entries. Any reviewed-tuple change withdraws consent.
+5. Review the saved launch recipient and literal ordered arguments. The recipient
+   is the separate launcher when configured, otherwise the outer game bundle.
+   Bundle launch uses macOS `NSWorkspace`, not a shell or its inner executable;
+   direct-executable launchers use their reviewed working-directory policy.
+   The launcher owns onward game arguments/cwd; its PID or exit is not game
+   identity or readiness. Approve **launch if absent** only when permitted.
+6. Approve capture and input separately, then Start. Every submission consumes
+   all approvals, even a refusal. Relevant edits, target edit/discard, environment
+   changes and leaving the workspace withdraw them. Unrelated settings changes
+   do not change the reviewed environment. Native does not request activation,
+   focus, permissions or elevation, substitute a route, or retry uncertain input
+   or launch. The launched app can independently present windows or change focus;
+   disabling API prompts cannot suppress macOS Gatekeeper UI.
+7. Preflight validates captured package/profile, static compilation/imports, assets
+   and required resources without evaluating package code or acquiring capture/input.
+   The existing runner then enters `readiness()` before attaching a target.
+   That Script must explicitly call `host.call("target_start", {})`; without it,
+   no target is acquired or launched. The call returns `pending` without waiting
+   for a window. Poll `host.call("target_status", {})` with Script-owned waits,
+   then use actual image/template/OCR criteria before returning `"Ready"`.
+   Target status (`not_requested`, `pending`, `capture_ready`), preparation phase
+   and launch disposition are shown separately. Capture availability is not game
+   readiness. Early capture/`"Ready"`, duplicate requests and argument overrides
+   refuse. Input remains unavailable until Workflow. Typed startup faults are not
+   converted to pending or automatically retried.
+8. Keep launch disposition, input receipts, entry, postcondition and cleanup
+   separate. An accepted launch is not a ready game or a successful workflow.
    Postconditions require a strictly newer compatible frame; input submission or
    a newer frame alone does not establish the expected effect. Independently
    confirm the authorized visible effect. First-frame placement is authoritative;
    later geometry changes are refused, not silently rescaled.
 
-Stop remains available through navigation and App settings. Wait for owned
-worker/child settlement before a fresh review. Forced/incomplete/unverified
-Native cleanup leaves `NativeCleanupRequired`: reconcile the target manually
-and restart the application. Controlled/replay work and configuration
-reconstruction cannot clear that refusal.
+Insert explicit startup/polling before the package's existing Native Readiness
+recognition criteria. For example, this finite polling fragment does not itself
+declare the game ready:
 
-For local acceptance, complete one authored recognition/input/postcondition
-workflow on an ordinary fixed-position/size target, exercise normal Stop during
-finite work, then approve and complete a new run. Record exact build/resources,
-receipt, independent visible effect and cleanup privately. Missing authority or
-prerequisites leaves this acceptance open. Do not kill, move or resize the game
+```ts
+let target = host.call("target_start", {});
+for (let probe = 0; probe < 120 && target.status !== "capture_ready"; probe++) {
+  host.call("wait", { duration_ms: 500 });
+  target = host.call("target_status", {});
+}
+if (target.status !== "capture_ready") throw new Error("CaptureNotReady");
+```
+
+The reviewed host deadlines can expire before the local probe bound. Only
+Desktop Native Readiness permits these empty-argument calls; module evaluation,
+Workflow, Controlled, Replay and the independent explicit-plan CLI refuse them.
+No path, recipe or process identity belongs in Script arguments.
+
+Stop remains available through navigation and App settings. Cancellation before
+launch admission submits nothing. After admission an OS request can still open
+the app, even after Stop or timeout; no late completion can resume automation.
+Stop does not terminate the game/launcher or undo an accepted launch. Wait for
+owned request workers/callbacks and automation-child settlement before a fresh
+review. An external launcher remaining alive is not an active automation worker.
+Forced/incomplete/unverified Native cleanup leaves `NativeCleanupRequired`:
+reconcile the target manually and restart the application. Controlled/replay
+work and configuration reconstruction cannot clear that refusal.
+
+For local acceptance, run the same authored recognition/input/postcondition
+workflow with the game already running and initially absent. Review any startup
+interaction explicitly; the launch library does not click through startup screens.
+Record phase timing, a single absent-game launch, normal Stop and a separately
+approved clean rerun. Exercise both a direct bundle and an authorized installed
+separate-launcher recipe, including its argument/cwd semantics. Record exact
+build/resources, independent visible effect and cleanup privately. Missing
+authority, a launcher recipe, prerequisites or completion within the duration
+leaves the corresponding acceptance open. Do not kill, move or resize the game
 to manufacture target loss; disruptive cases need separate approval. Controlled
 target-loss regressions do not replace native evidence or the independent
 Windows/M0/R6 obligations.

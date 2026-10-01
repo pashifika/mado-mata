@@ -238,7 +238,17 @@ impl Host {
                 return Err(Fault::new("ReadinessContract", "readiness may start once"));
             }
             state.phase = Phase::Readiness;
-            state.readiness_started = Some(Instant::now());
+            state.readiness_started = (!self.script_startup()).then(Instant::now);
+        }
+        if self.script_startup() {
+            self.native_phase(crate::desktop::NativePhase::Readiness);
+            return Ok(());
+        }
+        if self.inner.plan.lane == "native" {
+            crate::runner::emit_native_preparation(
+                &self.inner.control,
+                crate::desktop::NativePhase::Readiness,
+            );
         }
         // Establish an eligible current observation before entering package readiness.
         let observation = self.call("observe", json!({}))?;
@@ -255,12 +265,30 @@ impl Host {
                 "workflow requires explicit readiness",
             ));
         }
+        if self.script_startup() {
+            if !self.capture_ready() {
+                return Err(Fault::new(
+                    "ReadinessContract",
+                    "Ready requires a capture_ready Native target",
+                ));
+            }
+            let deadline = self.inner.control.native_transition(2, None)?;
+            crate::runner::emit_native_transition(2, deadline)?;
+        }
         state.phase = Phase::Workflow;
         self.inner.control.admission.store(true, Ordering::Release);
         drop(state);
         if let Err(error) = self.check() {
             self.close_admission();
             return Err(error);
+        }
+        if self.script_startup() {
+            self.native_phase(crate::desktop::NativePhase::Workflow);
+        } else if self.inner.plan.lane == "native" {
+            crate::runner::emit_native_preparation(
+                &self.inner.control,
+                crate::desktop::NativePhase::Workflow,
+            );
         }
         Ok(())
     }
@@ -298,7 +326,7 @@ impl Host {
             }
         }
         #[cfg(feature = "engine")]
-        if let Some(engine) = &self.inner.engine {
+        if let Some(engine) = self.inner.engine.get() {
             engine.call("validate_observation", json!({"observation":observation}))?;
         }
         Ok(())

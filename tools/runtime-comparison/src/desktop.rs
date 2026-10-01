@@ -56,6 +56,8 @@ pub struct NativeIntent {
     pub target_declaration_identity: String,
     pub capture_approved: bool,
     pub input_approved: bool,
+    #[serde(default)]
+    pub launch_approved: bool,
     pub operation: String,
     pub visible_postcondition: String,
     pub limits: NativeLimits,
@@ -64,7 +66,9 @@ pub struct NativeIntent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeLimits {
-    pub duration_ms: u64,
+    pub startup_ms: u64,
+    pub readiness_ms: u64,
+    pub workflow_ms: u64,
     pub max_frames: u64,
     pub wait_ms: u64,
     pub interval_ms: u64,
@@ -73,10 +77,22 @@ pub struct NativeLimits {
     pub containment_ms: u64,
 }
 
+impl NativeLimits {
+    pub fn budgets(&self) -> crate::model::NativeBudgets {
+        crate::model::NativeBudgets {
+            startup_ms: self.startup_ms,
+            readiness_ms: self.readiness_ms,
+            workflow_ms: self.workflow_ms,
+        }
+    }
+}
+
 /// Per-Start defaults and ceilings; containment is the fixed supervisor bound.
 pub fn native_limits() -> NativeLimits {
     NativeLimits {
-        duration_ms: REPLAY_DURATION_MS,
+        startup_ms: 60_000,
+        readiness_ms: 30_000,
+        workflow_ms: 30_000,
         max_frames: 300,
         wait_ms: 1_000,
         interval_ms: 100,
@@ -106,9 +122,46 @@ pub struct NativeTarget {
 }
 
 #[derive(Debug, Default)]
-pub struct StartPreparation {
+pub struct StartPreparation<P = ()> {
     pub environment: Option<crate::environment::OcrEnvironment>,
-    pub native: Option<NativeTarget>,
+    pub native: P,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePhase {
+    Preflight,
+    TargetDiscovery,
+    LaunchSubmission,
+    WaitingForProcess,
+    WaitingForWindow,
+    NativeInitialization,
+    Readiness,
+    Workflow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchDisposition {
+    NotRequested,
+    Accepted,
+    Rejected,
+    Uncertain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeTargetStatus {
+    NotRequested,
+    Pending,
+    CaptureReady,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeProgress {
+    pub status: NativeTargetStatus,
+    pub phase: NativePhase,
+    pub launch: LaunchDisposition,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,6 +185,7 @@ pub struct ControllerView {
     pub result: Option<Value>,
     pub error: Option<Fault>,
     pub progress: Vec<Value>,
+    pub native_preparation: Option<NativeProgress>,
     pub logs: Vec<Value>,
     pub dropped_logs: u64,
 }
@@ -152,6 +206,7 @@ struct State {
     active: Option<Active>,
     result: Option<Value>,
     error: Option<Fault>,
+    native_preparation: Option<NativeProgress>,
     progress: Vec<Value>,
     logs: VecDeque<Value>,
     seen_logs: BTreeSet<u64>,
@@ -168,6 +223,7 @@ impl State {
             active: None,
             result: None,
             error: None,
+            native_preparation: None,
             progress: Vec::new(),
             logs: VecDeque::new(),
             seen_logs: BTreeSet::new(),

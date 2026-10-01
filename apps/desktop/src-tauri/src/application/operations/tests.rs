@@ -240,6 +240,7 @@ fn native_request(selection: &crate::application::Selection) -> StartRequest {
         target_declaration_identity: selection.package.target_identity.clone().unwrap(),
         capture_approved: true,
         input_approved: true,
+        launch_approved: false,
         operation: "One reviewed click".into(),
         visible_postcondition: "The reviewed label changes".into(),
         limits: mado_runtime_comparison::desktop::native_limits(),

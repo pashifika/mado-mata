@@ -66,6 +66,9 @@ The version and integrity sources are:
 | Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Desktop persisted identifiers | Public `pashifika/xid-rs` Git dependency at the immutable `rev` in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml), repeated in its [lockfile](../apps/desktop/src-tauri/Cargo.lock); default features disabled | The public checkout fetches the Fork directly; no maintenance checkout or local path override is required |
 | macOS application metadata, picker, and clipboard | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Application launch library | libc 0.2.189 on Unix; objc2 0.6.4, block2 0.6.2 and objc2-foundation/objc2-app-kit 0.3.2 on macOS | [Library manifest](../crates/application-launch/Cargo.toml) and [lockfile](../crates/application-launch/Cargo.lock); no Desktop or runtime dependency |
+| Shared supervisor/child monotonic deadline | libc 0.2.189 on Unix; windows-sys 0.61.2 with `Win32_System_Performance` on Windows | Default target-scoped dependencies in the [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock); absolute boot-clock transport does not refund child startup |
+| macOS engine startup lifetime guard | objc2 0.6.4, objc2-foundation/objc2-app-kit 0.3.2; shared Unix libc pin above | Optional Objective-C `engine` dependencies in the [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock); read-only selected-process checks, not a capture/input implementation |
 | GitHub Actions | Full commit SHAs | [Workflow](../.github/workflows/ci.yml) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
@@ -79,8 +82,10 @@ Target metadata parsing uses `plist` in-process, with the exactly pinned
 bounded XML/binary streaming. No system plist helper is executed. macOS core
 checks exercise public Foundation bundle resolution with isolated filesystem
 fixtures, including same-process metadata updates and unsupported alternate
-metadata. Non-macOS bundle resolution is explicitly unsupported; portable
-declaration, record, restore, and observation-policy checks remain cross-platform.
+metadata. They also check the current test process's kernel architecture and
+invalid-PID refusal without launching an application. Non-macOS bundle resolution
+is explicitly unsupported; portable declaration, record, restore, and
+observation-policy checks remain cross-platform.
 Apple framework dependencies are macOS-target-scoped. Native selection uses
 host-owned AppKit sheets for application bundles or saved PNGs, not a general
 dialog/filesystem plugin capability. Recognition Copy uses `NSPasteboard` only
@@ -122,15 +127,22 @@ The full check has these responsibilities:
 - Exercise accepted/refused branch routes, malformed metadata, repository-policy
   failures, and gate outcomes through behavioral tests.
 - Install and check the trusted TypeScript compiler with package scripts disabled.
+- Test the independent [application-launch library](../crates/application-launch/Cargo.toml)
+  and its literal argument/cwd, refusal and external-child ownership contracts.
+  These checks do not launch a game or authorize bundle/native acceptance.
 - Build and test the locked Rust comparison executable, then execute its
   controlled `check` suite for direct Rust, JavaScript, TypeScript, and Lua.
   Image regressions cover full PNG validation, original-pixel crops, split
   package quotas, decoded/payload bounds, recognition metadata/maps, and generated
   SDK snippets. These commands do not enable the optional `engine` feature or
   execute real OCR.
-  External CLI plans also refuse Desktop-only native authority; real owned-child
-  regressions distinguish parent deadlines from explicit Stop while preserving
-  submitted receipts and cleanup.
+  External CLI plans refuse Desktop-only reviewed input authority and phase
+  budgets before package/output I/O. Real owned-child regressions cover
+  Script-requested startup, no-request cleanup, one-shot/polled preparation,
+  typed startup failures, and independent phase deadlines versus explicit Stop.
+  Those child fixtures run serially so the CPU-expiry case cannot starve unrelated
+  startup assertions; their phase deadlines and protocol checks remain unchanged.
+  Submitted receipts and physical cleanup ownership remain separate outcomes.
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
   run its state tests (including per-file history, stale saves, source-diagnostic
   projection, Recognition geometry/Undo, grouped selection, stale trial/Copy
@@ -141,7 +153,9 @@ The full check has these responsibilities:
   bounded logging and the shared controller contracts. Log-content and
   initialization-error assertions join the real writer independently of the
   production shutdown deadline; a separate stalled-worker test checks the
-  bounded shutdown and incomplete-cleanup outcome. Identifier regressions cover
+  bounded shutdown and incomplete-cleanup outcome. Command-retirement checks accept
+  settled logging or an explicit `LoggingShutdown` refusal with retirement and
+  closed admission; they do not assume disk-sync latency. Identifier regressions cover
   canonical XIDs, typed owner-scoped conversion, bounded durable mappings,
   repeat ingress/conflicts, stale-schema preservation, and reservation retention
   through interrupted publication and recovery. Restore/migration regressions
@@ -150,10 +164,12 @@ The full check has these responsibilities:
   the storage boundaries and Windows directory-sync qualification limitation.
   Optional OCR settings, bounded replay projection, admission races, and
   pre-startup failures are checked without loading a real OCR backend.
-  Native intent/unknown-field rejection, saved target expectations, typed
-  projection, preparation cancellation and sticky cleanup refusal are checked
-  without native capture/input. Optional engine-feature publication regressions
-  use public-facade controlled replay and require the separate
+  Native intent/unknown-field rejection, separate launch approval, saved target
+  expectations, immutable prelaunch preflight, typed discovery/progress,
+  one-launch status probes, launch-admission cancellation and sticky cleanup
+  refusal are checked without game launch or native capture/input. Optional
+  engine-feature publication, exact-lifetime/window probes and Readiness input
+  gating regressions require the separate
   [native build prerequisites](runtime-native.md#consumer-publication-regressions).
   Directory-authoring regressions cover configured ID-only destinations, source
   ownership, configuration-only preservation of `sources` and `pkgs`, snapshot

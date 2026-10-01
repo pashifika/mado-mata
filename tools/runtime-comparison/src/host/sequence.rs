@@ -66,7 +66,7 @@ impl Host {
             #[cfg(not(feature = "engine"))]
             let expanded = action.event_count();
             #[cfg(feature = "engine")]
-            let expanded = self.inner.engine.as_ref().map_or_else(
+            let expanded = self.inner.engine.get().map_or_else(
                 || action.event_count(),
                 |engine| engine.action_event_count(action),
             );
@@ -80,7 +80,7 @@ impl Host {
             let engine = self
                 .inner
                 .engine
-                .as_ref()
+                .get()
                 .ok_or_else(|| Fault::new("Blocked", "native engine is unavailable"))?;
             engine.call("validate_input", args.clone())?;
         }
@@ -104,7 +104,7 @@ impl Host {
         let permit = self.inner.handle_budget.reserve(1)?;
         let action_limit = self.inner.plan.limits.max_actions;
         #[cfg(feature = "engine")]
-        let action_limit = self.inner.engine.as_ref().map_or(action_limit, |engine| {
+        let action_limit = self.inner.engine.get().map_or(action_limit, |engine| {
             action_limit.min(engine.action_limit())
         });
         if event_count > action_limit.saturating_sub(state.admitted_actions) {
@@ -237,7 +237,7 @@ impl Host {
             let result = self
                 .inner
                 .engine
-                .as_ref()
+                .get()
                 .ok_or_else(|| Fault::new("Blocked", "native engine is unavailable"))
                 .and_then(|engine| {
                     engine.call(
@@ -441,7 +441,7 @@ impl Host {
         drop(state);
         // Native handle identities are opaque; route by ownership, not spelling.
         #[cfg(feature = "engine")]
-        if let Some(engine) = &self.inner.engine {
+        if let Some(engine) = self.inner.engine.get() {
             return engine.call("release", args.clone());
         }
         Err(Fault::new(
@@ -454,13 +454,16 @@ impl Host {
         // Closure is observable before touching dispatch/native work locks.
         self.inner.terminating.store(true, Ordering::Release);
         self.close_admission();
+        if self.script_startup() {
+            self.inner.control.cancel();
+        }
         let started = Instant::now();
         let cleanup_ms = self.inner.plan.limits.cleanup_ms;
         #[cfg(feature = "engine")]
         let cleanup_ms = self
             .inner
             .engine
-            .as_ref()
+            .get()
             .map_or(cleanup_ms, crate::engine::Engine::cleanup_limit_ms);
         {
             let mut state = lock(&self.inner.state);
@@ -488,12 +491,13 @@ impl Host {
             }
             state.handles.clear();
         }
+        while self.startup_active() && started.elapsed() < Duration::from_millis(cleanup_ms) {
+            self.reap_startup();
+            thread::sleep(Duration::from_millis(1));
+        }
+        self.reap_startup();
         #[cfg(feature = "engine")]
-        let engine_cleanup = self
-            .inner
-            .engine
-            .as_ref()
-            .map(crate::engine::Engine::finish);
+        let engine_cleanup = self.inner.engine.get().map(crate::engine::Engine::finish);
         while started.elapsed() < Duration::from_millis(cleanup_ms) {
             self.reap_workers();
             if self.inner.physical.load(Ordering::Acquire) == 0
@@ -519,18 +523,25 @@ impl Host {
             .inner
             .physical
             .load(Ordering::Acquire)
-            .max(lock(&self.inner.workers).len());
-        let clean = physical == 0 && !active && state.held_keys.is_empty();
+            .max(lock(&self.inner.workers).len())
+            + usize::from(self.startup_active());
+        let native_cleanup_unverified =
+            self.inner.native_cleanup_unverified.load(Ordering::Acquire);
+        let clean =
+            physical == 0 && !active && state.held_keys.is_empty() && !native_cleanup_unverified;
         #[cfg(feature = "engine")]
         let clean = clean
             && engine_cleanup
                 .as_ref()
                 .is_none_or(|engine| engine["clean"].as_bool() == Some(true));
-        let result = json!({"clean":clean,"status":if clean {"CleanupFinished"} else {"IncompleteCleanup"},
+        let mut result = json!({"clean":clean,"status":if clean {"CleanupFinished"} else {"IncompleteCleanup"},
             "cleanup_finished_us":if clean {Some(self.inner.control.elapsed_us())} else {None},
             "elapsed_us":started.elapsed().as_micros() as u64,
             "remaining":{"live_handles":state.handles.len(),"queued":state.queue.len(),"in_flight_native":physical,"active_sequences":usize::from(active),"held_keys":state.held_keys.len()},
             "release_outcomes":state.release_outcomes});
+        if native_cleanup_unverified {
+            result["native_cleanup"] = json!("unverified");
+        }
         #[cfg(feature = "engine")]
         let result = if let Some(engine) = engine_cleanup {
             let mut result = result;

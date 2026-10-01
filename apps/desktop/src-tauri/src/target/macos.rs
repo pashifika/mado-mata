@@ -1,5 +1,5 @@
 use super::observation::{
-    Candidate, CandidateSnapshot, Lifetime, MAX_CANDIDATES, SigningIdentity,
+    Candidate, CandidateSnapshot, Lifetime, MAX_CANDIDATES, SigningIdentity, Summary,
     candidate_correspondence, invalidation, summarize_revalidated, unavailable,
 };
 use super::{
@@ -44,7 +44,7 @@ impl Guard<'_> {
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
-struct FileIdentity {
+pub(super) struct FileIdentity {
     device: u64,
     inode: u64,
     size: u64,
@@ -54,7 +54,7 @@ struct FileIdentity {
 }
 
 impl FileIdentity {
-    fn read(path: &Path, field: &str) -> Result<Self, Fault> {
+    pub(super) fn read(path: &Path, field: &str) -> Result<Self, Fault> {
         let metadata = fs::symlink_metadata(path).map_err(|_| metadata_fault(field, "identity"))?;
         Ok(Self {
             device: metadata.dev(),
@@ -146,7 +146,7 @@ fn foundation_string<'a>(
     Ok(value)
 }
 
-fn inspect_bundle(
+pub(super) fn inspect_bundle(
     path: &str,
     field: &str,
     checkpoint: &impl Fn() -> Result<(), Fault>,
@@ -366,6 +366,36 @@ fn lifetime(pid: i32, guard: &Guard<'_>) -> Result<Lifetime, Fault> {
     })
 }
 
+fn process_architecture(pid: i32, guard: &Guard<'_>) -> Result<i32, Fault> {
+    // libc omits PROC_PIDARCHINFO and proc_archinfo from public sys/proc_info.h.
+    const PROC_PIDARCHINFO: i32 = 19;
+    #[repr(C)]
+    struct ProcessArchitecture {
+        cpu_type: libc::cpu_type_t,
+        _cpu_subtype: libc::cpu_subtype_t,
+    }
+
+    let mut info = MaybeUninit::<ProcessArchitecture>::uninit();
+    let size = i32::try_from(size_of::<ProcessArchitecture>())
+        .map_err(|_| unavailable("process_architecture"))?;
+    // SAFETY: The SDK layout is two cpu_type_t/cpu_subtype_t integers. The aligned
+    // output buffer has exactly size writable bytes; libproc does not retain it.
+    #[expect(unsafe_code, reason = "audited public libproc architecture query")]
+    let returned = guard.call(|| unsafe {
+        libc::proc_pidinfo(pid, PROC_PIDARCHINFO, 0, info.as_mut_ptr().cast(), size)
+    })?;
+    if returned != size {
+        return Err(unavailable("process_architecture"));
+    }
+    // SAFETY: libproc reported the complete initialized architecture structure.
+    #[expect(unsafe_code, reason = "libproc returned the full initialized structure")]
+    let info = unsafe { info.assume_init() };
+    if info.cpu_type <= 0 {
+        return Err(unavailable("process_architecture"));
+    }
+    Ok(info.cpu_type)
+}
+
 fn url_path(url: &NSURL) -> Result<String, Fault> {
     if !url.isFileURL() {
         return Err(unavailable("runtime_url"));
@@ -392,11 +422,8 @@ fn candidate_snapshot(
         return Err(unavailable("runtime_identifier"));
     }
     let bundle_id = bundle_id.to_string();
-    let architecture = i32::try_from(guard.call(|| app.executableArchitecture())?)
-        .map_err(|_| unavailable("architecture"))?;
-    if architecture == 0 {
-        return Err(unavailable("architecture"));
-    }
+    // AppKit can report -1 during launch; the kernel already knows the live image.
+    let architecture = process_architecture(pid, guard)?;
     let url = guard
         .call(|| app.executableURL())?
         .ok_or_else(|| unavailable("runtime_url"))?;
@@ -480,6 +507,7 @@ pub(super) fn observe(
         deadline,
         None,
     )
+    .map(|inspection| inspection.observation)
 }
 
 pub(super) fn selected_application(
@@ -534,6 +562,43 @@ pub(super) fn selected_application(
     result.map_err(|_| unavailable("platform_exception"))?
 }
 
+struct Inspection {
+    observation: ApplicationObservation,
+    summary: Summary,
+}
+
+enum Proof<'a> {
+    Authoring(&'a mut super::AuthoringApplication),
+    Native(&'a mut super::AuthoringApplication),
+}
+
+pub(super) fn discover_native(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    resolution: &TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<super::NativeDiscovery, Fault> {
+    let mut proof = super::AuthoringApplication {
+        processes: Vec::new(),
+        installation: String::new(),
+    };
+    let inspection = inspect_application(
+        configuration,
+        declaration,
+        resolution,
+        cancelled,
+        deadline,
+        Some(Proof::Native(&mut proof)),
+    )?;
+    Ok(match inspection.summary {
+        Summary::Absent => super::NativeDiscovery::Absent,
+        Summary::Unique(_) if proof.processes.len() == 1 => super::NativeDiscovery::Unique(proof),
+        Summary::Ambiguous => super::NativeDiscovery::Ambiguous,
+        Summary::Unique(_) | Summary::Unverifiable => super::NativeDiscovery::Unverifiable,
+    })
+}
+
 pub(super) fn authoring_application(
     configuration: &TargetConfiguration,
     declaration: &TargetDeclaration,
@@ -551,8 +616,9 @@ pub(super) fn authoring_application(
         expected_resolution,
         cancelled,
         deadline,
-        Some(&mut proof),
-    )?;
+        Some(Proof::Authoring(&mut proof)),
+    )?
+    .observation;
     if proof.processes.is_empty() {
         return Err(Fault::new(
             "NativeCorrespondence",
@@ -643,13 +709,15 @@ fn inspect_application(
     expected_resolution: &TargetResolution,
     cancelled: &AtomicBool,
     deadline: Instant,
-    mut proof: Option<&mut super::AuthoringApplication>,
-) -> Result<ApplicationObservation, Fault> {
+    mut proof: Option<Proof<'_>>,
+) -> Result<Inspection, Fault> {
+    let native = matches!(&proof, Some(Proof::Native(_)));
     let guard = Guard {
         cancelled,
         deadline,
     };
     configuration.validate_declaration(declaration)?;
+    expected_resolution.validate(configuration)?;
     if configuration.game.kind != "bundle" {
         return Err(Fault::new(
             "TargetObservationSelection",
@@ -683,8 +751,7 @@ fn inspect_application(
             }
             let Some(bundle_id) = selected.bundle_id.as_deref() else {
                 return observation(
-                    "unverifiable",
-                    None,
+                    Summary::Unverifiable,
                     json!({"stage": "bundle_identifier"}),
                     &guard,
                 );
@@ -696,8 +763,7 @@ fn inspect_application(
             let count = applications.len();
             if count > MAX_CANDIDATES {
                 return observation(
-                    "unverifiable",
-                    None,
+                    Summary::Unverifiable,
                     json!({"stage": "candidate_limit", "candidate_count": count}),
                     &guard,
                 );
@@ -717,7 +783,7 @@ fn inspect_application(
                         candidates.push(candidate);
                         snapshots.push((app, snapshot, identity, candidate));
                     }
-                    Err(fault) if invalidation(&fault) => return Err(fault),
+                    Err(fault) if native || invalidation(&fault) => return Err(fault),
                     Err(fault) => {
                         details.push(json!({"stage": fault.context["stage"], "status": fault.context["os_status"]}));
                         candidates.push(Candidate::Unverifiable);
@@ -727,11 +793,10 @@ fn inspect_application(
             for (architecture, before) in &selected_codes {
                 match signing::selected(&selected.resolution.executable, *architecture, &guard) {
                     Ok(after) if after.identity == before.identity => {}
-                    Err(fault) if invalidation(&fault) => return Err(fault),
+                    Err(fault) if native || invalidation(&fault) => return Err(fault),
                     _ => {
                         return observation(
-                            "unverifiable",
-                            None,
+                            Summary::Unverifiable,
                             json!({"stage": "installation_changed"}),
                             &guard,
                         );
@@ -741,11 +806,10 @@ fn inspect_application(
             for (app, before, identity, _) in &snapshots {
                 match signing::running(before.lifetime.pid, &before.executable, &guard) {
                     Ok(after) if after.identity == *identity => {}
-                    Err(fault) if invalidation(&fault) => return Err(fault),
+                    Err(fault) if native || invalidation(&fault) => return Err(fault),
                     _ => {
                         return observation(
-                            "unverifiable",
-                            None,
+                            Summary::Unverifiable,
                             json!({"stage": "running_changed"}),
                             &guard,
                         );
@@ -753,11 +817,10 @@ fn inspect_application(
                 }
                 match candidate_snapshot(app, &guard) {
                     Ok(after) if *before == after => {}
-                    Err(fault) if invalidation(&fault) => return Err(fault),
+                    Err(fault) if native || invalidation(&fault) => return Err(fault),
                     _ => {
                         return observation(
-                            "unverifiable",
-                            None,
+                            Summary::Unverifiable,
                             json!({"stage": "process_changed"}),
                             &guard,
                         );
@@ -767,8 +830,7 @@ fn inspect_application(
             let after = inspect_bundle(&configuration.game.path, "game", &|| guard.check())?;
             if after != selected {
                 return observation(
-                    "unverifiable",
-                    None,
+                    Summary::Unverifiable,
                     json!({"stage": "installation_changed"}),
                     &guard,
                 );
@@ -778,8 +840,7 @@ fn inspect_application(
             })?;
             if current.len() != count {
                 return observation(
-                    "unverifiable",
-                    None,
+                    Summary::Unverifiable,
                     json!({"stage": "candidates_changed"}),
                     &guard,
                 );
@@ -791,25 +852,25 @@ fn inspect_application(
             let lifetimes = snapshots
                 .iter()
                 .map(|(_, before, _, _)| (before.lifetime, lifetime(before.lifetime.pid, &guard)));
-            let (status, evidence) = match summarize_revalidated(
+            let summary = match summarize_revalidated(
                 &candidates,
                 &mut discovered_pids,
                 &mut current_pids,
                 lifetimes,
             ) {
                 Ok(summary) => summary,
-                Err(fault) if invalidation(&fault) => return Err(fault),
+                Err(fault) if native || invalidation(&fault) => return Err(fault),
                 Err(fault) => {
-                    return observation("unverifiable", None, fault.context, &guard);
+                    return observation(Summary::Unverifiable, fault.context, &guard);
                 }
             };
-            if let Some(proof) = proof.as_mut() {
-                if candidates
-                    .iter()
-                    .any(|candidate| matches!(candidate, Candidate::Unverifiable))
-                {
+            if candidates.contains(&Candidate::Unverifiable) {
+                if matches!(proof, Some(Proof::Authoring(_))) {
                     return Err(unavailable("unverifiable_candidate"));
                 }
+            } else if (!native || matches!(summary, Summary::Unique(_)))
+                && let Some(Proof::Authoring(proof) | Proof::Native(proof)) = proof.as_mut()
+            {
                 for (app, snapshot, _, candidate) in &snapshots {
                     if matches!(candidate, Candidate::Verified(_)) {
                         // SDK's descriptive lifetime domain is the exact Foundation
@@ -837,9 +898,9 @@ fn inspect_application(
                 proof.installation =
                     installation_identity(&selected, &selected_codes, &proof.processes)?;
             }
+            let (_, evidence) = summary.observation();
             observation(
-                status,
-                evidence.map(|kind| kind.name()),
+                summary,
                 json!({
                     "candidate_count": count, "candidates": details,
                     "originating_copy": "unavailable", "window_identity": "not_checked",
@@ -854,11 +915,10 @@ fn inspect_application(
 }
 
 fn observation(
-    status: &str,
-    evidence: Option<&str>,
+    summary: Summary,
     diagnostics: serde_json::Value,
     guard: &Guard<'_>,
-) -> Result<ApplicationObservation, Fault> {
+) -> Result<Inspection, Fault> {
     guard.check()?;
     if serde_json::to_vec(&diagnostics)
         .map_err(|_| unavailable("diagnostics"))?
@@ -871,11 +931,15 @@ fn observation(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| unavailable("clock"))?
         .as_millis();
-    Ok(ApplicationObservation {
-        observed_at_ms: u64::try_from(observed_at_ms).map_err(|_| unavailable("clock"))?,
-        status: status.into(),
-        evidence: evidence.map(str::to_owned),
-        diagnostics,
+    let (status, evidence) = summary.observation();
+    Ok(Inspection {
+        observation: ApplicationObservation {
+            observed_at_ms: u64::try_from(observed_at_ms).map_err(|_| unavailable("clock"))?,
+            status: status.into(),
+            evidence: evidence.map(|kind| kind.name().to_owned()),
+            diagnostics,
+        },
+        summary,
     })
 }
 
@@ -884,6 +948,29 @@ mod tests {
     use super::*;
     use crate::target::tests::MetadataFixture;
     use std::cell::Cell;
+
+    #[test]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    fn kernel_architecture_selects_the_executing_slice_and_refuses_invalid_pid() {
+        let cancelled = AtomicBool::new(false);
+        let guard = Guard {
+            cancelled: &cancelled,
+            deadline: Instant::now() + std::time::Duration::from_secs(5),
+        };
+        let expected = if cfg!(target_arch = "aarch64") {
+            16_777_228
+        } else {
+            16_777_223
+        };
+        assert_eq!(
+            process_architecture(i32::try_from(std::process::id()).unwrap(), &guard).unwrap(),
+            expected
+        );
+        assert_eq!(
+            process_architecture(-1, &guard).unwrap_err().category,
+            "TargetObservationEvidence"
+        );
+    }
 
     #[test]
     fn metadata_changes_during_inspection_refuse_stale_resolution() {
