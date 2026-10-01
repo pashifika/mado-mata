@@ -140,6 +140,8 @@ The full check has these responsibilities:
   budgets before package/output I/O. Real owned-child regressions cover
   Script-requested startup, no-request cleanup, one-shot/polled preparation,
   typed startup failures, and independent phase deadlines versus explicit Stop.
+  Those child fixtures run serially so the CPU-expiry case cannot starve unrelated
+  startup assertions; their phase deadlines and protocol checks remain unchanged.
   Submitted receipts and physical cleanup ownership remain separate outcomes.
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
   run its state tests (including per-file history, stale saves, source-diagnostic

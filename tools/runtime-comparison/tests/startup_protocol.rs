@@ -7,19 +7,24 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+
+// The CPU-expiry child must not compete with unrelated startup assertions.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 struct OwnedProtocol {
     child: Child,
     input: ChildStdin,
     events: mpsc::Receiver<Value>,
     reader: Option<thread::JoinHandle<()>>,
+    _serial: MutexGuard<'static, ()>,
 }
 
 impl OwnedProtocol {
     fn start(source: &str, startup_ms: u64) -> Self {
+        let serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
         let mut plan: Plan =
             serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
         plan.candidate = "javascript".into();
@@ -79,6 +84,7 @@ impl OwnedProtocol {
             input,
             events,
             reader: Some(reader),
+            _serial: serial,
         };
         writeln!(owned.input, "{header}").unwrap();
         for bytes in assets.values() {
