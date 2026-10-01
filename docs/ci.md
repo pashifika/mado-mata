@@ -82,8 +82,10 @@ Target metadata parsing uses `plist` in-process, with the exactly pinned
 bounded XML/binary streaming. No system plist helper is executed. macOS core
 checks exercise public Foundation bundle resolution with isolated filesystem
 fixtures, including same-process metadata updates and unsupported alternate
-metadata. Non-macOS bundle resolution is explicitly unsupported; portable
-declaration, record, restore, and observation-policy checks remain cross-platform.
+metadata. They also check the current test process's kernel architecture and
+invalid-PID refusal without launching an application. Non-macOS bundle resolution
+is explicitly unsupported; portable declaration, record, restore, and
+observation-policy checks remain cross-platform.
 Apple framework dependencies are macOS-target-scoped. Native selection uses
 host-owned AppKit sheets for application bundles or saved PNGs, not a general
 dialog/filesystem plugin capability. Recognition Copy uses `NSPasteboard` only

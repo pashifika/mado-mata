@@ -366,6 +366,36 @@ fn lifetime(pid: i32, guard: &Guard<'_>) -> Result<Lifetime, Fault> {
     })
 }
 
+fn process_architecture(pid: i32, guard: &Guard<'_>) -> Result<i32, Fault> {
+    // libc omits PROC_PIDARCHINFO and proc_archinfo from public sys/proc_info.h.
+    const PROC_PIDARCHINFO: i32 = 19;
+    #[repr(C)]
+    struct ProcessArchitecture {
+        cpu_type: libc::cpu_type_t,
+        _cpu_subtype: libc::cpu_subtype_t,
+    }
+
+    let mut info = MaybeUninit::<ProcessArchitecture>::uninit();
+    let size = i32::try_from(size_of::<ProcessArchitecture>())
+        .map_err(|_| unavailable("process_architecture"))?;
+    // SAFETY: The SDK layout is two cpu_type_t/cpu_subtype_t integers. The aligned
+    // output buffer has exactly size writable bytes; libproc does not retain it.
+    #[expect(unsafe_code, reason = "audited public libproc architecture query")]
+    let returned = guard.call(|| unsafe {
+        libc::proc_pidinfo(pid, PROC_PIDARCHINFO, 0, info.as_mut_ptr().cast(), size)
+    })?;
+    if returned != size {
+        return Err(unavailable("process_architecture"));
+    }
+    // SAFETY: libproc reported the complete initialized architecture structure.
+    #[expect(unsafe_code, reason = "libproc returned the full initialized structure")]
+    let info = unsafe { info.assume_init() };
+    if info.cpu_type <= 0 {
+        return Err(unavailable("process_architecture"));
+    }
+    Ok(info.cpu_type)
+}
+
 fn url_path(url: &NSURL) -> Result<String, Fault> {
     if !url.isFileURL() {
         return Err(unavailable("runtime_url"));
@@ -392,11 +422,8 @@ fn candidate_snapshot(
         return Err(unavailable("runtime_identifier"));
     }
     let bundle_id = bundle_id.to_string();
-    let architecture = i32::try_from(guard.call(|| app.executableArchitecture())?)
-        .map_err(|_| unavailable("architecture"))?;
-    if architecture == 0 {
-        return Err(unavailable("architecture"));
-    }
+    // AppKit can report -1 during launch; the kernel already knows the live image.
+    let architecture = process_architecture(pid, guard)?;
     let url = guard
         .call(|| app.executableURL())?
         .ok_or_else(|| unavailable("runtime_url"))?;
@@ -921,6 +948,29 @@ mod tests {
     use super::*;
     use crate::target::tests::MetadataFixture;
     use std::cell::Cell;
+
+    #[test]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    fn kernel_architecture_selects_the_executing_slice_and_refuses_invalid_pid() {
+        let cancelled = AtomicBool::new(false);
+        let guard = Guard {
+            cancelled: &cancelled,
+            deadline: Instant::now() + std::time::Duration::from_secs(5),
+        };
+        let expected = if cfg!(target_arch = "aarch64") {
+            16_777_228
+        } else {
+            16_777_223
+        };
+        assert_eq!(
+            process_architecture(i32::try_from(std::process::id()).unwrap(), &guard).unwrap(),
+            expected
+        );
+        assert_eq!(
+            process_architecture(-1, &guard).unwrap_err().category,
+            "TargetObservationEvidence"
+        );
+    }
 
     #[test]
     fn metadata_changes_during_inspection_refuse_stale_resolution() {
