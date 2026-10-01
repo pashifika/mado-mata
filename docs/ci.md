@@ -150,12 +150,13 @@ The full check has these responsibilities:
 - Test the Rust application core with `--no-default-features --lib`: explicit
   setup/recovery, named Tab ownership, scoped profiles, source-preserving legacy
   imports, bounded snapshots, and journaled restore/rollback are checked alongside
-  bounded logging and the shared controller contracts. Log-content and
-  initialization-error assertions join the real writer independently of the
-  production shutdown deadline; a separate stalled-worker test checks the
-  bounded shutdown and incomplete-cleanup outcome. Command-retirement checks accept
-  settled logging or an explicit `LoggingShutdown` refusal with retirement and
-  closed admission; they do not assume disk-sync latency. Identifier regressions cover
+  bounded logging and the shared controller contracts. Log-content,
+  initialization-error and successful receipt-restore assertions join the real
+  writer independently of the production shutdown deadline; a separate stalled-worker
+  test checks the bounded shutdown and incomplete-cleanup outcome.
+  Command-retirement checks accept settled logging or an explicit `LoggingShutdown`
+  refusal with retirement and closed admission; they do not assume disk-sync latency.
+  Identifier regressions cover
   canonical XIDs, typed owner-scoped conversion, bounded durable mappings,
   repeat ingress/conflicts, stale-schema preservation, and reservation retention
   through interrupted publication and recovery. Restore/migration regressions
