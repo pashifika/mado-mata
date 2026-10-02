@@ -40,6 +40,7 @@ lockfiles:
 | React / React DOM | 19.3.0 |
 | TypeScript | 5.9.3 |
 | Vite | 8.3.0 |
+| CodeMirror | state 6.7.6, view 6.43.13, language 6.12.4, JavaScript 6.2.5, autocomplete 6.20.3, commands 6.11.1 |
 | tracing / tracing-subscriber | 0.1.41 / 0.3.20 |
 
 The [frontend manifest](../apps/desktop/package.json),
@@ -51,6 +52,11 @@ set. The runtime's trusted compiler has its own
 [lockfile](../tools/runtime-comparison/compiler/package-lock.json).
 No package selected by the operator can install dependencies or run lifecycle
 scripts.
+
+Vite bundles the editor and a lazy TypeScript language-service worker, including
+the ES2020 declaration closure from the pinned frontend TypeScript dependency.
+No CDN, runtime type download, package plugin or package-selected compiler is
+used. The editor and execution compiler share the application-owned SDK generator.
 
 ```sh
 rustup toolchain install 1.98.1 --profile minimal
@@ -270,12 +276,14 @@ Neither action inspects, binds, or runs the package.
 - **Files** contains scripts and assets in expandable folders. Folder nodes come
   from declared paths: adding or renaming `src/lib/helper.ts` creates its parents.
   There is no independent empty-folder operation. Scripts have independent
-  drafts, selection, undo/redo, literal search and line numbers. File-tree assets
+  drafts, selection, undo/redo, highlighted TypeScript/JavaScript, literal
+  search/replacement and line numbers. Opening or revealing source preserves
+  its line endings and UTF-16 positions, including non-BMP characters. File-tree assets
   are inventory facts, not decoded or text-edited; image authoring belongs to
   **Recognition**.
 - **Metadata** opens structured manifest, option-schema and packaged preset
   controls; generated source maps are read-only facts. Metadata never
-  opens in the code textarea. Manifest controls preserve package identity and
+  opens in the source editor. Manifest controls preserve package identity and
   declarations while editing supported entries and portable target intent.
   Malformed schema/preset bytes remain unchanged until deliberate repair and
   Save; rebuilding an invalid document requires confirmation. Saved local
@@ -303,8 +311,9 @@ Neither action inspects, binds, or runs the package.
 - **Save file** and **Save all** publish drafts without running or validating
   them. Incomplete script or invalid metadata values can be saved for later
   repair; they are not an executable inventory. A later edit stays dirty if an
-  earlier Save response arrives afterward. The native textarea handles script
-  composition; no editor dependency or package-supplied WebView code is loaded.
+  earlier Save response arrives afterward. Composition, paste, completion and
+  replacement use the same file-local history as typing; package-supplied
+  WebView code is never loaded.
 - **Validate** checks one saved revision through the existing inventory and
   trusted compiler without evaluating package code. Unsaved text is excluded.
   Diagnostics identify their revision and link to declared source locations.
@@ -332,6 +341,49 @@ Neither action inspects, binds, or runs the package.
   contexts also expire; other Tabs disclose that any unsaved repair draft was
   cleared. Saved references and local profiles remain untouched; inspection
   uses the existing [profile reconciliation and repair flow](#recover-profiles-after-a-schema-change).
+
+### Script editing and completion
+
+Use **Cmd/Ctrl-S** to Save, **Cmd/Ctrl-F** to focus Find, **Cmd/Ctrl-G** and
+**Shift-Cmd/Ctrl-G** for next/previous matches, and **Cmd/Ctrl-Z** /
+**Shift-Cmd/Ctrl-Z** for file-local Undo/Redo. Tab inserts two spaces; Escape
+closes suggestions or returns from the search controls to source.
+
+Find is case-insensitive and literal. **Replace** changes the selected full
+match, or selects the next match without editing. **Replace all** changes every
+original non-overlapping match in one Undo action, even beyond the displayed
+10,000-match count cap. Replacement text is literal (`$&` and backslashes have
+no special meaning); empty text deletes. Empty queries, composition and
+ineligible files disable replacement. Oversized output is refused as a whole.
+Draft preflight checks the 1 MiB source and non-image draft budgets; host
+Save/Validate also count trusted dependency content and remain authoritative.
+
+**Complete** or **Ctrl-Space** requests suggestions at the caret; the button
+remains available when macOS reserves that shortcut. Suggestions also follow
+ordinary typing. Arrow keys select, Enter accepts, and Escape dismisses.
+Completion never accepts during IME composition. It covers the current source's
+local bindings, `host.call` methods and arguments, inferred SDK results, and
+nested fields/enum alternatives from the current structured options-schema draft.
+Local declarations that shadow `host` retain their own types.
+
+This is single-document assistance, not project-wide type resolution.
+Imported helper exports, auto-imports, cross-file edits, DOM/Node APIs and package
+type configuration are unavailable. Invalid schema immediately withdraws its
+option fields and visibly reports unknown options; independent SDK completion
+remains available. Repair or Discard uses only the resulting current schema.
+
+Analysis has one worker, one active request and one coalesced latest request.
+Startup is limited to 5 seconds and a dispatched request to 2 seconds.
+Declarations are bounded to 2 MiB, responses to 200 candidates / 256 KiB and
+details to 4 KiB. Capped results and omitted details are disclosed. A worker
+failure or deadline retires analysis without changing drafts or blocking Save,
+navigation or Stop; use **Complete** explicitly to retry. These are payload and
+deadline bounds, not a total WebView memory guarantee.
+
+Suggestions only edit drafts. Continue through **Save → Validate → Exit Edit →
+Inspect/Reinspect → Start**; neither highlighting nor completion validates or
+authorizes execution.
+
 
 ### Source conflicts and interrupted saves
 
@@ -1686,7 +1738,13 @@ local paths, and compiler/run records outside public commits.
    create another package using the saved root. Open an existing external source
    and a previously referenced package under `pkgs`; neither should be relocated.
 2. Add `src/lib/helper.ts`, edit two scripts and check independent undo/redo,
-   selection, search, line numbers and composition. Expand/collapse folders and
+   selection, highlighting, search/replacement, line numbers and composition.
+   Request and accept SDK method/argument/result and nested options/enum
+   completions; rename a field in the schema draft, make it invalid, then repair
+   or discard it and verify that old suggestions do not survive. Check individual
+   replacement, deletion, literal `$&`, replacement containing its query and
+   more than 10,000 matches; one Undo must restore the original file.
+   Expand/collapse folders and
    the entire left navigation; selection and drafts must survive. Use right-click,
    keyboard and menu-button actions to rename the helper into another folder,
    Save and reopen. Cancel removal, then confirm it; verify only the targeted
@@ -1711,10 +1769,16 @@ local paths, and compiler/run records outside public commits.
 7. Run the changed valid package through the real controlled runner. Choose the
    expected state/log result before the run and compare it with the actual record.
    Saving or compiler success alone is not execution acceptance.
-8. Check English/Japanese presentation and a narrow supported window. Record
-   whether composition was driven by WebView events or physical OS IME input;
-   the former does not qualify the latter. This procedure grants no game input
-   or live-capture authority.
+8. Check English/Japanese presentation and a narrow supported window. Exercise
+   physical Japanese IME, native clipboard and native Edit-menu Undo/Redo;
+   distinguish each from synthetic WebView events. Navigate through Recognition,
+   Logs and settings, return to the same drafts, paste an existing Recognition
+   snippet, and repeat the saved-source validation/run loop. Retire a failed
+   analysis worker and verify subsequent editing/Save and explicit completion
+   recovery. Record bundle size, worker startup/warm response observations and
+   the scope of memory measurements. Missing physical IME or GUI observations
+   remain incomplete; hosted checks cannot qualify them. This procedure grants
+   no game input or live-capture authority.
 
 ### Saved-image Recognition acceptance
 

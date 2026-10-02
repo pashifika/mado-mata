@@ -1103,7 +1103,7 @@
       "one": "{count} 行",
       "other": "{count} 行"
     },
-    "editorHelp": "Tab は空白 2 文字を挿入し、Shift+Tab でフォーカスを外に移します。⌘Z と ⇧⌘Z はこのファイルだけを元に戻す・やり直します。⌘F で検索、⌘G と ⇧⌘G で次・前の一致、⌘S でこのファイルを保存します。",
+    "editorHelp": "Tab は空白 2 文字を挿入し、Shift+Tab でフォーカスを外に移します。⌘Z と ⇧⌘Z はこのファイルだけを元に戻す・やり直します。⌘F で検索、⌘G と ⇧⌘G で次・前の一致、⌘S でこのファイルを保存します。Ctrl+Space または「補完」で候補を開き、矢印で選択、Enter で確定、Escape で閉じます。",
     "save": "ファイルを保存",
     "saveAll": "すべて保存",
     "undo": "元に戻す",
@@ -1113,6 +1113,29 @@
     "searchPlaceholder": "検索する文字列",
     "next": "次へ",
     "previous": "前へ",
+    "replacement": "置換後の文字列",
+    "replacementPlaceholder": "置換する文字列（空なら削除）",
+    "replace": "置換",
+    "replaceAll": "すべて置換",
+    "replacementRefusals": {
+      "stale": "ファイルまたは下書きが変わりました。現在の一致箇所を選び直してください。",
+      "ineligible": "このファイル、または IME 変換中は置換できません。",
+      "oversized": "置換するとソースまたはパッケージのサイズ上限を超えます。変更は適用していません。"
+    },
+    "complete": "補完",
+    "completionList": "補完候補",
+    "completionDetailOmitted": "表示上限を超えるため詳細を省略しています。",
+    "completionScope": "補完対象はこの Script、SDK、現在のオプションスキーマの下書きです。インポートしたヘルパーのエクスポート、自動インポート、ファイル間の移動には対応しません。補完は保存・検証の代わりにはなりません。",
+    "optionsCompletionUnavailable": "オプション補完は利用できません。現在のスキーマがないか、不正または未対応の形式です。オプションは unknown として扱い、独立した SDK の補完は利用できます。",
+    "completionStatuses": {
+      "idle": "",
+      "starting": "補完を起動しています…",
+      "pending": "候補を検索しています…",
+      "ready": "補完候補を取得しました。",
+      "capped": "候補数が上限に達しました。すべての候補は表示していません。",
+      "unavailable": "補完を利用できません。編集・保存は引き続き利用できます。「補完」で再試行してください。",
+      "oversized": "補完がソースまたはパッケージのサイズ上限を超えます。補完による変更は適用していません。"
+    },
     "matches": {
       "none": "一致なし",
       "count": "{count} 件の一致",

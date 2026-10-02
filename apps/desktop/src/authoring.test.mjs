@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {AUTHORING_CONFLICT,applyCatalogMutation,applyRecognitionMutation,applyRefresh,applySave,applyValidation,beginComposition,beginPending,catalogBlock,catalogTicket,diagnosticLocation,discardFile,editFile,endComposition,failCommand,fileDirty,findMatch,matchSummary,offsetAt,openSession,recoveryPath,redoFile,saveBlock,saveTicket,selectFile,selectRecognition,undoFile,validationCurrent,validationTicket} from './authoring.ts';
+import {AUTHORING_CONFLICT,AUTHORING_NON_IMAGE_BYTES,AUTHORING_SOURCE_BYTES,MATCH_LIMIT,applyCatalogMutation,applyRecognitionMutation,applyRefresh,applySave,applyValidation,beginComposition,beginPending,catalogBlock,catalogTicket,diagnosticLocation,discardFile,editFile,endComposition,failCommand,fileDirty,findMatch,lineColumn,lineCount,matchSummary,offsetAt,openSession,otherNonImageBytes,recoveryPath,redoFile,replaceFile,replacementEdit,revealRange,saveBlock,saveTicket,selectFile,selectRecognition,undoFile,validationCurrent,validationTicket} from './authoring.ts';
 import {applyAuthoringExit,applyInvalidatedViews,editDraft,updateBound,workspaceFromView} from './workspace.ts';
 
 const owner={workspace:{workspace_id:'a',revision:1},token:'lease-1'};
@@ -19,7 +19,7 @@ function withText(path,text,list=files){
 function mutation(revision,view,refreshError=null){
   return {owner,committed_revision:revision,view,refresh_error:refreshError};
 }
-// Inserts at the draft's caret exactly as the textarea reports it: new text/selection, the selection before the input.
+// Inserts at the draft's caret: new text/selection and the selection before the input.
 function type(state,path,inserted,inputType='insertText',before){
   const draft=state.drafts.get(path);
   const at=before??draft.range;
@@ -28,6 +28,17 @@ function type(state,path,inserted,inputType='insertText',before){
   return editFile(state,path,{text,start:caret,end:caret},at,{type:inputType,data:inserted,composing:false});
 }
 const text=(state,path)=>state.drafts.get(path).text;
+
+function replacementTicket(state,path=state.selected){
+  return {owner:state.owner.token,path,revision:state.drafts.get(path).revision};
+}
+function replace(state,query,replacement,all=false,range=state.drafts.get(state.selected).range){
+  const ticket=replacementTicket(state);
+  const result=replacementEdit(state,ticket,query,replacement,all,range);
+  if(result.kind==='edit') return editFile(state,ticket.path,result.next,range,{type:'insertReplacement',data:replacement,composing:false});
+  if(result.kind==='select') return revealRange(state,ticket.path,result.range);
+  return state;
+}
 
 test('each file keeps its own text, dirty state, caret and undo history across file switches',()=>{
   let state=openSession(packageView('rev-1',files));
@@ -277,6 +288,241 @@ test('search is literal, case-insensitive and wraps; diagnostics map to file off
   assert.equal(diagnosticLocation({category:'X',message:'x',context:{line:1}}),null);
   assert.equal(recoveryPath({category:'AuthoringRecoveryRequired',message:'x',context:{package_path:'/pkg/b'}},'/pkg/a'),'/pkg/b');
   assert.equal(recoveryPath({category:'AuthoringRecoveryRequired',message:'x',context:null},'/pkg/a'),'/pkg/a');
+});
+
+test('Replace selects the next full match without editing an unmatched or partial selection and wraps',()=>{
+  let state=openSession(packageView('rev-1',withText('main.ts','foo FOO foo')));
+  state=replace(state,'foo','bar',false,{start:1,end:2});
+  assert.deepEqual(state.drafts.get('main.ts').range,{start:4,end:7});
+  assert.equal(text(state,'main.ts'),'foo FOO foo');
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+  state=replace(state,'foo','bar');
+  assert.equal(text(state,'main.ts'),'foo bar foo');
+  state=undoFile(state,'main.ts');
+  assert.deepEqual(state.drafts.get('main.ts').range,{start:4,end:7});
+  state=replace(state,'foo','bar',false,{start:11,end:11});
+  assert.deepEqual(state.drafts.get('main.ts').range,{start:0,end:3});
+  assert.equal(text(state,'main.ts'),'foo FOO foo');
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+});
+
+test('selected replacement is a separate per-file Undo action restoring prior text and selection',()=>{
+  let state=openSession(packageView('rev-1',withText('main.ts','alpha alpha')));
+  state=type(state,'main.ts','draft ');
+  state=type(state,'helper.ts','other ');
+  state=revealRange(state,'main.ts',{start:6,end:11});
+  state=replace(state,'alpha','omega');
+  assert.equal(text(state,'main.ts'),'draft omega alpha');
+  assert.equal(text(state,'helper.ts'),'other '+HELPER);
+  state=undoFile(state,'main.ts');
+  assert.equal(text(state,'main.ts'),'draft alpha alpha');
+  assert.deepEqual(state.drafts.get('main.ts').range,{start:6,end:11});
+  assert.equal(fileDirty(state.drafts.get('main.ts')),true);
+  assert.equal(text(state,'helper.ts'),'other '+HELPER);
+  state=redoFile(state,'main.ts');
+  assert.equal(text(state,'main.ts'),'draft omega alpha');
+  state=undoFile(undoFile(state,'main.ts'),'main.ts');
+  assert.equal(text(state,'main.ts'),'alpha alpha');
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+  assert.equal(text(state,'helper.ts'),'other '+HELPER);
+});
+
+test('Replace all reaches beyond the display cap, inserts literal metacharacters once and undoes atomically',()=>{
+  const original='A '.repeat(MATCH_LIMIT+3);
+  const replacement='a$&$1$$\\a';
+  let state=openSession(packageView('rev-1',withText('main.ts',original)));
+  assert.deepEqual(matchSummary(original,'a',{start:0,end:1}),{count:MATCH_LIMIT,capped:true,current:1});
+  state=replace(state,'a',replacement,true);
+  assert.equal(text(state,'main.ts'),(replacement+' ').repeat(MATCH_LIMIT+3));
+  assert.equal(text(state,'helper.ts'),HELPER);
+  state=undoFile(state,'main.ts');
+  assert.equal(text(state,'main.ts'),original);
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+  state=redoFile(state,'main.ts');
+  assert.equal(text(state,'main.ts'),(replacement+' ').repeat(MATCH_LIMIT+3));
+});
+
+test('literal regex-looking queries and overlapping occurrences keep original non-overlapping replacement semantics',()=>{
+  const query='[$.*?+^{}()|\\]';
+  const replacement='$&$1$$\\';
+  const literal=openSession(packageView('rev-1',withText('main.ts',query+' other '+query)));
+  assert.equal(text(replace(literal,query,replacement,true),'main.ts'),replacement+' other '+replacement);
+  const overlapping=openSession(packageView('rev-1',withText('main.ts','aaaaa')));
+  assert.equal(text(replace(overlapping,'aa','aaa',true),'main.ts'),'aaaaaaa');
+});
+
+test('empty replacement deletes selected and remaining matches with one Undo action each',()=>{
+  let state=openSession(packageView('rev-1',withText('main.ts','foo foo')));
+  state=replace(state,'foo','',false,{start:0,end:3});
+  assert.equal(text(state,'main.ts'),' foo');
+  state=replace(state,'foo','',true);
+  assert.equal(text(state,'main.ts'),' ');
+  state=undoFile(state,'main.ts');
+  assert.equal(text(state,'main.ts'),' foo');
+  state=undoFile(state,'main.ts');
+  assert.equal(text(state,'main.ts'),'foo foo');
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+});
+
+const noOpReplacements=[
+  {scenario:'empty query leaves draft history unchanged',query:'',replacement:'bar',all:true},
+  {scenario:'unmatched query leaves draft history unchanged',query:'missing',replacement:'bar',all:true},
+  {scenario:'identical selected replacement leaves draft history unchanged',query:'foo',replacement:'foo',all:false},
+  {scenario:'identical Replace all leaves draft history unchanged',query:'foo',replacement:'foo',all:true},
+];
+for(const {scenario,query,replacement,all} of noOpReplacements) test(scenario,()=>{
+  let state=openSession(packageView('rev-1',withText('main.ts','foo foo')));
+  state=undoFile(type(state,'main.ts','later '),'main.ts');
+  const before=state;
+  assert.deepEqual(replacementEdit(state,replacementTicket(state),query,replacement,all,{start:0,end:3}),{kind:'noop'});
+  state=replace(state,query,replacement,all,{start:0,end:3});
+  assert.equal(state,before);
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+  assert.equal(state.drafts.get('main.ts').revision,before.drafts.get('main.ts').revision);
+  assert.equal(text(redoFile(state,'main.ts'),'main.ts'),'later foo foo');
+});
+
+const staleReplacements=[
+  {scenario:'a replacement ticket cannot enter a successor owner with equal path, revision and text',
+    change:state=>openSession(packageView('rev-1',withText('main.ts','foo'),'lease-next'))},
+  {scenario:'a replacement ticket cannot edit a file after selection moves elsewhere',
+    change:state=>selectFile(state,'helper.ts',null)},
+  {scenario:'a replacement ticket cannot edit an advanced revision even after Undo restores the same text',
+    change:state=>undoFile(type(state,'main.ts','later '),'main.ts')},
+];
+for(const {scenario,change} of staleReplacements) test(scenario,()=>{
+  const initial=openSession(packageView('rev-1',withText('main.ts','foo')));
+  const ticket=replacementTicket(initial);
+  const state=change(initial);
+  assert.deepEqual(replacementEdit(state,ticket,'foo','bar',true,{start:0,end:3}),{kind:'refused',reason:'stale'});
+  assert.equal(text(state,'main.ts'),'foo');
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+  assert.equal(text(state,'helper.ts'),HELPER);
+});
+
+const ineligibleReplacements=[
+  {scenario:'replacement cannot interrupt composition',change:state=>beginComposition(state,'main.ts',{start:0,end:0})},
+  {scenario:'replacement cannot edit during owner exit',change:state=>beginPending(state,{kind:'exit'})},
+  {scenario:'replacement cannot edit during duplication',change:state=>beginPending(state,{kind:'duplicate'})},
+  {scenario:'replacement cannot edit an undisplayed source in Recognition',change:state=>selectRecognition(state,null)},
+  {scenario:'replacement cannot rewrite structured metadata',change:state=>selectFile(state,'schema.json',null)},
+  {scenario:'replacement cannot rewrite binary assets',change:state=>selectFile(state,'images/logo.png',null)},
+];
+for(const {scenario,change} of ineligibleReplacements) test(scenario,()=>{
+  const state=change(openSession(packageView('rev-1',withText('main.ts','foo'))));
+  assert.deepEqual(replacementEdit(state,replacementTicket(state),'foo','bar',true,{start:0,end:3}),{kind:'refused',reason:'ineligible'});
+  assert.equal(text(state,'main.ts'),'foo');
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+  assert.equal(text(state,'schema.json'),'{}\n');
+  assert.equal(text(state,'images/logo.png'),null);
+});
+
+test('replacement refuses a removed source while preserving its recoverable unsaved draft',()=>{
+  let state=type(openSession(packageView('rev-1',withText('main.ts','foo'))),'main.ts','draft ');
+  state=applyRefresh(state,packageView('rev-2',files.filter(item=>item.path!=='main.ts')));
+  assert.equal(state.drafts.get('main.ts').missing,true);
+  assert.deepEqual(replacementEdit(state,replacementTicket(state),'foo','bar',true,{start:6,end:9}),{kind:'refused',reason:'ineligible'});
+  assert.equal(text(state,'main.ts'),'draft foo');
+  assert.equal(text(undoFile(state,'main.ts'),'main.ts'),'foo');
+});
+
+test('replacement preflights exact UTF-8 source bytes and refuses overflow without changing history',()=>{
+  const state=openSession(packageView('rev-1',[file('main.ts','source','x')]));
+  const ticket=replacementTicket(state);
+  const bounded='日'.repeat(Math.floor(AUTHORING_SOURCE_BYTES/3))+'a';
+  assert.equal(new TextEncoder().encode(bounded).length,AUTHORING_SOURCE_BYTES);
+  assert.deepEqual(replacementEdit(state,ticket,'x',bounded,true,{start:0,end:1}),
+    {kind:'edit',next:{text:bounded,start:bounded.length,end:bounded.length}});
+  assert.deepEqual(replacementEdit(state,ticket,'x',bounded+'a',true,{start:0,end:1}),{kind:'refused',reason:'oversized'});
+  assert.equal(replace(state,'x',bounded+'a',true),state);
+  assert.equal(text(state,'main.ts'),'x');
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+  assert.equal(undoFile(state,'main.ts'),state);
+});
+
+test('replacement counts surrogate pairs joined across output segments before refusing the whole result',()=>{
+  const prefix='a'.repeat(AUTHORING_SOURCE_BYTES-4);
+  let state=openSession(packageView('rev-1',[file('main.ts','source',prefix+'😀')]));
+  state=type(state,'main.ts','X','insertFromPaste',{start:prefix.length+1,end:prefix.length+1});
+  const result=replacementEdit(state,replacementTicket(state),'X','',true,{start:0,end:0});
+  assert.deepEqual(result,{kind:'edit',next:{text:prefix+'😀',start:prefix.length+1,end:prefix.length+1}});
+  state=replace(state,'X','',true);
+  assert.equal(text(state,'main.ts'),prefix+'😀');
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+  assert.equal(text(undoFile(state,'main.ts'),'main.ts'),prefix+'\ud83dX\ude00');
+});
+
+test('aggregate non-image preflight includes current metadata and binary JSON assets but not declared images',()=>{
+  const manifest=JSON.stringify({assets:{pixels:{path:'pixels.bin',format:'raw-rgba8'},logo:{path:'looks-like-json.json',format:'png'},
+    data:{path:'pretends-image.png',format:'json'}}});
+  const inventory=[
+    file('package.json','manifest',manifest),file('main.ts','source','x'),file('helper.ts','source','abc'),file('schema.json','schema','日'),
+    file('profile.json','profile','{"x":1}'),file('main.map','source_map','😀'),
+    {...file('pixels.bin','asset',null),bytes:32*1024*1024},{...file('looks-like-json.json','asset',null),bytes:1024*1024},
+    {...file('pretends-image.png','asset',null),bytes:11},
+  ];
+  let state=type(openSession(packageView('rev-1',inventory)),'helper.ts','日');
+  const expected=new TextEncoder().encode(manifest).length+6+3+7+4+11;
+  assert.equal(otherNonImageBytes(state,'main.ts'),expected);
+  const bounded='a'.repeat(AUTHORING_NON_IMAGE_BYTES-expected);
+  state=replace(state,'x',bounded,true);
+  assert.equal(text(state,'main.ts'),bounded);
+  assert.equal(text(state,'helper.ts'),'日abc');
+  state=undoFile(state,'main.ts');
+  assert.equal(text(state,'main.ts'),'x');
+  assert.deepEqual(replacementEdit(state,replacementTicket(state),'x',bounded+'a',true,{start:0,end:1}),{kind:'refused',reason:'oversized'});
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+  // Current text changes count immediately, but an unsaved manifest cannot exempt a disk JSON asset as an image.
+  const editedManifest=manifest.replace('"json"','"png"');
+  state=replaceFile(state,'package.json',editedManifest);
+  assert.equal(otherNonImageBytes(state,'main.ts'),new TextEncoder().encode(editedManifest).length+6+3+7+4+11);
+  state=applyRefresh(state,packageView('rev-2',inventory.filter(item=>item.path!=='helper.ts')));
+  assert.equal(state.drafts.get('helper.ts').missing,true);
+  assert.equal(otherNonImageBytes(state,'main.ts'),new TextEncoder().encode(editedManifest).length+3+7+4+11);
+});
+
+test('UTF-16 search and diagnostic positions support CRLF, lone CR and LF without normalizing source',()=>{
+  const original='一😀\r\nA😀\rB\nC';
+  let state=openSession(packageView('rev-1',withText('main.ts',original)));
+  assert.equal(lineCount(original),4);
+  assert.equal(offsetAt(original,1,99),3);
+  assert.equal(offsetAt(original,2,1),5);
+  assert.equal(offsetAt(original,2,99),8);
+  assert.equal(offsetAt(original,3,1),9);
+  assert.equal(offsetAt(original,4,1),11);
+  assert.equal(offsetAt(original,5,1),original.length);
+  assert.deepEqual(lineColumn(original,6),{line:2,column:2});
+  assert.deepEqual(lineColumn(original,7),{line:2,column:3});
+  assert.deepEqual(lineColumn(original,9),{line:3,column:1});
+  assert.deepEqual(findMatch(original,'😀',{start:1,end:3},false),{start:6,end:8});
+  state=revealRange(state,'main.ts',{start:6,end:8});
+  assert.equal(text(state,'main.ts'),original);
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+  state=replace(state,'😀','終');
+  assert.equal(text(state,'main.ts'),'一😀\r\nA終\rB\nC');
+  state=undoFile(state,'main.ts');
+  assert.equal(text(state,'main.ts'),original);
+  assert.deepEqual(state.drafts.get('main.ts').range,{start:6,end:8});
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+});
+
+test('Save of replacement A preserves replacement B and its Undo baseline while the save is pending',()=>{
+  let state=openSession(packageView('rev-1',withText('main.ts','foo foo')));
+  state=replace(state,'foo','A',false,{start:0,end:3});
+  const ticket=saveTicket(state,'main.ts');
+  state=beginPending(state,{kind:'save',path:'main.ts'});
+  state=replace(state,'foo','B',true);
+  state=applySave(state,ticket,mutation('rev-2',packageView('rev-2',withText('main.ts','A foo'))));
+  assert.equal(text(state,'main.ts'),'A B');
+  assert.equal(state.drafts.get('main.ts').base,'A foo');
+  assert.equal(fileDirty(state.drafts.get('main.ts')),true);
+  assert.equal(saveTicket(state,'main.ts').text,'A B');
+  state=undoFile(state,'main.ts');
+  assert.equal(text(state,'main.ts'),'A foo');
+  assert.equal(fileDirty(state.drafts.get('main.ts')),false);
+  state=redoFile(state,'main.ts');
+  assert.equal(text(state,'main.ts'),'A B');
+  assert.equal(fileDirty(state.drafts.get('main.ts')),true);
 });
 
 test('real compiler envelopes expose each diagnostic message and source location for editor navigation',()=>{

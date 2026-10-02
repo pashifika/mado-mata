@@ -35,8 +35,17 @@ function optionType(node, depth = 0) {
 }
 
 export function definitions(schema) {
+  return declarations(optionType(schema));
+}
+
+// Advisory editing only; invalid schemas remain errors in definitions().
+export function unknownOptionsDefinitions() {
+  return declarations("unknown");
+}
+
+function declarations(options) {
   return `// Generated from the captured schema and application-owned mado-host-v1 contract.
-type MadoOptions = ${optionType(schema)};
+type MadoOptions = ${options};
 // Desktop Native Readiness only. Exact empty payloads; no target or launch overrides.
 interface MadoNativeProgress {
   readonly status: "not_requested" | "pending" | "capture_ready";

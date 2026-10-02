@@ -1103,7 +1103,7 @@
       "one": "{count} line",
       "other": "{count} lines"
     },
-    "editorHelp": "Tab inserts two spaces; Shift+Tab moves focus out. ⌘Z and ⇧⌘Z undo and redo in this file only; ⌘F searches, ⌘G and ⇧⌘G find the next and previous match, ⌘S saves this file.",
+    "editorHelp": "Tab inserts two spaces; Shift+Tab moves focus out. ⌘Z and ⇧⌘Z undo and redo in this file only; ⌘F searches, ⌘G and ⇧⌘G find the next and previous match, ⌘S saves this file. Ctrl+Space or Complete opens suggestions; arrows select, Enter accepts and Escape closes.",
     "save": "Save file",
     "saveAll": "Save all",
     "undo": "Undo",
@@ -1113,6 +1113,29 @@
     "searchPlaceholder": "Find text",
     "next": "Next",
     "previous": "Previous",
+    "replacement": "Replace with",
+    "replacementPlaceholder": "Replacement text (empty deletes)",
+    "replace": "Replace",
+    "replaceAll": "Replace all",
+    "replacementRefusals": {
+      "stale": "The file or draft changed. Select the current match and try again.",
+      "ineligible": "Replacement is unavailable for this file or during composition.",
+      "oversized": "Replacement would exceed the source or package size limit. Nothing was changed."
+    },
+    "complete": "Complete",
+    "completionList": "Completions",
+    "completionDetailOmitted": "Detail omitted: exceeds display limit.",
+    "completionScope": "Suggestions cover this Script, the SDK and current options schema draft. Imported helper exports, auto-imports and cross-file navigation are not supported. Suggestions do not replace Save and Validate.",
+    "optionsCompletionUnavailable": "Options completion unavailable: the current schema is missing, malformed or unsupported. Options are unknown; independent SDK suggestions remain available.",
+    "completionStatuses": {
+      "idle": "",
+      "starting": "Starting completion…",
+      "pending": "Finding suggestions…",
+      "ready": "Suggestions ready.",
+      "capped": "Suggestions capped; this is not the complete candidate list.",
+      "unavailable": "Completion unavailable. Editing and Save remain available; use Complete to retry.",
+      "oversized": "Completion exceeds the source or package size limit. No completion edit was applied."
+    },
     "matches": {
       "none": "No matches",
       "count": "{count} matches",

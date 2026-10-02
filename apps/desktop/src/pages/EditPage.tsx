@@ -1,5 +1,5 @@
 import {Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
-import type {ReactNode, RefObject} from 'react';
+import type {ReactNode} from 'react';
 import {flushSync} from 'react-dom';
 import CatalogDialog from '../components/CatalogDialog.tsx';
 import type {CatalogIntent} from '../components/CatalogDialog.tsx';
@@ -12,17 +12,18 @@ import {AssetView, SourceMapView} from '../components/MetadataFacts.tsx';
 import PresetEditor from '../components/PresetEditor.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
 import SchemaEditor from '../components/SchemaEditor.tsx';
-import {AUTHORING_RECOVERY, catalogBlock, diagnosticLocation, dirtyDrafts, draftList, fileDirty, findMatch, lineColumn, lineCount, matchSummary, offsetAt, saveBlock, shortRevision, validationCurrent} from '../authoring.ts';
+import SourceEditor from '../editor/SourceEditor.tsx';
+import type {SourceEditorHandle} from '../editor/SourceEditor.tsx';
+import {CompletionClient} from '../editor/completion-client.ts';
+import type {CompletionContext, CompletionKey, CompletionStatus} from '../editor/completion-types.ts';
+import {AUTHORING_RECOVERY, catalogBlock, diagnosticLocation, dirtyDrafts, draftList, fileDirty, findMatch, matchSummary, offsetAt, otherNonImageBytes, replacementEdit, saveBlock, shortRevision, validationCurrent} from '../authoring.ts';
 import type {AuthoringSession, EditInput, FileDraft, Snapshot, TextRange, TypedText} from '../authoring.ts';
-import {parseJson, readManifest, treeKind} from '../metadata.ts';
+import {parseJson, readManifest, schemaIssues, treeKind} from '../metadata.ts';
 import {packageDestination} from '../state.ts';
 import type {AuthoringFileKind, CatalogEdit, Fault} from '../types.ts';
 import {messages, renderMessage} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
-// One editor line in CSS pixels; `.code-editor` in style.css uses the same line height for text and gutter.
-const LINE_HEIGHT = 18;
-const INDENT = '  ';
 // Metadata row order in the tree's Metadata group; the Files group holds sources and assets.
 const METADATA_ORDER: Record<AuthoringFileKind, number> = {manifest: 0, schema: 1, profile: 2, source_map: 3, source: 4, asset: 5};
 
@@ -93,129 +94,6 @@ interface Props {
   validationActive: boolean;
 }
 
-interface EditorProps {
-  draft: FileDraft & {text: string}; reveal: number; readOnly: boolean; label: string; help: string;
-  // The latest editor selection, shared with the page for search and file switching without re-rendering it.
-  selection: RefObject<TextRange>;
-  handlers: EditHandlers; onFind: () => void; onFindNext: (backward: boolean) => void;
-}
-
-// A native textarea keeps platform text input, selection and IME composition. History is kept per file by the
-// session instead of the element, so switching files never mixes undo stacks; native history commands are redirected.
-function CodeEditor({draft, reveal, readOnly, label, help, selection, handlers, onFind, onFindNext}: EditorProps) {
-  const locale = useLocale();
-  const a = messages[locale].ui.authoring;
-  const area = useRef<HTMLTextAreaElement>(null);
-  const gutter = useRef<HTMLPreElement>(null);
-  const composing = useRef(false);
-  // Selection to restore after a programmatic text change (Tab insertion) is committed.
-  const restore = useRef<TextRange | null>(null);
-  const latest = useRef({handlers, path: draft.path});
-  latest.current = {handlers, path: draft.path};
-  const [caret, setCaret] = useState(() => lineColumn(draft.text, draft.range.start));
-  const lines = lineCount(draft.text);
-  const numbers = useMemo(() => Array.from({length: lines}, (_, index) => index + 1).join('\n'), [lines]);
-
-  // Explicit reveals (file switch, undo/redo, search, diagnostics) apply the session's stored selection.
-  useLayoutEffect(() => {
-    const element = area.current;
-    if (!element) return;
-    const {start, end} = draft.range;
-    element.focus({preventScroll: true});
-    element.setSelectionRange(start, end);
-    selection.current = {start, end};
-    setCaret(lineColumn(element.value, start));
-    const top = (lineColumn(element.value, start).line - 1) * LINE_HEIGHT;
-    if (top < element.scrollTop || top > element.scrollTop + element.clientHeight - 2 * LINE_HEIGHT) {
-      element.scrollTop = Math.max(0, top - element.clientHeight / 3);
-    }
-    if (gutter.current) gutter.current.scrollTop = element.scrollTop;
-  }, [reveal, draft.path]);
-
-  useLayoutEffect(() => {
-    const element = area.current;
-    const target = restore.current;
-    if (!element || !target) return;
-    restore.current = null;
-    element.setSelectionRange(target.start, target.end);
-    selection.current = target;
-  });
-
-  // Edit-menu Undo/Redo reach the element as native history input; they use this file's session history instead.
-  useEffect(() => {
-    const element = area.current;
-    if (!element) return;
-    function history(event: InputEvent) {
-      if (event.inputType !== 'historyUndo' && event.inputType !== 'historyRedo') return;
-      event.preventDefault();
-      if (composing.current) return;
-      const {handlers: current, path} = latest.current;
-      if (event.inputType === 'historyUndo') current.undo(path); else current.redo(path);
-    }
-    element.addEventListener('beforeinput', history);
-    return () => element.removeEventListener('beforeinput', history);
-  }, []);
-
-  function track(element: HTMLTextAreaElement) {
-    selection.current = {start: element.selectionStart, end: element.selectionEnd};
-    setCaret(lineColumn(element.value, element.selectionStart));
-  }
-
-  return <div className="code-editor">
-    <pre id="authoring-line-numbers" ref={gutter} className="editor-gutter" aria-hidden="true">{numbers}</pre>
-    <textarea id="authoring-editor" ref={area} className="editor-text" value={draft.text} readOnly={readOnly} wrap="off"
-      spellCheck={false} autoCapitalize="off" autoCorrect="off" autoComplete="off" aria-label={label} aria-describedby="authoring-editor-help"
-      data-path={draft.path} data-draft-revision={draft.revision}
-      onChange={event => {
-        const element = event.currentTarget;
-        const native = event.nativeEvent as Partial<InputEvent>;
-        const before = selection.current ?? {start: element.selectionStart, end: element.selectionEnd};
-        const next = {text: element.value, start: element.selectionStart, end: element.selectionEnd};
-        track(element);
-        handlers.edit(draft.path, next, before, {type: native.inputType ?? '', data: native.data ?? null, composing: composing.current || native.isComposing === true});
-      }}
-      onSelect={event => track(event.currentTarget)}
-      onBlur={event => handlers.range(draft.path, {start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd})}
-      onScroll={event => {if (gutter.current) gutter.current.scrollTop = event.currentTarget.scrollTop;}}
-      onCompositionStart={event => {
-        composing.current = true;
-        handlers.compositionStart(draft.path, {start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd});
-      }}
-      onCompositionEnd={() => {
-        composing.current = false;
-        handlers.compositionEnd(draft.path);
-      }}
-      onKeyDown={event => {
-        if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
-        const modifier = event.metaKey || event.ctrlKey;
-        const key = event.key.toLowerCase();
-        if (modifier && !event.altKey && (key === 'z' || key === 'y')) {
-          event.preventDefault();
-          if (key === 'y' || event.shiftKey) handlers.redo(draft.path); else handlers.undo(draft.path);
-        } else if (modifier && key === 's') {
-          event.preventDefault();
-          handlers.save(draft.path);
-        } else if (modifier && key === 'f') {
-          event.preventDefault();
-          onFind();
-        } else if (modifier && key === 'g') {
-          event.preventDefault();
-          onFindNext(event.shiftKey);
-        } else if (event.key === 'Tab' && !modifier && !event.altKey && !event.shiftKey && !readOnly) {
-          event.preventDefault();
-          const element = event.currentTarget;
-          const {selectionStart: start, selectionEnd: end, value} = element;
-          const caretAt = start + INDENT.length;
-          restore.current = {start: caretAt, end: caretAt};
-          handlers.edit(draft.path, {text: value.slice(0, start) + INDENT + value.slice(end), start: caretAt, end: caretAt}, {start, end},
-            {type: 'insertText', data: INDENT, composing: false});
-        }
-      }}/>
-    <div className="editor-status"><span id="authoring-caret">{a.position(caret.line, caret.column)}</span><span>{a.lines(lines)}</span>
-      <span id="authoring-editor-help">{help}</span></div>
-  </div>;
-}
-
 export default function EditPage({session, label, handlers, recognition, recognitionDirty, recognitionSaveBlock, packagesRoot, locked, lockReason, leaseLost, validationActive}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
@@ -232,6 +110,18 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const searchInput = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
   const [duplicateId, setDuplicateId] = useState('');
+  const [replacement, setReplacement] = useState('');
+  const [replacementNotice, setReplacementNotice] = useState<'stale' | 'ineligible' | 'oversized' | null>(null);
+  const sourceEditor = useRef<SourceEditorHandle | null>(null);
+  const client = useRef<CompletionClient | null>(null);
+  const [completionStatus, setCompletionStatus] = useState<CompletionStatus>('idle');
+  const schemaDraft = drafts.find(draft => draft.kind === 'schema' && !draft.missing);
+  const schemaText = schemaDraft?.text ?? null;
+  const optionsAvailable = useMemo(() => {
+    if (schemaText === null) return false;
+    const parsed = parseJson(schemaText);
+    return parsed.ok && schemaIssues(parsed.value).length === 0;
+  }, [schemaText]);
   const manifestText = drafts.find(draft => draft.kind === 'manifest' && !draft.missing)?.text ?? null;
   // Declarations name presets, maps and assets; the manifest view never changes them, so its draft is authoritative here.
   const manifest = useMemo(() => {
@@ -287,6 +177,76 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const readOnly = pending?.kind === 'exit' || pending?.kind === 'duplicate';
   const summary = useMemo(() => editable && query ? matchSummary(editable.text, query, editable.range) : null,
     [editable?.text, query, editable?.range.start, editable?.range.end]);
+  const sourceReadOnly = readOnly || leaseLost || editable?.missing === true;
+  const generation = useRef(0);
+  const otherBytes = useMemo(() => editable ? otherNonImageBytes(session, editable.path) : 0, [session.drafts, editable?.path]);
+  const completionContext = useMemo<CompletionContext | null>(() => {
+    generation.current += 1;
+    if (!editable || sourceReadOnly || editable.composing !== null || pending?.kind === 'catalog'
+      || pending?.kind === 'refresh' || session.refreshRequired) return null;
+    return {owner: session.owner.token, path: editable.path, revision: editable.revision, generation: generation.current,
+      source: editable.text, schema: schemaText, otherBytes};
+  }, [session.owner.token, session.revision, session.order, session.destination, session.refreshRequired, session.conflict,
+    pending?.kind, editable?.path, editable?.text, editable?.revision, editable?.composing, sourceReadOnly,
+    schemaText, schemaDraft?.revision, otherBytes]);
+  const currentContext = useRef(completionContext);
+  currentContext.current = completionContext;
+  const currentSession = useRef(session);
+  currentSession.current = session;
+  const currentReadOnly = useRef(sourceReadOnly);
+  currentReadOnly.current = sourceReadOnly;
+
+  useLayoutEffect(() => {
+    currentContext.current = completionContext;
+    client.current?.setContext(completionContext);
+  }, [completionContext]);
+  useLayoutEffect(() => {
+    setReplacementNotice(null);
+  }, [completionContext, query, replacement]);
+  useLayoutEffect(() => {
+    setCompletionStatus('idle');
+    return () => {
+      currentContext.current = null;
+      client.current?.dispose();
+      client.current = null;
+    };
+  }, [session.owner.token]);
+
+  function invalidateCompletion(next?: Snapshot) {
+    const context = currentContext.current;
+    const updated = context && next ? {...context, source: next.text, revision: context.revision + 1, generation: ++generation.current} : null;
+    currentContext.current = updated;
+    client.current?.setContext(updated);
+  }
+  function acceptsCompletion(key: CompletionKey, source: string): boolean {
+    const context = currentContext.current;
+    const draft = currentSession.current.drafts.get(key.path);
+    return !currentReadOnly.current && sourceEditor.current?.composing() !== true && context !== null
+      && key.owner === context.owner && key.path === context.path && key.revision === context.revision
+      && key.generation === context.generation && source === context.source && draft?.text === source
+      && draft.revision === key.revision && draft.composing === null && client.current?.accepts(key) === true;
+  }
+  async function requestCompletion(position: number, explicit: boolean) {
+    const context = currentContext.current;
+    if (!context || currentReadOnly.current || sourceEditor.current?.composing()) return null;
+    if (!client.current) client.current = new CompletionClient(setCompletionStatus);
+    const active = client.current;
+    active.setContext(context);
+    const result = await active.request(position, explicit);
+    return result && acceptsCompletion(result.key, context.source) ? result : null;
+  }
+  function replaceMatch(all: boolean) {
+    if (!editable || sourceReadOnly || sourceEditor.current?.composing()) return;
+    const ticket = {owner: session.owner.token, path: editable.path, revision: editable.revision};
+    const before = selection.current;
+    const result = replacementEdit(currentSession.current, ticket, query, replacement, all, before);
+    setReplacementNotice(result.kind === 'refused' ? result.reason : null);
+    if (result.kind === 'edit') {
+      invalidateCompletion(result.next);
+      handlers.edit(editable.path, result.next, before, {type: 'insertReplacementText', data: null, composing: false});
+      handlers.reveal(editable.path, {start: result.next.start, end: result.next.end});
+    } else if (result.kind === 'select') handlers.reveal(editable.path, result.range);
+  }
 
   function find(backward: boolean) {
     if (!editable) return;
@@ -413,21 +373,56 @@ export default function EditPage({session, label, handlers, recognition, recogni
     </div>}
     {editable && <>
       <div className="editor-toolbar">
-        <button id="authoring-undo" type="button" disabled={editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
-        <button id="authoring-redo" type="button" disabled={editable.redo.length === 0 || editable.composing !== null} onClick={() => handlers.redo(editable.path)}>{a.redo}</button>
-        <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(editable) || readOnly} onClick={() => handlers.discard(editable.path)}>{a.discardFile}</button>
+        <button id="authoring-undo" type="button" disabled={sourceReadOnly || editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
+        <button id="authoring-redo" type="button" disabled={sourceReadOnly || editable.redo.length === 0 || editable.composing !== null} onClick={() => handlers.redo(editable.path)}>{a.redo}</button>
+        <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(editable) || readOnly || editable.composing !== null} onClick={() => handlers.discard(editable.path)}>{a.discardFile}</button>
+        <button id="authoring-complete" type="button" disabled={!completionContext} aria-keyshortcuts="Control+Space"
+          onClick={() => sourceEditor.current?.complete()}>{a.complete}</button>
         <span className="editor-search" role="search">
           <label className="visually-hidden" htmlFor="authoring-search">{a.search}</label>
           <input id="authoring-search" ref={searchInput} type="search" value={query} spellCheck={false} placeholder={a.searchPlaceholder}
             onChange={event => setQuery(event.target.value)}
-            onKeyDown={event => {if (event.key === 'Enter') {event.preventDefault(); find(event.shiftKey);}}}/>
+            onKeyDown={event => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+              if (event.key === 'Enter') {event.preventDefault(); find(event.shiftKey);}
+              if (event.key === 'Escape') {event.preventDefault(); sourceEditor.current?.focus();}
+            }}/>
           <button id="authoring-search-previous" type="button" disabled={!query} onClick={() => find(true)}>{a.previous}</button>
           <button id="authoring-search-next" type="button" disabled={!query} onClick={() => find(false)}>{a.next}</button>
           <span id="authoring-search-count" className="muted" role="status">{summary ? a.matches(summary.count, summary.current, summary.capped) : ''}</span>
         </span>
       </div>
-      <CodeEditor key={editable.path} draft={editable} reveal={session.reveal} readOnly={readOnly} label={a.editorLabel(editable.path)} help={a.editorHelp}
-        selection={selection} handlers={handlers} onFind={() => {searchInput.current?.focus(); searchInput.current?.select();}} onFindNext={find}/>
+      <div className="editor-toolbar editor-replacement">
+        <label htmlFor="authoring-replacement">{a.replacement}</label>
+        <input id="authoring-replacement" type="text" value={replacement} spellCheck={false} placeholder={a.replacementPlaceholder}
+          onChange={event => setReplacement(event.target.value)}
+          onKeyDown={event => {
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+            if (event.key === 'Enter') {event.preventDefault(); replaceMatch(false);}
+            if (event.key === 'Escape') {event.preventDefault(); sourceEditor.current?.focus();}
+          }}/>
+        <button id="authoring-replace" type="button" disabled={!query || sourceReadOnly || editable.composing !== null} onClick={() => replaceMatch(false)}>{a.replace}</button>
+        <button id="authoring-replace-all" type="button" disabled={!query || sourceReadOnly || editable.composing !== null} onClick={() => replaceMatch(true)}>{a.replaceAll}</button>
+        <span role="status">{replacementNotice === null ? '' : a.replacementRefusals[replacementNotice]}</span>
+      </div>
+      <SourceEditor key={`${session.owner.token}:${editable.path}`} draft={editable} reveal={session.reveal} readOnly={sourceReadOnly}
+        selection={selection} control={sourceEditor} context={completionContext} request={requestCompletion} accepts={acceptsCompletion}
+        completionUnavailable={completionStatus === 'unavailable' || completionStatus === 'oversized'}
+        onCompletionRefused={() => setCompletionStatus('oversized')}
+        onEdit={(next, before, input) => {
+          invalidateCompletion(next);
+          handlers.edit(editable.path, next, before, input);
+        }}
+        onRange={range => handlers.range(editable.path, range)}
+        onCompositionStart={range => {invalidateCompletion(); handlers.compositionStart(editable.path, range);}}
+        onCompositionEnd={() => handlers.compositionEnd(editable.path)}
+        onUndo={() => handlers.undo(editable.path)} onRedo={() => handlers.redo(editable.path)} onSave={() => handlers.save(editable.path)}
+        onFind={() => {searchInput.current?.focus(); searchInput.current?.select();}} onFindNext={find}/>
+      <div className="completion-status" role="status">
+        <span id="authoring-completion-status">{a.completionStatuses[completionStatus]}</span>
+        {!optionsAvailable && <span id="authoring-options-unavailable">{a.optionsCompletionUnavailable}</span>}
+      </div>
+      <p id="authoring-completion-scope" className="field-help">{a.completionScope}</p>
     </>}
     {text?.kind === 'manifest' && <ManifestEditor key={text.path} draft={text} disabled={formDisabled}
       onReplace={next => handlers.replace(text.path, next)} onOpen={path => handlers.select(path, null)}/>}
