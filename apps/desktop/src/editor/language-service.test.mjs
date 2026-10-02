@@ -146,7 +146,108 @@ for (const path of ['main.ts', 'main.js']) {
     assert.deepEqual(completion.result.candidates.map(item => item.label), ['local']);
     assert.equal(accept(completion, 'local'), 'export function run() { const host = {local: 42}; return host.local; }');
   });
+
+  test(`${path}: SDK method metadata follows resolved call provenance through inferred aliases`, async t => {
+    const service = new ScriptLanguageService(libraries);
+    t.after(() => service.dispose());
+    const direct = at(service, 'host.call("ob¦serve", {});', path);
+    const observed = direct.result.candidates.find(item => item.label === 'observe');
+    assert.ok(observed);
+    const preview = ts.createSourceFile('preview.ts',
+      observed.detail.replace(/^host\.call/, 'declare function preview') + ';', ts.ScriptTarget.ES2020, true);
+    assert.deepEqual(preview.parseDiagnostics, []);
+    const signature = preview.statements[0];
+    assert.ok(ts.isFunctionDeclaration(signature));
+    assert.equal(signature.parameters[0].type.literal.text, 'observe');
+    assert.equal(signature.parameters[1].type.typeName.text, 'Record');
+    assert.equal(signature.type.typeName.text, 'MadoObservation');
+    assert.equal(typeof observed.documentation, 'string');
+    assert.notEqual(observed.documentation, observed.label);
+    assert.equal(observed.kind, ts.ScriptElementKind.string);
+    assert.equal(accept(direct, 'observe'), 'host.call("observe", {});');
+    for (const row of [
+      {scenario: 'host object alias', marked: 'const runtime = host; runtime.call("ob¦serve", {});'},
+      {scenario: 'function alias', marked: 'const invoke = host.call; invoke("ob¦serve", {});'},
+      {scenario: 'destructured function alias', marked: 'const {call: invoke} = host; invoke("ob¦serve", {});'},
+      {scenario: 'indexed function alias', marked: 'const invoke = host["call"]; invoke("ob¦serve", {});'},
+    ]) {
+      await t.test(row.scenario, () => {
+        const completion = at(service, row.marked, path);
+        const candidate = completion.result.candidates.find(item => item.label === 'observe');
+        assert.ok(candidate);
+        assert.equal(candidate.detail, observed.detail);
+        assert.equal(candidate.documentation, observed.documentation);
+        assert.equal(accept(completion, 'observe'), row.marked.replace('¦', ''));
+      });
+    }
+  });
 }
+
+test('SDK metadata distinguishes argument and result contracts without weakening compiler admission', async t => {
+  const service = new ScriptLanguageService(libraries);
+  t.after(() => service.dispose());
+  const completion = at(service, 'host.call("¦", {});');
+  const signatures = new Map();
+  for (const candidate of completion.result.candidates) {
+    const file = ts.createSourceFile('preview.ts',
+      candidate.detail.replace(/^host\.call/, 'declare function preview') + ';', ts.ScriptTarget.ES2020, true);
+    assert.deepEqual(file.parseDiagnostics, []);
+    const signature = file.statements[0];
+    assert.ok(ts.isFunctionDeclaration(signature));
+    assert.equal(signature.parameters[0].type.literal.text, candidate.label);
+    assert.equal(signature.parameters[1].name.text, 'args');
+    assert.equal(accept(completion, candidate.label), `host.call("${candidate.label}", {});`);
+    signatures.set(candidate.label, signature);
+  }
+  assert.deepEqual(signatures.get('submit').parameters[1].type.members.map(member => member.name.text),
+    ['observation', 'actions']);
+  assert.deepEqual(signatures.get('submit').type.members.map(member => member.name.text), ['id', 'order']);
+  assert.equal(signatures.get('settle').type.typeName.text, 'MadoReceipt');
+  assert.equal(signatures.get('target_start').type.typeName.text, 'MadoNativeProgress');
+  assert.equal(signatures.get('target_status').type.typeName.text, 'MadoNativeProgress');
+  const invalid = await compileSource('export const observation = host.call("observe", {override: true});');
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.fault.category, 'TypeScript');
+});
+
+for (const row of [
+  {scenario: 'shadowed host with matching literal names',
+    marked: 'export function run() { const host = {call(method: "observe" | "submit", args: unknown) {}}; return host.call("ob¦serve", {}); }'},
+  {scenario: 'local generic using the SDK method type',
+    marked: 'function invoke<K extends keyof MadoCalls>(method: K, args: MadoCalls[K]["args"]): MadoCalls[K]["result"] { throw new Error("inert"); } invoke("ob¦serve", {}); export {};'},
+]) {
+  test(`SDK metadata is not injected into ${row.scenario}`, t => {
+    const service = new ScriptLanguageService(libraries);
+    t.after(() => service.dispose());
+    const completion = at(service, row.marked);
+    const candidate = completion.result.candidates.find(item => item.label === 'observe');
+    assert.ok(candidate);
+    assert.equal(candidate.documentation, undefined);
+    assert.equal(candidate.detail?.startsWith('host.call(') ?? false, false);
+    assert.equal(accept(completion, 'observe'), row.marked.replace('¦', ''));
+  });
+}
+
+test('local and trusted-library signatures remain separate from plain-text documentation', t => {
+  const service = new ScriptLanguageService(libraries);
+  t.after(() => service.dispose());
+  const documentation = 'Normalize a selected value. <em>Plain text only.</em>';
+  const local = at(service, `const local = {\n/** ${documentation} */\nmeasure(value: string): number { return value.length; }\n}; local.mea¦sure("x"); export {};`);
+  const method = local.result.candidates.find(item => item.label === 'measure');
+  assert.ok(method);
+  assert.equal(method.documentation, documentation);
+  assert.ok(method.detail.includes('value: string'));
+  assert.ok(method.detail.includes(': number'));
+  assert.equal(method.detail.includes(documentation), false);
+  assert.ok(accept(local, 'measure').endsWith('local.measure("x"); export {};'));
+  const library = at(service, 'export const result = ["x"].ma¦p(value => value.length);');
+  const map = library.result.candidates.find(item => item.label === 'map');
+  assert.ok(map);
+  assert.ok(map.detail.includes('callbackfn:'));
+  assert.equal(typeof map.documentation, 'string');
+  assert.equal(map.detail.includes(map.documentation), false);
+  assert.equal(accept(library, 'map'), 'export const result = ["x"].map(value => value.length);');
+});
 
 test('schema enum changes discard old literal alternatives and options stay readonly', async t => {
   const service = new ScriptLanguageService(libraries);
@@ -305,19 +406,32 @@ test('completion count and serialized response bounds disclose capping without t
   assert.ok(Buffer.byteLength(JSON.stringify({kind: 'result', result: bounded})) <= RESPONSE_BYTES);
 });
 
-test('oversized details are explicitly omitted while the complete source edit stays available', t => {
+test('the combined UTF-8 signature and documentation budget omits metadata without changing edits', t => {
   const service = new ScriptLanguageService(libraries);
   t.after(() => service.dispose());
-  const documentation = '<b>plain documentation</b> '.repeat(300);
-  assert.ok(Buffer.byteLength(documentation) > DETAIL_BYTES);
-  const completion = at(service, `const local = {\n/** ${documentation} */\nvalue: 1\n}; local.¦; export {};`);
-  const candidate = completion.result.candidates.find(item => item.label === 'value');
+  const signatureSource = `measure(value: "${'x'.repeat(2200)}"): void {}`;
+  const baseline = at(service, `const local = {${signatureSource}}; local.mea¦sure; export {};`);
+  const original = baseline.result.candidates.find(item => item.label === 'measure');
+  assert.ok(original);
+  const signatureBytes = Buffer.byteLength(original.detail);
+  assert.ok(signatureBytes < DETAIL_BYTES);
+  const remaining = DETAIL_BYTES - signatureBytes;
+  const documentation = '😀'.repeat(Math.floor(remaining / 4)) + 'x'.repeat(remaining % 4);
+  const bounded = at(service, `const local = {\n/** ${documentation} */\n${signatureSource}\n}; local.mea¦sure; export {};`);
+  const included = bounded.result.candidates.find(item => item.label === 'measure');
+  assert.ok(included);
+  assert.equal(Buffer.byteLength(included.detail) + Buffer.byteLength(included.documentation), DETAIL_BYTES);
+  assert.equal(included.detailOmitted, undefined);
+  const completion = at(service, `const local = {\n/** ${documentation}😀 */\n${signatureSource}\n}; local.mea¦sure; export {};`);
+  const candidate = completion.result.candidates.find(item => item.label === 'measure');
   assert.ok(candidate);
+  assert.ok(Buffer.byteLength(documentation + '😀') < DETAIL_BYTES);
   assert.equal(candidate.detailOmitted, true);
   assert.equal(candidate.detail, undefined);
-  assert.ok(accept(completion, 'value').endsWith('local.value; export {};'));
-  const plain = at(service, 'const local = {\n/** <b>not HTML</b> */\nvalue: 1\n}; local.¦; export {};');
-  assert.ok(plain.result.candidates.find(item => item.label === 'value').detail.includes('<b>not HTML</b>'));
+  assert.equal(candidate.documentation, undefined);
+  assert.equal(completion.result.capped, false);
+  assert.equal(candidate.to - candidate.from, 'measure'.length);
+  assert.ok(accept(completion, 'measure').endsWith('local.measure; export {};'));
 });
 
 test('input byte bounds, invalid positions and disposal fail without partial analysis results', () => {

@@ -208,8 +208,11 @@ export class CompletionClient {
       if (!candidate || typeof candidate.label !== 'string' || typeof candidate.insertText !== 'string'
         || typeof candidate.kind !== 'string' || !Number.isInteger(candidate.from) || !Number.isInteger(candidate.to)
         || candidate.from < 0 || candidate.to < candidate.from || candidate.to > source.length
-        || (candidate.detail !== undefined && (typeof candidate.detail !== 'string' || bytes(candidate.detail) > DETAIL_BYTES))) return false;
+        || (candidate.detail !== undefined && typeof candidate.detail !== 'string')
+        || (candidate.documentation !== undefined && typeof candidate.documentation !== 'string')
+        || (candidate.detailOmitted !== undefined && typeof candidate.detailOmitted !== 'boolean')
+        || bytes(candidate.detail ?? '') + bytes(candidate.documentation ?? '') > DETAIL_BYTES) return false;
     }
-    return bytes(JSON.stringify(result)) <= RESPONSE_BYTES;
+    return bytes(JSON.stringify({kind: 'result', result})) <= RESPONSE_BYTES;
   }
 }

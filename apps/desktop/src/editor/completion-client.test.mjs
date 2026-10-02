@@ -1,8 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {CompletionClient} from './completion-client.ts';
-import {REQUEST_MS, STARTUP_MS, CANDIDATE_LIMIT, RESPONSE_BYTES} from './completion-types.ts';
+import {REQUEST_MS, STARTUP_MS, CANDIDATE_LIMIT, DETAIL_BYTES, RESPONSE_BYTES} from './completion-types.ts';
 import {AUTHORING_SOURCE_BYTES} from '../authoring.ts';
+import {trustedLibraries} from '../../build/trusted-libraries.mjs';
+import {ScriptLanguageService} from './language-service.ts';
 
 function harness() {
   const workers = [], statuses = [], timers = new Map();
@@ -188,3 +190,87 @@ test('out-of-bounds worker results are unavailable, not acceptable truncated edi
   assert.equal(h.statuses.at(-1), 'unavailable');
   h.client.dispose();
 });
+
+test('real producer metadata and omitted details retain acceptance eligibility and complete insertion spans', async t => {
+  const service = new ScriptLanguageService(trustedLibraries());
+  const h = harness();
+  t.after(() => { h.client.dispose(); service.dispose(); });
+  for (const row of [
+    {scenario: 'SDK signature and documentation', marked: 'export const value = host.call("ob¦serve", {});',
+      label: 'observe', expected: 'export const value = host.call("observe", {});', omitted: undefined},
+    {scenario: 'oversized local documentation',
+      marked: `const local = {\n/** ${'😀'.repeat(1100)} */\nmeasure(value: string): number { return value.length; }\n}; local.mea¦sure("x"); export {};`,
+      label: 'measure', omitted: true},
+  ]) {
+    await t.test(row.scenario, async () => {
+      const position = row.marked.indexOf('¦');
+      const source = row.marked.replace('¦', '');
+      h.client.setContext({...context, revision: context.revision + position, source});
+      const pending = h.client.request(position, true);
+      const worker = h.workers.at(-1);
+      if (worker.requests.length === 0) worker.ready();
+      worker.send({kind: 'result', result: service.complete(worker.requests.at(-1))});
+      const result = await pending;
+      assert.ok(result);
+      assert.equal(h.client.accepts(result.key), true);
+      const candidate = result.candidates.find(item => item.label === row.label);
+      assert.ok(candidate);
+      assert.equal(candidate.detailOmitted, row.omitted);
+      const inserted = source.slice(0, candidate.from) + candidate.insertText + source.slice(candidate.to);
+      assert.equal(inserted, row.expected ?? row.marked.replace('¦', ''));
+    });
+  }
+});
+
+test('the consumer accepts the exact combined UTF-8 detail budget but rejects independently bounded over-budget metadata', async t => {
+  const service = new ScriptLanguageService(trustedLibraries());
+  const h = harness();
+  t.after(() => { h.client.dispose(); service.dispose(); });
+  const source = 'const local = {measure(value: string): number { return value.length; }}; local.measure("x"); export {};';
+  const position = source.indexOf('local.measure') + 'local.mea'.length;
+  h.client.setContext({...context, source});
+  const first = h.client.request(position, true);
+  const worker = h.workers[0];
+  worker.ready();
+  const response = service.complete(worker.requests[0]);
+  const candidate = response.candidates.find(item => item.label === 'measure');
+  assert.ok(candidate);
+  const remaining = DETAIL_BYTES - Buffer.byteLength(candidate.detail);
+  candidate.documentation = '😀'.repeat(Math.floor(remaining / 4)) + 'x'.repeat(remaining % 4);
+  worker.send({kind: 'result', result: response});
+  const accepted = await first;
+  assert.ok(accepted);
+  assert.equal(h.client.accepts(accepted.key), true);
+  assert.equal(source.slice(0, candidate.from) + candidate.insertText + source.slice(candidate.to), source);
+  const second = h.client.request(position, true);
+  const overBudget = service.complete(worker.requests[1]);
+  const oversized = overBudget.candidates.find(item => item.label === 'measure');
+  assert.ok(oversized);
+  oversized.documentation = candidate.documentation + '😀';
+  assert.ok(Buffer.byteLength(oversized.detail) <= DETAIL_BYTES);
+  assert.ok(Buffer.byteLength(oversized.documentation) <= DETAIL_BYTES);
+  assert.ok(Buffer.byteLength(oversized.detail) + Buffer.byteLength(oversized.documentation) > DETAIL_BYTES);
+  worker.send({kind: 'result', result: overBudget});
+  assert.equal(await second, null);
+  assert.equal(h.client.accepts(overBudget.key), false);
+  assert.equal(worker.terminated, true);
+  assert.equal(h.statuses.at(-1), 'unavailable');
+});
+
+for (const row of [
+  {scenario: 'non-string documentation', metadata: {documentation: {text: 'invalid'}}},
+  {scenario: 'non-boolean omitted-details signal', metadata: {detailOmitted: 'true'}},
+]) {
+  test(`malformed ${row.scenario} cannot authorize a source edit`, async () => {
+    const h = harness();
+    h.client.setContext(context);
+    const pending = h.client.request(5, true);
+    const worker = h.workers[0];
+    worker.ready();
+    worker.result(0, {candidates: [{label: 'call', insertText: 'call', from: 5, to: 5, kind: 'method', ...row.metadata}]});
+    assert.equal(await pending, null);
+    assert.equal(h.client.accepts(worker.requests[0].key), false);
+    assert.equal(worker.terminated, true);
+    h.client.dispose();
+  });
+}

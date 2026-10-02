@@ -1,7 +1,8 @@
 import {useImperativeHandle, useLayoutEffect, useRef, useState} from 'react';
 import type {RefObject} from 'react';
 import {Annotation, Compartment, EditorState, Prec, Transaction} from '@codemirror/state';
-import {EditorView, drawSelection, highlightActiveLine, keymap, lineNumbers} from '@codemirror/view';
+import {EditorView, drawSelection, highlightActiveLine, keymap, lineNumbers, tooltips} from '@codemirror/view';
+import type {Rect} from '@codemirror/view';
 import {defaultHighlightStyle, indentUnit, syntaxHighlighting} from '@codemirror/language';
 import {javascript} from '@codemirror/lang-javascript';
 import {defaultKeymap} from '@codemirror/commands';
@@ -11,7 +12,7 @@ import type {EditInput, FileDraft, Snapshot, TextRange} from '../authoring.ts';
 import {AUTHORING_NON_IMAGE_BYTES, AUTHORING_SOURCE_BYTES} from '../authoring.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
-import type {CompletionContext, CompletionKey, CompletionResult} from './completion-types.ts';
+import type {CompletionCandidate, CompletionContext, CompletionKey, CompletionResult} from './completion-types.ts';
 import {SourcePositions} from './source-positions.ts';
 import type {SourceChange} from './source-positions.ts';
 
@@ -37,6 +38,86 @@ interface Props {
 
 const synchronize = Annotation.define<boolean>();
 const inputKind = Annotation.define<EditInput>();
+
+function completionInfo(candidate: CompletionCandidate, omitted: string) {
+  if (!candidate.detail && !candidate.documentation && !candidate.detailOmitted) return null;
+  const panel = document.createElement('div');
+  panel.className = 'source-completion-content';
+  panel.addEventListener('mousedown', event => event.preventDefault());
+  if (candidate.detail) {
+    const signature = document.createElement('pre');
+    signature.className = 'source-completion-signature';
+    signature.textContent = candidate.detail;
+    panel.appendChild(signature);
+  }
+  if (candidate.documentation) {
+    const documentation = document.createElement('div');
+    documentation.className = 'source-completion-documentation';
+    documentation.textContent = candidate.documentation;
+    panel.appendChild(documentation);
+  }
+  if (candidate.detailOmitted) {
+    const notice = document.createElement('p');
+    notice.className = 'source-completion-omitted';
+    notice.textContent = omitted;
+    panel.appendChild(notice);
+  }
+  return panel;
+}
+
+function completionSpace(view: EditorView): Rect {
+  const viewport = view.dom.ownerDocument.documentElement;
+  const editor = view.scrollDOM.getBoundingClientRect();
+  const space = {left: Math.max(0, editor.left), top: Math.max(0, editor.top),
+    right: Math.min(viewport.clientWidth, editor.right), bottom: Math.min(viewport.clientHeight, editor.bottom)};
+  for (let parent = view.scrollDOM.parentElement; parent; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    const clipX = /auto|scroll|hidden|clip/.test(style.overflowX);
+    const clipY = /auto|scroll|hidden|clip/.test(style.overflowY);
+    if (!clipX && !clipY) continue;
+    const bounds = parent.getBoundingClientRect();
+    if (clipX) {space.left = Math.max(space.left, bounds.left); space.right = Math.min(space.right, bounds.right);}
+    if (clipY) {space.top = Math.max(space.top, bounds.top); space.bottom = Math.min(space.bottom, bounds.bottom);}
+  }
+  return space;
+}
+
+function positionCompletionInfo(view: EditorView, list: Rect, option: Rect, info: Rect, space: Rect) {
+  const scaleX = view.scaleX, scaleY = view.scaleY;
+  const gapX = 8 * scaleX, gapY = 8 * scaleY;
+  const left = space.left + 8, right = space.right - 8;
+  const top = space.top + 8, bottom = space.bottom - 8;
+  let width = Math.min(416 * scaleX, Math.max(0, right - left));
+  const height = Math.min(info.bottom - info.top, Math.max(0, bottom - top));
+  const spaceRight = right - list.right - gapX;
+  let x: number, offset: string, maxHeight: number, placement: string;
+  if (spaceRight >= Math.min(width, 280 * scaleX)) {
+    width = Math.min(width, spaceRight);
+    placement = 'right';
+    x = list.right + gapX;
+    const y = Math.max(top, Math.min(option.top, bottom - height));
+    offset = `top: ${(y - list.top) / scaleY}px`;
+    maxHeight = bottom - y;
+  } else {
+    x = Math.max(left, Math.min(list.left, right - width));
+    const below = Math.max(0, bottom - list.bottom - gapY);
+    const above = Math.max(0, list.top - gapY - top);
+    // Keep the panel outside the entire list, even when the selected row is in its middle.
+    if (below < Math.min(height, 96 * scaleY) && above > below) {
+      placement = 'above';
+      offset = `bottom: ${(list.bottom - list.top + gapY) / scaleY}px`;
+      maxHeight = above;
+    } else {
+      placement = 'below';
+      offset = `top: ${(list.bottom - list.top + gapY) / scaleY}px`;
+      maxHeight = below;
+    }
+  }
+  return {
+    style: `left: ${(x - list.left) / scaleX}px; ${offset}; width: ${width / scaleX}px; max-width: ${width / scaleX}px; max-height: ${Math.min(320, maxHeight / scaleY)}px`,
+    class: `source-completion-panel-${placement}`,
+  };
+}
 
 export default function SourceEditor(props: Props) {
   const locale = useLocale();
@@ -64,6 +145,7 @@ export default function SourceEditor(props: Props) {
     explicit.current = requested;
     closeCompletion(view);
     if (requested) view.focus();
+    view.dom.scrollIntoView({block: 'nearest', inline: 'nearest'});
     startCompletion(view);
   }
   useImperativeHandle(props.control, () => ({complete: () => complete(true), focus: () => editor.current?.focus(),
@@ -108,7 +190,7 @@ export default function SourceEditor(props: Props) {
         && mapping.toSource(mapping.toEditor(candidate.from)) === candidate.from
         && mapping.toSource(mapping.toEditor(candidate.to)) === candidate.to).map(candidate => ({
         label: candidate.label,
-        detail: candidate.detailOmitted ? latest.current.a.completionDetailOmitted : candidate.detail,
+        info: () => completionInfo(candidate, latest.current.a.completionDetailOmitted),
         apply(view, option) {
           const current = latest.current.props;
           if (!alive || composing.current || view.composing || current.readOnly || positions.current !== mapping
@@ -146,7 +228,9 @@ export default function SourceEditor(props: Props) {
         javascript({typescript: /\.[cm]?tsx?$/i.test(first.draft.path), jsx: /\.[jt]sx$/i.test(first.draft.path)}),
         syntaxHighlighting(defaultHighlightStyle),
         EditorState.changeFilter.of(transaction => !transaction.docChanged || transaction.annotation(synchronize) === true || !latest.current.props.readOnly),
-        autocompletion({override: [source], activateOnTyping: false, defaultKeymap: false, icons: false}),
+        tooltips({tooltipSpace: completionSpace}),
+        autocompletion({override: [source], activateOnTyping: false, defaultKeymap: false, icons: false,
+          positionInfo: positionCompletionInfo}),
         Prec.highest(keymap.of([
           {key: 'Mod-z', run: command(() => {if (!latest.current.props.readOnly) latest.current.props.onUndo();}), preventDefault: true},
           {key: 'Mod-Shift-z', run: command(() => {if (!latest.current.props.readOnly) latest.current.props.onRedo();}), preventDefault: true},

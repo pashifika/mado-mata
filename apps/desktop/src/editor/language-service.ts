@@ -1,5 +1,5 @@
 import ts from 'typescript';
-import {definitions, unknownOptionsDefinitions} from '../../../../tools/runtime-comparison/compiler/sdk.mjs';
+import {definitions, methods, unknownOptionsDefinitions} from '../../../../tools/runtime-comparison/compiler/sdk.mjs';
 import {AUTHORING_NON_IMAGE_BYTES, AUTHORING_SOURCE_BYTES} from '../authoring.ts';
 import {parseJson, schemaIssues} from '../metadata.ts';
 import {CANDIDATE_LIMIT, DECLARATION_BYTES, DETAIL_BYTES, RESPONSE_BYTES} from './completion-types.ts';
@@ -74,6 +74,18 @@ function stringContext(node: ts.Node, file: ts.SourceFile, position: number): St
   const closed = node.end > start + 1 && file.text[node.end - 1] === quote && !node.isUnterminated;
   const to = node.end - (closed ? 1 : 0);
   return position > start && position <= to ? {quote, from: start + 1, to} : null;
+}
+
+function sdkMethodLiteral(node: ts.Node, checker: ts.TypeChecker): boolean {
+  if (!ts.isStringLiteralLike(node)) return false;
+  let argument: ts.Node = node;
+  while (ts.isParenthesizedExpression(argument.parent)) argument = argument.parent;
+  const call = argument.parent;
+  if (!ts.isCallExpression(call) || call.arguments[0] !== argument) return false;
+  const declaration = checker.getResolvedSignature(call)?.declaration;
+  // Inferred aliases retain this declaration; a locally declared lookalike does not.
+  return declaration !== undefined && declaration.getSourceFile().fileName === SDK
+    && ts.isMethodSignature(declaration) && ts.isIdentifier(declaration.name) && declaration.name.text === 'call';
 }
 
 function escapedContent(value: string, quote: string): string {
@@ -223,10 +235,12 @@ export class ScriptLanguageService {
     if (size > RESPONSE_BYTES) throw new Error('Completion identity exceeds the response byte bound');
     const info = this.service.getCompletionsAtPosition(this.active, position, preferences);
     if (!info) return result;
-    const file = this.service.getProgram()?.getSourceFile(this.active);
+    const program = this.service.getProgram();
+    const file = program?.getSourceFile(this.active);
     if (!file) throw new Error('Missing active completion source');
     const node = nodeAt(file, position);
     const literal = stringContext(node, file, position);
+    const sdkLiteral = literal !== null && program !== undefined && sdkMethodLiteral(node, program.getTypeChecker());
     result.capped = info.isIncomplete === true;
     for (const entry of info.entries) {
       if (entry.hasAction || entry.source || entry.isSnippet || entry.isImportStatementCompletion || entry.isFromUncheckedFile) continue;
@@ -235,10 +249,15 @@ export class ScriptLanguageService {
       if (!candidate) continue;
       const details = this.service.getCompletionEntryDetails(this.active, position, entry.name, undefined, entry.source, preferences, entry.data);
       if (details?.codeActions?.length) continue;
-      if (details) {
-        const detail = [ts.displayPartsToString(details.displayParts), ts.displayPartsToString(details.documentation)].filter(Boolean).join('\n');
-        if (bytes(detail) > DETAIL_BYTES) candidate.detailOmitted = true;
-        else if (detail) candidate.detail = detail;
+      const method = sdkLiteral && Object.hasOwn(methods, entry.name) ? methods[entry.name] : undefined;
+      const detail = method
+        ? `host.call(method: ${JSON.stringify(entry.name)}, args: ${method[0]}): ${method[1]}`
+        : ts.displayPartsToString(details?.displayParts);
+      const documentation = method ? method[2] : ts.displayPartsToString(details?.documentation);
+      if (bytes(detail) + bytes(documentation) > DETAIL_BYTES) candidate.detailOmitted = true;
+      else {
+        if (detail) candidate.detail = detail;
+        if (documentation) candidate.documentation = documentation;
       }
       const added = bytes(JSON.stringify(candidate)) + (result.candidates.length > 0 ? 1 : 0);
       if (size + added > RESPONSE_BYTES) { result.capped = true; continue; }

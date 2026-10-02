@@ -366,6 +366,15 @@ local bindings, `host.call` methods and arguments, inferred SDK results, and
 nested fields/enum alternatives from the current structured options-schema draft.
 Local declarations that shadow `host` retain their own types.
 
+Candidates stay on one line. A separate panel follows the selected candidate's
+signature and available documentation, beside the list when there is room and
+below or above it otherwise. The shared SDK provides method-specific call
+signatures and descriptions; local functions retain their own inferred types and
+documentation. Long candidate names are ellipsized in the list, while details
+wrap and scroll in the panel. All documentation is rendered as plain text.
+Opening suggestions brings the editor into view. The list stays inside its visible
+area rather than jumping above the first source line; constrained lists scroll.
+
 This is single-document assistance, not project-wide type resolution.
 Imported helper exports, auto-imports, cross-file edits, DOM/Node APIs and package
 type configuration are unavailable. Invalid schema immediately withdraws its
@@ -375,7 +384,8 @@ remains available. Repair or Discard uses only the resulting current schema.
 Analysis has one worker, one active request and one coalesced latest request.
 Startup is limited to 5 seconds and a dispatched request to 2 seconds.
 Declarations are bounded to 2 MiB, responses to 200 candidates / 256 KiB and
-details to 4 KiB. Capped results and omitted details are disclosed. A worker
+each candidate's signature and documentation together to 4 KiB. Capped results
+and omitted details are disclosed. A worker
 failure or deadline retires analysis without changing drafts or blocking Save,
 navigation or Stop; use **Complete** explicitly to retry. These are payload and
 deadline bounds, not a total WebView memory guarantee.

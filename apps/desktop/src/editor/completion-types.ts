@@ -23,7 +23,9 @@ export interface CompletionCandidate {
   from: number;
   to: number;
   kind: string;
+  // Signature and plain-text prose are presented separately; their combined UTF-8 bound is DETAIL_BYTES.
   detail?: string;
+  documentation?: string;
   detailOmitted?: boolean;
 }
 
