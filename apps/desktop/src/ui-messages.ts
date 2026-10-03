@@ -163,6 +163,7 @@ function catalog(data: typeof enData) {
     },
     authoring: {
       ...data.authoring,
+      completionPhrases: {Completions: data.authoring.completionList},
       scope: (label: string) => interpolate(data.authoring.scope, {label}),
       kind: (value: string) => known(data.authoring.kinds, value),
       unsavedFiles: (count: number) => interpolate(data.authoring.unsavedFiles[count === 1 ? 'one' : 'other'], {count}),

@@ -498,12 +498,34 @@ details[open] > summary { font-weight: 600; }
 .editor-search { display: flex; align-items: center; gap: 6px; margin-left: auto; min-width: 0; flex: 0 1 380px; }
 .editor-search input { min-height: 28px; padding: 4px 8px; font-size: 11px; }
 .editor-search .muted { white-space: nowrap; }
-.code-editor { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: minmax(320px, 62vh) auto; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
-.editor-gutter, .editor-text { font-family: var(--mono); font-size: 12px; line-height: 18px; tab-size: 2; }
-.editor-gutter { margin: 0; max-height: none; padding: 8px 8px 48px 10px; border-radius: 0; overflow: hidden; white-space: pre; overflow-wrap: normal; text-align: right; color: var(--text-faint); background: var(--surface-alt); border-right: 1px solid var(--border); user-select: none; }
-.editor-text { height: 100%; min-height: 0; resize: none; border: 0; border-radius: 0; padding: 8px 10px; white-space: pre; overflow: auto; overflow-wrap: normal; }
-.editor-text:focus-visible { outline-offset: -3px; }
-.editor-status { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 14px; padding: 5px 10px; border-top: 1px solid var(--border); background: var(--surface-alt); color: var(--text-muted); font-size: 10px; }
+.editor-replacement label { font-size: 11px; color: var(--text-muted); }
+.editor-replacement input { flex: 1 1 160px; min-width: 0; width: auto; min-height: 28px; padding: 4px 8px; font-size: 11px; }
+.editor-replacement [role="status"] { flex-basis: 100%; font-size: 11px; color: var(--text-muted); }
+.code-editor { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
+.source-editor .cm-editor { height: clamp(320px, 62vh, 900px); font-family: var(--mono); font-size: 12px; color: var(--text); }
+.source-editor .cm-scroller { overflow: auto; font-family: inherit; line-height: 18px; }
+.source-editor .cm-content { padding: 8px 0; caret-color: var(--text); }
+.source-editor .cm-line { padding: 0 10px; }
+.source-editor .cm-gutters { color: var(--text-faint); background: var(--surface-alt); border-right: 1px solid var(--border); }
+/* drawSelection paints below the text, so the active line must not cover its background. */
+.source-editor .cm-activeLine { background: #285c9b08; }
+.source-editor .cm-activeLineGutter { background: var(--surface-alt); }
+.source-editor .cm-editor .cm-selectionBackground { background: #d8e0e9; }
+.source-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground { background: #c6dcf7; }
+.source-editor .cm-cursor { border-left-color: var(--text); }
+.source-editor .cm-focused { outline: 2px solid var(--accent); outline-offset: -2px; }
+.source-editor .cm-tooltip { border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }
+.source-editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete { border-radius: var(--radius-sm); box-shadow: 0 4px 14px #12223b22; }
+.source-editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul { width: min(300px, calc(100vw - 24px)); min-width: 0; max-width: calc(100vw - 24px); max-height: min(240px, 34vh); padding: 4px 0; font-family: var(--mono); }
+.source-editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li { padding: 3px 10px; line-height: 18px; white-space: nowrap; overflow-wrap: normal; overflow: hidden; text-overflow: ellipsis; }
+.source-editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] { background: var(--accent); color: white; }
+.source-editor .cm-editor .cm-tooltip.cm-completionInfo { width: 416px; max-width: calc(100vw - 24px); max-height: min(320px, calc(100vh - 24px)); padding: 0; overflow: auto; overscroll-behavior: contain; border-radius: var(--radius-sm); box-shadow: 0 4px 14px #12223b22; white-space: normal; }
+.source-editor .source-completion-content { display: grid; gap: 10px; padding: 10px 12px; }
+.source-editor .source-completion-signature { margin: 0; padding: 8px; max-height: none; overflow: visible; background: var(--surface-alt); font-family: var(--mono); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.source-editor .source-completion-documentation { font-family: var(--font); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.source-editor .source-completion-omitted { margin: 0; color: var(--text-muted); font-family: var(--font); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.editor-status { display: flex; flex-wrap: wrap; gap: 14px; padding: 5px 10px; border-top: 1px solid var(--border); background: var(--surface-alt); color: var(--text-muted); font-size: 10px; }
+.completion-status { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; color: var(--text-muted); font-size: 11px; }
 .editor-status #authoring-editor-help { flex: 1; min-width: 200px; }
 .validation-panel { margin-top: 18px; }
 .diagnostic-list { padding-left: 22px; font-size: 11px; display: grid; gap: 6px; }

@@ -11,6 +11,9 @@ export const HISTORY_ENTRIES = 200;
 export const HISTORY_CHARACTERS = 4_000_000;
 // Search counting stops here; navigation still reaches every match.
 export const MATCH_LIMIT = 10_000;
+// Rust authoring's text-file limit and the inventory's package non-image allowance.
+export const AUTHORING_SOURCE_BYTES = 1_048_576;
+export const AUTHORING_NON_IMAGE_BYTES = 1_048_576;
 
 export interface TextRange {start:number; end:number}
 export interface Snapshot extends TextRange {text:string}
@@ -64,6 +67,9 @@ export interface SaveTicket {token:string; path:string; expected:string; draftRe
 export interface CatalogTicket {token:string; expected:string; edit:CatalogEdit}
 export interface ValidationTicket {token:string; revision:string}
 export interface EditInput {type:string; data:string|null; composing:boolean}
+export interface ReplacementTicket {owner:string; path:string; revision:number}
+export type ReplacementResult = {kind:'edit'; next:Snapshot} | {kind:'select'; range:TextRange} | {kind:'noop'}
+  | {kind:'refused'; reason:'stale'|'ineligible'|'oversized'};
 export type PublishBlock = 'pending' | 'refresh' | 'missing' | 'clean' | 'binary' | 'manifestDirty' | 'fileDirty';
 
 export function sameAuthoringRef(a:AuthoringRef|null|undefined, b:AuthoringRef|null|undefined):boolean {
@@ -423,29 +429,32 @@ export function diagnosticLocation(fault:Fault):SourceLocation|null {
 }
 
 export function offsetAt(text:string, line:number, column:number):number {
+  const breaks = /\r\n|\r|\n/g;
   let offset = 0;
   for (let current = 1; current < line; current++) {
-    const next = text.indexOf('\n', offset);
-    if (next < 0) return text.length;
-    offset = next + 1;
+    const next = breaks.exec(text);
+    if (!next) return text.length;
+    offset = next.index + next[0].length;
   }
-  const end = text.indexOf('\n', offset);
-  return Math.min(offset + column - 1, end < 0 ? text.length : end);
+  const end = breaks.exec(text)?.index ?? text.length;
+  return Math.min(offset + column - 1, end);
 }
 
 export function lineColumn(text:string, offset:number):{line:number; column:number} {
+  const breaks = /\r\n|\r|\n/g;
   let line = 1;
   let start = 0;
-  for (let index = text.indexOf('\n'); index >= 0 && index < offset; index = text.indexOf('\n', index + 1)) {
+  for (let next = breaks.exec(text); next && next.index + next[0].length <= offset; next = breaks.exec(text)) {
     line += 1;
-    start = index + 1;
+    start = next.index + next[0].length;
   }
   return {line, column: offset - start + 1};
 }
 
 export function lineCount(text:string):number {
+  const breaks = /\r\n|\r|\n/g;
   let count = 1;
-  for (let index = text.indexOf('\n'); index >= 0; index = text.indexOf('\n', index + 1)) count += 1;
+  while (breaks.exec(text)) count += 1;
   return count;
 }
 
@@ -488,4 +497,104 @@ export function matchSummary(text:string, query:string, range:TextRange):{count:
     if (count >= MATCH_LIMIT) return {count, capped: true, current};
   }
   return {count, capped: false, current};
+}
+
+function highSurrogate(unit:number):boolean {
+  return unit >= 0xd800 && unit <= 0xdbff;
+}
+
+function lowSurrogate(unit:number):boolean {
+  return unit >= 0xdc00 && unit <= 0xdfff;
+}
+
+// Match TextEncoder without allocating an encoded copy, including unpaired UTF-16 surrogates.
+function utf8Bytes(text:string, start = 0, end = text.length):number {
+  let bytes = 0;
+  for (let index = start; index < end; index++) {
+    const unit = text.charCodeAt(index);
+    if (unit < 0x80) bytes += 1;
+    else if (unit < 0x800) bytes += 2;
+    else if (highSurrogate(unit) && index + 1 < end && lowSurrogate(text.charCodeAt(index + 1))) {
+      bytes += 4;
+      index += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+// Present disk-file drafts only; host Save/Validate additionally count the trusted dependency closure.
+export function otherNonImageBytes(session:AuthoringSession, path:string):number {
+  const images = new Set<string>();
+  const manifest = [...session.drafts.values()].find(draft => draft.kind === 'manifest' && !draft.missing);
+  // Unsaved manifest changes must not reclassify assets owned by the current host inventory.
+  if (manifest?.base !== null && manifest?.base !== undefined) {
+    try {
+      const value = JSON.parse(manifest.base);
+      if (value !== null && typeof value === 'object' && value.assets !== null && typeof value.assets === 'object') {
+        for (const asset of Object.values(value.assets)) {
+          if (asset !== null && typeof asset === 'object' && 'path' in asset && typeof asset.path === 'string'
+            && 'format' in asset && (asset.format === 'png' || asset.format === 'raw-rgba8')) images.add(asset.path);
+        }
+      }
+    } catch {
+      // A view without a valid saved manifest cannot grant the image-byte exemption.
+    }
+  }
+  let bytes = 0;
+  for (const draft of session.drafts.values()) {
+    if (draft.path === path || draft.missing || (draft.kind === 'asset' && images.has(draft.path))) continue;
+    bytes += draft.text === null ? draft.bytes : utf8Bytes(draft.text);
+  }
+  return bytes;
+}
+
+// Produces a draft transaction only; the caller retains edit/history and publication ownership.
+export function replacementEdit(session:AuthoringSession|null, ticket:ReplacementTicket, query:string, replacement:string,
+  all:boolean, range:TextRange):ReplacementResult {
+  if (!session || session.owner.token !== ticket.owner || session.selected !== ticket.path) return {kind: 'refused', reason: 'stale'};
+  const draft = session.drafts.get(ticket.path);
+  if (draft && draft.revision !== ticket.revision) return {kind: 'refused', reason: 'stale'};
+  if (!draft || draft.kind !== 'source' || draft.text === null || draft.missing || draft.composing !== null
+    || session.destination !== 'file' || session.pending?.kind === 'exit' || session.pending?.kind === 'duplicate') {
+    return {kind: 'refused', reason: 'ineligible'};
+  }
+  if (!query) return {kind: 'noop'};
+  const original = draft.text;
+  const search = pattern(query);
+  if (!all) search.lastIndex = range.start;
+  const first = search.exec(original);
+  if (!all && (!first || first.index !== range.start || first.index + first[0].length !== range.end)) {
+    const next = findMatch(original, query, range, false);
+    return next ? {kind: 'select', range: next} : {kind: 'noop'};
+  }
+  if (!first) return {kind: 'noop'};
+
+  const replacementBytes = utf8Bytes(replacement);
+  let bytes = 0;
+  let lastUnit = NaN;
+  let changed = false;
+  let end = 0;
+  // Segment boundaries can split or join surrogate pairs; count the actual joined output.
+  function append(text:string, start:number, stop:number, size = utf8Bytes(text, start, stop)) {
+    if (start === stop) return;
+    bytes += size - (highSurrogate(lastUnit) && lowSurrogate(text.charCodeAt(start)) ? 2 : 0);
+    lastUnit = text.charCodeAt(stop - 1);
+  }
+  for (let match:RegExpExecArray|null = first; match; match = all ? search.exec(original) : null) {
+    append(original, end, match.index);
+    append(replacement, 0, replacement.length, replacementBytes);
+    end = match.index + match[0].length;
+    changed ||= match[0] !== replacement;
+  }
+  append(original, end, original.length);
+  if (!changed) return {kind: 'noop'};
+  if (bytes > AUTHORING_SOURCE_BYTES || bytes + otherNonImageBytes(session, ticket.path) > AUTHORING_NON_IMAGE_BYTES) {
+    return {kind: 'refused', reason: 'oversized'};
+  }
+  // Allocation follows the complete preflight; callback replacement keeps dollar signs and backslashes literal.
+  const text = all ? original.replace(pattern(query), () => replacement)
+    : original.slice(0, first.index) + replacement + original.slice(first.index + first[0].length);
+  if (text === original) return {kind: 'noop'};
+  const caret = first.index + replacement.length;
+  return {kind: 'edit', next: {text, start: caret, end: caret}};
 }

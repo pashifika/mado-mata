@@ -61,6 +61,7 @@ The version and integrity sources are:
 | Node.js | 24.18.0 | [check.py](../tools/ci/check.py) and [workflow](../.github/workflows/ci.yml) |
 | TypeScript | 5.9.3 | [Compiler manifest](../tools/runtime-comparison/compiler/package.json) and [lockfile](../tools/runtime-comparison/compiler/package-lock.json) |
 | Desktop frontend | React 19.3.0, TypeScript 5.9.3, Vite 8.3.0, Tauri API 2.11.1 / CLI 2.11.5 | [App manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json) |
+| Script editor | CodeMirror state 6.7.6, view 6.43.13, language 6.12.4, JavaScript 6.2.5, autocomplete 6.20.3, commands 6.11.1; existing TypeScript 5.9.3 language service | Exact [frontend manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json); trusted ES2020 declarations are bundled by the [build helper](../apps/desktop/build/trusted-libraries.mjs), with no runtime downloads |
 | Desktop Rust | Tauri 2.11.6, tauri-build 2.6.3, tracing 0.1.41, tracing-subscriber 0.3.20 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Saved-image payloads | png 0.18.1; flate2 1.1.9 (default features disabled; `rust_backend`) | [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock) |
 | Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
@@ -145,8 +146,11 @@ The full check has these responsibilities:
   Submitted receipts and physical cleanup ownership remain separate outcomes.
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
   run its state tests (including per-file history, stale saves, source-diagnostic
-  projection, Recognition geometry/Undo, grouped selection, stale trial/Copy
-  state, and per-Start Native consent invalidation), and type-check/build its trusted UI.
+  projection, atomic literal replacement, UTF-16/line-ending mapping, real
+  restricted SDK/options completion, schema invalidation, worker fencing and
+  finite failure/retry, Recognition geometry/Undo, grouped selection, stale
+  trial/Copy state, and per-Start Native consent invalidation), and
+  type-check/build its trusted UI and bundled language worker.
 - Test the Rust application core with `--no-default-features --lib`: explicit
   setup/recovery, named Tab ownership, scoped profiles, source-preserving legacy
   imports, bounded snapshots, and journaled restore/rollback are checked alongside
@@ -180,8 +184,10 @@ The full check has these responsibilities:
   conflicts, frame replacement, and confirmation. Frontend checks cover
   structured metadata round trips and numeric draft provenance. Actual
   [Edit WebView acceptance](desktop.md#directory-package-authoring-acceptance),
-  including left-tree navigation and contextual file actions, physical OS IME
-  input, and storage power-loss durability are not hosted CI claims.
+  including source highlighting/completion, native clipboard/menu Undo/Redo,
+  left-tree navigation and contextual file actions, physical OS IME input,
+  worker startup/warm-response/memory observations, and storage power-loss
+  durability are not hosted CI claims.
 - On macOS and Windows, build the real Tauri shell with `--features custom-protocol`
   after building frontend assets. Windows also runs non-GUI shell validation and
   real owned-process/Job lifetime regressions; the test-only `webdriver` feature
