@@ -519,6 +519,7 @@ details[open] > summary { font-weight: 600; }
 .source-editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul { width: min(300px, calc(100vw - 24px)); min-width: 0; max-width: calc(100vw - 24px); max-height: min(240px, 34vh); padding: 4px 0; font-family: var(--mono); }
 .source-editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li { padding: 3px 10px; line-height: 18px; white-space: nowrap; overflow-wrap: normal; overflow: hidden; text-overflow: ellipsis; }
 .source-editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] { background: var(--accent); color: white; }
+.source-editor .cm-completionIcon { height: 18px; vertical-align: top; }
 .source-editor .cm-editor .cm-tooltip.cm-completionInfo { width: 416px; max-width: calc(100vw - 24px); max-height: min(320px, calc(100vh - 24px)); padding: 0; overflow: auto; overscroll-behavior: contain; border-radius: var(--radius-sm); box-shadow: 0 4px 14px #12223b22; white-space: normal; }
 .source-editor .source-completion-content { display: grid; gap: 10px; padding: 10px 12px; }
 .source-editor .source-completion-signature { margin: 0; padding: 8px; max-height: none; overflow: visible; background: var(--surface-alt); font-family: var(--mono); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }

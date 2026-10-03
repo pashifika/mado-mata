@@ -6,7 +6,7 @@ import type {Rect} from '@codemirror/view';
 import {defaultHighlightStyle, indentUnit, syntaxHighlighting} from '@codemirror/language';
 import {javascript} from '@codemirror/lang-javascript';
 import {defaultKeymap} from '@codemirror/commands';
-import {autocompletion, closeCompletion, completionKeymap, pickedCompletion, startCompletion} from '@codemirror/autocomplete';
+import {acceptCompletion, autocompletion, closeCompletion, completionKeymap, pickedCompletion, selectedCompletion, startCompletion} from '@codemirror/autocomplete';
 import type {Completion, CompletionSource} from '@codemirror/autocomplete';
 import type {EditInput, FileDraft, Snapshot, TextRange} from '../authoring.ts';
 import type {EditorCompletionPreferences} from '../types.ts';
@@ -41,6 +41,23 @@ interface Props {
 
 const synchronize = Annotation.define<boolean>();
 const inputKind = Annotation.define<EditInput>();
+
+function completionType(kind: string): string {
+  switch (kind) {
+    case 'class': case 'interface': case 'enum': case 'function': case 'method':
+    case 'property': case 'keyword': case 'type': return kind;
+    case 'local class': return 'class';
+    case 'local function': case 'call': case 'construct': return 'function';
+    case 'constructor': return 'method';
+    case 'const': case 'enum member': return 'constant';
+    case 'var': case 'local var': case 'let': case 'parameter':
+    case 'using': case 'await using': case 'alias': return 'variable';
+    case 'getter': case 'setter': case 'accessor': case 'index': case 'JSX attribute': return 'property';
+    case 'module': case 'external module name': return 'namespace';
+    case 'primitive type': case 'type parameter': return 'type';
+    default: return 'text';
+  }
+}
 
 function completionInfo(candidate: CompletionCandidate, omitted: string) {
   if (!candidate.detail && !candidate.documentation && !candidate.detailOmitted) return null;
@@ -183,6 +200,7 @@ export default function SourceEditor(props: Props) {
         && mapping.toSource(mapping.toEditor(candidate.from)) === candidate.from
         && mapping.toSource(mapping.toEditor(candidate.to)) === candidate.to).map(candidate => ({
         label: candidate.label,
+        type: completionType(candidate.kind),
         info: () => session?.accepts(publication) ? completionInfo(candidate, latest.current.a.completionDetailOmitted) : null,
         apply(view, option) {
           const current = latest.current.props;
@@ -223,7 +241,7 @@ export default function SourceEditor(props: Props) {
         syntaxHighlighting(defaultHighlightStyle),
         EditorState.changeFilter.of(transaction => !transaction.docChanged || transaction.annotation(synchronize) === true || !latest.current.props.readOnly),
         tooltips({tooltipSpace: completionSpace}),
-        autocompletion({override: [source], activateOnTyping: false, defaultKeymap: false, icons: false,
+        autocompletion({override: [source], activateOnTyping: false, defaultKeymap: false, icons: true,
           positionInfo: positionCompletionInfo}),
         Prec.highest(keymap.of([
           {key: 'Mod-z', run: command(() => {if (!latest.current.props.readOnly) latest.current.props.onUndo();}), preventDefault: true},
@@ -240,6 +258,10 @@ export default function SourceEditor(props: Props) {
           }},
           {key: 'Tab', run: view => {
             if (composing.current || view.composing || latest.current.props.readOnly) return false;
+            if (selectedCompletion(view.state)) {
+              acceptCompletion(view);
+              return true;
+            }
             view.dispatch({...view.state.replaceSelection('  '), annotations: [Transaction.userEvent.of('input'),
               inputKind.of({type: 'insertText', data: '  ', composing: false})]});
             return true;

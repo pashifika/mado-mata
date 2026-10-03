@@ -346,8 +346,9 @@ Neither action inspects, binds, or runs the package.
 
 Use **Cmd/Ctrl-S** to Save, **Cmd/Ctrl-F** to focus Find, **Cmd/Ctrl-G** and
 **Shift-Cmd/Ctrl-G** for next/previous matches, and **Cmd/Ctrl-Z** /
-**Shift-Cmd/Ctrl-Z** for file-local Undo/Redo. Tab inserts two spaces; Escape
-closes suggestions or returns from the search controls to source.
+**Shift-Cmd/Ctrl-Z** for file-local Undo/Redo. Tab accepts the selected completion,
+or inserts two spaces when no candidate is selected; Shift-Tab moves focus out.
+Escape closes suggestions or returns from the search controls to source.
 Mouse drag, double-click and Shift-arrow selections remain highlighted on the
 current line. Selection stays visible in a subdued color while a toolbar control
 has focus; typing over a focused selection and Undo use the same file-local history.
@@ -379,13 +380,14 @@ Escape, blur, unrelated caret/selection movement, context departure and composit
 cancel pending work and remove old candidates/documentation. Paste, acceptance,
 Undo/Redo, focus restoration, idle and composition commit alone do not open a
 session; Backspace alone does not reopen a closed session. Arrow keys select,
-Enter accepts, and one Undo restores the prior source. Completion never accepts
+Enter or Tab accepts, and one Undo restores the prior source. Completion never accepts
 during IME composition. It covers the current source's local bindings, `host.call`
 methods and arguments, inferred SDK results, and nested fields/enum alternatives
 from the current structured options-schema draft. Local declarations that shadow
 `host` retain their own types.
 
-Candidates stay on one line. A separate panel follows the selected candidate's
+Candidates show provider-derived type icons and stay on one line. A separate
+panel follows the selected candidate's
 signature and available documentation, beside the list when there is room and
 below or above it otherwise. The shared SDK provides method-specific call
 signatures and descriptions; local functions retain their own inferred types and

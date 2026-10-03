@@ -1109,7 +1109,7 @@
       "one": "{count} line",
       "other": "{count} lines"
     },
-    "editorHelp": "Tab inserts two spaces; Shift+Tab moves focus out. ⌘Z and ⇧⌘Z undo and redo in this file only; ⌘F searches, ⌘G and ⇧⌘G find the next and previous match, ⌘S saves this file. Ctrl+Space or Complete opens suggestions; arrows select, Enter accepts and Escape closes.",
+    "editorHelp": "Tab inserts two spaces when no suggestion is selected; Shift+Tab moves focus out. ⌘Z and ⇧⌘Z undo and redo in this file only; ⌘F searches, ⌘G and ⇧⌘G find the next and previous match, ⌘S saves this file. Ctrl+Space or Complete opens suggestions; arrows select, Enter or Tab accepts and Escape closes.",
     "save": "Save file",
     "saveAll": "Save all",
     "undo": "Undo",
