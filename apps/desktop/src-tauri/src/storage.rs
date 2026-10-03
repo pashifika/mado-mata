@@ -5,7 +5,9 @@ mod tabs;
 mod targets;
 
 pub use profiles::{LegacyImport, Profile, ProfileListing};
-pub use settings::{EditableSettings, Locale, NotificationPreferences, Settings};
+pub use settings::{
+    EditableSettings, EditorCompletionPreferences, Locale, NotificationPreferences, Settings,
+};
 pub use tabs::{PackageReference, PackageSource, TabListing, TabRecord};
 
 pub(crate) use fs::{
@@ -417,12 +419,23 @@ mod tests {
         store
             .save_preferences(EditableSettings {
                 ocr_environment: Some(environment.clone()),
+                editor_completion: EditorCompletionPreferences {
+                    automatic: false,
+                    delay_ms: 375,
+                },
                 ..preferences()
             })
             .unwrap();
         assert_eq!(
             directory.store().settings().unwrap().ocr_environment,
             Some(environment.clone())
+        );
+        assert_eq!(
+            directory.store().settings().unwrap().editor_completion,
+            EditorCompletionPreferences {
+                automatic: false,
+                delay_ms: 375,
+            }
         );
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(fs::read(tab_path(&directory, "Owned")).unwrap(), tab_before);
@@ -486,11 +499,54 @@ mod tests {
         let settings = directory.0.join("settings.json");
         let settings_before = fs::read(&settings).unwrap();
         put(&settings.with_extension("pending"), b"settings unfinished");
-        assert!(store.save_preferences(preferences()).is_err());
+        let mut draft = preferences();
+        draft.editor_completion = EditorCompletionPreferences {
+            automatic: false,
+            delay_ms: 0,
+        };
+        assert_eq!(
+            store.save_preferences(draft.clone()).unwrap_err().category,
+            "StoragePending"
+        );
         assert_eq!(fs::read(&settings).unwrap(), settings_before);
         assert_eq!(
             fs::read(settings.with_extension("pending")).unwrap(),
             b"settings unfinished"
+        );
+        assert_eq!(
+            store.settings().unwrap().editor_completion,
+            EditorCompletionPreferences::default()
+        );
+        fs::remove_file(settings.with_extension("pending")).unwrap();
+        let mut changed = store.settings().unwrap();
+        changed.editor_completion = draft.editor_completion.clone();
+        let bytes = encode(&changed, MAX_SETTINGS_BYTES).unwrap();
+        assert!(
+            write_atomic(&settings, &bytes, |from, to| fs::rename(
+                from,
+                to.join("not-a-directory")
+            ))
+            .is_err()
+        );
+        assert_eq!(fs::read(&settings).unwrap(), settings_before);
+        assert!(!settings.with_extension("pending").exists());
+        #[cfg(unix)]
+        {
+            // An unprivileged owner can read the settings but cannot stage a replacement.
+            fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o500)).unwrap();
+            let refused = store.save_preferences(draft);
+            fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o700)).unwrap();
+            let fault = refused.unwrap_err();
+            assert_eq!(fault.category, "Storage");
+            assert_eq!(fault.context["operation"], "create atomic write");
+            assert_eq!(fault.context["kind"], "PermissionDenied");
+        }
+        assert_eq!(fs::read(&settings).unwrap(), settings_before);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!settings.with_extension("pending").exists());
+        assert_eq!(
+            store.settings().unwrap().editor_completion,
+            EditorCompletionPreferences::default()
         );
     }
 

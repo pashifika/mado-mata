@@ -17,8 +17,20 @@ fn invalid_initialization_leaves_absent_destination_and_legacy_source_untouched(
     assert!(store.initialize(invalid).is_err());
     assert!(!root.exists());
     assert_eq!(fs::read(&legacy).unwrap(), original);
+    let mut invalid = preferences();
+    invalid.editor_completion.delay_ms = 1001;
+    assert!(store.initialize(invalid).is_err());
+    assert!(!root.exists());
+    assert_eq!(fs::read(&legacy).unwrap(), original);
     store.initialize(preferences()).unwrap();
     assert!(root.join("settings.json").exists());
+    assert_eq!(
+        store.settings().unwrap().editor_completion,
+        EditorCompletionPreferences {
+            automatic: true,
+            delay_ms: 100,
+        }
+    );
     assert_eq!(fs::read(&legacy).unwrap(), original);
 }
 #[test]
@@ -30,6 +42,13 @@ fn legacy_settings_load_without_rewrite_and_preferences_preserve_current_hint() 
     put(&path, original);
     let loaded = store.settings().unwrap();
     assert_eq!(loaded.locale, Locale::English);
+    assert_eq!(
+        loaded.editor_completion,
+        EditorCompletionPreferences {
+            automatic: true,
+            delay_ms: 100,
+        }
+    );
     assert!(loaded.backup_directory.is_none());
     assert!(loaded.packages_root.is_none());
     assert!(!loaded.capture_cache_enabled);
@@ -41,6 +60,10 @@ fn legacy_settings_load_without_rewrite_and_preferences_preserve_current_hint() 
         locale: Locale::Japanese,
         backup_directory: Some(directory.0.join("archives").to_str().unwrap().into()),
         capture_cache_enabled: true,
+        editor_completion: EditorCompletionPreferences {
+            automatic: false,
+            delay_ms: 1000,
+        },
         ..preferences()
     };
     put(
@@ -49,6 +72,13 @@ fn legacy_settings_load_without_rewrite_and_preferences_preserve_current_hint() 
     );
     let saved = store.save_preferences(draft).unwrap();
     assert_eq!(saved.package_path.as_deref(), Some("newer-root"));
+    assert_eq!(
+        directory.store().settings().unwrap().editor_completion,
+        EditorCompletionPreferences {
+            automatic: false,
+            delay_ms: 1000,
+        }
+    );
     assert_eq!(
         directory.store().settings().unwrap().locale,
         Locale::Japanese
@@ -61,6 +91,20 @@ fn legacy_settings_load_without_rewrite_and_preferences_preserve_current_hint() 
     assert!(directory.store().settings().unwrap().capture_cache_enabled);
     store.save_preferences(preferences()).unwrap();
     assert!(!directory.store().settings().unwrap().capture_cache_enabled);
+    assert_eq!(
+        directory.store().settings().unwrap().editor_completion,
+        EditorCompletionPreferences::default()
+    );
+    let mut immediate = preferences();
+    immediate.editor_completion.delay_ms = 0;
+    store.save_preferences(immediate).unwrap();
+    assert_eq!(
+        directory.store().settings().unwrap().editor_completion,
+        EditorCompletionPreferences {
+            automatic: true,
+            delay_ms: 0,
+        }
+    );
 }
 
 #[test]
@@ -79,6 +123,9 @@ fn malformed_settings_never_become_defaults_or_accept_replacements() {
         br#"{"version":1,"gui_log_limit":12,"future":true}"#.as_slice(),
         br#"{"version":1,"gui_log_limit":12,"capture_cache_enabled":"true"}"#.as_slice(),
         br#"{"version":1,"gui_log_limit":12,"capture_cache_enabled":null}"#.as_slice(),
+        br#"{"version":1,"gui_log_limit":12,"editor_completion":{"automatic":false,"automatic":true,"delay_ms":100}}"#.as_slice(),
+        br#"{"version":1,"gui_log_limit":12,"editor_completion":{"automatic":true,"delay_ms":0,"delay_ms":100}}"#.as_slice(),
+        br#"{"version":1,"gui_log_limit":12,"editor_completion":{"automatic":true,"delay_ms":100},"editor_completion":{"automatic":false,"delay_ms":0}}"#.as_slice(),
         b"not JSON".as_slice(),
         br#"[1,12,"path"]"#.as_slice(),
     ] {
@@ -137,6 +184,73 @@ fn invalid_locale_notifications_and_backup_paths_preserve_settings() {
         invalid.backup_directory = Some(backup);
         assert!(store.save_preferences(invalid).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn invalid_editor_completion_preserves_settings_and_requires_complete_editable_values() {
+    let directory = Directory::new();
+    let store = directory.store();
+    store.initialize(preferences()).unwrap();
+    let path = directory.0.join("settings.json");
+    let before = fs::read(&path).unwrap();
+    let mut missing = serde_json::to_value(preferences()).unwrap();
+    missing.as_object_mut().unwrap().remove("editor_completion");
+    assert!(serde_json::from_value::<EditableSettings>(missing).is_err());
+
+    for value in [
+        Value::Null,
+        json!(true),
+        json!(100),
+        json!("automatic"),
+        json!([true, 100]),
+        json!({}),
+        json!({"automatic":true}),
+        json!({"delay_ms":100}),
+        json!({"automatic":true,"delay_ms":100,"future":false}),
+        json!({"automatic":"true","delay_ms":100}),
+        json!({"automatic":1,"delay_ms":100}),
+        json!({"automatic":null,"delay_ms":100}),
+        json!({"automatic":true,"delay_ms":"100"}),
+        json!({"automatic":true,"delay_ms":null}),
+        json!({"automatic":true,"delay_ms":false}),
+        json!({"automatic":true,"delay_ms":-1}),
+        json!({"automatic":true,"delay_ms":0.5}),
+        json!({"automatic":true,"delay_ms":100.0}),
+    ] {
+        let mut editable = serde_json::to_value(preferences()).unwrap();
+        editable["editor_completion"] = value.clone();
+        assert!(serde_json::from_value::<EditableSettings>(editable).is_err());
+        let mut document = serde_json::to_value(Settings::default()).unwrap();
+        document["editor_completion"] = value;
+        let bytes = serde_json::to_vec(&document).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert!(store.settings().is_err());
+        assert!(store.save_preferences(preferences()).is_err());
+        assert!(store.initialize(preferences()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+    fs::write(&path, &before).unwrap();
+
+    for delay_ms in [1001, u64::MAX] {
+        let mut invalid = preferences();
+        invalid.editor_completion.delay_ms = delay_ms;
+        let editable =
+            serde_json::from_value::<EditableSettings>(serde_json::to_value(invalid).unwrap())
+                .unwrap();
+        assert_eq!(
+            store.save_preferences(editable).unwrap_err().category,
+            "Settings"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let mut document = Settings::default();
+        document.editor_completion.delay_ms = delay_ms;
+        let bytes = serde_json::to_vec(&document).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(store.settings().unwrap_err().category, "Settings");
+        assert!(store.save_preferences(preferences()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::write(&path, &before).unwrap();
     }
 }
 

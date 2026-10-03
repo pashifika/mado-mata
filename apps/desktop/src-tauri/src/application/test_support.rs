@@ -126,6 +126,7 @@ pub(super) fn preferences() -> EditableSettings {
         gui_log_limit: settings.gui_log_limit,
         ocr_environment: settings.ocr_environment,
         notifications: settings.notifications,
+        editor_completion: settings.editor_completion,
         backup_directory: settings.backup_directory,
         packages_root: settings.packages_root,
         capture_cache_enabled: settings.capture_cache_enabled,

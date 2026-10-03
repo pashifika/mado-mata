@@ -361,18 +361,29 @@ ineligible files disable replacement. Oversized output is refused as a whole.
 Draft preflight checks the 1 MiB source and non-image draft budgets; host
 Save/Validate also count trusted dependency content and remain authoritative.
 
-**Complete** or **Ctrl-Space** requests suggestions at the caret; the button
-remains available when macOS reserves that shortcut. Suggestions also follow
-eligible direct typing, not paste, completion acceptance, Undo/Redo or focus changes.
-Moving the selection, Escape or blur cancels pending automatic suggestions.
-Arrow keys select, Enter accepts, and Escape dismisses.
-Completion never accepts during IME composition. It covers the current source's
-local bindings, `host.call` methods and arguments, inferred SDK results, and
-nested fields/enum alternatives from the current structured options-schema draft.
-Local declarations that shadow `host` retain their own types.
-Candidates match the typed prefix case-insensitively before the 200-candidate
-and response-byte limits. More text narrows the list; an unmatched prefix closes
-it rather than showing unrelated names. An empty prefix retains contextual choices.
+**Complete** or **Ctrl-Space** requests suggestions immediately at the caret; the
+button remains available when macOS reserves that shortcut. New automatic
+sessions follow eligible direct typing after the saved opening delay (100 ms by
+default). Configure automatic opening and its 0–1000 ms delay in
+**Application → App settings → Editor**. Provider processing takes additional
+time; the delay does not apply to explicit requests or an active session's updates.
+
+Typing and Backspace within an active token refresh candidates from the current
+source, even when automatic opening is off. Backspace from `rel` to `re` restores
+both `recognize` and `release`, including candidates outside an earlier capped
+subset. Candidates retain provider order and match the decoded prefix
+case-insensitively before the 200-candidate and response-byte limits. An unmatched
+prefix closes either session kind; an empty prefix retains contextual choices.
+
+Escape, blur, unrelated caret/selection movement, context departure and composition
+cancel pending work and remove old candidates/documentation. Paste, acceptance,
+Undo/Redo, focus restoration, idle and composition commit alone do not open a
+session; Backspace alone does not reopen a closed session. Arrow keys select,
+Enter accepts, and one Undo restores the prior source. Completion never accepts
+during IME composition. It covers the current source's local bindings, `host.call`
+methods and arguments, inferred SDK results, and nested fields/enum alternatives
+from the current structured options-schema draft. Local declarations that shadow
+`host` retain their own types.
 
 Candidates stay on one line. A separate panel follows the selected candidate's
 signature and available documentation, beside the list when there is room and
@@ -393,14 +404,21 @@ Analysis has one worker, one active request and one coalesced latest request.
 Startup is limited to 5 seconds and a dispatched request to 2 seconds.
 Declarations are bounded to 2 MiB, responses to 200 candidates / 256 KiB and
 each candidate's signature and documentation together to 4 KiB. Capped results
-and omitted details are disclosed. A worker
-failure or deadline retires analysis without changing drafts or blocking Save,
-navigation or Stop; use **Complete** explicitly to retry. These are payload and
-deadline bounds, not a total WebView memory guarantee.
+and omitted details are disclosed. A worker failure or deadline retires analysis
+without changing drafts or blocking Save, navigation or Stop. Only a fresh
+**Complete** or **Ctrl-Space** request may retry; continuing a manually opened
+session does not grant restart authority. These are payload and deadline bounds,
+not a total WebView memory guarantee.
 
 Suggestions only edit drafts. Continue through **Save → Validate → Exit Edit →
 Inspect/Reinspect → Start**; neither highlighting nor completion validates or
 authorizes execution.
+
+Session transitions are an independent behavioral adaptation of the supplied MIT
+VS Code 1.140.0 snapshot's `suggestModel.ts`, `suggestController.ts` and
+`completionModel.ts`; no VS Code source functions are copied. CodeMirror and the
+existing restricted TypeScript worker remain authoritative. Builds and checks
+do not read the reference checkout or use Monaco/workbench services.
 
 
 ### Source conflicts and interrupted saves
@@ -919,8 +937,8 @@ controls and workspace command buttons are disabled. Schema options remain edita
 Stop and navigation stay available. The reason is shown in the issuing workspace,
 the workspace dropdown, and the **+** dialog.
 
-Use **Application → App settings** for Display, Notifications, Packages, OCR
-environment, Logs, and Backups.
+Use **Application → App settings** for Display, Notifications, Editor, Packages,
+OCR environment, Captures, Logs, and Backups.
 Categories share one draft and one **Save changes** action. **Cancel**, the
 dialog close button, or **Escape** discards unsaved edits; merely opening the
 dialog initializes no recognition backend. A category whose fields are invalid
@@ -934,6 +952,30 @@ the legacy `package_path` field is preserved but is not used to reopen packages.
 Active operations keep the settings they already captured.
 **Application → Application logs** opens application-wide
 diagnostics; **Close window** follows the bounded shutdown path.
+
+### Editor completion preferences
+
+**Editor → Show completions automatically** defaults to on; **Automatic opening
+delay (ms)** accepts integers from 0 through 1000 and defaults to 100. These are
+App-owned `settings.json` values under `editor_completion.automatic` and
+`editor_completion.delay_ms`, not package or Profile preferences.
+
+One authoritative **Save changes** applies the pair. Draft changes, Cancel and
+Escape do not preview preferences; a failed Save preserves correctable edits.
+Edits made after submission remain unsaved when the earlier Save returns.
+Settings Save remains available during an otherwise admitted Edit session:
+source, selection, history and the Edit owner stay intact. A changed completion
+value cancels pending/visible suggestions in place; unchanged values do not reset
+completion. Saving or returning focus does not itself open suggestions. The
+existing busy-command, closing and restore refusals still apply, and settings Save
+does not enable Script Start, OCR Check or another Edit while the lease is held.
+
+Older settings without the whole `editor_completion` object read as on/100 without
+rewriting the file. Present malformed, partial, unknown-member, wrong-type or
+out-of-range values are refused without repair or clamping. Saved values survive
+restart and use the existing configuration snapshot/restore path. Preserve a
+compatible configuration backup before rolling back to an older strict binary.
+
 
 ### Display language
 
@@ -1797,6 +1839,15 @@ local paths, and compiler/run records outside public commits.
    the scope of memory measurements. Missing physical IME or GUI observations
    remain incomplete; hosted checks cannot qualify them. This procedure grants
    no game input or live-capture authority.
+9. During unsaved Edit, use **App settings → Editor** to save automatic opening
+   off/on and delays **0 / 100 / 1000 ms**. Check Cancel, a refused save, edits
+   made while Save is pending, unchanged view/selection/Undo history, and saved
+   values after restart. With automatic opening off, explicitly open at `r`, type
+   to `rel`, then Backspace to `re`; broader candidates must return immediately.
+   With it on, rapidly type `host.` and wait for member candidates. Check escaped
+   quotes at an unterminated literal's end. Dismiss before the delay or worker
+   response, type an unmatched prefix, and verify that stale rows cannot return
+   or insert text. Separate opening-delay measurements from provider latency.
 
 ### Saved-image Recognition acceptance
 

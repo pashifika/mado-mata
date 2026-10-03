@@ -20,7 +20,7 @@ import {AUTHORING_RECOVERY, catalogBlock, diagnosticLocation, dirtyDrafts, draft
 import type {AuthoringSession, EditInput, FileDraft, Snapshot, TextRange, TypedText} from '../authoring.ts';
 import {parseJson, readManifest, schemaIssues, treeKind} from '../metadata.ts';
 import {packageDestination} from '../state.ts';
-import type {AuthoringFileKind, CatalogEdit, Fault} from '../types.ts';
+import type {AuthoringFileKind, CatalogEdit, EditorCompletionPreferences, Fault} from '../types.ts';
 import {messages, renderMessage} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
@@ -86,6 +86,7 @@ interface Props {
   recognitionSaveBlock: string | null;
   // The effective packages root (the sources folder) the host resolves Duplicate destinations in; shown as a preview only.
   packagesRoot: string;
+  completionPreferences: EditorCompletionPreferences;
   // Another host command is in flight or the application is closing; typing stays available.
   locked: boolean; lockReason: string | null;
   // The host no longer reports this lease: text is kept for copying, publication is refused.
@@ -94,7 +95,7 @@ interface Props {
   validationActive: boolean;
 }
 
-export default function EditPage({session, label, handlers, recognition, recognitionDirty, recognitionSaveBlock, packagesRoot, locked, lockReason, leaseLost, validationActive}: Props) {
+export default function EditPage({session, label, handlers, recognition, recognitionDirty, recognitionSaveBlock, packagesRoot, completionPreferences, locked, lockReason, leaseLost, validationActive}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const a = t.authoring;
@@ -407,6 +408,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
       </div>
       <SourceEditor key={`${session.owner.token}:${editable.path}`} draft={editable} reveal={session.reveal} readOnly={sourceReadOnly}
         selection={selection} control={sourceEditor} context={completionContext} request={requestCompletion} accepts={acceptsCompletion}
+        completionPreferences={completionPreferences}
         completionUnavailable={completionStatus === 'unavailable' || completionStatus === 'oversized'}
         onCompletionRefused={() => setCompletionStatus('oversized')}
         onEdit={(next, before, input) => {

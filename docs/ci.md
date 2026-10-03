@@ -147,9 +147,11 @@ The full check has these responsibilities:
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
   run its state tests (including per-file history, stale saves, source-diagnostic
   projection, atomic literal replacement, UTF-16/line-ending mapping, real
-  restricted SDK/options completion, schema invalidation, worker fencing and
-  finite failure/retry, Recognition geometry/Undo, grouped selection, stale
-  trial/Copy state, and per-Start Native consent invalidation), and
+  restricted SDK/options completion, current-source session refresh and Backspace,
+  saved completion preferences, stale request/acceptance fencing, schema
+  invalidation, worker fencing and finite failure/explicit retry, Recognition
+  geometry/Undo, grouped selection, stale trial/Copy state, and per-Start Native
+  consent invalidation), and
   type-check/build its trusted UI and bundled language worker.
 - Test the Rust application core with `--no-default-features --lib`: explicit
   setup/recovery, named Tab ownership, scoped profiles, source-preserving legacy
@@ -163,8 +165,11 @@ The full check has these responsibilities:
   Identifier regressions cover
   canonical XIDs, typed owner-scoped conversion, bounded durable mappings,
   repeat ingress/conflicts, stale-schema preservation, and reservation retention
-  through interrupted publication and recovery. Restore/migration regressions
-  cover discoverable cleanup after restart, not physical power loss. The
+  through interrupted publication and recovery. Completion-preference regressions
+  cover old-file defaults without rewriting, strict object/range refusal, atomic
+  write failure, Edit/busy/restore admission, and configuration restore/restart.
+  Restore/migration regressions cover discoverable cleanup after restart, not
+  physical power loss. The
   [configuration recovery ADR](adr/0005-desktop-configuration-recovery.md) records
   the storage boundaries and Windows directory-sync qualification limitation.
   Optional OCR settings, bounded replay projection, admission races, and

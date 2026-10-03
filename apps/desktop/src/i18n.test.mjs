@@ -198,7 +198,7 @@ for (const {scenario,input,value,invalid} of [
 }
 
 test('draft locale and validation presentation do not implicitly change each other',()=>{
-  const draft={locale:'ja',logLimit:'invalid',notifications:{...DEFAULT_NOTIFICATIONS},captureCacheEnabled:false,environment:environmentDraft(null),backupDirectory:'',packagesRoot:''};
+  const draft={locale:'ja',logLimit:'invalid',notifications:{...DEFAULT_NOTIFICATIONS},completionAutomatic:true,completionDelayMs:'100',captureCacheEnabled:false,environment:environmentDraft(null),backupDirectory:'',packagesRoot:''};
   const original=structuredClone(draft);
   const en=readSettingsDraft(draft,'en');
   const ja=readSettingsDraft(draft,'ja');
@@ -211,6 +211,25 @@ test('draft locale and validation presentation do not implicitly change each oth
   assert.equal(saved.locale,'ja');
   assert.equal(saved.gui_log_limit,123);
 });
+
+for (const {scenario,edit,field} of [
+  {scenario:'an invalid completion delay',edit:{completionDelayMs:'1001'},field:'completionDelayMs'},
+  {scenario:'a nonboolean automatic completion flag',edit:{completionAutomatic:'false'},field:'completionAutomatic'},
+]) {
+  test(`settings localize ${scenario} without changing the pending input`,()=>{
+    const draft={locale:'ja',logLimit:'1000',notifications:{...DEFAULT_NOTIFICATIONS},completionAutomatic:true,completionDelayMs:'100',
+      captureCacheEnabled:false,environment:environmentDraft(null),backupDirectory:'',packagesRoot:'',...edit};
+    const original=structuredClone(draft);
+    const en=readSettingsDraft(draft,'en');
+    const ja=readSettingsDraft(draft,'ja');
+    assert.equal(en.settings,null);
+    assert.equal(ja.settings,null);
+    assert.deepEqual(Object.keys(en.errors),[field]);
+    assert.deepEqual(Object.keys(ja.errors),[field]);
+    assert.notEqual(en.errors[field],ja.errors[field]);
+    assert.deepEqual(draft,original);
+  });
+}
 
 test('unknown diagnostic identifiers stay raw and localized controls do not replace log or card bodies',()=>{
   const entry={sequence:1,time_ms:0,source:'Script',level:'ERROR',run:'run-a',workspace_id:'a',code:'command.failed',message:'Unknown SDK: {name} <private>',fields:{category:'UnknownSdkCategory',hidden:'not-searchable'}};

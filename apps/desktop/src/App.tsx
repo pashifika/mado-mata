@@ -193,6 +193,9 @@ export default function App() {
   const snapshotBusy = useRef(false);
   const retention = useRef(1000);
   const preferences = useRef(DEFAULT_NOTIFICATIONS);
+  // A settings read fault can retain the Application but clear its settings response. Keep the editor's last
+  // authoritative preferences in that case, rather than unmounting its view or substituting defaults.
+  const editorCompletion = useRef<Settings['editor_completion'] | null>(null);
   const openWorkspaces = useRef(workspaces);
   openWorkspaces.current = workspaces;
   const menuButton = useRef<HTMLButtonElement>(null);
@@ -296,6 +299,7 @@ export default function App() {
     dispatch({type:'presentation', locale:saved.locale});
     retention.current = saved.gui_log_limit;
     preferences.current = saved.notifications;
+    editorCompletion.current = saved.editor_completion;
     setLogs(old => retainLogs(old, [], saved.gui_log_limit));
   }
 
@@ -332,6 +336,7 @@ export default function App() {
   function applyStatus(next: BootstrapStatus, constructing: boolean) {
     dispatch({type: 'status', status: next});
     if (next.settings) adoptSettings(next.settings); else setSettings(null);
+    if (!next.application_available) editorCompletion.current = null;
     const catalog = next.catalog;
     // A constructing action that ended Ready without a readable catalog is confirmed by the next catalog read.
     const rebuild = constructing || pendingReconstruction.current;
@@ -1696,6 +1701,8 @@ export default function App() {
   const parsedSettings = useMemo(() => readSettingsDraft(settingsDraft, locale), [settingsDraft, locale]);
   const dialogDirty = settings === null || settingsDraft.locale !== settings.locale || settingsDraft.logLimit.trim() !== String(settings.gui_log_limit)
     || !sameNotifications(settingsDraft.notifications, settings.notifications) || settingsDraft.captureCacheEnabled !== settings.capture_cache_enabled
+    || settingsDraft.completionAutomatic !== settings.editor_completion.automatic
+    || settingsDraft.completionDelayMs.trim() !== String(settings.editor_completion.delay_ms)
     || settingsDraft.backupDirectory.trim() !== (settings.backup_directory ?? '')
     || settingsDraft.packagesRoot.trim() !== (settings.packages_root ?? '') || envDirty;
   // Check binds the workspace visible when the dialog opened; an unbound Tab is never passed as a package association.
@@ -2120,10 +2127,11 @@ export default function App() {
         <span className="muted">{ui.bootstrap.actionFailedHelp}</span></div></div>}
     <div className="workspace">
       <main id="workspace-panel" className="content" aria-label={selected ? t.workspaceAria(workspaceLabel(selected, workspaces)) : undefined}>
-        {selected && selected.page === 'edit' && editVisible && authoring && <EditPage key={authoring.owner.token} session={authoring} label={workspaceLabel(selected, workspaces)}
+        {selected && selected.page === 'edit' && editVisible && authoring && editorCompletion.current !== null && <EditPage key={authoring.owner.token} session={authoring} label={workspaceLabel(selected, workspaces)}
           handlers={editHandlers} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
           packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive} recognitionDirty={recognitionDirty}
           recognitionSaveBlock={recognitionSaveReason}
+          completionPreferences={editorCompletion.current}
           recognition={authoring.recognition
             ? <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null}
               lockReason={commandReason ?? (closing ? t.applicationClosing : authoring.pending !== null ? ui.authoring.block('pending') : null)}

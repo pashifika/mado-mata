@@ -1,5 +1,5 @@
 import type {Locale} from './i18n.ts';
-import {DEFAULT_NOTIFICATIONS, record} from './state.ts';
+import {DEFAULT_EDITOR_COMPLETION, DEFAULT_NOTIFICATIONS, record} from './state.ts';
 import type {BootstrapStatus, EditableSettings, Fault, Json, SnapshotReceipt} from './types.ts';
 
 export type BootstrapAction = 'initializing' | 'retrying' | 'importingRoot' | 'restoring' | 'recovering' | 'refreshingStatus';
@@ -83,7 +83,8 @@ export function surface(status:BootstrapStatus|null):Surface {
 // Initialize writes exactly the operator's explicit choices plus documented defaults; nothing is inspected or probed.
 export function initialSettings(draft:SetupDraft):EditableSettings {
   const destination = draft.backupDirectory.trim();
-  return {locale: draft.locale, gui_log_limit: 1000, ocr_environment: null, notifications: {...DEFAULT_NOTIFICATIONS}, capture_cache_enabled:false, backup_directory: destination === '' ? null : destination, packages_root: null};
+  return {locale: draft.locale, gui_log_limit: 1000, ocr_environment: null, notifications: {...DEFAULT_NOTIFICATIONS},
+    editor_completion: {...DEFAULT_EDITOR_COMPLETION}, capture_cache_enabled:false, backup_directory: destination === '' ? null : destination, packages_root: null};
 }
 
 // Only a constructing action that ended Ready without a fault can have rebuilt the Application; its catalog then

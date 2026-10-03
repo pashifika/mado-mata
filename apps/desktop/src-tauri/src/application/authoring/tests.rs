@@ -1,6 +1,9 @@
 use super::*;
 use crate::application::test_support::profile_path;
-use crate::application::test_support::{Fixture, inspect_named, request, view_ref, workspace_ref};
+use crate::application::test_support::{
+    Fixture, inspect_named, preferences, request, view_ref, workspace_ref,
+};
+use crate::storage::EditorCompletionPreferences;
 use std::fs;
 use std::sync::{Barrier, mpsc};
 use std::time::Instant;
@@ -112,6 +115,40 @@ fn lease_excludes_all_ordinary_admission_and_invalidates_shared_source_on_exit()
         app.poll().controller["run"].is_null(),
         "idle Edit must not launch a timed worker"
     );
+    let mut before = app.capture_configuration().unwrap().files;
+    let source_files = ["main.js", "package.json", "profiles/template-first.json"];
+    let source_before = source_files.map(|path| fs::read(sources.package.join(path)).unwrap());
+    let mut draft = preferences();
+    draft.editor_completion = EditorCompletionPreferences {
+        automatic: false,
+        delay_ms: 375,
+    };
+    let saved = app.save_settings(draft.clone()).unwrap();
+    assert_eq!(saved.editor_completion, draft.editor_completion);
+    assert_eq!(app.poll().authoring, Some(editor.owner.clone()));
+    assert_eq!(
+        app.authoring_refresh(&editor.owner).unwrap().revision,
+        editor.revision
+    );
+    let mut after = app.capture_configuration().unwrap().files;
+    before.remove("settings.json");
+    after.remove("settings.json");
+    assert_eq!(after, before);
+    for (path, bytes) in source_files.into_iter().zip(source_before) {
+        assert_eq!(fs::read(sources.package.join(path)).unwrap(), bytes);
+    }
+    let settings_before = fs::read(sources.fixture.root.join("settings.json")).unwrap();
+    draft.editor_completion.delay_ms = 1001;
+    assert_eq!(app.save_settings(draft).unwrap_err().category, "Settings");
+    assert_eq!(
+        fs::read(sources.fixture.root.join("settings.json")).unwrap(),
+        settings_before
+    );
+    assert_eq!(
+        app.settings().unwrap().editor_completion,
+        saved.editor_completion
+    );
+    assert_eq!(app.poll().authoring, Some(editor.owner.clone()));
     assert_eq!(
         app.start(&second_ref, request(&second))
             .unwrap_err()
@@ -857,6 +894,19 @@ fn pending_restore_evidence_blocks_commands_but_not_close_and_survives_shutdown(
             path.clone()
         };
         fs::write(&evidence, b"unresolved restore evidence").unwrap();
+        let settings_path = sources.fixture.root.join("settings.json");
+        let settings_before = fs::read(&settings_path).unwrap();
+        let mut draft = preferences();
+        draft.editor_completion = EditorCompletionPreferences {
+            automatic: false,
+            delay_ms: 1000,
+        };
+        assert_eq!(
+            app.save_settings(draft).unwrap_err().category,
+            "RestorePending",
+            "{marker}"
+        );
+        assert_eq!(fs::read(&settings_path).unwrap(), settings_before);
 
         assert_eq!(
             app.start(&workspace, request(&selection))

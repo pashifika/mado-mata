@@ -22,16 +22,18 @@ export interface OcrEnvironment {
 }
 // Finite choices validated in Rust: visible_count 1|2, timeout_seconds 5|8|12.
 export interface NotificationPreferences {visible_count:number; timeout_seconds:number; show_success:boolean}
+// delay_ms is an integer from 0 through 1000, validated by the host.
+export interface EditorCompletionPreferences {automatic:boolean; delay_ms:number}
 export interface Settings {
   version:number; gui_log_limit:number; package_path:string|null; ocr_environment:OcrEnvironment|null;
-  notifications:NotificationPreferences; locale:Locale; capture_cache_enabled:boolean;
+  notifications:NotificationPreferences; editor_completion:EditorCompletionPreferences; locale:Locale; capture_cache_enabled:boolean;
   // Absent or null means the default `<root>/backups` destination.
   backup_directory:string|null;
   // Null keeps the default `<application data-dir>/sources` collection.
   packages_root:string|null;
 }
 // The only settings the dialog may write; version and package hint stay host-owned.
-export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvironment|null; notifications:NotificationPreferences; locale:Locale; capture_cache_enabled:boolean; backup_directory:string|null; packages_root:string|null}
+export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvironment|null; notifications:NotificationPreferences; editor_completion:EditorCompletionPreferences; locale:Locale; capture_cache_enabled:boolean; backup_directory:string|null; packages_root:string|null}
 // Host-issued session identity; revisions increment on reinspect and ids are never reused.
 export interface WorkspaceRef {workspace_id:string; revision:number}
 export interface ProfileCatalog {profiles:Profile[]; profiles_error:Fault|null}
