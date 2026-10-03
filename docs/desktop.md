@@ -377,9 +377,13 @@ case-insensitively before the 200-candidate and response-byte limits. An unmatch
 prefix closes either session kind; an empty prefix retains contextual choices.
 
 Escape, blur, unrelated caret/selection movement, context departure and composition
-cancel pending work and remove old candidates/documentation. Paste, acceptance,
-Undo/Redo, focus restoration, idle and composition commit alone do not open a
-session; Backspace alone does not reopen a closed session. Arrow keys select,
+cancel pending work and remove old candidates/documentation. After an identifier or
+keyword, `{`, `}` or a backslash that starts no `\uXXXX`/`\u{…}` escape is a
+departure. An incomplete escape keeps the session without candidates or requests.
+Completing a valid identifier escape refreshes the decoded prefix; any other
+completed escape cancels the session. Paste, acceptance, Undo/Redo, focus
+restoration, idle and composition commit alone do not open a session; Backspace
+alone does not reopen a closed session. Arrow keys select,
 Enter or Tab accepts, and one Undo restores the prior source. Completion never accepts
 during IME composition. It covers the current source's local bindings, `host.call`
 methods and arguments, inferred SDK results, and nested fields/enum alternatives

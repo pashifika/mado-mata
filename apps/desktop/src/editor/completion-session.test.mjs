@@ -462,3 +462,71 @@ for (const suffix of ['"]; export {};', '']) {
     assert.equal(h.source, `${prefix}read\\"less${suffix}`);
   });
 }
+
+// Each character is a separate direct keystroke after a live `else` session.
+const departures = [
+  {scenario: 'an opening brace', typed: '{'},
+  {scenario: 'a closing brace', typed: '}'},
+  {scenario: 'a backslash that starts no Unicode escape', typed: '\\x'},
+  {scenario: 'an empty code-point escape', typed: '\\u{}'},
+  {scenario: 'an escaped non-identifier character', typed: '\\u007b'},
+];
+for (const {scenario, typed} of departures) {
+  test(`${scenario} leaves a live keyword token without a new request or stale acceptance`, async t => {
+    const h = harness(t, 'if (true) {} else¦', {automatic: false, delay_ms: 100});
+    h.session.explicit();
+    const worker = h.workers[0];
+    worker.ready();
+    worker.respond();
+    await Promise.resolve();
+    const original = h.visible;
+    assert.deepEqual(original.result.candidates.map(candidate => candidate.label), ['else']);
+    for (const key of typed) h.type(key);
+    h.advance(1000);
+    assert.equal(h.visible, null);
+    assert.equal(worker.requests.length, 1, 'the departed session cannot query the new context');
+    assert.equal(h.publications.length, 1);
+    assert.equal(h.accept(original, 'else'), false);
+    assert.equal(h.source, `if (true) {} else${typed}`);
+    assert.equal(h.session.cancel(), false, 'Escape is not consumed by a closed session');
+  });
+}
+
+for (const {scenario, escape} of [
+  {scenario: 'a four-digit', escape: '\\u0065'},
+  {scenario: 'a code-point', escape: '\\u{65}'},
+]) {
+  test(`a manual identifier session waits through ${scenario} Unicode escape and refreshes its decoded prefix`, async t => {
+    const prefix = 'const release = 1, recognize = 2; export const selected = ';
+    const h = harness(t, `${prefix}rel¦`, {automatic: false, delay_ms: 1000});
+    h.session.explicit();
+    const worker = h.workers[0];
+    worker.ready();
+    worker.respond();
+    await Promise.resolve();
+    const original = h.visible;
+    assert.deepEqual(original.result.candidates.map(candidate => candidate.label), ['release']);
+    for (const key of escape.slice(0, -1)) {
+      h.type(key);
+      assert.equal(h.visible, null);
+      assert.equal(worker.requests.length, 1, 'an incomplete escape is not queried as another token');
+    }
+    assert.equal(h.accept(original, 'release'), false);
+    h.type(escape.at(-1));
+    assert.equal(worker.requests.length, 2, 'the completed escape refreshes without an opening delay');
+    worker.respond();
+    await Promise.resolve();
+    const completed = h.visible;
+    assert.deepEqual(completed.result.candidates.map(candidate => candidate.label), ['release']);
+    h.backspace();
+    assert.equal(h.visible, null);
+    assert.equal(h.session.accepts(completed), false);
+    assert.equal(worker.requests.length, 2, 'Backspace into the escape waits instead of querying');
+    h.type(escape.at(-1));
+    assert.equal(worker.requests.length, 3);
+    worker.respond();
+    await Promise.resolve();
+    assert.equal(h.accept(h.visible, 'release'), true);
+    assert.equal(h.source, `${prefix}release`);
+  });
+}
