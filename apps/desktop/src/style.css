@@ -519,7 +519,24 @@ details[open] > summary { font-weight: 600; }
 .source-editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul { width: min(300px, calc(100vw - 24px)); min-width: 0; max-width: calc(100vw - 24px); max-height: min(240px, 34vh); padding: 4px 0; font-family: var(--mono); }
 .source-editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li { padding: 3px 10px; line-height: 18px; white-space: nowrap; overflow-wrap: normal; overflow: hidden; text-overflow: ellipsis; }
 .source-editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] { background: var(--accent); color: white; }
-.source-editor .cm-completionIcon { height: 18px; vertical-align: top; }
+/* VS Code/Codicons glyphs and light-theme colors; see public/third-party/vscode-icons/NOTICE.txt. */
+.source-editor .cm-completionIcon { display: inline-flex; align-items: center; width: 16px; height: 18px; margin-right: 4px; padding: 0; vertical-align: top; opacity: 1; }
+.source-editor .cm-completionIcon::after { content: ""; display: block; width: 16px; height: 16px; background-color: currentColor; mask: var(--completion-icon) center / contain no-repeat; }
+.source-editor .cm-completionIcon-class { --completion-icon: url('./editor/codicons/symbol-class.svg'); color: #d67e00; }
+.source-editor .cm-completionIcon-constant { --completion-icon: url('./editor/codicons/symbol-constant.svg'); }
+.source-editor .cm-completionIcon-enum { --completion-icon: url('./editor/codicons/symbol-enum.svg'); color: #d67e00; }
+.source-editor .cm-completionIcon-enum-member { --completion-icon: url('./editor/codicons/symbol-enum-member.svg'); color: #007acc; }
+.source-editor .cm-completionIcon-field { --completion-icon: url('./editor/codicons/symbol-field.svg'); color: #007acc; }
+.source-editor .cm-completionIcon-file { --completion-icon: url('./editor/codicons/symbol-file.svg'); }
+.source-editor .cm-completionIcon-folder { --completion-icon: url('./editor/codicons/folder.svg'); }
+.source-editor .cm-completionIcon-function, .source-editor .cm-completionIcon-method { --completion-icon: url('./editor/codicons/symbol-method.svg'); color: #652d90; }
+.source-editor .cm-completionIcon-interface { --completion-icon: url('./editor/codicons/symbol-interface.svg'); color: #007acc; }
+.source-editor .cm-completionIcon-keyword { --completion-icon: url('./editor/codicons/symbol-keyword.svg'); }
+.source-editor .cm-completionIcon-module { --completion-icon: url('./editor/codicons/symbol-namespace.svg'); }
+.source-editor .cm-completionIcon-property { --completion-icon: url('./editor/codicons/symbol-property.svg'); }
+.source-editor .cm-completionIcon-text { --completion-icon: url('./editor/codicons/symbol-key.svg'); }
+.source-editor .cm-completionIcon-variable { --completion-icon: url('./editor/codicons/symbol-variable.svg'); color: #007acc; }
+.source-editor li[aria-selected] .cm-completionIcon { color: inherit; }
 .source-editor .cm-editor .cm-tooltip.cm-completionInfo { width: 416px; max-width: calc(100vw - 24px); max-height: min(320px, calc(100vh - 24px)); padding: 0; overflow: auto; overscroll-behavior: contain; border-radius: var(--radius-sm); box-shadow: 0 4px 14px #12223b22; white-space: normal; }
 .source-editor .source-completion-content { display: grid; gap: 10px; padding: 10px 12px; }
 .source-editor .source-completion-signature { margin: 0; padding: 8px; max-height: none; overflow: visible; background: var(--surface-alt); font-family: var(--mono); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }

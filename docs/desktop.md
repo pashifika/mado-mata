@@ -386,8 +386,11 @@ methods and arguments, inferred SDK results, and nested fields/enum alternatives
 from the current structured options-schema draft. Local declarations that shadow
 `host` retain their own types.
 
-Candidates show provider-derived type icons and stay on one line. A separate
-panel follows the selected candidate's
+Candidates use original 16px VS Code Codicons (`0.0.46-40`), its TypeScript-kind
+mapping and light-theme symbol colors, and stay on one line. The SVG assets and
+[CC BY 4.0 / MIT notices](../apps/desktop/public/third-party/vscode-icons/NOTICE.txt)
+are bundled locally; there is no runtime icon download. Selected icons inherit
+the selected row's foreground. A separate panel follows the selected candidate's
 signature and available documentation, beside the list when there is room and
 below or above it otherwise. The shared SDK provides method-specific call
 signatures and descriptions; local functions retain their own inferred types and

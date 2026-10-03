@@ -42,20 +42,24 @@ interface Props {
 const synchronize = Annotation.define<boolean>();
 const inputKind = Annotation.define<EditInput>();
 
+// Adapted from VS Code's MyCompletionItem.convertKind. See public/third-party/vscode-icons/NOTICE.txt.
 function completionType(kind: string): string {
   switch (kind) {
-    case 'class': case 'interface': case 'enum': case 'function': case 'method':
-    case 'property': case 'keyword': case 'type': return kind;
-    case 'local class': return 'class';
-    case 'local function': case 'call': case 'construct': return 'function';
-    case 'constructor': return 'method';
-    case 'const': case 'enum member': return 'constant';
-    case 'var': case 'local var': case 'let': case 'parameter':
-    case 'using': case 'await using': case 'alias': return 'variable';
-    case 'getter': case 'setter': case 'accessor': case 'index': case 'JSX attribute': return 'property';
-    case 'module': case 'external module name': return 'namespace';
-    case 'primitive type': case 'type parameter': return 'type';
-    default: return 'text';
+    case 'primitive type': case 'keyword': return 'keyword';
+    case 'const': case 'let': case 'var': case 'local var': case 'alias': case 'parameter': return 'variable';
+    case 'property': case 'getter': case 'setter': return 'field';
+    case 'function': case 'local function': return 'function';
+    case 'method': case 'construct': case 'call': case 'index': return 'method';
+    case 'enum': return 'enum';
+    case 'enum member': return 'enum-member';
+    case 'module': case 'external module name': return 'module';
+    case 'class': case 'type': return 'class';
+    case 'interface': return 'interface';
+    case 'warning': return 'text';
+    case 'script': return 'file';
+    case 'directory': return 'folder';
+    case 'string': return 'constant';
+    default: return 'property';
   }
 }
 

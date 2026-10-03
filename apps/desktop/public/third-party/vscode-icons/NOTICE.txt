@@ -1,0 +1,41 @@
+Visual Studio Code completion icons
+
+Copyright (c) Microsoft Corporation and contributors.
+
+The SVG files in src/editor/codicons are unchanged copies from
+@vscode/codicons 0.0.46-40, the version locked by the supplied VS Code 1.140.0
+reference. Only the completion icon subset is included. The original 16x16
+artwork is rendered as CSS masks; no icon outlines have been redrawn.
+
+Source: https://github.com/microsoft/vscode-codicons
+Package: https://registry.npmjs.org/@vscode/codicons/-/codicons-0.0.46-40.tgz
+Package integrity (SHA-512, base64):
+sFaz0+i9FLHyqDY3/mjyYF4U8dyxcAWEqfZFF/4IQEZM/jjlbhRDOtDbHPe8P6nQktm6+QsuvlDhtOi4nSFSSQ==
+
+The artwork is licensed under Creative Commons Attribution 4.0 International:
+https://creativecommons.org/licenses/by/4.0/
+The complete upstream license and warranty disclaimer are in LICENSE-ICONS.txt.
+No Microsoft affiliation or endorsement is implied.
+
+The TypeScript-kind adapter in SourceEditor.tsx and the light-theme symbol
+colors in style.css are adapted from the following VS Code reference files.
+Protocol constants and enum results are represented as local strings; the
+renderer remains CodeMirror, with SVG masks rather than VS Code's icon font.
+Selected icons inherit the existing selected-row foreground.
+
+Source: https://github.com/microsoft/vscode
+Reference snapshot: 1.140.0 (not asserted to identify an upstream commit)
+Files and SHA-256 fingerprints:
+- extensions/typescript-language-features/src/languageFeatures/completions.ts
+  d59ca2d102847548f8ba06cbe41e538c19c50010674230084f145199f31048cb
+  MyCompletionItem.convertKind
+- src/vs/editor/common/languages.ts
+  c35e7f0372e7443fbac34dda6eb8d0fefb8089a17b0ffd3d4677f7f7b7c9ee62
+  CompletionItemKinds icon aliases
+- src/vs/editor/contrib/symbolIcons/browser/symbolIcons.ts
+  d4ad122f721c87722eaf42490c07d252b64964df82a7bea36bfe8279522a3975
+  Light-theme symbol colors
+
+These VS Code portions are licensed under the MIT License. The original
+Microsoft copyright, permission notice and disclaimer are in LICENSE-CODE.txt.
+These notices and both licenses are copied into the built application assets.
