@@ -760,7 +760,7 @@ fn import_legacy_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{Locale, NotificationPreferences};
+    use crate::storage::{EditorCompletionPreferences, Locale, NotificationPreferences};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     struct Home(PathBuf);
@@ -804,6 +804,7 @@ mod tests {
             gui_log_limit: 1000,
             ocr_environment: None,
             notifications: NotificationPreferences::default(),
+            editor_completion: EditorCompletionPreferences::default(),
             backup_directory: None,
             packages_root: None,
             capture_cache_enabled: false,
@@ -1071,9 +1072,18 @@ mod tests {
         let home = Home::new();
         let root = home.0.join("restore");
         let bootstrap = home.bootstrap(root.clone());
+        let mut initial = preferences(Locale::English);
+        initial.editor_completion = EditorCompletionPreferences {
+            automatic: false,
+            delay_ms: 0,
+        };
+        bootstrap.initialize(initial.clone(), false).unwrap();
         bootstrap
-            .initialize(preferences(Locale::English), false)
+            .application()
+            .unwrap()
+            .create_workspace("Retained", "Retained")
             .unwrap();
+        let original = configuration::capture(&root).unwrap();
         let receipt = bootstrap.snapshot(Some(&home.0.join("first"))).unwrap();
         let archive = Path::new(&receipt.path);
         let missing = bootstrap
@@ -1081,10 +1091,12 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(missing.category, "StaleReceipt");
+        let mut changed = preferences(Locale::Japanese);
+        changed.editor_completion.delay_ms = 1000;
         bootstrap
             .application()
             .unwrap()
-            .save_settings(preferences(Locale::Japanese))
+            .save_settings(changed.clone())
             .unwrap();
         let stale = bootstrap
             .restore_snapshot(archive, Some(&receipt.generation), true, true)
@@ -1094,6 +1106,15 @@ mod tests {
         assert_eq!(
             bootstrap.application().unwrap().settings().unwrap().locale,
             Locale::Japanese
+        );
+        assert_eq!(
+            bootstrap
+                .application()
+                .unwrap()
+                .settings()
+                .unwrap()
+                .editor_completion,
+            changed.editor_completion
         );
         let current = bootstrap.snapshot(Some(&home.0.join("second"))).unwrap();
         assert_eq!(
@@ -1113,9 +1134,21 @@ mod tests {
             .restore_snapshot(archive, Some(&current.generation), true, true)
             .unwrap();
         assert!(matches!(restored.state, Phase::Ready));
-        assert_eq!(restored.settings.unwrap().locale, Locale::English);
+        let restored_settings = restored.settings.unwrap();
+        assert_eq!(restored_settings.locale, Locale::English);
+        assert_eq!(
+            restored_settings.editor_completion,
+            initial.editor_completion
+        );
+        assert_eq!(configuration::capture(&root).unwrap(), original);
         assert!(Path::new(&current.path).exists());
         bootstrap.shutdown().unwrap();
+        let restarted = home.bootstrap(root.clone());
+        let settings = restarted.status().settings.unwrap();
+        assert_eq!(settings.locale, Locale::English);
+        assert_eq!(settings.editor_completion, initial.editor_completion);
+        assert_eq!(configuration::capture(&root).unwrap(), original);
+        restarted.shutdown().unwrap();
     }
 
     #[test]

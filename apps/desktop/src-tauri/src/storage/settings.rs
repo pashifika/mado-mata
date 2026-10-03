@@ -28,6 +28,57 @@ impl Default for NotificationPreferences {
     }
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct EditorCompletionPreferences {
+    pub automatic: bool,
+    pub delay_ms: u64,
+}
+
+impl Default for EditorCompletionPreferences {
+    fn default() -> Self {
+        Self {
+            automatic: true,
+            delay_ms: 100,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EditorCompletionPreferences {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            automatic: bool,
+            delay_ms: u64,
+        }
+
+        struct PreferencesVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for PreferencesVisitor {
+            type Value = EditorCompletionPreferences;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an editor completion preferences object")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let fields =
+                    Fields::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(EditorCompletionPreferences {
+                    automatic: fields.automatic,
+                    delay_ms: fields.delay_ms,
+                })
+            }
+        }
+
+        // A derived struct also accepts arrays; persisted and IPC values require an object.
+        deserializer.deserialize_map(PreferencesVisitor)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
 pub enum Locale {
     #[default]
@@ -69,6 +120,7 @@ pub struct EditableSettings {
     pub gui_log_limit: usize,
     pub ocr_environment: Option<OcrEnvironment>,
     pub notifications: NotificationPreferences,
+    pub editor_completion: EditorCompletionPreferences,
     #[serde(default)]
     pub backup_directory: Option<String>,
     #[serde(default)]
@@ -90,6 +142,8 @@ pub struct Settings {
     #[serde(default)]
     pub notifications: NotificationPreferences,
     #[serde(default)]
+    pub editor_completion: EditorCompletionPreferences,
+    #[serde(default)]
     pub backup_directory: Option<String>,
     #[serde(default)]
     pub packages_root: Option<String>,
@@ -106,6 +160,7 @@ impl Default for Settings {
             package_path: None,
             ocr_environment: None,
             notifications: NotificationPreferences::default(),
+            editor_completion: EditorCompletionPreferences::default(),
             backup_directory: None,
             packages_root: None,
             capture_cache_enabled: false,
@@ -140,6 +195,7 @@ impl Store {
             gui_log_limit: preferences.gui_log_limit,
             ocr_environment: preferences.ocr_environment,
             notifications: preferences.notifications,
+            editor_completion: preferences.editor_completion,
             backup_directory: preferences.backup_directory,
             packages_root: preferences.packages_root,
             capture_cache_enabled: preferences.capture_cache_enabled,
@@ -174,6 +230,7 @@ impl Store {
         settings.gui_log_limit = preferences.gui_log_limit;
         settings.ocr_environment = preferences.ocr_environment;
         settings.notifications = preferences.notifications;
+        settings.editor_completion = preferences.editor_completion;
         settings.backup_directory = preferences.backup_directory;
         settings.packages_root = preferences.packages_root;
         settings.capture_cache_enabled = preferences.capture_cache_enabled;
@@ -266,6 +323,12 @@ pub(crate) fn validate_settings(settings: &Settings) -> Result<(), Fault> {
         return Err(Fault::new(
             "Settings",
             "notification count must be 1 or 2 and timeout must be 5, 8, or 12 seconds",
+        ));
+    }
+    if settings.editor_completion.delay_ms > 1000 {
+        return Err(Fault::new(
+            "Settings",
+            "editor completion delay must be an integer from 0 to 1000 milliseconds",
         ));
     }
     // This is a location hint, not a captured inventory or permission grant.

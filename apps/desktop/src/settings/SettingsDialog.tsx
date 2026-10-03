@@ -12,12 +12,13 @@ import type {EditableSettings, Fault, Settings} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
-type Category = 'display' | 'notifications' | 'packages' | 'environment' | 'captures' | 'logs' | 'backups';
-const CATEGORIES: Category[] = ['display', 'notifications', 'packages', 'environment', 'captures', 'logs', 'backups'];
+type Category = 'display' | 'notifications' | 'editor' | 'packages' | 'environment' | 'captures' | 'logs' | 'backups';
+const CATEGORIES: Category[] = ['display', 'notifications', 'editor', 'packages', 'environment', 'captures', 'logs', 'backups'];
 // state.ts stays the validation authority; this only maps its error keys to the category whose fields show them.
 const ERROR_CATEGORY: Record<string, Category> = {
   locale: 'display',
   visibleCount: 'notifications', timeoutSeconds: 'notifications', showSuccess: 'notifications',
+  completionAutomatic: 'editor', completionDelayMs: 'editor',
   logLimit: 'logs',
   packagesRoot: 'packages',
   profile: 'environment', model_root: 'environment', runtime_path: 'environment', library_paths: 'environment',
@@ -63,7 +64,7 @@ export default function SettingsDialog(props: Props) {
     }
   }, [open]);
   const errors = parsed.errors;
-  const invalidCount: Record<Category, number> = {display: 0, notifications: 0, packages: 0, environment: 0, captures: 0, logs: 0, backups: 0};
+  const invalidCount: Record<Category, number> = {display: 0, notifications: 0, editor: 0, packages: 0, environment: 0, captures: 0, logs: 0, backups: 0};
   for (const key of Object.keys(errors)) {
     const owner = ERROR_CATEGORY[key];
     if (owner) invalidCount[owner] += 1;
@@ -117,6 +118,20 @@ export default function SettingsDialog(props: Props) {
               <input id="show-success" type="checkbox" checked={draft.notifications.show_success}
                 onChange={event => onDraft({...draft, notifications: {...draft.notifications, show_success: event.target.checked}})}/></div>
             <p className="field-help">{t.settings.successHelp}</p>
+          </section>}
+          {category === 'editor' && <section aria-labelledby="editor-settings-heading">
+            <h3 id="editor-settings-heading">{t.common.editor}</h3>
+            <p className="muted">{t.settings.editorHelp}</p>
+            <div className="switch-row"><label htmlFor="completion-automatic">{t.settings.completionAutomatic}</label>
+              <input id="completion-automatic" type="checkbox" checked={draft.completionAutomatic} aria-invalid={Boolean(errors.completionAutomatic)}
+                onChange={event => onDraft({...draft, completionAutomatic: event.target.checked})}/></div>
+            {errors.completionAutomatic && <p className="field-error">{errors.completionAutomatic}</p>}
+            <p className="field-help">{t.settings.completionAutomaticHelp}</p>
+            <div className="field"><label htmlFor="completion-delay-ms">{t.settings.completionDelayMs}</label>
+              <input id="completion-delay-ms" type="text" inputMode="numeric" value={draft.completionDelayMs} aria-invalid={Boolean(errors.completionDelayMs)}
+                onChange={event => onDraft({...draft, completionDelayMs: event.target.value})}/>
+              {errors.completionDelayMs && <p className="field-error">{errors.completionDelayMs}</p>}
+              <p className="field-help">{t.settings.completionDelayHelp}</p></div>
           </section>}
           {category === 'packages' && <section aria-labelledby="packages-heading">
             <h3 id="packages-heading">{t.settings.packagesHeading}</h3>

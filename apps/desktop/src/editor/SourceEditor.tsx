@@ -6,15 +6,16 @@ import type {Rect} from '@codemirror/view';
 import {defaultHighlightStyle, indentUnit, syntaxHighlighting} from '@codemirror/language';
 import {javascript} from '@codemirror/lang-javascript';
 import {defaultKeymap} from '@codemirror/commands';
-import {autocompletion, closeCompletion, completionKeymap, pickedCompletion, startCompletion} from '@codemirror/autocomplete';
+import {acceptCompletion, autocompletion, closeCompletion, completionKeymap, pickedCompletion, selectedCompletion, startCompletion} from '@codemirror/autocomplete';
 import type {Completion, CompletionSource} from '@codemirror/autocomplete';
 import type {EditInput, FileDraft, Snapshot, TextRange} from '../authoring.ts';
+import type {EditorCompletionPreferences} from '../types.ts';
 import {AUTHORING_NON_IMAGE_BYTES, AUTHORING_SOURCE_BYTES} from '../authoring.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import type {CompletionCandidate, CompletionContext, CompletionKey, CompletionResult} from './completion-types.ts';
 import {SourcePositions} from './source-positions.ts';
-import {activatesCompletion} from './completion-activation.ts';
+import {CompletionSession} from './completion-session.ts';
 import type {SourceChange} from './source-positions.ts';
 
 export interface SourceEditorHandle {complete: () => void; focus: () => void; composing: () => boolean}
@@ -22,6 +23,7 @@ interface Props {
   draft: FileDraft & {text: string};
   reveal: number;
   readOnly: boolean;
+  completionPreferences: EditorCompletionPreferences;
   selection: RefObject<TextRange>;
   control: RefObject<SourceEditorHandle | null>;
   context: CompletionContext | null;
@@ -39,6 +41,27 @@ interface Props {
 
 const synchronize = Annotation.define<boolean>();
 const inputKind = Annotation.define<EditInput>();
+
+// Adapted from VS Code's MyCompletionItem.convertKind. See public/third-party/vscode-icons/NOTICE.txt.
+function completionType(kind: string): string {
+  switch (kind) {
+    case 'primitive type': case 'keyword': return 'keyword';
+    case 'const': case 'let': case 'var': case 'local var': case 'alias': case 'parameter': return 'variable';
+    case 'property': case 'getter': case 'setter': return 'field';
+    case 'function': case 'local function': return 'function';
+    case 'method': case 'construct': case 'call': case 'index': return 'method';
+    case 'enum': return 'enum';
+    case 'enum member': return 'enum-member';
+    case 'module': case 'external module name': return 'module';
+    case 'class': case 'type': return 'class';
+    case 'interface': return 'interface';
+    case 'warning': return 'text';
+    case 'script': return 'file';
+    case 'directory': return 'folder';
+    case 'string': return 'constant';
+    default: return 'property';
+  }
+}
 
 function completionInfo(candidate: CompletionCandidate, omitted: string) {
   if (!candidate.detail && !candidate.documentation && !candidate.detailOmitted) return null;
@@ -131,27 +154,16 @@ export default function SourceEditor(props: Props) {
   const composing = useRef(false);
   const nativeInput = useRef<EditInput | null>(null);
   const settings = useRef(new Compartment());
-  const autoTimer = useRef<number | undefined>(undefined);
-  const explicit = useRef(false);
+  const completion = useRef<CompletionSession | null>(null);
   const [caret, setCaret] = useState({line: 1, column: 1, lines: 1});
 
-  function cancelAutomatic() {
-    clearTimeout(autoTimer.current);
-    autoTimer.current = undefined;
-  }
-  function complete(requested: boolean) {
-    cancelAutomatic();
+  useImperativeHandle(props.control, () => ({complete: () => {
     const view = editor.current;
-    if (!view || composing.current || view.composing || latest.current.props.readOnly || !latest.current.props.context) return;
-    if (!requested && (!view.hasFocus || !view.state.selection.main.empty)) return;
-    explicit.current = requested;
-    closeCompletion(view);
-    if (requested) view.focus();
+    if (!view || composing.current || view.composing || latest.current.props.readOnly) return;
+    view.focus();
     view.dom.scrollIntoView({block: 'nearest', inline: 'nearest'});
-    startCompletion(view);
-  }
-  useImperativeHandle(props.control, () => ({complete: () => complete(true), focus: () => editor.current?.focus(),
-    composing: () => composing.current || editor.current?.composing === true}));
+    completion.current?.explicit();
+  }, focus: () => editor.current?.focus(), composing: () => composing.current || editor.current?.composing === true}));
 
   function configuration() {
     const {props: current, a: labels} = latest.current;
@@ -168,6 +180,7 @@ export default function SourceEditor(props: Props) {
     const first = latest.current.props;
     positions.current = new SourcePositions(first.draft.text);
     let alive = true;
+    let session: CompletionSession | null = null;
     const rangeOf = (view: EditorView): TextRange => {
       const range = view.state.selection.main;
       return {start: positions.current!.toSource(range.from), end: positions.current!.toSource(range.to)};
@@ -177,29 +190,26 @@ export default function SourceEditor(props: Props) {
       const line = view.state.doc.lineAt(view.state.selection.main.head);
       setCaret({line: line.number, column: view.state.selection.main.head - line.from + 1, lines: view.state.doc.lines});
     };
-    const source: CompletionSource = async context => {
-      const current = latest.current.props;
-      const mapping = positions.current!;
-      // complete() starts both admitted request kinds explicitly; reject CodeMirror's implicit IME starts.
-      if (!context.explicit) return null;
-      if (!alive || composing.current || current.readOnly || current.context?.source !== mapping.source) return null;
-      const position = context.pos;
-      const result = await current.request(mapping.toSource(position), explicit.current);
-      if (!alive || context.aborted || !result || composing.current || editor.current?.composing
-        || positions.current !== mapping || editor.current?.state.selection.main.head !== position
-        || !latest.current.props.accepts(result.key, mapping.source)) return null;
+    const source: CompletionSource = context => {
+      const publication = session?.current();
+      // Only our session can publish. In particular, CodeMirror's composition-end trigger cannot.
+      if (!context.explicit || !publication) return null;
+      const {result, ticket} = publication;
+      const mapping = ticket.snapshot.mapping;
+      const position = ticket.snapshot.state.selection.main.head;
+      if (context.pos !== position || context.state.doc !== ticket.snapshot.state.doc) return null;
       const options: Completion[] = result.candidates.filter(candidate => Number.isInteger(candidate.from)
         && Number.isInteger(candidate.to) && candidate.from >= 0 && candidate.to >= candidate.from
         && candidate.to <= mapping.source.length
         && mapping.toSource(mapping.toEditor(candidate.from)) === candidate.from
         && mapping.toSource(mapping.toEditor(candidate.to)) === candidate.to).map(candidate => ({
         label: candidate.label,
-        info: () => completionInfo(candidate, latest.current.a.completionDetailOmitted),
+        type: completionType(candidate.kind),
+        info: () => session?.accepts(publication) ? completionInfo(candidate, latest.current.a.completionDetailOmitted) : null,
         apply(view, option) {
           const current = latest.current.props;
-          if (!alive || composing.current || view.composing || current.readOnly || positions.current !== mapping
-            || view.state.selection.main.head !== position || !current.accepts(result.key, mapping.source)) {
-            closeCompletion(view);
+          if (!alive || !session?.accepts(publication)) {
+            session?.cancel();
             return;
           }
           const from = mapping.toEditor(candidate.from), to = mapping.toEditor(candidate.to);
@@ -207,17 +217,19 @@ export default function SourceEditor(props: Props) {
           const next = mapping.apply([{from, to, insert: inserted.toString()}]);
           const size = new TextEncoder().encode(next.source).length;
           if (size > AUTHORING_SOURCE_BYTES || size + (current.context?.otherBytes ?? AUTHORING_NON_IMAGE_BYTES) > AUTHORING_NON_IMAGE_BYTES) {
-            closeCompletion(view);
+            session?.cancel();
             current.onCompletionRefused();
             return;
           }
+          session.cancel();
           view.dispatch({changes: {from, to, insert: inserted}, selection: {anchor: from + inserted.length},
             annotations: [Transaction.userEvent.of('input.complete'), pickedCompletion.of(option),
               inputKind.of({type: 'insertReplacementText', data: null, composing: false})]});
         },
       }));
       // Each option owns its exact worker span; CodeMirror must not reuse it after another edit.
-      return options.length ? {from: position, to: position, options, filter: false} : null;
+      if (!options.length) { session?.cancel(); return null; }
+      return {from: position, to: position, options, filter: false};
     };
     const command = (run: () => void) => () => {
       if (composing.current || editor.current?.composing) return false;
@@ -233,7 +245,7 @@ export default function SourceEditor(props: Props) {
         syntaxHighlighting(defaultHighlightStyle),
         EditorState.changeFilter.of(transaction => !transaction.docChanged || transaction.annotation(synchronize) === true || !latest.current.props.readOnly),
         tooltips({tooltipSpace: completionSpace}),
-        autocompletion({override: [source], activateOnTyping: false, defaultKeymap: false, icons: false,
+        autocompletion({override: [source], activateOnTyping: false, defaultKeymap: false, icons: true,
           positionInfo: positionCompletionInfo}),
         Prec.highest(keymap.of([
           {key: 'Mod-z', run: command(() => {if (!latest.current.props.readOnly) latest.current.props.onUndo();}), preventDefault: true},
@@ -243,15 +255,17 @@ export default function SourceEditor(props: Props) {
           {key: 'Mod-f', run: command(() => latest.current.props.onFind()), preventDefault: true},
           {key: 'Mod-g', run: command(() => latest.current.props.onFindNext(false)), preventDefault: true},
           {key: 'Mod-Shift-g', run: command(() => latest.current.props.onFindNext(true)), preventDefault: true},
-          {key: 'Ctrl-Space', run: command(() => complete(true)), preventDefault: true},
+          {key: 'Ctrl-Space', run: command(() => session?.explicit()), preventDefault: true},
           {key: 'Escape', run: view => {
             if (composing.current || view.composing) return false;
-            const pending = autoTimer.current !== undefined;
-            cancelAutomatic();
-            return closeCompletion(view) || pending;
+            return session?.cancel() ?? false;
           }},
           {key: 'Tab', run: view => {
             if (composing.current || view.composing || latest.current.props.readOnly) return false;
+            if (selectedCompletion(view.state)) {
+              acceptCompletion(view);
+              return true;
+            }
             view.dispatch({...view.state.replaceSelection('  '), annotations: [Transaction.userEvent.of('input'),
               inputKind.of({type: 'insertText', data: '  ', composing: false})]});
             return true;
@@ -263,9 +277,9 @@ export default function SourceEditor(props: Props) {
       ],
     }), dispatchTransactions(transactions, view) {
       const edits: {next: Snapshot; before: TextRange; input: EditInput}[] = [];
-      let typed = false;
+      const inputs: (EditInput | null)[] = [];
       for (const transaction of transactions) {
-        if (!transaction.docChanged || transaction.annotation(synchronize)) continue;
+        if (!transaction.docChanged || transaction.annotation(synchronize)) { inputs.push(null); continue; }
         const old = positions.current!;
         const before = {start: old.toSource(transaction.startState.selection.main.from), end: old.toSource(transaction.startState.selection.main.to)};
         const changes: SourceChange[] = [];
@@ -282,26 +296,31 @@ export default function SourceEditor(props: Props) {
         else if (transaction.isUserEvent('delete.backward')) input = {type: 'deleteContentBackward', data: null, composing: false};
         else if (transaction.isUserEvent('delete.forward')) input = {type: 'deleteContentForward', data: null, composing: false};
         else input = {type: '', data: null, composing: false};
-        typed = input.type === 'insertText' && !input.composing && activatesCompletion(transaction);
+        inputs.push(input);
         nativeInput.current = null;
         edits.push({next: {text: positions.current.source, start: positions.current.toSource(selection.from), end: positions.current.toSource(selection.to)}, before, input});
       }
       view.update(transactions);
       if (transactions.some(transaction => transaction.docChanged || transaction.selection)) track(view);
+      session?.update(transactions, inputs);
       for (const edit of edits) latest.current.props.onEdit(edit.next, edit.before, edit.input);
       if (edits.length === 0 && transactions.some(transaction => transaction.selection && !transaction.annotation(synchronize))) {
         latest.current.props.onRange(rangeOf(view));
       }
-      const changed = transactions.some(transaction => transaction.docChanged || transaction.selection);
-      if (changed) {
-        cancelAutomatic();
-        closeCompletion(view);
-      }
-      if (typed && !composing.current && !view.composing) {
-        autoTimer.current = window.setTimeout(() => {autoTimer.current = undefined; if (alive && view.hasFocus) complete(false);}, 100);
-      }
     }});
     editor.current = view;
+    session = new CompletionSession({
+      read: () => ({state: view.state, mapping: positions.current!, context: latest.current.props.context,
+        focused: view.hasFocus, composing: composing.current || view.composing,
+        readOnly: latest.current.props.readOnly, preferences: latest.current.props.completionPreferences}),
+      request: (position, explicit) => latest.current.props.request(position, explicit),
+      accepts: (result, source) => alive && latest.current.props.accepts(result.key, source),
+      close: () => { closeCompletion(view); },
+      publish: () => { startCompletion(view); },
+      setTimer: (callback, ms) => window.setTimeout(callback, ms),
+      clearTimer: timer => window.clearTimeout(timer),
+    });
+    completion.current = session;
     let compositionTimer: number | undefined;
     const compositionEnd = () => {
       window.clearTimeout(compositionTimer);
@@ -333,13 +352,11 @@ export default function SourceEditor(props: Props) {
     const compositionStart = () => {
       if (latest.current.props.readOnly || composing.current) return;
       composing.current = true;
-      cancelAutomatic();
-      closeCompletion(view);
+      session?.cancel();
       latest.current.props.onCompositionStart(rangeOf(view));
     };
     const blur = () => {
-      cancelAutomatic();
-      closeCompletion(view);
+      session?.cancel();
       latest.current.props.onRange(rangeOf(view));
     };
     view.contentDOM.addEventListener('beforeinput', beforeInput, true);
@@ -350,7 +367,8 @@ export default function SourceEditor(props: Props) {
     view.focus();
     return () => {
       alive = false;
-      cancelAutomatic();
+      session?.cancel();
+      completion.current = null;
       window.clearTimeout(compositionTimer);
       view.contentDOM.removeEventListener('beforeinput', beforeInput, true);
       view.contentDOM.removeEventListener('compositionstart', compositionStart, true);
@@ -387,11 +405,11 @@ export default function SourceEditor(props: Props) {
   }, [props.reveal, props.draft.path]);
 
   useLayoutEffect(() => {
-    if (editor.current) closeCompletion(editor.current);
-  }, [props.context]);
+    completion.current?.synchronize();
+  }, [props.context, props.readOnly, props.completionPreferences.automatic, props.completionPreferences.delay_ms]);
 
   useLayoutEffect(() => {
-    if (props.completionUnavailable && editor.current) closeCompletion(editor.current);
+    if (props.completionUnavailable) completion.current?.cancel();
   }, [props.completionUnavailable]);
 
   return <div className="code-editor">

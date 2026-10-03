@@ -451,10 +451,18 @@ fn reconstruction_requires_settled_commands_and_closes_all_future_admission() {
     let fixture = Fixture::new();
     let application = &fixture.application;
     let workspace = application.create_workspace("Empty", "Empty").unwrap();
+    let settings_path = fixture.root.join("settings.json");
+    let before = fs::read(&settings_path).unwrap();
+    let mut draft = preferences();
+    draft.editor_completion = crate::storage::EditorCompletionPreferences {
+        automatic: false,
+        delay_ms: 1000,
+    };
+    let expected = draft.editor_completion.clone();
     let store = lock(&application.store);
     application.command_admitted.store(false, Ordering::Release);
     let saving = application.clone();
-    let writer = std::thread::spawn(move || saving.save_settings(preferences()));
+    let writer = std::thread::spawn(move || saving.save_settings(draft));
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !application.command_admitted.load(Ordering::Acquire) {
         assert!(std::time::Instant::now() < deadline);
@@ -464,8 +472,18 @@ fn reconstruction_requires_settled_commands_and_closes_all_future_admission() {
     assert_eq!(refusal.category, "WorkspaceBusy");
     assert_ne!(refusal.context["application_retired"], true);
     assert!(!application.closing.load(Ordering::Acquire));
+    assert_eq!(
+        application
+            .save_settings(preferences())
+            .unwrap_err()
+            .category,
+        "WorkspaceBusy"
+    );
+    assert_eq!(fs::read(&settings_path).unwrap(), before);
     drop(store);
-    writer.join().unwrap().unwrap();
+    assert_eq!(writer.join().unwrap().unwrap().editor_completion, expected);
+    let saved = fs::read(&settings_path).unwrap();
+    assert_ne!(saved, before);
     // Real disk sync may exceed the bounded logger shutdown on a loaded host.
     match application.prepare_reconstruction() {
         Ok(()) => {
@@ -502,6 +520,8 @@ fn reconstruction_requires_settled_commands_and_closes_all_future_admission() {
             .category,
         "Closing"
     );
+    assert_eq!(fs::read(&settings_path).unwrap(), saved);
+    assert_eq!(application.settings().unwrap().editor_completion, expected);
     assert_eq!(
         application.prepare_reconstruction().unwrap_err().context["application_retired"],
         true
@@ -1284,6 +1304,7 @@ fn successor_retains_unpolled_terminal_and_independent_check_association() {
             gui_log_limit: settings.gui_log_limit,
             ocr_environment: Some(environment.clone()),
             notifications: settings.notifications,
+            editor_completion: settings.editor_completion,
         })
         .unwrap();
     let descriptor = "private-recorded-corpus.json".to_owned();
@@ -1313,6 +1334,7 @@ fn successor_retains_unpolled_terminal_and_independent_check_association() {
             gui_log_limit: settings.gui_log_limit,
             ocr_environment: None,
             notifications: settings.notifications,
+            editor_completion: settings.editor_completion,
         })
         .unwrap();
     let mut next_request = request(&second);

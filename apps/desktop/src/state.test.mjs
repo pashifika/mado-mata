@@ -248,13 +248,71 @@ test('a completed settings Save preserves later locale and invalid input edits',
   assert.ok(parsed.errors.logLimit);
 });
 
-const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},captureCacheEnabled:false,environment:environmentDraft(checkedEnvironment),backupDirectory:'',packagesRoot:''};
+const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},completionAutomatic:true,completionDelayMs:'100',captureCacheEnabled:false,environment:environmentDraft(checkedEnvironment),backupDirectory:'',packagesRoot:''};
 test('a complete settings draft becomes one editable settings object without version or package hint',()=>{
   const parsed=readSettingsDraft(validSettingsDraft);
   assert.deepEqual(parsed.errors,{});
-  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true},capture_cache_enabled:false,backup_directory:null,packages_root:null});
+  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true},editor_completion:{automatic:true,delay_ms:100},capture_cache_enabled:false,backup_directory:null,packages_root:null});
   assert.equal(readSettingsDraft({...validSettingsDraft,environment:environmentDraft(null)}).settings.ocr_environment,null);
 });
+
+test('completion drafts use host values without previewing or mutating the saved preferences',()=>{
+  const initial=settingsDraftFrom(null);
+  assert.equal(initial.completionAutomatic,true);
+  assert.equal(initial.completionDelayMs,'100');
+  const saved={version:1,package_path:null,...readSettingsDraft(initial).settings,editor_completion:{automatic:false,delay_ms:0}};
+  const original=structuredClone(saved);
+  const draft=settingsDraftFrom(saved);
+  assert.equal(draft.completionAutomatic,false);
+  assert.equal(draft.completionDelayMs,'0');
+  draft.completionAutomatic=true;
+  draft.completionDelayMs='1000';
+  assert.deepEqual(readSettingsDraft(draft).settings.editor_completion,{automatic:true,delay_ms:1000});
+  assert.deepEqual(saved,original);
+  const reopened=settingsDraftFrom(saved);
+  assert.equal(reopened.completionAutomatic,false);
+  assert.equal(reopened.completionDelayMs,'0');
+});
+
+for (const {scenario,automatic,delay,expected} of [
+  {scenario:'zero opening delay with automatic disabled',automatic:false,delay:'0',expected:{automatic:false,delay_ms:0}},
+  {scenario:'the default delay with automatic enabled',automatic:true,delay:'100',expected:{automatic:true,delay_ms:100}},
+  {scenario:'the upper boundary with surrounding whitespace',automatic:false,delay:' 1000 ',expected:{automatic:false,delay_ms:1000}},
+]) {
+  test(`completion preferences accept ${scenario}`,()=>{
+    const parsed=readSettingsDraft({...validSettingsDraft,completionAutomatic:automatic,completionDelayMs:delay});
+    assert.deepEqual(parsed.errors,{});
+    assert.deepEqual(parsed.settings.editor_completion,expected);
+  });
+}
+
+test('settled completion preferences are reconstructed from the authoritative Save response',()=>{
+  const submitted={...validSettingsDraft,completionAutomatic:false,completionDelayMs:' 250 '};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  const settled=settingsDraftAfterSave(submitted,submitted,saved);
+  assert.equal(settled.completionAutomatic,false);
+  assert.equal(settled.completionDelayMs,'250');
+  assert.deepEqual(readSettingsDraft(settled).settings.editor_completion,saved.editor_completion);
+  assert.equal(submitted.completionDelayMs,' 250 ');
+});
+
+for (const {scenario,edit,expected,errors} of [
+  {scenario:'an automatic switch edit',edit:{completionAutomatic:true},expected:{automatic:true,delay_ms:250},errors:[]},
+  {scenario:'a valid delay edit',edit:{completionDelayMs:'1000'},expected:{automatic:false,delay_ms:1000},errors:[]},
+  {scenario:'an invalid pending delay',edit:{completionDelayMs:''},expected:null,errors:['completionDelayMs']},
+]) {
+  test(`a completed Save preserves ${scenario} made after submission`,()=>{
+    const submitted={...validSettingsDraft,completionAutomatic:false,completionDelayMs:'250'};
+    const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+    const current={...submitted,...edit};
+    const settled=settingsDraftAfterSave(current,submitted,saved);
+    assert.equal(settled,current);
+    const parsed=readSettingsDraft(settled);
+    assert.deepEqual(parsed.settings?.editor_completion ?? null,expected);
+    assert.deepEqual(Object.keys(parsed.errors),errors);
+    assert.deepEqual(saved.editor_completion,{automatic:false,delay_ms:250});
+  });
+}
 test('cache preference persists through a saved settings draft without overriding a later edit',()=>{
   const initial=settingsDraftFrom(null);
   assert.equal(initial.captureCacheEnabled,false);
@@ -268,9 +326,9 @@ test('cache preference persists through a saved settings draft without overridin
 
 test('the backup directory draft is blank for the default destination and otherwise saved as typed without padding',()=>{
   assert.equal(settingsDraftFrom(null).backupDirectory,'');
-  assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,notifications:DEFAULT_NOTIFICATIONS,locale:'en',backup_directory:'/private/backups'}).backupDirectory,'/private/backups');
+  assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,notifications:DEFAULT_NOTIFICATIONS,editor_completion:{automatic:true,delay_ms:100},locale:'en',backup_directory:'/private/backups'}).backupDirectory,'/private/backups');
   assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,
-    notifications:DEFAULT_NOTIFICATIONS,locale:'en',backup_directory:null}).captureCacheEnabled,false,
+    notifications:DEFAULT_NOTIFICATIONS,editor_completion:{automatic:true,delay_ms:100},locale:'en',backup_directory:null}).captureCacheEnabled,false,
     'older saved settings without the flag default to opt-out');
   assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:'   '}).settings.backup_directory,null);
   assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:' /private/backups '}).settings.backup_directory,'/private/backups');
@@ -303,6 +361,13 @@ for (const {scenario,draft,field} of [
   {scenario:'a non-integer log limit',draft:{...validSettingsDraft,logLimit:'1e3'},field:'logLimit'},
   {scenario:'three visible cards',draft:{...validSettingsDraft,notifications:{...DEFAULT_NOTIFICATIONS,visible_count:3}},field:'visibleCount'},
   {scenario:'a ten second timeout',draft:{...validSettingsDraft,notifications:{...DEFAULT_NOTIFICATIONS,timeout_seconds:10}},field:'timeoutSeconds'},
+  {scenario:'a nonboolean automatic completion flag',draft:{...validSettingsDraft,completionAutomatic:'false'},field:'completionAutomatic'},
+  {scenario:'a missing automatic completion flag',draft:{...validSettingsDraft,completionAutomatic:undefined},field:'completionAutomatic'},
+  {scenario:'an empty completion delay',draft:{...validSettingsDraft,completionDelayMs:''},field:'completionDelayMs'},
+  {scenario:'a negative completion delay',draft:{...validSettingsDraft,completionDelayMs:'-1'},field:'completionDelayMs'},
+  {scenario:'a fractional completion delay',draft:{...validSettingsDraft,completionDelayMs:'0.5'},field:'completionDelayMs'},
+  {scenario:'a completion delay above 1000',draft:{...validSettingsDraft,completionDelayMs:'1001'},field:'completionDelayMs'},
+  {scenario:'an exponential completion delay',draft:{...validSettingsDraft,completionDelayMs:'1e2'},field:'completionDelayMs'},
   {scenario:'a partial environment',draft:{...validSettingsDraft,environment:{...environmentDraft(checkedEnvironment),model_root:''}},field:'model_root'},
   {scenario:'an unsupported language',draft:{...validSettingsDraft,locale:'fr'},field:'locale'},
   {scenario:'a null language',draft:{...validSettingsDraft,locale:null},field:'locale'},
