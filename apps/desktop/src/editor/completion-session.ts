@@ -70,6 +70,24 @@ function directTyping(transaction: Transaction, input: EditInput | null): boolea
   return input?.type === 'insertText' && !input.composing && transaction.isUserEvent('input.type')
     && !transaction.isUserEvent('input.type.compose');
 }
+// The worker decodes `\uXXXX` and `\u{X}` escapes, so they continue an identifier token.
+const identifierChar = /^[$\p{ID_Continue}]$/u;
+const identifierPart = /[$\p{ID_Continue}]|\\u(?:([\da-fA-F]{4})|\{([\da-fA-F]+)\})/uy;
+const partialEscape = /^\\(?:u(?:[\da-fA-F]{0,3}|\{[\da-fA-F]*))?$/u;
+// Text from an identifier boundary to the caret is still that token, the token ending in an escape
+// the worker cannot query yet, or a departure such as `{`, `}` or a backslash that starts no escape.
+function identifierPrefix(text: string): 'token' | 'escape' | null {
+  for (let offset = 0; offset < text.length; offset = identifierPart.lastIndex) {
+    identifierPart.lastIndex = offset;
+    const part = identifierPart.exec(text);
+    if (!part) return partialEscape.test(text.slice(offset)) ? 'escape' : null;
+    const escaped: string | undefined = part[1] ?? part[2];
+    if (escaped === undefined) continue;
+    const code = Number.parseInt(escaped, 16);
+    if (code > 0x10ffff || !identifierChar.test(String.fromCodePoint(code))) return null;
+  }
+  return 'token';
+}
 function compatible(transaction: Transaction, input: EditInput | null, boundary: Boundary): boolean {
   const before = transaction.startState.selection.main, after = transaction.newSelection.main;
   if (!before.empty || !after.empty || input?.composing || transaction.isUserEvent('input.type.compose')) return false;
@@ -81,7 +99,7 @@ function compatible(transaction: Transaction, input: EditInput | null, boundary:
       matches = from < to && inserted.length === 0;
     } else if (directTyping(transaction, input) && from === to && inserted.length > 0) {
       const text = inserted.toString();
-      if (boundary.quote === null) matches = /^[$\p{ID_Continue}\\{}]+$/u.test(text);
+      if (boundary.quote === null) matches = identifierPrefix(transaction.state.doc.sliceString(boundary.from, newTo)) !== null;
       else {
         const next = boundaryAt(transaction.state);
         matches = !/[\r\n]/.test(text) && next.from === boundary.from && next.quote === boundary.quote;
@@ -199,8 +217,12 @@ export class CompletionSession {
     const snapshot = this.environment.read();
     if (!snapshot.focused || snapshot.composing || snapshot.readOnly || !snapshot.context
       || (cause !== 'explicit' && !snapshot.state.selection.main.empty)) return;
-    const ticket: RequestTicket = {cause, snapshot, boundary: boundary ?? boundaryAt(snapshot.state),
-      context: snapshot.context, waiting, ready: cause !== 'automatic', dispatched: false};
+    const token = boundary ?? boundaryAt(snapshot.state);
+    // A refresh keeps its intent through an incomplete identifier escape, but does not query another token.
+    const held = cause === 'refresh' && token.quote === null
+      && identifierPrefix(snapshot.state.doc.sliceString(token.from, snapshot.state.selection.main.head)) === 'escape';
+    const ticket: RequestTicket = {cause, snapshot, boundary: token,
+      context: snapshot.context, waiting, ready: cause !== 'automatic' && !held, dispatched: false};
     this.ticket = ticket;
     this.live = cause !== 'automatic';
     if (cause === 'automatic') {
