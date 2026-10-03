@@ -14,6 +14,7 @@ import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import type {CompletionCandidate, CompletionContext, CompletionKey, CompletionResult} from './completion-types.ts';
 import {SourcePositions} from './source-positions.ts';
+import {activatesCompletion} from './completion-activation.ts';
 import type {SourceChange} from './source-positions.ts';
 
 export interface SourceEditorHandle {complete: () => void; focus: () => void; composing: () => boolean}
@@ -142,6 +143,7 @@ export default function SourceEditor(props: Props) {
     cancelAutomatic();
     const view = editor.current;
     if (!view || composing.current || view.composing || latest.current.props.readOnly || !latest.current.props.context) return;
+    if (!requested && (!view.hasFocus || !view.state.selection.main.empty)) return;
     explicit.current = requested;
     closeCompletion(view);
     if (requested) view.focus();
@@ -178,6 +180,8 @@ export default function SourceEditor(props: Props) {
     const source: CompletionSource = async context => {
       const current = latest.current.props;
       const mapping = positions.current!;
+      // complete() starts both admitted request kinds explicitly; reject CodeMirror's implicit IME starts.
+      if (!context.explicit) return null;
       if (!alive || composing.current || current.readOnly || current.context?.source !== mapping.source) return null;
       const position = context.pos;
       const result = await current.request(mapping.toSource(position), explicit.current);
@@ -240,19 +244,26 @@ export default function SourceEditor(props: Props) {
           {key: 'Mod-g', run: command(() => latest.current.props.onFindNext(false)), preventDefault: true},
           {key: 'Mod-Shift-g', run: command(() => latest.current.props.onFindNext(true)), preventDefault: true},
           {key: 'Ctrl-Space', run: command(() => complete(true)), preventDefault: true},
+          {key: 'Escape', run: view => {
+            if (composing.current || view.composing) return false;
+            const pending = autoTimer.current !== undefined;
+            cancelAutomatic();
+            return closeCompletion(view) || pending;
+          }},
           {key: 'Tab', run: view => {
             if (composing.current || view.composing || latest.current.props.readOnly) return false;
             view.dispatch({...view.state.replaceSelection('  '), annotations: [Transaction.userEvent.of('input'),
               inputKind.of({type: 'insertText', data: '  ', composing: false})]});
             return true;
           }},
-          ...completionKeymap.filter(binding => binding.key !== 'Ctrl-Space').map(binding => ({...binding,
+          ...completionKeymap.filter(binding => binding.run !== startCompletion && binding.key !== 'Escape').map(binding => ({...binding,
             run: binding.run ? (view: EditorView) => !composing.current && !view.composing && binding.run!(view) : undefined})),
         ])),
         keymap.of(defaultKeymap),
       ],
     }), dispatchTransactions(transactions, view) {
       const edits: {next: Snapshot; before: TextRange; input: EditInput}[] = [];
+      let typed = false;
       for (const transaction of transactions) {
         if (!transaction.docChanged || transaction.annotation(synchronize)) continue;
         const old = positions.current!;
@@ -271,6 +282,7 @@ export default function SourceEditor(props: Props) {
         else if (transaction.isUserEvent('delete.backward')) input = {type: 'deleteContentBackward', data: null, composing: false};
         else if (transaction.isUserEvent('delete.forward')) input = {type: 'deleteContentForward', data: null, composing: false};
         else input = {type: '', data: null, composing: false};
+        typed = input.type === 'insertText' && !input.composing && activatesCompletion(transaction);
         nativeInput.current = null;
         edits.push({next: {text: positions.current.source, start: positions.current.toSource(selection.from), end: positions.current.toSource(selection.to)}, before, input});
       }
@@ -285,7 +297,7 @@ export default function SourceEditor(props: Props) {
         cancelAutomatic();
         closeCompletion(view);
       }
-      if (edits.length > 0 && !composing.current && !view.composing) {
+      if (typed && !composing.current && !view.composing) {
         autoTimer.current = window.setTimeout(() => {autoTimer.current = undefined; if (alive && view.hasFocus) complete(false);}, 100);
       }
     }});
@@ -325,7 +337,11 @@ export default function SourceEditor(props: Props) {
       closeCompletion(view);
       latest.current.props.onCompositionStart(rangeOf(view));
     };
-    const blur = () => latest.current.props.onRange(rangeOf(view));
+    const blur = () => {
+      cancelAutomatic();
+      closeCompletion(view);
+      latest.current.props.onRange(rangeOf(view));
+    };
     view.contentDOM.addEventListener('beforeinput', beforeInput, true);
     view.contentDOM.addEventListener('compositionstart', compositionStart, true);
     view.contentDOM.addEventListener('compositionend', compositionEnd, true);

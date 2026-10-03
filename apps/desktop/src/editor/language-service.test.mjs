@@ -114,6 +114,101 @@ for (const path of ['main.ts', 'main.js']) {
     }
   });
 
+  test(`${path}: SDK method prefixes narrow case-insensitively without a no-match fallback`, async t => {
+    const service = new ScriptLanguageService(libraries);
+    t.after(() => service.dispose());
+    for (const row of [
+      {scenario: 'first letter', prefix: 'r', labels: ['recognize', 'release']},
+      {scenario: 'uppercase first letter', prefix: 'R', labels: ['recognize', 'release']},
+      {scenario: 'longer recognition prefix', prefix: 'reco', labels: ['recognize']},
+      {scenario: 'longer uppercase release prefix', prefix: 'RELE', labels: ['release']},
+      {scenario: 'escaped first letter', prefix: '\\u0072', labels: ['recognize', 'release']},
+      {scenario: 'no matching method', prefix: 'noSuchMethod', labels: []},
+    ]) {
+      await t.test(row.scenario, () => {
+        const completion = at(service, `host.call("${row.prefix}¦")`, path);
+        assert.deepEqual(completion.result.candidates.map(item => item.label).sort(), row.labels);
+        for (const label of row.labels) assert.equal(accept(completion, label), `host.call("${label}")`);
+      });
+    }
+    const middle = at(service, 'host.call("Re¦placed", {});', path);
+    assert.deepEqual(middle.result.candidates.map(item => item.label).sort(), ['recognize', 'release']);
+    for (const label of ['recognize', 'release']) {
+      const candidate = middle.result.candidates.find(item => item.label === label);
+      assert.equal(candidate.from, 'host.call("'.length);
+      assert.equal(candidate.to, 'host.call("Replaced'.length);
+      assert.equal(accept(middle, label), `host.call("${label}", {});`);
+    }
+  });
+
+  test(`${path}: member, object-property and local prefixes replace the whole token`, async t => {
+    const service = new ScriptLanguageService(libraries);
+    t.after(() => service.dispose());
+    for (const row of [
+      {scenario: 'member prefix', marked: 'const local = {read: 1, release: 2, other: 3}; local.REA¦d; export {};',
+        accepted: {read: 'const local = {read: 1, release: 2, other: 3}; local.read; export {};'}},
+      {scenario: 'object-property prefix', marked: 'const local: {read: number; release: number} = {REA¦d: 1}; export {};',
+        accepted: {read: 'const local: {read: number; release: number} = {read: 1}; export {};'}},
+      {scenario: 'local identifier prefix', marked: 'const localReader = 1; const localRelease = 2; const other = 3; export const selected = LOCALR¦emainder;',
+        accepted: {
+          localReader: 'const localReader = 1; const localRelease = 2; const other = 3; export const selected = localReader;',
+          localRelease: 'const localReader = 1; const localRelease = 2; const other = 3; export const selected = localRelease;',
+        }},
+      {scenario: 'escaped local identifier prefix', marked: 'const localReader = 1; const other = 3; export const selected = local\\u0052¦emainder;',
+        accepted: {localReader: 'const localReader = 1; const other = 3; export const selected = localReader;'}},
+      {scenario: 'astral identifier prefix', marked: 'const 𐐀Reader = 1; const other = 3; export const selected = 𐐨r¦emainder;',
+        accepted: {'𐐀Reader': 'const 𐐀Reader = 1; const other = 3; export const selected = 𐐀Reader;'}},
+      {scenario: 'raw quoted member name is not a quoted-source label',
+        marked: `const local = {'"read"': 1, reader: 2}; local.re¦; export {};`,
+        accepted: {reader: `const local = {'"read"': 1, reader: 2}; local.reader; export {};`}},
+      {scenario: 'member no-match', marked: 'const local = {read: 1}; local.noMatch¦; export {};', accepted: {}},
+      {scenario: 'local no-match', marked: 'const localReader = 1; export const selected = noMatchingLocal¦;', accepted: {}},
+    ]) {
+      await t.test(row.scenario, () => {
+        const completion = at(service, row.marked, path);
+        assert.deepEqual(completion.result.candidates.map(item => item.label).sort(), Object.keys(row.accepted).sort());
+        for (const [label, expected] of Object.entries(row.accepted)) assert.equal(accept(completion, label), expected);
+      });
+    }
+  });
+
+  test(`${path}: keyword prefixes keep their word range instead of offering all globals`, async t => {
+    const service = new ScriptLanguageService(libraries);
+    t.after(() => service.dispose());
+    for (const row of [
+      {scenario: 'complete return keyword', marked: 'export function workflow() { return¦; }',
+        label: 'return', expected: 'export function workflow() { return; }'},
+      {scenario: 'middle of return keyword', marked: 'export function workflow() { ret¦urn; }',
+        label: 'return', expected: 'export function workflow() { return; }'},
+      {scenario: 'else token inside its parent statement', marked: 'export function workflow() { if (true) {} else¦ {} }',
+        label: 'else', expected: 'export function workflow() { if (true) {} else {} }'},
+    ]) {
+      await t.test(row.scenario, () => {
+        const completion = at(service, row.marked, path);
+        assert.deepEqual(completion.result.candidates.map(item => item.label), [row.label]);
+        assert.equal(accept(completion, row.label), row.expected);
+      });
+    }
+  });
+
+  test(`${path}: quoted object-property names match decoded prefixes without changing their edits`, async t => {
+    const service = new ScriptLanguageService(libraries);
+    t.after(() => service.dispose());
+    const shape = '{"target-name": string; "target\\\\name": string; targetName?: string}';
+    const declaration = path.endsWith('.ts') ? `const local: ${shape} = ` : `/** @type {${shape}} */ const local = `;
+    for (const row of [
+      {scenario: 'source-quoted names', prefix: 'TA', labels: ['"target-name"', '"target\\\\name"', 'targetName']},
+      {scenario: 'narrow to the identifier property', prefix: 'targetName', labels: ['targetName']},
+      {scenario: 'unmatched property prefix', prefix: 'missing', labels: []},
+    ]) {
+      await t.test(row.scenario, () => {
+        const completion = at(service, declaration + `{${row.prefix}¦il: "x"}; export {};`, path);
+        assert.deepEqual(completion.result.candidates.map(item => item.label).sort(), row.labels);
+        for (const label of row.labels) assert.equal(accept(completion, label), declaration + `{${label}: "x"}; export {};`);
+      });
+    }
+  });
+
   test(`${path}: invalid schema immediately withdraws old options and repair uses only current fields`, t => {
     const service = new ScriptLanguageService(libraries);
     t.after(() => service.dispose());
@@ -273,6 +368,9 @@ for (const row of [
   {scenario: 'double-quoted bracket', expression: 'host.options["¦"]'},
   {scenario: 'single-quoted bracket', expression: "host.options['¦']"},
   {scenario: 'template-literal bracket', expression: 'host.options[`¦`]'},
+  {scenario: 'escaped quote prefix in a double-quoted bracket', expression: 'host.options["<tag>\\\"¦old"]'},
+  {scenario: 'escaped quote prefix in a single-quoted bracket', expression: "host.options['<tag>\"\\'¦old']"},
+  {scenario: 'escaped interpolation prefix in a template bracket', expression: "host.options[`<tag>\"'\\\\\\r\\n\\${¦old`]"},
 ]) {
   test(`escaped property insertion: ${row.scenario}`, async t => {
     const service = new ScriptLanguageService(libraries);
@@ -289,6 +387,61 @@ for (const row of [
     assert.equal(declaration.initializer.argumentExpression.text, escapedName);
     const compiled = await compileSource(accepted, escapedSchema);
     assert.equal(compiled.ok, true, JSON.stringify(compiled));
+  });
+}
+
+for (const row of [
+  {scenario: 'dot', expression: 'host.options.TA¦il',
+    accepted: {'target-name': 'host.options["target-name"]', targetName: 'host.options.targetName'},
+    bracketFrom: 'host.options'.length},
+  {scenario: 'optional chain', expression: 'host.options?.TA¦il',
+    accepted: {'target-name': 'host.options?.["target-name"]', targetName: 'host.options?.targetName'},
+    bracketFrom: 'host.options'.length},
+]) {
+  test(`member prefix ignores syntax in a bracket replacement span: ${row.scenario}`, t => {
+    const service = new ScriptLanguageService(libraries);
+    t.after(() => service.dispose());
+    const current = {version: 1, type: 'object', additionalProperties: false, required: [],
+      properties: {'target-name': {type: 'string'}, targetName: {type: 'string'}, other: {type: 'string'}}};
+    const prefix = '// 日本語 😀\r\nexport const selected = ';
+    const completion = at(service, prefix + row.expression + ';\r\n', 'main.ts', JSON.stringify(current));
+    assert.deepEqual(completion.result.candidates.map(item => item.label).sort(), ['target-name', 'targetName']);
+    const bracket = completion.result.candidates.find(item => item.label === 'target-name');
+    assert.equal(bracket.from, prefix.length + row.bracketFrom);
+    assert.equal(bracket.to, prefix.length + row.expression.replace('¦', '').length);
+    for (const [label, expected] of Object.entries(row.accepted)) {
+      assert.equal(accept(completion, label), prefix + expected + ';\r\n');
+    }
+  });
+}
+
+for (const row of [
+  {scenario: 'double-quote escape', expression: '"RED\\\"¦old"', expected: 'red"name'},
+  {scenario: 'single-quote escape', expression: "'red\\'¦old'", expected: "red'name"},
+  {scenario: 'backslash escape', expression: '"red\\\\¦old"', expected: 'red\\name'},
+  {scenario: 'unicode escape', expression: '"\\u0072ed\\\"¦old"', expected: 'red"name'},
+  {scenario: 'template interpolation escape', expression: '`red\\${¦old`', expected: 'red${name}`😀'},
+  {scenario: 'template delimiter escape', expression: '`red\\${name}\\`¦old`', expected: 'red${name}`😀'},
+]) {
+  test(`escaped enum prefix matches the literal value: ${row.scenario}`, t => {
+    const service = new ScriptLanguageService(libraries);
+    t.after(() => service.dispose());
+    const current = {version: 1, type: 'object', additionalProperties: false, required: ['mode'],
+      properties: {mode: {type: 'string', enum: ['red"name', "red'name", 'red\\name', 'red${name}`😀', 'other']}}};
+    const prefix = '// 😀 日本語\r\nexport const selected = host.options.mode === ';
+    const completion = at(service, prefix + row.expression + ';\r\n', 'main.ts', JSON.stringify(current));
+    assert.equal(completion.result.candidates.length, 1);
+    const candidate = completion.result.candidates[0];
+    const accepted = accept(completion, candidate.label);
+    assert.equal(candidate.from, prefix.length + 1);
+    assert.equal(candidate.to, prefix.length + row.expression.replace('¦', '').length - 1);
+    assert.equal(accepted.slice(0, prefix.length), prefix);
+    assert.equal(accepted.slice(-3), ';\r\n');
+    const file = ts.createSourceFile('main.ts', accepted, ts.ScriptTarget.ES2020, true);
+    assert.deepEqual(file.parseDiagnostics, []);
+    const literal = file.statements[0].declarationList.declarations[0].initializer.right;
+    assert.ok(ts.isStringLiteralLike(literal));
+    assert.equal(literal.text, row.expected);
   });
 }
 
@@ -405,6 +558,27 @@ test('completion count and serialized response bounds disclose capping without t
   assert.equal(bounded.capped, true);
   assert.ok(Buffer.byteLength(JSON.stringify({kind: 'result', result: bounded})) <= RESPONSE_BYTES);
 });
+
+for (const row of [
+  {scenario: 'more than 200 unrelated entries',
+    unrelated: Object.fromEntries(Array.from({length: 250}, (_, index) => [`field${index}`, {type: 'string'}]))},
+  {scenario: 'unrelated entries exceeding the response byte budget',
+    unrelated: Object.fromEntries(Array.from({length: 100}, (_, index) => ['a'.repeat(2500) + index, {type: 'string'}]))},
+]) {
+  test(`prefix filtering preserves relevant late candidates with ${row.scenario}`, t => {
+    const service = new ScriptLanguageService(libraries);
+    t.after(() => service.dispose());
+    const current = {version: 1, type: 'object', additionalProperties: false, required: [],
+      properties: {...row.unrelated, zRelevant: {type: 'string'}, zRemark: {type: 'string'}}};
+    const unfiltered = at(service, 'host.options.¦', 'main.ts', JSON.stringify(current));
+    assert.equal(unfiltered.result.capped, true);
+    const completion = at(service, 'host.options.ZRE¦mainder;', 'main.ts', JSON.stringify(current));
+    assert.deepEqual(completion.result.candidates.map(item => item.label).sort(), ['zRelevant', 'zRemark']);
+    assert.equal(completion.result.capped, false);
+    assert.equal(accept(completion, 'zRelevant'), 'host.options.zRelevant;');
+    assert.equal(accept(completion, 'zRemark'), 'host.options.zRemark;');
+  });
+}
 
 test('the combined UTF-8 signature and documentation budget omits metadata without changing edits', t => {
   const service = new ScriptLanguageService(libraries);

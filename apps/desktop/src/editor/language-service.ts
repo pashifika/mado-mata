@@ -60,9 +60,15 @@ function libraryInventory(libraries: TrustedLibraries): Map<string, string> {
 }
 
 function nodeAt(file: ts.SourceFile, position: number): ts.Node {
-  const visit = (node: ts.Node): ts.Node => ts.forEachChild(node, child =>
-    child.getStart(file) < position && position <= child.end ? visit(child) : undefined) ?? node;
+  const visit = (node: ts.Node): ts.Node => {
+    const child = node.getChildren(file).find(child => child.getStart(file) < position && position <= child.end);
+    return child ? visit(child) : node;
+  };
   return visit(file);
+}
+
+function wordToken(node: ts.Node): boolean {
+  return ts.isIdentifier(node) || (node.kind >= ts.SyntaxKind.FirstKeyword && node.kind <= ts.SyntaxKind.LastKeyword);
 }
 
 interface StringContext {quote: string; from: number; to: number}
@@ -99,6 +105,11 @@ function completionEdit(entry: ts.CompletionEntry, info: ts.CompletionInfo, file
   node: ts.Node, literal: StringContext | null): CompletionCandidate | null {
   let insertText = entry.insertText ?? entry.name;
   let span = entry.replacementSpan ?? info.optionalReplacementSpan;
+  if (entry.replacementSpan && info.optionalReplacementSpan
+    && entry.replacementSpan.start + entry.replacementSpan.length === info.optionalReplacementSpan.start) {
+    // TypeScript can return the access operator and identifier as adjacent replacement spans.
+    span = {start: entry.replacementSpan.start, length: entry.replacementSpan.length + info.optionalReplacementSpan.length};
+  }
   if (literal) {
     // Literal alternatives are already escaped by TypeScript; property symbols are raw names.
     if (entry.kind !== ts.ScriptElementKind.string) insertText = escapedContent(entry.name, literal.quote);
@@ -106,14 +117,43 @@ function completionEdit(entry: ts.CompletionEntry, info: ts.CompletionInfo, file
     span = {start: literal.from, length: literal.to - literal.from};
   }
   if (!span) {
-    const start = ts.isIdentifier(node) ? node.getStart(file) : position;
-    span = {start, length: ts.isIdentifier(node) ? node.end - start : 0};
+    const word = wordToken(node), start = word ? node.getStart(file) : position;
+    span = {start, length: word ? node.end - start : 0};
   }
   const from = span.start;
   const to = span.start + span.length;
   if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || from > position
     || to < position || to > file.text.length) return null;
   return {label: entry.name, insertText, from, to, kind: entry.kind};
+}
+
+function completionPrefix(scanner: ts.Scanner, file: ts.SourceFile, position: number, node: ts.Node,
+  literal: StringContext | null): string {
+  // Entry edits may replace a preceding dot with brackets; only the current token is the prefix.
+  const start = literal ? literal.from - 1 : wordToken(node) ? node.getStart(file) : position;
+  if (start === position) return '';
+  scanner.setText(file.text, start, position - start);
+  scanner.scan();
+  return scanner.getTokenValue().toLowerCase();
+}
+
+function matchesPrefix(candidate: CompletionCandidate, prefix: string, literal: StringContext | null,
+  scanner: ts.Scanner): boolean {
+  if (!prefix) return true;
+  let name = candidate.label;
+  if (literal && candidate.kind === ts.ScriptElementKind.string) {
+    // TypeScript string alternatives are source-escaped, unlike raw property-symbol names.
+    scanner.setText(literal.quote + candidate.insertText);
+    scanner.scan();
+    name = scanner.getTokenValue();
+  } else if (!literal && candidate.insertText === name && (name[0] === '"' || name[0] === "'")) {
+    // Object-property names may already be quoted source, unlike raw member-symbol names.
+    scanner.setText(name);
+    if (scanner.scan() === ts.SyntaxKind.StringLiteral && !scanner.isUnterminated() && scanner.getTextPos() === name.length) {
+      name = scanner.getTokenValue();
+    }
+  }
+  return name.toLowerCase().startsWith(prefix);
 }
 
 // One active document, with no resolver or host fallback to ts.sys.
@@ -240,13 +280,15 @@ export class ScriptLanguageService {
     if (!file) throw new Error('Missing active completion source');
     const node = nodeAt(file, position);
     const literal = stringContext(node, file, position);
+    const scanner = ts.createScanner(ts.ScriptTarget.ES2020, false, file.languageVariant);
+    const prefix = completionPrefix(scanner, file, position, node, literal);
     const sdkLiteral = literal !== null && program !== undefined && sdkMethodLiteral(node, program.getTypeChecker());
     result.capped = info.isIncomplete === true;
     for (const entry of info.entries) {
       if (entry.hasAction || entry.source || entry.isSnippet || entry.isImportStatementCompletion || entry.isFromUncheckedFile) continue;
-      if (result.candidates.length === CANDIDATE_LIMIT) { result.capped = true; break; }
       const candidate = completionEdit(entry, info, file, position, node, literal);
-      if (!candidate) continue;
+      if (!candidate || !matchesPrefix(candidate, prefix, literal, scanner)) continue;
+      if (result.candidates.length === CANDIDATE_LIMIT) { result.capped = true; break; }
       const details = this.service.getCompletionEntryDetails(this.active, position, entry.name, undefined, entry.source, preferences, entry.data);
       if (details?.codeActions?.length) continue;
       const method = sdkLiteral && Object.hasOwn(methods, entry.name) ? methods[entry.name] : undefined;

@@ -348,6 +348,9 @@ Use **Cmd/Ctrl-S** to Save, **Cmd/Ctrl-F** to focus Find, **Cmd/Ctrl-G** and
 **Shift-Cmd/Ctrl-G** for next/previous matches, and **Cmd/Ctrl-Z** /
 **Shift-Cmd/Ctrl-Z** for file-local Undo/Redo. Tab inserts two spaces; Escape
 closes suggestions or returns from the search controls to source.
+Mouse drag, double-click and Shift-arrow selections remain highlighted on the
+current line. Selection stays visible in a subdued color while a toolbar control
+has focus; typing over a focused selection and Undo use the same file-local history.
 
 Find is case-insensitive and literal. **Replace** changes the selected full
 match, or selects the next match without editing. **Replace all** changes every
@@ -360,11 +363,16 @@ Save/Validate also count trusted dependency content and remain authoritative.
 
 **Complete** or **Ctrl-Space** requests suggestions at the caret; the button
 remains available when macOS reserves that shortcut. Suggestions also follow
-ordinary typing. Arrow keys select, Enter accepts, and Escape dismisses.
+eligible direct typing, not paste, completion acceptance, Undo/Redo or focus changes.
+Moving the selection, Escape or blur cancels pending automatic suggestions.
+Arrow keys select, Enter accepts, and Escape dismisses.
 Completion never accepts during IME composition. It covers the current source's
 local bindings, `host.call` methods and arguments, inferred SDK results, and
 nested fields/enum alternatives from the current structured options-schema draft.
 Local declarations that shadow `host` retain their own types.
+Candidates match the typed prefix case-insensitively before the 200-candidate
+and response-byte limits. More text narrows the list; an unmatched prefix closes
+it rather than showing unrelated names. An empty prefix retains contextual choices.
 
 Candidates stay on one line. A separate panel follows the selected candidate's
 signature and available documentation, beside the list when there is room and
