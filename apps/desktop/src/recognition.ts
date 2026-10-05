@@ -1128,13 +1128,13 @@ export function previewSnapshot(state:RecognitionState, locale:Locale, editable:
 
 // Applies one relayed on-image edit. Metadata edits are fenced by the frame and basis stamp of the edited snapshot,
 // geometry and deletion also by the definition revision, and Undo by the local revision, so an edit made on an
-// older snapshot is refused (`staleEdit`) instead of overwriting newer main-window changes.
+// older snapshot is refused (`staleEdit`) instead of overwriting newer main-window changes. `state.display` is only the
+// last acknowledged Preview display and never gates geometry: the Preview owns its effective tool and its Inspect guards.
 export function applyPreviewEdit(state:RecognitionState, message:PreviewEditMessage, defaultName:(number:number) => string):RecognitionState {
   if (message.token !== state.owner.token || message.capture_id !== state.view.capture_id || message.revision !== state.view.revision) return state;
   const {edit: change} = message;
   const stale = {...state, notice: 'staleEdit' as const};
   if (message.frameId !== (state.view.frame?.id ?? null) || message.basisRevision !== state.basis) return stale;
-  if (state.display.tool === 'inspect' && change.kind !== 'display') return state;
   if (change.kind === 'select') return selectDefinition(state, change.id);
   if (change.kind === 'display') return setDisplay(state, change.display);
   const revision = (id:string) => state.document?.definitions.find(item => item.id === id)?.revision;

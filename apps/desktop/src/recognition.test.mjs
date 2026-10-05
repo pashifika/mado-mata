@@ -1012,23 +1012,49 @@ test('Inspect works on unconfirmed raw geometry and pixels outside Game content 
   assert.deepEqual(raw,rawSaved);
 });
 
-test('Inspect rejects all Preview geometry edits but display changes and Regions/Game content remain ordinary',()=>{
+test('main applies Regions edits after a dropped Preview display edit left its own display at Inspect',()=>{
+  // Main acknowledged Inspect, then dropped the Preview's Regions switch (unsaved-changes choice, capture transition,
+  // closing). Its later snapshots still carry `inspect`, but the Preview's effective tool is Regions and its send guard
+  // lets geometry through; main must apply that geometry instead of discarding it without a notice.
   let state=create(loaded(INSPECT_FRAME),edges(1,1,4,4));
   state=setDisplay(state,{tool:'inspect',zoom:'fit'});
+  const h=inspectionHarness(previewSnapshot(state,'en',false,'pending',false,null,null,true));
+  assert.equal(h.inspection.inspecting,true,'the Preview send guard refuses geometry while Inspect is effective');
+  h.inspection.setDisplay({tool:'zones',zoom:'fit'});
+  const reopened=previewSnapshot(state,'en',true,null);
+  assert.equal(reopened.display.tool,'inspect');
+  assert.deepEqual(h.inspection.incoming(reopened),{tool:'zones',zoom:'fit'});
+  assert.equal(h.inspection.inspecting,false,'the Preview send guard now emits Regions edits');
+  const message=edit=>({token:owner.token,capture_id:CAPTURE_A,revision:reopened.revision,frameId:'f1',basisRevision:reopened.basisRevision,edit});
+  const apply=(current,edit)=>applyPreviewEdit(current,message(edit),n=>`Region ${n}`);
+  const moved=apply(state,{kind:'region',id:'r1',part:'region',revision:state.document.definitions[0].revision,
+    region:regionFromEdges(edges(2,2,5,5),state.document.basis)});
+  assert.deepEqual(mapRegion(moved.document.definitions[0].region,moved.document.basis),edges(2,2,5,5));
+  assert.equal(moved.notice,null);
+  const created=apply(moved,{kind:'create',region:regionFromEdges(edges(5,0,8,3),moved.document.basis)});
+  assert.deepEqual(created.document.definitions.map(item=>item.id),['r1','r2']);
+  assert.equal(created.selected,'r2');
+  const chosen=apply(created,{kind:'select',id:'r1'});
+  assert.equal(chosen.selected,'r1');
+  const deleted=apply(chosen,{kind:'delete',id:'r1',revision:chosen.document.definitions[0].revision});
+  assert.deepEqual(deleted.document.definitions.map(item=>item.id),['r2']);
+  const undone=apply(deleted,{kind:'undo',localRevision:deleted.localRevision});
+  assert.deepEqual(undone.document.definitions.map(item=>item.id),['r1','r2']);
+  // Main only records the last acknowledged Preview display; it stays `inspect` until the next display edit arrives.
+  assert.equal(undone.display.tool,'inspect');
+  assert.deepEqual(apply(undone,{kind:'display',display:{tool:'zones',zoom:'fit'}}).display,{tool:'zones',zoom:'fit'});
+});
+
+test('display edits change neither the draft nor Undo, and Regions/Game content edits remain ordinary afterwards',()=>{
+  const state=create(loaded(INSPECT_FRAME),edges(1,1,4,4));
   const snapshot=previewSnapshot(state,'en',true,null);
   const message=edit=>({token:owner.token,capture_id:CAPTURE_A,revision:snapshot.revision,frameId:'f1',basisRevision:snapshot.basisRevision,edit});
-  const edits=[
-    {kind:'select',id:null},{kind:'create',region:{u0:0,v0:0,u1:1,v1:1}},
-    {kind:'region',id:'r1',part:'region',revision:state.document.definitions[0].revision,region:{u0:0,v0:0,u1:1,v1:1}},
-    {kind:'content',content:{x:0,y:0,width:9,height:7}},{kind:'delete',id:'r1',revision:state.document.definitions[0].revision},
-    {kind:'undo',localRevision:state.localRevision},{kind:'rebase'},
-  ];
-  for (const edit of edits) assert.equal(applyPreviewEdit(state,message(edit),n=>`Region ${n}`),state,edit.kind);
-  const zoomed=applyPreviewEdit(state,message({kind:'display',display:{tool:'inspect',zoom:200}}),n=>`Region ${n}`);
-  assert.equal(zoomed.document,state.document);
-  assert.equal(zoomed.undo,state.undo);
-  assert.deepEqual(zoomed.display,{tool:'inspect',zoom:200});
-  const regions=applyPreviewEdit(zoomed,message({kind:'display',display:{tool:'zones',zoom:200}}),n=>`Region ${n}`);
+  const inspecting=applyPreviewEdit(state,message({kind:'display',display:{tool:'inspect',zoom:200}}),n=>`Region ${n}`);
+  assert.equal(inspecting.document,state.document);
+  assert.equal(inspecting.undo,state.undo);
+  assert.equal(inspecting.localRevision,state.localRevision);
+  assert.deepEqual(inspecting.display,{tool:'inspect',zoom:200});
+  const regions=applyPreviewEdit(inspecting,message({kind:'display',display:{tool:'zones',zoom:200}}),n=>`Region ${n}`);
   assert.equal(applyPreviewEdit(regions,message({kind:'delete',id:'r1',revision:regions.document.definitions[0].revision}),n=>`Region ${n}`).document.definitions.length,0);
   const content=applyPreviewEdit(regions,message({kind:'display',display:{tool:'content',zoom:200}}),n=>`Region ${n}`);
   assert.deepEqual(applyPreviewEdit(content,message({kind:'content',content:{x:0,y:1,width:9,height:6}}),n=>`Region ${n}`).document.basis.content,

@@ -1907,6 +1907,8 @@ separately.
    focus. Inspect must also work on a different-size unconfirmed raw frame without
    rebasing. Compare draft/Undo and saved package bytes before/after inspection,
    then return to Regions/Game content and verify ordinary editing.
+   Switch from Inspect to Regions while the main window asks about unsaved changes;
+   cancel that choice and confirm the next Region edit and Undo still apply.
    Exercise equal/different-size source and capture changes, A → B → A, held late
    success/failure, raster loss, tool departure and Preview close/reopen. Old
    values/queued points must not return; failed reads require explicit reselection.
