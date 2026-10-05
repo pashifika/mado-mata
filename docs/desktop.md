@@ -684,9 +684,9 @@ models; **Check engine** retries a missing capability. No guessed limit or
 substitute backend enables a trial.
 
 **Open preview** opens one independent, normal-level native window for the image,
-**Fit**/zoom, and the **Regions / Game content** tool switch. It is not attached above
-the main window; either window can come to the front. Definitions, results,
-**Save recognition**, and **Copy snippet** remain in the main Edit window.
+**Fit**/zoom, and the **Regions / Game content / Inspect** tool switch. It is not
+attached above the main window; either window can come to the front. Definitions,
+results, **Save recognition**, and **Copy snippet** remain in the main Edit window.
 Selection, metadata, and bounded Undo are shared; closing and reopening the
 preview keeps the draft and Edit lease. The preview receives a bounded display
 raster, not a second editable original. Its scale does not change stored geometry.
@@ -697,6 +697,27 @@ The toolbar's rightmost **Done** button uses the primary accent color and closes
 only the preview, including when no image is loaded. It does not save, discard,
 exit Edit, or stop a running trial.
 Reopen with **Open preview** to continue the same draft.
+
+With **Inspect**, click a pixel anywhere in the original image, including outside
+Game content or before geometry confirmation. X/Y are zero-based full-frame
+coordinates from the top-left. With the image focused, arrows move one original
+pixel, including with Shift; an edge move is a no-op and no selection is invented.
+Escape clears the selection. Inspect does not change geometry, drafts, crops,
+trial evidence or Undo; Delete/Undo controls and geometry shortcuts do not edit.
+
+The host's decoded **RGBA8** channel numbers are authoritative, not browser
+compositing, the reduced display raster, monitor color or encoded sample depth.
+**RGB only** hex excludes alpha; A is shown separately, and the checkerboard
+swatch illustrates transparency. Even A 0 retains the stored RGB values.
+
+The readout is transient, not saved or written to ordinary logs. Pointer leave
+and same-source zoom/scroll preserve it. Repeated background status snapshots do
+not reset a just-selected tool or zoom. Source/owner changes, a missing or replaced
+raster, leaving Inspect, acquisition start and Preview close clear it.
+One read runs at a time; newer selections replace the queued point and immediately
+clear the old color. Pending/errors stay in the fixed readout without resizing
+the image viewport or Fit scale. After a failure, explicitly select a pixel again;
+there is no automatic retry or previous-color fallback.
 
 Use this workflow:
 
@@ -1876,6 +1897,25 @@ separately.
    order; the preview must not remain above the main window. Record whether
    pointer actions were WebView events or physical OS input; one does not
    qualify the other.
+   For **Inspect**, use a deterministic supported PNG and an independent source
+   byte oracle, including more than 4,194,304 pixels so the display is reduced.
+   Include a source pixel omitted by reduction, first/last and outside-Game-content
+   pixels, and alpha 0/partial/255 with stored RGB. Compare exact X/Y, RGBA and
+   RGB-only hex at Fit, 150% zoom and scrolling; never use composited display
+   pixels as the original oracle. Check the pixel-center marker, focused arrows
+   (also with Shift), boundary no-op, Escape, pointer leave and foreign-control
+   focus. Inspect must also work on a different-size unconfirmed raw frame without
+   rebasing. Compare draft/Undo and saved package bytes before/after inspection,
+   then return to Regions/Game content and verify ordinary editing.
+   Exercise equal/different-size source and capture changes, A → B → A, held late
+   success/failure, raster loss, tool departure and Preview close/reopen. Old
+   values/queued points must not return; failed reads require explicit reselection.
+   Check acquisition-start invalidation only with separate native authorization.
+   At the minimum **480 × 320 content viewport**, check English/Japanese
+   pending/value/cleared/error states, stable image viewport/Fit scale, scrollable
+   feedback/help and reachable Done/Help plus Stop during owned work. Record
+   actual WKWebView observations separately from physical input and native/Windows
+   qualification; this saved-image procedure does not supply those missing checks.
 2. Keep at least nine definitions. Confirm the actual child reports its grouped
    limit; trial a non-contiguous selection within it and verify attribution/order.
    Over-limit selection must refuse without hidden batching or omitted zones.

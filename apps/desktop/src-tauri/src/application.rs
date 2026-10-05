@@ -23,7 +23,8 @@ pub use authoring::{
     AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, NativeCandidateView,
     NativeCaptureArea, NativeCaptureBounds, NativeCaptureResult, NativeCoordinateUnit,
     NativePickerCandidate, NativePickerSnapshot, NativeSelectionView, RecognitionCopy,
-    RecognitionFrame, RecognitionPickerGuard, RecognitionSaved, RecognitionTrial, RecognitionView,
+    RecognitionFrame, RecognitionPickerGuard, RecognitionPixel, RecognitionSaved, RecognitionTrial,
+    RecognitionView,
 };
 mod native_run;
 mod operations;

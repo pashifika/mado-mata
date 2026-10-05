@@ -697,6 +697,7 @@ fn main() {
             cache_commands::capture_cache_open,
             cache_commands::recognition_load_cached,
             recognition_commands::recognition_preview,
+            recognition_commands::recognition_pixel,
             recognition_commands::recognition_update,
             recognition_commands::recognition_confirm,
             recognition_commands::recognition_discard,

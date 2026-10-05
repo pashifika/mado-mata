@@ -36,15 +36,16 @@
 .preview-tools { grid-area: tools; }
 .preview-zoom-controls { grid-area: zoom; }
 .preview-toolbar > .preview-edit-actions, .preview-toolbar > .content-trial { grid-area: edit; justify-self: end; flex-wrap: nowrap; margin: 0; }
+.preview-toolbar > .content-trial { min-width: 0; max-width: 100%; overflow-x: auto; justify-self: stretch; }
 .preview-actions { grid-area: actions; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .preview-actions > button { min-height: 30px; }
 .preview-actions > #preview-stop { margin-inline-end: auto; }
 .preview-toolbar .capture-main-button { box-sizing: border-box; width: 96px; }
-@media (max-width: 1000px) {
-  .preview-toolbar { grid-template-areas: "tools zoom edit" "actions actions actions"; grid-template-columns: auto auto 1fr; grid-template-rows: repeat(2, 32px); }
+@media (max-width: 1200px) {
+  .preview-toolbar { grid-template-areas: "tools zoom edit" "actions actions actions"; grid-template-columns: auto auto minmax(0, 1fr); grid-template-rows: repeat(2, 32px); }
 }
 @media (max-width: 760px) {
-  .preview-toolbar { grid-template-areas: "tools zoom" "edit edit" "actions actions"; grid-template-columns: auto 1fr; grid-template-rows: repeat(3, 32px); }
+  .preview-toolbar { grid-template-areas: "tools tools" "zoom edit" "actions actions"; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: repeat(3, 32px); }
 }
 .preview-capture-button { display: inline-flex; align-items: stretch; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); }
 .preview-capture-button > button { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; border: 0; border-radius: 0; background: transparent; color: #fff; }
@@ -76,6 +77,18 @@
 .preview-toolbar .select-trigger:disabled { background: var(--surface); color: inherit; }
 .preview-toolbar .preview-zoom-select { width: 92px; min-width: 92px; max-width: 92px; }
 .preview-message { margin: 24px; }
+/* This rail keeps its dimensions in every tool and pending/value/error state, so Fit never follows text. */
+.preview-inspection { box-sizing: border-box; flex: 0 0 80px; height: 80px; display: grid; grid-template-rows: 16px 20px 22px; gap: 3px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--surface); font-size: 11px; min-width: 0; }
+.preview-inspection > strong { font-weight: 600; }
+.inspection-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1.6fr)) repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0; font-variant-numeric: tabular-nums; }
+.inspection-values > div { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.inspection-values dt { color: var(--text-muted); }
+.inspection-values dd { margin: 0; min-width: 0; white-space: nowrap; }
+.inspection-color-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.inspection-hex { flex: none; white-space: nowrap; }
+.inspection-status { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspection-swatch { position: relative; flex: 0 0 22px; height: 22px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 3px; overflow: hidden; background-color: #fff; background-image: linear-gradient(45deg, #bbb 25%, transparent 25%), linear-gradient(-45deg, #bbb 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #bbb 75%), linear-gradient(-45deg, transparent 75%, #bbb 75%); background-size: 10px 10px; background-position: 0 0, 0 5px, 5px -5px, -5px 0; }
+.inspection-swatch > span { position: absolute; inset: 0; }
 /* Candidate controls occupy the toolbar, never the image. Feedback stays in the fixed-height rail. */
 .content-trial { display: flex; align-items: center; gap: 8px; }
 .preview-toolbar .content-trial .select { width: 80px; min-width: 80px; }
@@ -90,8 +103,6 @@
 .segmented > button[aria-pressed="true"] { background: var(--info-soft); border-color: var(--accent); color: var(--accent); }
 .recognition-stage { flex: 1; min-height: 0; overflow: auto; margin: 8px 12px 12px; background: #1c2230; border-radius: var(--radius-sm); }
 .recognition-stage.fit { display: flex; align-items: center; justify-content: center; overflow: hidden; }
-.recognition-stage.preview-raw { display: flex; align-items: center; justify-content: center; }
-.preview-raw img { width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; }
 .recognition-surface { position: relative; flex: none; touch-action: none; user-select: none; }
 .recognition-surface:focus-visible { outline: 3px solid var(--focus); outline-offset: -3px; }
 .recognition-surface img { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -112,3 +123,5 @@
 .recognition-handle { fill: #fff; stroke: #4c9aff; stroke-width: 1.5; }
 .recognition-handle.search { stroke: #b37feb; }
 .recognition-handle.content { stroke: #f6c343; }
+.recognition-pixel-marker { pointer-events: none; fill: none; stroke: #fff; stroke-width: 1.5; }
+.recognition-pixel-marker .pixel-marker-outline { stroke: #111; stroke-width: 3; }

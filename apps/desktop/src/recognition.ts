@@ -123,7 +123,7 @@ export interface UndoEntry {
   // Only selections removed with a definition; pixels remain in the host.
   crops:Record<string, {mark:number; source:string}>;
 }
-export type PreviewTool = 'zones' | 'content';
+export type PreviewTool = 'zones' | 'content' | 'inspect';
 export type Zoom = 'fit' | number;
 export interface PreviewDisplay {zoom:Zoom; tool:PreviewTool}
 
@@ -783,7 +783,7 @@ export function toggleCrop(state:RecognitionState, id:string):RecognitionState {
 
 export function setDisplay(state:RecognitionState, display:PreviewDisplay):RecognitionState {
   const levels: readonly number[] = ZOOM_LEVELS;
-  if ((display.zoom !== 'fit' && !levels.includes(display.zoom)) || (display.tool !== 'zones' && display.tool !== 'content')) return state;
+  if ((display.zoom !== 'fit' && !levels.includes(display.zoom)) || !['zones', 'content', 'inspect'].includes(display.tool)) return state;
   return sameJson(display, state.display) ? state : {...state, display};
 }
 
@@ -1134,6 +1134,7 @@ export function applyPreviewEdit(state:RecognitionState, message:PreviewEditMess
   const {edit: change} = message;
   const stale = {...state, notice: 'staleEdit' as const};
   if (message.frameId !== (state.view.frame?.id ?? null) || message.basisRevision !== state.basis) return stale;
+  if (state.display.tool === 'inspect' && change.kind !== 'display') return state;
   if (change.kind === 'select') return selectDefinition(state, change.id);
   if (change.kind === 'display') return setDisplay(state, change.display);
   const revision = (id:string) => state.document?.definitions.find(item => item.id === id)?.revision;

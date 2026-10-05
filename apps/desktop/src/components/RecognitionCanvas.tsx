@@ -2,6 +2,8 @@ import {useEffect, useRef, useState} from 'react';
 import type {KeyboardEvent, PointerEvent} from 'react';
 import {clientToFrame, dragEdges, edgesRect, hitHandle, hitRegion, mapRegion, rectEdges, regionFromEdges, spanEdges} from '../recognition.ts';
 import type {Edges, GeometryBasis, Handle, PixelRect, Point, PreviewDefinition, PreviewEdit, PreviewObservation, PreviewTool} from '../recognition.ts';
+import {pixelCenter} from '../recognitionInspection.ts';
+import type {PixelInspection} from '../recognitionInspection.ts';
 
 // CSS pixels around an edge that grab it; converted to frame pixels by the rendered scale.
 const HIT_PX = 6;
@@ -25,7 +27,7 @@ interface Pending {key: string; edges: Edges}
 export interface CanvasLabels {surface: string; search: (name: string) => string; observed: string}
 
 interface Props {
-  width: number; height: number; basis: GeometryBasis;
+  width: number; height: number; basis: GeometryBasis | null;
   definitions: PreviewDefinition[]; selected: string | null; observations: PreviewObservation[];
   // Preview raster (possibly smaller than the frame); it is stretched to the frame's display size.
   image: string | null;
@@ -37,6 +39,10 @@ interface Props {
   // A reviewed-before-apply proposal; it never changes the saved basis or hit testing.
   contentCandidate?: PixelRect | null;
   onContentEditStart?: () => void;
+  inspection?: PixelInspection;
+  inspectPoint?: Point | null;
+  onImageReady?: (image: string) => void;
+  onImageError?: (image: string) => void;
   onEdit: (edit: PreviewEdit) => void;
 }
 
@@ -53,12 +59,15 @@ function handlePoints(edges: Edges): [Handle, number, number][] {
 // Original-pixel image surface with the content rectangle and recognition regions. All geometry is in frame pixels;
 // the SVG viewBox is the frame, so display scale changes only the rendered size. Pointer positions map through the
 // rendered client rectangle (zoom, scroll and letterboxing included); device-pixel ratio is not applied again.
-export default function RecognitionCanvas({width, height, basis, definitions, selected, observations, image, scale, tool, editable, generation, labels, contentCandidate, onContentEditStart, onEdit}: Props) {
+export default function RecognitionCanvas({width, height, basis: storedBasis, definitions, selected, observations, image, scale, tool, editable: canEdit, generation, labels, contentCandidate, onContentEditStart, inspection, inspectPoint, onImageReady, onImageError, onEdit}: Props) {
   const surface = useRef<HTMLDivElement>(null);
   const dragRef = useRef<Drag | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [cursor, setCursor] = useState('crosshair');
+  const geometryReady = storedBasis !== null && storedBasis.frame_width === width && storedBasis.frame_height === height;
+  const basis = geometryReady ? storedBasis : {frame_width:width, frame_height:height, content:{x:0, y:0, width, height}};
+  const editable = canEdit && geometryReady && tool !== 'inspect';
   const content = rectEdges(basis.content);
   const frame: Edges = {left: 0, top: 0, right: width, bottom: height};
 
@@ -77,7 +86,7 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
   }, [pending]);
   useEffect(() => {
     if (!editable) update(null);
-  }, [editable]);
+  }, [editable, tool]);
   useEffect(() => {
     if (drag === null) return;
     const cancel = (event: globalThis.KeyboardEvent) => {if (event.key === 'Escape') update(null);};
@@ -110,6 +119,12 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
   }
 
   function down(event: PointerEvent<HTMLDivElement>) {
+    if (tool === 'inspect' || inspection?.inspecting) {
+      if (event.button !== 0 || !image) return;
+      event.currentTarget.focus({preventScroll:true});
+      if (inspection?.pointer(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect())) event.preventDefault();
+      return;
+    }
     if (!editable || event.button !== 0 || pending !== null) return;
     const {point, perPixel} = locate(event);
     const tolerance = HIT_PX / perPixel;
@@ -130,6 +145,7 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
   }
 
   function move(event: PointerEvent<HTMLDivElement>) {
+    if (tool === 'inspect' || inspection?.inspecting) return;
     const active = dragRef.current;
     const {point, perPixel} = locate(event);
     if (active === null) {
@@ -148,6 +164,7 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
   function up() {
     const active = dragRef.current;
     update(null);
+    if (tool === 'inspect' || inspection?.inspecting) return;
     if (active === null) return;
     if (active.kind === 'region') {
       const region = sameEdges(active.current, active.start) ? null : regionFromEdges(active.current, basis);
@@ -166,6 +183,11 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
 
   // Arrow keys move the selected region (or the content rectangle) by one pixel, ten with Shift.
   function key(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.target !== event.currentTarget) return;
+    if (tool === 'inspect' || inspection?.inspecting) {
+      if (inspection?.key(event.key, true)) { event.preventDefault(); event.stopPropagation(); }
+      return;
+    }
     const step = event.shiftKey ? 10 : 1;
     const delta: Record<string, [number, number]> = {ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step]};
     const offset = delta[event.key];
@@ -202,11 +224,13 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
   const chosenSearch = chosen?.search ? shown(chosen, 'search') : null;
 
   return <div ref={surface} className="recognition-surface" tabIndex={0} role="application" aria-label={labels.surface}
-    style={{width: width * scale, height: height * scale, cursor: editable ? cursor : 'default'}}
+    style={{width: width * scale, height: height * scale, cursor: tool === 'inspect' ? 'crosshair' : editable ? cursor : 'default'}}
     onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={() => update(null)} onLostPointerCapture={() => update(null)}
     onKeyDown={key}>
-    {image && <img src={image} alt="" draggable={false} className={scale >= 2 ? 'pixelated' : undefined}/>}
+    {image && <img key={image} src={image} alt="" draggable={false} onLoad={() => onImageReady?.(image)}
+      onError={() => onImageError?.(image)} className={scale >= 2 ? 'pixelated' : undefined}/>}
     <svg className="recognition-overlay" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+      {geometryReady && tool !== 'inspect' && <>
       <path className="recognition-bars" fillRule="evenodd"
         d={`M0 0H${width}V${height}H0Z M${bars.left} ${bars.top}V${bars.bottom}H${bars.right}V${bars.top}Z`}/>
       <rect className={tool === 'content' ? 'recognition-content active' : 'recognition-content'} x={bars.left} y={bars.top}
@@ -230,6 +254,12 @@ export default function RecognitionCanvas({width, height, basis, definitions, se
       {editable && chosenRegion && handles(chosenRegion, 'recognition-handle')}
       {tool === 'content' && contentCandidate && <rect className="recognition-content-candidate"
         x={contentCandidate.x} y={contentCandidate.y} width={contentCandidate.width} height={contentCandidate.height} style={stroke}/>}
+      </>}
+      {tool === 'inspect' && inspectPoint && <g className="recognition-pixel-marker"
+        transform={`translate(${pixelCenter(inspectPoint).x} ${pixelCenter(inspectPoint).y})`}>
+        <circle r={7 / scale} className="pixel-marker-outline" style={stroke}/>
+        <path d={`M${-10 / scale} 0H${10 / scale}M0 ${-10 / scale}V${10 / scale}`} style={stroke}/>
+      </g>}
     </svg>
   </div>;
 }

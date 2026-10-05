@@ -19,8 +19,8 @@ pub use native_capture::{
 
 mod recognition;
 pub use recognition::{
-    RecognitionCopy, RecognitionFrame, RecognitionPickerGuard, RecognitionSaved, RecognitionTrial,
-    RecognitionView,
+    RecognitionCopy, RecognitionFrame, RecognitionPickerGuard, RecognitionPixel, RecognitionSaved,
+    RecognitionTrial, RecognitionView,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

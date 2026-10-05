@@ -149,6 +149,483 @@ fn zone(id: &str) -> RecognitionDefinition {
     }
 }
 
+fn original_pixel(
+    app: &Application,
+    view: &RecognitionView,
+    x: u32,
+    y: u32,
+) -> Result<RecognitionPixel, Fault> {
+    let frame = view.frame.as_ref().unwrap();
+    app.recognition_pixel(
+        &view.owner,
+        view.capture_id.as_deref().unwrap(),
+        &frame.id,
+        frame.revision,
+        x,
+        y,
+    )
+}
+
+fn retained_frame(app: &Application) -> std::sync::Weak<DecodedImage> {
+    let state = lock(&app.workspaces);
+    Arc::downgrade(
+        &state
+            .authoring
+            .as_ref()
+            .unwrap()
+            .recognition
+            .frame
+            .as_ref()
+            .unwrap()
+            .image,
+    )
+}
+
+#[test]
+fn recognition_pixel_reads_exact_odd_frame_bytes_and_refuses_exclusive_bounds() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let pixels = [
+        [13, 71, 219, 0],
+        [6, 54, 132, 255],
+        [231, 19, 5, 128],
+        [83, 7, 201, 64],
+        [39, 151, 99, 127],
+        [11, 209, 61, 255],
+        [27, 93, 177, 255],
+        [145, 3, 87, 1],
+        [251, 41, 109, 255],
+        [53, 181, 23, 255],
+        [101, 67, 211, 0],
+        [17, 149, 43, 192],
+        [73, 229, 31, 255],
+        [193, 59, 163, 32],
+        [241, 113, 47, 255],
+    ];
+    let image = DecodedImage::from_rgba(3, 5, pixels.concat()).unwrap();
+    let png = images::encode_input(&image).unwrap();
+    fs::write(&editor.source, png.as_bytes()).unwrap();
+    drop((png, image));
+    let loaded = editor.load();
+    let mut document = loaded.document.clone().unwrap();
+    document.basis.content = PixelRect {
+        x: 1,
+        y: 1,
+        width: 1,
+        height: 1,
+    };
+    let loaded = app
+        .recognition_update(
+            &loaded.owner,
+            &loaded.revision,
+            document,
+            Some(&loaded.frame.as_ref().unwrap().id),
+            loaded.document_revision,
+            loaded.capture_id.as_deref().unwrap(),
+        )
+        .unwrap();
+    assert!(!loaded.basis_confirmed && !loaded.frame.as_ref().unwrap().confirmed);
+    let before = serde_json::to_value(&loaded).unwrap();
+    fs::remove_file(&editor.source).unwrap();
+    for (x, y, rgba) in [
+        (0, 0, [13, 71, 219, 0]),
+        (2, 0, [231, 19, 5, 128]),
+        (1, 1, [39, 151, 99, 127]),
+        (0, 4, [73, 229, 31, 255]),
+        (2, 4, [241, 113, 47, 255]),
+    ] {
+        let result = original_pixel(app, &loaded, x, y).unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            json!({
+                "owner": loaded.owner,
+                "capture_id": loaded.capture_id,
+                "frame_id": loaded.frame.as_ref().unwrap().id,
+                "frame_revision": loaded.frame.as_ref().unwrap().revision,
+                "x": x, "y": y, "rgba": rgba,
+            }),
+        );
+    }
+    for (x, y) in [(3, 0), (0, 5), (3, 5), (u32::MAX, 0), (0, u32::MAX)] {
+        let error = original_pixel(app, &loaded, x, y).unwrap_err();
+        assert_eq!(error.category, "RecognitionInput");
+        assert_eq!(
+            error.context,
+            json!({"reason": "pixel_bounds", "x": x, "y": y, "width": 3, "height": 5}),
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(app.recognition_view(&loaded.owner, &loaded.revision).unwrap()).unwrap(),
+        before,
+    );
+}
+
+#[test]
+fn recognition_pixel_reads_a_source_pixel_omitted_by_the_bounded_preview() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let (width, height) = (2049u32, 2049u32);
+    let mut pixels = vec![0; width as usize * height as usize * 4];
+    let last = pixels.len() - 4;
+    pixels[last..].copy_from_slice(&[231, 19, 5, 128]);
+    let image = DecodedImage::from_rgba(width, height, pixels).unwrap();
+    let png = images::encode_input(&image).unwrap();
+    fs::write(&editor.source, png.as_bytes()).unwrap();
+    drop((png, image));
+    let loaded = editor.load();
+    let frame = loaded.frame.as_ref().unwrap();
+    let preview = app
+        .recognition_preview(
+            &loaded.owner,
+            &frame.id,
+            loaded.capture_id.as_deref().unwrap(),
+        )
+        .unwrap();
+    let display = images::decode_png(&preview, ImageKind::Crop).unwrap();
+    assert!(display.width < width && display.height < height);
+    assert!(display.rgba.len() <= images::CROP_MAX_PIXELS * 4);
+    assert!(
+        display.rgba.chunks_exact(4).all(|rgba| rgba == [0, 0, 0, 0]),
+        "the unique bottom-right source pixel is absent from the display raster",
+    );
+    drop((preview, display));
+    fs::remove_file(&editor.source).unwrap();
+    assert_eq!(
+        original_pixel(app, &loaded, width - 1, height - 1)
+            .unwrap()
+            .rgba,
+        [231, 19, 5, 128],
+    );
+    assert_eq!(original_pixel(app, &loaded, 0, 0).unwrap().rgba, [0; 4]);
+}
+
+#[test]
+fn recognition_pixel_rejects_replaced_sources_and_expired_authoring_owners() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let first = editor.load();
+    let first_pixel = original_pixel(app, &first, 2, 3).unwrap();
+    assert_eq!(first_pixel.rgba, [2, 3, 17, 255]);
+    let old_pixels = retained_frame(app);
+    let replacement = refresh_frame(
+        &editor,
+        &first,
+        || DecodedImage::from_rgba(32, 24, [91, 137, 203, 128].repeat(32 * 24)).unwrap(),
+        false,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let current = replacement.frame.as_ref().unwrap();
+    let old = first.frame.as_ref().unwrap();
+    assert_eq!((current.width, current.height), (old.width, old.height));
+    assert!(
+        old_pixels.upgrade().is_none(),
+        "even a retained pixel response keeps no obsolete image alive",
+    );
+    for (frame_id, frame_revision) in [
+        (old.id.as_str(), old.revision),
+        (old.id.as_str(), current.revision),
+        (current.id.as_str(), old.revision),
+        (current.id.as_str(), u64::MAX),
+    ] {
+        assert_eq!(
+            app.recognition_pixel(
+                &replacement.owner,
+                replacement.capture_id.as_deref().unwrap(),
+                frame_id,
+                frame_revision,
+                2,
+                3,
+            )
+            .unwrap_err()
+            .category,
+            "StaleRecognition",
+        );
+    }
+    assert_eq!(
+        original_pixel(app, &replacement, 2, 3).unwrap().rgba,
+        [91, 137, 203, 128],
+    );
+    let next_capture = refresh_frame(
+        &editor,
+        &replacement,
+        || DecodedImage::from_rgba(32, 24, [7, 29, 61, 255].repeat(32 * 24)).unwrap(),
+        true,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_ne!(next_capture.capture_id, first.capture_id);
+    let next_frame = next_capture.frame.as_ref().unwrap();
+    assert_eq!(
+        app.recognition_pixel(
+            &next_capture.owner,
+            first.capture_id.as_deref().unwrap(),
+            &next_frame.id,
+            next_frame.revision,
+            2,
+            3,
+        )
+        .unwrap_err()
+        .category,
+        "StaleRecognition",
+    );
+    assert_eq!(
+        original_pixel(app, &next_capture, 2, 3).unwrap().rgba,
+        [7, 29, 61, 255],
+    );
+    // Keep local frame identity equal to the earlier capture to isolate the capture fence.
+    // Production counters do not need to collide for capture identity to remain mandatory.
+    {
+        let mut state = lock(&app.workspaces);
+        let frame = state
+            .authoring
+            .as_mut()
+            .unwrap()
+            .recognition
+            .frame
+            .as_mut()
+            .unwrap();
+        frame.id.clone_from(&old.id);
+        frame.revision = old.revision;
+    }
+    let repeated_ids = app
+        .recognition_view(&next_capture.owner, &next_capture.revision)
+        .unwrap();
+    assert_eq!(repeated_ids.frame.as_ref().unwrap().id, old.id);
+    assert_eq!(repeated_ids.frame.as_ref().unwrap().revision, old.revision);
+    assert_eq!(
+        original_pixel(app, &first, 2, 3).unwrap_err().category,
+        "StaleRecognition",
+    );
+    assert_eq!(
+        original_pixel(app, &repeated_ids, 2, 3).unwrap().rgba,
+        [7, 29, 61, 255],
+    );
+    let workspace = app.authoring_exit(&editor.view.owner).unwrap();
+    let reopened = app
+        .authoring_open(&view_ref(&workspace), Path::new(&editor.view.package_path))
+        .unwrap();
+    let new_owner_frame =
+        load_selected(app, &reopened.owner, &reopened.revision, &editor.source).unwrap();
+    assert_eq!(
+        new_owner_frame.frame.as_ref().unwrap().revision,
+        first.frame.as_ref().unwrap().revision,
+        "a new owner's local frame counter may repeat",
+    );
+    assert_eq!(
+        original_pixel(app, &first, 2, 3).unwrap_err().category,
+        "StaleAuthoring",
+    );
+    let frame = new_owner_frame.frame.as_ref().unwrap();
+    for owner in [
+        next_capture.owner.clone(),
+        AuthoringRef {
+            workspace: crate::application::WorkspaceRef {
+                revision: reopened.owner.workspace.revision + 1,
+                ..reopened.owner.workspace.clone()
+            },
+            token: reopened.owner.token.clone(),
+        },
+    ] {
+        assert_eq!(
+            app.recognition_pixel(
+                &owner,
+                new_owner_frame.capture_id.as_deref().unwrap(),
+                &frame.id,
+                frame.revision,
+                2,
+                3,
+            )
+            .unwrap_err()
+            .category,
+            "StaleAuthoring",
+        );
+    }
+    assert_eq!(
+        original_pixel(app, &new_owner_frame, 2, 3).unwrap().rgba,
+        [2, 3, 17, 255],
+    );
+    drop(first_pixel);
+}
+
+#[test]
+fn recognition_pixel_preserves_draft_crops_evidence_saved_bytes_and_image_accounting() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let draft = draft_zone(&editor);
+    let sources = BTreeMap::from([("pending".into(), draft.frame.as_ref().unwrap().id.clone())]);
+    let saved = app
+        .recognition_save(
+            &draft.owner,
+            &draft.revision,
+            draft.document_revision,
+            &["pending".into()],
+            draft.capture_id.as_deref().unwrap(),
+            &sources,
+        )
+        .unwrap()
+        .recognition
+        .unwrap();
+    let mut document = saved.document.clone().unwrap();
+    document.definitions[0].expected = Some("Unsaved inspection-independent edit".into());
+    document.definitions[0].revision += 1;
+    let changed = app
+        .recognition_update(
+            &saved.owner,
+            &saved.revision,
+            document,
+            Some(&saved.frame.as_ref().unwrap().id),
+            saved.document_revision,
+            saved.capture_id.as_deref().unwrap(),
+        )
+        .unwrap();
+    let raw = refresh_frame(
+        &editor,
+        &changed,
+        || DecodedImage::from_rgba(16, 12, vec![90; 16 * 12 * 4]).unwrap(),
+        false,
+        &sources,
+    )
+    .unwrap();
+    assert!(!raw.basis_confirmed && !raw.frame.as_ref().unwrap().confirmed);
+    assert_eq!(raw.staged_crop_ids, ["pending"]);
+    assert_ne!(raw.document, raw.saved_document);
+    retain_observed_trial(app, &raw.owner, &raw.revision, &raw, &["pending"]);
+    app.recognition_preview(
+        &raw.owner,
+        &raw.frame.as_ref().unwrap().id,
+        raw.capture_id.as_deref().unwrap(),
+    )
+    .unwrap();
+    let before = serde_json::to_value(app.recognition_view(&raw.owner, &raw.revision).unwrap())
+        .unwrap();
+    let crop_budget = pending_crop_budget(&editor);
+    let (preview_budget, staged_pixels) = {
+        let state = lock(&app.workspaces);
+        let recognition = &state.authoring.as_ref().unwrap().recognition;
+        (
+            recognition.preview_payload.as_ref().unwrap().bytes(),
+            recognition
+                .staged_crops
+                .iter()
+                .map(|crop| crop.png.to_vec())
+                .collect::<Vec<_>>(),
+        )
+    };
+    let original = retained_frame(app);
+    let package_path = Path::new(&editor.view.package_path);
+    let saved_files = ["main.ts", "package.json", "recognition/authoring.json"];
+    let package_before =
+        saved_files.map(|relative| fs::read(package_path.join(relative)).unwrap());
+    let candidate = app.publisher.open(package_path).unwrap();
+    let metadata_before = candidate.recognition().unwrap();
+    let crop_before = candidate
+        .recognition_crop(raw.capture_id.as_deref().unwrap(), "pending")
+        .unwrap()
+        .unwrap();
+    let samples = [(0, 0), (15, 0), (0, 11), (15, 11)]
+        .map(|(x, y)| original_pixel(app, &raw, x, y).unwrap());
+    for sample in &samples {
+        assert_eq!(sample.rgba, [90; 4]);
+    }
+    assert_eq!(
+        original_pixel(app, &raw, 16, 11).unwrap_err().category,
+        "RecognitionInput",
+    );
+    assert_eq!(
+        serde_json::to_value(app.recognition_view(&raw.owner, &raw.revision).unwrap()).unwrap(),
+        before,
+    );
+    assert_eq!(pending_crop_budget(&editor), crop_budget);
+    {
+        let state = lock(&app.workspaces);
+        let recognition = &state.authoring.as_ref().unwrap().recognition;
+        assert_eq!(
+            recognition.preview_payload.as_ref().unwrap().bytes(),
+            preview_budget,
+        );
+        assert_eq!(
+            recognition
+                .staged_crops
+                .iter()
+                .map(|crop| crop.png.to_vec())
+                .collect::<Vec<_>>(),
+            staged_pixels,
+        );
+        assert!(original.ptr_eq(&Arc::downgrade(&recognition.frame.as_ref().unwrap().image)));
+    }
+    assert_eq!(
+        saved_files.map(|relative| fs::read(package_path.join(relative)).unwrap()),
+        package_before,
+    );
+    let candidate = app.publisher.open(package_path).unwrap();
+    assert_eq!(candidate.recognition().unwrap(), metadata_before);
+    assert_eq!(
+        candidate
+            .recognition_crop(raw.capture_id.as_deref().unwrap(), "pending")
+            .unwrap()
+            .unwrap(),
+        crop_before,
+    );
+    let image = lock(&app.workspaces)
+        .authoring
+        .as_mut()
+        .unwrap()
+        .recognition
+        .frame
+        .take()
+        .unwrap()
+        .image;
+    let (pixels, reservation) = Arc::try_unwrap(image).unwrap().into_parts();
+    assert_eq!(pixels, vec![90; 16 * 12 * 4]);
+    assert_eq!(reservation.bytes(), 16 * 12 * 4);
+    drop(samples);
+    assert!(
+        original.upgrade().is_none(),
+        "no inspection owner keeps the original alive",
+    );
+}
+
+#[test]
+fn recognition_pixel_preserves_busy_missing_frame_and_closing_refusals() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let loaded = editor.load();
+    let before = serde_json::to_value(&loaded).unwrap();
+    let (command, state) = app.command_state().unwrap();
+    drop(state);
+    assert_eq!(
+        original_pixel(app, &loaded, 0, 0).unwrap_err().category,
+        "WorkspaceBusy",
+    );
+    drop(command);
+    assert_eq!(original_pixel(app, &loaded, 0, 0).unwrap().rgba, [0, 0, 17, 255]);
+    assert_eq!(
+        serde_json::to_value(app.recognition_view(&loaded.owner, &loaded.revision).unwrap()).unwrap(),
+        before,
+    );
+    let original = retained_frame(app);
+    app.recognition_prepare_capture(
+        &loaded.owner,
+        &loaded.revision,
+        loaded.capture_id.as_deref(),
+        loaded.document_revision,
+        false,
+        &[],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(original.upgrade().is_none());
+    let error = original_pixel(app, &loaded, 0, 0).unwrap_err();
+    assert_eq!(error.category, "RecognitionInput");
+    assert_eq!(error.context, json!({"reason": "missing_frame"}));
+    app.shutdown().unwrap();
+    assert_eq!(
+        original_pixel(app, &loaded, 0, 0).unwrap_err().category,
+        "Closing",
+    );
+}
+
 #[test]
 fn cropped_save_reopens_without_original_frame_and_copy_does_not_edit_source() {
     let editor = Editor::new();
