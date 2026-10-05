@@ -7,6 +7,7 @@ import {
   selectDefinition, setContent, setDisplay, setExpected, setKind, setRegion, setRights, spanEdges, syncTicket, toggleCrop, toggleTrial, trialBlock,
   trialFreshness, trialTicket, undoRecognition, captureDocuments, aggregateDefinitions, canUndoRecognition, discardPixelCrops, canReleaseImage, rebaseFrame, nativePrimaryAction,
 } from './recognition.ts';
+import {PixelInspection, clientToPixel, pixelCenter, rgbHex} from './recognitionInspection.ts';
 
 const MIB=1_048_576;
 const owner={workspace:{workspace_id:'a',revision:1},token:'lease-1'};
@@ -914,4 +915,668 @@ test('saving an active confirmed capture cannot hide another unconfirmed capture
   assert.equal(saveTicket(state),null);
   state={...state,view:{...state.view,other_bases_confirmed:true}};
   assert.equal(saveBlock(state),null);
+});
+
+// Literal expected points are independent of the conversion; no DPR or display-raster pixels enter the read.
+const pixelMappings=[
+  {scenario:'offset image at a noninteger scale',rect:{left:17.25,top:43.5,width:11.25,height:8.75},client:[20.375,47.875],expected:{x:2,y:3}},
+  {scenario:'scrolled image at 200 percent',rect:{left:-13.5,top:-8.25,width:18,height:14},client:[3.75,4.5],expected:{x:8,y:6}},
+  {scenario:'the first pixel at the exact top-left',rect:{left:17.25,top:43.5,width:11.25,height:8.75},client:[17.25,43.5],expected:{x:0,y:0}},
+  {scenario:'the last pixel just inside both edges',rect:{left:17.25,top:43.5,width:11.25,height:8.75},client:[28.499,52.249],expected:{x:8,y:6}},
+  {scenario:'the exact right edge is excluded',rect:{left:17.25,top:43.5,width:11.25,height:8.75},client:[28.5,47],expected:null},
+  {scenario:'the exact bottom edge is excluded',rect:{left:17.25,top:43.5,width:11.25,height:8.75},client:[20,52.25],expected:null},
+  {scenario:'right-edge subtraction rounding must not become the last pixel',rect:{left:0.3,top:0,width:0.6,height:7},client:[0.3+0.6,3],expected:null},
+  {scenario:'bottom-edge subtraction rounding must not become the last pixel',rect:{left:0,top:0.3,width:9,height:0.6},client:[2,0.3+0.6],expected:null},
+  {scenario:'negative frame coordinates are excluded before flooring',rect:{left:17.25,top:43.5,width:11.25,height:8.75},client:[17.249,47],expected:null},
+  {scenario:'the empty viewport outside the image is excluded',rect:{left:17.25,top:43.5,width:11.25,height:8.75},client:[40,60],expected:null},
+  {scenario:'zero rendered width is refused',rect:{left:0,top:0,width:0,height:7},client:[0,0],expected:null},
+  {scenario:'negative rendered height is refused',rect:{left:0,top:0,width:9,height:-7},client:[0,0],expected:null},
+  {scenario:'a nonfinite pointer is refused',rect:{left:0,top:0,width:9,height:7},client:[Infinity,0],expected:null},
+  {scenario:'a nonfinite image offset is refused',rect:{left:NaN,top:0,width:9,height:7},client:[0,0],expected:null},
+];
+for (const {scenario,rect,client,expected} of pixelMappings) {
+  test(`Inspect mapping: ${scenario}`,()=>{
+    assert.deepEqual(clientToPixel(...client,rect,9,7),expected);
+  });
+}
+
+test('Inspect mapping uses CSS pixels once, with finite integer original dimensions and pixel-center markers',()=>{
+  const prior=Object.getOwnPropertyDescriptor(globalThis,'devicePixelRatio');
+  Object.defineProperty(globalThis,'devicePixelRatio',{value:3,configurable:true});
+  try {
+    assert.deepEqual(clientToPixel(20.375,47.875,{left:17.25,top:43.5,width:11.25,height:8.75},9,7),{x:2,y:3});
+  } finally {
+    if (prior) Object.defineProperty(globalThis,'devicePixelRatio',prior);
+    else delete globalThis.devicePixelRatio;
+  }
+  for (const [width,height] of [[0,7],[9,0],[9.5,7],[9,Infinity]]) {
+    assert.equal(clientToPixel(0,0,{left:0,top:0,width:9,height:7},width,height),null);
+  }
+  assert.deepEqual(pixelCenter({x:0,y:0}),{x:0.5,y:0.5});
+  assert.deepEqual(pixelCenter({x:8,y:6}),{x:8.5,y:6.5});
+  assert.equal(rgbHex([13,201,77,0]),'#0DC94D','alpha zero preserves RGB');
+  assert.equal(rgbHex([13,201,77,128]),'#0DC94D','RGB-only hex excludes partial alpha');
+  assert.equal(rgbHex([255,0,16,255]),'#FF0010');
+});
+
+const INSPECT_FRAME={...FRAME,width:9,height:7};
+function inspectionSnapshot(overrides={}){
+  return {...previewSnapshot(setDisplay(loaded(INSPECT_FRAME),{tool:'inspect',zoom:'fit'}),'en',true,null),...overrides};
+}
+// Transport promises are controlled, but responses are independent fixed original-pixel values, not request echoes.
+function inspectionSample(overrides={}){
+  return {owner,capture_id:CAPTURE_A,frame_id:'f1',frame_revision:1,x:2,y:3,rgba:[13,201,77,128],...overrides};
+}
+function inspectionHarness(snapshot=inspectionSnapshot()){
+  const calls=[],published=[];
+  const inspection=new PixelInspection(request=>new Promise((resolve,reject)=>calls.push({request,resolve,reject})),
+    value=>published.push(value),cause=>cause);
+  inspection.incoming(snapshot);
+  inspection.setRaster(inspection.sourceEpoch,'blob:original');
+  inspection.rasterLoaded(inspection.sourceEpoch,'blob:original');
+  return {inspection,calls,published,snapshot};
+}
+function inspectionSettled(){
+  return new Promise(resolve=>setImmediate(resolve));
+}
+
+test('Inspect works on unconfirmed raw geometry and pixels outside Game content without changing draft state',async()=>{
+  let state=toggleCrop(create(loaded(INSPECT_FRAME),edges(1,1,4,4)),'r1');
+  state=setContent(state,{x:1,y:1,width:7,height:5});
+  state=setDisplay(state,{tool:'inspect',zoom:'fit'});
+  const saved=structuredClone(state);
+  const snapshot=previewSnapshot(state,'en',true,null);
+  const h=inspectionHarness(snapshot);
+  assert.equal(h.inspection.select({x:0,y:0}),true,'top/left bars are inside the original frame');
+  await inspectionSettled();
+  h.calls[0].resolve(inspectionSample({x:0,y:0,rgba:[231,19,47,0]}));
+  await inspectionSettled();
+  assert.deepEqual(h.inspection.value.sample.rgba,[231,19,47,0]);
+  assert.deepEqual(state,saved,'selection cannot change geometry, crops, trial stamps, dirty state or Undo');
+
+  const raw=applyView(state,{...state.view,frame:{...INSPECT_FRAME,width:11,height:5,confirmed:false}});
+  const rawSaved=structuredClone(raw);
+  const rawSnapshot=previewSnapshot(raw,'en',true,null);
+  assert.equal(rawSnapshot.frameGeometryReady,false);
+  assert.equal(rawSnapshot.confirmed,false);
+  assert.equal(rawSnapshot.basis.frame_width,9,'inspection does not rebase the retained basis');
+  h.inspection.incoming(rawSnapshot);
+  h.inspection.setRaster(h.inspection.sourceEpoch,'blob:raw');
+  h.inspection.rasterLoaded(h.inspection.sourceEpoch,'blob:raw');
+  assert.equal(h.inspection.pointer(10.9,4.9,{left:0,top:0,width:11,height:5}),true);
+  await inspectionSettled();
+  assert.deepEqual(h.calls[1].request,{owner,captureId:CAPTURE_A,frameId:'f1',frameRevision:1,x:10,y:4});
+  h.calls[1].resolve(inspectionSample({x:10,y:4,rgba:[4,88,173,255]}));
+  await inspectionSettled();
+  assert.deepEqual(h.inspection.value.sample.rgba,[4,88,173,255]);
+  assert.deepEqual(raw,rawSaved);
+});
+
+test('main applies Regions edits after a dropped Preview display edit left its own display at Inspect',()=>{
+  // Main acknowledged Inspect, then dropped the Preview's Regions switch (unsaved-changes choice, capture transition,
+  // closing). Its later snapshots still carry `inspect`, but the Preview's effective tool is Regions and its send guard
+  // lets geometry through; main must apply that geometry instead of discarding it without a notice.
+  let state=create(loaded(INSPECT_FRAME),edges(1,1,4,4));
+  state=setDisplay(state,{tool:'inspect',zoom:'fit'});
+  const h=inspectionHarness(previewSnapshot(state,'en',false,'pending',false,null,null,true));
+  assert.equal(h.inspection.inspecting,true,'the Preview send guard refuses geometry while Inspect is effective');
+  h.inspection.setDisplay({tool:'zones',zoom:'fit'});
+  const reopened=previewSnapshot(state,'en',true,null);
+  assert.equal(reopened.display.tool,'inspect');
+  assert.deepEqual(h.inspection.incoming(reopened),{tool:'zones',zoom:'fit'});
+  assert.equal(h.inspection.inspecting,false,'the Preview send guard now emits Regions edits');
+  const message=edit=>({token:owner.token,capture_id:CAPTURE_A,revision:reopened.revision,frameId:'f1',basisRevision:reopened.basisRevision,edit});
+  const apply=(current,edit)=>applyPreviewEdit(current,message(edit),n=>`Region ${n}`);
+  const moved=apply(state,{kind:'region',id:'r1',part:'region',revision:state.document.definitions[0].revision,
+    region:regionFromEdges(edges(2,2,5,5),state.document.basis)});
+  assert.deepEqual(mapRegion(moved.document.definitions[0].region,moved.document.basis),edges(2,2,5,5));
+  assert.equal(moved.notice,null);
+  const created=apply(moved,{kind:'create',region:regionFromEdges(edges(5,0,8,3),moved.document.basis)});
+  assert.deepEqual(created.document.definitions.map(item=>item.id),['r1','r2']);
+  assert.equal(created.selected,'r2');
+  const chosen=apply(created,{kind:'select',id:'r1'});
+  assert.equal(chosen.selected,'r1');
+  const deleted=apply(chosen,{kind:'delete',id:'r1',revision:chosen.document.definitions[0].revision});
+  assert.deepEqual(deleted.document.definitions.map(item=>item.id),['r2']);
+  const undone=apply(deleted,{kind:'undo',localRevision:deleted.localRevision});
+  assert.deepEqual(undone.document.definitions.map(item=>item.id),['r1','r2']);
+  // Main only records the last acknowledged Preview display; it stays `inspect` until the next display edit arrives.
+  assert.equal(undone.display.tool,'inspect');
+  assert.deepEqual(apply(undone,{kind:'display',display:{tool:'zones',zoom:'fit'}}).display,{tool:'zones',zoom:'fit'});
+});
+
+test('display edits change neither the draft nor Undo, and Regions/Game content edits remain ordinary afterwards',()=>{
+  const state=create(loaded(INSPECT_FRAME),edges(1,1,4,4));
+  const snapshot=previewSnapshot(state,'en',true,null);
+  const message=edit=>({token:owner.token,capture_id:CAPTURE_A,revision:snapshot.revision,frameId:'f1',basisRevision:snapshot.basisRevision,edit});
+  const inspecting=applyPreviewEdit(state,message({kind:'display',display:{tool:'inspect',zoom:200}}),n=>`Region ${n}`);
+  assert.equal(inspecting.document,state.document);
+  assert.equal(inspecting.undo,state.undo);
+  assert.equal(inspecting.localRevision,state.localRevision);
+  assert.deepEqual(inspecting.display,{tool:'inspect',zoom:200});
+  const regions=applyPreviewEdit(inspecting,message({kind:'display',display:{tool:'zones',zoom:200}}),n=>`Region ${n}`);
+  assert.equal(applyPreviewEdit(regions,message({kind:'delete',id:'r1',revision:regions.document.definitions[0].revision}),n=>`Region ${n}`).document.definitions.length,0);
+  const content=applyPreviewEdit(regions,message({kind:'display',display:{tool:'content',zoom:200}}),n=>`Region ${n}`);
+  assert.deepEqual(applyPreviewEdit(content,message({kind:'content',content:{x:0,y:1,width:9,height:6}}),n=>`Region ${n}`).document.basis.content,
+    {x:0,y:1,width:9,height:6});
+});
+
+test('focused pixel-step keys never invent a selection, consume foreign focus or turn boundary arrows into scroll',async()=>{
+  const h=inspectionHarness();
+  assert.equal(h.inspection.key('ArrowRight',true),false);
+  assert.equal(h.inspection.value.point,null);
+  h.inspection.select({x:0,y:0});
+  await inspectionSettled();
+  h.calls[0].resolve(inspectionSample({x:0,y:0}));
+  await inspectionSettled();
+  const unchanged=h.inspection.value;
+  assert.equal(h.inspection.key('ArrowRight',false),false);
+  assert.equal(h.inspection.key('Escape',false),false);
+  assert.equal(h.inspection.key('Delete',true),false);
+  assert.equal(h.inspection.key('z',true),false);
+  assert.equal(h.inspection.value,unchanged);
+  assert.equal(h.inspection.key('ArrowLeft',true),true);
+  assert.equal(h.inspection.key('ArrowUp',true),true);
+  assert.equal(h.inspection.value,unchanged,'an edge no-op preserves selected bytes and dispatches nothing');
+  assert.equal(h.calls.length,1);
+  assert.equal(h.inspection.key('ArrowRight',true),true);
+  assert.deepEqual(h.inspection.value.point,{x:1,y:0});
+  assert.equal(h.inspection.value.sample,null);
+  assert.equal(h.inspection.key('ArrowDown',true),true);
+  assert.deepEqual(h.inspection.value.point,{x:1,y:1});
+  await inspectionSettled();
+  assert.equal(h.calls.length,2);
+  assert.deepEqual([h.calls[1].request.x,h.calls[1].request.y],[1,1]);
+  h.calls[1].resolve(inspectionSample({x:1,y:1}));
+  await inspectionSettled();
+  assert.equal(h.inspection.key('Escape',true),true);
+  assert.deepEqual(h.inspection.value,{point:null,sample:null,pending:false,error:null});
+});
+
+test('same-source zoom, scroll-only redisplay and package revision changes preserve selected original bytes',async()=>{
+  const h=inspectionHarness();
+  h.inspection.select({x:2,y:3});
+  await inspectionSettled();
+  h.calls[0].resolve(inspectionSample());
+  await inspectionSettled();
+  const value=h.inspection.value,epoch=h.inspection.sourceEpoch;
+  h.inspection.incoming({...h.snapshot,revision:'saved-next',display:{tool:'inspect',zoom:200}});
+  h.inspection.incoming({...h.snapshot,display:{tool:'inspect',zoom:'fit'}});
+  assert.equal(h.inspection.sourceEpoch,epoch);
+  assert.equal(h.inspection.value,value);
+  assert.deepEqual(value.sample.rgba,[13,201,77,128]);
+  assert.equal(h.calls.length,1);
+});
+
+for (const outcome of ['success','failure']) {
+  test(`single-flight selection coalesces to the latest point after late ${outcome}`,async()=>{
+    const h=inspectionHarness();
+    h.inspection.select({x:2,y:3});
+    await inspectionSettled();
+    h.inspection.select({x:1,y:1});
+    h.inspection.select({x:8,y:6});
+    assert.equal(h.calls.length,1);
+    assert.deepEqual(h.inspection.value,{point:{x:8,y:6},sample:null,pending:true,error:null});
+    if (outcome==='success') h.calls[0].resolve(inspectionSample());
+    else h.calls[0].reject({category:'Busy',message:'old read refused',context:null});
+    await inspectionSettled();
+    assert.equal(h.calls.length,2);
+    assert.deepEqual(h.calls[1].request,{owner,captureId:CAPTURE_A,frameId:'f1',frameRevision:1,x:8,y:6});
+    assert.equal(h.inspection.value.error,null);
+    assert.equal(h.inspection.value.sample,null);
+    h.calls[1].resolve(inspectionSample({x:8,y:6,rgba:[9,72,240,255]}));
+    await inspectionSettled();
+    assert.deepEqual(h.inspection.value.sample.rgba,[9,72,240,255]);
+    assert.equal(h.calls.length,2);
+  });
+}
+
+test('a new selection immediately clears previous channels and hex, and a failed read never automatically retries',async()=>{
+  const h=inspectionHarness();
+  h.inspection.select({x:2,y:3});
+  await inspectionSettled();
+  h.calls[0].resolve(inspectionSample());
+  await inspectionSettled();
+  assert.equal(rgbHex(h.inspection.value.sample.rgba),'#0DC94D');
+  h.inspection.select({x:8,y:6});
+  assert.equal(h.inspection.value.sample,null);
+  assert.equal(h.inspection.value.pending,true);
+  await inspectionSettled();
+  const error={category:'CommandBusy',message:'explicitly refused',context:null};
+  h.calls[1].reject(error);
+  await inspectionSettled();
+  assert.deepEqual(h.inspection.value,{point:{x:8,y:6},sample:null,pending:false,error});
+  h.inspection.incoming(h.snapshot);
+  await inspectionSettled();
+  assert.equal(h.calls.length,2);
+  h.inspection.select({x:8,y:6});
+  await inspectionSettled();
+  assert.equal(h.calls.length,3,'the same point can be explicitly selected again after failure');
+  h.calls[2].resolve(inspectionSample({x:8,y:6}));
+  await inspectionSettled();
+});
+
+const inspectionInvalidations=[
+  {scenario:'equal-size frame replacement',change:snapshot=>({...snapshot,frame:{...snapshot.frame,id:'f2'}})},
+  {scenario:'frame revision replacement',change:snapshot=>({...snapshot,frame:{...snapshot.frame,revision:2}})},
+  {scenario:'different dimensions with the same local frame ID',change:snapshot=>({...snapshot,frame:{...snapshot.frame,width:11,height:5}})},
+  {scenario:'another capture with the same local frame identity',change:snapshot=>({...snapshot,capture_id:CAPTURE_B})},
+  {scenario:'another owner token',change:snapshot=>({...snapshot,owner:{...owner,token:'lease-2'}})},
+  {scenario:'another workspace revision with the same owner token',change:snapshot=>({...snapshot,owner:{...owner,workspace:{...owner.workspace,revision:2}}})},
+  {scenario:'another workspace ID with the same owner token and revision',change:snapshot=>({...snapshot,owner:{...owner,workspace:{...owner.workspace,workspace_id:'b'}}})},
+  {scenario:'native acquisition starts',change:snapshot=>({...snapshot,nativeSelection:{busy:true}})},
+  {scenario:'the original frame disappears',change:snapshot=>({...snapshot,frame:null})},
+  {scenario:'the Edit owner disappears',change:()=>null},
+  {scenario:'Inspect is left in an incoming snapshot',change:snapshot=>({...snapshot,display:{zoom:'fit',tool:'zones'}})},
+];
+for (const {scenario,change} of inspectionInvalidations) {
+  for (const outcome of ['success','failure']) {
+    test(`Inspect fences ${outcome} and drops queued coordinates when ${scenario}`,async()=>{
+      const h=inspectionHarness();
+      h.inspection.select({x:2,y:3});
+      await inspectionSettled();
+      h.inspection.select({x:8,y:6});
+      h.inspection.incoming(change(h.snapshot));
+      assert.deepEqual(h.inspection.value,{point:null,sample:null,pending:false,error:null});
+      const publications=h.published.length;
+      if (outcome==='success') h.calls[0].resolve(inspectionSample());
+      else h.calls[0].reject({category:'Stale',message:'obsolete failure',context:null});
+      await inspectionSettled();
+      assert.equal(h.published.length,publications,'late settlement cannot publish success or failure');
+      assert.equal(h.calls.length,1,'cleared desired work never dispatches');
+      assert.deepEqual(h.inspection.value,{point:null,sample:null,pending:false,error:null});
+    });
+  }
+}
+
+test('batched A-B-A source snapshots invalidate both pixel replies and old raster-load events',async()=>{
+  const h=inspectionHarness();
+  const oldEpoch=h.inspection.sourceEpoch;
+  h.inspection.select({x:2,y:3});
+  await inspectionSettled();
+  h.inspection.incoming({...h.snapshot,capture_id:CAPTURE_B});
+  h.inspection.incoming(h.snapshot);
+  assert.equal(h.inspection.sourceEpoch,oldEpoch+2);
+  assert.equal(h.inspection.rasterLoaded(oldEpoch,'blob:original'),false);
+  assert.equal(h.inspection.select({x:2,y:3}),false);
+  const epoch=h.inspection.sourceEpoch;
+  h.inspection.setRaster(epoch,'blob:returned-a');
+  assert.equal(h.inspection.rasterLoaded(oldEpoch,'blob:returned-a'),false);
+  assert.equal(h.inspection.rasterLoaded(epoch,'blob:returned-a'),true);
+  h.inspection.select({x:2,y:3});
+  assert.equal(h.calls.length,1,'the obsolete invocation still owns its slot');
+  h.calls[0].resolve(inspectionSample());
+  await inspectionSettled();
+  assert.equal(h.inspection.value.sample,null,'old A cannot revive by returning to the same source and coordinate');
+  assert.equal(h.calls.length,2);
+  h.calls[1].resolve(inspectionSample({rgba:[67,8,249,0]}));
+  await inspectionSettled();
+  assert.deepEqual(h.inspection.value.sample.rgba,[67,8,249,0]);
+});
+
+test('a missing raster or replaced blob clears inspection and only the matching image load can enable reads',async()=>{
+  const h=inspectionHarness(),epoch=h.inspection.sourceEpoch;
+  h.inspection.select({x:2,y:3});
+  await inspectionSettled();
+  h.inspection.select({x:8,y:6});
+  h.inspection.setRaster(epoch,null);
+  assert.equal(h.inspection.value.point,null);
+  assert.equal(h.inspection.select({x:2,y:3}),false);
+  h.inspection.setRaster(epoch,'blob:replacement');
+  assert.equal(h.inspection.rasterLoaded(epoch,'blob:original'),false);
+  assert.equal(h.inspection.available,false);
+  assert.equal(h.inspection.rasterLoaded(epoch,'blob:replacement'),true);
+  h.calls[0].reject({category:'Image',message:'old image failed',context:null});
+  await inspectionSettled();
+  assert.equal(h.calls.length,1);
+  assert.equal(h.inspection.value.error,null);
+  h.inspection.select({x:8,y:6});
+  await inspectionSettled();
+  h.calls[1].resolve(inspectionSample({x:8,y:6}));
+  await inspectionSettled();
+});
+
+for (const cause of ['Escape','tool departure','close','source transition']) {
+  test(`a ${cause} before the dispatch microtask prevents even the obsolete transport invocation`,async()=>{
+    const h=inspectionHarness();
+    h.inspection.select({x:2,y:3});
+    if (cause==='Escape') h.inspection.key('Escape',true);
+    else if (cause==='tool departure') h.inspection.setDisplay({tool:'content',zoom:'fit'});
+    else if (cause==='close') h.inspection.close();
+    else h.inspection.incoming({...h.snapshot,capture_id:CAPTURE_B});
+    await inspectionSettled();
+    assert.equal(h.calls.length,0);
+    assert.deepEqual(h.inspection.value,{point:null,sample:null,pending:false,error:null});
+  });
+}
+
+for (const outcome of ['success','failure']) {
+  test(`close/reopen keeps the occupied slot until late ${outcome} settles without publishing into the new instance`,async()=>{
+    const h=inspectionHarness();
+    const oldEpoch=h.inspection.sourceEpoch;
+    h.inspection.select({x:2,y:3});
+    await inspectionSettled();
+    h.inspection.select({x:8,y:6});
+    h.inspection.close();
+    const closedPublications=h.published.length;
+    assert.equal(h.inspection.select({x:2,y:3}),false);
+    assert.equal(h.inspection.rasterLoaded(oldEpoch,'blob:original'),false);
+    h.inspection.incoming(h.snapshot);
+    assert.equal(h.published.length,closedPublications,'closed Preview cannot publish incoming invalidations');
+    h.inspection.open();
+    assert.equal(h.inspection.select({x:2,y:3}),false,'reopening requires a matching newly loaded raster');
+    h.inspection.setRaster(h.inspection.sourceEpoch,'blob:reopened');
+    h.inspection.rasterLoaded(h.inspection.sourceEpoch,'blob:reopened');
+    h.inspection.select({x:2,y:3});
+    assert.equal(h.calls.length,1);
+    if (outcome==='success') h.calls[0].resolve(inspectionSample());
+    else h.calls[0].reject({category:'Busy',message:'closed read failed',context:null});
+    await inspectionSettled();
+    assert.equal(h.calls.length,2);
+    assert.equal(h.inspection.value.sample,null);
+    assert.equal(h.inspection.value.error,null);
+    h.calls[1].resolve(inspectionSample({rgba:[211,18,5,255]}));
+    await inspectionSettled();
+    assert.deepEqual(h.inspection.value.sample.rgba,[211,18,5,255]);
+  });
+}
+
+test('Escape discards both queued selection and in-flight failure, and reselection cannot resurrect its reply',async()=>{
+  const h=inspectionHarness();
+  h.inspection.select({x:2,y:3});
+  await inspectionSettled();
+  h.inspection.select({x:8,y:6});
+  assert.equal(h.inspection.key('Escape',true),true);
+  h.inspection.select({x:2,y:3});
+  h.calls[0].reject({category:'Busy',message:'old selection failed',context:null});
+  await inspectionSettled();
+  assert.equal(h.calls.length,2);
+  assert.equal(h.inspection.value.error,null);
+  assert.equal(h.inspection.value.sample,null);
+  h.calls[1].resolve(inspectionSample({rgba:[0,255,16,0]}));
+  await inspectionSettled();
+  assert.equal(rgbHex(h.inspection.value.sample.rgba),'#00FF10');
+});
+
+const mismatchedPixels=[
+  {scenario:'owner',override:{owner:{...owner,token:'foreign'}}},
+  {scenario:'owner workspace ID',override:{owner:{...owner,workspace:{...owner.workspace,workspace_id:'b'}}}},
+  {scenario:'capture',override:{capture_id:CAPTURE_B}},
+  {scenario:'frame',override:{frame_id:'foreign'}},
+  {scenario:'frame revision',override:{frame_revision:2}},
+  {scenario:'X coordinate',override:{x:3}},
+  {scenario:'Y coordinate',override:{y:4}},
+];
+for (const {scenario,override} of mismatchedPixels) {
+  test(`a mismatched pixel response ${scenario} reports an attributable failure without a default sample or retry`,async()=>{
+    const h=inspectionHarness();
+    h.inspection.select({x:2,y:3});
+    await inspectionSettled();
+    h.calls[0].resolve(inspectionSample(override));
+    await inspectionSettled();
+    assert.equal(h.inspection.value.pending,false);
+    assert.equal(h.inspection.value.sample,null);
+    assert.equal(h.inspection.value.error.category,'Stale');
+    assert.equal(h.calls.length,1);
+  });
+}
+
+test('synchronous transport failures settle the slot normally and require another explicit selection',async()=>{
+  const error={category:'Transport',message:'synchronous refusal',context:null};
+  let calls=0;
+  const inspection=new PixelInspection(()=>{calls++;throw error;},()=>{},cause=>cause);
+  inspection.incoming(inspectionSnapshot());
+  inspection.setRaster(inspection.sourceEpoch,'blob:source');
+  inspection.rasterLoaded(inspection.sourceEpoch,'blob:source');
+  inspection.select({x:2,y:3});
+  await inspectionSettled();
+  assert.deepEqual(inspection.value,{point:{x:2,y:3},sample:null,pending:false,error});
+  assert.equal(calls,1);
+  inspection.select({x:8,y:6});
+  await inspectionSettled();
+  assert.equal(calls,2);
+});
+
+test('bottom/right pixel-step boundaries and invalid selections preserve the last successful sample without another read',async()=>{
+  const h=inspectionHarness();
+  h.inspection.select({x:8,y:6});
+  await inspectionSettled();
+  h.calls[0].resolve(inspectionSample({x:8,y:6,rgba:[25,219,6,255]}));
+  await inspectionSettled();
+  const value=h.inspection.value;
+  assert.equal(h.inspection.key('ArrowRight',true),true);
+  assert.equal(h.inspection.key('ArrowDown',true),true);
+  for (const point of [{x:-1,y:0},{x:9,y:0},{x:0,y:7},{x:0.5,y:0},{x:NaN,y:0},{x:0,y:Infinity}]) {
+    assert.equal(h.inspection.select(point),false);
+    assert.equal(h.inspection.value,value);
+  }
+  assert.equal(h.inspection.pointer(9,7,{left:0,top:0,width:9,height:7}),false);
+  assert.equal(h.inspection.value,value);
+  await inspectionSettled();
+  assert.equal(h.calls.length,1);
+});
+
+test('a failed obsolete blob cannot clear the currently loaded image at the same source epoch',()=>{
+  const h=inspectionHarness(),epoch=h.inspection.sourceEpoch;
+  h.inspection.setRaster(epoch,'blob:new-display');
+  h.inspection.rasterLoaded(epoch,'blob:new-display');
+  assert.equal(h.inspection.rasterFailed(epoch,'blob:original'),false);
+  assert.equal(h.inspection.available,true);
+  assert.equal(h.inspection.rasterFailed(epoch,'blob:new-display'),true);
+  assert.equal(h.inspection.available,false);
+  assert.deepEqual(h.inspection.value,{point:null,sample:null,pending:false,error:null});
+});
+
+test('acquisition A-busy-A does not revive a pending read even when the source identity is unchanged',async()=>{
+  const h=inspectionHarness();
+  h.inspection.select({x:2,y:3});
+  await inspectionSettled();
+  h.inspection.incoming({...h.snapshot,nativeSelection:{busy:true}});
+  assert.equal(h.inspection.select({x:8,y:6}),false);
+  h.inspection.incoming(h.snapshot);
+  assert.equal(h.inspection.available,true);
+  assert.equal(h.inspection.value.point,null,'acquisition ending does not restore the old point');
+  h.inspection.select({x:2,y:3});
+  h.calls[0].resolve(inspectionSample());
+  await inspectionSettled();
+  assert.equal(h.calls.length,2);
+  assert.equal(h.inspection.value.sample,null);
+  h.calls[1].resolve(inspectionSample({rgba:[184,7,222,128]}));
+  await inspectionSettled();
+  assert.deepEqual(h.inspection.value.sample.rgba,[184,7,222,128]);
+});
+
+for (const outcome of ['success','failure']) {
+  test(`a closed Preview never dispatches its queued point or publishes a late ${outcome}`,async()=>{
+    const old=inspectionHarness();
+    old.inspection.select({x:2,y:3});
+    await inspectionSettled();
+    old.inspection.select({x:8,y:6});
+    old.inspection.close();
+    const publications=old.published.length;
+    const reopened=inspectionHarness();
+    reopened.inspection.select({x:8,y:6});
+    await inspectionSettled();
+    if (outcome==='success') old.calls[0].resolve(inspectionSample());
+    else old.calls[0].reject({category:'Stale',message:'closed instance',context:null});
+    await inspectionSettled();
+    assert.equal(old.published.length,publications);
+    assert.equal(old.calls.length,1);
+    assert.equal(old.inspection.value.sample,null);
+    assert.deepEqual(reopened.inspection.value,{point:{x:8,y:6},sample:null,pending:true,error:null});
+    reopened.calls[0].resolve(inspectionSample({x:8,y:6,rgba:[127,16,201,255]}));
+    await inspectionSettled();
+    assert.deepEqual(reopened.inspection.value.sample.rgba,[127,16,201,255]);
+  });
+}
+
+test('an owner workspace mismatch cannot publish a pixel even when its token and frame identity match',async()=>{
+  const h=inspectionHarness();
+  h.inspection.select({x:2,y:3});
+  await inspectionSettled();
+  h.calls[0].resolve(inspectionSample({owner:{...owner,workspace:{...owner.workspace,revision:99}}}));
+  await inspectionSettled();
+  assert.equal(h.inspection.value.sample,null);
+  assert.equal(h.inspection.value.error.category,'Stale');
+  assert.equal(h.calls.length,1);
+});
+
+test('a raw frame loads once before Inspect and stays ready across tool changes and zoom without rebasing geometry',async()=>{
+  const before=create(loaded(INSPECT_FRAME),edges(1,1,4,4));
+  let state=applyView(before,{...before.view,frame:{...INSPECT_FRAME,id:'raw',revision:2,width:11,height:5,confirmed:false}});
+  const retained=structuredClone(state);
+  const snapshot=previewSnapshot(state,'ja',true,null);
+  assert.equal(snapshot.display.tool,'zones');
+  assert.equal(snapshot.frameGeometryReady,false);
+  assert.equal(snapshot.confirmed,false);
+  const h=inspectionHarness(snapshot),epoch=h.inspection.sourceEpoch;
+  assert.equal(h.inspection.available,false,'loading the raw raster does not activate Inspect');
+  state=setDisplay(state,{tool:'inspect',zoom:'fit'});
+  h.inspection.setDisplay(state.display);
+  h.inspection.incoming(previewSnapshot(state,'ja',true,null));
+  assert.equal(h.inspection.available,true,'the already loaded raw raster stays available on tool entry');
+  assert.equal(h.inspection.sourceEpoch,epoch);
+  assert.equal(h.inspection.pointer(10.9,4.9,{left:0,top:0,width:11,height:5}),true);
+  await inspectionSettled();
+  h.calls[0].resolve(inspectionSample({frame_id:'raw',frame_revision:2,x:10,y:4,rgba:[171,5,244,0]}));
+  await inspectionSettled();
+  const value=h.inspection.value;
+  state=setDisplay(state,{tool:'inspect',zoom:150});
+  h.inspection.setDisplay(state.display);
+  h.inspection.incoming(previewSnapshot(state,'ja',true,null));
+  assert.equal(h.inspection.value,value,'a display-only zoom preserves the original point and bytes');
+  assert.equal(h.inspection.sourceEpoch,epoch);
+  assert.equal(h.inspection.available,true);
+  state=setDisplay(state,{tool:'zones',zoom:150});
+  h.inspection.setDisplay(state.display);
+  h.inspection.incoming(previewSnapshot(state,'ja',true,null));
+  assert.deepEqual(h.inspection.value,{point:null,sample:null,pending:false,error:null});
+  state=setDisplay(state,{tool:'inspect',zoom:150});
+  h.inspection.setDisplay(state.display);
+  h.inspection.incoming(previewSnapshot(state,'ja',true,null));
+  assert.equal(h.inspection.available,true,'reentry needs no second image load for the unchanged raster');
+  assert.equal(h.inspection.value.point,null,'reentry does not restore the old selection');
+  assert.equal(h.inspection.sourceEpoch,epoch);
+  assert.equal(h.calls.length,1);
+  assert.deepEqual({...state,display:retained.display},retained,'geometry, crops, trials, dirtiness and Undo remain unchanged');
+});
+
+for (const outcome of ['success','failure']) {
+  test(`incoming Inspect-Regions-Inspect snapshots fence late ${outcome} while retaining the same loaded raster`,async()=>{
+    const initial=setDisplay(loaded(INSPECT_FRAME),{tool:'inspect',zoom:'fit'});
+    const h=inspectionHarness(previewSnapshot(initial,'en',true,null)),epoch=h.inspection.sourceEpoch;
+    h.inspection.select({x:2,y:3});
+    await inspectionSettled();
+    h.inspection.select({x:8,y:6});
+    h.inspection.incoming(previewSnapshot(setDisplay(initial,{tool:'zones',zoom:'fit'}),'en',true,null));
+    h.inspection.incoming(previewSnapshot(initial,'en',true,null));
+    assert.equal(h.inspection.sourceEpoch,epoch);
+    assert.equal(h.inspection.available,true);
+    assert.deepEqual(h.inspection.value,{point:null,sample:null,pending:false,error:null});
+    h.inspection.select({x:2,y:3});
+    assert.equal(h.calls.length,1,'tool invalidation cannot release an occupied invocation');
+    if (outcome==='success') h.calls[0].resolve(inspectionSample());
+    else h.calls[0].reject({category:'CommandBusy',message:'departed tool read',context:null});
+    await inspectionSettled();
+    assert.equal(h.calls.length,2);
+    assert.deepEqual(h.inspection.value,{point:{x:2,y:3},sample:null,pending:true,error:null});
+    h.calls[1].resolve(inspectionSample({rgba:[203,49,7,128]}));
+    await inspectionSettled();
+    assert.deepEqual(h.inspection.value.sample.rgba,[203,49,7,128]);
+    assert.equal(h.calls.length,2);
+  });
+}
+
+const inspectionToolTransitions=[
+  {scenario:'incoming snapshot',update:(inspection,snapshot,tool)=>inspection.incoming({...snapshot,display:{...snapshot.display,tool}})},
+  {scenario:'local tool change',update:(inspection,snapshot,tool)=>inspection.setDisplay({...snapshot.display,tool})},
+];
+for (const {scenario,update} of inspectionToolTransitions) {
+  test(`${scenario} exposes the synchronous Inspect guard before the next render and clears it on departure`,async()=>{
+    const snapshot=inspectionSnapshot({display:{tool:'zones',zoom:'fit'}});
+    const h=inspectionHarness(snapshot),epoch=h.inspection.sourceEpoch;
+    assert.equal(h.inspection.inspecting,false);
+    assert.equal(h.inspection.available,false);
+    update(h.inspection,snapshot,'inspect');
+    assert.equal(snapshot.display.tool,'zones','a handler can still hold the previous rendered snapshot');
+    assert.equal(h.inspection.inspecting,true,'pointer/key/edit routing reads the synchronous guard instead');
+    assert.equal(h.inspection.available,true);
+    assert.equal(h.inspection.key('ArrowRight',true),false,'tool entry still cannot invent a selection');
+    h.inspection.select({x:2,y:3});
+    await inspectionSettled();
+    update(h.inspection,snapshot,'zones');
+    assert.equal(h.inspection.inspecting,false);
+    assert.equal(h.inspection.available,false);
+    assert.equal(h.inspection.sourceEpoch,epoch,'tool changes keep the loaded raster');
+    assert.deepEqual(h.inspection.value,{point:null,sample:null,pending:false,error:null});
+    const publications=h.published.length;
+    h.calls[0].resolve(inspectionSample());
+    await inspectionSettled();
+    assert.equal(h.published.length,publications);
+    assert.equal(h.calls.length,1);
+  });
+}
+
+const rasterFailureSettlements=[
+  {scenario:'success',settle:call=>call.resolve(inspectionSample())},
+  {scenario:'failure',settle:call=>call.reject({category:'Image',message:'obsolete raster read',context:null})},
+];
+for (const {scenario,settle} of rasterFailureSettlements) {
+  test(`a current raster failure clears queued selection and fences late ${scenario} until explicit reselection`,async()=>{
+    const h=inspectionHarness(),epoch=h.inspection.sourceEpoch;
+    h.inspection.select({x:2,y:3});
+    await inspectionSettled();
+    h.inspection.select({x:8,y:6});
+    assert.equal(h.inspection.rasterFailed(epoch,'blob:original'),true);
+    assert.equal(h.inspection.available,false);
+    assert.deepEqual(h.inspection.value,{point:null,sample:null,pending:false,error:null});
+    h.inspection.setRaster(epoch,'blob:recovered');
+    assert.equal(h.inspection.rasterLoaded(epoch,'blob:original'),false);
+    assert.equal(h.inspection.rasterLoaded(epoch,'blob:recovered'),true);
+    assert.equal(h.inspection.value.point,null,'a successful image load never restores the old selection');
+    h.inspection.select({x:2,y:3});
+    assert.equal(h.calls.length,1,'image failure cannot free an occupied invocation');
+    settle(h.calls[0]);
+    await inspectionSettled();
+    assert.equal(h.calls.length,2);
+    assert.deepEqual(h.inspection.value,{point:{x:2,y:3},sample:null,pending:true,error:null});
+    h.calls[1].resolve(inspectionSample({rgba:[52,213,6,0]}));
+    await inspectionSettled();
+    assert.deepEqual(h.inspection.value.sample.rgba,[52,213,6,0]);
+    assert.equal(rgbHex(h.inspection.value.sample.rgba),'#34D506');
+  });
+}
+
+test('an unchanged pre-edit snapshot cannot discard a local Inspect selection or its queued pixel',async()=>{
+  const snapshot=inspectionSnapshot({display:{tool:'zones',zoom:'fit'}});
+  const h=inspectionHarness(snapshot);
+  h.inspection.setDisplay({tool:'inspect',zoom:'fit'});
+  h.inspection.select({x:2,y:3});
+  await inspectionSettled();
+  h.inspection.select({x:8,y:6});
+  h.inspection.incoming({...snapshot,commandBusy:true});
+  assert.equal(h.inspection.inspecting,true);
+  assert.deepEqual(h.inspection.value,{point:{x:8,y:6},sample:null,pending:true,error:null});
+  h.inspection.incoming({...snapshot,display:{tool:'inspect',zoom:'fit'}});
+  h.calls[0].resolve(inspectionSample());
+  await inspectionSettled();
+  assert.equal(h.calls.length,2);
+  h.calls[1].resolve(inspectionSample({x:8,y:6,rgba:[25,219,6,255]}));
+  await inspectionSettled();
+  assert.deepEqual(h.inspection.value.sample.rgba,[25,219,6,255]);
+});
+
+test('display synchronization retains local zoom through repeated polls but accepts authoritative display and source changes',()=>{
+  const snapshot=inspectionSnapshot();
+  const h=inspectionHarness(snapshot);
+  h.inspection.setDisplay({tool:'inspect',zoom:150});
+  assert.deepEqual(h.inspection.incoming({...snapshot,commandBusy:true}),{tool:'inspect',zoom:150});
+  const acknowledged={...snapshot,display:{tool:'inspect',zoom:150}};
+  assert.deepEqual(h.inspection.incoming(acknowledged),{tool:'inspect',zoom:150});
+  assert.deepEqual(h.inspection.incoming({...acknowledged,display:{tool:'content',zoom:200}}),{tool:'content',zoom:200});
+  h.inspection.setDisplay({tool:'inspect',zoom:300});
+  const replaced={...acknowledged,display:{tool:'content',zoom:200},frame:{...snapshot.frame,id:'replacement'}};
+  assert.deepEqual(h.inspection.incoming(replaced),{tool:'content',zoom:200});
+  assert.equal(h.inspection.inspecting,false);
+  assert.equal(h.inspection.available,false);
 });

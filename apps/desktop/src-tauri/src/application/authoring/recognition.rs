@@ -182,6 +182,17 @@ pub struct RecognitionFrame {
     pub historical_capture_at_ms: Option<u64>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct RecognitionPixel {
+    pub owner: AuthoringRef,
+    pub capture_id: String,
+    pub frame_id: String,
+    pub frame_revision: u64,
+    pub x: u32,
+    pub y: u32,
+    pub rgba: [u8; 4],
+}
+
 #[derive(Serialize)]
 pub struct RecognitionView {
     pub owner: AuthoringRef,
@@ -1313,6 +1324,61 @@ impl Application {
             trial.stale = true;
         }
         recognition.commit_image(&mut prepared.image);
+    }
+
+    /// Reads the current original without retaining it beyond ordinary command admission.
+    pub fn recognition_pixel(
+        &self,
+        owner: &AuthoringRef,
+        capture_id: &str,
+        frame_id: &str,
+        frame_revision: u64,
+        x: u32,
+        y: u32,
+    ) -> Result<RecognitionPixel, Fault> {
+        let (_command, state) = self.command_state()?;
+        let recognition = &state.authoring(owner)?.recognition;
+        recognition.check_capture(Some(capture_id))?;
+        let frame = recognition.frame.as_ref().ok_or_else(|| {
+            invalid("No original frame is retained").with_context(json!({"reason": "missing_frame"}))
+        })?;
+        if frame.id != frame_id || frame.revision != frame_revision {
+            return Err(stale());
+        }
+        let image = &frame.image;
+        let bounds = || {
+            invalid("Pixel coordinates are outside the retained original frame").with_context(
+                json!({"reason": "pixel_bounds", "x": x, "y": y,
+                    "width": image.width, "height": image.height}),
+            )
+        };
+        if x >= image.width || y >= image.height {
+            return Err(bounds());
+        }
+        let width = usize::try_from(image.width).map_err(|_| bounds())?;
+        let x_index = usize::try_from(x).map_err(|_| bounds())?;
+        let y_index = usize::try_from(y).map_err(|_| bounds())?;
+        let offset = y_index
+            .checked_mul(width)
+            .and_then(|row| row.checked_add(x_index))
+            .and_then(|pixel| pixel.checked_mul(4))
+            .ok_or_else(bounds)?;
+        let end = offset.checked_add(4).ok_or_else(bounds)?;
+        let rgba: [u8; 4] = image
+            .rgba
+            .get(offset..end)
+            .ok_or_else(bounds)?
+            .try_into()
+            .map_err(|_| bounds())?;
+        Ok(RecognitionPixel {
+            owner: owner.clone(),
+            capture_id: capture_id.to_owned(),
+            frame_id: frame.id.clone(),
+            frame_revision: frame.revision,
+            x,
+            y,
+            rgba,
+        })
     }
 
     pub fn recognition_preview(

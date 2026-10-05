@@ -1,6 +1,7 @@
 use super::{Backend, background};
 use mado_mata_desktop::application::{
-    AuthoringRef, RecognitionCopy, RecognitionSaved, RecognitionTrial, RecognitionView,
+    AuthoringRef, RecognitionCopy, RecognitionPixel, RecognitionSaved, RecognitionTrial,
+    RecognitionView,
 };
 use mado_runtime_comparison::model::Fault;
 use mado_runtime_comparison::recognition::{RecognitionDocument, SnippetKind};
@@ -104,6 +105,16 @@ pub async fn native_release_selection(
 
 pub const PREVIEW_WINDOW: &str = "recognition-preview";
 
+fn require_preview_window(label: &str) -> Result<(), Fault> {
+    if label != PREVIEW_WINDOW {
+        return Err(Fault::new(
+            "RecognitionPreview",
+            "Only the preview window may receive image pixels",
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn recognition_view(
     owner: AuthoringRef,
@@ -206,12 +217,7 @@ pub async fn recognition_preview(
     app: tauri::AppHandle,
     state: tauri::State<'_, Backend>,
 ) -> Result<tauri::ipc::Response, Fault> {
-    if window.label() != PREVIEW_WINDOW {
-        return Err(Fault::new(
-            "RecognitionPreview",
-            "Only the preview window may receive image pixels",
-        ));
-    }
+    require_preview_window(window.label())?;
     let application = state.bootstrap.application()?;
     let worker = application.clone();
     let expected = owner.clone();
@@ -225,6 +231,25 @@ pub async fn recognition_preview(
         ));
     }
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+pub async fn recognition_pixel(
+    owner: AuthoringRef,
+    capture_id: String,
+    frame_id: String,
+    frame_revision: u64,
+    x: u32,
+    y: u32,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Backend>,
+) -> Result<RecognitionPixel, Fault> {
+    require_preview_window(window.label())?;
+    let application = state.bootstrap.application()?;
+    background(move || {
+        application.recognition_pixel(&owner, &capture_id, &frame_id, frame_revision, x, y)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -789,4 +814,59 @@ pub async fn recognition_close_preview(
 
 fn preview_fault(error: tauri::Error) -> Fault {
     Fault::new("RecognitionPreview", error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[test]
+    fn pixel_commands_require_the_exact_preview_window_label() {
+        require_preview_window(PREVIEW_WINDOW).unwrap();
+        for label in ["main", "", "recognition-preview-other"] {
+            assert_eq!(
+                require_preview_window(label).unwrap_err().category,
+                "RecognitionPreview",
+            );
+        }
+    }
+
+    #[test]
+    fn pixel_command_coordinates_reject_invalid_transport_numbers_without_coercion() {
+        // Both coordinate arguments use u32. Tauri's CommandItem forwards JSON
+        // values to this same deserializer; no native WebView is needed here.
+        for raw in [
+            "-1", "-0", "0.5", "1.0", "4294967296", "1e100", "null", "\"1\"", "true",
+            "false", "[]", "{}",
+        ] {
+            let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+            assert!(
+                u32::deserialize(&value).is_err(),
+                "a pixel coordinate must reject {raw} rather than floor, wrap or default",
+            );
+        }
+        for expected in [0u32, 1, u32::MAX] {
+            let value = serde_json::json!(expected);
+            assert_eq!(u32::deserialize(&value).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn pixel_command_frame_revision_rejects_invalid_transport_numbers() {
+        for raw in [
+            "-1", "-0", "0.5", "1.0", "18446744073709551616", "1e100", "null", "\"1\"",
+            "true", "false", "[]", "{}",
+        ] {
+            let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+            assert!(
+                u64::deserialize(&value).is_err(),
+                "frameRevision must reject {raw}",
+            );
+        }
+        for expected in [0u64, 1, u64::MAX] {
+            let value = serde_json::json!(expected);
+            assert_eq!(u64::deserialize(&value).unwrap(), expected);
+        }
+    }
 }
