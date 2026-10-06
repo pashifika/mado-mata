@@ -706,6 +706,10 @@ Reopen with **Open preview** to continue the same draft.
 At the default Preview width, **Capture** and **Done** stay on the same toolbar
 row as the editing controls. Narrow windows use fixed additional rows; tool,
 capture, and feedback state do not change the image viewport's height.
+The Regions **Undo/Delete** controls and Game content controls share the same
+left edge. **Inspect** replaces the lower status-bar contents with a compact
+two-line pixel readout; no separate inspection area is reserved above the image,
+and the readout never covers image pixels.
 
 With **Inspect**, click a pixel anywhere in the original image, including outside
 Game content or before geometry confirmation. X/Y are zero-based full-frame

@@ -35,7 +35,7 @@
 .preview-toolbar button { flex-shrink: 0; font-size: 12px; padding: 4px 10px; white-space: nowrap; }
 .preview-tools { grid-area: tools; }
 .preview-zoom-controls { grid-area: zoom; }
-.preview-toolbar > .preview-edit-actions, .preview-toolbar > .content-trial { grid-area: edit; justify-self: end; flex-wrap: nowrap; margin: 0; }
+.preview-toolbar > .preview-edit-actions, .preview-toolbar > .content-trial { grid-area: edit; justify-self: start; flex-wrap: nowrap; margin: 0; }
 .preview-toolbar > .content-trial { min-width: 0; max-width: 100%; overflow-x: auto; justify-self: stretch; }
 .preview-actions { grid-area: actions; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .preview-actions > button { min-height: 30px; }
@@ -77,9 +77,8 @@
 .preview-toolbar .select-trigger:disabled { background: var(--surface); color: inherit; }
 .preview-toolbar .preview-zoom-select { width: 92px; min-width: 92px; max-width: 92px; }
 .preview-message { margin: 24px; }
-/* This rail keeps its dimensions in every tool and pending/value/error state, so Fit never follows text. */
-.preview-inspection { box-sizing: border-box; flex: 0 0 80px; height: 80px; display: grid; grid-template-rows: 16px 20px 22px; gap: 3px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--surface); font-size: 11px; min-width: 0; }
-.preview-inspection > strong { font-weight: 600; }
+/* Inspect reuses the status rail instead of reserving space above the image. */
+.preview-inspection { flex: 1; display: grid; grid-template-rows: 14px 14px; gap: 1px; font-size: 11px; line-height: 14px; min-width: 0; }
 .inspection-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1.6fr)) repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0; font-variant-numeric: tabular-nums; }
 .inspection-values > div { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .inspection-values dt { color: var(--text-muted); }
@@ -87,7 +86,7 @@
 .inspection-color-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .inspection-hex { flex: none; white-space: nowrap; }
 .inspection-status { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inspection-swatch { position: relative; flex: 0 0 22px; height: 22px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 3px; overflow: hidden; background-color: #fff; background-image: linear-gradient(45deg, #bbb 25%, transparent 25%), linear-gradient(-45deg, #bbb 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #bbb 75%), linear-gradient(-45deg, transparent 75%, #bbb 75%); background-size: 10px 10px; background-position: 0 0, 0 5px, 5px -5px, -5px 0; }
+.inspection-swatch { position: relative; flex: 0 0 14px; height: 14px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 3px; overflow: hidden; background-color: #fff; background-image: linear-gradient(45deg, #bbb 25%, transparent 25%), linear-gradient(-45deg, #bbb 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #bbb 75%), linear-gradient(-45deg, transparent 75%, #bbb 75%); background-size: 10px 10px; background-position: 0 0, 0 5px, 5px -5px, -5px 0; }
 .inspection-swatch > span { position: absolute; inset: 0; }
 /* Candidate controls occupy the toolbar, never the image. Feedback stays in the fixed-height rail. */
 .content-trial { display: flex; align-items: center; gap: 8px; }
