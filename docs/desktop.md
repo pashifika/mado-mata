@@ -1845,10 +1845,18 @@ roots; do not modify tracked fixtures or the operator's normal configuration.
 Run the Setup, Recovery, naming, snapshot, and restore checks in both English and
 Japanese. Do not replace actual WebView interaction with mocked command results.
 
-The main-window configuration currently requests **1180 × 840** initially and
-**760 × 600** as its minimum, in logical window dimensions. This is not a
-verified supported minimum; native clamp and layout qualification remain open.
-Preview sizing is unchanged. For both English and Japanese:
+The macOS main window starts at **1180 × 840** and enforces a verified
+**760 × 600** minimum, in logical window dimensions. At that minimum, the
+measured WebView viewport was **760 × 568**. The layout checks covered both
+English and Japanese, including long labels, concurrent notices and dialogs.
+Normal operator edge and corner drags stopped at the configured lower bounds;
+native maximize and restore returned to the same minimum-size layout.
+Enlargement remains available. This qualifies main-window layout and resizing,
+not native capture, OCR, game input or other-platform acceptance.
+
+Detached Preview retains its independent sizing. Repeat the following checks
+after layout changes or when qualifying another display environment, in both
+English and Japanese:
 
 - Record display/work-area geometry and scale, native logical window dimensions,
   and measured WebView viewport dimensions separately. Resize interactively to
