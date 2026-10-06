@@ -285,6 +285,9 @@ Neither action inspects, binds, or runs the package.
   controls; generated source maps are read-only facts. Metadata never
   opens in the source editor. Manifest controls preserve package identity and
   declarations while editing supported entries and portable target intent.
+  Schema **Fields** pair the type selector and field-name input in one joined
+  control, like Logs filters, including the new-field row. Names commit on Enter
+  or focus loss; empty or duplicate names retain adjacent validation feedback.
   Malformed schema/preset bytes remain unchanged until deliberate repair and
   Save; rebuilding an invalid document requires confirmation. Saved local
   workspace profiles are not part of these forms.
