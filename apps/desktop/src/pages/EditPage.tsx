@@ -146,7 +146,9 @@ export default function EditPage({session, label, handlers, recognition, recogni
     if (revealRequest === 0) return;
     const main = document.getElementById('authoring-main');
     const top = main?.getBoundingClientRect().top ?? 0;
-    if (main && (top < 0 || top > window.innerHeight / 2)) main.scrollIntoView({block: 'start'});
+    const shell = main?.closest('.app');
+    const clearance = shell ? parseFloat(getComputedStyle(shell).getPropertyValue('--navigation-clearance')) || 0 : 0;
+    if (main && (top < clearance + 12 || top > clearance + (window.innerHeight - clearance) / 2)) main.scrollIntoView({block: 'start'});
     const body = document.getElementById('authoring-rail-body');
     const path = session.selected;
     const row = body && path !== null ? body.querySelector<HTMLElement>(`[data-path="${CSS.escape(path)}"]`) : null;
@@ -450,7 +452,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
       </div>
     </div>
     <div id="authoring-status" className="operation-status" role="status">{statusText}</div>
-    <p className="authority-note">{a.authority}</p>
     {leaseLost && <p id="authoring-lease-lost" className="inline-warning" role="alert">{a.leaseLost}</p>}
     {session.error && <div id="authoring-error"><FaultMessage title={a.actionFailed} value={session.error}/></div>}
     {recoveryFault && <div className="button-row"><button id="authoring-recover" type="button" disabled={locked} onClick={handlers.recover}>{a.recover}</button>

@@ -1,4 +1,5 @@
 import {useMemo, useState} from 'react';
+import type {ReactNode} from 'react';
 import Select from './Select.tsx';
 import {JsonErrorNotice, NormalizationNotice, NumberInput, RebuildControl, ValuesEditor} from './MetadataControls.tsx';
 import type {FileDraft, TypedText} from '../authoring.ts';
@@ -35,14 +36,16 @@ function IssueRows({node, root, path, onChange}: {node: Json | undefined; root?:
 }
 
 // Field names are committed on Enter or when focus leaves; an empty or taken name is refused and reverted.
-function FieldName({id, name, names, onRename}: {id: string; name: string; names: string[]; onRename: (name: string) => void}) {
+function FieldName({id, name, names, onRename, children}: {id: string; name: string; names: string[]; onRename: (name: string) => void; children: ReactNode}) {
   const {a} = useCopy();
   const [text, setText] = useState(name);
   const error = text === '' ? a.fieldNameEmpty : text !== name && names.includes(text) ? a.fieldNameTaken : null;
   const commit = () => {
     if (error === null && text !== name) onRename(text); else setText(name);
   };
-  return <div className="field schema-name"><label htmlFor={id}>{a.fieldName}</label>
+  return <div className="field schema-name"><div className="input-select-group">
+    {children}
+    <label htmlFor={id} className="visually-hidden">{a.fieldName}</label>
     <input id={id} type="text" value={text} spellCheck={false} autoCapitalize="off" autoCorrect="off" aria-invalid={error !== null}
       aria-describedby={error ? `${id}-error` : undefined} onChange={event => setText(event.target.value)} onBlur={commit}
       onKeyDown={event => {
@@ -53,7 +56,7 @@ function FieldName({id, name, names, onRename}: {id: string; name: string; names
         } else if (event.key === 'Escape') {
           setText(name);
         }
-      }}/>
+      }}/></div>
     {error && <p id={`${id}-error`} className="field-error">{error}</p>}</div>;
 }
 
@@ -64,13 +67,14 @@ function AddField({path, names, onAdd}: {path: string; names: string[]; onAdd: (
   const id = `${controlId(path)}-new`;
   const taken = names.includes(name);
   return <div className="schema-add" role="group" aria-label={a.addFieldHeading(path)}>
-    <div className="field"><label htmlFor={`${id}-name`}>{a.newFieldName}</label>
-      <input id={`${id}-name`} type="text" value={name} spellCheck={false} autoCapitalize="off" autoCorrect="off" aria-invalid={taken}
-        aria-describedby={taken ? `${id}-error` : undefined} onChange={event => setName(event.target.value)}/>
-      {taken && <p id={`${id}-error`} className="field-error">{a.fieldNameTaken}</p>}</div>
-    <div className="field"><label htmlFor={`${id}-type`}>{a.fieldType}</label>
+    <div className="field"><div className="input-select-group">
+      <label htmlFor={`${id}-type`} className="visually-hidden">{a.fieldType}</label>
       <Select id={`${id}-type`} value={type} onChange={value => setType(schemaType({type: value}) ?? type)}
-        options={SCHEMA_TYPES.map(item => ({value: item, label: a.schemaType(item)}))}/></div>
+        options={SCHEMA_TYPES.map(item => ({value: item, label: a.schemaType(item)}))}/>
+      <label htmlFor={`${id}-name`} className="visually-hidden">{a.newFieldName}</label>
+      <input id={`${id}-name`} type="text" value={name} placeholder={a.newFieldName} spellCheck={false} autoCapitalize="off" autoCorrect="off" aria-invalid={taken}
+        aria-describedby={taken ? `${id}-error` : undefined} onChange={event => setName(event.target.value)}/></div>
+      {taken && <p id={`${id}-error`} className="field-error">{a.fieldNameTaken}</p>}</div>
     <button id={`${id}-add`} type="button" disabled={name === '' || taken} onClick={() => {onAdd(name, type); setName('');}}>{s.addField}</button>
   </div>;
 }
@@ -125,15 +129,17 @@ function SchemaNode({node, path, depth, onChange, field}: {node: Json; path: str
   const object = isObject(node) ? node : null;
   const bounds = type === null ? undefined : SCHEMA_BOUNDS[type];
   const issues = nodeIssues(node);
+  const typeControl = <><label htmlFor={`${id}-type`} className={field ? 'visually-hidden' : undefined}>{a.fieldType}</label>
+    <Select id={`${id}-type`} value={type ?? ''} onChange={value => {
+      const next = schemaType({type: value});
+      if (next) onChange(withType(node, next));
+    }} options={[...(type === null ? [{value: '', label: a.unsupportedType(JSON.stringify(object?.type ?? null)), disabled: true}] : []),
+      ...SCHEMA_TYPES.map(item => ({value: item, label: a.schemaType(item)}))]}/></>;
   return <section className="schema-node" data-schema-path={path} aria-label={path}>
     <div className="schema-node-heading">
-      {field ? <FieldName id={`${id}-name`} name={field.name} names={field.names} onRename={field.onRename}/> : <span className="schema-node-label">{a.items}</span>}
-      <div className="field schema-type"><label htmlFor={`${id}-type`}>{a.fieldType}</label>
-        <Select id={`${id}-type`} value={type ?? ''} onChange={value => {
-          const next = schemaType({type: value});
-          if (next) onChange(withType(node, next));
-        }} options={[...(type === null ? [{value: '', label: a.unsupportedType(JSON.stringify(object?.type ?? null)), disabled: true}] : []),
-          ...SCHEMA_TYPES.map(item => ({value: item, label: a.schemaType(item)}))]}/></div>
+      {field
+        ? <FieldName id={`${id}-name`} name={field.name} names={field.names} onRename={field.onRename}>{typeControl}</FieldName>
+        : <><span className="schema-node-label">{a.items}</span><div className="field schema-type">{typeControl}</div></>}
       {field && <label className="checkbox-label"><input id={`${id}-required`} type="checkbox" checked={field.required}
         onChange={event => field.onRequired(event.target.checked)}/>{a.fieldRequired}</label>}
       {field && <button id={`${id}-remove`} type="button" className="danger-text" onClick={field.onRemove}>{s.removeField}</button>}
