@@ -31,7 +31,7 @@
 /* Detached preview window. */
 .preview-app { height: 100vh; display: flex; flex-direction: column; overflow: hidden; background: var(--canvas); }
 /* Rows depend only on window width, never on capture, error or help state. */
-.preview-toolbar { flex: none; display: grid; grid-template-areas: "tools zoom edit actions"; grid-template-columns: auto auto auto 1fr; grid-template-rows: 32px; align-items: center; gap: 6px 12px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); overflow-x: auto; }
+.preview-toolbar { flex: none; display: grid; grid-template-areas: "tools zoom edit actions"; grid-template-columns: auto auto minmax(0, 1fr) auto; grid-template-rows: 32px; align-items: center; gap: 6px 12px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); overflow-x: auto; }
 .preview-toolbar button { flex-shrink: 0; font-size: 12px; padding: 4px 10px; white-space: nowrap; }
 .preview-tools { grid-area: tools; }
 .preview-zoom-controls { grid-area: zoom; }
@@ -41,7 +41,7 @@
 .preview-actions > button { min-height: 30px; }
 .preview-actions > #preview-stop { margin-inline-end: auto; }
 .preview-toolbar .capture-main-button { box-sizing: border-box; width: 96px; }
-@media (max-width: 1200px) {
+@media (max-width: 1000px) {
   .preview-toolbar { grid-template-areas: "tools zoom edit" "actions actions actions"; grid-template-columns: auto auto minmax(0, 1fr); grid-template-rows: repeat(2, 32px); }
 }
 @media (max-width: 760px) {

@@ -703,6 +703,9 @@ The toolbar's rightmost **Done** button uses the primary accent color and closes
 only the preview, including when no image is loaded. It does not save, discard,
 exit Edit, or stop a running trial.
 Reopen with **Open preview** to continue the same draft.
+At the default Preview width, **Capture** and **Done** stay on the same toolbar
+row as the editing controls. Narrow windows use fixed additional rows; tool,
+capture, and feedback state do not change the image viewport's height.
 
 With **Inspect**, click a pixel anywhere in the original image, including outside
 Game content or before geometry confirmation. X/Y are zero-based full-frame
