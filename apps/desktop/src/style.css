@@ -128,6 +128,7 @@ details[open] > summary { font-weight: 600; }
 .tag.current { color: var(--ok); background: var(--ok-soft); }
 
 /* Shell */
+html:has(.navigation-header) { overscroll-behavior-y: none; }
 .app { min-height: 100vh; display: flex; flex-direction: column; }
 .app, .bootstrap-page { --navigation-clearance: 0px; }
 .navigation-header { position: sticky; top: 0; z-index: 30; flex-shrink: 0; isolation: isolate; }
@@ -371,6 +372,7 @@ details[open] > summary { font-weight: 600; }
 .toast-progress { height: 2px; background: #6f86a3; transform-origin: left; transition: transform .2s linear; }
 
 /* App settings dialog */
+.settings-dialog, .settings-nav, .settings-content { overscroll-behavior-y: none; }
 .settings-dialog { width: min(760px, calc(100vw - 30px)); max-height: calc(100vh - 60px); border: 1px solid #c8d2de; border-radius: 12px; padding: 0; color: var(--text); box-shadow: 0 22px 75px #12223b3d; }
 .settings-dialog::backdrop { background: #18293f66; }
 .dialog-header { padding: 20px 24px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }

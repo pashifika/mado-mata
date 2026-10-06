@@ -890,6 +890,11 @@ Keep images, recognized text, clipboard contents, and local resource paths priva
 The two-row navigation header stays at the top while the document and the
 package tree continue scrolling. Revealed diagnostics must clear the measured
 header height; scrolling or collapsing the tree does not discard drafts.
+Vertical overscroll at the main document's boundaries is disabled so the
+navigation does not move with the page's rubber-band effect. The settings dialog,
+its category navigation, and its content also suppress vertical overscroll and
+scroll chaining at their boundaries. Ordinary scrolling remains available;
+package-tree scrolling and detached Preview are unchanged.
 The icon-only **Menu** button opens the existing Application actions, with a
 localized accessible name and tooltip; its icon is decorative. Enter/Space
 opens the menu, Up/Down moves between actions, Escape closes it and returns
@@ -1856,6 +1861,11 @@ Preview sizing is unchanged. For both English and Japanese:
   scrolling. Scroll a long package tree independently, collapse/expand it and
   resize without losing its position or drafts. Exercise diagnostic reveal as
   described below rather than assuming a fixed header offset.
+  Continue the scroll gesture past both document boundaries: navigation must
+  remain stationary, while ordinary document and independent tree scrolling work.
+  In App settings, scroll long content past both boundaries in wide and stacked
+  layouts: category navigation must not move when the content boundary is reached.
+  Check category scrolling and access to Save/Close.
 - Check one shared Edit exclusion with another workspace selected, expandable
   static Save/Inspect details, adjacent faults, and modal-local Stop/Return.
   Verify the localized Menu name, decorative icon, keyboard behavior and focus
