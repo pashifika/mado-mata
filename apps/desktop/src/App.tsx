@@ -20,6 +20,7 @@ import CreateWorkspaceDialog from './components/CreateWorkspaceDialog.tsx';
 import type {CreateDraft} from './components/CreateWorkspaceDialog.tsx';
 import DirtyChoiceDialog from './components/DirtyChoiceDialog.tsx';
 import Notifications from './components/Notifications.tsx';
+import NavigationHeader from './components/NavigationHeader.tsx';
 import type {RecoveryHandlers} from './components/ProfileRecovery.tsx';
 import ResultPanel, {FaultMessage, fault} from './components/ResultPanel.tsx';
 import RunPage from './pages/RunPage.tsx';
@@ -78,7 +79,7 @@ function OperationStrip({idPrefix, owner, kind, phase, run, detail = null, messa
   const locale = useLocale();
   const t = messages[locale].app;
   const ui = messages[locale].ui;
-  return <div id={`${idPrefix}-operation-strip`} className="operation-strip" role="status" aria-live="polite">
+  return <div id={`${idPrefix}-operation-strip`} className={`operation-strip ${message?.error ? 'notice-error' : 'notice-info'}`} role={message?.error ? 'alert' : 'status'} aria-live={message?.error ? 'assertive' : 'polite'}>
     <span className="strip-owner"><span className="eyebrow">{t.activeOperation}</span><strong>{owner}</strong></span>
     <span className="strip-kind">{kind} · <code>{run ?? t.admitting}</code></span>
     <span className={`phase phase-${phase}`}>{ui.phase(phase)}</span>
@@ -94,11 +95,17 @@ function AuthoringStrip({idPrefix, owner, packageId, unsaved, showReturn, onRetu
 }) {
   const locale = useLocale();
   const a = messages[locale].ui.authoring;
-  return <div id={`${idPrefix}-authoring-strip`} className="operation-strip authoring-strip" role="status" aria-live="polite">
-    <span className="strip-owner"><span className="eyebrow">{a.ownerEyebrow}</span><strong>{owner}</strong></span>
-    <span className="strip-kind">{packageId === null ? a.stripUnknown : a.stripKind(packageId)}</span>
-    {unsaved > 0 && <span className="tag unsaved">{a.unsavedFiles(unsaved)}</span>}
-    <span className="strip-note">{a.stripNote}</span>
+  return <div id={`${idPrefix}-authoring-strip`} className="operation-strip authoring-strip notice-info">
+    <div className="authoring-status" role="status" aria-live="polite">
+      <span className="strip-owner"><span className="eyebrow">{a.ownerEyebrow}</span><strong>{owner}</strong></span>
+      <span className="strip-kind">{packageId === null ? a.stripUnknown : a.stripKind(packageId)}</span>
+      {unsaved > 0 && <span className="tag unsaved">{a.unsavedFiles(unsaved)}</span>}
+      <span id={`${idPrefix}-authoring-reason`} className="strip-note">{a.stripNote}</span>
+    </div>
+    <details id={`${idPrefix}-authoring-details`} className="strip-details">
+      <summary>{a.details}</summary>
+      <p id={`${idPrefix}-authoring-guidance`}>{a.authority}</p>
+    </details>
     {showReturn && <button id={`${idPrefix}-return-to-edit`} type="button" onClick={onReturn}>{a.returnToEdit}</button>}
   </div>;
 }
@@ -2037,6 +2044,7 @@ export default function App() {
     return <LocaleContext value={locale}>
       {shell === 'loading' || status === null
         ? <div className="bootstrap-page">
+          <NavigationHeader>
           <header className="topbar">
             <div className="brand"><span className="brandmark" aria-hidden="true">M</span><span>MadoMata</span></div>
             <div className="topbar-actions"><div className="inline-label"><label htmlFor="presentation-locale">{ui.bootstrap.presentation}</label>
@@ -2044,6 +2052,7 @@ export default function App() {
                 onChange={value => {if (value === 'en' || value === 'ja') dispatch({type: 'presentation', locale: value});}}/></div>
               <button id="bootstrap-exit" type="button" disabled={closing} onClick={() => void exitApplication()}>{closing ? ui.bootstrap.exiting : ui.bootstrap.exit}</button></div>
           </header>
+          </NavigationHeader>
           <main className="content bootstrap-content" aria-busy="true">
             <p className="muted" role="status">{ui.bootstrap.loading}</p>
             {bootstrap.actionError && <FaultMessage title={ui.bootstrap.actionFailed} value={bootstrap.actionError}/>}
@@ -2077,12 +2086,15 @@ export default function App() {
   const activeOwner = (workspace: Workspace): ActiveOwner => !active || owner === workspace.id ? null : owner === null ? 'application' : 'other';
 
   return <LocaleContext value={locale}><div className="app">
+    <NavigationHeader>
     <header className="topbar">
       <div className="brand"><span className="brandmark" aria-hidden="true">M</span><span>MadoMata</span><span className="divider" aria-hidden="true"/><span className="eyebrow">{t.workspace}</span></div>
       <div className="topbar-actions">
         <span className="lane-badge">{t.controlledScope}</span>
         <div className="menu-anchor">
-          <button id="application-menu" ref={menuButton} type="button" aria-haspopup="menu" aria-expanded={menuOpen} aria-controls="application-menu-items" onClick={() => setMenuOpen(open => !open)}>{t.application} ▾</button>
+          <button id="application-menu" ref={menuButton} type="button" className="application-menu-button" aria-label={t.menu} title={t.menu} aria-haspopup="menu" aria-expanded={menuOpen} aria-controls="application-menu-items" onClick={() => setMenuOpen(open => !open)}>
+            <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
           {menuOpen && <div id="application-menu-items" ref={menu} className="dropdown" role="menu" aria-labelledby="application-menu" onKeyDown={menuKeys}>
             <button type="button" role="menuitem" id="menu-settings" disabled={settings === null || !normalReady} onClick={openSettings}>{t.appSettings}</button>
             <button type="button" role="menuitem" id="menu-restore" onClick={() => {menuButton.current?.focus(); setMenuOpen(false); setConfigurationOpen(true);}}>{ui.bootstrap.restoreHeading}</button>
@@ -2114,6 +2126,7 @@ export default function App() {
         {nav.kind === 'closed' && <span className="scope-label">{t.closedDiagnostics}</span>}
       </nav>
     </div>
+    </NavigationHeader>
     {pendingClose && workspaces.some(workspace => workspace.id === pendingClose) && <div className="confirm-bar" role="alertdialog" aria-labelledby="confirm-close-text">
       <span id="confirm-close-text">{t.closeConfirm(labelOf(pendingClose))}</span>
       <button type="button" className="danger-text" onClick={() => {const workspace = workspaces.find(item => item.id === pendingClose); if (workspace) void closeTab(workspace, true);}}>{t.discardClose}</button>

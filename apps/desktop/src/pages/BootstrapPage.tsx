@@ -1,4 +1,5 @@
 import Select from '../components/Select.tsx';
+import NavigationHeader from '../components/NavigationHeader.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
 import {reconstructionBlock, restoreBlock, restoreOutcome} from '../bootstrap.ts';
 import type {Admission, BootstrapEvent, BootstrapUi} from '../bootstrap.ts';
@@ -92,12 +93,12 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
       <span className="muted" role="status">{restore ? b.block(restore) : ''}</span></div>
   </div></section>;
   return <div className={inShell ? 'bootstrap-inline' : 'bootstrap-page'}>
-    {!inShell && <header className="topbar">
+    {!inShell && <NavigationHeader><header className="topbar">
       <div className="brand"><span className="brandmark" aria-hidden="true">M</span><span>MadoMata</span><span className="divider" aria-hidden="true"/><span className="eyebrow">{b.state(status.state)}</span></div>
       <div className="topbar-actions"><div className="inline-label"><label htmlFor="presentation-locale">{b.presentation}</label>
         <Select id="presentation-locale" value={ui.presentation} options={languageOptions} onChange={value => asLocale(value, next => dispatch({type: 'presentation', locale: next}))}/></div>
         <button id="bootstrap-exit" type="button" disabled={exiting} onClick={handlers.onExit}>{exiting ? b.exiting : b.exit}</button></div>
-    </header>}
+    </header></NavigationHeader>}
     <Content className="content bootstrap-content" aria-labelledby="bootstrap-heading">
       <div className="page-heading"><div><span className="eyebrow">{b.state(status.state)}</span><Heading id="bootstrap-heading">{setup ? b.setupHeading : ready ? b.restoreHeading : b.recoveryHeading}</Heading>
         <p>{setup ? b.setupIntro : ready ? b.restoreHelp : recoveryIntro}</p></div>

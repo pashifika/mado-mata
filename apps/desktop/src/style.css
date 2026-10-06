@@ -129,6 +129,10 @@ details[open] > summary { font-weight: 600; }
 
 /* Shell */
 .app { min-height: 100vh; display: flex; flex-direction: column; }
+.app, .bootstrap-page { --navigation-clearance: 0px; }
+.navigation-header { position: sticky; top: 0; z-index: 30; flex-shrink: 0; isolation: isolate; }
+.app .content, .bootstrap-page .content { scroll-margin-top: 12px; }
+.app #authoring-main { scroll-margin-top: 12px; }
 .topbar { height: var(--topbar-height); display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 var(--space-5); background: #18293f; color: #fff; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: -.4px; }
 .brandmark { display: grid; place-items: center; width: 28px; height: 28px; background: #fff; color: #18293f; border-radius: 7px; font-size: 15px; }
@@ -138,6 +142,8 @@ details[open] > summary { font-weight: 600; }
 .lane-badge { font-size: 11px; color: #c8d7e9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .topbar button { background: #283d56; border-color: #4c5e73; color: #eaf0f8; }
 .topbar button:hover:not(:disabled) { background: #365071; }
+.application-menu-button { display: inline-grid; place-items: center; width: 38px; height: 36px; padding: 6px; flex-shrink: 0; }
+.application-menu-button svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; }
 .menu-anchor { position: relative; }
 .dropdown { position: absolute; top: 42px; right: 0; width: 260px; z-index: 30; background: var(--surface); color: var(--text); border: 1px solid #c8d2de; border-radius: 10px; box-shadow: 0 10px 28px #12223b22; padding: 6px; }
 .dropdown [role="menuitem"] { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: 0; background: transparent; color: var(--text); font-size: 13px; font-weight: 500; padding: 9px 10px; border-radius: 6px; }
@@ -185,6 +191,10 @@ details[open] > summary { font-weight: 600; }
 .strip-note { color: var(--text-muted); flex: 1; min-width: 160px; }
 .strip-error { color: var(--danger); flex: 1; min-width: 160px; font-weight: 600; }
 .operation-strip .stop-button { margin-left: auto; }
+.authoring-status { display: flex; flex: 1 1 540px; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.strip-details { flex: 0 1 260px; }
+.strip-details summary { font-size: 11px; }
+.strip-details p { margin: 4px 0; font-size: 11px; color: var(--text-muted); }
 .content-wide { padding: var(--space-4) var(--space-5) 0; }
 
 /* Workspace layout */
@@ -229,6 +239,7 @@ details[open] > summary { font-weight: 600; }
 .run-buttons { display: flex; gap: 12px; align-items: center; margin: 4px 0 12px; flex-wrap: wrap; }
 .run-buttons button { padding: 9px 16px; }
 .authority-note { color: #795629; border-left: 3px solid #c49a5a; background: #fbf6ed; padding: 9px 11px; font-size: 11px; }
+:where(.app, .bootstrap-page) .authority-note { color: var(--text-muted); border-left-color: var(--border-strong); background: var(--surface-alt); }
 .run-identity { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 6px 9px; font-size: 11px; margin: 0; }
 .run-identity dt { color: #6b7c90; }
 .run-identity dd { margin: 0; overflow-wrap: anywhere; }
@@ -257,6 +268,26 @@ details[open] > summary { font-weight: 600; }
 .inline-warning { padding: 9px; margin: 8px 0; border-radius: 4px; background: #fff3df; color: #865c24; font-size: 11px; overflow-wrap: anywhere; }
 .inline-warning button { margin: 6px 0 0 6px; font-size: 10px; }
 .field-error { color: #a3322f; font-size: 11px; margin: 4px 0 0; }
+/* Main-surface feedback shares severity and spacing without changing detached Preview feedback. */
+:where(.app, .bootstrap-page) :is(.fault, .inline-warning, .inline-info, .operation-status) {
+  --notice-color: var(--accent);
+  --notice-surface: var(--info-soft);
+  padding: 10px 12px;
+  margin: 8px 0 12px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--notice-color);
+  border-radius: var(--radius-sm);
+  background: var(--notice-surface);
+  color: var(--text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+:where(.app, .bootstrap-page) .inline-warning { --notice-color: var(--warn); --notice-surface: var(--warn-soft); }
+:where(.app, .bootstrap-page) .fault, .operation-strip.notice-error { --notice-color: var(--danger); --notice-surface: var(--danger-soft); border-color: var(--danger-border); color: var(--danger); }
+.operation-strip.notice-error { background: var(--notice-surface); border-left-color: var(--notice-color); }
+:where(.app, .bootstrap-page) .dismissible-fault { padding-inline-end: 46px; }
+:where(.app, .bootstrap-page) .inline-warning button { font-size: 11px; }
+:where(.app, .bootstrap-page) .operation-status:empty { min-height: 0; padding: 0; margin: 0; border: 0; background: transparent; }
 .validated > summary { color: var(--ok); }
 .open-form { margin-top: 4px; }
 .open-form h2 { margin-top: 18px; }
@@ -424,7 +455,7 @@ details[open] > summary { font-weight: 600; }
    folder) and Metadata (manifest, schema, presets, source maps) above the Duplicate entry; the right shows only the
    selected file: the native textarea editor with a synchronized line-number gutter, a structured form or facts.
    Validation results follow. File changes live in row menus and small dialogs. */
-.authoring-strip { background: var(--warn-soft); border-left-color: var(--warn); }
+.authoring-strip { background: var(--info-soft); border-left-color: var(--accent); }
 .authoring-strip button { margin-left: auto; }
 .repo-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; font-size: 11px; }
 .repo-facts dl { display: flex; flex-wrap: wrap; gap: 4px 18px; min-width: 0; margin: 0; }
@@ -433,7 +464,7 @@ details[open] > summary { font-weight: 600; }
 .repo-facts dd { margin: 0; overflow-wrap: anywhere; }
 .repo { display: grid; grid-template-columns: minmax(190px, 270px) minmax(0, 1fr); gap: 14px; align-items: start; margin-top: 12px; }
 .repo.rail-closed { grid-template-columns: minmax(0, 1fr); }
-.repo-rail { position: sticky; top: 12px; display: flex; flex-direction: column; max-height: calc(100vh - 24px); min-width: 0; }
+.repo-rail { position: sticky; top: calc(var(--navigation-clearance) + 12px); display: flex; flex-direction: column; max-height: calc(100vh - var(--navigation-clearance) - 24px); min-width: 0; }
 .repo-rail[hidden] { display: none; }
 .rail-heading { display: flex; align-items: center; gap: 4px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--border); }
 .rail-heading h2 { flex: 1; min-width: 0; margin: 0; font-size: 13px; }

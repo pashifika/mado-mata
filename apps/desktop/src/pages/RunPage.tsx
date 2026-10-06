@@ -55,7 +55,6 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   const [confirmEdit, setConfirmEdit] = useState(false);
   const a = t.authoring;
   const editOwner = authoring.role === 'owner';
-  const editReason = authoring.role !== null && authoring.ownerLabel !== null ? a.startBlocked(authoring.ownerLabel) : null;
   const reinspectButton = useRef<HTMLButtonElement>(null);
   const confirmRow = useRef<HTMLDivElement>(null);
   // Set only when the confirmation row closes while it owns focus. Focus returns to Reinspect; once the submitted
@@ -115,7 +114,9 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
       <p>{t.run.introduction}</p></div>
       <div className="actions">
         <button id="validate" disabled={locked || numericErrors || !profileBound} onClick={handlers.validate}>{t.run.validate}</button>
-        <button id="start" className="primary" disabled={!canStart} onClick={handlers.start}>{t.run.start}</button>
+        <button id="start" className="primary" disabled={!canStart}
+          aria-describedby={[authoring.role !== null ? 'app-authoring-strip' : null, startBlock ? 'start-block' : null].filter(Boolean).join(' ') || undefined}
+          onClick={handlers.start}>{t.run.start}</button>
       </div>
     </div>
     <div id="error">
@@ -128,12 +129,10 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
         ? <section className="fault" role="alert"><strong>{check ? t.run.checkError : t.run.runError} · {faultSummary(primary, !privatePrimary)}</strong>
             <p>{t.run.diagnosticHelp}</p></section>
         : <FaultMessage title={t.run.runError} value={primary}/>)}
-      {outcome?.failure && <p className="inline-warning" id="native-failure">{outcome.cause ? t.run.nativeCauses[outcome.cause] : t.run.nativeFailures[outcome.failure]}</p>}
+      {outcome?.failure && <p className="fault" id="native-failure">{outcome.cause ? t.run.nativeCauses[outcome.cause] : t.run.nativeFailures[outcome.failure]}</p>}
       {outcome?.launch && <p className="inline-warning" id="native-launch-outcome">{t.run.nativeLaunchOutcomes[outcome.launch]}</p>}
     </div>
-    <div className="operation-status" role="status">{renderMessage(locale, workspace.busy ?? workspace.notice) || (startBlock ?? '')}</div>
-    {editReason && <p id="start-authoring-block" className="inline-warning">{editReason}
-      {editOwner && <button id="run-return-to-edit" type="button" onClick={authoring.onReturn}>{a.returnToEdit}</button>}</p>}
+    <div className="operation-status" role="status">{renderMessage(locale, workspace.busy ?? workspace.notice)}</div>
     <section className="panel summary-panel" aria-label={t.run.summary}>
       <div className="summary-item"><span className="eyebrow">{t.common.execution}</span>
         <div className="state-line"><span className={`dot phase-${phase}`} aria-hidden="true"/><span id="state" className={`phase phase-${phase}`}>{t.phase(phase)}</span></div>
@@ -160,6 +159,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                 <button type="button" className="danger-text" onClick={() => closeConfirm(true)}>{t.run.discardReinspect}</button>
                 <button type="button" autoFocus onClick={() => closeConfirm(false)}>{t.run.keepDraft}</button></div>
               : <button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()}
+                aria-describedby={editOwner ? 'app-authoring-guidance' : undefined}
                 title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button>}
             {editOwner
               ? <button id="edit-package-return" type="button" onClick={authoring.onReturn}>{a.returnToEdit}</button>

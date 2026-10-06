@@ -157,12 +157,14 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
         <div className="open-row"><div className="field"><label htmlFor="package-path">{g.packageDirectory}</label>
           <input id="package-path" type="text" value={path} disabled={workspace.busy !== null} placeholder={g.packagePlaceholder} spellCheck={false}
             onChange={event => onPath(event.target.value)} onKeyDown={event => {if (event.key === 'Enter') confirmedInspect();}}/></div>
-          <button id="inspect" ref={inspectButton} className="primary" disabled={locked || owner || !path.trim()} title={inspectReason ?? undefined} onClick={confirmedInspect}>{g.inspect}</button></div>
+          <button id="inspect" ref={inspectButton} className="primary" disabled={locked || owner || !path.trim()}
+            aria-describedby={inspectReason ? 'inspect-block' : undefined}
+            title={inspectReason ?? undefined} onClick={confirmedInspect}>{g.inspect}</button></div>
         {confirmInspect && <div ref={confirmRow} className="confirm-row" role="alertdialog" aria-labelledby="confirm-inspect-text">
           <span id="confirm-inspect-text">{g.confirmInspect}</span>
           <button id="inspect-discard" type="button" className="danger-text" onClick={() => closeConfirm(true)}>{g.discardInspect}</button>
           <button id="inspect-keep" type="button" autoFocus onClick={() => closeConfirm(false)}>{t.run.keepDraft}</button></div>}
-        <div className="operation-status" role="status">{inspectReason ?? ''}</div>
+        <div id="inspect-block" className={owner ? 'visually-hidden' : 'operation-status'} role={owner ? undefined : 'status'}>{inspectReason ?? ''}</div>
         {workspace.error && <><FaultMessage title={g.actionFailed} value={workspace.error}/>
           {workspace.error.category === AUTHORING_RECOVERY && <div className="button-row">
             <button id="workspace-recover" type="button" disabled={locked} onClick={() => authoring.onRecover(recoveryPath(workspace.error!, workspace.editPath.trim() || path.trim()))}>{a.recover}</button>

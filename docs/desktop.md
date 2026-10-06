@@ -321,6 +321,9 @@ Neither action inspects, binds, or runs the package.
   requests cancellation and retains ownership until the worker settles.
 - One Edit session owns the application. Ordinary **Start**, independent OCR
   **Check**, a second editor, and configuration reconstruction are refused.
+  One shared application strip explains this exclusion, including when another
+  workspace is selected. Its expandable authority details explain Save/Inspect
+  as static content outside the live status announcement, not another warning.
   Idle Edit has no timed runner. Navigation remains available; the owner strip
   and **Return to Edit** preserve the session across workspaces and dialogs.
 - Guidance **Open/Create**, like Run-page Edit, asks before leaving unsaved
@@ -881,6 +884,14 @@ Keep images, recognized text, clipboard contents, and local resource paths priva
 
 ## Package workspaces and App settings
 
+The two-row navigation header stays at the top while the document and the
+package tree continue scrolling. Revealed diagnostics must clear the measured
+header height; scrolling or collapsing the tree does not discard drafts.
+The icon-only **Menu** button opens the existing Application actions, with a
+localized accessible name and tooltip; its icon is decorative. Enter/Space
+opens the menu, Up/Down moves between actions, Escape closes it and returns
+focus to the button, and Tab or an outside click dismisses it.
+
 A Workspace is an open session of a saved **Tab**, not a game attachment.
 **+** opens **New workspace**, asking for an internal name and an optional display name:
 
@@ -952,6 +963,14 @@ Switching workspaces does not transfer an operation. There is **one application-
 operation slot** for Start and OCR Check; the owner and Stop remain available
 across navigation and inside App settings. The host retains the latest terminal
 outcome for each open workspace independently of log retention.
+
+Persistent notices stay with their scope: the application strip identifies the
+Edit or operation owner, while action-specific refusals and faults remain beside
+the relevant controls or panel. Dialogs provide their own **Stop** and
+**Return to Edit** controls because the background is inert. Dismissing a
+notification or closable notice changes presentation only: it does not release
+Edit ownership, enable a refused command, erase a retained failure, or prove
+cleanup.
 
 Use **Close selected workspace** in the dropdown footer to close the current
 workspace. A touched unsaved draft requires confirmation. An active owner or a
@@ -1818,6 +1837,29 @@ roots; do not modify tracked fixtures or the operator's normal configuration.
 Run the Setup, Recovery, naming, snapshot, and restore checks in both English and
 Japanese. Do not replace actual WebView interaction with mocked command results.
 
+The main-window configuration currently requests **1180 × 840** initially and
+**760 × 600** as its minimum, in logical window dimensions. This is not a
+verified supported minimum; native clamp and layout qualification remain open.
+Preview sizing is unchanged. For both English and Japanese:
+
+- Record display/work-area geometry and scale, native logical window dimensions,
+  and measured WebView viewport dimensions separately. Resize interactively to
+  the native minimum on each axis independently, then at both limits together.
+  A programmatic window rectangle that bypasses the native clamp is not proof
+  of normal interactive enforcement. Check source, metadata, Run, Logs,
+  Recognition, Menu and settings for overflow and reachable primary controls.
+- Measure the current header's bottom edge and content clearance after locale
+  changes and resizing; keep both navigation rows visible during long document
+  scrolling. Scroll a long package tree independently, collapse/expand it and
+  resize without losing its position or drafts. Exercise diagnostic reveal as
+  described below rather than assuming a fixed header offset.
+- Check one shared Edit exclusion with another workspace selected, expandable
+  static Save/Inspect details, adjacent faults, and modal-local Stop/Return.
+  Verify the localized Menu name, decorative icon, keyboard behavior and focus
+  return. Dismiss a notification, navigate away and back, and confirm retained
+  failure and cleanup outcomes remain available. Report synthetic WebView
+  actions separately from physical keyboard or native resize observations.
+
 ### Directory-package authoring acceptance
 
 Use an isolated App data root and disposable package collections. Keep screenshots,
@@ -1844,9 +1886,13 @@ local paths, and compiler/run records outside public commits.
    across file/page navigation. Refuse occupied or nested package destinations.
    Duplicate by ID; verify original bytes and absence of App-local configuration
    in the copy. Refuse Snapshot inside either package collection before any write.
-3. Save a syntax error and Validate. Follow its diagnostic to the source, repair
-   it, and validate the new saved revision. Test Stop while validation owns the
-   operation slot; no new work may start before it settles.
+3. Save a syntax error and Validate. With the document and package tree scrolled,
+   follow its diagnostic: the editor target must clear the current measured
+   header and the selected tree row must be visible. Reveal must not change
+   draft/saved bytes or add Undo history. Repair it and validate the new saved
+   revision. Test Stop while validation owns the operation slot; no new work may
+   start before it settles. Record the primary outcome and cleanup separately;
+   preserve forced/incomplete cleanup rather than claiming a clean Stop.
 4. Keep another workspace bound to the same source. While Edit owns the first,
    verify disabled Start/Check controls and host-side refusal of a stale client
    request. Navigate through Logs/settings and return to the unchanged drafts.

@@ -89,10 +89,15 @@ function completionInfo(candidate: CompletionCandidate, omitted: string) {
   return panel;
 }
 
+function navigationClearance(view: EditorView): number {
+  const shell = view.dom.closest('.app');
+  return shell ? parseFloat(getComputedStyle(shell).getPropertyValue('--navigation-clearance')) || 0 : 0;
+}
+
 function completionSpace(view: EditorView): Rect {
   const viewport = view.dom.ownerDocument.documentElement;
   const editor = view.scrollDOM.getBoundingClientRect();
-  const space = {left: Math.max(0, editor.left), top: Math.max(0, editor.top),
+  const space = {left: Math.max(0, editor.left), top: Math.max(navigationClearance(view), editor.top),
     right: Math.min(viewport.clientWidth, editor.right), bottom: Math.min(viewport.clientHeight, editor.bottom)};
   for (let parent = view.scrollDOM.parentElement; parent; parent = parent.parentElement) {
     const style = getComputedStyle(parent);
@@ -181,6 +186,7 @@ export default function SourceEditor(props: Props) {
     positions.current = new SourcePositions(first.draft.text);
     let alive = true;
     let session: CompletionSession | null = null;
+    const navigationScroll = {};
     const rangeOf = (view: EditorView): TextRange => {
       const range = view.state.selection.main;
       return {start: positions.current!.toSource(range.from), end: positions.current!.toSource(range.to)};
@@ -222,7 +228,7 @@ export default function SourceEditor(props: Props) {
             return;
           }
           session.cancel();
-          view.dispatch({changes: {from, to, insert: inserted}, selection: {anchor: from + inserted.length},
+          view.dispatch({changes: {from, to, insert: inserted}, selection: {anchor: from + inserted.length}, scrollIntoView: true,
             annotations: [Transaction.userEvent.of('input.complete'), pickedCompletion.of(option),
               inputKind.of({type: 'insertReplacementText', data: null, composing: false})]});
         },
@@ -243,6 +249,22 @@ export default function SourceEditor(props: Props) {
         indentUnit.of('  '), lineNumbers(), drawSelection(), highlightActiveLine(),
         javascript({typescript: /\.[cm]?tsx?$/i.test(first.draft.path), jsx: /\.[jt]sx$/i.test(first.draft.path)}),
         syntaxHighlighting(defaultHighlightStyle),
+        EditorView.scrollHandler.of((view, range, options) => {
+          // Let CodeMirror reveal inside its scroller first; correct only actual document/header overlap.
+          view.requestMeasure({
+            key: navigationScroll,
+            read: () => {
+              const clearance = navigationClearance(view);
+              if (clearance <= 0) return 0;
+              const bounds = view.scrollDOM.getBoundingClientRect();
+              const caret = view.coordsAtPos(range.head, range.assoc || (range.head > range.anchor ? -1 : 1));
+              return caret && caret.bottom > bounds.top && caret.top < bounds.bottom && caret.top < clearance
+                ? caret.top - clearance - Math.max(0, options.yMargin) : 0;
+            },
+            write: delta => {if (delta < 0) view.dom.ownerDocument.defaultView?.scrollBy(0, delta);},
+          });
+          return false;
+        }),
         EditorState.changeFilter.of(transaction => !transaction.docChanged || transaction.annotation(synchronize) === true || !latest.current.props.readOnly),
         tooltips({tooltipSpace: completionSpace}),
         autocompletion({override: [source], activateOnTyping: false, defaultKeymap: false, icons: true,
@@ -316,7 +338,10 @@ export default function SourceEditor(props: Props) {
       request: (position, explicit) => latest.current.props.request(position, explicit),
       accepts: (result, source) => alive && latest.current.props.accepts(result.key, source),
       close: () => { closeCompletion(view); },
-      publish: () => { startCompletion(view); },
+      publish: () => {
+        view.dispatch({effects: EditorView.scrollIntoView(view.state.selection.main.head)});
+        startCompletion(view);
+      },
       setTimer: (callback, ms) => window.setTimeout(callback, ms),
       clearTimer: timer => window.clearTimeout(timer),
     });
