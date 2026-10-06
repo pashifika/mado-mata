@@ -319,28 +319,6 @@ export default function RecognitionPreview() {
             onClick={() => void done()}>{r.previewDone}</button>
         </div>
       </header>
-      <section className="preview-inspection" aria-label={r.inspectTitle} aria-hidden={display.tool !== 'inspect'}
-        style={{visibility:display.tool === 'inspect' ? 'visible' : 'hidden'}}>
-        <strong>{r.inspectTitle}</strong>
-        <dl className="inspection-values mono">
-          <div><dt>X</dt><dd id="inspect-x">{inspected.point?.x ?? '—'}</dd></div>
-          <div><dt>Y</dt><dd id="inspect-y">{inspected.point?.y ?? '—'}</dd></div>
-          {(['R', 'G', 'B', 'A'] as const).map((channel, index) => <div key={channel}>
-            <dt>{channel}</dt><dd id={`inspect-${channel.toLowerCase()}`}>{inspected.sample?.rgba[index] ?? '—'}</dd>
-          </div>)}
-        </dl>
-        <div className="inspection-color-line">
-          <span className="inspection-swatch" role="img" aria-label={r.inspectSwatch}>
-            {inspected.sample && <span style={{backgroundColor:`rgba(${inspected.sample.rgba.slice(0, 3).join(',')},${inspected.sample.rgba[3] / 255})`}}/>}
-          </span>
-          <span className="inspection-hex mono">{r.inspectHex} <span id="inspect-hex">{inspected.sample ? rgbHex(inspected.sample.rgba) : '—'}</span></span>
-          <span id="inspect-status" className={`inspection-status${inspected.error ? ' danger-text' : ' muted'}`} role="status"
-            title={inspected.error ? `${inspected.error.category}: ${inspected.error.message}` : undefined}>
-            {inspected.pending ? r.inspectPending : inspected.error
-              ? `${r.inspectFailed} · ${inspected.error.category}: ${inspected.error.message}` : inspected.point ? '' : r.inspectEmpty}
-          </span>
-        </div>
-      </section>
       <main className="preview-viewport">
         <div ref={stage} id="preview-image-viewport"
           className={`recognition-stage${display.zoom === 'fit' ? ' fit' : ''}`}>
@@ -369,11 +347,32 @@ export default function RecognitionPreview() {
         </aside>}
       </main>
       <footer className="preview-status-rail">
-        <span id="native-capture-status" className="preview-capture-status muted" role="status" title={status}>{status}</span>
-        {feedback}
-        <span id="preview-scale" className="muted mono" title={frame ? r.scale(frame.width, frame.height, percent) : undefined}>
-          {frame && r.scale(frame.width, frame.height, percent)}
-        </span>
+        {display.tool === 'inspect' ? <section className="preview-inspection" aria-label={r.inspectTitle} title={r.inspectTitle}>
+          <dl className="inspection-values mono">
+            <div><dt>X</dt><dd id="inspect-x">{inspected.point?.x ?? '—'}</dd></div>
+            <div><dt>Y</dt><dd id="inspect-y">{inspected.point?.y ?? '—'}</dd></div>
+            {(['R', 'G', 'B', 'A'] as const).map((channel, index) => <div key={channel}>
+              <dt>{channel}</dt><dd id={`inspect-${channel.toLowerCase()}`}>{inspected.sample?.rgba[index] ?? '—'}</dd>
+            </div>)}
+          </dl>
+          <div className="inspection-color-line">
+            <span className="inspection-swatch" role="img" aria-label={r.inspectSwatch}>
+              {inspected.sample && <span style={{backgroundColor:`rgba(${inspected.sample.rgba.slice(0, 3).join(',')},${inspected.sample.rgba[3] / 255})`}}/>}
+            </span>
+            <span className="inspection-hex mono">{r.inspectHex} <span id="inspect-hex">{inspected.sample ? rgbHex(inspected.sample.rgba) : '—'}</span></span>
+            <span id="inspect-status" className={`inspection-status${inspected.error ? ' danger-text' : ' muted'}`} role="status"
+              title={inspected.error ? `${inspected.error.category}: ${inspected.error.message}` : undefined}>
+              {inspected.pending ? r.inspectPending : inspected.error
+                ? `${r.inspectFailed} · ${inspected.error.category}: ${inspected.error.message}` : inspected.point ? '' : r.inspectEmpty}
+            </span>
+          </div>
+        </section> : <>
+          <span id="native-capture-status" className="preview-capture-status muted" role="status" title={status}>{status}</span>
+          {feedback}
+          <span id="preview-scale" className="muted mono" title={frame ? r.scale(frame.width, frame.height, percent) : undefined}>
+            {frame && r.scale(frame.width, frame.height, percent)}
+          </span>
+        </>}
         <button ref={helpButton} id="preview-help-toggle" type="button" aria-expanded={helpOpen} aria-controls="preview-help"
           onClick={() => setHelpOpen(value => !value)}>{r.previewHelpButton}</button>
       </footer>
