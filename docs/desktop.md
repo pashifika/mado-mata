@@ -885,6 +885,64 @@ bounds encoded input, original pixels, crop size, package content, decoded
 frames, and accounted application-owned payloads. It is not a total-RSS limit.
 Keep images, recognized text, clipboard contents, and local resource paths private.
 
+## Verify one connected authoring workflow
+
+Use one disposable package copy and an isolated App root. Keep private captures,
+model paths and full records outside public commits. Record the exact build,
+package/profile/resource identities, finite limits and independently expected
+text, template outcomes and workflow decision **before** running recognition.
+This procedure joins the authoring surfaces; it does not qualify native input,
+prove application effects, or replace Windows and runtime-comparison evidence.
+
+1. **Open for Edit** and change the entry and a helper. Exercise SDK/options
+   completion, literal replacement, file-local Undo and source/asset navigation.
+   Return from another view without losing drafts. A competing workspace cannot
+   Start or Check its OCR environment while Edit owns the application.
+2. If separately authorized, save a compatible application binding with the
+   actual exact window title, select the verified window and capture one frame.
+   Leave input-policy fields blank for capture-only use. Inspect an original
+   pixel at Fit and zoom, then return to Regions and edit an ROI. Read capture
+   and cleanup outcomes separately; release the selection when finished.
+3. Explicitly choose the image used for recognition. If the live frame and the
+   recorded corpus have different geometry, keep separate captures and load the
+   corresponding original image; do not reinterpret one capture's coordinates
+   as the other's. Confirm Game content and review its placement.
+4. Try real OCR and a rights-reviewed template. Compare region attribution and
+   actual observations with the independent expectations. Exercise a genuine
+   no-match as well as a match; no-match has no score. Select only the crops to
+   persist and **Save recognition**. Check crop dimensions and stable references,
+   not just the success notice; the original image is not exported by Save.
+5. Copy Game content setup, checked OCR and the selected saved template source.
+   Bring the main editor to the front before requesting completion or pasting;
+   closing Preview with **Done** also returns to the main window. Paste the setup
+   once before the request blocks, preserve their handle releases, and explicitly
+   use their results in the workflow/helper. Copy never synchronizes source.
+6. **Save all**, **Validate**, explicitly **Exit Edit**, then **Inspect** the saved
+   package and choose its saved profile. Select **Replay**, not Controlled, for
+   real recognition with the non-native sink. Use a genuine recorded descriptor
+   compatible with the authored geometry and generated template maps. Budget
+   frames for the host's initial readiness observation, any package readiness
+   observations and every copied request block; an exhausted corpus fails
+   `Closed` rather than repeating its last frame.
+7. Start the saved workflow. Compare its decision and disclosed recognition
+   evidence with the declared expectations; compiler success or a generic PASS
+   alone is insufficient. Retain package, profile, corpus and run identities.
+   Compare a declared negative case without fabricating recognition results.
+8. In the disposable copy, save a syntax error, follow its diagnostic and repair
+   it. Separately run a valid revision with a deliberate helper exception,
+   inspect its original cause/location, repair it and repeat Save/Validate/
+   Exit/Inspect before the successful rerun. Dismissing a notice must not erase
+   the immutable operation result.
+9. Stop an outstanding owned operation. Check cancellation, cleanup and worker
+   settlement independently; Start stays unavailable until ownership settles.
+   Record forced/incomplete cleanup honestly, then prove a later valid run.
+10. Restart the app and reopen the same package/profile. Verify saved source,
+    crop bytes/references, metadata, editor preferences and profile values.
+    Select an image explicitly before new frame recognition and repeat Replay.
+    Check English/Japanese at the supported minimum layout. Label synthetic
+    interactions separately from native clipboard/Edit-menu and physical IME
+    observations; historical evidence needs an unchanged-path justification.
+
 ## Package workspaces and App settings
 
 The two-row navigation header stays at the top while the document and the
