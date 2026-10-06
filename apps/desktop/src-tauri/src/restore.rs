@@ -6,7 +6,7 @@ use crate::configuration::{self, Capture, Kind, MAX_ENUMERATED, capture, io_faul
 use crate::storage::{
     self, MAX_OPEN_TABS, MAX_PROFILES, MAX_TABS, MAX_TOTAL_BYTES, Profile, Settings, TabRecord,
     check_directory, checked_file, decode, encode, exists, filesystem_key, read_bytes,
-    validate_package_id, validate_profile, validate_settings, validate_tab,
+    validate_package_id, validate_settings, validate_tab,
 };
 use crate::target::{MAX_TARGET_BYTES, TargetRecord};
 use mado_runtime_comparison::model::Fault;
@@ -24,6 +24,18 @@ const MAX_JOURNAL: usize = 2 * MAX_MANIFEST + 1024;
 /// Preservation archives can contain malformed or future documents. Only a
 /// complete, supported and ownership-consistent set may be installed.
 pub fn validate(capture: &Capture) -> Result<(), Fault> {
+    validate_set(capture, true, true)
+}
+
+pub(crate) fn validate_installed(capture: &Capture) -> Result<(), Fault> {
+    validate_set(capture, false, true)
+}
+
+pub(crate) fn validate_owned(capture: &Capture, allow_legacy: bool) -> Result<(), Fault> {
+    validate_set(capture, allow_legacy, false)
+}
+
+fn validate_set(capture: &Capture, allow_legacy: bool, unassigned: bool) -> Result<(), Fault> {
     capture.check()?;
     let settings = capture.files.get("settings.json").ok_or_else(|| {
         invalid("snapshot has no App settings; it is preservation material, not a complete restore")
@@ -47,56 +59,75 @@ pub fn validate(capture: &Capture) -> Result<(), Fault> {
     }
     let mut budgets: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for (path, bytes) in &capture.files {
-        match path_kind(path)? {
-            Kind::Settings | Kind::Tab => {}
-            Kind::LegacyProfile => {
-                let profile: Profile = decode(bytes)?;
-                validate_profile(&profile)?;
-                if path != &format!("profiles/{}.json", profile.id) {
-                    return Err(invalid("legacy profile identity differs from its filename"));
-                }
-                budget(&mut budgets, "profiles", bytes.len())?;
-            }
-            Kind::Package => {
-                let parts: Vec<_> = path.split('/').collect();
-                let tab = tabs.get(parts[1]).ok_or_else(|| {
-                    invalid("orphaned package configuration has no supported Tab record")
-                })?;
-                validate_package_id(parts[2])?;
-                if !tab
-                    .packages
-                    .iter()
-                    .any(|reference| reference.package_id == parts[2])
-                {
-                    return Err(invalid(
-                        "package configuration is not owned by a saved Tab reference",
-                    ));
-                }
-                if parts[3] == "target.config" {
-                    if bytes.len() > MAX_TARGET_BYTES {
-                        return Err(invalid("target configuration exceeds its byte bound"));
+        let result = (|| {
+            match path_kind(path)? {
+                Kind::Settings | Kind::Tab => {}
+                Kind::IdentityMigrations => crate::identity_migrations::validate_ledger(capture)?,
+                Kind::LegacyProfile => {
+                    if !unassigned {
+                        return Ok(());
                     }
-                    let target: TargetRecord = decode(bytes)?;
-                    target.validate_owned(parts[1], parts[2])?;
-                    // Target has its own per-file limit; Capture enforces the shared
-                    // file/byte budget without consuming a portable-profile slot.
-                    continue;
+                    let mut profile: Profile = decode(bytes)?;
+                    crate::identity_migrations::validate_profile(&mut profile, true)?;
+                    if path != &format!("profiles/{}.json", profile.id) {
+                        return Err(invalid("legacy profile identity differs from its filename"));
+                    }
+                    budget(&mut budgets, "profiles", bytes.len())?;
                 }
-                let profile: Profile = decode(bytes)
-                    .map_err(|_| invalid("unsupported or malformed package configuration owner"))?;
-                validate_profile(&profile)?;
-                if parts[3] != format!("{}.config", profile.id) || profile.package_id != parts[2] {
-                    return Err(invalid(
-                        "profile identity differs from its Tab/package/file scope",
-                    ));
+                Kind::Package => {
+                    let parts: Vec<_> = path.split('/').collect();
+                    let tab = tabs.get(parts[1]).ok_or_else(|| {
+                        invalid("orphaned package configuration has no supported Tab record")
+                    })?;
+                    validate_package_id(parts[2])?;
+                    if parts[3] == "target.config" {
+                        if bytes.len() > MAX_TARGET_BYTES {
+                            return Err(invalid("target configuration exceeds its byte bound"));
+                        }
+                        let mut target: TargetRecord = decode(bytes)?;
+                        crate::identity_migrations::validate_target(
+                            &mut target,
+                            parts[1],
+                            parts[2],
+                            allow_legacy,
+                        )?;
+                        // Target has its own per-file limit; Capture enforces the shared
+                        // file/byte budget without consuming a portable-profile slot.
+                        return Ok(());
+                    }
+                    if !tab
+                        .packages
+                        .iter()
+                        .any(|reference| reference.package_id == parts[2])
+                    {
+                        return Err(invalid(
+                            "package configuration is not owned by a saved Tab reference",
+                        ));
+                    }
+                    let mut profile: Profile = decode(bytes).map_err(|_| {
+                        invalid("unsupported or malformed package configuration owner")
+                    })?;
+                    crate::identity_migrations::validate_profile(&mut profile, allow_legacy)?;
+                    if parts[3] != format!("{}.config", profile.id)
+                        || profile.package_id != parts[2]
+                    {
+                        return Err(invalid(
+                            "profile identity differs from its Tab/package/file scope",
+                        ));
+                    }
+                    budget(
+                        &mut budgets,
+                        &format!("{}/{}", parts[1], parts[2]),
+                        bytes.len(),
+                    )?;
                 }
-                budget(
-                    &mut budgets,
-                    &format!("{}/{}", parts[1], parts[2]),
-                    bytes.len(),
-                )?;
             }
-        }
+            Ok(())
+        })();
+        result.map_err(|mut fault: Fault| {
+            fault.context["path"] = json!(path);
+            fault
+        })?;
     }
     Ok(())
 }
@@ -127,8 +158,19 @@ pub fn pending(root: &Path) -> Result<bool, Fault> {
 #[serde(deny_unknown_fields)]
 struct Journal {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation: Option<crate::identity_migrations::Operation>,
     before: Manifest,
     after: Manifest,
+}
+
+impl Journal {
+    fn check(&self) -> Result<(), Fault> {
+        match (self.version, &self.operation) {
+            (1, None) | (2, Some(_)) => Ok(()),
+            _ => Err(invalid("unsupported or ambiguous configuration journal")),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -154,25 +196,22 @@ enum Point {
     CompletionMarkerRemoved,
 }
 
-/// The receipt's session authority and idle/discard admission are shell-owned.
-/// This boundary independently binds the receipt to the actual source bytes.
-pub fn install(root: &Path, new: Capture, expected_generation: Option<&str>) -> Result<(), Fault> {
-    install_with(root, new, expected_generation, &mut |_| Ok(()))
+/// A normalized Restore generation whose deterministic publication checks passed.
+/// Only Bootstrap supplies session receipt, confirmation, and discard authority.
+pub(crate) struct PreparedRestore(PreparedPublication);
+
+struct PreparedPublication {
+    observed: Capture,
+    new: Capture,
+    operation: crate::identity_migrations::Operation,
 }
 
-fn install_with(
-    root: &Path,
+/// Bind the preparation to the preserved live generation without retiring its session.
+pub(crate) fn prepare(
     new: Capture,
+    observed: Capture,
     expected_generation: Option<&str>,
-    hook: &mut impl FnMut(Point) -> Result<(), Fault>,
-) -> Result<(), Fault> {
-    validate(&new)?;
-    if pending(root)? {
-        return Err(invalid(
-            "an interrupted restore must be completed or rolled back first",
-        ));
-    }
-    let observed = capture(root)?;
+) -> Result<PreparedRestore, Fault> {
     if (!observed.files.is_empty() && expected_generation != Some(observed.generation.as_str()))
         || expected_generation.is_some_and(|expected| expected != observed.generation)
     {
@@ -181,18 +220,83 @@ fn install_with(
             "a separately requested snapshot matching the current configuration is required",
         ));
     }
+    let new = crate::identity_migrations::normalize_restore(new, &observed)?;
+    Ok(PreparedRestore(prepare_publication(
+        observed,
+        new,
+        crate::identity_migrations::Operation::Restore,
+    )?))
+}
+
+pub(crate) fn install(root: &Path, plan: PreparedRestore) -> Result<(), Fault> {
+    install_with(root, plan, &mut |_| Ok(()))
+}
+
+fn install_with(
+    root: &Path,
+    plan: PreparedRestore,
+    hook: &mut impl FnMut(Point) -> Result<(), Fault>,
+) -> Result<(), Fault> {
+    publish(root, plan.0, hook)
+}
+
+pub(crate) fn install_migration(
+    root: &Path,
+    plan: crate::identity_migrations::Plan,
+) -> Result<(), Fault> {
+    let (before, after, operation) = plan.into_parts();
+    let prepared = prepare_publication(before, after, operation)?;
+    publish(root, prepared, &mut |_| Ok(()))
+}
+
+fn prepare_publication(
+    observed: Capture,
+    new: Capture,
+    operation: crate::identity_migrations::Operation,
+) -> Result<PreparedPublication, Fault> {
+    crate::identity_migrations::validate_transition(&observed, &new, &operation)?;
+    crate::identity_migrations::check_rollback_budget(&observed, &new)?;
     // Changing the spelling of an existing directory is not an authorized tree
     // migration, and may alias a retained empty container after replacement.
     let mut aliases = BTreeMap::new();
     for path in observed.files.keys().chain(new.files.keys()) {
         configuration::check_aliases(path, &mut aliases)?;
     }
+    Ok(PreparedPublication {
+        observed,
+        new,
+        operation,
+    })
+}
+
+fn publish(
+    root: &Path,
+    prepared: PreparedPublication,
+    hook: &mut impl FnMut(Point) -> Result<(), Fault>,
+) -> Result<(), Fault> {
+    let PreparedPublication {
+        observed,
+        new,
+        operation,
+    } = prepared;
+    if pending(root)? {
+        return Err(invalid(
+            "an interrupted configuration transaction must be recovered first",
+        ));
+    }
+    if capture(root)? != observed {
+        return Err(Fault::new(
+            "ConfigurationChanged",
+            "configuration changed after transaction admission",
+        ));
+    }
     storage::private_directory(root)?;
     let before = Capture::from_files(observed.files, true)?;
     let staging = configuration::temporary(root, "restore-stage");
     configuration::create_private_directory(&staging)?;
     let journal = Journal {
-        version: 1,
+        version: 2,
+        operation: Some(operation),
         before: Manifest::new(&before),
         after: Manifest::new(&new),
     };
@@ -272,12 +376,14 @@ fn recover_with(
     let directory = root.join(JOURNAL);
     check_directory(&directory)?;
     let journal: Journal = decode(&read_bytes(&directory.join("journal.json"), MAX_JOURNAL)?)?;
-    if journal.version != 1 {
-        return Err(invalid("unsupported restore journal version"));
-    }
+    journal.check()?;
     let before = load_capture(&directory, "old", &journal.before)?;
     let after = load_capture(&directory, "new", &journal.after)?;
-    validate(&after)?;
+    if let Some(operation) = &journal.operation {
+        crate::identity_migrations::validate_transition(&before, &after, operation)?;
+    } else {
+        validate(&after)?;
+    }
     let mut aliases = BTreeMap::new();
     for path in before.files.keys().chain(after.files.keys()) {
         configuration::check_aliases(path, &mut aliases)?;
@@ -320,7 +426,13 @@ fn apply(
     rollback: bool,
     hook: &mut impl FnMut(Point) -> Result<(), Fault>,
 ) -> Result<(), Fault> {
-    let target = if rollback { before } else { after };
+    let retained;
+    let target = if rollback {
+        retained = crate::identity_migrations::rollback_capture(before, after)?;
+        &retained
+    } else {
+        after
+    };
     let live = capture(root)?;
     let paths: BTreeSet<_> = before
         .files
@@ -531,11 +643,13 @@ fn finish(
         } else {
             let journal: Journal =
                 decode(&read_bytes(&directory.join("journal.json"), MAX_JOURNAL)?)?;
-            if journal.version != 1 {
-                return Err(invalid("unsupported restore journal version"));
-            }
+            journal.check()?;
             let target = if rollback {
-                journal.before
+                let before = load_capture(&directory, "old", &journal.before)?;
+                let after = load_capture(&directory, "new", &journal.after)?;
+                Manifest::new(&crate::identity_migrations::rollback_capture(
+                    &before, &after,
+                )?)
             } else {
                 journal.after
             };
@@ -653,6 +767,7 @@ pub(crate) mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     pub(crate) fn interrupt_install(root: &Path, new: Capture, expected_generation: &str) {
+        let plan = prepare(new, capture(root).unwrap(), Some(expected_generation)).unwrap();
         let mut hook = |at| {
             if at
                 == (Point::Displaced {
@@ -664,15 +779,7 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| install_with(
-                root,
-                new,
-                Some(expected_generation),
-                &mut hook
-            )))
-            .is_err()
-        );
+        assert!(catch_unwind(AssertUnwindSafe(|| install_with(root, plan, &mut hook))).is_err());
         assert!(pending(root).unwrap());
     }
 
@@ -710,6 +817,13 @@ pub(crate) mod tests {
         root.put("logs/run.log", b"keep logs");
         root.put("payload/model.bin", b"keep payload");
         root.put("backups/app.config.1", b"keep operator snapshot");
+        for area in ["sources", "pkgs"] {
+            root.put(
+                &format!("{area}/sample/main.ts"),
+                b"export const retained = true;",
+            );
+            root.put(&format!("{area}/sample/assets/pixel.rgba"), &[1, 2, 3, 255]);
+        }
         let old = capture(&root.0).unwrap();
         (root, old)
     }
@@ -723,9 +837,19 @@ pub(crate) mod tests {
             fs::read(root.0.join("backups/app.config.1")).unwrap(),
             b"keep operator snapshot"
         );
+        for area in ["sources", "pkgs"] {
+            assert_eq!(
+                fs::read(root.0.join(area).join("sample/main.ts")).unwrap(),
+                b"export const retained = true;"
+            );
+            assert_eq!(
+                fs::read(root.0.join(area).join("sample/assets/pixel.rgba")).unwrap(),
+                [1, 2, 3, 255]
+            );
+        }
     }
     fn profile_id() -> String {
-        format!("p-{}-{}-{}", "0".repeat(32), "0".repeat(8), "0".repeat(16))
+        "00000000000000000000".into()
     }
     fn tab(name: &str, open: bool) -> Vec<u8> {
         serde_json::to_vec(&TabRecord {
@@ -762,14 +886,14 @@ pub(crate) mod tests {
     #[test]
     fn requires_current_receipt_and_rejects_invalid_before_mutation() {
         let (root, old) = fixture();
-        assert!(install(&root.0, replacement(200), None).is_err());
-        assert!(install(&root.0, replacement(200), Some("stale")).is_err());
+        assert!(prepare(replacement(200), old.clone(), None).is_err());
+        assert!(prepare(replacement(200), old.clone(), Some("stale")).is_err());
         let invalid = Capture::from_files(
             BTreeMap::from([("settings.json".into(), b"broken".to_vec())]),
             true,
         )
         .unwrap();
-        assert!(install(&root.0, invalid, Some(&old.generation)).is_err());
+        assert!(prepare(invalid, old.clone(), Some(&old.generation)).is_err());
         assert_eq!(capture(&root.0).unwrap(), old);
         assert!(!pending(&root.0).unwrap());
     }
@@ -778,10 +902,114 @@ pub(crate) mod tests {
     fn successful_install_replaces_only_managed_configuration() {
         let (root, old) = fixture();
         let new = replacement(200);
-        install(&root.0, new.clone(), Some(&old.generation)).unwrap();
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        install(&root.0, plan).unwrap();
         assert_eq!(capture(&root.0).unwrap(), new);
         assert!(!pending(&root.0).unwrap());
         assert_unrelated(&root);
+    }
+
+    #[test]
+    fn prepared_restore_rechecks_live_generation_and_pending_recovery_before_writes() {
+        for interrupted in [false, true] {
+            let (root, old) = fixture();
+            let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+            if interrupted {
+                root.put(COMPLETION, b"pending recovery evidence");
+            } else {
+                fs::write(root.0.join("settings.json"), settings(333)).unwrap();
+            }
+            let current = capture(&root.0).unwrap();
+            let error = install(&root.0, plan).unwrap_err();
+            assert_eq!(
+                error.category,
+                if interrupted {
+                    "Restore"
+                } else {
+                    "ConfigurationChanged"
+                }
+            );
+            assert_eq!(capture(&root.0).unwrap(), current);
+            assert_eq!(pending(&root.0).unwrap(), interrupted);
+            assert!(!root.0.join(JOURNAL).exists());
+            if interrupted {
+                assert_eq!(
+                    fs::read(root.0.join(COMPLETION)).unwrap(),
+                    b"pending recovery evidence"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn os_metadata_is_preserved_but_never_archived_or_installed_as_configuration() {
+        let source = Root::new();
+        let archive_directory = Root::new();
+        let destination = Root::new();
+        let id = profile_id();
+        source.put("settings.json", &settings(100));
+        source.put("tabs/One/tab.config", &tab("One", true));
+        source.put(&format!("tabs/One/pkg/{id}.config"), &profile());
+        source.put(&format!("profiles/{id}.json"), &profile());
+        let expected = capture(&source.0).unwrap();
+        validate(&expected).unwrap();
+        let metadata_paths = [
+            ".DS_Store".to_owned(),
+            "profiles/._legacy.pending".to_owned(),
+            format!("profiles/._{id}.json"),
+            "tabs/One/._tab.pending".to_owned(),
+            format!("tabs/One/pkg/._{id}.config"),
+            format!("tabs/One/pkg/._{id}.pending"),
+            "tabs/One/pkg/desktop.ini".to_owned(),
+        ];
+        for path in &metadata_paths {
+            source.put(path, b"source OS metadata");
+            destination.put(path, b"destination OS metadata");
+        }
+        let captured = capture(&source.0).unwrap();
+        assert_eq!(captured, expected);
+        let receipt =
+            crate::backup::write(&source.0, captured, Some(&archive_directory.0)).unwrap();
+        let archived = crate::backup::read(Path::new(&receipt.path)).unwrap();
+        assert_eq!(archived, expected);
+        validate(&archived).unwrap();
+
+        destination.put("settings.json", &settings(200));
+        let before = capture(&destination.0).unwrap();
+        // New metadata after the preservation receipt must not invalidate it.
+        destination.put("tabs/One/pkg/Thumbs.db", b"new thumbnail cache");
+        let expected_generation = before.generation.clone();
+        let plan = prepare(archived, before, Some(&expected_generation)).unwrap();
+        install(&destination.0, plan).unwrap();
+        assert_eq!(capture(&destination.0).unwrap(), expected);
+        assert!(!pending(&destination.0).unwrap());
+        let store = Store::new(destination.0.clone()).unwrap();
+        let tabs = store.tabs().unwrap();
+        assert!(tabs.faults.is_empty());
+        assert_eq!(tabs.tabs.len(), 1);
+        assert_eq!(tabs.tabs[0].internal_name, "One");
+        let profiles = store
+            .profile_store("One", "pkg")
+            .unwrap()
+            .list("pkg", &"a".repeat(64))
+            .unwrap();
+        assert!(profiles.rejected.is_empty());
+        assert_eq!(profiles.profiles.len(), 1);
+        assert_eq!(profiles.profiles[0].id, id);
+        for path in metadata_paths {
+            assert_eq!(
+                fs::read(source.0.join(&path)).unwrap(),
+                b"source OS metadata"
+            );
+            assert_eq!(
+                fs::read(destination.0.join(path)).unwrap(),
+                b"destination OS metadata"
+            );
+        }
+        assert_eq!(
+            fs::read(destination.0.join("tabs/One/pkg/Thumbs.db")).unwrap(),
+            b"new thumbnail cache"
+        );
     }
 
     #[test]
@@ -816,9 +1044,8 @@ pub(crate) mod tests {
                     Ok(())
                 }
             };
-            assert!(
-                install_with(&root.0, replacement(200), Some(&old.generation), &mut hook).is_err()
-            );
+            let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+            assert!(install_with(&root.0, plan, &mut hook).is_err());
             assert!(fired);
             assert_eq!(capture(&root.0).unwrap(), old);
             assert!(!pending(&root.0).unwrap());
@@ -842,14 +1069,9 @@ pub(crate) mod tests {
                 }
                 Ok(())
             };
+            let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
             assert!(
-                catch_unwind(AssertUnwindSafe(|| install_with(
-                    &root.0,
-                    new.clone(),
-                    Some(&old.generation),
-                    &mut hook
-                )))
-                .is_err()
+                catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook))).is_err()
             );
             assert!(pending(&root.0).unwrap());
             recover(&root.0, rollback).unwrap();
@@ -868,7 +1090,8 @@ pub(crate) mod tests {
             } => Err(invalid("injected rollback failure")),
             _ => Ok(()),
         };
-        assert!(install_with(&root.0, replacement(200), Some(&old.generation), &mut hook).is_err());
+        let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+        assert!(install_with(&root.0, plan, &mut hook).is_err());
         assert!(pending(&root.0).unwrap());
         recover(&root.0, true).unwrap();
         assert_eq!(capture(&root.0).unwrap(), old);
@@ -883,9 +1106,8 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            install_with(&root.0, replacement(200), Some(&old.generation), &mut hook)
-        }));
+        let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+        let _ = catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook)));
         fs::write(root.0.join("settings.json"), settings(333)).unwrap();
         assert!(recover(&root.0, false).is_err());
         assert!(recover(&root.0, true).is_err());
@@ -911,8 +1133,8 @@ pub(crate) mod tests {
                 Ok(())
             }
         };
-        let fault =
-            install_with(&root.0, new.clone(), Some(&old.generation), &mut hook).unwrap_err();
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        let fault = install_with(&root.0, plan, &mut hook).unwrap_err();
         assert_eq!(fault.context["configuration_installed"], true);
         assert_eq!(capture(&root.0).unwrap(), new);
         assert!(pending(&root.0).unwrap());
@@ -935,14 +1157,9 @@ pub(crate) mod tests {
                 }
                 Ok(())
             };
+            let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
             assert!(
-                catch_unwind(AssertUnwindSafe(|| install_with(
-                    &root.0,
-                    new.clone(),
-                    Some(&old.generation),
-                    &mut hook
-                )))
-                .is_err()
+                catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook))).is_err()
             );
             assert_eq!(capture(&root.0).unwrap(), new);
             assert!(pending(&root.0).unwrap());
@@ -971,8 +1188,8 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        let fault =
-            install_with(&root.0, new.clone(), Some(&old.generation), &mut hook).unwrap_err();
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        let fault = install_with(&root.0, plan, &mut hook).unwrap_err();
         assert_eq!(fault.context["configuration_installed"], true);
         assert_eq!(fault.context["cleanup_incomplete"], true);
         assert!(pending(&root.0).unwrap());
@@ -997,9 +1214,8 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            install_with(&root.0, replacement(200), Some(&old.generation), &mut hook)
-        }));
+        let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+        let _ = catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook)));
         fs::write(root.0.join("settings.json"), settings(333)).unwrap();
         assert!(recover(&root.0, false).is_err());
         assert!(pending(&root.0).unwrap());
@@ -1022,15 +1238,8 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| install_with(
-                &root.0,
-                new.clone(),
-                Some(&old.generation),
-                &mut hook
-            )))
-            .is_err()
-        );
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        assert!(catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook))).is_err());
         let committed = fs::read(root.0.join(COMPLETION)).unwrap();
         let mut unsupported: serde_json::Value = serde_json::from_slice(&committed).unwrap();
         unsupported["version"] = json!(2);
@@ -1069,15 +1278,8 @@ pub(crate) mod tests {
             Point::AfterCleanupCommit => panic!("exit during rollback cleanup"),
             _ => Ok(()),
         };
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| install_with(
-                &root.0,
-                replacement(200),
-                Some(&old.generation),
-                &mut hook
-            )))
-            .is_err()
-        );
+        let plan = prepare(replacement(200), old.clone(), Some(&old.generation)).unwrap();
+        assert!(catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook))).is_err());
         assert_eq!(capture(&root.0).unwrap(), old);
         assert!(pending(&root.0).unwrap());
         let wrong_direction = recover(&root.0, false).unwrap_err();
@@ -1146,7 +1348,8 @@ pub(crate) mod tests {
     #[test]
     fn restore_removing_a_tab_with_package_configuration_frees_its_name_and_slots() {
         let (root, old, new) = tabbed_fixture();
-        install(&root.0, new.clone(), Some(&old.generation)).unwrap();
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        install(&root.0, plan).unwrap();
         assert_converged_catalog(&root, &new);
     }
 
@@ -1161,7 +1364,8 @@ pub(crate) mod tests {
             .delete(&profile_id())
             .unwrap();
         let old = capture(&root.0).unwrap();
-        install(&root.0, new.clone(), Some(&old.generation)).unwrap();
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        install(&root.0, plan).unwrap();
         assert_converged_catalog(&root, &new);
     }
 
@@ -1182,15 +1386,8 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| install_with(
-                &root.0,
-                new.clone(),
-                Some(&old.generation),
-                &mut hook
-            )))
-            .is_err()
-        );
+        let plan = prepare(new.clone(), old.clone(), Some(&old.generation)).unwrap();
+        assert!(catch_unwind(AssertUnwindSafe(|| install_with(&root.0, plan, &mut hook))).is_err());
         assert!(pending(&root.0).unwrap());
         assert!(root.0.join("tabs/Beta/pkg").is_dir());
         recover(&root.0, false).unwrap();
@@ -1223,7 +1420,8 @@ pub(crate) mod tests {
                 Ok(())
             }
         };
-        let fault = install_with(&root.0, new, Some(&old.generation), &mut hook).unwrap_err();
+        let plan = prepare(new, old.clone(), Some(&old.generation)).unwrap();
+        let fault = install_with(&root.0, plan, &mut hook).unwrap_err();
         assert!(fired);
         assert_eq!(fault.context["rolled_back"], true);
         assert_eq!(capture(&root.0).unwrap(), old);
@@ -1256,7 +1454,7 @@ pub(crate) mod tests {
         };
         let profile = Profile {
             version: 1,
-            id: format!("p-{}-{}-{}", "0".repeat(32), "0".repeat(8), "0".repeat(16)),
+            id: profile_id(),
             name: "Profile".into(),
             package_id: "pkg".into(),
             schema_identity: "a".repeat(64),
@@ -1331,7 +1529,9 @@ pub(crate) mod tests {
         destination.put("settings.json", &settings(100));
         destination.put("logs/retained.log", b"unrelated");
         let before = capture(&destination.0).unwrap();
-        install(&destination.0, snapshot.clone(), Some(&before.generation)).unwrap();
+        let expected_generation = before.generation.clone();
+        let plan = prepare(snapshot.clone(), before, Some(&expected_generation)).unwrap();
+        install(&destination.0, plan).unwrap();
         assert_eq!(capture(&destination.0).unwrap(), snapshot);
         assert_eq!(
             Store::new(destination.0.clone())
@@ -1347,12 +1547,50 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn target_only_snapshot_restores_before_inspection_but_refuses_unbound_profiles() {
+        let source = Root::new();
+        source.put("settings.json", &settings(200));
+        let mut owner: TabRecord = decode(&tab("Owner", true)).unwrap();
+        owner.packages.clear();
+        owner.selected_package_id = None;
+        source.put(
+            "tabs/Owner/tab.config",
+            &serde_json::to_vec(&owner).unwrap(),
+        );
+        let record = target_record();
+        source.put(
+            "tabs/Owner/pkg/target.config",
+            &serde_json::to_vec(&record).unwrap(),
+        );
+        let snapshot = capture(&source.0).unwrap();
+        validate(&snapshot).unwrap();
+
+        let destination = Root::new();
+        destination.put("settings.json", &settings(100));
+        let before = capture(&destination.0).unwrap();
+        let generation = before.generation.clone();
+        let plan = prepare(snapshot.clone(), before, Some(&generation)).unwrap();
+        install(&destination.0, plan).unwrap();
+        let restored = Store::new(destination.0.clone()).unwrap();
+        assert_eq!(restored.read_target("Owner", "pkg").unwrap(), record);
+        assert_eq!(restored.tab("Owner").unwrap(), owner);
+        assert!(matches!(
+            restored.profile_store("Owner", "pkg"),
+            Err(fault) if fault.category == "ProfileIdentity"
+        ));
+
+        let mut files = snapshot.files;
+        files.insert(format!("tabs/Owner/pkg/{}.config", profile_id()), profile());
+        assert!(validate(&Capture::from_files(files, true).unwrap()).is_err());
+    }
+
+    #[test]
     fn restore_target_owner_schema_and_shared_budget_are_strict_without_using_profile_slots() {
         let mut files = replacement(200).files;
         files.insert("tabs/Owner/tab.config".into(), tab("Owner", true));
         for index in 0..MAX_PROFILES {
             let mut profile: Profile = decode(&profile()).unwrap();
-            profile.id = format!("p-{index:032x}-{:08x}-{:016x}", 0, 0);
+            profile.id = format!("{index:019x}0");
             files.insert(
                 format!("tabs/Owner/pkg/{}.config", profile.id),
                 serde_json::to_vec(&profile).unwrap(),
@@ -1401,3 +1639,6 @@ pub(crate) mod tests {
         assert!(Capture::from_files(aggregate, true).is_err());
     }
 }
+
+#[cfg(test)]
+pub(crate) mod migration_tests;

@@ -1,6 +1,6 @@
 use mado_runtime_comparison::{check, inventory, model, report, runner};
 
-use model::{Fault, Plan};
+use model::{Fault, Plan, StopReason};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -10,6 +10,10 @@ fn execute() -> Result<bool, Fault> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [command] if command == "child" => runner::child(),
+        [command] if command == "recognition-child" => runner::recognition_child(),
+        [command] if command == "authoring-capture-child" => {
+            mado_runtime_comparison::authoring_capture::authoring_capture_child()
+        }
         [command] if command == "parent-probe" => runner::parent_probe(false),
         [command] if command == "parent-stop-probe" => runner::parent_probe(true),
         [command] if command == "target-probe" => {
@@ -23,8 +27,7 @@ fn execute() -> Result<bool, Fault> {
             Ok(passed)
         }
         [command, plan_path, package] if command == "run" => {
-            let plan: Plan = runner::read_json(Path::new(plan_path), 65_536)?;
-            plan.validate()?;
+            let plan = read_external_plan(Path::new(plan_path))?;
             let inventory = inventory::Inventory::capture(Path::new(package), &plan.limits)?;
             let result = runner::sample(&plan, &inventory)?;
             let passed = result.iter().all(|row| row.status == "PASS");
@@ -60,9 +63,26 @@ fn help() {
     );
 }
 
-fn manual(plan_path: &Path, package: &Path, output_path: &Path) -> Result<bool, Fault> {
-    let mut plan: Plan = runner::read_json(plan_path, 65_536)?;
+fn read_external_plan(path: &Path) -> Result<Plan, Fault> {
+    let plan: Plan = runner::read_json(path, 65_536)?;
     plan.validate()?;
+    if plan.native_budgets.is_some()
+        || plan
+            .native_config
+            .as_ref()
+            .and_then(|configuration| configuration.pointer("/native/input/reviewed_operation"))
+            .is_some_and(|operation| !operation.is_null())
+    {
+        return Err(Fault::new(
+            "NativeRefused",
+            "Desktop-reviewed authority cannot be supplied in an external CLI plan",
+        ));
+    }
+    Ok(plan)
+}
+
+fn manual(plan_path: &Path, package: &Path, output_path: &Path) -> Result<bool, Fault> {
+    let mut plan = read_external_plan(plan_path)?;
     plan.samples = 1;
     plan.warmups = 0;
     plan.repetitions = 1;
@@ -139,12 +159,12 @@ fn manual(plan_path: &Path, package: &Path, output_path: &Path) -> Result<bool, 
         let mut poll = || match receive.try_recv() {
             Ok(request) => {
                 control = Some(request);
-                true
+                Some(StopReason::Cancelled)
             }
-            Err(mpsc::TryRecvError::Empty) => false,
+            Err(mpsc::TryRecvError::Empty) => None,
             Err(mpsc::TryRecvError::Disconnected) => {
                 control = Some(Err(Fault::new("Control", "operator control reader exited")));
-                true
+                Some(StopReason::Cancelled)
             }
         };
         runner::run_once(&plan, &inventory, None, false, Some(&mut poll))

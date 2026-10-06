@@ -9,13 +9,13 @@ signed checksums. Rustup installs Rust **1.98.1** with the command below.
 Linux needs a C compiler and linker; macOS needs Xcode Command Line Tools;
 Windows needs the Visual Studio C++ build tools and Windows SDK for Rust's
 MSVC target. The controlled runtime and desktop core do not require OCR models,
-capture permissions, or a sibling engine checkout. Only macOS builds the Tauri
-desktop shell; Linux and Windows check the frontend and shell-independent core.
+capture permissions, or a sibling engine checkout. macOS and Windows build the
+Tauri desktop shell; Linux checks the frontend and shell-independent core.
 
 The actionlint/lychee installer supports Linux x86_64/aarch64 and macOS
 arm64/x86_64. It does not provide Windows assets; use a supported Linux
-environment for the full check, or run the documented runtime/desktop-core mode
-on Windows. This tooling limitation is not an application support decision.
+environment for the full check, or run the documented runtime/desktop mode on
+Windows. This tooling limitation is not native GUI acceptance.
 
 The pinned binary-only Python requirements cover CPython 3.11 through 3.14.
 Other interpreter versions need reviewed wheel hashes; do not fall back to an
@@ -44,7 +44,7 @@ application-owned compiler and desktop directories inside a temporary
 tracked-file snapshot. It verifies Node's exact version and uses the committed
 npm lockfiles. Compiler self-checks precede the Rust comparison checks; desktop
 state tests, the frontend build, and Rust core tests follow the controlled suite.
-macOS then builds the shell with `custom-protocol`, without `webdriver`.
+macOS and Windows then build the shell with `custom-protocol`, without `webdriver`.
 Installation never runs a workload package's installer or dependency lifecycle
 scripts; only the trusted application test/build scripts run explicitly.
 Cargo and npm need access to public dependency sources on a fresh checkout;
@@ -61,9 +61,15 @@ The version and integrity sources are:
 | Node.js | 24.18.0 | [check.py](../tools/ci/check.py) and [workflow](../.github/workflows/ci.yml) |
 | TypeScript | 5.9.3 | [Compiler manifest](../tools/runtime-comparison/compiler/package.json) and [lockfile](../tools/runtime-comparison/compiler/package-lock.json) |
 | Desktop frontend | React 19.3.0, TypeScript 5.9.3, Vite 8.3.0, Tauri API 2.11.1 / CLI 2.11.5 | [App manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json) |
+| Script editor | CodeMirror state 6.7.6, view 6.43.13, language 6.12.4, JavaScript 6.2.5, autocomplete 6.20.3, commands 6.11.1; existing TypeScript 5.9.3 language service | Exact [frontend manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json); trusted ES2020 declarations are bundled by the [build helper](../apps/desktop/build/trusted-libraries.mjs), with no runtime downloads |
 | Desktop Rust | Tauri 2.11.6, tauri-build 2.6.3, tracing 0.1.41, tracing-subscriber 0.3.20 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Saved-image payloads | png 0.18.1; flate2 1.1.9 (default features disabled; `rust_backend`) | [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock) |
 | Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
-| macOS application metadata and picker | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Desktop persisted identifiers | Public `pashifika/xid-rs` Git dependency at the immutable `rev` in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml), repeated in its [lockfile](../apps/desktop/src-tauri/Cargo.lock); default features disabled | The public checkout fetches the Fork directly; no maintenance checkout or local path override is required |
+| macOS application metadata, picker, and clipboard | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Application launch library | libc 0.2.189 on Unix; objc2 0.6.4, block2 0.6.2 and objc2-foundation/objc2-app-kit 0.3.2 on macOS | [Library manifest](../crates/application-launch/Cargo.toml) and [lockfile](../crates/application-launch/Cargo.lock); no Desktop or runtime dependency |
+| Shared supervisor/child monotonic deadline | libc 0.2.189 on Unix; windows-sys 0.61.2 with `Win32_System_Performance` on Windows | Default target-scoped dependencies in the [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock); absolute boot-clock transport does not refund child startup |
+| macOS engine startup lifetime guard | objc2 0.6.4, objc2-foundation/objc2-app-kit 0.3.2; shared Unix libc pin above | Optional Objective-C `engine` dependencies in the [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock); read-only selected-process checks, not a capture/input implementation |
 | GitHub Actions | Full commit SHAs | [Workflow](../.github/workflows/ci.yml) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
@@ -77,12 +83,20 @@ Target metadata parsing uses `plist` in-process, with the exactly pinned
 bounded XML/binary streaming. No system plist helper is executed. macOS core
 checks exercise public Foundation bundle resolution with isolated filesystem
 fixtures, including same-process metadata updates and unsupported alternate
-metadata. Non-macOS bundle resolution is explicitly unsupported; portable
-declaration, record, restore, and observation-policy checks remain cross-platform.
-Apple framework dependencies are macOS-target-scoped. The native picker uses a
-host-owned AppKit sheet, not a general dialog/filesystem plugin capability.
-Actual macOS WebView selection and authorized running-application observation
-remain separate from hosted checks and grant no native execution authority.
+metadata. They also check the current test process's kernel architecture and
+invalid-PID refusal without launching an application. Non-macOS bundle resolution
+is explicitly unsupported; portable declaration, record, restore, and
+observation-policy checks remain cross-platform.
+Apple framework dependencies are macOS-target-scoped. Native selection uses
+host-owned AppKit sheets for application bundles or saved PNGs, not a general
+dialog/filesystem plugin capability. Recognition Copy uses `NSPasteboard` only
+on explicit request. Actual macOS WebView selection, clipboard publication, and
+authorized running-application observation remain separate from hosted checks
+and grant no native execution authority.
+
+The desktop crate denies `unsafe_code` and `unsafe_op_in_unsafe_fn` by default.
+Audited native FFI uses narrowly scoped `#[expect(unsafe_code)]` with a reason
+and documented safety conditions; no crate-wide warning suppression is used.
 
 ## Local check scope
 
@@ -114,28 +128,83 @@ The full check has these responsibilities:
 - Exercise accepted/refused branch routes, malformed metadata, repository-policy
   failures, and gate outcomes through behavioral tests.
 - Install and check the trusted TypeScript compiler with package scripts disabled.
+- Test the independent [application-launch library](../crates/application-launch/Cargo.toml)
+  and its literal argument/cwd, refusal and external-child ownership contracts.
+  These checks do not launch a game or authorize bundle/native acceptance.
 - Build and test the locked Rust comparison executable, then execute its
   controlled `check` suite for direct Rust, JavaScript, TypeScript, and Lua.
-  These commands do not enable the optional `engine` feature.
+  Image regressions cover full PNG validation, original-pixel crops, split
+  package quotas, decoded/payload bounds, recognition metadata/maps, and generated
+  SDK snippets. These commands do not enable the optional `engine` feature or
+  execute real OCR.
+  External CLI plans refuse Desktop-only reviewed input authority and phase
+  budgets before package/output I/O. Real owned-child regressions cover
+  Script-requested startup, no-request cleanup, one-shot/polled preparation,
+  typed startup failures, and independent phase deadlines versus explicit Stop.
+  Those child fixtures run serially so the CPU-expiry case cannot starve unrelated
+  startup assertions; their phase deadlines and protocol checks remain unchanged.
+  Submitted receipts and physical cleanup ownership remain separate outcomes.
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
-  run its state tests, and type-check/build its trusted UI.
+  run its state tests (including per-file history, stale saves, source-diagnostic
+  projection, atomic literal replacement, UTF-16/line-ending mapping, real
+  restricted SDK/options completion, current-source session refresh and Backspace,
+  saved completion preferences, stale request/acceptance fencing, schema
+  invalidation, worker fencing and finite failure/explicit retry, Recognition
+  geometry/Undo, grouped selection, stale trial/Copy state, and per-Start Native
+  consent invalidation), and
+  type-check/build its trusted UI and bundled language worker.
 - Test the Rust application core with `--no-default-features --lib`: explicit
-  setup/recovery, named Tab ownership, scoped profiles, byte-preserving legacy
-  imports, bounded snapshots, archive refusals, and journaled restore/rollback
-  are checked alongside bounded logging and the shared controller contracts.
-  Restore regressions cover interrupted publication and discoverable cleanup
-  after restart, not physical power loss. The
+  setup/recovery, named Tab ownership, scoped profiles, source-preserving legacy
+  imports, bounded snapshots, and journaled restore/rollback are checked alongside
+  bounded logging and the shared controller contracts. Log-content,
+  initialization-error and successful receipt-restore assertions join the real
+  writer independently of the production shutdown deadline; a separate stalled-worker
+  test checks the bounded shutdown and incomplete-cleanup outcome.
+  Command-retirement checks accept settled logging or an explicit `LoggingShutdown`
+  refusal with retirement and closed admission; they do not assume disk-sync latency.
+  Identifier regressions cover
+  canonical XIDs, typed owner-scoped conversion, bounded durable mappings,
+  repeat ingress/conflicts, stale-schema preservation, and reservation retention
+  through interrupted publication and recovery. Completion-preference regressions
+  cover old-file defaults without rewriting, strict object/range refusal, atomic
+  write failure, Edit/busy/restore admission, and configuration restore/restart.
+  Restore/migration regressions cover discoverable cleanup after restart, not
+  physical power loss. The
   [configuration recovery ADR](adr/0005-desktop-configuration-recovery.md) records
   the storage boundaries and Windows directory-sync qualification limitation.
   Optional OCR settings, bounded replay projection, admission races, and
   pre-startup failures are checked without loading a real OCR backend.
-- On macOS, build the real Tauri shell with `--features custom-protocol` after
-  building frontend assets. The test-only `webdriver` feature is not enabled.
-  The separate engine artifact and actual
-  [recorded-replay WebView acceptance](desktop.md#recorded-replay-acceptance)
-  remain explicit local checks; no private corpus, model, or native permission
-  is added to default CI. Linux and Windows explicitly report the shell build as
-  unexecuted.
+  Native intent/unknown-field rejection, separate launch approval, saved target
+  expectations, immutable prelaunch preflight, typed discovery/progress,
+  one-launch status probes, launch-admission cancellation and sticky cleanup
+  refusal are checked without game launch or native capture/input. Optional
+  engine-feature publication, exact-lifetime/window probes and Readiness input
+  gating regressions require the separate
+  [native build prerequisites](runtime-native.md#consumer-publication-regressions).
+  Directory-authoring regressions cover configured ID-only destinations, source
+  ownership, configuration-only preservation of `sources` and `pkgs`, snapshot
+  source exclusion, revision conflicts, interrupted publication, global Edit
+  admission, non-evaluating validation and bounded close/cleanup. Recognition
+  regressions cover crop-only publication, retained asset references, source
+  conflicts, frame replacement, and confirmation. Frontend checks cover
+  structured metadata round trips and numeric draft provenance. Actual
+  [Edit WebView acceptance](desktop.md#directory-package-authoring-acceptance),
+  including source highlighting/completion, native clipboard/menu Undo/Redo,
+  left-tree navigation and contextual file actions, physical OS IME input,
+  worker startup/warm-response/memory observations, and storage power-loss
+  durability are not hosted CI claims.
+- On macOS and Windows, build the real Tauri shell with `--features custom-protocol`
+  after building frontend assets. Windows also runs non-GUI shell validation and
+  real owned-process/Job lifetime regressions; the test-only `webdriver` feature
+  is not enabled. Linux reports the shell build as unexecuted.
+  The separate engine artifact, actual
+  [recorded-replay WebView acceptance](desktop.md#recorded-replay-acceptance),
+  [saved-image Recognition acceptance](desktop.md#saved-image-recognition-acceptance)
+  and [native authoring acceptance](desktop.md#acquire-a-native-historical-frame)
+  remain explicit local checks. No private target, corpus, model, or native
+  permission is added to default CI. These checks do not prove native picker or
+  clipboard interaction, recognition quality, physical pointer behavior,
+  capture-session cleanup under a real backend, or total RSS.
 
 For governance policy and its behavioral tests only, after Python dependency
 setup:
@@ -258,10 +327,26 @@ scope and remaining qualification blockers.
 ## Hosted workflow and required gate
 
 The [workflow](../.github/workflows/ci.yml) runs on PRs targeting `main` and
-`dev/**`, protected-branch pushes, and manual dispatch. PR events include
-`opened`, `synchronize`, `reopened`, `ready_for_review`, and `edited` so a base
-change is rechecked. There are no workflow path filters. Manual dispatch becomes
-available when the workflow is on the default branch.
+`dev/**`, protected-branch pushes, and manual dispatch. PR events are limited to
+`opened`, `synchronize`, `reopened`, and `ready_for_review`. The workflow does
+not subscribe to `edited`: changing a PR title, description, or task-list
+checkbox creates no new CI workflow run or skipped checks. A job-level `if`
+would only skip jobs after a workflow run already exists, so it is not a
+substitute for removing the event subscription. There are no workflow path
+filters. Manual dispatch becomes available when the workflow is on the default
+branch. GitHub documents activity-type filtering in
+[Events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request).
+
+A base-branch retarget is also an `edited` activity and no longer automatically
+revalidates the PR. After changing the base, the maintainer must close and reopen
+the PR, or push a new commit to its head branch, and confirm that the resulting
+PR run validates the new route and passes `CI Gate` before merging. Resolve any
+merge conflict first. Do not use an earlier run's success as evidence for the new
+base: rerunning an old workflow uses the original event's SHA/ref, and manual
+dispatch produces `CI Gate (manual)`, not the required PR check. See
+[Re-running workflows and jobs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
+This is an explicit maintainer step, not automatic server-side retarget
+protection; branch rulesets and the required `CI Gate` context remain unchanged.
 
 The lightweight `dev-push-policy` job runs only on pushes. It suppresses duplicate
 `dev/<topic>` push checks only when an open promotion PR to `main` has both its
@@ -293,7 +378,7 @@ job runs with `always()` and needs the selector plus all four mandatory jobs:
 | `branch-flow` | Event and branch-route validation |
 | `repository` | Full local check, controlled runtime, desktop frontend/core on Linux |
 | `runtime-macos` | Policy, governance tests, controlled runtime, desktop frontend/core, and shell build on Apple Silicon macOS |
-| `runtime-windows` | Policy, governance tests, controlled runtime, desktop frontend/core on Windows |
+| `runtime-windows` | Policy, governance tests, controlled runtime, desktop frontend/core, Windows shell build and non-GUI shell/owned-process contracts |
 
 Only success from every mandatory job passes. Failure, cancellation, missing
 results, unexpected dependencies, and skipped mandatory work cannot produce a
@@ -316,6 +401,8 @@ owned by [CONTRIBUTING.md](../CONTRIBUTING.md#select-the-route-before-implementa
 
 The workflow uses read-only repository authority, credential-free checkout,
 pinned actions/tools, bounded jobs, and event-scoped concurrency cancellation.
+PR metadata edits create no run and therefore cannot cancel or supersede running
+or pending validation. New commits still supersede older runs for the same PR.
 It does not use secrets, administration tokens, `pull_request_target`, private
 Rasen access, or self-hosted interactive desktops. Superseding one PR run must
 not cancel another PR's run or turn a cancellation into success.
@@ -327,6 +414,9 @@ tests do not prove those interactions or additional-OS desktop support. A passed
 local setup smoke does not pass the remaining GUI scenarios, full CI, or native
 qualification. Normal builds and release builds have no WebDriver listener; CI
 does not enable the test-only automation feature or launch a GUI session.
+Native review/refusal can be exercised without capture or input. Useful Native
+workflow, actual game effect and normal Native Stop/rerun require the separate
+[authorized Desktop procedure](desktop.md#reviewed-macos-native-start).
 
 Administrative activation requires an observed successful PR check and its
 GitHub Actions app identity; use the

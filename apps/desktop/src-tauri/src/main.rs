@@ -1,13 +1,14 @@
 use mado_mata_desktop::application::{
-    InspectionOutcome, Poll, ProfileCatalog, RecoveryMutation, RecoveryRef,
-    TargetApplicationResponse, TargetCheckResponse, TargetSaveResponse, TargetView,
-    WorkspaceCatalog, WorkspaceRef, WorkspaceView,
+    AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, InspectionOutcome, Poll,
+    ProfileCatalog, RecoveryMutation, RecoveryRef, TargetApplicationResponse, TargetCheckResponse,
+    TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView,
 };
+use mado_mata_desktop::authoring::CatalogEdit;
 use mado_mata_desktop::backup::SnapshotReceipt;
 use mado_mata_desktop::bootstrap::{Bootstrap, BootstrapStatus, selected_roots};
 use mado_mata_desktop::storage::{EditableSettings, LegacyImport, Profile, Settings};
 use mado_mata_desktop::target::{TargetConfiguration, TargetExpectation, TargetResolution};
-use mado_runtime_comparison::desktop::StartRequest;
+use mado_runtime_comparison::desktop::{NativeLimits, StartRequest};
 use mado_runtime_comparison::model::Fault;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -15,15 +16,22 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
+mod cache_commands;
 #[cfg(target_os = "macos")]
 mod picker;
+mod recognition_commands;
+mod visual_picker;
+#[cfg(windows)]
+mod windows_shell;
 
 struct Backend {
     bootstrap: Arc<Bootstrap>,
     closing: AtomicBool,
     exiting: AtomicBool,
+    shutdown_finished: AtomicBool,
+    preview_owner: std::sync::Mutex<Option<Arc<recognition_commands::PreviewSession>>>,
 }
 
 async fn background<T: Send + 'static>(
@@ -388,6 +396,11 @@ async fn delete_profile(
 }
 
 #[tauri::command]
+fn native_run_limits() -> Option<NativeLimits> {
+    cfg!(target_os = "macos").then(mado_runtime_comparison::desktop::native_limits)
+}
+
+#[tauri::command]
 async fn start(
     workspace: WorkspaceRef,
     request: StartRequest,
@@ -419,6 +432,139 @@ async fn poll(state: tauri::State<'_, Backend>) -> Result<Poll, Fault> {
     background(move || Ok(application.poll())).await
 }
 
+#[tauri::command]
+async fn authoring_open(
+    workspace: WorkspaceRef,
+    package_path: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_open(&workspace, Path::new(&package_path))).await
+}
+
+#[tauri::command]
+async fn authoring_create(
+    workspace: WorkspaceRef,
+    package_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_create(&workspace, &package_id)).await
+}
+
+#[tauri::command]
+async fn authoring_duplicate(
+    owner: AuthoringRef,
+    revision: String,
+    package_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_duplicate(&owner, &revision, &package_id)).await
+}
+
+#[tauri::command]
+async fn authoring_save(
+    owner: AuthoringRef,
+    revision: String,
+    path: String,
+    text: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringMutation, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_save(&owner, &revision, &path, text)).await
+}
+
+#[tauri::command]
+async fn authoring_catalog(
+    owner: AuthoringRef,
+    revision: String,
+    edit: CatalogEdit,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringMutation, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_catalog(&owner, &revision, edit)).await
+}
+
+#[tauri::command]
+async fn authoring_refresh(
+    owner: AuthoringRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_refresh(&owner)).await
+}
+
+#[tauri::command]
+async fn authoring_validate(
+    owner: AuthoringRef,
+    revision: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<AuthoringValidation, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_validate(&owner, &revision)).await
+}
+
+#[tauri::command]
+fn authoring_stop(owner: AuthoringRef, state: tauri::State<'_, Backend>) -> Result<bool, Fault> {
+    state
+        .bootstrap
+        .running_application()?
+        .authoring_stop(&owner)
+}
+
+#[tauri::command]
+async fn authoring_exit(
+    owner: AuthoringRef,
+    state: tauri::State<'_, Backend>,
+) -> Result<WorkspaceView, Fault> {
+    let application = state.bootstrap.running_application()?;
+    background(move || application.authoring_exit(&owner)).await
+}
+
+#[tauri::command]
+async fn authoring_recover(
+    package_path: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_recover(Path::new(&package_path))).await
+}
+
+#[tauri::command]
+async fn app_close(
+    owner: Option<AuthoringRef>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), Fault> {
+    let bootstrap = state.bootstrap.clone();
+    background(move || {
+        if let Ok(application) = bootstrap.running_application() {
+            application.prepare_close(owner.as_ref())?;
+        }
+        close(&app);
+        Ok(())
+    })
+    .await
+}
+
+fn request_close(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Ok(application) = app.state::<Backend>().bootstrap.running_application() {
+            if let Err(fault) = application.prepare_close(None) {
+                if fault.category == "AuthoringActive" {
+                    let _ = app.emit("authoring-close-requested", ());
+                } else {
+                    let _ = app.emit("application-close-refused", fault);
+                }
+                return;
+            }
+        }
+        close(&app);
+    });
+}
+
 fn close(app: &tauri::AppHandle) {
     let backend = app.state::<Backend>();
     if backend.closing.swap(true, Ordering::SeqCst) {
@@ -435,6 +581,10 @@ fn close(app: &tauri::AppHandle) {
         if app
             .run_on_main_thread(move || {
                 if !exit_app.state::<Backend>().exiting.load(Ordering::SeqCst) {
+                    exit_app
+                        .state::<Backend>()
+                        .shutdown_finished
+                        .store(true, Ordering::SeqCst);
                     exit_app.exit(i32::from(outcome.is_err()));
                 }
             })
@@ -455,11 +605,11 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let executable = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../tools/runtime-comparison/target/debug/mado-runtime-comparison");
-    let engine_executable = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../../../tools/runtime-comparison/target/desktop-engine/debug/mado-runtime-comparison",
-    );
+    let runner_name = format!("mado-runtime-comparison{}", std::env::consts::EXE_SUFFIX);
+    let runtime =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../tools/runtime-comparison/target");
+    let executable = runtime.join("debug").join(&runner_name);
+    let engine_executable = runtime.join("desktop-engine/debug").join(&runner_name);
     let builder = tauri::Builder::default()
         .setup(move |app| {
             let home = if data_root.is_some() {
@@ -479,11 +629,14 @@ fn main() {
                 )),
                 closing: AtomicBool::new(false),
                 exiting: AtomicBool::new(false),
+                shutdown_finished: AtomicBool::new(false),
+                preview_owner: std::sync::Mutex::new(None),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap_status,
+            native_run_limits,
             initialize,
             retry_bootstrap,
             import_legacy_root,
@@ -508,6 +661,13 @@ fn main() {
             save_target,
             remove_target,
             choose_target_application,
+            visual_picker::native_pick_window,
+            recognition_commands::native_discover,
+            recognition_commands::native_select_candidate,
+            recognition_commands::native_capture,
+            recognition_commands::native_release_selection,
+            recognition_commands::native_start,
+            recognition_commands::native_reset_target,
             reserve_running_application,
             check_running_application,
             cancel_running_application,
@@ -518,12 +678,44 @@ fn main() {
             start,
             check_environment,
             stop,
+            authoring_open,
+            authoring_create,
+            authoring_duplicate,
+            authoring_save,
+            authoring_catalog,
+            authoring_refresh,
+            authoring_validate,
+            authoring_stop,
+            authoring_exit,
+            authoring_recover,
+            recognition_commands::recognition_view,
+            recognition_commands::recognition_capabilities,
+            recognition_commands::recognition_pick,
+            recognition_commands::recognition_select,
+            recognition_commands::recognition_load,
+            cache_commands::capture_cache_info,
+            cache_commands::capture_cache_open,
+            cache_commands::recognition_load_cached,
+            recognition_commands::recognition_preview,
+            recognition_commands::recognition_pixel,
+            recognition_commands::recognition_update,
+            recognition_commands::recognition_confirm,
+            recognition_commands::recognition_discard,
+            recognition_commands::recognition_trial,
+            recognition_commands::recognition_save,
+            recognition_commands::recognition_copy,
+            recognition_commands::recognition_open_preview,
+            recognition_commands::recognition_close_preview,
+            app_close,
             poll
         ])
         .on_window_event(|window, event| {
+            if window.label() == recognition_commands::PREVIEW_WINDOW {
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                close(window.app_handle());
+                request_close(window.app_handle());
             }
         });
     #[cfg(all(feature = "webdriver", debug_assertions))]
@@ -533,9 +725,12 @@ fn main() {
         .expect("desktop initialization")
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { api, .. } => {
-                if !app.state::<Backend>().closing.load(Ordering::SeqCst) {
+                let backend = app.state::<Backend>();
+                if !backend.shutdown_finished.load(Ordering::SeqCst) {
                     api.prevent_exit();
-                    close(app);
+                    if !backend.closing.load(Ordering::SeqCst) {
+                        request_close(app);
+                    }
                 }
             }
             tauri::RunEvent::Exit => {

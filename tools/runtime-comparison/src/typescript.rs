@@ -1,10 +1,11 @@
 use crate::inventory::Inventory;
 use crate::model::{Control, Fault, Limits};
-use serde::Deserialize;
+use crate::owned_child::{ChildStdio, Environment, OwnedChild};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -41,19 +42,20 @@ struct Reply {
     fault: Option<Fault>,
 }
 
-struct CompilerChild(Child);
-
-impl Drop for CompilerChild {
-    fn drop(&mut self) {
-        if !matches!(self.0.try_wait(), Ok(Some(_))) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
+fn worker_deadline_fault(
+    deadline: Instant,
+    control: Option<&Control>,
+    message: &'static str,
+) -> Fault {
+    // Only the shared operation deadline can inherit the supervisor's Stop.
+    control
+        .filter(|control| control.deadline() == deadline)
+        .and_then(|control| control.check().err())
+        .unwrap_or_else(|| Fault::new("Timeout", message))
 }
 
 fn transport(
-    request: &Value,
+    request: &impl Serialize,
     limit: usize,
     deadline: Instant,
     control: Option<&Control>,
@@ -70,7 +72,11 @@ fn transport(
         ));
     }
     if Instant::now() >= deadline {
-        return Err(Fault::new("Timeout", "compiler worker deadline expired"));
+        return Err(worker_deadline_fault(
+            deadline,
+            control,
+            "compiler worker deadline expired",
+        ));
     }
     if !std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -87,14 +93,10 @@ fn transport(
         ));
     }
     #[cfg(windows)]
-    let node = std::env::var_os("MADO_COMPILER_NODE")
-        .map(std::path::PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| "node".into());
+    let node = compiler_node()?;
     #[cfg(not(windows))]
     let node = "node";
     let mut command = Command::new(node);
-    command.env_clear();
     // Resolve the trusted compiler installation without inheriting Node hooks.
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
@@ -120,26 +122,20 @@ fn transport(
                 .to_string(),
         )
         .arg("--owner-pid")
-        .arg(std::process::id().to_string())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = CompilerChild(command.spawn().map_err(|error| {
+        .arg(std::process::id().to_string());
+    let mut child = OwnedChild::spawn(&mut command, ChildStdio::Piped, Environment::Cleared).map_err(|error| {
         Fault::new("Blocked", "application-owned TypeScript compiler could not start")
-            .with_context(json!({"cause": error.to_string(), "requires": "Node 24 and npm ci --ignore-scripts in compiler/"}))
-    })?);
+            .with_context(json!({"cause": error, "requires": "Node 24 and npm ci --ignore-scripts in compiler/"}))
+    })?;
     let stdin = child
-        .0
         .stdin
         .take()
         .ok_or_else(|| Fault::new("CompilerProtocol", "missing compiler stdin"))?;
     let stdout = child
-        .0
         .stdout
         .take()
         .ok_or_else(|| Fault::new("CompilerProtocol", "missing compiler stdout"))?;
     let stderr = child
-        .0
         .stderr
         .take()
         .ok_or_else(|| Fault::new("CompilerProtocol", "missing compiler stderr"))?;
@@ -190,7 +186,7 @@ fn transport(
                 Err(error) => failure = Some(Fault::new("CompilerTransport", error.to_string())),
             }
         }
-        match child.0.try_wait() {
+        match child.try_wait() {
             Ok(Some(exit)) => status = Some(exit),
             Ok(None) => {}
             Err(error) => failure = Some(Fault::new("CompilerTransport", error.to_string())),
@@ -202,8 +198,9 @@ fn transport(
             break;
         }
         if Instant::now() >= deadline {
-            failure = Some(Fault::new(
-                "Timeout",
+            failure = Some(worker_deadline_fault(
+                deadline,
+                control,
                 "compiler worker exceeded its deadline",
             ));
             break;
@@ -211,13 +208,13 @@ fn transport(
         thread::sleep(Duration::from_millis(2));
     }
     if status.is_none() {
-        if let Err(error) = child.0.kill() {
+        if let Err(error) = child.kill() {
             failure = Some(
                 Fault::new("CompilerContainment", "compiler termination failed")
                     .with_context(json!({"cause": error.to_string(), "primary": failure})),
             );
         }
-        if let Err(error) = child.0.wait() {
+        if let Err(error) = child.wait() {
             failure = Some(
                 Fault::new("CompilerContainment", "compiler reaping failed")
                     .with_context(json!({"cause": error.to_string(), "primary": failure})),
@@ -261,6 +258,98 @@ fn transport(
         .ok_or_else(|| Fault::new("CompilerProtocol", "compiler response has no value"))
 }
 
+#[cfg(windows)]
+fn compiler_node() -> Result<std::path::PathBuf, Fault> {
+    if let Some(path) = std::env::var_os("MADO_COMPILER_NODE") {
+        let path = std::path::PathBuf::from(path);
+        if !path.is_absolute()
+            || !path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+        {
+            return Err(Fault::new(
+                "Blocked",
+                "The owned compiler requires an absolute Node executable",
+            ));
+        }
+        return path
+            .canonicalize()
+            .and_then(|path| {
+                if path.is_file() {
+                    Ok(path)
+                } else {
+                    Err(std::io::Error::other(
+                        "Node executable is not a regular file",
+                    ))
+                }
+            })
+            .map_err(|error| Fault::new("Blocked", error.to_string()));
+    }
+    node_from_path()
+}
+
+#[cfg(windows)]
+pub(crate) fn node_from_path() -> Result<std::path::PathBuf, Fault> {
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path).filter(|directory| directory.is_absolute()) {
+            let node = directory.join("node.exe");
+            match std::fs::metadata(&node) {
+                Ok(metadata) if metadata.is_file() => {
+                    return node
+                        .canonicalize()
+                        .map_err(|error| Fault::new("Blocked", error.to_string()));
+                }
+                Ok(_) => {
+                    return Err(Fault::new(
+                        "Blocked",
+                        "Node executable is not a regular file",
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(Fault::new("Blocked", error.to_string())),
+            }
+        }
+    }
+    Err(Fault::new(
+        "Blocked",
+        "Node 24.18.0 node.exe is required on an absolute PATH entry",
+    ))
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedModules {
+    inventory_identity: String,
+    parser: Value,
+}
+
+impl PreparedModules {
+    pub(crate) fn capture(
+        inventory: &Arc<Inventory>,
+        limits: &Limits,
+        control: &Arc<Control>,
+    ) -> Result<Self, Fault> {
+        let parser = validate_javascript_modules(inventory, limits, control)?;
+        Ok(Self {
+            inventory_identity: inventory.identity.clone(),
+            parser,
+        })
+    }
+
+    pub(crate) fn parser(&self, inventory: &Inventory) -> Result<&Value, Fault> {
+        if inventory.identity != self.inventory_identity
+            || inventory.metadata["runtime"] != "javascript"
+        {
+            return Err(Fault::new(
+                "StaleIdentity",
+                "prepared modules do not match the captured executable inventory",
+            ));
+        }
+        Ok(&self.parser)
+    }
+}
+
 /// Inspect JavaScript with the pinned parser without type checking or emitting.
 /// The worker shares the attempt's remaining deadline and cancellation latch.
 pub(crate) fn validate_javascript_imports(
@@ -287,11 +376,7 @@ fn inspect_javascript(
     link: bool,
 ) -> Result<Value, Fault> {
     control.check()?;
-    let remaining_us = limits
-        .duration_ms
-        .saturating_mul(1000)
-        .saturating_sub(control.elapsed_us());
-    let deadline = Instant::now() + Duration::from_micros(remaining_us);
+    let deadline = control.deadline();
     let limit = limits
         .snapshot_bytes
         .saturating_mul(8)
@@ -382,9 +467,20 @@ fn inspect_javascript(
 
 /// Compile only the immutable inventory, before creating the JavaScript VM.
 pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Fault> {
+    limits.validate()?;
+    compile_with_control(inventory, limits, &Control::new(limits))
+}
+
+/// Compile within an already reserved operation's cancellation and deadline.
+pub(crate) fn compile_with_control(
+    inventory: &Inventory,
+    limits: &Limits,
+    control: &Control,
+) -> Result<Inventory, Fault> {
+    control.check()?;
     inventory.validate()?;
     limits.validate()?;
-    let deadline = Instant::now() + Duration::from_millis(limits.duration_ms);
+    let deadline = control.deadline();
     let limit = limits
         .snapshot_bytes
         .saturating_mul(8)
@@ -403,11 +499,13 @@ pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Faul
         fault.context["stage"] = json!("compilation");
         fault
     };
-    let inspection: Inspection =
-        serde_json::from_value(transport(&request, limit, deadline, None).map_err(&attribute)?)
-            .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
+    let inspection: Inspection = serde_json::from_value(
+        transport(&request, limit, deadline, Some(control)).map_err(&attribute)?,
+    )
+    .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     let mut resolutions: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for import in inspection.imports {
+        control.check()?;
         let destination =
             inventory
                 .resolve(&import.from, &import.specifier)
@@ -428,9 +526,10 @@ pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Faul
     request["resolutions"] = serde_json::to_value(resolutions)
         .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     request["compiler_identity"] = inspection.identity;
-    let compilation: Compilation =
-        serde_json::from_value(transport(&request, limit, deadline, None).map_err(&attribute)?)
-            .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
+    let compilation: Compilation = serde_json::from_value(
+        transport(&request, limit, deadline, Some(control)).map_err(&attribute)?,
+    )
+    .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     let mut compiled = inventory.clone();
     compiled.metadata["original_sources"] = serde_json::to_value(&inventory.sources)
         .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
@@ -458,6 +557,7 @@ pub fn compile(inventory: &Inventory, limits: &Limits) -> Result<Inventory, Faul
             entry.module = format!("{stem}.js");
         }
     }
+    control.check()?;
     compiled.refresh_identity()?;
     Ok(compiled)
 }
@@ -655,4 +755,41 @@ pub fn map_fault(inventory: &Inventory, mut fault: Fault) -> Fault {
         "frames": frames,
     });
     fault
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Plan;
+
+    struct StopDuringEncoding<'a>(&'a Control);
+
+    impl Serialize for StopDuringEncoding<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            assert!(Instant::now() < self.0.deadline());
+            self.0.cancel();
+            // Expire the real deadline during encoding, before any worker spawn.
+            thread::sleep(self.0.deadline().saturating_duration_since(Instant::now()));
+            while Instant::now() < self.0.deadline() {
+                std::hint::spin_loop();
+            }
+            serializer.serialize_unit()
+        }
+    }
+
+    #[test]
+    fn stop_during_encoding_wins_over_the_shared_worker_deadline() {
+        let plan: Plan =
+            serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+        let control = Control::with_deadline(&plan.limits, Instant::now() + Duration::from_secs(5));
+        let fault = transport(
+            &StopDuringEncoding(&control),
+            64,
+            control.deadline(),
+            Some(&control),
+        )
+        .unwrap_err();
+        assert_eq!(fault.category, "Cancelled");
+        assert_eq!(control.admit_launch().unwrap_err().category, "Cancelled");
+    }
 }

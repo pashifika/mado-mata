@@ -8,7 +8,7 @@ import sys
 
 SLUG = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-PR_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
+PR_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
 
 
 def object_at(value, key):

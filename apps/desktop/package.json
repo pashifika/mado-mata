@@ -5,11 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
-    "test": "node --experimental-strip-types --test src/state.test.mjs src/workspace.test.mjs src/notifications.test.mjs src/i18n.test.mjs src/bootstrap.test.mjs",
+    "test": "node --experimental-strip-types --test src/state.test.mjs src/workspace.test.mjs src/notifications.test.mjs src/i18n.test.mjs src/bootstrap.test.mjs src/authoring.test.mjs src/metadata.test.mjs src/recognition.test.mjs src/contentDetection.test.mjs src/editor/*.test.mjs",
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "6.20.3",
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/lang-javascript": "6.2.5",
+    "@codemirror/language": "6.12.4",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.13",
     "@tauri-apps/api": "2.11.1",
     "react": "19.3.0",
     "react-dom": "19.3.0"

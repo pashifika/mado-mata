@@ -12,7 +12,8 @@ The trusted WebView renders forms and status. It never evaluates package code.
 The shared Rust `DesktopController` captures package/profile inputs and invokes
 the existing supervised runtime executable. CLI `current_exe` behavior remains
 unchanged. The application supplies a fixed development-build runner path;
-package data and IPC cannot choose the executable or acquire native authority.
+package data and IPC cannot choose the executable. Reviewed macOS Native authority
+is a separate host projection under [ADR 0008](0008-macos-native-run-admission.md).
 The existing application-owned compiler installation remains required. This is
 not a relocatable release bundle or an additional-OS support commitment.
 
@@ -74,11 +75,16 @@ plists or assume they are ignored. These checks do not make concurrent external
 filesystem replacement atomic.
 
 Running-application checks use AppKit bundle-ID candidates, precise process-start
-identity, and architecture-specific signed-code evidence. Path equality alone
-cannot accept an old signed process after an in-place update. A relocated match
-additionally requires a matching nonempty Team ID and explicitly cannot identify
-the original physical copy. Never reverse temporary paths or use private
-translocation APIs.
+identity, and architecture-specific signed-code evidence. Read the executing
+architecture from public libproc `PROC_PIDARCHINFO`, not AppKit's launch-time
+cache: `executableArchitecture` can temporarily return `-1` for a live arm64
+process, causing static-code creation to refuse the invalid architecture.
+Require a complete kernel reply and positive CPU type; retain the before/after
+lifetime, executable-path and signing checks without retrying signature faults.
+Path equality alone cannot accept an old signed process after an in-place
+update. A relocated match additionally requires a matching nonempty Team ID and
+explicitly cannot identify the original physical copy. Never reverse temporary
+paths or use private translocation APIs.
 
 Do not interpret dynamic `errSecCSUnsigned` as proof of an unsigned live image.
 Apple's
@@ -100,9 +106,11 @@ and bound discovery to 64 candidates and private projection to 64 KiB. Publicati
 rechecks ownership, saved binding, installation, lifetime, and cancellation.
 
 These observations do not enable native Start, establish a window/input route,
-or replace M0/R6 qualification. Windows target implementation remains deferred;
-portable declaration/storage/restore and existing Windows core CI remain in scope.
-Actual WebView and authorized OS observations are separate from hosted checks.
+or replace M0/R6 qualification. General Windows target/launch configuration remains
+deferred. [ADR 0007](0007-native-capture-authoring.md) adds a separate transient
+Windows authoring selection and checkout shell without extending this macOS
+observation API. Actual WebView and authorized OS observations remain separate
+from hosted checks.
 
 ## Shell evidence
 

@@ -1,14 +1,12 @@
 use super::protocol::{Invocation, Operation, emit, emit_bytes, frame};
+use crate::desktop::{LaunchDisposition, NativePhase, NativeProgress, NativeTargetStatus};
 use crate::host::Host;
-#[cfg(feature = "engine")]
-use crate::model::Control;
-use crate::model::{Fault, MAX_TRANSPORT_BYTES, encode_bounded};
+use crate::model::{Control, Fault, MAX_TRANSPORT_BYTES, encode_bounded};
 use serde_json::{Value, json};
-use std::io::BufReader;
-use std::process::ChildStdout;
+use std::io::{BufReader, Read};
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     mpsc,
 };
 use std::thread;
@@ -17,6 +15,24 @@ static EXECUTION_EVIDENCE: OnceLock<mpsc::SyncSender<(&'static str, u64)>> = Onc
 static HOST_WAIT_REPORTED: AtomicBool = AtomicBool::new(false);
 pub(super) static BACKEND_INITIALIZATION_STARTED: AtomicBool = AtomicBool::new(false);
 static SCRIPT_LOGS: OnceLock<ScriptStream> = OnceLock::new();
+static NATIVE_EVIDENCE: OnceLock<mpsc::SyncSender<(NativeProgress, u64)>> = OnceLock::new();
+static NATIVE_PHASE: AtomicU8 = AtomicU8::new(0);
+static NATIVE_EVENTS: AtomicU8 = AtomicU8::new(0);
+static NATIVE_STATUS: AtomicU8 = AtomicU8::new(0);
+static NATIVE_LAUNCH: AtomicU8 = AtomicU8::new(0);
+const NATIVE_EVENT_LIMIT: u8 = 10;
+const LIFECYCLE_RECORD_LIMIT: usize = 26;
+
+const NATIVE_PHASES: [NativePhase; 8] = [
+    NativePhase::Preflight,
+    NativePhase::TargetDiscovery,
+    NativePhase::LaunchSubmission,
+    NativePhase::WaitingForProcess,
+    NativePhase::WaitingForWindow,
+    NativePhase::NativeInitialization,
+    NativePhase::Readiness,
+    NativePhase::Workflow,
+];
 
 struct ScriptStream {
     sender: mpsc::SyncSender<Value>,
@@ -54,6 +70,9 @@ impl Observer {
             "supervisor_received_us",
             "operation",
             "stage",
+            "phase",
+            "status",
+            "launch",
         ] {
             if let Some(field) = value.get(key) {
                 progress.insert(key.into(), field.clone());
@@ -129,6 +148,62 @@ pub(crate) fn emit_backend_initialization_started(control: &Control) {
     }
 }
 
+pub(crate) fn emit_native_status(control: &Control, progress: NativeProgress) {
+    NATIVE_STATUS.store(
+        match progress.status {
+            NativeTargetStatus::NotRequested => 0,
+            NativeTargetStatus::Pending => 1,
+            NativeTargetStatus::CaptureReady => 2,
+        },
+        Ordering::Release,
+    );
+    NATIVE_LAUNCH.store(
+        match progress.launch {
+            LaunchDisposition::NotRequested => 0,
+            LaunchDisposition::Accepted => 1,
+            LaunchDisposition::Rejected => 2,
+            LaunchDisposition::Uncertain => 3,
+        },
+        Ordering::Release,
+    );
+    emit_native_preparation(control, progress.phase);
+}
+
+fn native_projection(phase: NativePhase) -> NativeProgress {
+    NativeProgress {
+        status: match NATIVE_STATUS.load(Ordering::Acquire) {
+            0 => NativeTargetStatus::NotRequested,
+            1 => NativeTargetStatus::Pending,
+            _ => NativeTargetStatus::CaptureReady,
+        },
+        phase,
+        launch: match NATIVE_LAUNCH.load(Ordering::Acquire) {
+            0 => LaunchDisposition::NotRequested,
+            1 => LaunchDisposition::Accepted,
+            2 => LaunchDisposition::Rejected,
+            _ => LaunchDisposition::Uncertain,
+        },
+    }
+}
+
+pub(crate) fn emit_native_preparation(control: &Control, phase: NativePhase) {
+    let index = NATIVE_PHASES
+        .iter()
+        .position(|candidate| *candidate == phase)
+        .expect("all native phases have an evidence index");
+    let previous = NATIVE_PHASE.swap(index as u8 + 1, Ordering::AcqRel);
+    if let Some(sender) = NATIVE_EVIDENCE.get()
+        && previous != index as u8 + 1
+        && NATIVE_EVENTS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < NATIVE_EVENT_LIMIT).then_some(count + 1)
+            })
+            .is_ok()
+    {
+        let _ = sender.try_send((native_projection(phase), control.elapsed_us()));
+    }
+}
+
 // Diagnostic detail is expendable; accepted actions, receipts, release
 // obligations, postconditions and ownership facts are not.
 fn compact_observations(value: &mut Value) {
@@ -191,13 +266,39 @@ pub(super) fn settlement_bytes(mut value: Value) -> Result<Vec<u8>, Fault> {
     Ok(bytes)
 }
 
-pub(super) fn emit_settlement(value: Value) -> Result<(), Fault> {
+pub(super) fn emit_settlement(mut value: Value) -> Result<(), Fault> {
+    if let Some(phase) = NATIVE_PHASE
+        .load(Ordering::Acquire)
+        .checked_sub(1)
+        .and_then(|index| NATIVE_PHASES.get(usize::from(index)))
+        && value["observations"].get("native_phase").is_none()
+    {
+        if !value["observations"].is_object() {
+            value["observations"] = json!({});
+        }
+        value["observations"]["native_phase"] = json!(phase);
+        value["observations"]["native_status"] = json!(native_projection(*phase).status);
+        value["observations"]["native_launch"] = json!(native_projection(*phase).launch);
+    }
     emit_bytes(&settlement_bytes(value)?)
 }
 
 pub(super) fn start_evidence(invocation: &Invocation) {
     let run = &invocation.run;
     let attempt = invocation.attempt;
+    if invocation.plan.lane == "native" {
+        let (sender, receiver) = mpsc::sync_channel(usize::from(NATIVE_EVENT_LIMIT));
+        let _ = NATIVE_EVIDENCE.set(sender);
+        let event_run = run.clone();
+        thread::spawn(move || {
+            for (progress, at_us) in receiver.iter().take(usize::from(NATIVE_EVENT_LIMIT)) {
+                let _ = emit(&json!({
+                    "event":"NativePreparation","run":event_run,"attempt":attempt,
+                    "status":progress.status,"phase":progress.phase,"launch":progress.launch,"at_us":at_us,
+                }));
+            }
+        });
+    }
     if invocation.observe_logs && invocation.operation == Operation::Run {
         let (sender, receiver) = mpsc::sync_channel::<Value>(invocation.plan.limits.log_records);
         let _ = SCRIPT_LOGS.set(ScriptStream {
@@ -233,30 +334,54 @@ pub(super) fn start_evidence(invocation: &Invocation) {
 }
 
 pub(super) fn receive_evidence(
-    stdout: ChildStdout,
+    stdout: impl Read + Send + 'static,
     observer: Option<&Observer>,
     invocation: &Invocation,
 ) -> (mpsc::Receiver<Result<Value, Fault>>, thread::JoinHandle<()>) {
-    let run = &invocation.run;
-    let plan = &invocation.plan;
-    // Logs bypass the independent sixteen-record lifecycle allowance.
-    let (sender, receiver) = mpsc::sync_channel(17);
+    receive_frames(
+        stdout,
+        observer,
+        &invocation.run,
+        if observer.is_some() {
+            invocation.plan.limits.log_records
+        } else {
+            0
+        },
+        MAX_TRANSPORT_BYTES,
+    )
+}
+
+pub(super) fn receive_frames(
+    stdout: impl Read + Send + 'static,
+    observer: Option<&Observer>,
+    run: &str,
+    log_limit: usize,
+    frame_bytes: usize,
+) -> (mpsc::Receiver<Result<Value, Fault>>, thread::JoinHandle<()>) {
+    // Logs cannot displace the finite lifecycle and native-preparation allowance.
+    let (sender, receiver) = mpsc::sync_channel(LIFECYCLE_RECORD_LIMIT + 1);
     let log_observer = observer.cloned();
-    let event_run = run.clone();
-    let log_limit = if observer.is_some() {
-        plan.limits.log_records
-    } else {
-        0
-    };
+    let event_run = run.to_owned();
     let reader = thread::spawn(move || {
         let mut input = BufReader::new(stdout);
         let mut control_records = 0;
         let mut log_records = 0;
-        for _ in 0..16 + log_limit {
-            match frame(&mut input, MAX_TRANSPORT_BYTES) {
+        loop {
+            match frame(&mut input, frame_bytes) {
                 Ok(Some(bytes)) => {
                     let result = serde_json::from_slice::<Value>(&bytes)
                         .map_err(|e| Fault::new("Transport", e.to_string()));
+                    // Startup requests are stop-and-wait, not retained lifecycle records.
+                    if let Ok(value) = &result
+                        && value["event"] == "TargetProbe"
+                        && value["run"] == event_run
+                        && value["attempt"] == 1
+                    {
+                        if sender.try_send(result).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
                     if let Ok(value) = &result
                         && value["event"] == "ScriptLog"
                         && value["run"] == event_run
@@ -270,7 +395,7 @@ pub(super) fn receive_evidence(
                         continue;
                     }
                     control_records += 1;
-                    if control_records > 16 {
+                    if control_records > LIFECYCLE_RECORD_LIMIT {
                         break;
                     }
                     if sender.try_send(result).is_err() {

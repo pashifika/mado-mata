@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     pub version: u32,
@@ -87,7 +87,7 @@ impl Store {
                 let Some(id) = name.strip_suffix(".json") else {
                     continue;
                 };
-                validate_id(id)?;
+                crate::identity_migrations::validate_ingress_id(id)?;
                 count += 1;
                 let bytes = read_bytes(&entry.path(), MAX_PROFILE_BYTES)
                     .map_err(|fault| profile_fault(fault, id))?;
@@ -97,8 +97,10 @@ impl Store {
                         "legacy profiles exceed their count or aggregate byte bound",
                     ));
                 }
-                let profile: Profile = decode(&bytes).map_err(|fault| profile_fault(fault, id))?;
-                validate_profile(&profile).map_err(|fault| profile_fault(fault, id))?;
+                let mut profile: Profile =
+                    decode(&bytes).map_err(|fault| profile_fault(fault, id))?;
+                crate::identity_migrations::validate_profile(&mut profile, true)
+                    .map_err(|fault| profile_fault(fault, id))?;
                 if profile.id != id {
                     return Err(profile_fault(
                         Fault::new(
@@ -113,33 +115,30 @@ impl Store {
                 {
                     continue;
                 }
-                validate_values(inventory, profile.values)
+                profile.values = validate_values(inventory, profile.values)
                     .map_err(|fault| profile_fault(fault, id))?;
-                scoped.check_owner()?;
-                let destination = scoped.profile_path(id);
-                if exists(&destination)? {
-                    scoped.read_profile(id)?;
-                    if read_bytes(&destination, MAX_PROFILE_BYTES)? != bytes {
-                        return Err(profile_fault(
-                            Fault::new(
-                                "LegacyConflict",
-                                "legacy profile conflicts with an existing owner profile; neither file was changed",
-                            ),
-                            id,
-                        ));
-                    }
-                    result.unchanged.push(id.to_owned());
-                    continue;
+                scoped.profiles()?;
+                let (mapped, unchanged) =
+                    match crate::identity_migrations::import_profile(&self.root, tab_name, profile)
+                    {
+                        Ok(result) => result,
+                        Err(fault) => {
+                            if let Some(committed) = fault.context["committed_profile_id"].as_str()
+                            {
+                                if fault.context["already_imported"] == true {
+                                    result.unchanged.push(committed.to_owned());
+                                } else {
+                                    result.imported.push(committed.to_owned());
+                                }
+                            }
+                            return Err(profile_fault(fault, id));
+                        }
+                    };
+                if unchanged {
+                    result.unchanged.push(mapped);
+                } else {
+                    result.imported.push(mapped);
                 }
-                let profiles = scoped.profiles()?;
-                if profiles.len() >= MAX_PROFILES
-                    || profiles.iter().map(|(_, size)| size).sum::<usize>() + bytes.len()
-                        > MAX_TOTAL_BYTES
-                {
-                    return Err(limit("import exceeds this Tab/package profile budget"));
-                }
-                scoped.write_profile(id, &bytes, false)?;
-                result.imported.push(id.to_owned());
             }
             Ok(())
         })();
@@ -327,7 +326,10 @@ impl ProfileStore {
         for _ in 0..16 {
             let id = new_id()?;
             let path = self.profile_path(&id);
-            if !exists(&path)? && !exists(&path.with_extension("pending"))? {
+            if !exists(&path)?
+                && !exists(&path.with_extension("pending"))?
+                && !crate::identity_migrations::reserved(&self.root, &id)?
+            {
                 return Ok(id);
             }
         }

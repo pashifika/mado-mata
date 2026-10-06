@@ -16,6 +16,7 @@ RUST_VERSION = "1.98.1"
 NODE_VERSION = "24.18.0"
 RUNTIME_ROOT = Path("tools/runtime-comparison")
 DESKTOP_ROOT = Path("apps/desktop")
+LAUNCH_ROOT = Path("crates/application-launch")
 RUNTIME_RESULTS = Path(".cache/repository-ci/runtime-results")
 FAILURE_ROW_LIMIT = 10
 FIELD_TEXT_LIMIT = 240
@@ -165,6 +166,7 @@ def check_runtime(root, results_directory):
     run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], compiler)
     run([node, "compile.mjs", "--self-check"], compiler)
     cargo = ["cargo", f"+{RUST_VERSION}"]
+    run([*cargo, "test", "--locked", "--manifest-path", LAUNCH_ROOT / "Cargo.toml"], root)
     manifest = ["--locked", "--manifest-path", RUNTIME_ROOT / "Cargo.toml"]
     run([*cargo, "build", *manifest], root)
     run([*cargo, "test", *manifest], root)
@@ -174,10 +176,13 @@ def check_runtime(root, results_directory):
     run([npm, "run", "build", "--prefix", DESKTOP_ROOT], root)
     desktop_manifest = ["--locked", "--manifest-path", DESKTOP_ROOT / "src-tauri/Cargo.toml"]
     run([*cargo, "test", *desktop_manifest, "--no-default-features", "--lib"], root)
-    if platform.system() == "Darwin":
+    if platform.system() in {"Darwin", "Windows"}:
         run([*cargo, "build", *desktop_manifest, "--features", "custom-protocol"], root)
+        if platform.system() == "Windows":
+            run([*cargo, "test", *desktop_manifest, "--features", "custom-protocol",
+                 "--bin", "mado-mata-desktop", "windows_shell::tests"], root)
     else:
-        print("Desktop shell build unexecuted: supported only on macOS; frontend and core checked.", flush=True)
+        print("Desktop shell build unexecuted on this host; macOS/Windows shell, portable frontend and core checks are separate.", flush=True)
 
 
 def main():

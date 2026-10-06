@@ -5,7 +5,9 @@ mod tabs;
 mod targets;
 
 pub use profiles::{LegacyImport, Profile, ProfileListing};
-pub use settings::{EditableSettings, Locale, NotificationPreferences, Settings};
+pub use settings::{
+    EditableSettings, EditorCompletionPreferences, Locale, NotificationPreferences, Settings,
+};
 pub use tabs::{PackageReference, PackageSource, TabListing, TabRecord};
 
 pub(crate) use fs::{
@@ -18,12 +20,11 @@ pub(crate) use tabs::{validate_internal_name, validate_tab};
 
 use self::fs::{limit, storage};
 use crate::configuration::{MAX_BYTES, MAX_ENUMERATED, MAX_FILES};
+use mado_runtime_comparison::inventory::is_os_metadata_entry;
 use mado_runtime_comparison::model::Fault;
 use serde_json::json;
 use std::fs as std_fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 mod fixtures;
@@ -42,7 +43,6 @@ const MAX_NAME_BYTES: usize = 128;
 pub(crate) const MAX_PATH_BYTES: usize = 4096;
 const MAX_VALUE_NODES: usize = 8192;
 const MAX_VALUE_DEPTH: usize = 32;
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A package owner, not a global catalog. Callers serialize it with the Store mutex.
 pub struct ProfileStore {
@@ -204,6 +204,14 @@ impl Budget<'_> {
                 "settings.json" | "settings.pending" => {
                     self.account(&name, &key, &metadata, MAX_SETTINGS_BYTES);
                 }
+                "identity-migrations.config" | "identity-migrations.pending" => {
+                    self.account(
+                        &name,
+                        &key,
+                        &metadata,
+                        crate::identity_migrations::MAX_LEDGER_BYTES,
+                    );
+                }
                 "profiles" => {
                     if self.container(&name, &metadata)? {
                         for (_, child, metadata) in self.entries(&path, &name)? {
@@ -272,15 +280,17 @@ impl Budget<'_> {
             }
             let entry = entry
                 .map_err(|error| measure_fault(storage("read managed entry", error), relative))?;
+            let filename = entry.file_name();
+            if is_os_metadata_entry(&filename, &entry).map_err(|error| {
+                measure_fault(storage("inspect managed metadata", error), relative)
+            })? {
+                continue;
+            }
             let path = entry.path();
             let metadata = std_fs::symlink_metadata(&path).map_err(|error| {
                 measure_fault(storage("inspect managed entry", error), relative)
             })?;
-            entries.push((
-                path,
-                entry.file_name().to_string_lossy().into_owned(),
-                metadata,
-            ));
+            entries.push((path, filename.to_string_lossy().into_owned(), metadata));
         }
         Ok(entries)
     }
@@ -326,30 +336,16 @@ fn measure_fault(mut fault: Fault, relative: &str) -> Fault {
     fault
 }
 
-fn new_id() -> Result<String, Fault> {
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| Fault::new("Storage", "system clock precedes the profile ID epoch"))?;
-    Ok(format!(
-        "p-{:032x}-{:08x}-{:016x}",
-        time.as_nanos(),
-        std::process::id(),
-        NEXT_ID.fetch_add(1, Ordering::Relaxed)
-    ))
+pub(crate) fn new_id() -> Result<String, Fault> {
+    xid::try_new()
+        .map(|id| id.to_string())
+        .map_err(|error| Fault::new("IdentityGeneration", error.to_string()))
 }
 
 pub(crate) fn validate_id(id: &str) -> Result<(), Fault> {
-    if id.len() != 60
-        || !id.starts_with("p-")
-        || id.as_bytes()[34] != b'-'
-        || id.as_bytes()[43] != b'-'
-        || !id.as_bytes()[2..].iter().enumerate().all(|(index, byte)| {
-            matches!(index, 32 | 41) || byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)
-        })
-    {
-        return Err(Fault::new("ProfileIdentity", "invalid profile ID"));
-    }
-    Ok(())
+    id.parse::<xid::Id>()
+        .map(|_| ())
+        .map_err(|_| Fault::new("ProfileIdentity", "invalid canonical XID"))
 }
 
 #[cfg(test)]
@@ -423,12 +419,23 @@ mod tests {
         store
             .save_preferences(EditableSettings {
                 ocr_environment: Some(environment.clone()),
+                editor_completion: EditorCompletionPreferences {
+                    automatic: false,
+                    delay_ms: 375,
+                },
                 ..preferences()
             })
             .unwrap();
         assert_eq!(
             directory.store().settings().unwrap().ocr_environment,
             Some(environment.clone())
+        );
+        assert_eq!(
+            directory.store().settings().unwrap().editor_completion,
+            EditorCompletionPreferences {
+                automatic: false,
+                delay_ms: 375,
+            }
         );
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(fs::read(tab_path(&directory, "Owned")).unwrap(), tab_before);
@@ -492,11 +499,54 @@ mod tests {
         let settings = directory.0.join("settings.json");
         let settings_before = fs::read(&settings).unwrap();
         put(&settings.with_extension("pending"), b"settings unfinished");
-        assert!(store.save_preferences(preferences()).is_err());
+        let mut draft = preferences();
+        draft.editor_completion = EditorCompletionPreferences {
+            automatic: false,
+            delay_ms: 0,
+        };
+        assert_eq!(
+            store.save_preferences(draft.clone()).unwrap_err().category,
+            "StoragePending"
+        );
         assert_eq!(fs::read(&settings).unwrap(), settings_before);
         assert_eq!(
             fs::read(settings.with_extension("pending")).unwrap(),
             b"settings unfinished"
+        );
+        assert_eq!(
+            store.settings().unwrap().editor_completion,
+            EditorCompletionPreferences::default()
+        );
+        fs::remove_file(settings.with_extension("pending")).unwrap();
+        let mut changed = store.settings().unwrap();
+        changed.editor_completion = draft.editor_completion.clone();
+        let bytes = encode(&changed, MAX_SETTINGS_BYTES).unwrap();
+        assert!(
+            write_atomic(&settings, &bytes, |from, to| fs::rename(
+                from,
+                to.join("not-a-directory")
+            ))
+            .is_err()
+        );
+        assert_eq!(fs::read(&settings).unwrap(), settings_before);
+        assert!(!settings.with_extension("pending").exists());
+        #[cfg(unix)]
+        {
+            // An unprivileged owner can read the settings but cannot stage a replacement.
+            fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o500)).unwrap();
+            let refused = store.save_preferences(draft);
+            fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o700)).unwrap();
+            let fault = refused.unwrap_err();
+            assert_eq!(fault.category, "Storage");
+            assert_eq!(fault.context["operation"], "create atomic write");
+            assert_eq!(fault.context["kind"], "PermissionDenied");
+        }
+        assert_eq!(fs::read(&settings).unwrap(), settings_before);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!settings.with_extension("pending").exists());
+        assert_eq!(
+            store.settings().unwrap().editor_completion,
+            EditorCompletionPreferences::default()
         );
     }
 

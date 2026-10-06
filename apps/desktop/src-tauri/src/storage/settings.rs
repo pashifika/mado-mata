@@ -8,7 +8,7 @@ use mado_runtime_comparison::environment::OcrEnvironment;
 use mado_runtime_comparison::model::Fault;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +25,57 @@ impl Default for NotificationPreferences {
             timeout_seconds: 8,
             show_success: true,
         }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct EditorCompletionPreferences {
+    pub automatic: bool,
+    pub delay_ms: u64,
+}
+
+impl Default for EditorCompletionPreferences {
+    fn default() -> Self {
+        Self {
+            automatic: true,
+            delay_ms: 100,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EditorCompletionPreferences {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            automatic: bool,
+            delay_ms: u64,
+        }
+
+        struct PreferencesVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for PreferencesVisitor {
+            type Value = EditorCompletionPreferences;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an editor completion preferences object")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let fields =
+                    Fields::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(EditorCompletionPreferences {
+                    automatic: fields.automatic,
+                    delay_ms: fields.delay_ms,
+                })
+            }
+        }
+
+        // A derived struct also accepts arrays; persisted and IPC values require an object.
+        deserializer.deserialize_map(PreferencesVisitor)
     }
 }
 
@@ -69,8 +120,13 @@ pub struct EditableSettings {
     pub gui_log_limit: usize,
     pub ocr_environment: Option<OcrEnvironment>,
     pub notifications: NotificationPreferences,
+    pub editor_completion: EditorCompletionPreferences,
     #[serde(default)]
     pub backup_directory: Option<String>,
+    #[serde(default)]
+    pub packages_root: Option<String>,
+    #[serde(default)]
+    pub capture_cache_enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,7 +142,13 @@ pub struct Settings {
     #[serde(default)]
     pub notifications: NotificationPreferences,
     #[serde(default)]
+    pub editor_completion: EditorCompletionPreferences,
+    #[serde(default)]
     pub backup_directory: Option<String>,
+    #[serde(default)]
+    pub packages_root: Option<String>,
+    #[serde(default)]
+    pub capture_cache_enabled: bool,
 }
 
 impl Default for Settings {
@@ -98,22 +160,49 @@ impl Default for Settings {
             package_path: None,
             ocr_environment: None,
             notifications: NotificationPreferences::default(),
+            editor_completion: EditorCompletionPreferences::default(),
             backup_directory: None,
+            packages_root: None,
+            capture_cache_enabled: false,
         }
     }
 }
 
 impl Store {
+    pub fn packages_root(&self) -> Result<PathBuf, Fault> {
+        self.resolve_packages_root(&self.settings()?)
+    }
+
+    fn resolve_packages_root(&self, settings: &Settings) -> Result<PathBuf, Fault> {
+        let root = settings
+            .packages_root
+            .as_ref()
+            .map_or_else(|| self.root.join("sources"), PathBuf::from);
+        std::path::absolute(root).map_err(|error| {
+            Fault::new("Settings", format!("cannot resolve packages root: {error}"))
+        })
+    }
+
+    fn check_packages_root(&self, settings: &Settings) -> Result<(), Fault> {
+        crate::authoring::Publisher::new(self.root.clone())
+            .packages_root(&self.resolve_packages_root(settings)?)
+            .map(|_| ())
+    }
+
     pub fn initialize(&self, preferences: EditableSettings) -> Result<Settings, Fault> {
         let settings = Settings {
             locale: preferences.locale,
             gui_log_limit: preferences.gui_log_limit,
             ocr_environment: preferences.ocr_environment,
             notifications: preferences.notifications,
+            editor_completion: preferences.editor_completion,
             backup_directory: preferences.backup_directory,
+            packages_root: preferences.packages_root,
+            capture_cache_enabled: preferences.capture_cache_enabled,
             ..Settings::default()
         };
         validate_settings(&settings)?;
+        self.check_packages_root(&settings)?;
         let bytes = encode(&settings, MAX_SETTINGS_BYTES)?;
         private_directory(&self.root)?;
         check_alias(&self.root, "settings.json")?;
@@ -141,8 +230,12 @@ impl Store {
         settings.gui_log_limit = preferences.gui_log_limit;
         settings.ocr_environment = preferences.ocr_environment;
         settings.notifications = preferences.notifications;
+        settings.editor_completion = preferences.editor_completion;
         settings.backup_directory = preferences.backup_directory;
+        settings.packages_root = preferences.packages_root;
+        settings.capture_cache_enabled = preferences.capture_cache_enabled;
         validate_settings(&settings)?;
+        self.check_packages_root(&settings)?;
         self.write_settings(&settings)?;
         Ok(settings)
     }
@@ -207,6 +300,20 @@ pub(crate) fn validate_settings(settings: &Settings) -> Result<(), Fault> {
             "backup directory must be an absolute path of at most 4096 bytes",
         ));
     }
+    if settings.packages_root.as_ref().is_some_and(|path| {
+        path.trim().is_empty()
+            || path.len() > MAX_PATH_BYTES
+            || !Path::new(path).is_absolute()
+            || Path::new(path)
+                .components()
+                .any(|part| matches!(part, Component::ParentDir))
+            || path.chars().any(char::is_control)
+    }) {
+        return Err(Fault::new(
+            "Settings",
+            "packages root must be an absolute path of at most 4096 bytes without parent traversal",
+        ));
+    }
     if let Some(environment) = &settings.ocr_environment {
         environment.validate()?;
     }
@@ -216,6 +323,12 @@ pub(crate) fn validate_settings(settings: &Settings) -> Result<(), Fault> {
         return Err(Fault::new(
             "Settings",
             "notification count must be 1 or 2 and timeout must be 5, 8, or 12 seconds",
+        ));
+    }
+    if settings.editor_completion.delay_ms > 1000 {
+        return Err(Fault::new(
+            "Settings",
+            "editor completion delay must be an integer from 0 to 1000 milliseconds",
         ));
     }
     // This is a location hint, not a captured inventory or permission grant.

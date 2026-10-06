@@ -35,6 +35,13 @@ const adapterArguments = {
   'app.waitForCommand': [['savingSettings'],['creatingWorkspace'],['importingProfiles'],['repairingProfile']],
   'app.recoverySaved': [['profile-A','P']], 'app.recoveryEarlierSaved': [['profile-A','P']],
   'app.inspectionOutcomes': [[0,1],[2,0]],
+  'app.editOwner': [['workspace-A']], 'app.authoringWait': [['savingFile'],['exitingEdit']],
+  'app.authoringDuplicated': [['/pkg-B','pkg-B']], 'app.authoringSaved': [['src/main.ts','rev-A']],
+  'app.authoringEarlierSaved': [['src/main.ts','rev-A']], 'app.authoringSavedRefreshFailed': [['src/main.ts','rev-A']],
+  'app.authoringCatalogSaved': [['rev-A']], 'app.authoringCatalogRefreshFailed': [['rev-A']], 'app.authoringRefreshed': [['rev-A']],
+  'app.authoringDiskChanged': [[1],[2]], 'app.authoringValidated': [['rev-A']], 'app.authoringInvalid': [['rev-A',1],['rev-A',2]],
+  'app.authoringEarlierValidated': [['rev-A']], 'app.authoringDiscarded': [['src/main.ts']],
+  'app.recognitionSaveBlocked': ['invalid','cropFrame','unconfirmed','rights'].map(code=>[code]),
   'ui.phase': [['idle']], 'ui.operation': [['run']], 'ui.lane': [['controlled']],
   'ui.severity': [['ERROR']], 'ui.entryOutcome': [['Returned']],
   'ui.common.revision': [['package-A',2]],
@@ -70,12 +77,55 @@ const adapterArguments = {
   'ui.workspaces.closeTitle': [['workspace-A']],
   'ui.bootstrap.state': [['loading'],['setup'],['ready'],['recovery'],['future-state']],
   'ui.bootstrap.legacyHelp': [['/Users/example/Library/Application Support/dev.madomata.desktop']],
-  'ui.bootstrap.block': ['pendingRestore','active','command','archivePath','confirm','discard'].map(kind=>[kind]),
+  'ui.bootstrap.block': ['pendingRestore','active','authoring','command','archivePath','confirm','discard'].map(kind=>[kind]),
   'ui.create.count': [[0,64],[80,80]], 'ui.create.openLimit': [[8]], 'ui.create.savedLimit': [[64]],
   'ui.create.errors': ['internalEmpty','internalLong','internalChars','displayBlank','displayLong','displayControl'].map(kind=>[kind]),
   'ui.reopen.directory': [['pkg-A']], 'ui.reopen.archive': [['pkg-A']], 'ui.reopen.references': [[2]],
   'ui.reopen.saved': [[3,64]], 'ui.reopen.limit': [[8]], 'ui.reopen.reopenLabel': [['workspace-A']],
   'ui.guidance.scope': [['workspace-A']],
+  'ui.recognition.frame': [[1920,1080]], 'ui.recognition.limits': [[32,'16,777,216',16,'4,194,304']],
+  'ui.recognition.count': [[9,256]], 'ui.recognition.undoHelp': [[3,64]], 'ui.recognition.trialFor': [['HP']], 'ui.recognition.cropFor': [['HP']],
+  'ui.recognition.savedFacts': [['recognition/crops/r1.png',40,12]], 'ui.recognition.threshold': [['0.9',8]], 'ui.recognition.bytes': [[12,4096]],
+  'ui.recognition.issue': ['name','region','search','searchSmall'].map(code=>[code]),
+  'ui.recognition.notice': ['definitionLimit','documentLimit','expectedLimit','nameLimit','invalidGeometry','staleEdit'].map(code=>[code]),
+  'ui.recognition.block': ['noDocument','noFrame','unconfirmed','confirmed','running','noCapability','empty','overLimit','mixedKinds','templateSingle','noSample','invalid','noChanges','otherCapture','rights','cropFrame','kind','templateUnsaved'].map(code=>[code]),
+  'ui.recognition.engineLimit': [[8]], 'ui.recognition.selection': [[3,8],[3,null]],
+  'ui.recognition.freshness': ['fresh','stale','historical'].map(value=>[value]), 'ui.recognition.freshnessHelp': ['fresh','stale','historical'].map(value=>[value]),
+  'ui.recognition.regions': [[1],[2]], 'ui.recognition.rect': [[10,20,300,40]], 'ui.recognition.templateThreshold': [['0.9']], 'ui.recognition.score': [['0.97']],
+  'ui.recognition.cleanupState': [[true,false],[true,true],[false,false]], 'ui.recognition.crops': [[1],[2]],
+  'ui.recognition.basis': [[1920,1080,0,60,1920,960]], 'ui.recognition.defaultName': [[3]], 'ui.recognition.percent': [[150]],
+  'ui.recognition.scale': [[1920,1080,50]], 'ui.recognition.searchLabel': [['HP']],
+  'ui.authoring.scope': [['workspace-A']], 'ui.authoring.kind': [['source'],['source_map'],['future-kind']],
+  'ui.authoring.unsavedFiles': [[1],[2]], 'ui.authoring.binary': [[42]], 'ui.authoring.editorLabel': [['src/main.ts']],
+  'ui.authoring.position': [[1,1]], 'ui.authoring.lines': [[1],[2]],
+  'ui.authoring.matches': [[0,null,false],[3,null,false],[3,2,false],[10000,null,true]],
+  'ui.authoring.valid': [['rev-A']], 'ui.authoring.invalid': [['rev-A',1],['rev-A',2]], 'ui.authoring.staleValidation': [['rev-A']],
+  'ui.authoring.location': [['src/main.ts',3,7]], 'ui.authoring.goTo': [['src/main.ts:3:7']],
+  'ui.authoring.renameHeading': [['src/main.ts']], 'ui.authoring.confirmRemove': [['src/main.ts']],
+  'ui.authoring.fileActions': [['src/main.ts'],['src/lib/']],
+  'ui.authoring.block': ['pending','refresh','missing','clean','binary','manifestDirty','fileDirty'].map(kind=>[kind]),
+  'ui.authoring.blockedOther': [['workspace-A']], 'ui.authoring.startBlocked': [['workspace-A']], 'ui.authoring.stripKind': [['pkg-A']],
+  'ui.authoring.dirtyHeading': ['exit','duplicate','close','closeTab'].map(kind=>[kind]),
+  'ui.authoring.presetLabel': [['default']], 'ui.authoring.sourceMapLabel': [['main.ts']],
+  'ui.authoring.jsonLocation': ['unexpectedCharacter','unexpectedEnd','invalidString','invalidNumber','trailingContent','depth','future-problem'].map(problem=>[problem,3,7]),
+  'ui.authoring.normalizedNumbers': [['1.0, 1e3']], 'ui.authoring.normalizedDuplicates': [['$.a, $.b[0].c']],
+  'ui.authoring.runtimeLabel': [['typescript'],['javascript'],['lua']], 'ui.authoring.runtimeUnsupported': [['lua']],
+  'ui.authoring.entryName': [['readiness'],['workflow']], 'ui.authoring.entryModule': [['Readiness']], 'ui.authoring.entryFunction': [['Workflow']],
+  'ui.authoring.moduleUndeclared': [['src/main.ts']], 'ui.authoring.helper': [['@mado/helper','1.0.0']],
+  'ui.authoring.assetDimensions': [['0','0'],['640','480']], 'ui.authoring.addFieldHeading': [['$.recognition']],
+  'ui.authoring.schemaType': ['object','array','string','number','integer','boolean','future-type'].map(type=>[type]),
+  'ui.authoring.unsupportedType': [['"date"']],
+  'ui.authoring.boundLabel': ['minLength','maxLength','minimum','maximum','minItems','maxItems'].map(key=>[key]),
+  'ui.authoring.enumValue': [[1]], 'ui.authoring.enumRemove': [[2]], 'ui.authoring.nestedDefault': [['0.5']],
+  'ui.authoring.schemaProblems': [[1],[2]],
+  'ui.authoring.schemaIssue': ['node','type','version','rootType','additionalProperties','properties','required','items','reversed','enum','depth']
+    .map(code=>[{code}]).concat([[{code:'keyword',key:'format'}],[{code:'bound',key:'minimum'}]]),
+  'ui.authoring.schemaRepair': ['node','type','version','rootType','additionalProperties','properties','required','items','reversed','enum','depth']
+    .map(code=>[{code}]).concat([[{code:'keyword',key:'format'}],[{code:'bound',key:'minimum'}]]),
+  'ui.authoring.presetIssue': ['root','packageId','schemaVersion','options'].map(code=>[{code}]).concat([[{code:'member',key:'extra'}]]),
+  'ui.authoring.presetRepair': ['root','packageId','schemaVersion','options'].map(code=>[{code}]).concat([[{code:'member',key:'extra'}]]),
+  'ui.authoring.characters': [[1],[2]],
+  'ui.authoring.sourceMapIssue': ['root','version','sources','mappings','sourceRoot'].map(code=>[{code}]).concat([[{code:'source',index:0}]]),
   'ui.recovery.outcomeStatus': [['saved'],['repair_required'],['storage_failed'],['future-status']],
   'ui.recovery.confirmReset': [['profile-A','P','workspace-A','pkg-A']],
 };
@@ -148,7 +198,7 @@ for (const {scenario,input,value,invalid} of [
 }
 
 test('draft locale and validation presentation do not implicitly change each other',()=>{
-  const draft={locale:'ja',logLimit:'invalid',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(null),backupDirectory:''};
+  const draft={locale:'ja',logLimit:'invalid',notifications:{...DEFAULT_NOTIFICATIONS},completionAutomatic:true,completionDelayMs:'100',captureCacheEnabled:false,environment:environmentDraft(null),backupDirectory:'',packagesRoot:''};
   const original=structuredClone(draft);
   const en=readSettingsDraft(draft,'en');
   const ja=readSettingsDraft(draft,'ja');
@@ -161,6 +211,25 @@ test('draft locale and validation presentation do not implicitly change each oth
   assert.equal(saved.locale,'ja');
   assert.equal(saved.gui_log_limit,123);
 });
+
+for (const {scenario,edit,field} of [
+  {scenario:'an invalid completion delay',edit:{completionDelayMs:'1001'},field:'completionDelayMs'},
+  {scenario:'a nonboolean automatic completion flag',edit:{completionAutomatic:'false'},field:'completionAutomatic'},
+]) {
+  test(`settings localize ${scenario} without changing the pending input`,()=>{
+    const draft={locale:'ja',logLimit:'1000',notifications:{...DEFAULT_NOTIFICATIONS},completionAutomatic:true,completionDelayMs:'100',
+      captureCacheEnabled:false,environment:environmentDraft(null),backupDirectory:'',packagesRoot:'',...edit};
+    const original=structuredClone(draft);
+    const en=readSettingsDraft(draft,'en');
+    const ja=readSettingsDraft(draft,'ja');
+    assert.equal(en.settings,null);
+    assert.equal(ja.settings,null);
+    assert.deepEqual(Object.keys(en.errors),[field]);
+    assert.deepEqual(Object.keys(ja.errors),[field]);
+    assert.notEqual(en.errors[field],ja.errors[field]);
+    assert.deepEqual(draft,original);
+  });
+}
 
 test('unknown diagnostic identifiers stay raw and localized controls do not replace log or card bodies',()=>{
   const entry={sequence:1,time_ms:0,source:'Script',level:'ERROR',run:'run-a',workspace_id:'a',code:'command.failed',message:'Unknown SDK: {name} <private>',fields:{category:'UnknownSdkCategory',hidden:'not-searchable'}};

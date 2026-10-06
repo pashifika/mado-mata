@@ -48,7 +48,7 @@ export default function LogsPage(props: Props) {
     <section className="panel logs-panel" aria-labelledby="logs-heading">
       <h2 id="logs-heading" className="visually-hidden">{heading}</h2>
       <div className="log-toolbar">
-        <div className="log-search-field" role="group" aria-label={t.logs.filters}>
+        <div className="input-select-group" role="group" aria-label={t.logs.filters}>
           <label htmlFor="log-level" className="visually-hidden">{t.logs.level}</label>
           <Select id="log-level" value={filter.level} onChange={level => onFilter({...filter, level})}
             options={[{value: '', label: t.logs.allLevels}, ...LOG_LEVELS.map(level => ({value: level, label: t.severity(level)}))]}/>

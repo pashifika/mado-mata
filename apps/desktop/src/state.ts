@@ -1,6 +1,6 @@
 import {messages} from './i18n.ts';
 import type {Locale} from './i18n.ts';
-import type {ControllerView, EditableSettings, Fault, LogEntry, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Settings, Json, WorkspaceRef} from './types.ts';
+import type {ControllerView, EditableSettings, EditorCompletionPreferences, Fault, LogEntry, NativePhase, NativeProgress, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Settings, Json, WorkspaceRef} from './types.ts';
 
 export const DISCLOSURE_LIMIT = 512 * 1024;
 
@@ -10,8 +10,46 @@ export function faultSummary(value:Fault|Record<string,Json>, includeMessage = f
     includeMessage ? text(value.message) : null,
   ].filter(Boolean).join(' · '), 1024).text;
 }
+// A poll answer for another operation is ignored, and one for this operation never regresses local Stop or settled
+// truth. A later same-run Stopping answer still replaces the view, so an OS launch that completes after Stop remains
+// visible without reviving the operation.
 export function acceptController(current:ControllerView, incoming:ControllerView, expectedRun:string|null):ControllerView {
-  return expectedRun !== null && incoming.run !== expectedRun ? current : incoming;
+  if (expectedRun !== null && incoming.run !== expectedRun) return current;
+  if (incoming.run !== current.run) return incoming;
+  if (current.state === 'stopping' && (incoming.state === 'preparing' || incoming.state === 'running')) return current;
+  return current.state === 'terminal' && incoming.state === 'terminal' ? current : incoming;
+}
+
+export type NativeCause = 'missing'|'ambiguous'|'unverifiable';
+export type NativeLaunchOutcome = 'accepted'|'acceptedStopped'|'uncertain'|'rejected';
+// The failed stage, refined by target status where the remedy differs: a Script that never requested startup, a
+// Readiness that ended while startup was pending, and Readiness criteria that did not hold once capture was available.
+export type NativeFailure = Exclude<NativePhase, 'readiness'>|'unrequested'|'readinessPending'|'readinessCriteria';
+export interface NativeOutcome {failure:NativeFailure|null; cause:NativeCause|null; launch:NativeLaunchOutcome|null}
+const NATIVE_CAUSES:Record<string, NativeCause> = {NativeTargetMissing: 'missing', NativeTargetAmbiguous: 'ambiguous', NativeTargetUnverifiable: 'unverifiable'};
+const READINESS_REFUSALS:Record<string, true> = {Script:true, ReadinessContract:true, TargetNotReady:true, NativeStartRefused:true, Authority:true, Argument:true};
+
+function nativeFailure({phase, status}:NativeProgress, category:string|null):NativeFailure {
+  if (phase === 'preflight') return phase;
+  if (status === 'not_requested') return 'unrequested';
+  if (status === 'pending' && category !== null && Object.hasOwn(READINESS_REFUSALS, category)) return 'readinessPending';
+  return phase === 'readiness' ? 'readinessCriteria' : phase;
+}
+
+// What a settled Native operation leaves the operator to act on, from the host's typed preparation state and primary
+// category, never log wording: the failed stage and target status, a known discovery cause, and a launch whose OS effect
+// can outlive the operation. Stop is not a stage failure, and a launch the host did not submit needs no notice.
+export function nativeOutcome(view:ControllerView):NativeOutcome|null {
+  const preparation = view.native_preparation;
+  if (view.state !== 'terminal' || !preparation) return null;
+  const primary = view.error ?? (view.result?.primary ? record(view.result.primary) : null);
+  const category = primary === null ? null : text(primary.category);
+  const stopped = category === 'Cancelled';
+  const failed = primary !== null && !stopped;
+  const launch = preparation.launch === 'accepted' ? primary === null ? null : stopped ? 'acceptedStopped' : 'accepted'
+    : preparation.launch === 'not_requested' ? null : preparation.launch;
+  const cause = failed && category !== null && Object.hasOwn(NATIVE_CAUSES, category) ? NATIVE_CAUSES[category] : null;
+  return {failure: failed ? nativeFailure(preparation, category) : null, cause, launch};
 }
 
 export function record(value:Json|undefined):Record<string,Json> {
@@ -47,7 +85,8 @@ export function defaultDraft(schema:Schema):Record<string,Json> {
     .map(([key,node])=>[key,structuredClone(node.default!)]));
 }
 
-function exactIntegerText(text: string, number: number): boolean {
+// True when valid JSON number text denotes exactly the integer `number` (no rounding beyond double precision).
+export function exactIntegerText(text: string, number: number): boolean {
   const match = /^-?(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text.trim())!;
   const fraction = match[2] ?? '';
   const digits = (match[1] + fraction).replace(/^0+/, '');
@@ -203,17 +242,24 @@ export function retainedCheck(retained:RetainedCheck):{association:CheckAssociat
 export const VISIBLE_COUNTS: readonly number[] = [1, 2];
 export const TIMEOUT_SECONDS: readonly number[] = [5, 8, 12];
 export const DEFAULT_NOTIFICATIONS: NotificationPreferences = {visible_count: 2, timeout_seconds: 8, show_success: true};
+export const DEFAULT_EDITOR_COMPLETION: EditorCompletionPreferences = {automatic: true, delay_ms: 100};
 
 // `backupDirectory` is a text draft; blank means the default destination, and an unsaved edit is never used by Back up now.
-export interface SettingsDraft {locale:Locale; logLimit:string; notifications:NotificationPreferences; environment:EnvironmentDraft; backupDirectory:string}
+export interface SettingsDraft {locale:Locale; logLimit:string; notifications:NotificationPreferences; completionAutomatic:boolean; completionDelayMs:string; captureCacheEnabled:boolean; environment:EnvironmentDraft; backupDirectory:string; packagesRoot:string}
 
 export function settingsDraftFrom(settings: Settings | null): SettingsDraft {
+  // Defaults belong only to the unloaded draft. A loaded host response must carry the complete record.
+  const completion = settings === null ? DEFAULT_EDITOR_COMPLETION : settings.editor_completion;
   return {
     locale: settings?.locale ?? 'en',
     logLimit: String(settings?.gui_log_limit ?? 1000),
     notifications: {...(settings?.notifications ?? DEFAULT_NOTIFICATIONS)},
+    completionAutomatic: completion.automatic,
+    completionDelayMs: String(completion.delay_ms),
+    captureCacheEnabled: settings?.capture_cache_enabled ?? false,
     environment: environmentDraft(settings?.ocr_environment ?? null),
     backupDirectory: settings?.backup_directory ?? '',
+    packagesRoot: settings?.packages_root ?? '',
   };
 }
 
@@ -232,12 +278,35 @@ export function readSettingsDraft(draft:SettingsDraft, locale:Locale = 'en'):{se
   if (!VISIBLE_COUNTS.includes(draft.notifications.visible_count)) errors.visibleCount = t.visibleCount;
   if (!TIMEOUT_SECONDS.includes(draft.notifications.timeout_seconds)) errors.timeoutSeconds = t.timeout;
   if (typeof draft.notifications.show_success !== 'boolean') errors.showSuccess = t.success;
+  if (typeof draft.completionAutomatic !== 'boolean') errors.completionAutomatic = t.completionAutomatic;
+  const delayText = draft.completionDelayMs.trim();
+  const delay = Number(delayText);
+  if (!/^\d+$/.test(delayText) || !Number.isSafeInteger(delay) || delay < 0 || delay > 1000) errors.completionDelayMs = t.completionDelayMs;
   if (draft.locale !== 'en' && draft.locale !== 'ja') errors.locale = t.locale;
+  const packagesRoot = draft.packagesRoot.trim();
+  if (packagesRoot && (!/^(\/|[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(packagesRoot)
+    || packagesRoot.split(/[\\/]/).includes('..') || /[\u0000-\u001f\u007f-\u009f]/.test(packagesRoot)
+    || new TextEncoder().encode(packagesRoot).length > 4096)) errors.packagesRoot = t.packagesRoot;
   const environment = readEnvironment(draft.environment, locale);
   Object.assign(errors, environment.errors);
   if (Object.keys(errors).length > 0) return {settings: null, errors};
   const destination = draft.backupDirectory.trim();
-  return {settings: {locale:draft.locale, gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications}, backup_directory: destination === '' ? null : destination}, errors};
+  return {settings: {locale:draft.locale, gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications},
+    editor_completion: {automatic: draft.completionAutomatic, delay_ms: delay},
+    capture_cache_enabled:draft.captureCacheEnabled, backup_directory: destination === '' ? null : destination, packages_root: packagesRoot === '' ? null : packagesRoot}, errors};
+}
+
+export function portableComponent(value:string):boolean {
+  return /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$/.test(value) && !value.endsWith('.')
+    && !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(value) && !/^node_modules$/i.test(value);
+}
+
+// Preview only; the host independently validates the ID, filesystem and saved root.
+export function packageDestination(root:string, id:string):string|null {
+  if (!root || !portableComponent(id)) return null;
+  const windows = /^(?:[A-Za-z]:\\|\\\\)/.test(root);
+  const separator = windows ? '\\' : '/';
+  return `${root.replace(windows ? /[\\/]+$/ : /\/+$/, '')}${separator}${id}`;
 }
 
 export function sameNotifications(left:NotificationPreferences, right:NotificationPreferences):boolean {

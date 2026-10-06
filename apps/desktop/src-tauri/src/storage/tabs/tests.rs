@@ -219,3 +219,64 @@ fn tab_document_bound_is_independent_of_smaller_profile_bound() {
     assert!(store.set_tab_open("Owner", true).is_err());
     assert_eq!(fs::read(&path).unwrap(), padded);
 }
+
+#[test]
+fn os_metadata_does_not_orphan_empty_tabs_or_block_reopen() {
+    let directory = Directory::new();
+    let store = directory.store();
+    let original = store.create_tab("Saved", "Saved workspace").unwrap();
+    store.set_tab_open("Saved", false).unwrap();
+    private_directory(&directory.0.join("tabs/Empty")).unwrap();
+    let paths = [
+        ".DS_Store",
+        "._tabs",
+        "tabs/.DS_Store",
+        "tabs/._Saved",
+        "tabs/Saved/._tab.config",
+        "tabs/Saved/desktop.ini",
+        "tabs/Empty/.DS_Store",
+    ];
+    for path in paths {
+        fs::write(directory.0.join(path), b"retained OS metadata").unwrap();
+    }
+    let listing = directory.store().tabs().unwrap();
+    assert!(listing.faults.is_empty());
+    assert_eq!(listing.tabs.len(), 1);
+    assert_eq!(listing.tabs[0].internal_name, "Saved");
+    assert!(!listing.tabs[0].open);
+    assert_eq!(store.set_tab_open("Saved", true).unwrap(), original);
+    assert_eq!(
+        store
+            .create_tab("Empty", "New workspace")
+            .unwrap()
+            .internal_name,
+        "Empty"
+    );
+    for path in paths {
+        assert_eq!(
+            fs::read(directory.0.join(path)).unwrap(),
+            b"retained OS metadata"
+        );
+    }
+}
+
+#[test]
+fn metadata_named_directories_and_unknown_tab_data_remain_visible() {
+    let directory = Directory::new();
+    let store = directory.store();
+    store.create_tab("Healthy", "Healthy").unwrap();
+    private_directory(&directory.0.join("tabs/.DS_Store")).unwrap();
+    private_directory(&directory.0.join("tabs/Retained/._tab.config")).unwrap();
+    let unknown = directory.0.join("tabs/Unknown/.operator-note");
+    put(&unknown, b"retained unknown data");
+    let listing = store.tabs().unwrap();
+    let names: BTreeSet<_> = listing
+        .faults
+        .iter()
+        .map(|fault| fault.context["internal_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, BTreeSet::from([".DS_Store", "Retained", "Unknown"]));
+    assert!(store.create_tab("Retained", "Replacement").is_err());
+    assert!(store.create_tab("Unknown", "Replacement").is_err());
+    assert_eq!(fs::read(unknown).unwrap(), b"retained unknown data");
+}

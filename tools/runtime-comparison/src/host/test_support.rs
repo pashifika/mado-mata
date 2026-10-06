@@ -43,13 +43,14 @@ pub(super) fn make_host(scenario: &str, selected_profile: &str) -> Host {
         repetitions: 1,
         budgets: BTreeMap::new(),
         native_config: None,
+        native_budgets: None,
     };
     let options = resolve_options(&schema(), &profile(selected_profile), "m0-workload")
         .expect("resolved fixture");
     Host::new(
         plan,
         options,
-        BTreeMap::from([("marker".into(), vec![255; 16])]),
+        BTreeMap::from([("marker".into(), PayloadBytes::new(vec![255; 16]).unwrap())]),
         control,
     )
     .expect("controlled host")

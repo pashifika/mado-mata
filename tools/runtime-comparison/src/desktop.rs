@@ -1,7 +1,9 @@
 //! One application-owned operation, with independent lifecycle and log queues.
 
+mod native;
 mod operation;
 mod packages;
+mod recognition;
 
 #[cfg(test)]
 mod test_support;
@@ -20,7 +22,6 @@ const LOG_CAPACITY: usize = 64;
 const PROGRESS_CAPACITY: usize = 32;
 const REQUEST_BYTES: usize = 65_536;
 const SHUTDOWN_MS: u64 = 14_000;
-const REPLAY_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
 const REPLAY_DURATION_MS: u64 = 30_000;
 static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
 
@@ -39,10 +40,128 @@ pub struct StartRequest {
     pub scenario: String,
     #[serde(default)]
     pub replay_descriptor_path: Option<String>,
+    #[serde(default)]
+    pub native_intent: Option<NativeIntent>,
 }
 
 fn workflow() -> String {
     "workflow".into()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntent {
+    pub target_revision: u64,
+    pub target_binding_id: String,
+    pub target_declaration_identity: String,
+    pub capture_approved: bool,
+    pub input_approved: bool,
+    #[serde(default)]
+    pub launch_approved: bool,
+    pub operation: String,
+    pub visible_postcondition: String,
+    pub limits: NativeLimits,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeLimits {
+    pub startup_ms: u64,
+    pub readiness_ms: u64,
+    pub workflow_ms: u64,
+    pub max_frames: u64,
+    pub wait_ms: u64,
+    pub interval_ms: u64,
+    pub max_actions: usize,
+    pub cleanup_ms: u64,
+    pub containment_ms: u64,
+}
+
+impl NativeLimits {
+    pub fn budgets(&self) -> crate::model::NativeBudgets {
+        crate::model::NativeBudgets {
+            startup_ms: self.startup_ms,
+            readiness_ms: self.readiness_ms,
+            workflow_ms: self.workflow_ms,
+        }
+    }
+}
+
+/// Per-Start defaults and ceilings; containment is the fixed supervisor bound.
+pub fn native_limits() -> NativeLimits {
+    NativeLimits {
+        startup_ms: 60_000,
+        readiness_ms: 30_000,
+        workflow_ms: 30_000,
+        max_frames: 300,
+        wait_ms: 1_000,
+        interval_ms: 100,
+        max_actions: 64,
+        cleanup_ms: 1_000,
+        containment_ms: 2_000,
+    }
+}
+
+/// Saved binding policy, constructed only by the application host.
+#[derive(Debug)]
+pub struct NativeInputPolicy {
+    pub route: String,
+    pub focus: String,
+    pub pointer_mode: Option<String>,
+    pub click_hold_ms: u64,
+}
+
+/// Fresh application correspondence, never accepted from public IPC.
+#[derive(Debug)]
+pub struct NativeTarget {
+    pub executable: PathBuf,
+    pub process_id: u32,
+    pub process_lifetime: String,
+    pub window_title: String,
+    pub input: NativeInputPolicy,
+}
+
+#[derive(Debug, Default)]
+pub struct StartPreparation<P = ()> {
+    pub environment: Option<crate::environment::OcrEnvironment>,
+    pub native: P,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativePhase {
+    Preflight,
+    TargetDiscovery,
+    LaunchSubmission,
+    WaitingForProcess,
+    WaitingForWindow,
+    NativeInitialization,
+    Readiness,
+    Workflow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchDisposition {
+    NotRequested,
+    Accepted,
+    Rejected,
+    Uncertain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeTargetStatus {
+    NotRequested,
+    Pending,
+    CaptureReady,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeProgress {
+    pub status: NativeTargetStatus,
+    pub phase: NativePhase,
+    pub launch: LaunchDisposition,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,6 +185,7 @@ pub struct ControllerView {
     pub result: Option<Value>,
     pub error: Option<Fault>,
     pub progress: Vec<Value>,
+    pub native_preparation: Option<NativeProgress>,
     pub logs: Vec<Value>,
     pub dropped_logs: u64,
 }
@@ -86,6 +206,7 @@ struct State {
     active: Option<Active>,
     result: Option<Value>,
     error: Option<Fault>,
+    native_preparation: Option<NativeProgress>,
     progress: Vec<Value>,
     logs: VecDeque<Value>,
     seen_logs: BTreeSet<u64>,
@@ -102,6 +223,7 @@ impl State {
             active: None,
             result: None,
             error: None,
+            native_preparation: None,
             progress: Vec::new(),
             logs: VecDeque::new(),
             seen_logs: BTreeSet::new(),
@@ -137,8 +259,10 @@ impl Drop for DesktopController {
 }
 
 fn manual_plan() -> Result<Plan, Fault> {
-    serde_json::from_str(include_str!("../fixtures/manual-plan.json"))
-        .map_err(|error| Fault::new("InvalidPlan", error.to_string()))
+    let mut plan: Plan = serde_json::from_str(include_str!("../fixtures/manual-plan.json"))
+        .map_err(|error| Fault::new("InvalidPlan", error.to_string()))?;
+    plan.limits.snapshot_bytes = crate::images::PACKAGE_BYTES;
+    Ok(plan)
 }
 
 #[cfg(test)]

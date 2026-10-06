@@ -118,12 +118,32 @@ pub(super) fn correspondence(
     }
 }
 
-pub(super) fn summarize(candidates: &[Candidate]) -> (&'static str, Option<Evidence>) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Summary {
+    Absent,
+    Unique(Evidence),
+    Ambiguous,
+    Unverifiable,
+}
+
+#[cfg(target_os = "macos")]
+impl Summary {
+    pub(super) fn observation(self) -> (&'static str, Option<Evidence>) {
+        match self {
+            Self::Absent => ("not_running", None),
+            Self::Unique(evidence) => ("matched", Some(evidence)),
+            Self::Ambiguous => ("ambiguous", None),
+            Self::Unverifiable => ("unverifiable", None),
+        }
+    }
+}
+
+pub(super) fn summarize(candidates: &[Candidate]) -> Summary {
     if candidates.len() > MAX_CANDIDATES {
-        return ("unverifiable", None);
+        return Summary::Unverifiable;
     }
     if candidates.is_empty() {
-        return ("not_running", None);
+        return Summary::Absent;
     }
     let mut evidence = None;
     let mut matches = 0;
@@ -139,11 +159,11 @@ pub(super) fn summarize(candidates: &[Candidate]) -> (&'static str, Option<Evide
         }
     }
     if matches > 1 {
-        ("ambiguous", None)
-    } else if matches == 1 && !uncertain {
-        ("matched", evidence)
+        Summary::Ambiguous
+    } else if !uncertain && matches == 1 {
+        evidence.map_or(Summary::Unverifiable, Summary::Unique)
     } else {
-        ("unverifiable", None)
+        Summary::Unverifiable
     }
 }
 
@@ -153,7 +173,7 @@ pub(super) fn summarize_revalidated(
     discovered_pids: &mut [i32],
     current_pids: &mut [i32],
     lifetimes: impl IntoIterator<Item = (Lifetime, Result<Lifetime, Fault>)>,
-) -> Result<(&'static str, Option<Evidence>), Fault> {
+) -> Result<Summary, Fault> {
     current_pids.sort_unstable();
     discovered_pids.sort_unstable();
     if current_pids != discovered_pids || current_pids.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -249,7 +269,7 @@ mod tests {
                 before.map(|lifetime| (lifetime, Ok(lifetime))),
             )
             .unwrap(),
-            ("matched", Some(Evidence::ExactPath))
+            Summary::Unique(Evidence::ExactPath)
         );
         for changed in 0..before.len() {
             for after in [
@@ -331,12 +351,13 @@ mod tests {
     fn overflow_refuses_instead_of_truncating_to_one_match() {
         let mut candidates = vec![Candidate::Different; MAX_CANDIDATES];
         candidates[0] = Candidate::Verified(Evidence::ExactPath);
-        assert_eq!(
-            summarize(&candidates),
-            ("matched", Some(Evidence::ExactPath))
-        );
+        assert_eq!(summarize(&candidates), Summary::Unique(Evidence::ExactPath));
         candidates.push(Candidate::Different);
-        assert_eq!(summarize(&candidates), ("unverifiable", None));
+        assert_eq!(summarize(&candidates), Summary::Unverifiable);
+        assert_eq!(
+            summarize(&vec![Candidate::Different; MAX_CANDIDATES + 1]),
+            Summary::Unverifiable
+        );
     }
 
     fn signed(team: Option<&str>, hash: u8) -> SigningIdentity {
@@ -350,21 +371,18 @@ mod tests {
     #[test]
     fn only_complete_unique_correspondence_can_match() {
         let matched = Candidate::Verified(Evidence::ExactPath);
-        assert_eq!(summarize(&[]), ("not_running", None));
+        assert_eq!(summarize(&[]), Summary::Absent);
         assert_eq!(
             summarize(&[matched, Candidate::Different]),
-            ("matched", Some(Evidence::ExactPath))
+            Summary::Unique(Evidence::ExactPath)
         );
-        assert_eq!(summarize(&[matched, matched]), ("ambiguous", None));
+        assert_eq!(summarize(&[matched, matched]), Summary::Ambiguous);
         assert_eq!(
             summarize(&[matched, Candidate::Unverifiable]),
-            ("unverifiable", None)
+            Summary::Unverifiable
         );
-        assert_eq!(summarize(&[Candidate::Different]), ("unverifiable", None));
-        assert_eq!(
-            summarize(&[Candidate::Unverifiable]),
-            ("unverifiable", None)
-        );
+        assert_eq!(summarize(&[Candidate::Different]), Summary::Unverifiable);
+        assert_eq!(summarize(&[Candidate::Unverifiable]), Summary::Unverifiable);
     }
 
     #[test]

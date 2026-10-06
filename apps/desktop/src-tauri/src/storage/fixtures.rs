@@ -1,6 +1,6 @@
 use super::{
-    EditableSettings, Locale, NotificationPreferences, ProfileStore, Store, new_id,
-    private_directory, write_atomic,
+    EditableSettings, EditorCompletionPreferences, Locale, NotificationPreferences, ProfileStore,
+    Store, new_id, private_directory, write_atomic,
 };
 use crate::target::{TargetBinding, TargetRecord, TargetResolution};
 use mado_runtime_comparison::inventory::{Entries, Entry, Inventory};
@@ -80,7 +80,10 @@ pub(super) fn preferences() -> EditableSettings {
         gui_log_limit: 1000,
         ocr_environment: None,
         notifications: NotificationPreferences::default(),
+        editor_completion: EditorCompletionPreferences::default(),
         backup_directory: None,
+        packages_root: None,
+        capture_cache_enabled: false,
     }
 }
 

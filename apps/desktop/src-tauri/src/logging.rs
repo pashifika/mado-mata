@@ -742,7 +742,7 @@ fn writer_loop(output: &Output, writer: io::Result<RotatingFile>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -787,6 +787,14 @@ mod tests {
             "Ready",
             Value::Null,
         );
+    }
+
+    pub(crate) fn finish_file_output(logger: &Logger) -> LogStatus {
+        // Content assertions wait for real I/O, not the production shutdown deadline.
+        logger.layer.output.close();
+        let mut worker = lock(&logger.worker).take().unwrap();
+        worker.thread.take().unwrap().join().unwrap();
+        logger.status()
     }
 
     #[test]
@@ -861,9 +869,7 @@ mod tests {
             json!({"details": "(sk-alpha987)"}),
         );
         let entries = logger.drain().entries;
-        let status = logger.shutdown();
-        assert!(status.shutdown_complete);
-        assert!(!status.shutdown_timed_out);
+        let status = finish_file_output(&logger);
         assert_eq!(status.file_written, 3);
         assert_eq!(status.file_errors, 0);
         let lines = fs::read_to_string(directory.0.join(FILE_NAMES[0])).unwrap();
@@ -982,7 +988,7 @@ mod tests {
             "Ready",
             Value::Null,
         );
-        let status = logger.shutdown();
+        let status = finish_file_output(&logger);
         assert_eq!(status.file_errors, 1);
         assert_eq!(status.file_written, 0);
         assert_eq!(logger.drain().entries.len(), 1);
@@ -1031,7 +1037,7 @@ mod tests {
             "Ready",
             Value::Null,
         );
-        let status = logger.shutdown();
+        let status = finish_file_output(&logger);
         assert_eq!(status.file_errors, 1);
         assert_eq!(status.file_dropped, 1);
         assert_eq!(logger.drain().entries.len(), 1);

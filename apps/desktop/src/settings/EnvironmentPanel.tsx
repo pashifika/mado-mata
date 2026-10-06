@@ -16,6 +16,8 @@ interface Props {
   saved: OcrEnvironment | null; loaded: boolean; dirty: boolean; locked: boolean; active: boolean; pickerBusy: boolean;
   // Label of the package/workspace host command that keeps Check unavailable; editing the draft stays possible.
   busyReason: string | null;
+  // The application-wide Edit lease refuses an independent Check until Edit ends.
+  authoringReason: string | null;
   target: CheckTarget; onCheck: () => void;
   lastCheck: LastCheck | null; stale: string[];
   originLabel: (workspaceId: string | null) => string;
@@ -61,14 +63,14 @@ function CheckCard({check, stale, originLabel}: {check: LastCheck; stale: string
 export default function EnvironmentPanel(props: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
-  const {draft, errors, onDraft, saved, loaded, dirty, locked, active, pickerBusy, busyReason, target, onCheck, lastCheck, stale, originLabel} = props;
+  const {draft, errors, onDraft, saved, loaded, dirty, locked, active, pickerBusy, busyReason, authoringReason, target, onCheck, lastCheck, stale, originLabel} = props;
   const supported = SUPPORTED_PROFILES.find(item => item.profile === draft.profile);
   const savedModel = saved ? SUPPORTED_PROFILES.find(item => item.profile === saved.profile)?.model : undefined;
   const fixedMismatch = saved !== null && (saved.language !== ENVIRONMENT_LANGUAGE || saved.provider !== ENVIRONMENT_PROVIDER || saved.runtime_profile !== ENVIRONMENT_RUNTIME_PROFILE || saved.model !== savedModel);
   const checkBlock = !loaded ? t.environment.notLoaded : !saved ? t.environment.saveFirst
     : dirty ? t.environment.dirty : active ? t.environment.active
-    : pickerBusy ? t.environment.wait(t.target.choosing)
-    : busyReason ? t.environment.wait(busyReason) : null;
+    : authoringReason ?? (pickerBusy ? t.environment.wait(t.target.choosing)
+      : busyReason ? t.environment.wait(busyReason) : null);
   const blank = !draft.profile && !draft.model_root.trim() && !draft.runtime_path.trim() && !draft.library_paths.trim();
   function field(key: keyof EnvironmentDraft, value: string) {
     onDraft({...draft, [key]: value});
@@ -114,8 +116,11 @@ export default function EnvironmentPanel(props: Props) {
         <dt>{t.common.descriptor}</dt><dd>{target.descriptorPath ?? t.environment.setDescriptor}</dd>
         <dt>{t.common.package}</dt><dd><code>{target.packageInventoryIdentity ?? t.common.noneInspected}</code></dd>
       </dl>
-      <div className="run-buttons"><button id="check-environment" className="primary" disabled={checkBlock !== null || locked} onClick={onCheck}>{t.environment.check}</button></div>
-      <p className="muted" id="check-block">{checkBlock ?? (target.descriptorPath ? t.environment.checkHelp : t.environment.noCorpus)}</p>
+      <div className="run-buttons"><button id="check-environment" className="primary" disabled={checkBlock !== null || locked}
+        aria-describedby={authoringReason !== null && checkBlock === authoringReason ? 'dialog-authoring-strip' : 'check-block'}
+        onClick={onCheck}>{t.environment.check}</button></div>
+      <p className={authoringReason !== null && checkBlock === authoringReason ? 'visually-hidden' : checkBlock !== null ? 'inline-info' : 'muted'}
+        id="check-block">{checkBlock ?? (target.descriptorPath ? t.environment.checkHelp : t.environment.noCorpus)}</p>
       {lastCheck ? <CheckCard key={lastCheck.association.operation} check={lastCheck} stale={stale} originLabel={originLabel}/> : <p className="muted">{t.environment.noChecks}</p>}
     </div>
   </div>;

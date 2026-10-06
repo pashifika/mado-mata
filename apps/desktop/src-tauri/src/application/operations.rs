@@ -1,3 +1,4 @@
+use super::native_run::NativeBinding;
 use super::profiles::{
     checked_profile, desktop_options, normalize_editor_numbers, same_json_values,
 };
@@ -6,7 +7,7 @@ use super::{
     Workspaces, lock,
 };
 use crate::logging::LogStatus;
-use mado_runtime_comparison::desktop::StartRequest;
+use mado_runtime_comparison::desktop::{StartPreparation, StartRequest};
 use mado_runtime_comparison::model::Fault;
 use serde_json::{Value, json};
 use std::io::Write;
@@ -14,7 +15,50 @@ use std::sync::{Arc, OnceLock, atomic::Ordering, mpsc};
 use std::time::Duration;
 
 impl Workspaces {
+    fn native_ready(&self) -> Result<(), Fault> {
+        if self.native_cleanup_required {
+            return Err(Fault::new(
+                "NativeCleanupRequired",
+                "Previous native cleanup was incomplete or unverified; reconcile the target and restart the application before another native run",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn idle(&self) -> Result<(), Fault> {
+        if let Some(lease) = &self.authoring {
+            return Err(Fault::new(
+                "AuthoringActive",
+                "Exit the authoring session before ordinary work",
+            )
+            .with_context(json!({"owner":lease.owner})));
+        }
+        self.work_idle()
+    }
+
+    pub(super) fn work_idle(&self) -> Result<(), Fault> {
+        self.work_idle_except_native()?;
+        if self
+            .authoring
+            .as_ref()
+            .is_some_and(|lease| lease.native.operation_active())
+        {
+            return Err(Fault::new(
+                "NativeCaptureBusy",
+                "Wait for the active native operation or picker to settle",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn work_idle_except_native(&self) -> Result<(), Fault> {
+        if let Some(fault) = self
+            .authoring
+            .as_ref()
+            .and_then(|lease| lease.containment.as_ref())
+        {
+            return Err(fault.clone());
+        }
         if self.owner.as_ref().is_some_and(|owner| !owner.terminal) {
             Err(Fault::new(
                 "RunActive",
@@ -33,6 +77,7 @@ impl Workspaces {
 
 impl Application {
     pub(super) fn collect(&self, state: &mut Workspaces) {
+        self.collect_native(state);
         let Some(owner) = &mut state.owner else {
             return;
         };
@@ -70,18 +115,28 @@ impl Application {
         let terminal = value["state"] == "terminal";
         let controller = Arc::new(value);
         if terminal {
-            let outcome = TerminalOutcome::from_view(&controller);
-            let (level, message) = outcome.notice();
-            self.logger.emit(
-                "Rust",
-                level,
-                Some(&owner.run),
-                workspace_id,
-                "run.terminal",
-                message,
-                outcome.fields(&controller["operation"]),
-            );
-            if let Some(workspace) = workspace {
+            let recognition_operation = controller["operation"]
+                .as_str()
+                .is_some_and(|operation| operation.starts_with("recognition_"));
+            let authoring_operation =
+                recognition_operation || controller["operation"] == "authoring_validate";
+            if !authoring_operation {
+                let outcome = TerminalOutcome::from_view(&controller);
+                let (level, message) = outcome.notice();
+                if owner.native && outcome.requires_native_reconciliation() {
+                    state.native_cleanup_required = true;
+                }
+                self.logger.emit(
+                    "Rust",
+                    level,
+                    Some(&owner.run),
+                    workspace_id,
+                    "run.terminal",
+                    message,
+                    outcome.fields(&controller["operation"]),
+                );
+            }
+            if let Some(workspace) = workspace.filter(|_| !authoring_operation) {
                 if let Some(selected) = state
                     .open
                     .iter_mut()
@@ -102,6 +157,13 @@ impl Application {
                     controller: controller.clone(),
                 }));
             }
+            if recognition_operation {
+                // Containment and the retained outcome settle with terminal ownership,
+                // before any admission check can observe this run as terminal.
+                if let Some(lease) = state.authoring.as_mut() {
+                    lease.settle_recognition(&owner.run, &controller);
+                }
+            }
             owner.terminal = true;
         }
         state.controller = controller;
@@ -109,7 +171,7 @@ impl Application {
 
     pub fn prepare_reconstruction(&self) -> Result<(), Fault> {
         {
-            let (_command, mut state) = self.command_state().map_err(|error| {
+            let (_command, mut state) = self.reconstruction_state().map_err(|error| {
                 if self.closing.load(Ordering::Acquire) {
                     retired_fault(error)
                 } else {
@@ -118,6 +180,8 @@ impl Application {
             })?;
             self.collect(&mut state);
             state.idle()?;
+            state.native_ready()?;
+            self.publisher.recover_pending()?;
             self.closing.store(true, Ordering::Release);
         }
         self.shutdown().map_err(retired_fault)?;
@@ -138,6 +202,12 @@ impl Application {
     ) -> Result<String, Fault> {
         let result = (|| {
             let (_command, mut state) = self.command_state()?;
+            self.collect(&mut state);
+            state.idle()?;
+            let native = request.lane == "native";
+            if native {
+                state.native_ready()?;
+            }
             let selected = state.resolve(workspace)?;
             if request.inventory_identity != selected.inventory.identity
                 || request.package_id != selected.inventory.package_id
@@ -149,50 +219,68 @@ impl Application {
                 ));
             }
             // The caller's location is never an execution authority.
+            self.publisher.check_admission(&selected.path)?;
             request.package_path = selected.path.to_string_lossy().into_owned();
             normalize_editor_numbers(&selected.inventory.schema, &mut request.values);
             desktop_options(&selected.inventory, request.values.clone())?;
             let internal_name = selected.internal_name.clone();
-            self.collect(&mut state);
-            // Never let reserve refresh away an uncollected terminal outcome.
-            state.idle()?;
+            let native_package = native.then(|| selected.package.clone());
             let store = self.store.clone();
             let (acquired, ready) = mpsc::sync_channel(1);
-            let run = self
-                .runner
-                .start_with_preparation(request, move |request, control| {
-                    let store = lock(&store);
-                    let _ = acquired.send(());
-                    control.check()?;
-                    let environment = if request.lane == "replay" {
-                        store.settings()?.ocr_environment
-                    } else {
-                        None
-                    };
-                    let profiles = store.profile_store(&internal_name, &request.package_id)?;
-                    if request.profile_id != "draft" {
-                        let profile = checked_profile(
-                            &profiles,
-                            &request.package_id,
-                            &request.schema_identity,
-                            &request.profile_id,
-                        )?;
-                        if !same_json_values(&profile.values, &request.values) {
-                            return Err(Fault::new(
-                                "ProfileIdentity",
-                                "Saved profile values changed; select it again",
-                            )
-                            .with_context(json!({"profile_id":profile.id})));
+            let run = self.runner.start_with_preparation(
+                request,
+                move |request, control| {
+                    let (environment, binding) = {
+                        let store = lock(&store);
+                        let _ = acquired.send(());
+                        control.check()?;
+                        let environment = if matches!(request.lane.as_str(), "replay" | "native") {
+                            store.settings()?.ocr_environment
+                        } else {
+                            None
+                        };
+                        let profiles = store.profile_store(&internal_name, &request.package_id)?;
+                        if request.profile_id != "draft" {
+                            let profile = checked_profile(
+                                &profiles,
+                                &request.package_id,
+                                &request.schema_identity,
+                                &request.profile_id,
+                            )?;
+                            if !same_json_values(&profile.values, &request.values) {
+                                return Err(Fault::new(
+                                    "ProfileIdentity",
+                                    "Saved profile values changed; select it again",
+                                )
+                                .with_context(json!({"profile_id":profile.id})));
+                            }
                         }
-                    }
+                        let binding = native_package
+                            .map(|package| {
+                                let record =
+                                    store.read_target(&internal_name, &request.package_id)?;
+                                NativeBinding::capture(request, &package, record)
+                            })
+                            .transpose()?;
+                        (environment, binding)
+                    };
                     control.check()?;
-                    Ok(environment)
-                })?;
+                    Ok(StartPreparation {
+                        environment,
+                        native: binding,
+                    })
+                },
+                |binding, control, report, verify_resources| match binding.as_mut() {
+                    Some(binding) => binding.resolve(control, report, verify_resources),
+                    None => Ok(None),
+                },
+            )?;
             state.owner = Some(OperationOwner {
                 run: run.clone(),
                 workspace: Some(workspace.clone()),
                 check: None,
                 terminal: false,
+                native,
             });
             self.collect(&mut state);
             drop(_command);
@@ -220,6 +308,8 @@ impl Application {
                 ));
             }
             let (_command, mut state) = self.command_state()?;
+            self.collect(&mut state);
+            state.idle()?;
             let selected = workspace
                 .map(|workspace| state.resolve(workspace))
                 .transpose()?;
@@ -231,8 +321,7 @@ impl Application {
                     selected.inventory.package_id.clone(),
                 )
             });
-            self.collect(&mut state);
-            state.idle()?;
+            self.publisher.recover_pending()?;
             let environment = Arc::new(OnceLock::new());
             let captured = environment.clone();
             let check = CheckInputs {
@@ -261,6 +350,7 @@ impl Application {
                 run: run.clone(),
                 workspace: workspace.cloned(),
                 check: Some(check),
+                native: false,
                 terminal: false,
             });
             self.collect(&mut state);
@@ -280,8 +370,14 @@ impl Application {
     pub fn poll(&self) -> Poll {
         let mut state = lock(&self.workspaces);
         self.collect(&mut state);
+        self.refresh_native_target(&mut state);
         Poll {
+            authoring: state.authoring.as_ref().map(|lease| lease.owner.clone()),
             controller: state.controller.clone(),
+            native_selection: state
+                .authoring
+                .as_ref()
+                .map(|lease| lease.native.view(&lease.owner, &lease.revision)),
             logs: self.logger.drain(),
             workspace_results: state
                 .open
@@ -295,9 +391,68 @@ impl Application {
     pub fn shutdown(&self) -> Result<(), Fault> {
         self.shutdown_outcome
             .get_or_init(|| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(14);
                 self.closing.store(true, Ordering::Release);
                 self.invalidate_target_observation(None);
-                let outcome = self.runner.shutdown();
+                self.cancel_native();
+                let mut outcome = self.runner.shutdown();
+                // Publication holds command admission, not the Stop/runner lock.
+                // A forced shutdown retains its lease/journal if storage cannot settle.
+                loop {
+                    match self.commands.try_lock() {
+                        Ok(_command) => {
+                            let mut state = lock(&self.workspaces);
+                            // The joined worker's evidence settles a just-finished recognition
+                            // run here even if no command or poll has collected it yet.
+                            self.collect(&mut state);
+                            if state.authoring.as_ref().is_some_and(|lease| lease.native.operation_active()) {
+                                drop(state);
+                                drop(_command);
+                                if std::time::Instant::now() >= deadline {
+                                    outcome = Err(Fault::new("NativeCaptureCleanup", "Native picker cleanup has not settled"));
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                                continue;
+                            }
+                            if let Some(owner) = state.authoring.as_ref().map(|lease| lease.owner.clone()) {
+                                state = match self.settle_native_selection(&owner, state) {
+                                    Ok(state) => state,
+                                    Err(error) => {
+                                        outcome = Err(error);
+                                        break;
+                                    }
+                                };
+                            }
+                            let lease = state.authoring.as_ref();
+                            if let Some(fault) = lease.and_then(|lease| lease.containment.as_ref()) {
+                                outcome = Err(fault.clone());
+                            } else if outcome.is_ok() {
+                                // Reaped ownership has settled, but a cleanup failure its
+                                // command never returned is still reported.
+                                if let Some(fault) = lease
+                                    .and_then(super::authoring::Lease::unreturned_recognition_cleanup)
+                                {
+                                    outcome = Err(fault);
+                                }
+                                state.authoring = None;
+                                *lock(&self.authoring_stop) = None;
+                            }
+                            break;
+                        }
+                        Err(std::sync::TryLockError::Poisoned(error)) => {
+                            let _command = error.into_inner();
+                            break;
+                        }
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            if std::time::Instant::now() >= deadline {
+                                outcome = Err(Fault::new("Containment", "Shutdown command/publication has not settled; ownership and recovery evidence retained"));
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                }
                 if let Some(bridge) = lock(&self.bridge).take() {
                     let _ = bridge.join();
                 }
@@ -348,6 +503,10 @@ impl<'a> TerminalOutcome<'a> {
                 .or_else(|| boundary["child_started"].as_bool()),
             forced: boundary["forced"].as_bool(),
         }
+    }
+
+    fn requires_native_reconciliation(&self) -> bool {
+        self.cleanup_clean != Some(true) || self.forced == Some(true)
     }
 
     fn notice(&self) -> (&'static str, &'static str) {

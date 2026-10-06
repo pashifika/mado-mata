@@ -12,9 +12,12 @@ export function fault(error: unknown): Fault {
   return {category: 'Application', message: String(error), context: null};
 }
 
-export function FaultMessage({value, title}: {value: Fault; title: string}) {
+export function FaultMessage({value, title, onDismiss}: {value: Fault; title: string; onDismiss?: () => void}) {
   const locale = useLocale();
-  return <section className="fault" role="alert"><strong>{title} · {value.category}</strong><p>{value instanceof LocalFault ? renderMessage(locale, value.presentation) : value.message}</p>
+  const close = messages[locale].ui.common.close;
+  return <section className={onDismiss ? 'fault dismissible-fault' : 'fault'} role="alert">
+    {onDismiss && <button className="fault-dismiss" type="button" aria-label={close} title={close} onClick={onDismiss}>×</button>}
+    <strong>{title} · {value.category}</strong><p>{value instanceof LocalFault ? renderMessage(locale, value.presentation) : value.message}</p>
     {value.context !== null && <pre className="diagnostic">{JSON.stringify(value.context, null, 2)}</pre>}
   </section>;
 }

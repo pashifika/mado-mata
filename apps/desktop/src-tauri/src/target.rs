@@ -1,4 +1,4 @@
-//! Machine-local metadata and read-only observations; never native authority.
+//! Machine-local metadata, verified discovery, and private reviewed launch recipes.
 use crate::storage::{MAX_PATH_BYTES, validate_id, validate_internal_name, validate_package_id};
 use mado_runtime_comparison::inventory::TargetDeclaration;
 use mado_runtime_comparison::model::{Fault, identity};
@@ -18,6 +18,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+
+mod launch;
+pub(crate) use launch::{LaunchFailure, LaunchRecipe, PreparedLaunch};
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -87,7 +90,7 @@ object!(TargetConfiguration {
     arguments: Vec<String>,
     working_directory: Option<String>,
     window_title: String,
-    input: TargetInputPolicy,
+    input: Option<TargetInputPolicy>,
 });
 object!(ResolvedLocation {
     path: String,
@@ -130,6 +133,128 @@ pub struct ApplicationObservation {
     pub diagnostics: serde_json::Value,
 }
 
+/// Fresh host-only signed application correspondence, never a capture handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AuthoringApplication {
+    pub processes: Vec<AuthoringProcess>,
+    pub installation: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AuthoringProcess {
+    pub pid: u32,
+    pub lifetime: u64,
+    pub architecture: i32,
+    pub started: (u64, u64),
+    pub executable: PathBuf,
+}
+
+/// Fresh process correspondence; absence never follows from a missing window.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NativeDiscovery {
+    Absent,
+    Unique(AuthoringApplication),
+    Ambiguous,
+    Unverifiable,
+}
+
+pub(crate) fn discover_native(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    resolution: &TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<NativeDiscovery, Fault> {
+    observation_checkpoint(cancelled, deadline)?;
+    #[cfg(target_os = "macos")]
+    return macos::discover_native(configuration, declaration, resolution, cancelled, deadline);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (configuration, declaration, resolution);
+        Err(Fault::new(
+            "TargetPlatform",
+            "Native application discovery requires macOS",
+        ))
+    }
+}
+
+/// Resolves OS installation metadata only for the retained SDK process lifetime.
+pub(crate) fn selected_application(
+    candidate: &mado_runtime_comparison::authoring_capture::Candidate,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<PathBuf, Fault> {
+    #[cfg(target_os = "macos")]
+    return macos::selected_application(candidate, cancelled, deadline);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (candidate, cancelled, deadline);
+        Err(Fault::new(
+            "TargetPlatform",
+            "Application bundle selection requires macOS",
+        ))
+    }
+}
+
+pub(crate) fn authoring_application(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    resolution: &TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<AuthoringApplication, Fault> {
+    #[cfg(target_os = "macos")]
+    return macos::authoring_application(
+        configuration,
+        declaration,
+        resolution,
+        cancelled,
+        deadline,
+    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (configuration, declaration, resolution, cancelled, deadline);
+        Err(Fault::new(
+            "TargetPlatform",
+            "Saved bundle capture requires macOS",
+        ))
+    }
+}
+
+/// Revalidates only saved installation evidence, never the former running cohort.
+pub(crate) fn revalidate_authoring_installation(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    resolution: &TargetResolution,
+    proof: &AuthoringApplication,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), Fault> {
+    #[cfg(target_os = "macos")]
+    return macos::revalidate_authoring_installation(
+        configuration,
+        declaration,
+        resolution,
+        proof,
+        cancelled,
+        deadline,
+    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (
+            configuration,
+            declaration,
+            resolution,
+            proof,
+            cancelled,
+            deadline,
+        );
+        Err(Fault::new(
+            "TargetPlatform",
+            "Saved bundle capture requires macOS",
+        ))
+    }
+}
 pub fn observe_application(
     configuration: &TargetConfiguration,
     declaration: &TargetDeclaration,
@@ -176,10 +301,37 @@ fn observation_checkpoint(cancelled: &AtomicBool, deadline: Instant) -> Result<(
 impl TargetConfiguration {
     /// Portable shape validation; deliberately does not inspect the filesystem.
     pub fn validate(&self) -> Result<(), Fault> {
-        if self.platform != "macos" {
+        if !matches!(self.platform.as_str(), "macos" | "windows") {
             return Err(configuration_fault(
                 "platform",
-                "only macos target configuration is supported",
+                "unsupported target platform",
+            ));
+        }
+        for path in std::iter::once(self.game.path.as_str())
+            .chain(
+                self.launcher
+                    .as_ref()
+                    .map(|location| location.path.as_str()),
+            )
+            .chain(self.working_directory.as_deref())
+        {
+            if (self.platform == "windows") != windows_absolute(path) {
+                return Err(configuration_fault(
+                    "platform",
+                    "target paths do not match the platform",
+                ));
+            }
+        }
+        if self.platform == "windows"
+            && (self.game.kind != "executable"
+                || self
+                    .launcher
+                    .as_ref()
+                    .is_some_and(|location| location.kind != "executable"))
+        {
+            return Err(configuration_fault(
+                "game",
+                "Windows targets require executable locations",
             ));
         }
         self.game.validate("game")?;
@@ -189,7 +341,7 @@ impl TargetConfiguration {
         if let Some(directory) = &self.working_directory {
             absolute_path(directory, "working_directory")?;
         }
-        text(&self.window_title, 512, false, "window_title")?;
+        text(&self.window_title, 512, true, "window_title")?;
         if self.arguments.len() > 32 {
             return Err(configuration_fault(
                 "arguments",
@@ -207,23 +359,24 @@ impl TargetConfiguration {
                 "literal arguments exceed 8192 total bytes",
             ));
         }
-        let policy = &self.input;
-        let supported = match policy.route.as_str() {
-            "system" => policy.focus == "require_focused" && policy.pointer_mode.is_none(),
-            "process_directed" => match policy.pointer_mode.as_deref() {
-                Some("core_graphics") => {
-                    matches!(policy.focus.as_str(), "preserve" | "require_focused")
-                }
-                Some("appkit_background") => policy.focus == "preserve",
+        if let Some(policy) = &self.input {
+            let supported = match policy.route.as_str() {
+                "system" => policy.focus == "require_focused" && policy.pointer_mode.is_none(),
+                "process_directed" => match policy.pointer_mode.as_deref() {
+                    Some("core_graphics") => {
+                        matches!(policy.focus.as_str(), "preserve" | "require_focused")
+                    }
+                    Some("appkit_background") => policy.focus == "preserve",
+                    _ => false,
+                },
                 _ => false,
-            },
-            _ => false,
-        };
-        if !supported || policy.click_hold_ms > 1000 {
-            return Err(configuration_fault(
-                "input",
-                "unsupported input policy combination or click hold",
-            ));
+            };
+            if !supported || policy.click_hold_ms > 1000 {
+                return Err(configuration_fault(
+                    "input",
+                    "unsupported input policy combination or click hold",
+                ));
+            }
         }
         Ok(())
     }
@@ -231,7 +384,7 @@ impl TargetConfiguration {
     pub fn validate_declaration(&self, declaration: &TargetDeclaration) -> Result<(), Fault> {
         self.validate()?;
         declaration.validate()?;
-        if declaration.macos.is_some() && self.game.kind != "bundle" {
+        if declaration.macos.is_some() && (self.platform != "macos" || self.game.kind != "bundle") {
             return Err(configuration_fault(
                 "game",
                 "the package requires an application bundle",
@@ -265,10 +418,12 @@ impl TargetConfiguration {
         declaration: &TargetDeclaration,
     ) -> Result<(TargetResolution, Option<String>), Fault> {
         self.validate_declaration(declaration)?;
-        if !cfg!(unix) {
+        if (self.platform == "windows" && !cfg!(windows))
+            || (self.platform == "macos" && !cfg!(unix))
+        {
             return Err(Fault::new(
                 "TargetPlatform",
-                "executable metadata checks require a Unix host",
+                "target metadata requires its native platform",
             ));
         }
         let (game, bundle_id) = resolve_location(&self.game, "game")?;
@@ -428,6 +583,22 @@ impl TargetRecord {
 
 impl TargetResolution {
     fn validate(&self, configuration: &TargetConfiguration) -> Result<(), Fault> {
+        for path in [&self.game.path, &self.game.executable]
+            .into_iter()
+            .chain(
+                self.launcher
+                    .iter()
+                    .flat_map(|location| [&location.path, &location.executable]),
+            )
+            .chain(self.working_directory.iter())
+        {
+            if (configuration.platform == "windows") != windows_absolute(path) {
+                return Err(configuration_fault(
+                    "platform",
+                    "saved resolution does not match target platform",
+                ));
+            }
+        }
         self.game.validate(&configuration.game, "game")?;
         match (&self.launcher, &configuration.launcher) {
             (Some(resolution), Some(location)) => resolution.validate(location, "launcher")?,
@@ -505,13 +676,38 @@ fn text(value: &str, maximum: usize, empty: bool, field: &str) -> Result<(), Fau
     Ok(())
 }
 
+fn windows_absolute(value: &str) -> bool {
+    let (value, verbatim) = match value.strip_prefix(r"\\?\") {
+        Some(value) => (value, true),
+        None => (value, false),
+    };
+    let bytes = value.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+    {
+        return true;
+    }
+    let unc = if verbatim {
+        value.strip_prefix(r"UNC\")
+    } else {
+        value.strip_prefix(r"\\")
+    };
+    unc.is_some_and(|path| {
+        let mut parts = path.split('\\');
+        matches!((parts.next(), parts.next()), (Some(server), Some(share))
+            if !server.is_empty() && !matches!(server, "." | "..") && !share.is_empty())
+    })
+}
+
 fn absolute_path(value: &str, field: &str) -> Result<(), Fault> {
     text(value, MAX_PATH_BYTES, false, field)?;
-    // The persisted platform is macOS; restore must accept its paths on any host.
-    if !value.starts_with('/') {
+    // Restore validates both persisted platforms without consulting this host.
+    if !value.starts_with('/') && !windows_absolute(value) {
         return Err(configuration_fault(
             field,
-            "an explicit absolute macOS path is required",
+            "an explicit absolute target path is required",
         ));
     }
     Ok(())
@@ -519,6 +715,19 @@ fn absolute_path(value: &str, field: &str) -> Result<(), Fault> {
 
 fn canonical_path(value: &str, field: &str) -> Result<(), Fault> {
     absolute_path(value, field)?;
+    if windows_absolute(value) {
+        let value = value.strip_prefix(r"\\?\").unwrap_or(value);
+        if value
+            .split(['\\', '/'])
+            .any(|part| matches!(part, "." | ".."))
+        {
+            return Err(configuration_fault(
+                field,
+                "saved resolution must be canonical",
+            ));
+        }
+        return Ok(());
+    }
     if value != "/"
         && value[1..]
             .split('/')
@@ -789,13 +998,49 @@ pub(crate) mod tests {
             ],
             working_directory: None,
             window_title: "Exact title".into(),
-            input: TargetInputPolicy {
+            input: Some(TargetInputPolicy {
                 route: "process_directed".into(),
                 focus: "preserve".into(),
                 pointer_mode: Some("appkit_background".into()),
                 click_hold_ms: 0,
-            },
+            }),
         }
+    }
+
+    #[test]
+    fn capture_only_windows_locator_round_trips_without_input_authority() {
+        let mut selected = configuration(r"C:\Games\Game.exe");
+        selected.platform = "windows".into();
+        selected.window_title.clear();
+        selected.input = None;
+        let declaration = TargetDeclaration {
+            id: "game".into(),
+            window_title: None,
+            macos: None,
+        };
+        selected.validate_declaration(&declaration).unwrap();
+        let encoded = serde_json::to_value(&selected).unwrap();
+        assert!(encoded["input"].is_null());
+        let decoded: TargetConfiguration = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, selected);
+        let resolution = TargetResolution {
+            game: ResolvedLocation {
+                path: r"\\?\C:\Games\Game.exe".into(),
+                executable: r"\\?\C:\Games\Game.exe".into(),
+            },
+            launcher: None,
+            working_directory: None,
+        };
+        resolution.validate(&selected).unwrap();
+        selected.platform = "macos".into();
+        assert_eq!(
+            selected.validate().unwrap_err().context["field"],
+            "platform"
+        );
+        assert_eq!(
+            resolution.validate(&selected).unwrap_err().context["field"],
+            "platform"
+        );
     }
 
     #[test]
@@ -910,12 +1155,12 @@ pub(crate) mod tests {
             ("process_directed", "preserve", Some("appkit_background")),
         ] {
             let mut configuration = valid.clone();
-            configuration.input = TargetInputPolicy {
+            configuration.input = Some(TargetInputPolicy {
                 route: route.into(),
                 focus: focus.into(),
                 pointer_mode: mode.map(str::to_owned),
                 click_hold_ms: 1000,
-            };
+            });
             configuration.validate_declaration(&declaration()).unwrap();
         }
         let mut boundary = valid;
@@ -1160,6 +1405,10 @@ pub(crate) mod tests {
 
     /// Places each unsupported alternate kind at `path`; returns refusal stages.
     #[cfg(target_os = "macos")]
+    #[expect(
+        unsafe_code,
+        reason = "audited mkfifo call creates an isolated metadata fixture"
+    )]
     fn alternate_stages(
         configuration: &TargetConfiguration,
         path: &Path,

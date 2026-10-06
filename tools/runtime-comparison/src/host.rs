@@ -1,19 +1,23 @@
 mod admission;
 mod options;
 mod sequence;
+mod startup;
 
 pub(crate) use admission::{HandleBudget, HandlePermit, Managed};
 pub use options::{option_path, resolve_options};
 
 #[cfg(test)]
+mod ocr_scan_tests;
+#[cfg(test)]
 mod test_support;
 
+use crate::images::PayloadBytes;
 use crate::model::{Control, Fault, Limits, Plan, RuntimeMetrics};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -233,10 +237,11 @@ struct Worker {
     thread: JoinHandle<()>,
 }
 
-const OPERATIONS: [&str; 13] = [
+const OPERATIONS: [&str; 16] = [
     "asset",
     "observe",
     "recognize",
+    "scan_ocr_zones",
     "query",
     "query_wait",
     "submit",
@@ -246,6 +251,8 @@ const OPERATIONS: [&str; 13] = [
     "wait",
     "log",
     "fixture",
+    "target_start",
+    "target_status",
     "unknown",
 ];
 
@@ -260,12 +267,14 @@ struct OperationMetrics {
 struct Inner {
     plan: Plan,
     options: Value,
-    assets: BTreeMap<String, Vec<u8>>,
+    assets: BTreeMap<String, PayloadBytes>,
     control: Arc<Control>,
     attempt: u64,
     lifetime: String,
     state: Mutex<State>,
     failure: Mutex<Option<Fault>>,
+    native_cleanup_unverified: AtomicBool,
+    native_initialization_started: AtomicBool,
     dispatch: Mutex<()>,
     workers: Mutex<Vec<Worker>>,
     physical: Arc<AtomicUsize>,
@@ -274,7 +283,9 @@ struct Inner {
     terminating: AtomicBool,
     metrics: [OperationMetrics; OPERATIONS.len()],
     #[cfg(feature = "engine")]
-    engine: Option<crate::engine::Engine>,
+    engine: OnceLock<crate::engine::Engine>,
+    startup: Mutex<startup::Startup>,
+    startup_link: OnceLock<Arc<crate::runner::StartupLink>>,
 }
 
 #[derive(Clone)]
@@ -293,7 +304,7 @@ impl Host {
     pub fn new(
         plan: Plan,
         options: Value,
-        assets: BTreeMap<String, Vec<u8>>,
+        assets: BTreeMap<String, PayloadBytes>,
         control: Arc<Control>,
     ) -> Result<Self, Fault> {
         plan.limits.validate()?;
@@ -308,20 +319,20 @@ impl Host {
         let lifetime = format!("controlled-{}-{nonce}-{attempt}", std::process::id());
         let handle_budget = Arc::new(HandleBudget::new(plan.limits.handles));
         #[cfg(feature = "engine")]
-        let engine = if plan.lane == "controlled" {
-            None
-        } else {
-            Some(crate::engine::Engine::new(
+        let engine = OnceLock::new();
+        #[cfg(feature = "engine")]
+        if plan.lane == "replay" || (plan.lane == "native" && plan.native_budgets.is_none()) {
+            let _ = engine.set(crate::engine::Engine::new(
                 &plan,
                 &assets,
                 Arc::clone(&control),
                 &lifetime,
                 attempt,
                 Arc::clone(&handle_budget),
-            )?)
-        };
+            )?);
+        }
         #[cfg(not(feature = "engine"))]
-        if plan.lane != "controlled" {
+        if plan.lane == "replay" || (plan.lane == "native" && plan.native_budgets.is_none()) {
             return Err(Fault::new(
                 "Blocked",
                 "replay/native requires the engine feature and explicit configuration",
@@ -374,6 +385,8 @@ impl Host {
                     cleanup: None,
                 }),
                 failure: Mutex::new(None),
+                native_cleanup_unverified: AtomicBool::new(false),
+                native_initialization_started: AtomicBool::new(false),
                 dispatch: Mutex::new(()),
                 workers: Mutex::new(Vec::new()),
                 physical: Arc::new(AtomicUsize::new(0)),
@@ -383,6 +396,8 @@ impl Host {
                 metrics: std::array::from_fn(|_| OperationMetrics::default()),
                 #[cfg(feature = "engine")]
                 engine,
+                startup: Mutex::new(startup::Startup::new()),
+                startup_link: OnceLock::new(),
             }),
         })
     }
@@ -397,7 +412,26 @@ impl Host {
         self.inner.plan.limits.clone()
     }
 
+    pub(crate) fn script_startup(&self) -> bool {
+        self.inner.plan.lane == "native" && self.inner.plan.native_budgets.is_some()
+    }
+
+    pub(crate) fn connect_startup(
+        &self,
+        link: Arc<crate::runner::StartupLink>,
+    ) -> Result<(), Fault> {
+        self.inner
+            .startup_link
+            .set(link)
+            .map_err(|_| Fault::new("Transport", "startup link already installed"))
+    }
+
     pub fn fail(&self, failure: Fault) {
+        if failure.context["native_cleanup"] == "unverified" {
+            self.inner
+                .native_cleanup_unverified
+                .store(true, Ordering::Release);
+        }
         self.close_admission();
         let mut first = lock(&self.inner.failure);
         if first.is_none() {
@@ -406,7 +440,19 @@ impl Host {
     }
 
     pub fn failure(&self) -> Option<Fault> {
-        lock(&self.inner.failure).clone()
+        let failure = lock(&self.inner.failure).clone();
+        if failure.is_some() {
+            return failure;
+        }
+        let failure = self
+            .inner
+            .startup_link
+            .get()
+            .and_then(|link| link.failure());
+        if let Some(failure) = &failure {
+            self.fail(failure.clone());
+        }
+        failure
     }
 
     pub fn set_failure_stack(&self, stack: Option<String>) {
@@ -470,11 +516,36 @@ impl Host {
                 "host work is unavailable during module instantiation",
             ));
         }
+        if matches!(method, "target_start" | "target_status") {
+            return self.target_call(method, &args);
+        }
+        if self.script_startup()
+            && !self.capture_ready()
+            && matches!(
+                method,
+                "observe"
+                    | "recognize"
+                    | "scan_ocr_zones"
+                    | "query"
+                    | "query_wait"
+                    | "postcondition"
+            )
+        {
+            return Err(Fault::new(
+                "TargetNotReady",
+                "Native capture requires capture_ready",
+            ));
+        }
         #[cfg(feature = "engine")]
-        if let Some(engine) = &self.inner.engine {
+        if let Some(engine) = self.inner.engine.get() {
             if matches!(
                 method,
-                "observe" | "recognize" | "query" | "query_wait" | "postcondition"
+                "observe"
+                    | "recognize"
+                    | "scan_ocr_zones"
+                    | "query"
+                    | "query_wait"
+                    | "postcondition"
             ) {
                 if method == "postcondition"
                     && lock(&self.inner.state).postconditions.len()
@@ -491,7 +562,7 @@ impl Host {
                 let mut state = lock(&self.inner.state);
                 match method {
                     "observe" => state.observations += 1,
-                    "recognize" | "query_wait" => state.recognitions += 1,
+                    "recognize" | "scan_ocr_zones" | "query_wait" => state.recognitions += 1,
                     "postcondition"
                         if state.postconditions.len() < self.inner.plan.limits.max_actions =>
                     {
@@ -516,6 +587,7 @@ impl Host {
                 self.observe()
             }
             "recognize" => self.recognize(&args, false),
+            "scan_ocr_zones" => self.scan_ocr_zones(args),
             "query" => self.recognize(&args, true),
             "query_wait" => self.query_wait(&args),
             "submit" => self.submit(&args),
@@ -739,6 +811,60 @@ impl Host {
         } else {
             Ok(result)
         }
+    }
+
+    fn scan_ocr_zones(&self, args: Value) -> Result<Value, Fault> {
+        let request: crate::ocr_scan::Request =
+            serde_json::from_value(args).map_err(|error| argument(error.to_string()))?;
+        self.check()?;
+        let mut state = lock(&self.inner.state);
+        let frame = self.observation(&state, &request.observation)?;
+        let (observation, zones) =
+            request.into_zones(640, 480, crate::ocr_scan::CONTROLLED_MAX_ZONES)?;
+        state.recognitions += 1;
+        if self.inner.plan.scenario == "backend-failure" {
+            return Err(
+                Fault::new("Backend", "controlled recognition backend failure")
+                    .with_context(json!({"operation":"ocr","observation":frame.value["id"],
+                    "cause":"injected-backend-failure"})),
+            );
+        }
+        let absent = matches!(
+            self.inner.plan.scenario.as_str(),
+            "no-match" | "query-absent"
+        );
+        let fixture = Region {
+            x: 100,
+            y: 80,
+            width: 40,
+            height: 20,
+        };
+        let mut output = Vec::with_capacity(zones.len());
+        let mut count = 0;
+        let mut text_bytes = 0usize;
+        for zone in zones {
+            let roi = Region {
+                x: zone.rect.x,
+                y: zone.rect.y,
+                width: zone.rect.width,
+                height: zone.rect.height,
+            };
+            let recognized = !absent && roi.contains(&fixture);
+            let regions = if recognized {
+                count += 1;
+                text_bytes = text_bytes.saturating_add(frame.visible.len());
+                crate::ocr_scan::check_region_budget(count, text_bytes)?;
+                vec![crate::ocr_scan::region_value(
+                    &frame.visible,
+                    0.98,
+                    [[100.0, 80.0], [140.0, 80.0], [140.0, 100.0], [100.0, 100.0]],
+                )]
+            } else {
+                Vec::new()
+            };
+            output.push(crate::ocr_scan::zone_value(zone.id, regions));
+        }
+        crate::ocr_scan::snapshot(Some(observation), output, count)
     }
 
     fn start_held_work(&self, frame: Arc<Frame>) -> Result<Arc<PhysicalWork>, Fault> {
@@ -1008,6 +1134,23 @@ impl Host {
             });
         }
         drop(state);
+        if self.script_startup() {
+            let startup = lock(&self.inner.startup);
+            let progress = self
+                .inner
+                .startup_link
+                .get()
+                .and_then(|link| link.progress())
+                .unwrap_or(startup.progress);
+            value["native_status"] = json!(progress.status);
+            value["native_phase"] = json!(progress.phase);
+            value["native_launch"] = json!(progress.launch);
+            value["native_initialization_started"] = json!(
+                self.inner
+                    .native_initialization_started
+                    .load(Ordering::Acquire)
+            );
+        }
         value["failure"] = json!(self.failure());
         value["operation_metrics"] = Value::Object(
             OPERATIONS
@@ -1027,7 +1170,7 @@ impl Host {
                 .collect(),
         );
         #[cfg(feature = "engine")]
-        if let Some(engine) = &self.inner.engine {
+        if let Some(engine) = self.inner.engine.get() {
             let engine = engine.snapshot();
             value["attempt_owners"] = json!(
                 value["attempt_owners"].as_u64().unwrap_or(0)
@@ -1142,7 +1285,7 @@ mod tests {
         inner.plan.lane = "replay".into();
         inner.plan.limits.handles = limit;
         inner.handle_budget = Arc::new(HandleBudget::new(limit));
-        inner.engine = Some(crate::engine::Engine::replay_for_test(
+        inner.engine = OnceLock::from(crate::engine::Engine::replay_for_test(
             &inner.plan,
             Arc::clone(&inner.control),
             &inner.lifetime,

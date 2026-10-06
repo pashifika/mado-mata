@@ -55,9 +55,11 @@ The example budgets are controlled-run ceilings, not native qualification budget
 Only the predeclared controlled scenarios are accepted; misspellings cannot
 silently become successful samples.
 
-`child`, `parent-probe`, `parent-stop-probe`, and `target-probe` are harness-internal
-modes. The last is an inert owned process used to prove that containment and
-intentional supervisor exit do not terminate the separate target.
+`child`, `parent-probe`, `parent-stop-probe`, `target-probe`, and
+`recognition-child` are harness-internal modes. `target-probe` is an inert owned
+process used to prove that containment and intentional supervisor exit do not
+terminate the separate target. Recognition capability/trial requests are
+supervised desktop operations, not standalone user commands.
 
 ## Manual script testing
 
@@ -107,9 +109,43 @@ A package declares every source, profile, schema, asset, and source map in
 `package.json`. Use the shipped fixtures as executable examples. Snapshot capture
 rejects undeclared files, missing assets, traversal, nonportable/colliding IDs,
 links inside the package, unsupported runtime/SDK contracts, and finite-limit
-violations. The selected root may lie below an OS path alias; capture anchors its
-canonical location. Captured content, not later edits or ambient `node_modules`,
-is used for compilation, preflight, module loading, and assets.
+violations. Known ordinary OS metadata files (`.DS_Store`, AppleDouble `._*`,
+`Thumbs.db`, `ehthumbs.db`, `ehthumbs_vista.db`, and `desktop.ini`) are ignored
+without reading or deleting them; they do not affect captured bytes or identity.
+This exception never admits links, special files, or directories, and a package
+cannot explicitly declare reserved metadata names. Other hidden files still
+require declarations. The selected root may lie below an OS path alias; capture
+anchors its canonical location. Captured content, not later edits or ambient
+`node_modules`, is used for compilation, preflight, module loading, and assets.
+
+The desktop can [create and edit directory packages](desktop.md#edit-directory-packages).
+Its editable candidate accepts repairable text errors but does not weaken this
+CLI's executable inventory: Save, Validate, and explicit Inspect/Start remain
+separate operations.
+
+Directory capture separates declared PNG/raw image payloads from non-image
+source, profile, schema, and JSON content under the
+[shared image policy](adr/0006-saved-image-recognition-observations.md#image-policy).
+An explicit lower `limits.snapshot_bytes` still applies; the larger image ceiling
+does not enlarge source or metadata allowances. Inventory checks validate complete
+PNG content and declared dimensions, not just its header.
+
+Comparison cohorts bind asset names, lengths and cached SHA-256 digests using
+the inventory's sorted framing, rather than serializing every image byte again.
+Candidate language and source are intentionally excluded from the cohort key;
+the full package inventory still binds them. Regenerate comparison samples
+together when changing builds or identity framing.
+
+Desktop [saved-image Recognition](desktop.md#author-saved-image-recognition)
+persists versioned metadata and explicitly selected crops as declared assets.
+Template assets include reviewed rights, content identities, match defaults, and
+runtime mappings; malformed or stale references are refused. Saved-image trials
+are script-free observations, separate from this CLI's exact-text query and
+postcondition semantics. Optional reference text is author context, never an
+authoring trial verdict or generated OCR filter. Copy provides reusable Game
+content setup and one grouped OCR request for all checked regions. It changes
+the native clipboard, never package source; preserve existing entry exports
+when deliberately pasting and editing.
 
 ### Optional portable target declaration
 
@@ -176,18 +212,74 @@ and package-identity mismatches fail before execution.
 Both named entry exports must be callable. Guarded module instantiation permits
 no ordinary observation/input work. Readiness has its own finite bound and must
 return the literal string `Ready`; truthy alternatives do not start workflow.
-The host establishes an eligible observation before readiness. The selected
-workflow performs observation, template/OCR recognition, priority choice, ordered
-submission, receipt handling, and an independent strictly newer-frame condition.
+Controlled, Replay and the independent explicit-plan native CLI establish an
+eligible observation before readiness. Reviewed Desktop Native instead runs
+Readiness before attachment: its Script must request startup, poll for capture
+availability and establish its own recognition criteria before returning `Ready`.
+The selected workflow performs observation, template/OCR recognition, priority
+choice, ordered submission, receipt handling, and an independent strictly
+newer-frame condition.
 
 `host.call(method, arguments)` exposes compact JSON values and managed identities,
-not native payloads. Operations include `asset`, `observe`, `recognize`, `query`,
-`query_wait`, `submit`, `settle`, `postcondition`, `wait`, `release`, and bounded
-`log`. Recognition absence is `null`; query exhaustion is a typed timeout.
+not native payloads. Operations include `asset`, `observe`, `recognize`,
+`scan_ocr_zones`, `query`, `query_wait`, `submit`, `settle`, `postcondition`, `wait`,
+`release`, and bounded `log`. Single recognition absence is `null`; grouped OCR
+returns explicit per-zone `no_match`; query exhaustion is a typed timeout.
 `Submitted`, `Partial`, and `Uncertain` receipts are not application-effect proof.
 No uncertain action is automatically replayed. Release remains available after
 admission closes. The controlled-only `fixture` operation injects declared state
 transitions; it is not native authority.
+
+Desktop Native Readiness additionally permits `target_start` and `target_status`,
+each with exactly `{}`. They use only the host's immutable saved binding and
+reviewed authority. Start is single-use and returns pending without waiting for
+a window; status separates `not_requested`, `pending` and `capture_ready` from
+preparation phase and launch disposition. Pending is not an error retry, and
+capture availability is not game readiness. Without a startup request, the host
+acquires no target.
+These calls refuse in every other lane/stage, including the independent native
+CLI. External `run`/`manual` plans cannot select Desktop-only `native_budgets`.
+See the [Desktop startup contract](desktop.md#reviewed-macos-native-start) for
+phase budgets, polling and cleanup ownership.
+
+`scan_ocr_zones` performs one public engine grouped scan of a retained observation:
+
+```ts
+const recognitionBasis = {
+  frame_width: 1920, frame_height: 1080,
+  content: { x: 80, y: 40, width: 1760, height: 1000 },
+};
+const observation = host.call("observe", {});
+try {
+  const scan = host.call("scan_ocr_zones", {
+    observation,
+    basis: recognitionBasis,
+    zones: [
+      { id: "status", region: { u0: 0, v0: 0, u1: 0.3, v1: 0.2 } },
+      { id: "counter", region: { u0: 0.7, v0: 0, u1: 1, v1: 0.2 } },
+    ],
+  });
+  // Consume scan.zones here. No result handle needs release.
+} finally {
+  host.call("release", { id: observation.id });
+}
+```
+
+The entire request is validated before backend work: exact retained-frame
+dimensions, bounded content, finite ordered normalized edges, unique bounded
+IDs, and the engine's zone limit (8 at the current pin). Mapping uses floor for
+left/top and ceil for right/bottom, with rejected clipping. Retained observations
+do not inherit the separate saved-PNG pixel ceiling. No per-zone calls, implicit
+splitting, or expected-text filtering occur. The controlled lane uses a distinct
+fixture-only bound; it is not evidence of native capability.
+
+The plain result contains `kind`, `observation`, `text_contract`, and ordered
+`zones`. Each zone has its supplied `id`, `recognized`/`no_match` outcome, and all
+returned `regions` with text, confidence, bounds, and four-point geometry.
+No root result `id` is allocated. Native outcomes are dropped after projection;
+the caller owns only its original observation. More than 256 regions or 256 KiB
+is an error, never truncated success. Engine initialization and machine-specific
+resources remain application-owned; geometry setup grants no native authority.
 
 Input actions retain the `key_down`/`key_up` forms and also accept a `click` with
 capture-pixel `x`, `y`, and `left`/`right`/`middle` button. Native sequences balance

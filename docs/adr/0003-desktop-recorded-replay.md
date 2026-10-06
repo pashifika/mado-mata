@@ -4,9 +4,11 @@ Status: Accepted for the macOS development application; not live native qualific
 
 ## Decision
 
-Keep the GUI and controlled runner non-native. Build the optional engine runner
-in a separate fixed checkout target directory. Neither packages, profiles, nor
-IPC can select an executable, supply a complete Plan, or acquire native authority.
+Keep the controlled and recorded-replay lanes non-native. Build the optional
+engine runner in a separate fixed checkout target directory. Neither packages,
+profiles, nor IPC can select an executable, supply a complete Plan, or grant
+native authority to replay. Reviewed Native Start is separate under
+[ADR 0008](0008-macos-native-run-admission.md).
 A missing engine artifact or pre-Rust loader failure must not prevent controlled
 operation or become a successful initialization result.
 
@@ -45,6 +47,11 @@ refusal retains structured `BLOCKED` evidence with known no-child cleanup and no
 invented build/startup identity.
 
 ## Bounds corrected by consuming evidence
+
+The package and decoded-frame bounds below record the earlier consuming evidence.
+[ADR 0006](0006-saved-image-recognition-observations.md#image-policy) supersedes
+them for saved-image authoring and shared package/replay capture. This historical
+evidence does not establish acceptance at the new ceilings.
 
 Package capture stays at the existing **1 MiB** for inspection, Check, and both
 Start lanes. Its bound participates in inventory identity: using 2 MiB only for

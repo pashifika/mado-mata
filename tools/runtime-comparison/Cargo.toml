@@ -7,19 +7,39 @@ publish = false
 
 [features]
 default = []
-engine = ["dep:mado-pilot"]
+engine = ["dep:mado-pilot", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.145", features = ["float_roundtrip"] }
 sha2 = "=0.10.9"
+xid = { git = "https://github.com/pashifika/xid-rs", rev = "bb7de7a0370d051f7fc07f31b87db62549118bfe", default-features = false }
+png = "=0.18.1"
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "loader"] }
 mlua = { version = "=0.12.1", default-features = false, features = ["lua54", "vendored", "serde"] }
-mado-pilot = { git = "https://github.com/pashifika/mado-pilot", rev = "acc5d98ae8cfc4958970be826a28011bc12185c9", optional = true }
+mado-pilot = { git = "https://github.com/pashifika/mado-pilot", rev = "4b4f3296838a9eecdcb00e9d2bb3121a25cdc240", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Performance", "Win32_System_Threading"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "=0.6.4", features = ["exception"], optional = true }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "libc", "NSRunningApplication"], optional = true }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSDate", "NSString", "NSURL"], optional = true }
 
 [build-dependencies]
 sha2 = "=0.10.9"
+
+[dev-dependencies]
+mado-pilot-runtime = { git = "https://github.com/pashifika/mado-pilot", rev = "4b4f3296838a9eecdcb00e9d2bb3121a25cdc240" }
+mado-pilot-capture = { git = "https://github.com/pashifika/mado-pilot", rev = "4b4f3296838a9eecdcb00e9d2bb3121a25cdc240" }
+mado-pilot-core = { git = "https://github.com/pashifika/mado-pilot", rev = "4b4f3296838a9eecdcb00e9d2bb3121a25cdc240" }
+mado-pilot-testkit = { git = "https://github.com/pashifika/mado-pilot", rev = "4b4f3296838a9eecdcb00e9d2bb3121a25cdc240" }
 
 [lints.rust]
 unsafe_code = "warn"

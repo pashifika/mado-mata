@@ -1,26 +1,18 @@
 use super::RunRecord;
+use super::clock::SharedDeadline;
 use super::evidence::{Observer, receive_evidence};
 use super::protocol::{Invocation, Operation, emit, frame};
 use crate::inventory::Inventory;
-use crate::model::{Fault, MAX_TRANSPORT_BYTES, Plan, encode_bounded, identity};
+use crate::model::{Control, Fault, MAX_TRANSPORT_BYTES, Plan, StopReason, identity};
+use crate::owned_child::{ChildStdio, Environment, OwnedChild};
 use serde_json::{Value, json};
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-
-struct OwnedChild(Child);
-impl Drop for OwnedChild {
-    fn drop(&mut self) {
-        if !matches!(self.0.try_wait(), Ok(Some(_))) {
-            let _ = self.0.kill();
-        }
-        let _ = self.0.wait();
-    }
-}
 
 pub fn sample(plan: &Plan, inventory: &Inventory) -> Result<Vec<RunRecord>, Fault> {
     plan.validate()?;
@@ -38,14 +30,14 @@ pub fn sample(plan: &Plan, inventory: &Inventory) -> Result<Vec<RunRecord>, Faul
     Ok(records)
 }
 
-/// The optional operator callback must be a nonblocking poll. A true result
-/// requests the same bounded Stop/cleanup path as the existing timed control.
+/// The optional nonblocking poll preserves cancellation versus operation deadline
+/// through the same bounded child Stop/cleanup path.
 pub fn run_once(
     plan: &Plan,
     inventory: &Inventory,
     stop_after_ms: Option<u64>,
     disconnect: bool,
-    operator_stop: Option<&mut dyn FnMut() -> bool>,
+    operator_stop: Option<&mut dyn FnMut() -> Option<StopReason>>,
 ) -> Result<RunRecord, Fault> {
     let executable = std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?;
     supervise(
@@ -58,6 +50,7 @@ pub fn run_once(
         &executable,
         None,
         Operation::Run,
+        None,
     )
 }
 
@@ -66,7 +59,7 @@ pub fn run_once_with_executable(
     executable: &Path,
     plan: &Plan,
     inventory: &Inventory,
-    operator_stop: &mut dyn FnMut() -> bool,
+    operator_stop: &mut dyn FnMut() -> Option<StopReason>,
     observer: &Observer,
 ) -> Result<RunRecord, Fault> {
     supervise(
@@ -79,6 +72,29 @@ pub fn run_once_with_executable(
         executable,
         Some(observer),
         Operation::Run,
+        None,
+    )
+}
+
+pub(crate) fn run_prepared_with_executable(
+    executable: &Path,
+    plan: &Plan,
+    inventory: &Inventory,
+    preparation: super::PreparedExecution<'_>,
+    observer: &Observer,
+) -> Result<RunRecord, Fault> {
+    let mut poll = || preparation.control.stop_reason();
+    supervise(
+        plan,
+        inventory,
+        None,
+        false,
+        Some(&mut poll),
+        None,
+        executable,
+        Some(observer),
+        Operation::Run,
+        Some(&preparation),
     )
 }
 
@@ -87,7 +103,7 @@ pub fn run_environment_check_with_executable(
     executable: &Path,
     plan: &Plan,
     inventory: &Inventory,
-    operator_stop: &mut dyn FnMut() -> bool,
+    operator_stop: &mut dyn FnMut() -> Option<StopReason>,
     observer: &Observer,
 ) -> Result<RunRecord, Fault> {
     supervise(
@@ -100,6 +116,7 @@ pub fn run_environment_check_with_executable(
         executable,
         Some(observer),
         Operation::EnvironmentCheck,
+        None,
     )
 }
 
@@ -121,6 +138,7 @@ pub(crate) fn run_once_after_milestone(
         &executable,
         None,
         Operation::Run,
+        None,
     )
 }
 
@@ -132,16 +150,8 @@ fn child_loader_environment(command: &mut Command, plan: &Plan) -> Result<Value,
     {
         command.env_remove("MADO_COMPILER_NODE");
         // Resolve Node before restricting the engine's DLL search path.
-        if let Some(path) = std::env::var_os("PATH") {
-            for directory in std::env::split_paths(&path) {
-                let node = directory.join("node.exe");
-                if node.is_file()
-                    && let Ok(node) = node.canonicalize()
-                {
-                    command.env("MADO_COMPILER_NODE", node);
-                    break;
-                }
-            }
+        if plan.candidate == "typescript" {
+            command.env("MADO_COMPILER_NODE", crate::typescript::node_from_path()?);
         }
     }
     if plan.lane == "controlled" {
@@ -157,6 +167,14 @@ fn child_loader_environment(command: &mut Command, plan: &Plan) -> Result<Value,
         serde_json::from_value(raw.clone()).map_err(|error| {
             crate::environment::blocked("configuration_validation", &error.to_string())
         })?;
+    configure_engine_loader(command, &configuration)
+}
+
+pub(super) fn configure_engine_loader(
+    command: &mut Command,
+    configuration: &crate::environment::Configuration<Value>,
+) -> Result<Value, Fault> {
+    command.env("ORT_DISABLE_TELEMETRY", "1");
     let mut directories = Vec::new();
     for library in
         std::iter::once(&configuration.ocr.runtime).chain(&configuration.native_libraries)
@@ -249,89 +267,110 @@ fn supervise(
     inventory: &Inventory,
     stop_after_ms: Option<u64>,
     disconnect: bool,
-    mut operator_stop: Option<&mut dyn FnMut() -> bool>,
+    mut operator_stop: Option<&mut dyn FnMut() -> Option<StopReason>>,
     stop_milestone: Option<(&str, u64)>,
     executable: &Path,
     observer: Option<&Observer>,
     operation: Operation,
+    preparation: Option<&super::PreparedExecution<'_>>,
 ) -> Result<RunRecord, Fault> {
     plan.validate()?;
     inventory.validate()?;
     operation.validate(plan)?;
+    if let Some(modules) = preparation.and_then(|prepared| prepared.modules) {
+        modules.parser(inventory)?;
+    }
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| Fault::new("Clock", e.to_string()))?
         .as_nanos();
     let run = format!("{}-{}-{nonce}", plan.id, std::process::id());
-    let invocation = Invocation {
+    let _image_reservation = if preparation.is_some_and(|prepared| prepared.images.is_some()) {
+        None
+    } else {
+        Some(super::payload::reserve_child_images(plan, inventory)?)
+    };
+    if observer.is_some()
+        && let Some(reason) = operator_stop.as_mut().and_then(|poll| poll())
+    {
+        return Err(reason.fault().with_context(json!({
+            "stage":"child_startup","boundary":"before_spawn","child_started":false,
+            "cleanup":{"clean":true,"child_started":false}
+        })));
+    }
+    let started = Instant::now();
+    let standalone_control = Control::new(&plan.limits);
+    let owner_control = preparation.map_or(&standalone_control, |prepared| prepared.control);
+    if preparation.is_none()
+        && let Some(budgets) = plan.native_budgets
+    {
+        owner_control.start_native(budgets, None)?;
+    }
+    let startup = preparation.and_then(|prepared| prepared.startup);
+    // One original bound for both processes: the child reads this absolute
+    // deadline on the shared clock, so transfer time is never refunded.
+    let deadline = owner_control.outer_deadline();
+    let mut invocation = Invocation {
         run: run.clone(),
         attempt: 1,
         operation,
         plan: plan.clone(),
         inventory: inventory.clone(),
         observe_logs: observer.is_some(),
+        prepared_modules: preparation.and_then(|prepared| prepared.modules.cloned()),
+        deadline: SharedDeadline::from_instant(deadline)?,
+        startup_deadline: plan
+            .native_budgets
+            .map(|_| SharedDeadline::from_instant(owner_control.deadline()))
+            .transpose()?,
+        prepare_target: startup.is_some(),
     };
-    let mut bytes = encode_bounded(&invocation, MAX_TRANSPORT_BYTES - 1)?;
-    bytes.push(b'\n');
-    if observer.is_some() && operator_stop.as_mut().is_some_and(|poll| poll()) {
-        return Err(
-            Fault::new("Cancelled", "Stop requested before child startup").with_context(json!({
-                "stage":"child_startup","boundary":"before_spawn","child_started":false,
-                "cleanup":{"clean":true,"child_started":false}
-            })),
-        );
-    }
-    let started = Instant::now();
+    let bytes = super::payload::header(&mut invocation)?;
+    let transfer_assets = invocation.inventory.assets.clone();
     let mut command = Command::new(executable);
-    command
-        .arg("child")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.arg("child");
     let loader_environment = match child_loader_environment(&mut command, plan) {
         Ok(environment) => environment,
         Err(error) => {
             return loader_prerequisite_record(run, plan, inventory, operation, error, started);
         }
     };
-    if operator_stop.as_mut().is_some_and(|poll| poll()) {
-        return Err(
-            Fault::new("Cancelled", "Stop requested before child startup").with_context(json!({
-                "stage":"child_startup","boundary":"before_spawn","child_started":false,
-                "cleanup":{"clean":true,"child_started":false}
-            })),
-        );
+    if let Some(reason) = operator_stop.as_mut().and_then(|poll| poll()) {
+        return Err(reason.fault().with_context(json!({
+            "stage":"child_startup","boundary":"before_spawn","child_started":false,
+            "cleanup":{"clean":true,"child_started":false}
+        })));
     }
-    let mut child = OwnedChild(command.spawn().map_err(|error| {
-        Fault::new("ChildStartup", error.to_string()).with_context(json!({
-            "stage":"child_startup","boundary":"spawn","io_kind":format!("{:?}",error.kind()),
-            "child_started":false,"cleanup":{"clean":true,"child_started":false}
-        }))
-    })?);
+    let mut child = OwnedChild::spawn(&mut command, ChildStdio::Piped, Environment::Inherited)?;
     let mut input = child
-        .0
         .stdin
         .take()
         .ok_or_else(|| Fault::new("Transport", "child stdin unavailable"))?;
-    let (commands, command_receive) = mpsc::sync_channel::<Value>(1);
+    let (commands, command_receive) = mpsc::sync_channel::<Value>(2);
     let mut commands = Some(commands);
     // A child stuck before reading cannot stall the supervisor's deadline.
     let writer = thread::spawn(move || -> Result<(), Fault> {
         input
             .write_all(&bytes)
             .map_err(|e| Fault::new("Startup", e.to_string()))?;
-        if let Ok(command) = command_receive.recv() {
+        for asset in transfer_assets.values() {
+            input
+                .write_all(asset)
+                .map_err(|e| Fault::new("Startup", e.to_string()))?;
+        }
+        while let Ok(command) = command_receive.recv() {
             writeln!(input, "{command}").map_err(|e| Fault::new("Transport", e.to_string()))?;
+            if command["command"] != "TargetPrepared" {
+                break;
+            }
         }
         Ok(())
     });
     let stdout = child
-        .0
         .stdout
         .take()
         .ok_or_else(|| Fault::new("Transport", "child stdout unavailable"))?;
     let stderr = child
-        .0
         .stderr
         .take()
         .ok_or_else(|| Fault::new("Transport", "child stderr unavailable"))?;
@@ -357,20 +396,74 @@ fn supervise(
     let mut startup_us = None;
     let mut child_build = None;
     let mut system = System::new();
-    let child_pid = Pid::from_u32(child.0.id());
+    let child_pid = Pid::from_u32(child.id());
     let mut milestone_received_at = None;
     let parent_pid = Pid::from_u32(std::process::id());
     let mut sampled_child_rss = 0u64;
     let mut sampled_parent_rss = 0u64;
     let mut metric_samples = 0usize;
+    let mut probe_sequence = 0u64;
+    let mut pending_probe = None;
+    let mut entry_settled = false;
     let exit;
     loop {
         while let Ok(message) = receiver.try_recv() {
             match message {
                 Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
+                    if value["event"] == "TargetProbe" {
+                        let result = (|| {
+                            if entry_settled
+                                || pending_probe.is_some()
+                                || value["sequence"].as_u64() != probe_sequence.checked_add(1)
+                            {
+                                return Err(Fault::new(
+                                    "Transport",
+                                    "invalid startup request sequence",
+                                ));
+                            }
+                            let startup = startup.ok_or_else(|| {
+                                Fault::new("Authority", "target preparation was not admitted")
+                            })?;
+                            startup.request()?;
+                            probe_sequence += 1;
+                            pending_probe = Some(probe_sequence);
+                            Ok(())
+                        })();
+                        if let Err(fault) = result {
+                            protocol_fault = Some(fault);
+                        }
+                        continue;
+                    }
+                    if value["event"] == "NativeTransition" {
+                        let result = (|| {
+                            if plan.lane != "native" || entry_settled {
+                                return Err(Fault::new(
+                                    "Authority",
+                                    "Native transition outside admitted operation",
+                                ));
+                            }
+                            let phase = value["phase"]
+                                .as_u64()
+                                .and_then(|phase| u8::try_from(phase).ok())
+                                .ok_or_else(|| Fault::new("Transport", "invalid Native phase"))?;
+                            let deadline: SharedDeadline =
+                                serde_json::from_value(value["deadline"].clone())
+                                    .map_err(|error| Fault::new("Transport", error.to_string()))?;
+                            owner_control.native_transition(phase, Some(deadline.instant()?))?;
+                            Ok(())
+                        })();
+                        if let Err(fault) = result {
+                            protocol_fault = Some(fault);
+                        }
+                    }
+                    if value["event"] == "EntrySettled" || value["event"] == "Terminal" {
+                        entry_settled = true;
+                        if pending_probe.is_some() {
+                            owner_control.cancel();
+                        }
+                    }
                     if value["event"] == "ChildStarted" {
-                        if let Err(error) =
-                            retain_child_build(&value, child.0.id(), &mut child_build)
+                        if let Err(error) = retain_child_build(&value, child.id(), &mut child_build)
                         {
                             protocol_fault = Some(error);
                             continue;
@@ -398,8 +491,25 @@ fn supervise(
                 Err(error) => protocol_fault = Some(error),
             }
         }
+        if let Some(startup) = startup
+            && let Some(sequence) = pending_probe
+            && let Some(reply) = startup.poll()
+        {
+            pending_probe = None;
+            if !entry_settled && stop_sent_at.is_none() {
+                if let Some(sender) = &commands {
+                    if sender
+                        .try_send(json!({"command":"TargetPrepared","run":run,"attempt":1,
+                        "sequence":sequence,"reply":reply}))
+                        .is_err()
+                    {
+                        protocol_fault =
+                            Some(Fault::new("Transport", "startup reply channel unavailable"));
+                    }
+                }
+            }
+        }
         if let Some(status) = child
-            .0
             .try_wait()
             .map_err(|e| Fault::new("Containment", e.to_string()))?
         {
@@ -409,16 +519,25 @@ fn supervise(
         let elapsed = started.elapsed();
         // The optional operator poll is nonblocking and runs in the supervisor,
         // independently of compilation, VM execution, and native-work locks.
-        let operator_requested =
-            stop_sent_at.is_none() && operator_stop.as_mut().is_some_and(|poll| poll());
-        let stop_at = stop_after_ms.unwrap_or(plan.limits.duration_ms);
+        let operator_requested = if stop_sent_at.is_none() {
+            operator_stop
+                .as_mut()
+                .and_then(|poll| poll())
+                .or_else(|| owner_control.stop_reason())
+        } else {
+            None
+        };
+        let stop_due = stop_after_ms.map_or_else(
+            || Instant::now() >= deadline,
+            |millis| elapsed >= Duration::from_millis(millis),
+        );
         let milestone_stop_due = stop_milestone.is_some_and(|(_, delay_ms)| {
             milestone_received_at
                 .is_some_and(|at: Instant| at.elapsed() >= Duration::from_millis(delay_ms))
         });
         if stop_sent_at.is_none()
-            && (operator_requested
-                || elapsed >= Duration::from_millis(stop_at)
+            && (operator_requested.is_some()
+                || stop_due
                 || protocol_fault.is_some()
                 || milestone_stop_due)
         {
@@ -426,21 +545,26 @@ fn supervise(
             if disconnect {
                 drop(commands.take());
             } else if let Some(sender) = commands.take() {
-                let _ = sender.send(json!({"command":"Stop","run":run,"attempt":1}));
+                let reason = operator_requested.unwrap_or_else(|| {
+                    if stop_after_ms.is_none() && Instant::now() >= deadline {
+                        StopReason::Timeout
+                    } else {
+                        StopReason::Cancelled
+                    }
+                });
+                owner_control.stop(reason);
+                let _ = sender.try_send(json!({"command":reason,"run":run,"attempt":1}));
             }
         }
         if stop_sent_at
             .is_some_and(|stop| stop.elapsed() >= Duration::from_millis(plan.limits.cleanup_ms))
-            || elapsed
-                >= Duration::from_millis(plan.limits.duration_ms + plan.limits.containment_ms)
+            || Instant::now() >= deadline + Duration::from_millis(plan.limits.containment_ms)
         {
             forced = true;
             child
-                .0
                 .kill()
                 .map_err(|e| Fault::new("Containment", e.to_string()))?;
             exit = child
-                .0
                 .wait()
                 .map_err(|e| Fault::new("Containment", e.to_string()))?;
             break;
@@ -461,6 +585,9 @@ fn supervise(
     }
     let exit_us = started.elapsed().as_micros() as u64;
     drop(commands);
+    // A reaped child does not settle a parent-owned launch callback or probe.
+    // Retain this supervisor (and the Desktop reservation) until physical return.
+    let preparation_fault = startup.and_then(super::NativePreparation::settle);
     if let Ok(Err(error)) = writer.join() {
         protocol_fault.get_or_insert(error);
     }
@@ -468,8 +595,11 @@ fn supervise(
     while let Ok(message) = receiver.try_recv() {
         match message {
             Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
+                if value["event"] == "TargetProbe" {
+                    continue;
+                }
                 if value["event"] == "ChildStarted" {
-                    if let Err(error) = retain_child_build(&value, child.0.id(), &mut child_build) {
+                    if let Err(error) = retain_child_build(&value, child.id(), &mut child_build) {
                         protocol_fault = Some(error);
                         continue;
                     }
@@ -518,9 +648,16 @@ fn supervise(
             protocol_fault.as_ref(),
             forced || exit.code() == Some(124),
         )
+        .or_else(|| preparation_fault.clone())
     };
-    let clean =
-        child_build.is_some() && terminal["cleanup"]["clean"] == true && exit.success() && !forced;
+    let preparation_clean = preparation_fault
+        .as_ref()
+        .is_none_or(|fault| fault.context["native_cleanup"] != "unverified");
+    let clean = preparation_clean
+        && child_build.is_some()
+        && terminal["cleanup"]["clean"] == true
+        && exit.success()
+        && !forced;
     let status = if primary.as_ref().is_some_and(|e| e.category == "Blocked") {
         "BLOCKED"
     } else if clean && primary.is_none() {
@@ -528,12 +665,18 @@ fn supervise(
     } else {
         "FAIL"
     };
-    let cleanup = if child_build.is_some() && terminal.get("cleanup").is_some() {
+    let mut cleanup = if child_build.is_some() && terminal.get("cleanup").is_some() {
         terminal["cleanup"].clone()
     } else {
         json!({"clean":false,"status":"IncompleteCleanup","outcome":"ForcedOrIncomplete","cleanup_finished_us":null,
             "external_effects":"unknown; no automatic continuation"})
     };
+    if !preparation_clean {
+        cleanup["clean"] = json!(false);
+        cleanup["status"] = json!("IncompleteCleanup");
+        cleanup["cleanup_finished_us"] = Value::Null;
+        cleanup["native_preparation_cleanup"] = json!("unverified");
+    }
     let reason = primary.as_ref().map_or_else(
         || {
             if clean {
@@ -574,6 +717,9 @@ fn supervise(
         .cloned()
         .unwrap_or_default();
     observations.insert("operation".into(), json!(operation.name()));
+    if let Some(fault) = preparation_fault {
+        observations.insert("native_preparation_fault".into(), json!(fault));
+    }
     if operation == Operation::EnvironmentCheck && !observations.contains_key("stage") {
         observations.insert(
             "stage".into(),
@@ -632,9 +778,7 @@ fn supervise(
             } else {
                 "attempt owners after cleanup, not peak"
             },"budgets":plan.budgets,
-            "comparison_identity":identity(&(&plan.lane,&plan.scenario,&plan.profile,&plan.limits,&plan.budgets,
-                (plan.samples,plan.warmups,plan.repetitions),&inventory.metadata["runtime_scenario"],
-                &plan.native_config,&inventory.package_id,&inventory.schema,&inventory.profiles,&inventory.assets))?,
+            "comparison_identity":comparison_identity(plan, inventory)?,
             "protocol_fault":protocol_fault,"entry_emission_failure":terminal["entry_emission_failure"],
             "diagnostic_details_omitted":terminal["diagnostic_details_omitted"],
             "stderr_bytes_retained":stderr.len(),"stderr":String::from_utf8_lossy(&stderr),
@@ -647,9 +791,32 @@ fn supervise(
     })
 }
 
+/// Candidate-independent cohort data; assets use the cached inventory-v2
+/// name/length/digest framing rather than streaming every byte as decimal JSON.
+pub(super) fn comparison_identity(plan: &Plan, inventory: &Inventory) -> Result<String, Fault> {
+    identity(&(
+        &plan.lane,
+        &plan.scenario,
+        &plan.profile,
+        &plan.limits,
+        &plan.budgets,
+        (plan.samples, plan.warmups, plan.repetitions),
+        &inventory.metadata["runtime_scenario"],
+        &plan.native_config,
+        &inventory.package_id,
+        &inventory.schema,
+        &inventory.profiles,
+        inventory.asset_digest(),
+    ))
+}
+
 // Call only after run/attempt correlation. Metadata is evidence, never a source
 // of executable paths or authority; the PID comes from the supervisor's child.
-fn retain_child_build(started: &Value, pid: u32, build: &mut Option<Value>) -> Result<(), Fault> {
+pub(super) fn retain_child_build(
+    started: &Value,
+    pid: u32,
+    build: &mut Option<Value>,
+) -> Result<(), Fault> {
     if build.is_some() {
         return Err(Fault::new("Transport", "duplicate child startup identity"));
     }
@@ -709,10 +876,7 @@ pub(super) fn terminal_primary(
 
 pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     let mut input = BufReader::new(std::io::stdin());
-    let bytes = frame(&mut input, MAX_TRANSPORT_BYTES)?
-        .ok_or_else(|| Fault::new("Fixture", "missing probe invocation"))?;
-    let invocation: Invocation = serde_json::from_slice(&bytes)
-        .map_err(|error| Fault::new("Transport", error.to_string()))?;
+    let mut invocation = super::payload::read(&mut input)?;
     if intentional {
         let record = run_once_after_milestone(
             &invocation.plan,
@@ -732,28 +896,16 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     }
     let mut command =
         Command::new(std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?);
-    command
-        .arg("child")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    command.arg("child");
     child_loader_environment(&mut command, &invocation.plan)?;
-    let mut child = OwnedChild(
-        command
-            .spawn()
-            .map_err(|e| Fault::new("Startup", e.to_string()))?,
-    );
+    let mut child = OwnedChild::spawn(&mut command, ChildStdio::Protocol, Environment::Inherited)?;
     let mut control = child
-        .0
         .stdin
         .take()
         .ok_or_else(|| Fault::new("Transport", "no probe control"))?;
-    control
-        .write_all(&bytes)
-        .map_err(|e| Fault::new("Transport", e.to_string()))?;
+    super::payload::write(&mut invocation, &mut control)?;
     let mut output = BufReader::new(
         child
-            .0
             .stdout
             .take()
             .ok_or_else(|| Fault::new("Transport", "no probe evidence"))?,
@@ -765,7 +917,6 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     }
     drop(control);
     Ok(child
-        .0
         .wait()
         .map_err(|e| Fault::new("Containment", e.to_string()))?
         .success())
@@ -773,47 +924,38 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
 
 pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value, Fault> {
     let run = format!("parent-loss-{}", std::process::id());
-    let invocation = Invocation {
+    let mut invocation = Invocation {
         run: run.clone(),
         attempt: 1,
         operation: Operation::Run,
         plan: plan.clone(),
         inventory: inventory.clone(),
         observe_logs: false,
+        prepared_modules: None,
+        deadline: SharedDeadline::from_instant(
+            Instant::now() + Duration::from_millis(plan.limits.duration_ms),
+        )?,
+        startup_deadline: None,
+        prepare_target: false,
     };
     let executable = std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?;
-    let mut target = OwnedChild(
-        Command::new(&executable)
-            .arg("target-probe")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| Fault::new("Startup", e.to_string()))?,
-    );
-    let mut parent = OwnedChild(
-        Command::new(executable)
-            .arg("parent-probe")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| Fault::new("Startup", e.to_string()))?,
-    );
+    let mut target = OwnedChild::spawn(
+        Command::new(&executable).arg("target-probe"),
+        ChildStdio::Null,
+        Environment::Inherited,
+    )?;
+    let mut parent = OwnedChild::spawn(
+        Command::new(executable).arg("parent-probe"),
+        ChildStdio::Protocol,
+        Environment::Inherited,
+    )?;
     let mut input = parent
-        .0
         .stdin
         .take()
         .ok_or_else(|| Fault::new("Transport", "no parent input"))?;
-    writeln!(
-        input,
-        "{}",
-        serde_json::to_string(&invocation).map_err(|e| Fault::new("Encoding", e.to_string()))?
-    )
-    .map_err(|e| Fault::new("Transport", e.to_string()))?;
+    super::payload::write(&mut invocation, &mut input)?;
     drop(input);
     let output = parent
-        .0
         .stdout
         .take()
         .ok_or_else(|| Fault::new("Transport", "no parent output"))?;
@@ -846,11 +988,9 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
     let child_start = system.process(child_pid).map(sysinfo::Process::start_time);
     let started = Instant::now();
     parent
-        .0
         .kill()
         .map_err(|e| Fault::new("Containment", e.to_string()))?;
     let parent_status = parent
-        .0
         .wait()
         .map_err(|e| Fault::new("Containment", e.to_string()))?;
     let mut child_exited = false;
@@ -873,7 +1013,6 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
         thread::sleep(Duration::from_millis(5));
     }
     let target_alive = target
-        .0
         .try_wait()
         .map_err(|e| Fault::new("Fixture", e.to_string()))?
         .is_none();
@@ -892,52 +1031,39 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
 pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value, Fault> {
     let executable =
         std::env::current_exe().map_err(|error| Fault::new("Startup", error.to_string()))?;
-    let invocation = Invocation {
+    let mut invocation = Invocation {
         run: format!("intentional-exit-{}", std::process::id()),
         attempt: 1,
         operation: Operation::Run,
         plan: plan.clone(),
         inventory: inventory.clone(),
         observe_logs: false,
+        prepared_modules: None,
+        deadline: SharedDeadline::from_instant(
+            Instant::now() + Duration::from_millis(plan.limits.duration_ms),
+        )?,
+        startup_deadline: None,
+        prepare_target: false,
     };
-    let mut bytes = serde_json::to_vec(&invocation)
-        .map_err(|error| Fault::new("Encoding", error.to_string()))?;
-    bytes.push(b'\n');
-    if bytes.len() > MAX_TRANSPORT_BYTES {
-        return Err(Fault::new(
-            "LimitExceeded",
-            "probe invocation exceeds its bound",
-        ));
-    }
-    let mut target = OwnedChild(
-        Command::new(&executable)
-            .arg("target-probe")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| Fault::new("Startup", error.to_string()))?,
-    );
-    let mut parent = OwnedChild(
-        Command::new(&executable)
-            .arg("parent-stop-probe")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| Fault::new("Startup", error.to_string()))?,
-    );
+    let mut target = OwnedChild::spawn(
+        Command::new(&executable).arg("target-probe"),
+        ChildStdio::Null,
+        Environment::Inherited,
+    )?;
+    let mut parent = OwnedChild::spawn(
+        Command::new(&executable).arg("parent-stop-probe"),
+        ChildStdio::Protocol,
+        Environment::Inherited,
+    )?;
     let mut input = parent
-        .0
         .stdin
         .take()
         .ok_or_else(|| Fault::new("Transport", "no probe input"))?;
     let output = parent
-        .0
         .stdout
         .take()
         .ok_or_else(|| Fault::new("Transport", "no probe output"))?;
-    let writer = thread::spawn(move || input.write_all(&bytes));
+    let writer = thread::spawn(move || super::payload::write(&mut invocation, &mut input));
     let reader = thread::spawn(move || {
         let mut bytes = Vec::new();
         output
@@ -949,7 +1075,6 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
     let mut forced = false;
     let status = loop {
         if let Some(status) = parent
-            .0
             .try_wait()
             .map_err(|error| Fault::new("Containment", error.to_string()))?
         {
@@ -960,11 +1085,9 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         {
             forced = true;
             parent
-                .0
                 .kill()
                 .map_err(|error| Fault::new("Containment", error.to_string()))?;
             break parent
-                .0
                 .wait()
                 .map_err(|error| Fault::new("Containment", error.to_string()))?;
         }
@@ -982,7 +1105,6 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
     };
     let record = &response["record"];
     let target_alive = target
-        .0
         .try_wait()
         .map_err(|error| Fault::new("Containment", error.to_string()))?
         .is_none();

@@ -8,6 +8,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
+impl Application {
+    pub(crate) fn finish_log_output(&self) -> crate::logging::LogStatus {
+        crate::logging::tests::finish_file_output(&self.logger)
+    }
+}
+
 pub(super) struct Fixture {
     pub(super) root: PathBuf,
     pub(super) application: Arc<Application>,
@@ -15,6 +21,11 @@ pub(super) struct Fixture {
 
 impl Fixture {
     pub(super) fn new() -> Self {
+        Self::with_engine(|root| root.join("engine-must-not-be-launched"))
+    }
+
+    /// Only a test that exercises a real child lifecycle names an engine executable.
+    pub(super) fn with_engine(engine: impl FnOnce(&Path) -> PathBuf) -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -31,7 +42,7 @@ impl Fixture {
         let application = Application::new(
             root.clone(),
             root.join("runner-must-not-be-launched"),
-            root.join("engine-must-not-be-launched"),
+            engine(&root),
         )
         .unwrap();
         Self { root, application }
@@ -115,7 +126,10 @@ pub(super) fn preferences() -> EditableSettings {
         gui_log_limit: settings.gui_log_limit,
         ocr_environment: settings.ocr_environment,
         notifications: settings.notifications,
+        editor_completion: settings.editor_completion,
         backup_directory: settings.backup_directory,
+        packages_root: settings.packages_root,
+        capture_cache_enabled: settings.capture_cache_enabled,
     }
 }
 
@@ -139,6 +153,7 @@ pub(super) fn request(selection: &Selection) -> StartRequest {
         lane: "controlled".into(),
         scenario: "workflow".into(),
         replay_descriptor_path: None,
+        native_intent: None,
     }
 }
 

@@ -1,16 +1,33 @@
 // mado-host-v1: JSON values only; native resources remain owned by Rust.
 export const methods = Object.freeze({
-  observe: ["Record<string, never>", "MadoObservation"],
-  asset: ["{ id: string }", "{ readonly id: string; readonly bytes: number }"],
-  recognize: ["MadoRecognitionRequest", "MadoRecognition | null"],
-  query: ["MadoRecognitionRequest & { expected?: string }", "{ readonly id: string }"],
-  query_wait: ["{ id: string; timeout_ms: number }", "MadoRecognition"],
-  submit: ["{ observation: MadoObservation; actions: readonly MadoAction[] }", "{ readonly id: string; readonly order: number }"],
-  settle: ["{ id: string }", "MadoReceipt"],
-  postcondition: ["{ observation: MadoObservation; checkpoint: MadoObservation; expected: string }", "{ readonly satisfied: boolean; readonly frame: number; readonly checkpoint: number }"],
-  release: ["{ id: string }", "{ readonly released: true }"],
-  wait: ["{ duration_ms: number }", "{ readonly elapsed_ms: number }"],
-  log: ["{ message: string }", "{ readonly recorded: boolean }"],
+  target_start: ["Record<string, never>", "MadoNativeProgress",
+    "Request target preparation once during Desktop Native Readiness using the saved binding and reviewed authority. Returns pending without waiting for a window; unavailable in other stages and lanes."],
+  target_status: ["Record<string, never>", "MadoNativeProgress",
+    "Poll target preparation during Desktop Native Readiness. Capture availability, preparation phase and launch disposition are separate; capture_ready does not establish game readiness."],
+  observe: ["Record<string, never>", "MadoObservation",
+    "Retain an eligible capture-pixel observation with run, process lifetime, session, geometry and frame identity. Release its id when finished."],
+  asset: ["{ id: string }", "{ readonly id: string; readonly bytes: number }",
+    "Look up an asset in the captured package inventory and return its id and byte size, without exposing native resources."],
+  recognize: ["MadoRecognitionRequest", "MadoRecognition | null",
+    "Recognize a template or OCR region in a retained observation. Returns null when no match is found; release a returned recognition id when finished."],
+  scan_ocr_zones: ["MadoOcrZoneScanRequest", "MadoOcrZoneScanResult",
+    "Scan normalized OCR zones in one retained observation and return ordered recognized or no_match outcomes. The result has no handle to release; the caller still owns the observation."],
+  query: ["MadoRecognitionRequest & { expected?: string }", "{ readonly id: string }",
+    "Create a managed template or OCR query from a retained observation. OCR may require expected text; use query_wait with a finite timeout and release the query id when finished."],
+  query_wait: ["{ id: string; timeout_ms: number }", "MadoRecognition",
+    "Wait within a finite timeout for a managed visual query to match. Exhaustion is a typed timeout, not a null result."],
+  submit: ["{ observation: MadoObservation; actions: readonly MadoAction[] }", "{ readonly id: string; readonly order: number }",
+    "Admit a bounded, ordered input sequence against its retained observation and return a sequence id. Admission is not application-effect proof; settle the sequence and independently check the expected effect."],
+  settle: ["{ id: string }", "MadoReceipt",
+    "Settle an admitted input sequence and return its submission and cleanup receipt. Submitted, Partial and Uncertain do not prove application effect; uncertain input is not automatically replayed."],
+  postcondition: ["{ observation: MadoObservation; checkpoint: MadoObservation; expected: string }", "{ readonly satisfied: boolean; readonly frame: number; readonly checkpoint: number }",
+    "Check the expected visual condition against a strictly newer compatible observation than the checkpoint. Frame freshness or input submission alone does not establish the expected effect."],
+  release: ["{ id: string }", "{ readonly released: true }",
+    "Release an attempt-owned managed handle or queued sequence. Remains available after ordinary admission closes; releasing a handle does not prove physical cleanup or application effect."],
+  wait: ["{ duration_ms: number }", "{ readonly elapsed_ms: number }",
+    "Wait for a positive, bounded duration while preserving cancellation and admission checks, then report elapsed milliseconds."],
+  log: ["{ message: string }", "{ readonly recorded: boolean }",
+    "Record a bounded Script message. Returns recorded: false when the log budget is exhausted; logging does not grant host authority."],
 });
 
 function optionType(node, depth = 0) {
@@ -32,8 +49,23 @@ function optionType(node, depth = 0) {
 }
 
 export function definitions(schema) {
+  return declarations(optionType(schema));
+}
+
+// Advisory editing only; invalid schemas remain errors in definitions().
+export function unknownOptionsDefinitions() {
+  return declarations("unknown");
+}
+
+function declarations(options) {
   return `// Generated from the captured schema and application-owned mado-host-v1 contract.
-type MadoOptions = ${optionType(schema)};
+type MadoOptions = ${options};
+// Desktop Native Readiness only. Exact empty payloads; no target or launch overrides.
+interface MadoNativeProgress {
+  readonly status: "not_requested" | "pending" | "capture_ready";
+  readonly phase: "preflight" | "target_discovery" | "launch_submission" | "waiting_for_process" | "waiting_for_window" | "native_initialization" | "readiness" | "workflow";
+  readonly launch: "not_requested" | "accepted" | "rejected" | "uncertain";
+}
 interface MadoRegion { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
 interface MadoObservation {
   readonly id: string; readonly run: string; readonly attempt: number;
@@ -48,6 +80,31 @@ interface MadoRecognition {
   readonly id: string; readonly observation: MadoObservation;
   readonly kind: "template" | "ocr"; readonly region: MadoRegion;
   readonly score: number; readonly text?: string;
+}
+interface MadoRecognitionBasis {
+  readonly frame_width: number; readonly frame_height: number; readonly content: MadoRegion;
+}
+interface MadoNormalizedRegion {
+  readonly u0: number; readonly v0: number; readonly u1: number; readonly v1: number;
+}
+interface MadoOcrZoneScanRequest {
+  readonly observation: MadoObservation;
+  readonly basis: MadoRecognitionBasis;
+  readonly zones: ReadonlyArray<{ readonly id: string; readonly region: MadoNormalizedRegion }>;
+}
+interface MadoOcrZoneScanResult {
+  readonly kind: "ocr"; readonly observation: MadoObservation;
+  readonly text_contract: "facade-nfc-unicode-trimmed-no-additional-application-normalization";
+  readonly zones: ReadonlyArray<{
+    readonly id: string; readonly outcome: "recognized" | "no_match";
+    readonly regions: ReadonlyArray<{
+      readonly text: string; readonly confidence: number; readonly bounds: MadoRegion;
+      readonly geometry: readonly [
+        readonly [number, number], readonly [number, number],
+        readonly [number, number], readonly [number, number]
+      ];
+    }>;
+  }>;
 }
 type MadoAction =
   | { readonly kind: "key_down" | "key_up"; readonly key: string; readonly x?: never; readonly y?: never; readonly button?: never }
@@ -68,11 +125,13 @@ interface MadoReceipt {
 interface MadoHostFault { readonly category: string; readonly message: string; readonly context: unknown }
 type MadoReady = "Ready";
 interface MadoCalls {
-${Object.entries(methods).map(([method, [args, result]]) => `  ${method}: { args: ${args}; result: ${result} };`).join("\n")}
+${Object.entries(methods).map(([method, [args, result, documentation]]) =>
+  `  /** ${documentation} */\n  ${method}: { args: ${args}; result: ${result} };`).join("\n")}
 }
 declare const host: {
   readonly options: MadoOptions;
   readonly state: Record<string, unknown>;
+  /** Invoke a typed mado-host-v1 operation with JSON arguments and managed identities. Runtime stage, authority and resource checks still apply. */
   call<K extends keyof MadoCalls>(method: K, args: MadoCalls[K]["args"]): MadoCalls[K]["result"];
 };
 `;

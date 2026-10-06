@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {acceptController,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
+import {acceptController,nativeOutcome,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,packageDestination,portableComponent,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
 import {messages} from './i18n.ts';
 
 test('late predecessor result cannot replace the successor or its preparing state',()=>{
@@ -9,6 +9,70 @@ test('late predecessor result cannot replace the successor or its preparing stat
   const running={run:'next',state:'running',result:null};
   assert.equal(acceptController(current,running,'next'),running);
 });
+
+test('an OS launch completing after Stop is shown while stale and foreign preparation answers are ignored',()=>{
+  const stopping={run:'owned',state:'stopping',result:null,native_preparation:{status:'pending',phase:'launch_submission',launch:'not_requested'}};
+  const late={...stopping,native_preparation:{status:'pending',phase:'launch_submission',launch:'accepted'}};
+  assert.equal(acceptController(stopping,late,'owned'),late);
+  // An answer read before Stop cannot revive the operation or rewind its status or stage.
+  const stale={...stopping,state:'preparing',native_preparation:{status:'not_requested',phase:'readiness',launch:'not_requested'}};
+  assert.equal(acceptController(late,stale,'owned'),late);
+  // Another operation's progress never updates the owned one.
+  const foreign={run:'other',state:'preparing',result:null,native_preparation:{status:'capture_ready',phase:'readiness',launch:'accepted'}};
+  assert.equal(acceptController(late,foreign,'owned'),late);
+  const settled={...late,state:'terminal',error:{category:'Cancelled',message:'attempt cancellation is latched',context:null}};
+  assert.equal(acceptController(settled,{...settled,native_preparation:{status:'pending',phase:'waiting_for_window',launch:'accepted'}},'owned'),settled);
+});
+
+const cancelled={category:'Cancelled',message:'attempt cancellation is latched',context:null};
+function fault(category) {
+  return {category,message:`${category} fixture`,context:null};
+}
+function settledNative(preparation,{error=null,result=null,state='terminal'}={}) {
+  return {run:'owned',state,operation:'run',result,error,progress:[],dropped_logs:0,workspace_id:'a',workspace_revision:1,native_preparation:preparation};
+}
+for (const {scenario, view, expected} of [
+  {scenario:'Stop after an accepted launch is no stage failure but warns that the game can still open',
+    view:settledNative({status:'pending',phase:'waiting_for_process',launch:'accepted'},{error:cancelled}),expected:{failure:null,cause:null,launch:'acceptedStopped'}},
+  {scenario:'a window timeout after an accepted launch names the stage and the still-open game',
+    view:settledNative({status:'pending',phase:'waiting_for_window',launch:'accepted'},{error:fault('Timeout')}),expected:{failure:'waiting_for_window',cause:null,launch:'accepted'}},
+  {scenario:'a launch-stage timeout retains an independently accepted OS request',
+    view:settledNative({status:'pending',phase:'launch_submission',launch:'accepted'},{error:fault('Timeout')}),expected:{failure:'launch_submission',cause:null,launch:'accepted'}},
+  {scenario:'an unconfirmed submission names the launch stage without claiming acceptance',
+    view:settledNative({status:'pending',phase:'launch_submission',launch:'uncertain'},{error:fault('NativeLaunchUncertain')}),expected:{failure:'launch_submission',cause:null,launch:'uncertain'}},
+  {scenario:'a launch rejected after Stop keeps both the Stop and the rejection',
+    view:settledNative({status:'pending',phase:'launch_submission',launch:'rejected'},{error:cancelled}),expected:{failure:null,cause:null,launch:'rejected'}},
+  {scenario:'an absent game without launch approval names the missing-target remedy',
+    view:settledNative({status:'pending',phase:'target_discovery',launch:'not_requested'},{error:fault('NativeTargetMissing')}),expected:{failure:'target_discovery',cause:'missing',launch:null}},
+  {scenario:'several matching running copies name the ambiguity remedy',
+    view:settledNative({status:'pending',phase:'target_discovery',launch:'not_requested'},{error:fault('NativeTargetAmbiguous')}),expected:{failure:'target_discovery',cause:'ambiguous',launch:null}},
+  {scenario:'a preflight refusal before Script entry names preflight rather than a missing startup request',
+    view:settledNative({status:'not_requested',phase:'preflight',launch:'not_requested'},{error:fault('Profile')}),expected:{failure:'preflight',cause:null,launch:null}},
+  {scenario:'a startup timeout before the Script requested startup names the missing request',
+    view:settledNative({status:'not_requested',phase:'readiness',launch:'not_requested'},{error:fault('Timeout')}),expected:{failure:'unrequested',cause:null,launch:null}},
+  {scenario:'a Script failure while startup is pending is not reported as a Readiness criteria miss',
+    view:settledNative({status:'pending',phase:'waiting_for_process',launch:'accepted'},{result:{status:'FAIL',primary:fault('Script')}}),expected:{failure:'readinessPending',cause:null,launch:'accepted'}},
+  {scenario:'early Ready is a Script contract refusal, not an exact-window binding failure',
+    view:settledNative({status:'pending',phase:'waiting_for_window',launch:'not_requested'},{error:fault('ReadinessContract')}),expected:{failure:'readinessPending',cause:null,launch:null}},
+  {scenario:'a duplicate startup request does not blame the in-flight SDK initializer',
+    view:settledNative({status:'pending',phase:'native_initialization',launch:'accepted'},{error:fault('NativeStartRefused')}),expected:{failure:'readinessPending',cause:null,launch:'accepted'}},
+  {scenario:'a readiness timeout after capture became available names the Script criteria and keeps the launch',
+    view:settledNative({status:'capture_ready',phase:'readiness',launch:'accepted'},{error:fault('Timeout')}),expected:{failure:'readinessCriteria',cause:null,launch:'accepted'}},
+  {scenario:'Stop before the Script requested startup is no failure and claims no launch',
+    view:settledNative({status:'not_requested',phase:'readiness',launch:'not_requested'},{error:cancelled}),expected:{failure:null,cause:null,launch:null}},
+  {scenario:'a workflow failure in the settled result keeps the accepted launch visible',
+    view:settledNative({status:'capture_ready',phase:'workflow',launch:'accepted'},{result:{status:'FAIL',primary:fault('Script')}}),expected:{failure:'workflow',cause:null,launch:'accepted'}},
+  {scenario:'a successful launched run leaves nothing to act on',
+    view:settledNative({status:'capture_ready',phase:'workflow',launch:'accepted'},{result:{status:'PASS',primary:null}}),expected:{failure:null,cause:null,launch:null}},
+  {scenario:'a still-stopping operation has no settled projection yet',
+    view:settledNative({status:'pending',phase:'launch_submission',launch:'accepted'},{state:'stopping'}),expected:null},
+  {scenario:'an operation without Native preparation has no projection',
+    view:settledNative(null,{error:cancelled}),expected:null},
+]) {
+  test(scenario,()=>{
+    assert.deepEqual(nativeOutcome(view),expected);
+  });
+}
 
 test('retention keeps newest items and trims immediately without mutating old state',()=>{
   const initial={items:[{sequence:1},{sequence:2},{sequence:3}],evicted:0};
@@ -184,19 +248,111 @@ test('a completed settings Save preserves later locale and invalid input edits',
   assert.ok(parsed.errors.logLimit);
 });
 
-const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},environment:environmentDraft(checkedEnvironment),backupDirectory:''};
+const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},completionAutomatic:true,completionDelayMs:'100',captureCacheEnabled:false,environment:environmentDraft(checkedEnvironment),backupDirectory:'',packagesRoot:''};
 test('a complete settings draft becomes one editable settings object without version or package hint',()=>{
   const parsed=readSettingsDraft(validSettingsDraft);
   assert.deepEqual(parsed.errors,{});
-  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true},backup_directory:null});
+  assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true},editor_completion:{automatic:true,delay_ms:100},capture_cache_enabled:false,backup_directory:null,packages_root:null});
   assert.equal(readSettingsDraft({...validSettingsDraft,environment:environmentDraft(null)}).settings.ocr_environment,null);
+});
+
+test('completion drafts use host values without previewing or mutating the saved preferences',()=>{
+  const initial=settingsDraftFrom(null);
+  assert.equal(initial.completionAutomatic,true);
+  assert.equal(initial.completionDelayMs,'100');
+  const saved={version:1,package_path:null,...readSettingsDraft(initial).settings,editor_completion:{automatic:false,delay_ms:0}};
+  const original=structuredClone(saved);
+  const draft=settingsDraftFrom(saved);
+  assert.equal(draft.completionAutomatic,false);
+  assert.equal(draft.completionDelayMs,'0');
+  draft.completionAutomatic=true;
+  draft.completionDelayMs='1000';
+  assert.deepEqual(readSettingsDraft(draft).settings.editor_completion,{automatic:true,delay_ms:1000});
+  assert.deepEqual(saved,original);
+  const reopened=settingsDraftFrom(saved);
+  assert.equal(reopened.completionAutomatic,false);
+  assert.equal(reopened.completionDelayMs,'0');
+});
+
+for (const {scenario,automatic,delay,expected} of [
+  {scenario:'zero opening delay with automatic disabled',automatic:false,delay:'0',expected:{automatic:false,delay_ms:0}},
+  {scenario:'the default delay with automatic enabled',automatic:true,delay:'100',expected:{automatic:true,delay_ms:100}},
+  {scenario:'the upper boundary with surrounding whitespace',automatic:false,delay:' 1000 ',expected:{automatic:false,delay_ms:1000}},
+]) {
+  test(`completion preferences accept ${scenario}`,()=>{
+    const parsed=readSettingsDraft({...validSettingsDraft,completionAutomatic:automatic,completionDelayMs:delay});
+    assert.deepEqual(parsed.errors,{});
+    assert.deepEqual(parsed.settings.editor_completion,expected);
+  });
+}
+
+test('settled completion preferences are reconstructed from the authoritative Save response',()=>{
+  const submitted={...validSettingsDraft,completionAutomatic:false,completionDelayMs:' 250 '};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  const settled=settingsDraftAfterSave(submitted,submitted,saved);
+  assert.equal(settled.completionAutomatic,false);
+  assert.equal(settled.completionDelayMs,'250');
+  assert.deepEqual(readSettingsDraft(settled).settings.editor_completion,saved.editor_completion);
+  assert.equal(submitted.completionDelayMs,' 250 ');
+});
+
+for (const {scenario,edit,expected,errors} of [
+  {scenario:'an automatic switch edit',edit:{completionAutomatic:true},expected:{automatic:true,delay_ms:250},errors:[]},
+  {scenario:'a valid delay edit',edit:{completionDelayMs:'1000'},expected:{automatic:false,delay_ms:1000},errors:[]},
+  {scenario:'an invalid pending delay',edit:{completionDelayMs:''},expected:null,errors:['completionDelayMs']},
+]) {
+  test(`a completed Save preserves ${scenario} made after submission`,()=>{
+    const submitted={...validSettingsDraft,completionAutomatic:false,completionDelayMs:'250'};
+    const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+    const current={...submitted,...edit};
+    const settled=settingsDraftAfterSave(current,submitted,saved);
+    assert.equal(settled,current);
+    const parsed=readSettingsDraft(settled);
+    assert.deepEqual(parsed.settings?.editor_completion ?? null,expected);
+    assert.deepEqual(Object.keys(parsed.errors),errors);
+    assert.deepEqual(saved.editor_completion,{automatic:false,delay_ms:250});
+  });
+}
+test('cache preference persists through a saved settings draft without overriding a later edit',()=>{
+  const initial=settingsDraftFrom(null);
+  assert.equal(initial.captureCacheEnabled,false);
+  const submitted={...initial,captureCacheEnabled:true};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  assert.equal(saved.capture_cache_enabled,true);
+  assert.equal(settingsDraftAfterSave(submitted,submitted,saved).captureCacheEnabled,true);
+  const later={...submitted,captureCacheEnabled:false};
+  assert.equal(settingsDraftAfterSave(later,submitted,saved).captureCacheEnabled,false);
 });
 
 test('the backup directory draft is blank for the default destination and otherwise saved as typed without padding',()=>{
   assert.equal(settingsDraftFrom(null).backupDirectory,'');
-  assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,notifications:DEFAULT_NOTIFICATIONS,locale:'en',backup_directory:'/private/backups'}).backupDirectory,'/private/backups');
+  assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,notifications:DEFAULT_NOTIFICATIONS,editor_completion:{automatic:true,delay_ms:100},locale:'en',backup_directory:'/private/backups'}).backupDirectory,'/private/backups');
+  assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,
+    notifications:DEFAULT_NOTIFICATIONS,editor_completion:{automatic:true,delay_ms:100},locale:'en',backup_directory:null}).captureCacheEnabled,false,
+    'older saved settings without the flag default to opt-out');
   assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:'   '}).settings.backup_directory,null);
   assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:' /private/backups '}).settings.backup_directory,'/private/backups');
+});
+
+test('packages root defaults, persisted drafts and edits made during Save remain distinct',()=>{
+  const submitted={...validSettingsDraft,packagesRoot:' /private/packages '};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  assert.equal(saved.packages_root,'/private/packages');
+  assert.equal(settingsDraftAfterSave(submitted,submitted,saved).packagesRoot,'/private/packages');
+  const changed={...submitted,packagesRoot:'/private/later'};
+  assert.equal(settingsDraftAfterSave(changed,submitted,saved).packagesRoot,'/private/later');
+  assert.equal(readSettingsDraft({...submitted,packagesRoot:'  '}).settings.packages_root,null);
+  assert.equal(settingsDraftFrom(null).packagesRoot,'');
+});
+
+test('package destination preview joins only portable IDs beneath the saved root',()=>{
+  assert.equal(packageDestination('/private/pkgs','example.starter'),'/private/pkgs/example.starter');
+  assert.equal(packageDestination('C:\\Packages\\','demo'),'C:\\Packages\\demo');
+  assert.equal(packageDestination('','demo'),null);
+  for (const id of ['../escape','a/b','a\\b','.hidden','last.','CON.txt','com9','NODE_MODULES','a'.repeat(129)]) {
+    assert.equal(portableComponent(id),false,id);
+    assert.equal(packageDestination('/private/pkgs',id),null,id);
+  }
 });
 
 for (const {scenario,draft,field} of [
@@ -205,9 +361,20 @@ for (const {scenario,draft,field} of [
   {scenario:'a non-integer log limit',draft:{...validSettingsDraft,logLimit:'1e3'},field:'logLimit'},
   {scenario:'three visible cards',draft:{...validSettingsDraft,notifications:{...DEFAULT_NOTIFICATIONS,visible_count:3}},field:'visibleCount'},
   {scenario:'a ten second timeout',draft:{...validSettingsDraft,notifications:{...DEFAULT_NOTIFICATIONS,timeout_seconds:10}},field:'timeoutSeconds'},
+  {scenario:'a nonboolean automatic completion flag',draft:{...validSettingsDraft,completionAutomatic:'false'},field:'completionAutomatic'},
+  {scenario:'a missing automatic completion flag',draft:{...validSettingsDraft,completionAutomatic:undefined},field:'completionAutomatic'},
+  {scenario:'an empty completion delay',draft:{...validSettingsDraft,completionDelayMs:''},field:'completionDelayMs'},
+  {scenario:'a negative completion delay',draft:{...validSettingsDraft,completionDelayMs:'-1'},field:'completionDelayMs'},
+  {scenario:'a fractional completion delay',draft:{...validSettingsDraft,completionDelayMs:'0.5'},field:'completionDelayMs'},
+  {scenario:'a completion delay above 1000',draft:{...validSettingsDraft,completionDelayMs:'1001'},field:'completionDelayMs'},
+  {scenario:'an exponential completion delay',draft:{...validSettingsDraft,completionDelayMs:'1e2'},field:'completionDelayMs'},
   {scenario:'a partial environment',draft:{...validSettingsDraft,environment:{...environmentDraft(checkedEnvironment),model_root:''}},field:'model_root'},
   {scenario:'an unsupported language',draft:{...validSettingsDraft,locale:'fr'},field:'locale'},
   {scenario:'a null language',draft:{...validSettingsDraft,locale:null},field:'locale'},
+  {scenario:'a relative packages root',draft:{...validSettingsDraft,packagesRoot:'packages'},field:'packagesRoot'},
+  {scenario:'packages root traversal',draft:{...validSettingsDraft,packagesRoot:'/private/../config'},field:'packagesRoot'},
+  {scenario:'packages root controls',draft:{...validSettingsDraft,packagesRoot:'/private/new\nline'},field:'packagesRoot'},
+  {scenario:'an oversized packages root',draft:{...validSettingsDraft,packagesRoot:`/${'あ'.repeat(1400)}`},field:'packagesRoot'},
 ]) {
   test(`settings draft refuses ${scenario} without producing a save payload`,()=>{
     const parsed=readSettingsDraft(draft);

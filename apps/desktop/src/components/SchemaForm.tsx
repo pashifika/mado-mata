@@ -53,9 +53,9 @@ function Field({schema, value, path, onChange, errors, idPrefix, stored}: FieldP
             <label htmlFor={`${idPrefix}-${encodeURIComponent(childPath)}`}>{name}</label>
             <span className="field-type">{child.type} · {schema.required?.includes(name) ? t.schema.required : t.schema.optional}</span>
             <button className="text-button" type="button" aria-label={t.schema.fieldAction(present, childPath)} onClick={() => {
-              const next = {...value};
+              // A computed key creates an own member even for `__proto__`; assignment would reach the inherited setter.
+              const next: Record<string, Json> = present ? {...value} : {...value, [name]: emptyValue(child)};
               if (present) delete next[name];
-              else next[name] = emptyValue(child);
               onChange(next, {kind:'replace', path:childPath});
             }}>{present ? t.schema.omit : t.schema.addField}</button>
           </div>

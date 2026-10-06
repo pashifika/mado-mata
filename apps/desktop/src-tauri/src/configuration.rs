@@ -1,8 +1,10 @@
 //! Raw, bounded configuration capture. No typed document loading or package traversal.
+//! Ordinary OS metadata files remain on disk and never enter the captured generation.
 use crate::storage::{
     MAX_PROFILE_BYTES, MAX_SETTINGS_BYTES, MAX_TAB_BYTES, check_directory, checked_file, exists,
     filesystem_key, read_bytes,
 };
+use mado_runtime_comparison::inventory::is_os_metadata_entry;
 use mado_runtime_comparison::model::Fault;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -86,6 +88,7 @@ pub(crate) enum Kind {
     Tab,
     Package,
     LegacyProfile,
+    IdentityMigrations,
 }
 
 impl Kind {
@@ -94,6 +97,7 @@ impl Kind {
             Self::Settings => MAX_SETTINGS_BYTES,
             Self::Tab => MAX_TAB_BYTES,
             Self::Package | Self::LegacyProfile => MAX_PROFILE_BYTES,
+            Self::IdentityMigrations => crate::identity_migrations::MAX_LEDGER_BYTES,
         }
     }
 }
@@ -143,11 +147,12 @@ pub(crate) fn safe_component(value: &str) -> bool {
 
 pub(crate) fn path_kind(path: &str) -> Result<Kind, Fault> {
     if path.len() > 1024 || !path.split('/').all(safe_component) {
-        return Err(fault("unsafe configuration path"));
+        return Err(fault("unsafe configuration path").with_context(json!({"path": path})));
     }
     let parts: Vec<_> = path.split('/').collect();
     match parts.as_slice() {
         ["settings.json"] => Ok(Kind::Settings),
+        ["identity-migrations.config"] => Ok(Kind::IdentityMigrations),
         ["profiles", file] if file.ends_with(".json") => Ok(Kind::LegacyProfile),
         ["tabs", _, "tab.config"] => Ok(Kind::Tab),
         ["tabs", _, package, file]
@@ -155,7 +160,8 @@ pub(crate) fn path_kind(path: &str) -> Result<Kind, Fault> {
         {
             Ok(Kind::Package)
         }
-        _ => Err(fault("path is outside the managed configuration set")),
+        _ => Err(fault("path is outside the managed configuration set")
+            .with_context(json!({"path": path}))),
     }
 }
 
@@ -176,7 +182,8 @@ pub(crate) fn check_aliases(
             .get(&key)
             .is_some_and(|previous| previous != &prefix)
         {
-            return Err(fault("configuration contains filesystem aliases"));
+            return Err(fault("configuration contains filesystem aliases")
+                .with_context(json!({"path": path, "alias": aliases[&key]})));
         }
         aliases.insert(key, prefix.clone());
     }
@@ -205,36 +212,56 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
     if !exists(root)? {
         return Capture::from_files(BTreeMap::new(), false);
     }
-    check_directory(root)?;
+    check_directory(root).map_err(|error| at_path(error, root, root))?;
     let mut files = BTreeMap::new();
     let mut remaining = MAX_BYTES;
     let mut enumerated = 0;
-    for entry in entries(root, &mut enumerated)? {
+    for entry in entries(root, &mut enumerated).map_err(|error| at_path(error, root, root))? {
         if let Some(name) = entry.file_name().to_str() {
             let key = filesystem_key(name);
-            if key == "settings.pending" {
+            if matches!(
+                key.as_str(),
+                "settings.pending" | "identity-migrations.pending"
+            ) {
                 return Err(fault(
-                    "an unresolved App settings write must be preserved or repaired first",
-                ));
+                    "an unresolved configuration write must be preserved or repaired first",
+                )
+                .with_context(json!({"path": name})));
             }
-            if matches!(key.as_str(), "settings.json" | "profiles" | "tabs") && name != key {
-                return Err(fault("managed root entry has an alias spelling"));
+            if matches!(
+                key.as_str(),
+                "settings.json" | "profiles" | "tabs" | "identity-migrations.config"
+            ) && name != key
+            {
+                return Err(fault("managed root entry has an alias spelling")
+                    .with_context(json!({"path": name})));
             }
         }
     }
     if exists(&root.join("settings.json"))? {
         add_file(root, "settings.json", &mut files, &mut remaining)?;
     }
+    if exists(&root.join("identity-migrations.config"))? {
+        add_file(
+            root,
+            "identity-migrations.config",
+            &mut files,
+            &mut remaining,
+        )?;
+    }
     let legacy = root.join("profiles");
     if exists(&legacy)? {
-        for entry in entries(&legacy, &mut enumerated)? {
+        for entry in
+            entries(&legacy, &mut enumerated).map_err(|error| at_path(error, root, &legacy))?
+        {
             let name = entry.file_name();
             let name = name
                 .to_str()
                 .ok_or_else(|| fault("non-UTF-8 legacy configuration entry"))?;
-            refuse_pending(&entry, name)?;
+            refuse_pending(root, &entry, name)?;
             if filesystem_key(name).ends_with(".json") && !name.ends_with(".json") {
-                return Err(fault("legacy configuration has an alias extension"));
+                return Err(fault("legacy configuration has an alias extension")
+                    .with_context(json!({"path": format!("profiles/{name}")})));
             }
             if name.ends_with(".json") {
                 add_file(
@@ -248,7 +275,7 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
     }
     let tabs = root.join("tabs");
     if exists(&tabs)? {
-        for tab in entries(&tabs, &mut enumerated)? {
+        for tab in entries(&tabs, &mut enumerated).map_err(|error| at_path(error, root, &tabs))? {
             let name = tab.file_name();
             let name = name
                 .to_str()
@@ -261,7 +288,9 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
             if !safe_component(name) {
                 return Err(fault("unsafe Tab container name"));
             }
-            for entry in entries(&tab.path(), &mut enumerated)? {
+            for entry in entries(&tab.path(), &mut enumerated)
+                .map_err(|error| at_path(error, root, &tab.path()))?
+            {
                 let child = entry.file_name();
                 let child = child
                     .to_str()
@@ -269,10 +298,12 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
                 if filesystem_key(child) == "tab.pending" {
                     return Err(fault(
                         "an unresolved Tab write must be preserved or repaired first",
-                    ));
+                    )
+                    .with_context(json!({"path": format!("tabs/{name}/{child}")})));
                 }
                 if filesystem_key(child) == "tab.config" && child != "tab.config" {
-                    return Err(fault("Tab document has an alias spelling"));
+                    return Err(fault("Tab document has an alias spelling")
+                        .with_context(json!({"path": format!("tabs/{name}/{child}")})));
                 }
                 if child == "tab.config" {
                     add_file(
@@ -290,16 +321,21 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
                     if !safe_component(child) {
                         return Err(fault("unsafe package container name"));
                     }
-                    for file in entries(&entry.path(), &mut enumerated)? {
+                    for file in entries(&entry.path(), &mut enumerated)
+                        .map_err(|error| at_path(error, root, &entry.path()))?
+                    {
                         let filename = file.file_name();
                         let filename = filename
                             .to_str()
                             .ok_or_else(|| fault("non-UTF-8 package configuration entry"))?;
-                        refuse_pending(&file, filename)?;
+                        refuse_pending(root, &file, filename)?;
                         if filesystem_key(filename).ends_with(".config")
                             && !filename.ends_with(".config")
                         {
-                            return Err(fault("package configuration has an alias extension"));
+                            return Err(fault("package configuration has an alias extension")
+                                .with_context(
+                                    json!({"path": format!("tabs/{name}/{child}/{filename}")}),
+                                ));
                         }
                         if filename.ends_with(".config") {
                             add_file(
@@ -317,15 +353,17 @@ fn capture_once(root: &Path) -> Result<Capture, Fault> {
     Capture::from_files(files, true)
 }
 
-fn refuse_pending(entry: &fs::DirEntry, name: &str) -> Result<(), Fault> {
+fn refuse_pending(root: &Path, entry: &fs::DirEntry, name: &str) -> Result<(), Fault> {
     if filesystem_key(name).ends_with(".pending")
         && !entry
             .file_type()
             .map_err(|e| io_fault("inspect pending configuration", e))?
             .is_dir()
     {
-        return Err(fault(
-            "an unresolved configuration write must be preserved or repaired first",
+        return Err(at_path(
+            fault("an unresolved configuration write must be preserved or repaired first"),
+            root,
+            &entry.path(),
         ));
     }
     Ok(())
@@ -339,7 +377,13 @@ fn entries(path: &Path, count: &mut usize) -> Result<Vec<fs::DirEntry>, Fault> {
         if *count > MAX_ENUMERATED {
             return Err(fault("configuration enumeration exceeds its bound"));
         }
-        output.push(entry.map_err(|e| io_fault("read configuration entry", e))?);
+        let entry = entry.map_err(|e| io_fault("read configuration entry", e))?;
+        if is_os_metadata_entry(&entry.file_name(), &entry)
+            .map_err(|e| io_fault("inspect configuration metadata", e))?
+        {
+            continue;
+        }
+        output.push(entry);
     }
     Ok(output)
 }
@@ -355,9 +399,9 @@ fn add_file(
     }
     let maximum = path_kind(relative)?.maximum().min(*remaining);
     let path = root.join(relative);
-    let before = checked_file(&path, maximum)?;
-    let bytes = read_bytes(&path, maximum)?;
-    let after = checked_file(&path, maximum)?;
+    let before = checked_file(&path, maximum).map_err(|error| at_path(error, root, &path))?;
+    let bytes = read_bytes(&path, maximum).map_err(|error| at_path(error, root, &path))?;
+    let after = checked_file(&path, maximum).map_err(|error| at_path(error, root, &path))?;
     if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
         return Err(fault("configuration changed while being read"));
     }
@@ -374,6 +418,17 @@ fn add_file(
     Ok(())
 }
 
+fn at_path(mut error: Fault, root: &Path, path: &Path) -> Fault {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let attributed = if relative.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        relative
+    };
+    error.context["path"] = json!(attributed.to_string_lossy());
+    error
+}
+
 /// Atomic no-replace publication for both files and directories. An unsupported
 /// platform/filesystem is an error, never an overwriting rename fallback.
 pub fn publish_no_replace(from: &Path, to: &Path) -> io::Result<()> {
@@ -383,11 +438,15 @@ pub fn publish_no_replace(from: &Path, to: &Path) -> io::Result<()> {
         use std::os::unix::ffi::OsStrExt;
         let from = CString::new(from.as_os_str().as_bytes())?;
         let to = CString::new(to.as_os_str().as_bytes())?;
-        // SAFETY: both pointers reference live NUL-terminated strings; the OS
-        // consumes them synchronously. EXCL/NOREPLACE is required, not emulated.
         #[cfg(target_os = "macos")]
+        // SAFETY: both pointers reference live NUL-terminated strings consumed
+        // synchronously. RENAME_EXCL enforces no-replace publication.
+        #[expect(unsafe_code, reason = "audited macOS atomic no-replace rename")]
         let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
         #[cfg(target_os = "linux")]
+        // SAFETY: both pointers reference live NUL-terminated strings consumed
+        // synchronously. AT_FDCWD and RENAME_NOREPLACE are valid renameat2 arguments.
+        #[expect(unsafe_code, reason = "audited Linux atomic no-replace rename")]
         let result = unsafe {
             libc::renameat2(
                 libc::AT_FDCWD,
@@ -414,8 +473,9 @@ pub fn publish_no_replace(from: &Path, to: &Path) -> io::Result<()> {
                 "path contains NUL",
             ));
         }
-        // SAFETY: live NUL-terminated UTF-16 buffers. Zero flags explicitly omit
-        // REPLACE_EXISTING and COPY_ALLOWED, including for directory publication.
+        // SAFETY: both pointers reference live NUL-terminated UTF-16 buffers consumed
+        // synchronously. Zero flags omit REPLACE_EXISTING and COPY_ALLOWED.
+        #[expect(unsafe_code, reason = "audited Windows atomic no-replace move")]
         let result = unsafe {
             windows_sys::Win32::Storage::FileSystem::MoveFileExW(from.as_ptr(), to.as_ptr(), 0)
         };
@@ -539,6 +599,148 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn os_metadata_changes_do_not_change_the_configuration_generation() {
+        let root = Root::new();
+        root.put("settings.json", b"preserved settings");
+        root.put("profiles/old.json", b"preserved legacy");
+        root.put("tabs/One/tab.config", b"preserved Tab");
+        root.put("tabs/One/pkg/profile.config", b"preserved profile");
+        let before = capture(&root.0).unwrap();
+        let paths = [
+            ".DS_Store",
+            "._settings.pending",
+            "profiles/._old.json",
+            "profiles/._old.pending",
+            "tabs/._One",
+            "tabs/One/._tab.config",
+            "tabs/One/._tab.pending",
+            "tabs/One/pkg/._profile.config",
+            "tabs/One/pkg/._profile.pending",
+            "tabs/One/pkg/desktop.ini",
+            "tabs/One/pkg/Thumbs.db",
+        ];
+        let appeared = capture_between(&root.0, || {
+            for path in paths {
+                fs::write(root.0.join(path), b"OS metadata").unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(appeared, before);
+        let updated = capture_between(&root.0, || {
+            for path in paths {
+                fs::write(root.0.join(path), b"updated OS metadata").unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(updated, before);
+        for path in paths {
+            assert_eq!(fs::read(root.0.join(path)).unwrap(), b"updated OS metadata");
+        }
+        let disappeared = capture_between(&root.0, || {
+            for path in paths {
+                fs::remove_file(root.0.join(path)).unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(disappeared, before);
+    }
+
+    #[test]
+    fn metadata_exclusion_keeps_raw_enumeration_bounded() {
+        let root = Root::new();
+        root.put(".DS_Store", b"metadata");
+        let mut count = MAX_ENUMERATED - 1;
+        assert!(entries(&root.0, &mut count).unwrap().is_empty());
+        assert_eq!(count, MAX_ENUMERATED);
+        assert!(entries(&root.0, &mut count).is_err());
+        assert_eq!(fs::read(root.0.join(".DS_Store")).unwrap(), b"metadata");
+    }
+
+    #[test]
+    fn metadata_named_directories_do_not_hide_managed_configuration() {
+        let root = Root::new();
+        for path in ["profiles/._old.json", "tabs/One/pkg/._profile.config"] {
+            let path = root.0.join(path);
+            crate::storage::private_directory(&path).unwrap();
+            assert!(capture(&root.0).is_err());
+            fs::remove_dir(path).unwrap();
+        }
+        root.put("tabs/One/pkg/.unknown.config", b"unknown retained record");
+        let captured = capture(&root.0).unwrap();
+        assert_eq!(
+            captured.files["tabs/One/pkg/.unknown.config"],
+            b"unknown retained record"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_named_links_cannot_bypass_configuration_file_safety() {
+        use std::os::unix::fs::symlink;
+        let root = Root::new();
+        root.put("outside", b"retained linked bytes");
+        let outside = root.0.join("outside");
+        for path in [
+            "profiles/._old.json",
+            "profiles/._old.pending",
+            "tabs/One/pkg/._profile.config",
+            "tabs/One/pkg/._profile.pending",
+        ] {
+            let path = root.0.join(path);
+            crate::storage::private_directory(path.parent().unwrap()).unwrap();
+            symlink(&outside, &path).unwrap();
+            assert!(capture(&root.0).is_err());
+            fs::remove_file(&path).unwrap();
+            fs::hard_link(&outside, &path).unwrap();
+            assert!(capture(&root.0).is_err());
+            fs::remove_file(path).unwrap();
+        }
+        assert_eq!(fs::read(outside).unwrap(), b"retained linked bytes");
+    }
+
+    #[test]
+    fn packages_subtree_is_not_read_or_admitted_to_configuration_snapshots() {
+        let root = Root::new();
+        root.put("settings.json", b"retained settings");
+        for area in ["sources", "pkgs"] {
+            root.put(&format!("{area}/sample/main.ts"), b"source before");
+            root.put(
+                &format!("{area}/sample/profiles/default.json"),
+                b"portable preset",
+            );
+        }
+        let before = capture(&root.0).unwrap();
+        let observed = capture_between(&root.0, || {
+            for area in ["sources", "pkgs"] {
+                fs::write(root.0.join(area).join("sample/main.ts"), b"source after").unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(observed, before);
+        assert_eq!(
+            observed.files,
+            BTreeMap::from([("settings.json".into(), b"retained settings".to_vec())])
+        );
+        for area in ["sources", "pkgs"] {
+            assert!(
+                Capture::from_files(
+                    BTreeMap::from([(format!("{area}/sample/main.ts"), b"overwrite".to_vec())]),
+                    true,
+                )
+                .is_err()
+            );
+            assert_eq!(
+                fs::read(root.0.join(area).join("sample/main.ts")).unwrap(),
+                b"source after"
+            );
+            assert_eq!(
+                fs::read(root.0.join(area).join("sample/profiles/default.json")).unwrap(),
+                b"portable preset"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_aggregate_and_aliasing_paths() {
         let files = BTreeMap::from([
             ("tabs/One/tab.config".into(), vec![]),
@@ -618,6 +820,10 @@ pub(crate) mod tests {
         ] {
             let root = Root::new();
             root.put(path, b"pending");
+            root.put(
+                "profiles/._old.pending",
+                b"metadata beside a genuine pending write",
+            );
             assert!(capture(&root.0).is_err(), "{path}");
         }
         let root = Root::new();

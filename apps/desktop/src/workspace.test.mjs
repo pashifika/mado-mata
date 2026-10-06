@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyRecoveryMutation,applyWorkspaceView,bindSelection,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
+import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyInvalidatedViews,applyRecoveryMutation,applyWorkspaceView,approveNative,bindSelection,chooseLane,clearNativeApproval,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,editNativeReview,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
 import {LocalFault} from './i18n.ts';
 import {currentRecoveryDraft,editRecovery,issuePath,readRecoveryDraft,recoveryIssue,recoveryState,recoveryTicket,selectRecovery} from './recovery.ts';
 import {optionPath,readDraft} from './state.ts';
@@ -562,6 +562,30 @@ for (const {scenario,update,field} of [
   });
 }
 
+test('a selected capture-only target stays input-free when its saved Windows locator is edited',()=>{
+  const config={platform:'windows',game:{kind:'executable',path:'C:\\Games\\example.exe'},launcher:null,
+    arguments:[],working_directory:null,window_title:'Game window',input:null};
+  const state=loadedTarget('a',config);
+  assert.equal(targetDirty(state),false);
+  assert.deepEqual(readTargetDraft(state.draft).configuration,config);
+  assert.equal(readTargetDraft({...state.draft,windowTitle:'Other window'}).configuration.input,null);
+  assert.equal(readTargetDraft({...state.draft,route:'system'}).configuration,null);
+});
+test('host-synchronized window binding updates clean target forms but preserves unsaved target edits',()=>{
+  const old=loadedTarget('a',targetConfiguration());
+  const selected={...targetConfiguration('/metadata/Other.app'),window_title:'Other window',input:null};
+  const view=targetView(old,{revision:2,configuration:selected,id:'selected-window'});
+  const clean=readTarget(old,view);
+  assert.equal(targetDirty(clean),false);
+  assert.equal(clean.draft.windowTitle,'Other window');
+  assert.equal(clean.draft.route,'');
+  const dirty=editTarget(old,{...old.draft,arguments:['my unsaved launch option']});
+  const merged=readTarget(dirty,view);
+  assert.deepEqual(merged.draft.arguments,['my unsaved launch option']);
+  assert.equal(targetDirty(merged),true);
+});
+
+
 test('system input explicitly selected with focused-only policy carries no process-pointer mode',()=>{
   const state=loadedTarget();
   const parsed=readTargetDraft({...state.draft,route:'system',focus:'require_focused'});
@@ -918,6 +942,22 @@ test('a recovery-required relocation candidate is never a selection: no bound st
   assert.throws(()=>commandValues(tab,undefined),error=>error instanceof LocalFault&&error.presentation.key==='unboundWorkspace');
 });
 
+test('another Tab ending Edit discloses invalidation of an unbound recovery draft without changing saved facts or unaffected Tabs',()=>{
+  const initial=candidateTab();
+  const tab={...initial,recovery:editRecovery(initial.recovery,{count:7},{kind:'replace',path:'$.count'})};
+  const unaffected=workspaceFromView(view('b'));
+  const next=applyInvalidatedViews([tab,unaffected],[view('a',{revision:2,savedPackage:savedReference})]);
+  assert.equal(next[0].recovery,null);
+  assert.equal(next[0].bound,null);
+  assert.equal(next[0].revision,2);
+  assert.deepEqual(next[0].notice,{key:'recoveryInvalidated'});
+  assert.equal(next[0].savedPackage,savedReference);
+  assert.equal(next[0].recoveryOutcomes,tab.recoveryOutcomes);
+  assert.deepEqual(tab.recovery.view.profiles[0].profile.values,{count:5,legacy:true});
+  assert.equal(next[1],unaffected);
+  assert.equal(applyInvalidatedViews(next,[view('a',{revision:2,savedPackage:savedReference})]),next);
+});
+
 test('a binding failure over a saved source retains its earlier source fault and leaves a retry context',()=>{
   const bindingError={category:'Storage',message:'tab write failed',context:null};
   const prior={category:'Package',message:'saved directory missing',context:null};
@@ -1119,6 +1159,7 @@ test('a Reset whose defaults are incomplete installs the unsaved default-based d
   assert.deepEqual(after.recovery.view.profiles[0].profile.values,{count:5,legacy:true});
   assert.deepEqual(after.notice,{key:'recoveryResetIncomplete'});
   assert.deepEqual(after.recoveryOutcomes,[outcome('Q','Quick','saved')]);
+  assert.equal(hasWorkspaceEdits(after,undefined),true);
   // Completing the draft retires the attributed failure; reloading the stored values drops the reset marker.
   const completed=editRecovery(after.recovery,{count:1,mode:'fast'},{kind:'replace',path:'$.mode'});
   assert.equal(completed.issue,null);
@@ -1127,6 +1168,7 @@ test('a Reset whose defaults are incomplete installs the unsaved default-based d
   const reloaded=selectRecovery(completed,'P');
   assert.equal(reloaded.resetDraft,false);
   assert.deepEqual(reloaded.draft,{count:5,legacy:true});
+  assert.equal(hasWorkspaceEdits({...after,recovery:reloaded},undefined),false);
 });
 
 for (const {scenario,retarget} of [
@@ -1344,3 +1386,162 @@ test('a successful explicit retry carries the unrepaired draft and its issue to 
   const stale=applyRecoveryMutation(different,ticket,mutation({draft:{count:1},issue:unreadable}));
   assert.equal(stale.recovery,different.recovery);
 });
+
+const nativeLimits={startup_ms:60000,readiness_ms:30000,workflow_ms:30000,max_frames:300,wait_ms:1000,interval_ms:100,max_actions:64,cleanup_ms:1000,containment_ms:2000};
+const nativeEnvironment={profile:'environment-a'};
+function bundleConfiguration(input=targetConfiguration().input) {
+  const configuration=targetConfiguration('/metadata/Game.app');
+  return {...configuration,game:{kind:'bundle',path:'/metadata/Game.app'},input};
+}
+// A native-lane draft reviewed against a compatible saved bundle; `approve` grants both consents for its current request.
+function nativeDraft(target=loadedBundle()) {
+  const tab=bindSelection(workspaceFromView(view('a')),targetSelection('a'));
+  return updateBound(tab,bound=>editNativeReview(editNativeReview(chooseLane({...bound,target},'native'),'operation','Press Confirm once'),'postcondition','Result dialog is shown'));
+}
+function approve(bound,environment=nativeEnvironment,limits=nativeLimits) {
+  return approveNative(approveNative(bound,'capture',true,environment,limits),'input',true,environment,limits);
+}
+function nativeOf(bound,environment=nativeEnvironment,limits=nativeLimits) {
+  return deriveBound(bound,environment,'en',limits).native;
+}
+
+test('a Native intent names the current saved binding only after both separate consents for that exact request',()=>{
+  const bound=nativeDraft().bound;
+  assert.equal(nativeOf(bound).block,'nativeApproval');
+  const captureOnly=approveNative(bound,'capture',true,nativeEnvironment,nativeLimits);
+  assert.equal(nativeOf(captureOnly).block,'nativeApproval');
+  assert.equal(nativeOf(captureOnly).intent,null);
+  const approved=approveNative(captureOnly,'input',true,nativeEnvironment,nativeLimits);
+  const facts=deriveBound(approved,nativeEnvironment,'en',nativeLimits);
+  assert.equal(facts.startBlock,null);
+  assert.deepEqual(facts.native.intent,{target_revision:1,target_binding_id:'binding-1',target_declaration_identity:'declaration-1',
+    capture_approved:true,input_approved:true,launch_approved:false,operation:'Press Confirm once',visible_postcondition:'Result dialog is shown',limits:nativeLimits});
+  // Consent given for an older request does not combine with consent given after an edit.
+  const edited=approveNative(editDraft(captureOnly,{count:2}),'input',true,nativeEnvironment,nativeLimits);
+  assert.equal(nativeOf(edited).capture,false);
+  assert.equal(nativeOf(edited).intent,null);
+  // Submission spends the approval; the same request needs fresh consent.
+  assert.equal(nativeOf(clearNativeApproval(approved)).intent,null);
+});
+
+test('Native approval is withdrawn by relevant edits and never restored by editing back or returning to the lane',()=>{
+  const approved=approve(nativeDraft().bound);
+  assert.ok(nativeOf(approved).intent);
+  const draftBack=editDraft(editDraft(approved,{count:2}),{count:1});
+  assert.deepEqual(draftBack.draft,approved.draft);
+  assert.equal(nativeOf(draftBack).intent,null);
+  const textBack=editNativeReview(editNativeReview(approved,'operation','Press Cancel'),'operation','Press Confirm once');
+  assert.equal(nativeOf(textBack).intent,null);
+  assert.equal(nativeOf(chooseLane(chooseLane(approved,'controlled'),'native')).intent,null);
+  assert.equal(nativeOf(approved,{profile:'environment-b'}).intent,null);
+  const newer=readTarget(approved.target,targetView(approved.target,{revision:2,configuration:bundleConfiguration()}));
+  assert.equal(nativeOf({...approved,target:newer}).intent,null);
+  const reissued={...approved,target:{...approved.target,context:{...approved.target.context,workspace:{workspace_id:'a',revision:2}}}};
+  assert.equal(nativeOf(reissued).intent,null);
+  const tab=updateBound(nativeDraft(),bound=>approve(selectProfile(bound,'prof-a')));
+  assert.ok(nativeOf(tab.bound).intent);
+  const changed=applyCatalog(tab,{profiles:[profile('prof-a','Saved a',{count:6},'shared')],profiles_error:null});
+  assert.equal(nativeOf(changed.bound).intent,null);
+});
+
+test('Native admission refuses an unsupported platform, unsuitable or unsettled target and missing environment regardless of consent',()=>{
+  const approved=approve(nativeDraft().bound);
+  assert.equal(nativeOf(approve(approved,nativeEnvironment,null),nativeEnvironment,null).block,'nativeUnavailable');
+  assert.equal(nativeOf(approved,null).block,'nativeEnvironment');
+  const bundle=loadedBundle();
+  for (const [scenario,target,block] of [
+    ['an unread target',targetState(targetSelection('a')),'nativeTarget'],
+    ['a failed target read',targetReadFailed(bundle,unreadable),'nativeTarget'],
+    ['a pending target command',beginTarget(bundle,'check'),'nativeTarget'],
+    ['a direct executable binding',loadedTarget(),'nativeBinding'],
+    ['a capture-only bundle binding',loadedTarget('a',bundleConfiguration(null)),'nativeBinding'],
+    ['an incompatible binding',{...bundle,view:{...bundle.view,compatible:false}},'nativeBinding'],
+    ['an unsaved target edit',editTarget(bundle,{...bundle.draft,windowTitle:'Other title'}),'nativeTargetDirty'],
+  ]) {
+    const facts=nativeOf(approve(nativeDraft(target).bound));
+    assert.equal(facts.block,block,scenario);
+    assert.equal(facts.intent,null,scenario);
+  }
+  const multiline=nativeOf(approve(editNativeReview(approved,'postcondition','Result\nshown')));
+  assert.deepEqual([multiline.block,multiline.postconditionError],['nativeText','control']);
+  assert.equal(nativeOf(editNativeReview(approved,'operation','あ'.repeat(1366))).operationError,'long');
+  assert.equal(nativeOf(editNativeReview(approved,'operation','  ')).operationError,'blank');
+  const controlled=deriveBound(chooseLane(approved,'controlled'),null,'en',null);
+  assert.deepEqual([controlled.native,controlled.startBlock],[null,null]);
+});
+
+test('Native target edits cannot restore consent after discard',()=>{
+  const approved=approve(nativeDraft().bound);
+  const edited=editTarget(approved.target,{...approved.target.draft,windowTitle:'Another window'});
+  const restored={...approved,target:discardTarget(edited)};
+  assert.equal(targetDirty(restored.target),false);
+  assert.equal(nativeOf(restored).intent,null);
+  const renewed=approveNative(restored,'capture',true,nativeEnvironment,nativeLimits);
+  assert.equal(nativeOf(renewed).input,false);
+});
+
+test('launch-if-absent approval neither substitutes for capture/input consent nor is required to attach',()=>{
+  const bound=nativeDraft().bound;
+  const launchOnly=nativeOf(approveNative(bound,'launch',true,nativeEnvironment,nativeLimits));
+  assert.deepEqual([launchOnly.launch,launchOnly.capture,launchOnly.input,launchOnly.block,launchOnly.intent],[true,false,false,'nativeApproval',null]);
+  assert.equal(nativeOf(approve(bound)).intent.launch_approved,false);
+  const all=approve(approveNative(bound,'launch',true,nativeEnvironment,nativeLimits));
+  assert.equal(nativeOf(all).intent.launch_approved,true);
+  // Withdrawing launch alone leaves the attach-only request with its separate consents.
+  const attachOnly=nativeOf(approveNative(all,'launch',false,nativeEnvironment,nativeLimits)).intent;
+  assert.deepEqual([attachOnly.capture_approved,attachOnly.input_approved,attachOnly.launch_approved],[true,true,false]);
+});
+
+for (const {scenario, change, environment=nativeEnvironment, limits=nativeLimits} of [
+  {scenario:'a submitted Start spends launch approval even when the host refuses it',change:bound=>clearNativeApproval(bound)},
+  {scenario:'a newer saved recipe with other arguments needs fresh launch approval',
+    change:bound=>({...bound,target:readTarget(bound.target,targetView(bound.target,{revision:2,configuration:{...bundleConfiguration(),arguments:['--other']}}))})},
+  {scenario:'a reissued owner needs fresh launch approval',
+    change:bound=>({...bound,target:{...bound.target,context:{...bound.target.context,workspace:{workspace_id:'a',revision:2}}}})},
+  {scenario:'an edited profile draft needs fresh launch approval',change:bound=>editDraft(bound,{count:2})},
+  {scenario:'another saved OCR environment needs fresh launch approval',change:bound=>bound,environment:{profile:'environment-b'}},
+  {scenario:'a different host startup budget needs fresh launch approval',change:bound=>bound,limits:{...nativeLimits,startup_ms:45000}},
+  {scenario:'a different host readiness budget needs fresh launch approval',change:bound=>bound,limits:{...nativeLimits,readiness_ms:20000}},
+  {scenario:'a different host workflow budget needs fresh launch approval',change:bound=>bound,limits:{...nativeLimits,workflow_ms:20000}},
+]) {
+  test(scenario,()=>{
+    const approved=approve(approveNative(nativeDraft().bound,'launch',true,nativeEnvironment,nativeLimits));
+    assert.equal(nativeOf(approved).intent.launch_approved,true);
+    // Consent given for one request is not approval of another, and a request without fresh capture/input has no intent.
+    assert.equal(nativeOf(change(approved),environment,limits).intent,null);
+    // Renewing only capture and input must not revive the spent or stale launch consent.
+    const renewed=nativeOf(approve(change(approved),environment,limits),environment,limits);
+    assert.equal(renewed.launch,false);
+    assert.equal(renewed.intent.launch_approved,false);
+    // The submitted intent carries exactly the tuple the renewed consent reviewed.
+    assert.deepEqual(renewed.intent.limits,limits);
+  });
+}
+
+const gameBundle={kind:'bundle',path:'/metadata/Game.app'};
+for (const {scenario, launcher, workingDirectory, recipient, location, directory} of [
+  {scenario:'the game bundle itself uses the macOS-defined launch directory',launcher:null,workingDirectory:null,
+    recipient:'game',location:gameBundle,directory:'os'},
+  {scenario:'an unsupported game bundle directory does not block attaching',launcher:null,workingDirectory:'/private/work',
+    recipient:'game',location:gameBundle,directory:'refused'},
+  {scenario:'an unsupported separate bundle launcher directory does not block attaching',launcher:{kind:'bundle',path:'/metadata/Launcher.app'},workingDirectory:'/private/work',
+    recipient:'launcher',location:{kind:'bundle',path:'/metadata/Launcher.app'},directory:'refused'},
+  {scenario:'an executable launcher receives its explicit directory',launcher:{kind:'executable',path:'/metadata/launch'},workingDirectory:'/private/work',
+    recipient:'launcher',location:{kind:'executable',path:'/metadata/launch'},directory:'explicit'},
+  {scenario:'an executable launcher without a directory uses its own folder',launcher:{kind:'executable',path:'/metadata/launch'},workingDirectory:null,
+    recipient:'launcher',location:{kind:'executable',path:'/metadata/launch'},directory:'parent'},
+]) {
+  test(scenario,()=>{
+    const configuration={...bundleConfiguration(),launcher,working_directory:workingDirectory};
+    const approved=approve(nativeDraft(loadedTarget('a',configuration)).bound);
+    const attach=nativeOf(approved);
+    assert.equal(attach.recipe.recipient,recipient);
+    assert.deepEqual(attach.recipe.location,location);
+    assert.equal(attach.recipe.directory,directory);
+    // The host may attach without submitting a recipe, even with conditional launch consent.
+    assert.equal(attach.block,null);
+    const launch=nativeOf(approveNative(approved,'launch',true,nativeEnvironment,nativeLimits));
+    assert.equal(launch.block,null);
+    assert.equal(launch.intent.launch_approved,true);
+  });
+}

@@ -1,3 +1,4 @@
+use crate::authoring::Publisher;
 use crate::configuration::{self, Capture};
 use crate::logging::{LogBatch, Logger};
 use crate::storage::{EditableSettings, PackageReference, Profile, Settings, Store, TabRecord};
@@ -17,6 +18,15 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod authoring;
+pub use authoring::{
+    AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, NativeCandidateView,
+    NativeCaptureArea, NativeCaptureBounds, NativeCaptureResult, NativeCoordinateUnit,
+    NativePickerCandidate, NativePickerSnapshot, NativeSelectionView, RecognitionCopy,
+    RecognitionFrame, RecognitionPickerGuard, RecognitionPixel, RecognitionSaved, RecognitionTrial,
+    RecognitionView,
+};
+mod native_run;
 mod operations;
 mod profiles;
 mod recovery;
@@ -199,6 +209,8 @@ pub struct RetainedCheck {
 
 #[derive(Serialize)]
 pub struct Poll {
+    pub authoring: Option<AuthoringRef>,
+    pub native_selection: Option<NativeSelectionView>,
     #[serde(serialize_with = "serialize_shared")]
     pub controller: Arc<Value>,
     pub logs: LogBatch,
@@ -253,6 +265,7 @@ struct OperationOwner {
     run: String,
     workspace: Option<WorkspaceRef>,
     check: Option<CheckInputs>,
+    native: bool,
     terminal: bool,
 }
 
@@ -264,15 +277,25 @@ struct Workspaces {
     controller: Arc<Value>,
     last_check: Option<Arc<RetainedCheck>>,
     target_picker: Option<WorkspaceRef>,
+    authoring: Option<authoring::Lease>,
+    next_authoring: u64,
+    native_cleanup_required: bool,
 }
 
 pub struct Application {
     runner: DesktopController,
+    root: PathBuf,
     store: Arc<Mutex<Store>>,
     commands: Mutex<()>,
     target_observation: Arc<Mutex<ObservationSlot>>,
+    publisher: Arc<Publisher>,
+    // Stop never waits for command, workspace, store, or publication locks.
+    authoring_stop: Mutex<Option<authoring::StopOwner>>,
+    native_engine: PathBuf,
     #[cfg(test)]
     command_admitted: AtomicBool,
+    #[cfg(test)]
+    authoring_validation_gate: Mutex<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>>,
     // Admission/collection share this lock; workers never acquire it.
     workspaces: Mutex<Workspaces>,
     logger: Logger,
@@ -290,6 +313,10 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl Application {
     pub fn new(root: PathBuf, controlled: PathBuf, engine: PathBuf) -> Result<Arc<Self>, Fault> {
         Self::with_observation_slot(root, controlled, engine, Arc::default())
+    }
+
+    pub fn capture_cache(&self) -> Result<crate::capture_cache::CaptureCache, Fault> {
+        crate::capture_cache::CaptureCache::new(&self.root)
     }
 
     pub(crate) fn with_observation_slot(
@@ -325,7 +352,17 @@ impl Application {
     ) -> Result<Arc<Self>, Fault> {
         let store = Store::new(root.clone())?;
         store.settings()?;
-        let runner = DesktopController::new(controlled, engine);
+        if crate::restore::pending(&root)? {
+            return Err(Fault::new(
+                "RestorePending",
+                "Resolve the interrupted configuration transaction before constructing an Application",
+            ));
+        }
+        let publisher = Arc::new(Publisher::new(root.clone()));
+        // Discover before any restored source is inspected. Keep the application
+        // available for explicit recovery; every source admission checks the journal.
+        let _ = publisher.recover_pending();
+        let runner = DesktopController::new(controlled, engine.clone());
         let mut workspaces = Workspaces {
             open: Vec::new(),
             session: format!(
@@ -346,12 +383,15 @@ impl Application {
             })),
             last_check: None,
             target_picker: None,
+            authoring: None,
+            next_authoring: 1,
+            native_cleanup_required: false,
         };
         for tab in store.tabs()?.tabs.into_iter().filter(|tab| tab.open) {
             let workspace = workspaces.next_workspace()?;
             workspaces
                 .open
-                .push(Self::restore_workspace(&runner, tab, workspace));
+                .push(Self::restore_workspace(&runner, &publisher, tab, workspace));
             workspaces.next_id += 1;
         }
         // Start the bridge first, but give it no Application until all workers
@@ -391,11 +431,17 @@ impl Application {
         };
         let application = Arc::new(Self {
             runner,
+            root,
             store: Arc::new(Mutex::new(store)),
             commands: Mutex::new(()),
             target_observation,
+            publisher,
+            authoring_stop: Mutex::new(None),
+            native_engine: engine,
             #[cfg(test)]
             command_admitted: AtomicBool::new(false),
+            #[cfg(test)]
+            authoring_validation_gate: Mutex::new(None),
             workspaces: Mutex::new(workspaces),
             logger,
             closing: AtomicBool::new(false),
@@ -421,6 +467,26 @@ impl Application {
     }
 
     fn command_state(
+        &self,
+    ) -> Result<
+        (
+            std::sync::MutexGuard<'_, ()>,
+            std::sync::MutexGuard<'_, Workspaces>,
+        ),
+        Fault,
+    > {
+        let guards = self.reconstruction_state()?;
+        // Root lookup must not wait on a preparation worker's Store lock.
+        if crate::restore::pending(&self.root)? {
+            return Err(Fault::new(
+                "RestorePending",
+                "Resolve the interrupted configuration transaction before using this session",
+            ));
+        }
+        Ok(guards)
+    }
+
+    fn reconstruction_state(
         &self,
     ) -> Result<
         (

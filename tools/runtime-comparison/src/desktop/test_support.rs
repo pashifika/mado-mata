@@ -24,6 +24,7 @@ pub(super) fn request(inventory: &Inventory) -> StartRequest {
         lane: "controlled".into(),
         scenario: workflow(),
         replay_descriptor_path: None,
+        native_intent: None,
     }
 }
 

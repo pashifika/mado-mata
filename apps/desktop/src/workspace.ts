@@ -3,9 +3,9 @@ import type {Locale, Message} from './i18n.ts';
 import {defaultDraft, readDraft} from './state.ts';
 import {mutatedRecovery, recoveryState, retriedRecovery, sameRecoveryContext, upsertOutcomes} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
-import {targetDirty, targetState} from './target.ts';
+import {targetDirty, targetExpectation, targetState} from './target.ts';
 import type {TargetState} from './target.ts';
-import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, NativeIntent, NativeLimits, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, TargetBinding, TargetLocation, WorkspaceRef, WorkspaceView} from './types.ts';
 
 export const WORKSPACE_LIMIT = 8;
 export const SAVED_LIMIT = 64;
@@ -14,6 +14,8 @@ export const INTERNAL_NAME_LIMIT = 64;
 export const DISPLAY_NAME_LIMIT = 80;
 // The host caps a retained check descriptor; refuse longer paths inline instead of after a round trip.
 export const DESCRIPTOR_LIMIT = 4096;
+// The host's bound for each reviewed Native text: trimmed non-empty, at most 4096 UTF-8 bytes, no control characters.
+const NATIVE_TEXT_LIMIT = 4096;
 // The host's category for a saved custom-archive reference; every other source fault is an unavailable directory.
 export const UNSUPPORTED_SOURCE = 'UnsupportedPackageSource';
 const BUSY_PHASES: Record<string, true> = {preparing: true, running: true, stopping: true};
@@ -25,7 +27,8 @@ export function busy(state:string):boolean {
   return BUSY_PHASES[state] === true;
 }
 
-export type Page = 'run' | 'logs';
+// `edit` is shown only for the Tab owning the Edit lease; otherwise it renders as `run`.
+export type Page = 'run' | 'logs' | 'edit';
 
 // Package-bound session state. Present only after real inspection in this session or host revalidation at bootstrap.
 export interface Bound {
@@ -39,7 +42,14 @@ export interface Bound {
   // True once the operator changed profile/draft state; a pristine default draft closes without confirmation.
   touched:boolean;
   target:TargetState;
+  // Transient per-Start Native review; never persisted, restored or inferred from settings, profiles or targets.
+  native:NativeReview;
 }
+
+// Operator-authored intent plus separate capture, input and launch-if-absent consent. `key` names the exact request the
+// consent approved: consent granted for any other key is not approval.
+export interface NativeReview {operation:string; postcondition:string; capture:boolean; input:boolean; launch:boolean; key:string|null}
+export type NativeConsent = 'capture'|'input'|'launch';
 
 // Session-local UI state for one open named Tab. The host persists names and package references; nothing here is.
 export interface Workspace {
@@ -54,6 +64,8 @@ export interface Workspace {
   busy:Message|null;
   // Inspect form draft for this Tab; a path is only a request, never a binding.
   inspectPath:string;
+  // Edit form drafts: a directory to open or create and the portable package ID a new package gets.
+  editPath:string; editPackageId:string;
   legacyImport:LegacyImport|null;
   // Host-issued profile recovery context with the operator's repair draft; null while this Tab has no current context.
   recovery:RecoveryState|null;
@@ -103,6 +115,7 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
     draftRevision: (previous?.draftRevision ?? 0) + 1, validation: null,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
     disclosedRun: null, touched: false, target: targetState(selection),
+    native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', capture: false, input: false, launch: false, key: null},
   };
 }
 
@@ -111,11 +124,12 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
 // custom archive is shown but never offered as a directory request.
 export function workspaceFromView(view:WorkspaceView, notice:Message|null = null):Workspace {
   const saved = view.saved_package;
+  const path = view.selection?.package_path ?? (saved !== null && saved.source.kind === 'directory' ? saved.source.path : '');
   return {
     id: view.workspace_id, revision: view.revision, internalName: view.internal_name, displayName: view.display_name,
     bound: view.selection ? fromSelection(view.selection) : null, sourceError: view.source_error, savedPackage: saved,
     page: 'run', error: null, notice, logFilter: {text: '', level: ''}, busy: null,
-    inspectPath: view.selection?.package_path ?? (saved !== null && saved.source.kind === 'directory' ? saved.source.path : ''), legacyImport: null,
+    inspectPath: path, editPath: path, editPackageId: '', legacyImport: null,
     recovery: view.recovery ? recoveryState(view.recovery, null) : null, recoveryOutcomes: [],
   };
 }
@@ -222,6 +236,28 @@ export function applyInspection(workspace:Workspace, outcome:InspectionOutcome, 
     recoveryOutcomes: retry ? upsertOutcomes(workspace.recoveryOutcomes, outcome.outcomes) : outcome.outcomes};
 }
 
+// Leaving Edit returns the owner's host view: its previous selection is invalidated, so the edited directory is
+// prefilled for the explicit Inspect/Reinspect that is the only way back into the Run flow.
+export function applyAuthoringExit(workspace:Workspace, view:WorkspaceView, packagePath:string|null):Workspace {
+  const next = applyWorkspaceView(workspace, view, {key: 'authoringExited'});
+  return {...next, page: 'run', inspectPath: packagePath ?? next.inspectPath, editPath: packagePath ?? next.editPath};
+}
+
+// A fresh host listing after the host invalidated selections (for example other Tabs bound to an edited source).
+// Only a changed revision is applied, so Tabs the host did not touch keep their profile and target drafts.
+export function applyInvalidatedViews(list:Workspace[], views:WorkspaceView[]):Workspace[] {
+  let changed = false;
+  const next = list.map(item => {
+    const view = views.find(entry => entry.workspace_id === item.id);
+    if (!view || view.revision === item.revision) return item;
+    changed = true;
+    const notice = item.recovery !== null && view.recovery === null ? {key: 'recoveryInvalidated'} as const
+      : view.selection === null && item.bound !== null ? {key: 'selectionInvalidated'} as const : item.notice;
+    return applyWorkspaceView(item, view, notice);
+  });
+  return changed ? next : list;
+}
+
 // A recovery context's store is the bound catalog only when it names the same package and schema; a relocation or
 // in-place candidate with another schema writes records the bound selection cannot use and never merges into it.
 function ownsCatalog(bound:Bound, context:RecoveryState):boolean {
@@ -297,11 +333,110 @@ export interface Derived {
   parsed:{values:Record<string,Json>; errors:Record<string,string>};
   numericErrors:boolean; valuesDirty:boolean; dirty:boolean; bound:boolean;
   selectedProfile:Profile|undefined; startBlock:string|null; descriptorError:string|null;
+  // Present only on the Native lane.
+  native:NativeFacts|null;
 }
 
 const encoder = new TextEncoder();
 
-export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en'):Derived {
+export type NativeTextError = 'blank'|'long'|'control';
+export type NativeBlock = 'nativeUnavailable'|'nativeTarget'|'nativeBinding'|'nativeTargetDirty'|'nativeEnvironment'|'nativeText'|'nativeApproval';
+// The working directory a launch would give its recipient: macOS defines it for bundles, where an explicit directory is
+// refused rather than ignored; an executable launcher gets the explicit directory or its own parent folder.
+export type NativeDirectory = 'os'|'refused'|'explicit'|'parent';
+// The saved recipe one approved launch would submit; it is review material only and never executed from here.
+export interface NativeRecipe {
+  recipient:'game'|'launcher'; location:TargetLocation; arguments:string[]; directory:NativeDirectory; workingDirectory:string|null;
+}
+export interface NativeFacts {
+  binding:TargetBinding|null; recipe:NativeRecipe|null; capture:boolean; input:boolean; launch:boolean;
+  operationError:NativeTextError|null; postconditionError:NativeTextError|null;
+  block:NativeBlock|null; intent:NativeIntent|null;
+}
+
+// Mirrors the host rule; the original text is submitted unchanged.
+function nativeTextError(value:string):NativeTextError|null {
+  if (value.trim() === '') return 'blank';
+  if (encoder.encode(value).length > NATIVE_TEXT_LIMIT) return 'long';
+  return CONTROL.test(value) ? 'control' : null;
+}
+
+// The saved binding a Native Start names: a compatible macOS application bundle with an explicit input policy.
+function nativeBinding(target:TargetState):TargetBinding|null {
+  const binding = target.view?.compatible ? target.view.record.binding : null;
+  return binding && binding.configuration.platform === 'macos' && binding.configuration.game.kind === 'bundle'
+    && binding.configuration.input !== null && target.context.declaration_identity !== null ? binding : null;
+}
+
+// Mirrors the host recipe rule: the separate launcher when present, otherwise the game bundle itself.
+function nativeRecipe(binding:TargetBinding):NativeRecipe {
+  const configuration = binding.configuration;
+  const location = configuration.launcher ?? configuration.game;
+  const workingDirectory = configuration.working_directory;
+  const directory:NativeDirectory = location.kind === 'bundle' ? workingDirectory === null ? 'os' : 'refused'
+    : workingDirectory === null ? 'parent' : 'explicit';
+  return {recipient: configuration.launcher ? 'launcher' : 'game', location, arguments: configuration.arguments, directory, workingDirectory};
+}
+
+// Everything the consent covers. Revisions are monotonic, so an edited-back draft or reissued selection stays stale.
+function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null):string {
+  const target = bound.target;
+  return JSON.stringify([target.context, target.draftRevision, target.view?.record.revision ?? null, target.view?.record.binding ?? null,
+    bound.packagePath, bound.package.inventory_identity, bound.package.schema_identity, bound.lane, bound.draftRevision,
+    bound.profiles.find(profile => profile.id === bound.selectedId) ?? null, environment, limits,
+    bound.native.operation, bound.native.postcondition]);
+}
+
+// Consent given for another request starts over rather than carrying the other consent forward.
+export function approveNative(bound:Bound, field:NativeConsent, value:boolean, environment:OcrEnvironment|null, limits:NativeLimits|null):Bound {
+  const key = nativeKey(bound, environment, limits);
+  const review = bound.native.key === key ? bound.native : {...bound.native, capture: false, input: false, launch: false};
+  return {...bound, native: {...review, [field]: value, key}};
+}
+
+export function clearNativeApproval(bound:Bound):Bound {
+  const review = bound.native;
+  return review.key === null && !review.capture && !review.input && !review.launch ? bound
+    : {...bound, native: {...review, capture: false, input: false, launch: false, key: null}};
+}
+
+export function editNativeReview(bound:Bound, field:'operation'|'postcondition', value:string):Bound {
+  return clearNativeApproval({...bound, native: {...bound.native, [field]: value}});
+}
+
+// Leaving a lane withdraws its consent; returning never restores it.
+export function chooseLane(bound:Bound, lane:string):Bound {
+  return clearNativeApproval({...bound, lane});
+}
+
+export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null):NativeFacts {
+  const target = bound.target;
+  const binding = nativeBinding(target);
+  const recipe = binding && nativeRecipe(binding);
+  const review = bound.native;
+  const current = review.key !== null && review.key === nativeKey(bound, environment, limits);
+  const capture = current && review.capture;
+  const input = current && review.input;
+  const launch = current && review.launch;
+  const operationError = nativeTextError(review.operation);
+  const postconditionError = nativeTextError(review.postcondition);
+  const block:NativeBlock|null = limits === null ? 'nativeUnavailable'
+    : targetExpectation(target) === null || target.operation !== null || target.review !== null ? 'nativeTarget'
+    : binding === null ? 'nativeBinding'
+    : targetDirty(target) ? 'nativeTargetDirty'
+    : environment === null ? 'nativeEnvironment'
+    : operationError !== null || postconditionError !== null ? 'nativeText'
+    : !capture || !input ? 'nativeApproval' : null;
+  const declaration = target.context.declaration_identity;
+  const intent = block === null && binding && limits && target.view && declaration !== null ? {
+    target_revision: target.view.record.revision, target_binding_id: binding.id, target_declaration_identity: declaration,
+    capture_approved: capture, input_approved: input, launch_approved: launch,
+    operation: review.operation, visible_postcondition: review.postcondition, limits,
+  } : null;
+  return {binding, recipe, capture, input, launch, operationError, postconditionError, block, intent};
+}
+
+export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en', nativeLimits:NativeLimits|null = null):Derived {
   const t = messages[locale].app;
   const parsed = readDraft(bound.package.schema, bound.draft, locale);
   const numericErrors = Object.keys(parsed.errors).length > 0;
@@ -310,15 +445,17 @@ export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, l
   const dirty = valuesDirty || bound.name !== selectedProfile?.name;
   const profileBound = !selectedProfile || (selectedProfile.package_id === bound.package.package_id && selectedProfile.schema_identity === bound.package.schema_identity);
   const descriptor = bound.descriptorPath.trim();
+  const native = bound.lane === 'native' ? nativeFacts(bound, savedEnvironment, nativeLimits) : null;
   const startBlock = bound.lane === 'replay' && !descriptor ? t.replayDescriptor
-    : bound.lane === 'replay' && !savedEnvironment ? t.replayEnvironment : null;
+    : bound.lane === 'replay' && !savedEnvironment ? t.replayEnvironment
+    : native?.block ? t[native.block] : null;
   const descriptorError = encoder.encode(descriptor).length > DESCRIPTOR_LIMIT ? t.descriptorLimit(DESCRIPTOR_LIMIT) : null;
-  return {parsed, numericErrors, valuesDirty, dirty, bound: profileBound, selectedProfile, startBlock, descriptorError};
+  return {parsed, numericErrors, valuesDirty, dirty, bound: profileBound, selectedProfile, startBlock, descriptorError, native};
 }
 
 export function hasWorkspaceEdits(workspace:Workspace, facts:Derived|undefined):boolean {
   return (workspace.bound !== null && ((workspace.bound.touched && facts?.dirty === true) || targetDirty(workspace.bound.target)))
-    || workspace.recovery?.touched === true;
+    || workspace.recovery?.touched === true || workspace.recovery?.resetDraft === true;
 }
 
 // Package commands carry values only from a real inspected selection. A genuine named Tab without one is refused

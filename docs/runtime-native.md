@@ -1,8 +1,10 @@
 # Runtime comparison: replay and native prerequisites
 
 The optional `engine` feature consumes the public `mado-pilot` facade at
-`acc5d98ae8cfc4958970be826a28011bc12185c9`. The harness uses no sibling path
-dependency, direct platform calls, fake OCR backend, or substitute input route.
+`4b4f3296838a9eecdcb00e9d2bb3121a25cdc240`. The harness uses no sibling path
+dependency, fake OCR backend, or substitute input route. macOS startup adds
+read-only Foundation/libproc lifetime checks while waiting for the selected
+process's first eligible window; capture and input still use the public facade.
 
 **Native integration is available; native qualification is not complete.** The
 facade now exposes optional retained-process provenance. The harness requires an
@@ -12,18 +14,44 @@ or mismatched provenance is refused. Native capture, OCR, and input receipts are
 real SDK operations, not the controlled sink. A submitted receipt still does not
 prove application effect. Both-OS workload and lifecycle evidence remain required.
 
-The current facade does not expose an atomic capture-terminal publication guard.
-Known native `TargetLost`/closed errors can close host admission, but target loss
-during an already-running recognition call can still race with successful result
-publication. That review finding remains unresolved pending a separately scoped
-upstream API repair and tested pin update. A new capture or input operation is
-not used as a status probe. Do not treat controlled regressions or earlier native
-smokes as qualification of this race.
+The pinned facade exposes `Session::commit_frame`, which orders acceptance of
+the exact acquired frame against capture-terminal state. Authoring requires clean
+per-frame session close and current owner/revision/cancellation checks before
+publication. Its original Engine/TargetId stays in one owned worker across explicit
+captures until Preview closes or cancellation/owner exit requires child reaping.
+Controlled consuming regressions are not per-OS native qualification. The broader R6/runtime-adoption
+matrix remains separate; neither this API nor an extra capture/status probe
+establishes full native Script acceptance.
 
 The optional macOS [desktop replay lane](desktop.md#save-and-check-an-ocr-environment)
 uses the same engine and replay object, with a separate fixed engine artifact.
 Its App settings hold local locations and Rust derives identities; portable
-profiles contain no model/runtime paths. It never projects live native authority.
+profiles contain no model/runtime paths. Saved-image
+[Recognition authoring](desktop.md#author-saved-image-recognition) uses that
+artifact for script-free observations over a selected PNG or saved crop.
+Neither operation projects live native authority. The separate
+[one-shot authoring path](desktop.md#acquire-a-native-historical-frame) requires
+explicit target/window selection and finite capture authority.
+
+The separate [macOS Native Run lane](desktop.md#reviewed-macos-native-start)
+captures a saved bundle binding and fresh per-Start review for the fixed engine
+child. After non-executing preflight, its existing `readiness()` explicitly
+requests `target_start` and polls `target_status` before capture/recognition.
+Without a startup request, no target is acquired. A unique running game is reused.
+Confirmed absence permits one saved-recipe submission through the independent
+launch library, with separate launch approval and final resource, cancellation
+and discovery checks.
+The application derives process/lifetime/window authority; neither IPC nor Script
+can supply replacements. Script status probes drive bounded window preparation,
+never a duplicate launch or replacement lifetime. Reviewed budgets are
+60 s Startup, 30 s Readiness after capture availability and 30 s Workflow after
+explicit `Ready`, beneath an outer deadline fixed from their sum.
+
+The independent CLI retains explicit `native_config` and its existing preparation
+contract. External `run`/`manual` plans cannot select Desktop-only `native_budgets`
+or `input.reviewed_operation`; the new startup calls do not grant CLI authority.
+See [ADR 0008](adr/0008-macos-native-run-admission.md) for recipe semantics,
+deadline/ownership rules, first-frame placement and result commitment.
 
 ## Install the engine prerequisites
 
@@ -41,8 +69,8 @@ engine build, acquire the following separately; the harness downloads nothing:
   No `PATH` search, alternate runtime, accelerator preference, or fallback is used.
 - The accepted detector and recognizer below, under one canonical model root.
 
-Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/acc5d98ae8cfc4958970be826a28011bc12185c9/CONTRIBUTING.md#native-development-prerequisites)
-and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/acc5d98ae8cfc4958970be826a28011bc12185c9/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
+Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/CONTRIBUTING.md#native-development-prerequisites)
+and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
 Its `tools/setup-native.py` configures only the command it launches; it installs
 nothing. A separately obtained, revision-pinned public checkout can provide that
 setup tool without becoming the application's dependency source. From this
@@ -80,6 +108,21 @@ environment is mutated after threads start, and no exit exception is suppressed.
 Internal child invocations outside the supervisor must supply the same startup
 environment; they are not a supported shortcut around supervision.
 
+### Consumer publication regressions
+
+After installing the optional engine prerequisites, run the consuming tests in
+the separate Desktop engine target directory:
+
+```sh
+MACOSX_DEPLOYMENT_TARGET=26.5.2 python3 /absolute/pinned-mado-pilot/tools/setup-native.py -- cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml --features engine --target-dir tools/runtime-comparison/target/desktop-engine --lib
+```
+
+These public-facade controlled/replay seams cover terminal commitment, empty
+recognition, grouped queries, newer postconditions, placement and input bounds.
+They neither discover a live target nor capture/send native input, and need no
+game or OCR model installation. They are separate from the ordinary full CI
+command and do not qualify a native OS/workload.
+
 ### Accepted OCR content
 
 Both supported profiles use these exact Apache-2.0 model bytes. Obtain them
@@ -103,6 +146,39 @@ and is not enabled by this comparison. Unsupported choices fail rather than fall
 back. The facade validates the complete accepted model tuple and runtime API
 before publishing an engine.
 
+## Saved-image authoring trials
+
+Desktop Recognition uses the fixed engine child and the saved App OCR
+environment, not a workload Plan, profile, or replay descriptor. The host supplies
+bounded captured pixels and selected geometry. The child opens one replay frame,
+runs real facade recognition, and closes its session; it never evaluates package
+source, captures a live window, or submits input.
+
+OCR submits one `scan_ocr_zones` request for any distinct selected definitions
+within the actual child's `MAX_OCR_ZONES` capability (**8** at the pinned revision).
+Selection order is caller order, with each result group attributed to that
+definition; regions retain engine order. The saved-definition limit is separate.
+An excess request is refused rather than split, clipped, or silently truncated.
+Text is the public NFC-normalized, Unicode-trimmed result with confidence and
+capture-pixel geometry, not pre-normalization backend output. No application
+exact-match judge or expected-text filter participates in the trial.
+
+Template trials use the selected pattern, separate search ROI, and validated
+manifest defaults. They report actual threshold/scores/boxes, not an invented
+no-match score. Saved OCR sample trials use the complete crop without needing
+the original image; their crop-local geometry does not verify current-frame
+placement. The [authoring decision](adr/0006-saved-image-recognition-observations.md)
+owns observation semantics and the shared image policy.
+
+The trial deadline is **30 s**, followed by independent **1 s** cleanup and
+**2 s** containment bounds. Cancellation reaches the engine without waiting
+for recognition to return, but cannot prove physical return, session close, or
+child reaping. Preserve primary and cleanup outcomes separately, including
+forced/incomplete cleanup. Actual
+[saved-image GUI acceptance](desktop.md#saved-image-recognition-acceptance)
+requires authorized local images/resources; controlled tests and build success
+do not establish it.
+
 ## Prepare a private replay package and plan
 
 Use `lane: "replay"` and the normal candidate, profile, limits, prospective budgets,
@@ -125,15 +201,25 @@ Each recorded frame, PNG template, and MadoPilot package manifest must be a
 - `replay.templates` maps host recognition asset aliases to template IDs declared
   by that engine manifest. Neither map grants filesystem access.
 
+Desktop replay merges validated authoring template maps from captured package
+assets before admission. Matching explicit entries are retained; disagreements,
+case-colliding aliases, or a conflicting `madopilot-package.json` mapping are
+refused without replacing either map. This does not merge arbitrary engine
+manifests. The CLI's explicit `native_config` still needs its complete maps;
+neither source edits nor a recorded-frame descriptor are generated by Save.
+
 The supplied workload consumes four observations: the host's readiness guard,
 the package readiness routine, the workflow decision, and a strictly newer
 postcondition. Supply those four acquisitions in order; unmatched query waits
 can consume additional frames. Set the profile ROI to the recorded dimensions.
-Keep the complete package within `limits.snapshot_files` and
-`limits.snapshot_bytes`; three distinct 320-by-160 RGBA assets occupy 614400 bytes
-before other package files, even when a frame asset is referenced more than once.
-For qualification, use real observations appropriate to the
-declared oracle, not generated success pixels or pre-filled OCR results.
+Keep the complete package within `limits.snapshot_files`, `limits.snapshot_bytes`,
+and the [shared image policy](adr/0006-saved-image-recognition-observations.md#image-policy).
+Three distinct 320-by-160 RGBA assets occupy 614400 bytes before other package
+files, even when a frame asset is referenced more than once. The decoded replay
+bound counts every frame acquisition, including repeated references; the package
+bound counts captured assets. A lower explicit Plan bound remains authoritative.
+For qualification, use real observations appropriate to the declared oracle,
+not generated success pixels or pre-filled OCR results.
 
 A separately labeled integration smoke may use an identified generated upstream
 fixture and its independent oracle. Such a static smoke does not qualify recorded
@@ -255,8 +341,8 @@ Unreturned work requires the runner's containment result, not a clean outcome.
 
 ## Native target selection and finite authority
 
-Use `lane: "native"`, `native_config.replay: null`, and the required prospective
-`native_config.native` record:
+For the standalone CLI, use `lane: "native"`, `native_config.replay: null`, and
+the required prospective `native_config.native` record:
 
 - `executable_or_bundle`: the exact canonical executable or application-bundle
   path. `permission_executable`: the canonical running comparison executable.

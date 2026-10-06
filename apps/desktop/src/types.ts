@@ -22,14 +22,18 @@ export interface OcrEnvironment {
 }
 // Finite choices validated in Rust: visible_count 1|2, timeout_seconds 5|8|12.
 export interface NotificationPreferences {visible_count:number; timeout_seconds:number; show_success:boolean}
+// delay_ms is an integer from 0 through 1000, validated by the host.
+export interface EditorCompletionPreferences {automatic:boolean; delay_ms:number}
 export interface Settings {
   version:number; gui_log_limit:number; package_path:string|null; ocr_environment:OcrEnvironment|null;
-  notifications:NotificationPreferences; locale:Locale;
+  notifications:NotificationPreferences; editor_completion:EditorCompletionPreferences; locale:Locale; capture_cache_enabled:boolean;
   // Absent or null means the default `<root>/backups` destination.
   backup_directory:string|null;
+  // Null keeps the default `<application data-dir>/sources` collection.
+  packages_root:string|null;
 }
 // The only settings the dialog may write; version and package hint stay host-owned.
-export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvironment|null; notifications:NotificationPreferences; locale:Locale; backup_directory:string|null}
+export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvironment|null; notifications:NotificationPreferences; editor_completion:EditorCompletionPreferences; locale:Locale; capture_cache_enabled:boolean; backup_directory:string|null; packages_root:string|null}
 // Host-issued session identity; revisions increment on reinspect and ids are never reused.
 export interface WorkspaceRef {workspace_id:string; revision:number}
 export interface ProfileCatalog {profiles:Profile[]; profiles_error:Fault|null}
@@ -73,13 +77,22 @@ export interface LegacyImport {imported:string[]; unchanged:string[]; fault:Faul
 // Shell-owned bootstrap truth, independent of any Application. Paths are disclosed deliberately by the host.
 export interface BootstrapStatus {
   state:BootstrapState; stage:string; root:string|null; legacy_root:string|null; fault:Fault|null;
+  default_packages_root:string|null;
   settings:Settings|null; application_available:boolean; pending_restore:boolean; catalog:WorkspaceCatalog|null;
 }
 export interface SnapshotReceipt {path:string; generation:string; files:number; bytes:number}
+// Typed Native preparation state; the values mirror the host's snake_case enums.
+export type NativePhase = 'preflight'|'target_discovery'|'launch_submission'|'waiting_for_process'|'waiting_for_window'|'native_initialization'|'readiness'|'workflow';
+export type LaunchDisposition = 'not_requested'|'accepted'|'rejected'|'uncertain';
+// Whether the Script has requested startup and whether capture is available. `capture_ready` is not game readiness.
+export type NativeTargetStatus = 'not_requested'|'pending'|'capture_ready';
+export interface NativeProgress {status:NativeTargetStatus; phase:NativePhase; launch:LaunchDisposition}
 export interface ControllerView {
   run:string|null; state:string; operation:string; result:Record<string,Json>|null; error:Fault|null;
   progress:Record<string,Json>[]; dropped_logs:number;
   workspace_id:string|null; workspace_revision:number|null;
+  // The host's retained target status, stage and launch disposition of this operation, kept through errors and Stop.
+  native_preparation?:NativeProgress|null;
 }
 export interface LogEntry {
   sequence:number; time_ms:number; source:string; level:string; run:string|null; workspace_id:string|null;
@@ -92,11 +105,50 @@ export interface RetainedCheck {
   workspace:WorkspaceRef|null; environment:OcrEnvironment|null; descriptor_path:string|null;
   package_inventory_identity:string|null; controller:ControllerView;
 }
-export interface Poll {controller:ControllerView; logs:LogBatch; workspace_results:WorkspaceResult[]; last_check:RetainedCheck|null}
+// `authoring` is the host's single application-wide Edit lease, present in every Workspace view while held.
+export interface Poll {controller:ControllerView; logs:LogBatch; workspace_results:WorkspaceResult[]; last_check:RetainedCheck|null; authoring:AuthoringRef|null; native_selection:NativeSelectionView|null}
+// Host-issued finite Native policy (`native_run_limits`); null there means this platform/build offers no Native lane.
+// Startup runs from reservation, readiness once from `capture_ready`, workflow once from `Ready`; none borrows another.
+export interface NativeLimits {
+  startup_ms:number; readiness_ms:number; workflow_ms:number;
+  max_frames:number; wait_ms:number; interval_ms:number; max_actions:number; cleanup_ms:number; containment_ms:number;
+}
+// Bounded per-Start operator intent. It names the reviewed saved target and carries no executable, process or plan.
+// `launch_approved` separately permits one launch of the saved recipe when the game is confirmed absent.
+export interface NativeIntent {
+  target_revision:number; target_binding_id:string; target_declaration_identity:string;
+  capture_approved:boolean; input_approved:boolean; launch_approved:boolean; operation:string; visible_postcondition:string; limits:NativeLimits;
+}
 export interface StartRequest {
   package_path:string; inventory_identity:string; package_id:string; schema_identity:string; profile_id:string;
-  values:Record<string,Json>; lane:string; scenario:string; replay_descriptor_path:string|null;
+  values:Record<string,Json>; lane:string; scenario:string; replay_descriptor_path:string|null; native_intent:NativeIntent|null;
 }
+
+// Host-issued Edit lease: the token is bound to one application generation, Workspace session and package source.
+export interface AuthoringRef {workspace:WorkspaceRef; token:string}
+export interface NativeCandidateView {id:string; application_label:string; window_label:string}
+export type NativeSelectionStatus = 'unselected'|'discovering'|'selecting'|'selected'|'capturing'|'expired'|'cancelling'|'cancelled'|'failed';
+export interface NativeSelectionView {
+  owner:AuthoringRef; revision:string; selection_generation:number; selected_id:string|null;
+  candidates:NativeCandidateView[]; status:NativeSelectionStatus; platform:'macos'|'windows'|'unsupported';
+  occupied:boolean; busy:boolean; has_saved_target:boolean; error:Fault|null;
+}
+export interface CaptureCacheReceipt {cached:boolean; error:Fault|null}
+export type AuthoringFileKind = 'manifest'|'source'|'schema'|'profile'|'asset'|'source_map';
+// A declared package file. Binary assets carry `text: null`: listed, never edited as text.
+export interface AuthoringFile {path:string; kind:AuthoringFileKind; text:string|null; bytes:number}
+// One read of the package at an opaque source revision; the next Save or catalog edit must name it.
+export interface AuthoringView {owner:AuthoringRef; package_path:string; package_id:string; revision:string; files:AuthoringFile[]}
+// `committed_revision` is true even when the follow-up read failed and `view` is null.
+export interface AuthoringMutation {owner:AuthoringRef; committed_revision:string; view:AuthoringView|null; refresh_error:Fault|null}
+// Non-evaluating validation of exactly one saved revision; diagnostics may carry path/line/column context.
+export interface AuthoringValidation {owner:AuthoringRef; revision:string; valid:boolean; diagnostics:Fault[]}
+export type CatalogAddKind = 'source'|'profile'|'asset'|'source_map';
+// Host-owned manifest edits. Assets need an ID and format; JSON assets are text with zero dimensions.
+export type CatalogEdit =
+  | {kind:'add'; path:string; file_kind:CatalogAddKind; text:string; id?:string; module?:string; format?:string; width?:number; height?:number}
+  | {kind:'rename'; path:string; destination:string}
+  | {kind:'remove'; path:string};
 
 export interface TargetDeclaration {id:string; window_title:string|null; macos?:{bundle_id:string}}
 export interface TargetLocation {kind:'executable'|'bundle'; path:string}
@@ -105,8 +157,8 @@ export interface TargetInputPolicy {
   pointer_mode:'core_graphics'|'appkit_background'|null; click_hold_ms:number;
 }
 export interface TargetConfiguration {
-  platform:'macos'; game:TargetLocation; launcher:TargetLocation|null; arguments:string[];
-  working_directory:string|null; window_title:string; input:TargetInputPolicy;
+  platform:'macos'|'windows'; game:TargetLocation; launcher:TargetLocation|null; arguments:string[];
+  working_directory:string|null; window_title:string; input:TargetInputPolicy|null;
 }
 export interface ResolvedLocation {path:string; executable:string}
 export interface TargetResolution {game:ResolvedLocation; launcher:ResolvedLocation|null; working_directory:string|null}

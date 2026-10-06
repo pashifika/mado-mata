@@ -33,6 +33,10 @@ pub(super) struct RecoveryContext {
 }
 
 impl RecoveryContext {
+    pub(super) fn package_path(&self) -> &Path {
+        &self.selected.path
+    }
+
     fn check_source_reference(&self, store: &Store) -> Result<(), Fault> {
         let tab = store.tab(&self.selected.internal_name)?;
         if !tab.open {
@@ -199,6 +203,7 @@ impl Application {
             drop(state);
             let selected = Self::inspect_selection(
                 &self.runner,
+                &self.publisher,
                 path,
                 reference.clone(),
                 &previous.internal_name,
@@ -336,6 +341,7 @@ impl Application {
     }
 
     fn check_recovery_inventory(&self, context: &RecoveryContext) -> Result<(), Fault> {
+        self.publisher.check_admission(&context.selected.path)?;
         let current = self.runner.inspect(&context.selected.path)?;
         if current.inventory_identity != context.selected.inventory.identity {
             return Err(Fault::new(

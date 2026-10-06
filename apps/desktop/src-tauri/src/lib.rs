@@ -1,7 +1,10 @@
 pub mod application;
+pub mod authoring;
 pub mod backup;
 pub mod bootstrap;
+pub mod capture_cache;
 pub mod configuration;
+mod identity_migrations;
 pub mod logging;
 pub mod restore;
 pub mod storage;

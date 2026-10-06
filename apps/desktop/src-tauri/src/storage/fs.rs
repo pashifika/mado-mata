@@ -1,5 +1,7 @@
 use super::{MAX_DIRECTORY_ENTRIES, MAX_PROFILE_BYTES, MAX_SETTINGS_BYTES, MAX_TAB_BYTES};
+use crate::configuration::MAX_ENUMERATED;
 use crate::target::MAX_TARGET_BYTES;
+use mado_runtime_comparison::inventory::is_os_metadata_entry;
 use mado_runtime_comparison::model::Fault;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -14,15 +16,25 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 pub(super) fn bounded_entries(directory: &Path) -> Result<Vec<fs::DirEntry>, Fault> {
     check_directory(directory)?;
     let mut entries = Vec::new();
-    for entry in
-        fs::read_dir(directory).map_err(|error| storage("list storage directory", error))?
+    for (index, entry) in fs::read_dir(directory)
+        .map_err(|error| storage("list storage directory", error))?
+        .enumerate()
     {
+        if index >= MAX_ENUMERATED {
+            return Err(limit("storage directory enumeration exceeds its bound"));
+        }
+        let entry = entry.map_err(|error| storage("read storage entry", error))?;
+        if is_os_metadata_entry(&entry.file_name(), &entry)
+            .map_err(|error| storage("inspect storage metadata", error))?
+        {
+            continue;
+        }
         if entries.len() >= MAX_DIRECTORY_ENTRIES - 1 {
             return Err(limit(
                 "storage directory has too many entries; retain space for an atomic write",
             ));
         }
-        entries.push(entry.map_err(|error| storage("read storage entry", error))?);
+        entries.push(entry);
     }
     Ok(entries)
 }
@@ -246,6 +258,7 @@ pub(crate) fn write_atomic(
     check_directory(directory)?;
     let maximum = match destination.file_name().and_then(|name| name.to_str()) {
         Some("settings.json") => MAX_SETTINGS_BYTES,
+        Some("identity-migrations.config") => crate::identity_migrations::MAX_LEDGER_BYTES,
         Some("tab.config") => MAX_TAB_BYTES,
         Some("target.config") => MAX_TARGET_BYTES,
         _ => MAX_PROFILE_BYTES,
