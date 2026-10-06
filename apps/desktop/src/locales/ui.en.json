@@ -284,7 +284,7 @@
     "active": "Save, Check and Remove are unavailable during an active run or OCR Check. Draft edits and navigation do not alter the operation.",
     "privacy": "Paths and literal arguments are private local configuration, not portable profile values. Do not enter credentials or secrets; there is no automatic secret detection.",
     "configuration": "Local target configuration",
-    "requiredFields": "Required: game kind and path, window title, input route, focus policy and click hold. A separate launcher also needs its kind and path; process-directed input needs a pointer mode. Check and Save stay disabled until the configuration is valid.",
+    "requiredFields": "Required: game kind and path, and exact window title. For capture-only use, leave all input fields blank. To configure input, complete route, focus policy and click hold; process-directed input also needs a pointer mode. A separate launcher needs its kind and path. Check and Save stay disabled until the configuration is valid.",
     "game": "Actual game",
     "gameKind": "Game location kind",
     "gamePath": "Game absolute path",
