@@ -21,6 +21,8 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 pub const MAX_FILES: usize = 4096;
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_ENUMERATED: usize = 16_384;
+pub(crate) const HISTORICAL_LEDGER: &str = "identity-migrations.config";
+pub(crate) const MAX_LEDGER_BYTES: usize = 4 * 1024 * 1024;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,7 +99,7 @@ impl Kind {
             Self::Settings => MAX_SETTINGS_BYTES,
             Self::Tab => MAX_TAB_BYTES,
             Self::Package | Self::LegacyProfile => MAX_PROFILE_BYTES,
-            Self::IdentityMigrations => crate::identity_migrations::MAX_LEDGER_BYTES,
+            Self::IdentityMigrations => MAX_LEDGER_BYTES,
         }
     }
 }

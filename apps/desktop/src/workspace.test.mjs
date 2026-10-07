@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyInvalidatedViews,applyRecoveryMutation,applyWorkspaceView,approveNative,bindSelection,busy,chooseLane,clearNativeApproval,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,editNativeReview,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
+import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyInvalidatedViews,applyRecoveryMutation,applyWorkspaceView,approveNative,bindSelection,busy,chooseLane,clearNativeApproval,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,editNativeReview,hasWorkspaceEdits,importProfileCommand,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
 import {LocalFault} from './i18n.ts';
 import {currentRecoveryDraft,editRecovery,issuePath,readRecoveryDraft,recoveryIssue,recoveryState,recoveryTicket,selectRecovery} from './recovery.ts';
 import {optionPath,readDraft} from './state.ts';
@@ -118,6 +118,86 @@ test('a catalog from one Tab never reaches another Tab bound to the same package
   assert.equal(beta.bound.selectedId,'P');
   assert.equal(beta.notice,null);
 });
+
+// UI sequencing only: these typed replies do not stand in for real Store publication/cleanup evidence.
+const importedXid='00000000000000000000';
+const unchangedXid='0000000000000000000g';
+const importCleanupFault={category:'Storage',message:'remove completed import marker: permission denied',
+  context:{path:'/data/.restore-completion',profile_id:importedXid,configuration_installed:true,cleanup_incomplete:true,pending_restore:true}};
+const importCatalogFault={category:'RestorePending',message:'configuration operation is pending',context:{path:'/data/.restore-journal'}};
+
+for (const {scenario,importFault,catalogFault,notice} of [
+  {scenario:'a partial durable import whose cleanup blocks catalog refresh',importFault:importCleanupFault,catalogFault:importCatalogFault,notice:'profilesImportPartial'},
+  {scenario:'a successful import followed by an unreadable catalog',importFault:null,catalogFault:unreadable,notice:'profilesImported'},
+]) {
+  test(`${scenario} publishes actual IDs and attributed faults before the catalog settles`,async()=>{
+    let list=sameSourceTabs();
+    list=applyIfCurrent(list,{id:'a',revision:1},item=>({...updateBound(item,bound=>editDraft(selectProfile(bound,'P'),{count:'8'})),busy:{key:'importingProfiles'}}));
+    const before=list[0];
+    const other=list[1];
+    const result={imported:[importedXid],unchanged:[unchangedXid],fault:importFault};
+    const events=[];
+    let settleCatalog;
+    const pending=importProfileCommand(
+      async()=>result,
+      update=>{list=applyIfCurrent(list,{id:'a',revision:1},update);events.push('published');},
+      ()=>{events.push('catalog');return new Promise(resolve=>{settleCatalog=resolve;});},
+    );
+    await Promise.resolve();
+    assert.deepEqual(events,['published','catalog']);
+    assert.equal(list[0].legacyImport,result);
+    assert.deepEqual(list[0].notice,{key:notice,args:[1,1]});
+    assert.equal(list[0].busy,before.busy);
+    assert.equal(list[1],other);
+    settleCatalog({profiles:[],profiles_error:catalogFault});
+    list=applyCommand(list,{id:'a',revision:1},await pending);
+    assert.deepEqual(list[0].legacyImport.imported,[importedXid]);
+    assert.deepEqual(list[0].legacyImport.unchanged,[unchangedXid]);
+    assert.equal(list[0].legacyImport.fault,importFault);
+    assert.equal(list[0].bound.profilesError,catalogFault);
+    assert.equal(list[0].bound.profiles,before.bound.profiles);
+    assert.deepEqual(list[0].bound.draft,{count:'8'});
+    assert.equal(list[0].bound.selectedId,'P');
+    assert.equal(list[0].bound.draftRevision,before.bound.draftRevision);
+    assert.equal(list[1],other);
+  });
+}
+
+test('a rejected follow-up read cannot erase an already published Import outcome',async()=>{
+  let list=sameSourceTabs();
+  const result={imported:[importedXid],unchanged:[unchangedXid],fault:importCleanupFault};
+  await assert.rejects(importProfileCommand(
+    async()=>result,
+    update=>{list=applyIfCurrent(list,{id:'a',revision:1},update);},
+    async()=>{throw importCatalogFault;},
+  ),error=>error===importCatalogFault);
+  assert.equal(list[0].legacyImport,result);
+  assert.equal(list[0].legacyImport.fault.context.profile_id,importedXid);
+});
+
+for (const {scenario,retire} of [
+  {scenario:'closed',retire:list=>closeWorkspace(list,'a')},
+  {scenario:'rebound',retire:list=>[bindSelection(list[0],selection('a',2,{packageId:'shared',profiles:[shared]})),list[1]]},
+  {scenario:'reopened with a new session identity',retire:list=>[workspaceFromView(view('a2',{internal:'a',display:'Tab a'})),list[1]]},
+]) {
+  test(`an Import reply for a ${scenario} owner cannot publish its outcome or catalog into another session`,async()=>{
+    const original=sameSourceTabs();
+    let list=original;
+    let answer;
+    const pending=importProfileCommand(
+      ()=>new Promise(resolve=>{answer=resolve;}),
+      update=>{list=applyIfCurrent(list,{id:'a',revision:1},update);},
+      async()=>({profiles:[profile(importedXid,'Imported',{count:2},'shared')],profiles_error:null}),
+    );
+    list=retire(list);
+    const retired=list;
+    answer({imported:[importedXid],unchanged:[],fault:importCleanupFault});
+    list=applyCommand(list,{id:'a',revision:1},await pending);
+    assert.equal(list,retired);
+    assert.equal(list.find(item=>item.id==='b'),original[1]);
+    assert.ok(list.every(item=>item.legacyImport===null));
+  });
+}
 
 for (const {scenario,localName,expectedName} of [
   {scenario:'an unedited name follows the rename',localName:'Review',expectedName:'Reviewed again'},

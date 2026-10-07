@@ -37,6 +37,7 @@ pub struct BootstrapStatus {
     pub settings: Option<Settings>,
     pub application_available: bool,
     pub pending_restore: bool,
+    pub recovery_supported: bool,
     pub catalog: Option<WorkspaceCatalog>,
 }
 
@@ -167,6 +168,7 @@ impl Bootstrap {
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned()),
             pending_restore: state.pending_restore,
+            recovery_supported: false,
             catalog: None,
         };
         drop(state);
@@ -202,6 +204,22 @@ impl Bootstrap {
                     }
                 }
                 Err(_) => {}
+            }
+        }
+        if status.pending_restore {
+            if let Ok(root) = &self.root {
+                match restore::check_recovery(root) {
+                    Ok(()) => status.recovery_supported = true,
+                    Err(error) => {
+                        if status
+                            .fault
+                            .as_ref()
+                            .is_none_or(|fault| fault.category == "RestorePending")
+                        {
+                            status.fault = Some(error);
+                        }
+                    }
+                }
             }
         }
         status
@@ -283,7 +301,7 @@ impl Bootstrap {
                     "restore",
                     Fault::new(
                         "RestorePending",
-                        "An interrupted configuration operation must be completed or rolled back",
+                        "An interrupted configuration operation blocks ordinary admission",
                     ),
                 );
                 return;
@@ -312,11 +330,6 @@ impl Bootstrap {
                 return;
             }
         };
-        if let Err(error) = crate::identity_migrations::migrate(root) {
-            lock(&self.state).pending_restore = restore::pending(root).unwrap_or(true);
-            self.fail("identity_migration", error);
-            return;
-        }
         if self.closing.load(Ordering::Acquire) {
             return;
         }
@@ -587,6 +600,7 @@ impl Bootstrap {
                 "There is no interrupted restore to recover",
             ));
         }
+        restore::check_recovery(root)?;
         self.retire(discard)?;
         #[cfg(not(test))]
         let recover_configuration = restore::recover;
@@ -672,10 +686,7 @@ fn import_legacy_with(
         ));
     }
     let files = legacy_files(source)?;
-    let normalized = crate::identity_migrations::normalize_restore(
-        configuration::Capture::from_files(files.clone(), true)?,
-        &configuration::Capture::from_files(BTreeMap::new(), false)?,
-    )?;
+    let captured = configuration::Capture::from_files(files.clone(), true)?;
     let parent = destination
         .parent()
         .ok_or_else(|| Fault::new("LegacyImport", "Destination has no parent"))?;
@@ -709,10 +720,10 @@ fn import_legacy_with(
         .create(&stage)
         .map_err(|error| Fault::new("LegacyImport", error.to_string()))?;
     let result = (|| {
-        for (relative, bytes) in &normalized.files {
+        for (relative, bytes) in &files {
             let path = stage.join(relative);
             storage::private_directory(path.parent().expect("known contained path"))?;
-            storage::write_atomic(&path, bytes, configuration::publish_no_replace)?;
+            configuration::write_private(&path, bytes)?;
         }
         staged();
         if legacy_files(source)? != files {
@@ -722,7 +733,7 @@ fn import_legacy_with(
             ));
         }
         let mut directories = std::collections::BTreeSet::new();
-        for relative in normalized.files.keys() {
+        for relative in files.keys() {
             let mut parent = stage.join(relative);
             while parent.pop() && parent.starts_with(&stage) {
                 directories.insert(parent.clone());
@@ -731,7 +742,7 @@ fn import_legacy_with(
         for directory in directories.iter().rev() {
             configuration::sync_directory(directory)?;
         }
-        if configuration::capture(&stage)? != normalized {
+        if configuration::capture(&stage)? != captured {
             return Err(Fault::new(
                 "LegacyImport",
                 "Staged historical configuration changed before publication",
@@ -1494,4 +1505,4 @@ mod tests {
 }
 
 #[cfg(test)]
-mod migration_tests;
+mod cutover_tests;

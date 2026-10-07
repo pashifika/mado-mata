@@ -202,6 +202,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           </div>
           <details className="legacy-import"><summary>{t.run.legacyHeading}</summary>
             <p className="field-help">{t.run.legacyHelp}</p>
+            <p className="field-help">{t.bootstrap.converterHelp}</p>
             <div className="button-row"><button id="import-legacy-profiles" disabled={locked} onClick={handlers.importLegacy}>{t.run.legacyImport}</button></div>
             {legacy && <dl className="run-identity">
               <dt>{t.run.legacyImported}</dt><dd>{legacy.imported.length ? legacy.imported.join(', ') : t.run.legacyNone}</dd>

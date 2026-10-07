@@ -544,8 +544,7 @@ impl TargetRecord {
             ));
         }
         if let Some(binding) = &self.binding {
-            validate_id(&binding.id)
-                .map_err(|_| configuration_fault("id", "invalid target binding identity"))?;
+            validate_id(&binding.id).map_err(|fault| configuration_fault("id", &fault.message))?;
             if binding.package_id != self.package_id {
                 return Err(Fault::new(
                     "TargetOwner",

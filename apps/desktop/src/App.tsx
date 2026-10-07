@@ -30,7 +30,7 @@ import Select from './components/Select.tsx';
 import SettingsDialog from './settings/SettingsDialog.tsx';
 import WorkspaceSwitcher from './components/WorkspaceSwitcher.tsx';
 import type {WorkspaceOption} from './components/WorkspaceSwitcher.tsx';
-import {INITIAL_BOOTSTRAP, PollGate, initialSettings, reconstructed, reduceBootstrap, surface} from './bootstrap.ts';
+import {INITIAL_BOOTSTRAP, PollGate, initialSettings, reconstructed, recoveryBlock, reduceBootstrap, surface} from './bootstrap.ts';
 import type {Admission, BootstrapAction} from './bootstrap.ts';
 import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards} from './notifications.ts';
 import type {Card, CardStack} from './notifications.ts';
@@ -40,7 +40,7 @@ import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from '.
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {applyCatalogMutation, applyRecognitionMutation, applyRefresh, applySave, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, saveBlock, saveTicket, selectFile, selectRecognition, undoFile, validationTicket} from './authoring.ts';
 import type {AuthoringSession} from './authoring.ts';
-import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, approveNative, busy, clearNativeApproval, closeWorkspace, commandValues, deriveBound, editNativeReview, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
+import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, approveNative, busy, clearNativeApproval, closeWorkspace, commandValues, deriveBound, editNativeReview, hasWorkspaceEdits, importProfileCommand, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
 import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
 import type {TargetOperation, TargetPickerField, TargetPickerTicket, TargetState} from './target.ts';
@@ -827,12 +827,11 @@ export default function App() {
       },
       importLegacy: () => {
         if (locked) return;
-        void runCommand(origin, 'importingProfiles', async () => {
-          const result = await invoke<LegacyImport>('import_legacy_profiles', {workspace: ref});
-          const catalog = await readProfiles(ref);
-          return {catalog, update: item => ({...item, legacyImport: result,
-            notice: {key: result.fault ? 'profilesImportPartial' : 'profilesImported', args: [result.imported.length, result.unchanged.length]}})};
-        }).then(() => bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false));
+        void runCommand(origin, 'importingProfiles', () => importProfileCommand(
+          () => invoke<LegacyImport>('import_legacy_profiles', {workspace:ref}),
+          update => setWorkspaces(list => applyIfCurrent(list, origin, update)),
+          () => readProfiles(ref),
+        )).then(() => bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false));
       },
       reinspect: () => inspectFor(workspace),
       native: {
@@ -1826,7 +1825,10 @@ export default function App() {
     onRestore: () => void bootstrapAction('restoring', () => invoke<BootstrapStatus>('restore_snapshot', {
       archivePath: bootstrap.restore.archivePath.trim(), receiptGeneration, confirm: bootstrap.restore.confirm, discard: bootstrap.restore.discard,
     }), true),
-    onRecover: (rollback: boolean) => void bootstrapAction('recovering', () => invoke<BootstrapStatus>('recover_restore', {rollback, confirm: bootstrap.restore.recoverConfirm, discard: bootstrap.restore.recoverDiscard}), true),
+    onRecover: (rollback: boolean) => {
+      if (!status || !bootstrap.restore.recoverConfirm || recoveryBlock(status, admission, bootstrap.restore.recoverDiscard) !== null) return;
+      void bootstrapAction('recovering', () => invoke<BootstrapStatus>('recover_restore', {rollback, confirm:bootstrap.restore.recoverConfirm, discard:bootstrap.restore.recoverDiscard}), true);
+    },
     onExit: () => void exitApplication(),
     onDismiss: () => {setConfigurationOpen(false); menuButton.current?.focus();},
   };
