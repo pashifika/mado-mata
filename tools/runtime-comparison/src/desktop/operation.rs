@@ -1033,7 +1033,7 @@ fn prepare_run(
     let mut inventory = Inventory::capture_with_stop(
         Path::new(&request.package_path),
         &manual_plan()?.limits,
-        Some(&control.cancelled),
+        Some(control),
     )?;
     control.check()?;
     evidence.complete();
@@ -1211,8 +1211,7 @@ fn execute_check(
         }
         control.check()?;
         // Package capture remains lane-independent; replay's larger bound covers expanded frames.
-        let inventory =
-            Inventory::capture_with_stop(path, &manual_plan()?.limits, Some(&control.cancelled))?;
+        let inventory = Inventory::capture_with_stop(path, &manual_plan()?.limits, Some(control))?;
         control.check()?;
         if inventory.identity != *expected {
             return Err(Fault::new(
