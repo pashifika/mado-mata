@@ -235,10 +235,25 @@ close, then the same Script in a fresh attempt to establish its own usable-scree
 postcondition. A newer compatible image after any reviewed startup click, complete
 receipts and independent physical cleanup are required; `Ready`, launch acceptance
 and `capture_ready` alone are not recovered usability. Verify a second separately
-reviewed run, default-off no-recovery and normal Stop during recovery. Deterministic
-recognition corpora must exercise the authored predicates, not a Ready echo.
-Missing authority, current geometry/images or a supported launcher recipe remains
-explicitly incomplete. Windows Native Desktop, requested activation, arbitrary
-retries, the broader M0/R6 matrix and release qualification remain out of scope.
-See the [Desktop procedure](../desktop.md#reviewed-macos-native-start)
+reviewed run, default-off no-recovery and normal Stop during recovery. Same-Run
+second-exit acceptance requires another positively identified lifetime exit
+during recovered Workflow, both retained outcomes and no attempt 3 or renewed
+deadline/credits. A freshly reviewed successor is a new Run, not continuation.
+
+Later recovery Stop acceptance must identify the authoritative stage at the
+latch: after OS launch submission before capture-ready, during genuine Readiness
+before Ready, and during active Workflow after independent usability and settled
+work. Preserve admitted launch effects and ownership until settlement. A prior
+UI label or an unresolvable race does not qualify a stage. Use the ordinary
+60/30/30-second tuple and existing limits; no production timing hooks or
+fabricated Native results. Deterministic safety coverage and earlier pre-launch
+Stop evidence do not complete these later-stage Native cases.
+
+Deterministic recognition corpora must exercise the authored predicates, not a
+Ready echo. Missing current authority, geometry/images, stage interception or a
+supported launcher recipe remains explicitly incomplete. Windows Native Desktop,
+requested activation, arbitrary retries, the broader M0/R6 matrix and release
+qualification remain out of scope. See the
+[general Desktop procedure](../desktop.md#reviewed-macos-native-start),
+[ordered six-Run acceptance](../desktop.md#repeated-exits-and-recovery-stage-stop-acceptance)
 and [engine prerequisites](../runtime-native.md).

@@ -2009,6 +2009,88 @@ default-off no-recovery and ordinary Stop during recovery; cover direct and save
 separate-launcher recipes when authorized. Missing authority or recipe leaves that
 acceptance open. These steps do not authorize operations by themselves.
 
+### Repeated exits and recovery-stage Stop acceptance
+
+Bounded macOS acceptance on 2026-10-07 at product revision
+`2c1a79e280eb3d9bf3bc31ef2fdb8d3fa78dd0bf`, with engine revision
+`4b4f3296838a9eecdcb00e9d2bb3121a25cdc240`, completed the six rows below
+in one actual Desktop process using a separately authorized saved launcher and
+CPU OCR environment. Both exits were retained without a third attempt; the fresh
+recovery and final recovery-disabled Runs succeeded. Cross-Workspace Stop was
+observed after accepted recovery launch before capture-ready, during recovered
+Readiness without Workflow admission, and during recovered Workflow after an
+independent usable-screen checkpoint. All attempts settled cleanly without forced
+containment or owned descendants; the admitted game was left running after Stop.
+
+The three Stop-to-visible-terminal upper bounds were 137–203 ms; supervisor-clock
+receipt and admission-closure latencies were each below 7 ms. Each Run retained
+independent target-only checkpoint images and passive observation through
+settlement plus ten seconds.
+Qualification preserved one fresh-recognition refusal without input before the
+successful Workflow-Stop qualification; it was not counted as a measured pass,
+and no predicate, input route or product code was changed to obtain acceptance.
+This is revision-bound primary-OS evidence, not broader Native qualification.
+Deterministic owner, supervisor and startup tests remain separate from actual
+Desktop/OS observations. Reusing this procedure still requires fresh authority.
+
+Use one Desktop process, an isolated private configuration and a fingerprinted
+copy of the useful recognition workflow. Obtain current explicit approval for
+the target, environment, saved recipe, capture/input, independent observation
+and each deliberate normal close; archived approval does not transfer. Recheck
+the exact bound process lifetime immediately before one normal-close request,
+with no forced fallback. Both exits must occur during active Workflow, not
+after Script return, launcher exit or unverified window loss.
+
+Keep the **60/30/30-second** Startup/Readiness/Workflow tuple, at most one
+reviewed recovery, the original **243-second** absolute continuation deadline
+and aggregate **300-frame/64-expanded-event** limits. Recovery cannot refund
+credits or renew the deadline. Qualify genuine recognition and independent
+usable-screen checkpoints before freezing workload/build/environment identities,
+mode options, marker retention and the following ordered matrix:
+
+| Row | Required result |
+| --- | --- |
+| E1: second-exit exhaustion | Normally close attempt 1 after its usable checkpoint while Workflow remains active. After full settlement and one recovery, establish attempt 2 usability and normally close its active Workflow lifetime. Retain both exits; no attempt 3, third child or further recovery launch. |
+| E2: fresh recovery success | After E1's clean settlement, freshly approve a new exit/recovery/usable-screen Run with its own one-credit budget; preserve E1 unchanged. |
+| S1: post-launch Stop | After a real first exit, latch global Stop after the recovered OS launch submission but before capture-ready. Retain the submitted launch and settle owned startup/native/child work without terminating the game. |
+| S2: Readiness Stop | After a real first exit and genuine recovered capture/recognition, latch Stop before Ready. No Workflow work may be admitted afterward. |
+| S3: Workflow Stop | After a real first exit, establish the recovered usable-screen checkpoint and settle guarded work; latch Stop during an authenticated bounded Workflow wait. No automatic continuation follows. |
+| F1: fresh ordinary success | After S3's clean settlement, freshly approve a short recovery-disabled workflow and verify success with independent cleanup and no inherited cancellation or consent. |
+
+For S1–S3, navigate to another Workspace before global Stop. Correlate the
+Run/attempt, actual launch disposition, authenticated stage transitions and
+Stop admission in a common monotonic clock domain, or record clock correlation.
+A UI label before the click, elapsed delay or later screenshot cannot establish
+the stage when Stop latched. Qualify each Stop boundary with at most three
+attempts; retain wrong-stage and failed trials separately. If natural Startup
+cannot be intercepted, S1 remains unverified. Do not add production pause hooks,
+dummy launchers, artificial OS delay or increased limits.
+
+Ordinary Script waits may expose a real boundary: at most five seconds after
+genuine recovered Readiness recognition before returning Ready, or a bounded
+Workflow wait after the usable checkpoint and settled input. Reserve markers
+within existing retention; marker text must not drive host recovery. Preserve
+actual failing recognition frames without weakening predicates or secretly
+resetting the game.
+
+Record Stop request-to-receipt and admission closure separately, each at most
+**500 ms**, and operator Stop-to-visible-terminal at most **one second** for
+clean qualified cases; keep the existing **one-second cleanup/two-second
+containment** gates. Observe focus/cursor over the action interval, retaining
+sampling gaps. Retain independent checkpoint images, both attempt outcomes,
+launch/input/effect distinctions, physical cleanup, zero outstanding owned
+native work and worker/child settlement. Start remains excluded while ownership
+remains; a Stop acknowledgement is not physical cleanup. Already-admitted work
+may return or have an OS effect but must not admit continuation.
+
+Observe through settlement and **ten seconds after terminal** for unexpected
+continuation; that finite window supplements owner accounting, not proof that
+late work is universally impossible. Never advance a row over uncertain,
+forced or incomplete cleanup, restart Desktop within the measured sequence or
+restore approval. Report fresh, inherited, deterministic-only, failed and
+unexecuted evidence separately. These rows do not qualify longer-duration
+recovery, Windows/M0/M2/R6, runtime adoption, release packaging or topic promotion.
+
 ## Logs and retention
 
 Rust diagnostics and explicitly imported Script records share structured event
