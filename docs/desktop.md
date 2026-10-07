@@ -1697,6 +1697,14 @@ fail in-flight or subsequent validation; it never updates captured identities.
 terminal outcome and owned-child cleanup before starting again. A late record
 cannot replace a successor's state. No automatic retry replaces an unsettled run.
 
+After clean success, Script failure or cancellation, explicitly Start the next
+profile without restarting the Desktop. Each Run captures fresh inputs and
+Script state. Inspect its result before another Start replaces that workspace's
+latest outcome. Workspace navigation does not transfer ownership: use the global
+Stop for the active Run, then wait for settlement. An incomplete Native cleanup
+still requires the reconciliation described below; neither a controlled Run nor
+reopening saved references proves physical cleanup.
+
 The UI displays the recorded result status, or the typed error category when no
 result record exists; a timeout or cancellation is not relabeled as a refusal.
 It keeps entry outcome, receipts, cancellation, and cleanup separate. A Stop
@@ -2363,6 +2371,42 @@ Keep package presets valid when changing the schema; do not edit tracked fixture
    Verify independent drafts, card pause/duration, log filters and original
    diagnostic bodies. A synthetic fault checks payload preservation, not actual
    SDK execution. Leave unavailable provider-specific evidence explicitly open.
+
+### Bounded repeated-run acceptance
+
+Use one actual Desktop process, an isolated data root, two Workspaces and a private
+copy of a representative controlled package. Declare distinct A/B decisions and
+receipts, an intentional original-source Script failure after real work, and a
+bounded wait profile. Do not replace the bridge, runner or results with mocks.
+
+1. Run one warm-up cycle: A success, B success, intentional failure, A success,
+   wait/Stop, B success. For Stop, first observe authenticated child work, navigate
+   to the other Workspace and use global Stop while the original Run remains
+   active. Check disabled Start through settlement and no resumed old work.
+2. Freeze workload/build fingerprints, sampling points and numerical
+   hardware-specific memory/latency limits before four measured repetitions:
+   24 Runs, 16 successes, four intentional failures and four cancellations.
+   Separately refuse an invalid profile, repair it through the form and run it;
+   refused admission is not a completed Run.
+3. Retain each result, decision, receipt, cleanup and child/worker settlement
+   before the next Start. Sample quiescent Desktop RSS, available thread/handle
+   counts and owned children consistently; distinguish cold/warm child samples
+   from the long-lived application. Measure Start-to-terminal, Stop admission
+   closure and Stop-to-settlement separately. Record unavailable metrics.
+4. Exercise finite logs within Script limits and verify bounded GUI/file retention,
+   explicit loss counters and independent Stop/results. Keep screenshots outside
+   timed resource trials, or include their overhead in the declared warm-up.
+   Stop on unexpected outcomes or exceeded limits; preserve the failed sequence,
+   diagnose it and identify any repeated scope. Never raise limits after failure.
+5. Close normally after measurement and reopen saved package/profile references.
+   Verify no automatic Run, live session or Native consent is restored.
+
+RSS alone proves neither a leak nor released native ownership. Separately
+authorized Native reuse requires fresh per-Start review, recovery off, current
+recognition and independent usability/physical-cleanup evidence for success,
+success, active-wait Stop and explicit success. Missing authority or recognition
+leaves that gate open. Controlled repetition does not qualify Native reuse,
+longer uninterrupted Runs, Windows native operation or all M4.
 
 ### Recorded-replay acceptance
 
