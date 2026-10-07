@@ -1816,6 +1816,9 @@ fail in-flight or subsequent validation; it never updates captured identities.
 **Stop** addresses the active operation independently of logs. Wait for its
 terminal outcome and owned-child cleanup before starting again. A late record
 cannot replace a successor's state. No automatic retry replaces an unsettled run.
+Package inventory capture checks the active Run's Stop at its cooperative
+filesystem checkpoints, including during Native preflight; it does not interrupt
+an individual blocked filesystem read.
 
 After clean success, Script failure or cancellation, explicitly Start the next
 profile without restarting the Desktop. Each Run captures fresh inputs and

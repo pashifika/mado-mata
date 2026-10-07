@@ -5,13 +5,12 @@ use super::validation::{
 use super::{Inventory, MAX_BYTES, MAX_DEPTH, MAX_FILES, Manifest, invalid, is_os_metadata_entry};
 use crate::host::resolve_options;
 use crate::images::{PayloadBytes, reserve_payload};
-use crate::model::{Fault, Limits};
+use crate::model::{Control, Fault, Limits};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 impl Inventory {
@@ -22,7 +21,7 @@ impl Inventory {
     pub(crate) fn capture_with_stop(
         root: &Path,
         limits: &Limits,
-        stop: Option<&AtomicBool>,
+        stop: Option<&Control>,
     ) -> Result<Self, Fault> {
         let capture = capture_files(root, limits, stop)?;
         inventory_from_capture(capture, limits)
@@ -32,7 +31,7 @@ impl Inventory {
 pub(super) fn capture_files<'a>(
     root: &Path,
     limits: &Limits,
-    stop: Option<&'a AtomicBool>,
+    stop: Option<&'a Control>,
 ) -> Result<Capture<'a>, Fault> {
     capture_files_bounded(root, limits, stop, 1)
 }
@@ -49,7 +48,7 @@ pub(super) fn capture_recovery_files<'a>(
 fn capture_files_bounded<'a>(
     root: &Path,
     limits: &Limits,
-    stop: Option<&'a AtomicBool>,
+    stop: Option<&'a Control>,
     revisions: usize,
 ) -> Result<Capture<'a>, Fault> {
     if limits.snapshot_files == 0
@@ -222,7 +221,7 @@ pub(super) struct Capture<'a> {
     file_limit: usize,
     byte_limit: usize,
     deadline: Instant,
-    stop: Option<&'a AtomicBool>,
+    stop: Option<&'a Control>,
 }
 
 impl Capture<'_> {
@@ -234,11 +233,8 @@ impl Capture<'_> {
     }
 
     fn check(&self) -> Result<(), Fault> {
-        if self.stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
-            return Err(Fault::new(
-                "Cancelled",
-                "Stop requested during inventory capture",
-            ));
+        if let Some(control) = self.stop {
+            control.check()?;
         }
         if Instant::now() >= self.deadline {
             return Err(Fault::new("Timeout", "inventory capture deadline exceeded"));

@@ -48,6 +48,24 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn capture_observes_owner_stop_between_files_before_its_snapshot_deadline() {
+    let fixture = Fixture::new();
+    let owner = std::sync::Arc::new(crate::model::Control::new(&fixture.limits));
+    let attempt = crate::model::Control::for_attempt(owner.clone(), &fixture.limits, true);
+    let mut capture = capture_files(&fixture.root, &fixture.limits, Some(&attempt)).unwrap();
+    owner.cancel();
+    assert_eq!(
+        capture.verify(&fixture.root).unwrap_err().category,
+        "Cancelled"
+    );
+    capture.deadline = Instant::now();
+    assert_eq!(
+        capture.verify(&fixture.root).unwrap_err().category,
+        "Cancelled"
+    );
+}
+
+#[test]
 fn os_metadata_preserves_strict_inventory_draft_and_recovery_identity() {
     let fixture = Fixture::new();
     let original = Inventory::capture(&fixture.root, &fixture.limits).unwrap();

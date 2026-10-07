@@ -97,7 +97,7 @@ fn preparation_stop_never_attempts_to_launch_the_runner() {
         Inventory::capture_with_stop(
             Path::new(&request.package_path),
             &manual_plan().unwrap().limits,
-            Some(&control.cancelled),
+            Some(&control),
         )
         .unwrap_err()
         .category,
