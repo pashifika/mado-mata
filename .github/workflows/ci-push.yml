@@ -32,9 +32,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 tools/ci/select_checks.py
 
-  # Push statuses must not satisfy PR validation when duplicate work is skipped.
+  # The push gate must not publish the PR-required gate context when skipped.
   branch-flow:
-    name: Branch flow (push)
+    name: Branch flow
     needs: dev-push-policy
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
     runs-on: ubuntu-24.04
@@ -47,7 +47,7 @@ jobs:
         run: python3 tools/ci/branch_flow.py
 
   repository:
-    name: Repository, runtime, and desktop core (Linux) (push)
+    name: Repository, runtime, and desktop core (Linux)
     needs: dev-push-policy
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
     runs-on: ubuntu-24.04
@@ -84,7 +84,7 @@ jobs:
           if-no-files-found: warn
 
   runtime-macos:
-    name: Controlled runtime and desktop (macOS arm64) (push)
+    name: Controlled runtime and desktop (macOS arm64)
     needs: dev-push-policy
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
     runs-on: macos-15
@@ -121,7 +121,7 @@ jobs:
           if-no-files-found: warn
 
   runtime-windows:
-    name: Controlled runtime and desktop (Windows) (push)
+    name: Controlled runtime and desktop (Windows)
     needs: dev-push-policy
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
     runs-on: windows-2025

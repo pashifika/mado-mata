@@ -415,8 +415,9 @@ optional lanes. On a confirmed duplicate push, the four jobs and push gate are
 skipped, not reported as successful validation.
 
 All job display names are literal, including skipped jobs. GitHub can expose
-unevaluated name expressions when a job is skipped. The push workflow fixes
-the four mandatory check names with a ` (push)` suffix.
+unevaluated name expressions when a job is skipped. Ordinary job names omit
+event suffixes because GitHub already labels the event in the check display.
+The aggregate gate names remain event-specific.
 Event subscriptions, rather than job-level conditions, isolate the gate names:
 a push/manual run cannot publish the PR-required `CI Gate`, even as a skipped
 check. Policy validates all three workflows, including their event, gate

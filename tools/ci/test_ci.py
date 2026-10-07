@@ -699,6 +699,11 @@ class RepositoryPolicyTests(unittest.TestCase):
                     workflow["jobs"]["gate"]["name"] = other_gate
                     with self.assertRaisesRegex(ValueError, "gate name must be"):
                         check_ci_workflow(workflow, self.manifest["actions"], filename)
+            with self.subTest(workflow=filename, ordinary_job_claims_gate=True):
+                workflow = deepcopy(source)
+                workflow["jobs"]["branch-flow"]["name"] = "CI Gate"
+                with self.assertRaisesRegex(ValueError, "must not claim gate contexts"):
+                    check_ci_workflow(workflow, self.manifest["actions"], filename)
 
     def test_ruleset_rejects_weakened_or_inoperable_protection(self):
         for topic in (False, True):
@@ -877,7 +882,6 @@ class RepositoryPolicyTests(unittest.TestCase):
                 ("if", "${{ needs.dev-push-policy.outputs.skip-checks != 'true' }}"),
                 ("needs", []),
                 ("needs", [SELECTOR_JOB, "gate"]),
-                ("name", "CI Gate"),
             ):
                 with self.subTest(job=name, field=field, value=value):
                     workflow = deepcopy(self.workflow)
