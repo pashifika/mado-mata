@@ -28,12 +28,13 @@ impl OwnedProtocol {
     }
 
     fn start_attempt(source: &str, startup_ms: u64, attempt: u64, native: bool) -> Self {
-        Self::start_case(source, startup_ms, attempt, native, "success", None)
+        Self::start_case(source, startup_ms, 1_000, attempt, native, "success", None)
     }
 
     fn start_case(
         source: &str,
         startup_ms: u64,
+        readiness_ms: u64,
         attempt: u64,
         native: bool,
         scenario: &str,
@@ -50,7 +51,7 @@ impl OwnedProtocol {
         }
         let budgets = NativeBudgets {
             startup_ms,
-            readiness_ms: 1_000,
+            readiness_ms,
             workflow_ms: 1_000,
         };
         plan.limits.duration_ms = budgets.total_ms().unwrap();
@@ -420,6 +421,71 @@ fn real_child_pre_workflow_exit_and_stale_stop_do_not_continue() {
 }
 
 #[test]
+fn recovered_child_stop_in_readiness_or_workflow_settles_without_continuation() {
+    for stage in ["readiness", "workflow"] {
+        let source = r"
+            function awaitStop() {
+                const observation = host.call('observe', {});
+                host.call('release', {id:observation.id});
+                host.call('log', {message:'current-attempt-awaiting-stop'});
+                while (true) { host.call('wait', {duration_ms:10}); }
+            }
+            export function readiness() {
+                if ('BOUNDARY' === 'readiness') awaitStop();
+                return 'Ready';
+            }
+            export function workflow() { awaitStop(); }
+        "
+        .replace("BOUNDARY", stage);
+        let mut child = OwnedProtocol::start_case(&source, 3_000, 5_000, 2, false, "success", None);
+        loop {
+            let event = child.next();
+            if event["event"] == "ScriptLog" && event["message"] == "current-attempt-awaiting-stop"
+            {
+                assert_eq!(event["attempt"], 2);
+                break;
+            }
+            assert_ne!(event["event"], "Terminal", "{stage}: {event}");
+        }
+        child.command(json!({"command":"Stop","run":"startup-protocol","attempt":2}));
+        let (terminal, mut events) = child.finish();
+        // The reader is joined; receipts may follow Terminal without being lost.
+        events.extend(child.events.try_iter());
+        let receipt = events
+            .iter()
+            .find(|event| event["event"] == "StopRequested")
+            .unwrap();
+        assert_eq!(receipt["reason"], "Stop");
+        assert_eq!(receipt["attempt"], 2);
+        assert!(
+            events
+                .iter()
+                .any(|event| event["event"] == "AdmissionClosed")
+        );
+        assert_eq!(terminal["attempt"], 2);
+        assert_eq!(terminal["primary"]["category"], "Cancelled", "{stage}");
+        assert_eq!(terminal["cleanup"]["clean"], true);
+        assert_eq!(
+            terminal["observations"]["workflow_entered"],
+            stage == "workflow"
+        );
+        assert_eq!(terminal["observations"]["accounting"]["complete"], true);
+        assert_eq!(
+            terminal["observations"]["accounting"]["input_uncertain"],
+            false
+        );
+        assert_eq!(
+            terminal["observations"]["accounting"]["expanded_input_events"],
+            0
+        );
+        assert_eq!(terminal["observations"]["dispatches"], 0);
+        for field in ["live_handles", "attempt_owners", "in_flight_native"] {
+            assert_eq!(terminal["observations"][field], 0, "{stage}: {field}");
+        }
+    }
+}
+
+#[test]
 fn old_attempt_startup_reply_cannot_initialize_a_fresh_child() {
     let mut child = OwnedProtocol::start_attempt(
         r"
@@ -469,6 +535,7 @@ fn real_child_partial_and_uncertain_input_never_report_refundable_authority() {
             }
         ",
             3_000,
+            1_000,
             1,
             false,
             scenario,
@@ -505,6 +572,7 @@ fn fresh_child_cannot_spend_beyond_transferred_expanded_event_allowance() {
         }
     ",
         3_000,
+        1_000,
         2,
         false,
         "success",

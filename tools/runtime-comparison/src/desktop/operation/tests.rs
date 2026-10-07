@@ -509,6 +509,259 @@ fn owned_recovery_loop_settles_past_workflow_without_renewing_run_authority() {
 }
 
 #[test]
+fn repeated_exit_and_recovered_stage_stop_keep_run_boundaries() {
+    for boundary in [
+        "second_exit",
+        "before_launch",
+        "after_launch",
+        "readiness",
+        "workflow",
+    ] {
+        let controller = DesktopController::new("unused-controlled".into(), "unused-engine".into());
+        let mut predecessor: Option<String> = None;
+        for fresh_run in [false, true] {
+            let (entered, arrived) = mpsc::sync_channel(1);
+            let (release, resume) = mpsc::sync_channel(1);
+            let limits = crate::desktop::native_limits();
+            let budgets = limits.budgets();
+            let stop = !fresh_run && boundary != "second_exit";
+            let run = controller
+                .reserve(
+                    "run",
+                    Some(budgets.operation_ms(1).unwrap()),
+                    move |run, owner, observer, _, _| {
+                        let mut plan = manual_plan().unwrap();
+                        plan.native_budgets = Some(budgets);
+                        plan.limits.duration_ms = budgets.total_ms().unwrap();
+                        plan.limits.readiness_ms = budgets.readiness_ms;
+                        let mut request = request(&fixture());
+                        request.native_intent = Some(crate::desktop::NativeIntent {
+                            target_revision: 1,
+                            target_binding_id: "controlled-recovery-boundaries".into(),
+                            target_declaration_identity: "controlled-only".into(),
+                            capture_approved: true,
+                            input_approved: true,
+                            launch_approved: true,
+                            max_exit_recoveries: 1,
+                            operation: "Controlled recovery boundary regression".into(),
+                            visible_postcondition: "Owned attempts settle before reuse".into(),
+                            limits,
+                        });
+                        let initial =
+                            Arc::new(Control::for_attempt(Arc::clone(owner), &plan.limits, true));
+                        initial.start_native(budgets, None).unwrap();
+                        let outer = owner.outer_deadline();
+                        let evidence = Evidence::new("run", run, None, None).unwrap();
+                        let mut executions = 0;
+                        let mut launch_admissions = 0;
+                        let result = run_attempts(
+                            owner,
+                            Arc::clone(&initial),
+                            &plan,
+                            &request,
+                            observer,
+                            &evidence,
+                            |attempt, control, remaining| {
+                                executions += 1;
+                                assert!(attempt <= 2, "no third executor or launch");
+                                assert_eq!(control.outer_deadline(), outer);
+                                assert_eq!(owner.outer_deadline(), outer);
+                                assert_eq!(
+                                    remaining,
+                                    Some(if attempt == 1 { (300, 64) } else { (298, 62) })
+                                );
+                                if attempt == 2 {
+                                    assert!(!Arc::ptr_eq(control, &initial));
+                                    assert_eq!(
+                                        owner.admit_recovery().unwrap_err().category,
+                                        "RecoveryRefused"
+                                    );
+                                }
+                                let mut controlled = plan.clone();
+                                controlled.native_budgets = None;
+                                controlled.lane = "controlled".into();
+                                controlled.limits.max_actions = remaining.unwrap().1;
+                                let host = crate::host::Host::new_attempt(
+                                    controlled,
+                                    json!({}),
+                                    Default::default(),
+                                    Arc::clone(control),
+                                    attempt,
+                                )
+                                .unwrap();
+                                assert_eq!(host.snapshot()["observations"], 0);
+                                let mut progress = NativeProgress {
+                                    attempt,
+                                    status: NativeTargetStatus::NotRequested,
+                                    phase: NativePhase::Preflight,
+                                    launch: LaunchDisposition::NotRequested,
+                                };
+                                // The barrier observes the actual owner/Host boundary.
+                                // Launch here is admission only, never an OS submission.
+                                let pause = |progress| {
+                                    evidence.native_progress(progress, observer);
+                                    entered.send(progress).unwrap();
+                                    resume.recv_timeout(Duration::from_secs(5)).unwrap();
+                                };
+                                let primary = (|| -> Result<(), Fault> {
+                                    if attempt == 2 {
+                                        if stop && boundary == "before_launch" {
+                                            pause(progress);
+                                        }
+                                        control.admit_launch()?;
+                                        launch_admissions += 1;
+                                        progress.phase = NativePhase::LaunchSubmission;
+                                        if stop && boundary == "after_launch" {
+                                            pause(progress);
+                                        }
+                                    }
+                                    control.native_transition(1, None)?;
+                                    host.begin_readiness()?;
+                                    progress.status = NativeTargetStatus::CaptureReady;
+                                    progress.phase = NativePhase::Readiness;
+                                    if attempt == 2 && stop && boundary == "readiness" {
+                                        pause(progress);
+                                    }
+                                    host.begin_workflow()?;
+                                    control.native_transition(2, None)?;
+                                    progress.phase = NativePhase::Workflow;
+                                    let observation = host.call("observe", json!({}))?;
+                                    let sequence = host.call(
+                                        "submit",
+                                        json!({"observation":observation,"actions":[
+                                            {"kind":"key_down","key":"A"},
+                                            {"kind":"key_up","key":"A"}
+                                        ]}),
+                                    )?;
+                                    let receipt =
+                                        host.call("settle", json!({"id":sequence["id"]}))?;
+                                    assert_eq!(receipt["status"], "Submitted");
+                                    host.call("release", json!({"id":sequence["id"]}))?;
+                                    host.call("release", json!({"id":observation["id"]}))?;
+                                    if attempt == 2 && (!stop || boundary == "workflow") {
+                                        pause(progress);
+                                    }
+                                    control.check()?;
+                                    if attempt == 1 || !fresh_run {
+                                        host.call("fixture", json!({"event":"confirmed_exit"}))?;
+                                        host.call("observe", json!({}))?;
+                                        panic!("confirmed exit must end the active Workflow");
+                                    }
+                                    Ok(())
+                                })()
+                                .err();
+                                if attempt == 2 && stop {
+                                    assert_eq!(primary.as_ref().unwrap().category, "Cancelled");
+                                    let before = host.snapshot();
+                                    assert_eq!(
+                                        host.call("observe", json!({})).unwrap_err().category,
+                                        "Cancelled"
+                                    );
+                                    assert_eq!(
+                                        host.call("submit", json!({})).unwrap_err().category,
+                                        "Cancelled"
+                                    );
+                                    assert_eq!(
+                                        host.snapshot()["observations"],
+                                        before["observations"]
+                                    );
+                                    assert_eq!(host.snapshot()["dispatches"], before["dispatches"]);
+                                    assert_eq!(host.workflow_entered(), boundary == "workflow");
+                                }
+                                control.settle_native();
+                                let mut record =
+                                    settle_controlled_host(run, attempt, &host, primary);
+                                record["native_preparation"] = json!(progress);
+                                Ok(record)
+                            },
+                        )?;
+                        assert_eq!(executions, 2);
+                        assert_eq!(
+                            launch_admissions,
+                            usize::from(!(stop && boundary == "before_launch"))
+                        );
+                        Ok(result)
+                    },
+                )
+                .unwrap();
+            let progress = arrived.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(progress.attempt, 2);
+            assert_eq!(
+                progress.phase,
+                if fresh_run {
+                    NativePhase::Workflow
+                } else {
+                    match boundary {
+                        "before_launch" => NativePhase::Preflight,
+                        "after_launch" => NativePhase::LaunchSubmission,
+                        "readiness" => NativePhase::Readiness,
+                        _ => NativePhase::Workflow,
+                    }
+                }
+            );
+            let pending = controller.poll();
+            assert_eq!(pending.run.as_deref(), Some(run.as_str()));
+            assert_eq!(pending.native_preparation, Some(progress));
+            assert_eq!(pending.attempts.len(), 1);
+            let original = pending.attempts[0].clone();
+            assert_eq!(original["primary"]["category"], "TargetExited");
+            assert_eq!(original["primary"]["context"]["exit_reason"], "absent");
+            assert_eq!(original["cleanup"]["clean"], true);
+            assert_eq!(original["observations"]["workflow_entered"], true);
+            if let Some(previous) = &predecessor {
+                assert_ne!(previous, &run);
+                assert_eq!(
+                    controller.stop(previous).unwrap_err().category,
+                    "StaleIdentity"
+                );
+            }
+            if stop {
+                controller.stop(&run).unwrap();
+                assert_eq!(controller.poll().state, "stopping");
+            }
+            assert_eq!(
+                controller
+                    .start(request(&fixture()), None)
+                    .unwrap_err()
+                    .category,
+                "RunActive"
+            );
+            release.send(()).unwrap();
+            let terminal = settled(&controller);
+            assert!(terminal.error.is_none(), "{boundary}: {:?}", terminal.error);
+            assert_eq!(terminal.attempts.len(), 2);
+            assert_eq!(terminal.attempts[0], original);
+            let result = terminal.result.unwrap();
+            assert_eq!(result["run"], run);
+            assert_eq!(result["attempt"], 2);
+            assert_eq!(result["recovery_count"], 1);
+            assert_eq!(result["attempts"], json!(terminal.attempts));
+            assert_eq!(result["status"], if fresh_run { "PASS" } else { "FAIL" });
+            if fresh_run {
+                assert!(result["primary"].is_null());
+            } else {
+                assert_eq!(
+                    result["primary"]["category"],
+                    if stop { "Cancelled" } else { "TargetExited" }
+                );
+                if !stop {
+                    assert_eq!(result["primary"]["context"]["exit_reason"], "absent");
+                    assert_eq!(result["observations"]["workflow_entered"], true);
+                }
+            }
+            for attempt in &terminal.attempts {
+                assert_eq!(attempt["run"], run);
+                assert_eq!(attempt["cleanup"]["clean"], true);
+                for field in ["live_handles", "attempt_owners", "in_flight_native"] {
+                    assert_eq!(attempt["observations"][field], 0, "{boundary}: {field}");
+                }
+            }
+            predecessor = Some(run);
+        }
+    }
+}
+
+#[test]
 fn mapped_typescript_exit_survives_bounding_recovery_and_retention() {
     let mut plan = manual_plan().unwrap();
     plan.limits.duration_ms = 30_000;
