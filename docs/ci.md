@@ -58,7 +58,7 @@ The version and integrity sources are:
 | lychee | 0.24.2 | [toolchain.json](../tools/ci/toolchain.json), including host assets and SHA-256 values |
 | PyYAML | 6.0.3 | [requirements.txt](../tools/ci/requirements.txt), hash-pinned Python distributions |
 | Rust | 1.98.1 | [check.py](../tools/ci/check.py), explicit `cargo +1.98.1` |
-| Node.js | 24.18.0 | [check.py](../tools/ci/check.py) and [workflow](../.github/workflows/ci.yml) |
+| Node.js | 24.18.0 | [check.py](../tools/ci/check.py) and [workflows](#hosted-workflow-and-required-gate) |
 | TypeScript | 5.9.3 | [Compiler manifest](../tools/runtime-comparison/compiler/package.json) and [lockfile](../tools/runtime-comparison/compiler/package-lock.json) |
 | Desktop frontend | React 19.3.0, TypeScript 5.9.3, Vite 8.3.0, Tauri API 2.11.1 / CLI 2.11.5 | [App manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json) |
 | Script editor | CodeMirror state 6.7.6, view 6.43.13, language 6.12.4, JavaScript 6.2.5, autocomplete 6.20.3, commands 6.11.1; existing TypeScript 5.9.3 language service | Exact [frontend manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json); trusted ES2020 declarations are bundled by the [build helper](../apps/desktop/build/trusted-libraries.mjs), with no runtime downloads |
@@ -70,7 +70,7 @@ The version and integrity sources are:
 | Application launch library | libc 0.2.189 on Unix; objc2 0.6.4, block2 0.6.2 and objc2-foundation/objc2-app-kit 0.3.2 on macOS | [Library manifest](../crates/application-launch/Cargo.toml) and [lockfile](../crates/application-launch/Cargo.lock); no Desktop or runtime dependency |
 | Shared supervisor/child monotonic deadline | libc 0.2.189 on Unix; windows-sys 0.61.2 with `Win32_System_Performance` on Windows | Default target-scoped dependencies in the [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock); absolute boot-clock transport does not refund child startup |
 | macOS engine startup lifetime guard | objc2 0.6.4, objc2-foundation/objc2-app-kit 0.3.2; shared Unix libc pin above | Optional Objective-C `engine` dependencies in the [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock); read-only selected-process checks, not a capture/input implementation |
-| GitHub Actions | Full commit SHAs | [Workflow](../.github/workflows/ci.yml) and [toolchain.json](../tools/ci/toolchain.json) |
+| GitHub Actions | Full commit SHAs | [Workflows](#hosted-workflow-and-required-gate) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
 CI uses Python 3.13, `ubuntu-24.04`, `macos-15`, and `windows-2025`. The macOS job
@@ -348,9 +348,14 @@ scope and remaining qualification blockers.
 
 ## Hosted workflow and required gate
 
-The [workflow](../.github/workflows/ci.yml) runs on PRs targeting `main` and
-`dev/**`, protected-branch pushes, and manual dispatch. PR events are limited to
-`opened`, `synchronize`, `reopened`, and `ready_for_review`. The workflow does
+Hosted checks use three event-exclusive workflows:
+
+- [CI](../.github/workflows/ci.yml): PRs targeting `main` and `dev/**`.
+- [CI (push)](../.github/workflows/ci-push.yml): pushes to `main` and `dev/**`.
+- [CI (manual)](../.github/workflows/ci-manual.yml): manual dispatch.
+
+PR events are limited to `opened`, `synchronize`, `reopened`, and
+`ready_for_review`. The PR workflow does
 not subscribe to `edited`: changing a PR title, description, or task-list
 checkbox creates no new CI workflow run or skipped checks. A job-level `if`
 would only skip jobs after a workflow run already exists, so it is not a
@@ -409,11 +414,17 @@ events); its output does not excuse skipped mandatory results. There are no
 optional lanes. On a confirmed duplicate push, the four jobs and push gate are
 skipped, not reported as successful validation.
 
-All four check names gain ` (push)` only on push events so their skipped statuses
-cannot satisfy PR checks. A push/manual gate result on the same SHA cannot
-replace the PR-required `CI Gate`. The aggregate reads `NEEDS_JSON` as data and
-requires exactly the selector plus the four mandatory job IDs; keep that set
-synchronized with the workflow when adding a lane.
+All job display names are literal, including skipped jobs. GitHub can expose
+unevaluated name expressions when a job is skipped. The push workflow fixes
+the four mandatory check names with a ` (push)` suffix.
+Event subscriptions, rather than job-level conditions, isolate the gate names:
+a push/manual run cannot publish the PR-required `CI Gate`, even as a skipped
+check. Policy validates all three workflows, including their event, gate
+context, permissions, pinned commands and mandatory dependencies.
+
+The aggregate reads `NEEDS_JSON` as data and requires exactly the selector plus
+the four mandatory job IDs; keep that set synchronized across all three
+workflows when adding a lane.
 
 Branch flow reads `GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`, and
 `GITHUB_REPOSITORY`; non-PR contexts also use `GITHUB_REF`. PR metadata is JSON
@@ -421,11 +432,11 @@ data, never shell source. Non-PR runs explicitly validate their event/ref contex
 instead of silently skipping the mandatory job. The accepted route policy is
 owned by [CONTRIBUTING.md](../CONTRIBUTING.md#select-the-route-before-implementation).
 
-The workflow uses read-only repository authority, credential-free checkout,
+The workflows use read-only repository authority, credential-free checkout,
 pinned actions/tools, bounded jobs, and event-scoped concurrency cancellation.
 PR metadata edits create no run and therefore cannot cancel or supersede running
 or pending validation. New commits still supersede older runs for the same PR.
-It does not use secrets, administration tokens, `pull_request_target`, private
+They do not use secrets, administration tokens, `pull_request_target`, private
 Rasen access, or self-hosted interactive desktops. Superseding one PR run must
 not cancel another PR's run or turn a cancellation into success.
 Local macOS GUI acceptance is separate: exercise Loading, Setup, Recovery, named

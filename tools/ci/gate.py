@@ -19,10 +19,6 @@ GATE_NAMES = {
     "push": "CI Gate (push)",
     "workflow_dispatch": "CI Gate (manual)",
 }
-GATE_NAME_EXPRESSION = (
-    "${{ github.event_name == 'pull_request' && 'CI Gate' || "
-    "github.event_name == 'push' && 'CI Gate (push)' || 'CI Gate (manual)' }}"
-)
 
 
 def evaluate(needs):
