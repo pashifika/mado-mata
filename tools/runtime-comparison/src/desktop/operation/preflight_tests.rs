@@ -46,6 +46,7 @@ impl Package {
             capture_approved: true,
             input_approved: true,
             launch_approved: true,
+            max_exit_recoveries: 0,
             operation: "One reviewed workflow".into(),
             visible_postcondition: "Reviewed result".into(),
             limits: native_limits(),
@@ -78,12 +79,15 @@ fn refused_before_resolve(
                     native: (),
                 })
             },
-            move |_, _, _, _| {
-                called.store(true, Ordering::Release);
-                Err(Fault::new(
-                    "UnexpectedResolution",
-                    "preflight admitted target resolution",
-                ))
+            move |_, _| {
+                let called = Arc::clone(&called);
+                move |_: &Control, _: &dyn Fn(NativeProgress), _: &dyn Fn() -> Result<(), Fault>| {
+                    called.store(true, Ordering::Release);
+                    Err(Fault::new(
+                        "UnexpectedResolution",
+                        "preflight admitted target resolution",
+                    ))
+                }
             },
         )
         .unwrap();
@@ -92,6 +96,7 @@ fn refused_before_resolve(
     assert_eq!(
         view.native_preparation,
         Some(NativeProgress {
+            attempt: 1,
             status: NativeTargetStatus::NotRequested,
             phase: NativePhase::Preflight,
             launch: LaunchDisposition::NotRequested,
@@ -284,6 +289,7 @@ fn late_launch_settlement_keeps_owner_and_disposition_despite_stop_and_full_prog
                 }
                 evidence.native_progress(
                     NativeProgress {
+                        attempt: 1,
                         status: NativeTargetStatus::Pending,
                         phase: NativePhase::LaunchSubmission,
                         launch: LaunchDisposition::Accepted,
@@ -309,6 +315,7 @@ fn late_launch_settlement_keeps_owner_and_disposition_despite_stop_and_full_prog
     release.send(()).unwrap();
     let terminal = settled(&controller);
     let accepted = NativeProgress {
+        attempt: 1,
         status: NativeTargetStatus::Pending,
         phase: NativePhase::LaunchSubmission,
         launch: LaunchDisposition::Accepted,
@@ -335,6 +342,7 @@ fn late_child_progress_cannot_erase_capture_readiness_or_the_launch_disposition(
     let mut state = State::new();
     state.run = Some("owner".into());
     let pending = NativeProgress {
+        attempt: 1,
         status: NativeTargetStatus::Pending,
         phase: NativePhase::WaitingForWindow,
         launch: LaunchDisposition::Accepted,
@@ -350,6 +358,7 @@ fn late_child_progress_cannot_erase_capture_readiness_or_the_launch_disposition(
         "phase":"workflow","launch":"not_requested"}),
     );
     let ready = NativeProgress {
+        attempt: 1,
         status: NativeTargetStatus::CaptureReady,
         phase: NativePhase::Workflow,
         launch: LaunchDisposition::Accepted,
@@ -367,12 +376,51 @@ fn late_child_progress_cannot_erase_capture_readiness_or_the_launch_disposition(
 }
 
 #[test]
+fn old_attempt_progress_cannot_replace_fresh_preparation_or_reopen_stopped_owner() {
+    let mut state = State::new();
+    state.run = Some("owner".into());
+    state.phase = "running";
+    state.progress(
+        json!({"event":"NativePreparation","app_run":"owner","attempt":1,
+        "status":"capture_ready","phase":"settling","launch":"accepted"}),
+    );
+    assert_eq!(state.phase, "recovering");
+    state.progress(
+        json!({"event":"NativePreparation","app_run":"owner","attempt":2,
+        "status":"not_requested","phase":"preflight","launch":"not_requested"}),
+    );
+    let fresh = state.native_preparation;
+    state.progress(
+        json!({"event":"NativePreparation","app_run":"owner","attempt":1,
+        "status":"capture_ready","phase":"workflow","launch":"accepted"}),
+    );
+    assert_eq!(state.native_preparation, fresh);
+    assert_eq!(fresh.unwrap().attempt, 2);
+    assert_eq!(fresh.unwrap().launch, LaunchDisposition::NotRequested);
+    state.phase = "stopping";
+    state.progress(
+        json!({"event":"NativePreparation","app_run":"owner","attempt":2,
+        "status":"pending","phase":"target_discovery","launch":"not_requested"}),
+    );
+    assert_eq!(state.phase, "stopping");
+    state.log(json!({"run":"owner","attempt":1,"sequence":1,"message":"old"}));
+    state.log(json!({"run":"owner","attempt":2,"sequence":1,"message":"fresh"}));
+    assert_eq!(
+        state.logs.len(),
+        2,
+        "fresh log sequences have a new namespace"
+    );
+}
+
+#[test]
 fn spent_preparation_budget_cannot_be_restarted_by_the_supervisor() {
     let plan = manual_plan().unwrap();
     let control = Control::with_deadline(&plan.limits, Instant::now() - Duration::from_millis(1));
     let (progress, _) = mpsc::sync_channel(PROGRESS_CAPACITY);
     let (logs, _) = mpsc::sync_channel(LOG_CAPACITY);
     let observer = Observer {
+        native_preparation: Default::default(),
+        attempts: Default::default(),
         progress,
         logs,
         dropped_logs: Arc::new(AtomicU64::new(0)),
@@ -382,6 +430,7 @@ fn spent_preparation_budget_cannot_be_restarted_by_the_supervisor() {
         &plan,
         &crate::desktop::test_support::fixture(),
         crate::runner::PreparedExecution {
+            identity: None,
             control: &control,
             modules: None,
             images: None,

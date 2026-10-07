@@ -30,7 +30,7 @@ import Select from './components/Select.tsx';
 import SettingsDialog from './settings/SettingsDialog.tsx';
 import WorkspaceSwitcher from './components/WorkspaceSwitcher.tsx';
 import type {WorkspaceOption} from './components/WorkspaceSwitcher.tsx';
-import {INITIAL_BOOTSTRAP, PollGate, initialSettings, reconstructed, reduceBootstrap, surface} from './bootstrap.ts';
+import {INITIAL_BOOTSTRAP, PollGate, initialSettings, reconstructed, recoveryBlock, reduceBootstrap, surface} from './bootstrap.ts';
 import type {Admission, BootstrapAction} from './bootstrap.ts';
 import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards} from './notifications.ts';
 import type {Card, CardStack} from './notifications.ts';
@@ -40,14 +40,14 @@ import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from '.
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {applyCatalogMutation, applyRecognitionMutation, applyRefresh, applySave, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, saveBlock, saveTicket, selectFile, selectRecognition, undoFile, validationTicket} from './authoring.ts';
 import type {AuthoringSession} from './authoring.ts';
-import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, approveNative, busy, clearNativeApproval, closeWorkspace, commandValues, deriveBound, editNativeReview, hasWorkspaceEdits, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
+import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, approveNative, busy, clearNativeApproval, closeWorkspace, commandValues, deriveBound, editNativeReview, hasWorkspaceEdits, importProfileCommand, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
 import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
 import type {TargetOperation, TargetPickerField, TargetPickerTicket, TargetState} from './target.ts';
 import type {AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, BootstrapStatus, CatalogEdit, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetApplicationResponse, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
-import type {CaptureCacheReceipt, NativeLimits, NativeSelectionView} from './types.ts';
+import type {CaptureCacheReceipt, NativeCapability, NativeSelectionView} from './types.ts';
 
-const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0, workspace_id: null, workspace_revision: null, native_preparation: null};
+const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0, workspace_id: null, workspace_revision: null, native_preparation: null, attempts: []};
 const EMPTY_FILTER: LogFilter = {text: '', level: ''};
 const EMPTY_CREATE: CreateDraft = {internalName: '', displayName: ''};
 
@@ -128,7 +128,7 @@ export default function App() {
   const [closing, setClosing] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   // One host read of the platform's Native policy; until it answers Native stays unavailable.
-  const [nativeCapability, setNativeCapability] = useState<{limits: NativeLimits | null; error: Fault | null}>({limits: null, error: null});
+  const [nativeCapability, setNativeCapability] = useState<{policy: NativeCapability | null; error: Fault | null}>({policy: null, error: null});
   // Saved settings win once loaded; before that the temporary bootstrap presentation applies and persists nothing.
   const locale = settings?.locale ?? bootstrap.presentation;
   const t = messages[locale].app;
@@ -214,7 +214,7 @@ export default function App() {
   const savedEnvironment = settings?.ocr_environment ?? null;
   const defaultPackagesRoot = status?.default_packages_root ?? '';
   const packagesRoot = settings?.packages_root ?? defaultPackagesRoot;
-  const derived = useMemo(() => Object.fromEntries(workspaces.filter(isBound).map(workspace => [workspace.id, deriveBound(workspace.bound, savedEnvironment, locale, nativeCapability.limits)])) as Record<string, Derived>, [workspaces, savedEnvironment, locale, nativeCapability.limits]);
+  const derived = useMemo(() => Object.fromEntries(workspaces.filter(isBound).map(workspace => [workspace.id, deriveBound(workspace.bound, savedEnvironment, locale, nativeCapability.policy)])) as Record<string, Derived>, [workspaces, savedEnvironment, locale, nativeCapability.policy]);
   const authoringWorkerPending = authoring?.pending?.kind === 'recognition_trial' || authoring?.pending?.kind === 'validate';
   const nativeOccupied = nativeSelection?.occupied === true;
   const active = starting !== null || busy(view.state) || authoringWorkerPending || nativeSelection?.busy === true;
@@ -422,9 +422,9 @@ export default function App() {
     void bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), true);
   }, []);
   useEffect(() => {
-    invoke<NativeLimits | null>('native_run_limits').then(
-      limits => setNativeCapability({limits: limits ?? null, error: null}),
-      cause => setNativeCapability({limits: null, error: fault(cause)}));
+    invoke<NativeCapability | null>('native_run_limits').then(
+      policy => setNativeCapability({policy, error: null}),
+      cause => setNativeCapability({policy: null, error: fault(cause)}));
   }, []);
 
   // While the host is still loading its root, re-read the status with one timer at a time; `bootstrapBusy` keeps
@@ -827,17 +827,16 @@ export default function App() {
       },
       importLegacy: () => {
         if (locked) return;
-        void runCommand(origin, 'importingProfiles', async () => {
-          const result = await invoke<LegacyImport>('import_legacy_profiles', {workspace: ref});
-          const catalog = await readProfiles(ref);
-          return {catalog, update: item => ({...item, legacyImport: result,
-            notice: {key: result.fault ? 'profilesImportPartial' : 'profilesImported', args: [result.imported.length, result.unchanged.length]}})};
-        }).then(() => bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false));
+        void runCommand(origin, 'importingProfiles', () => importProfileCommand(
+          () => invoke<LegacyImport>('import_legacy_profiles', {workspace:ref}),
+          update => setWorkspaces(list => applyIfCurrent(list, origin, update)),
+          () => readProfiles(ref),
+        )).then(() => bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false));
       },
       reinspect: () => inspectFor(workspace),
       native: {
         edit: (field, value) => edit(current => editNativeReview(current, field, value)),
-        approve: (field, value) => edit(current => approveNative(current, field, value, savedEnvironment, nativeCapability.limits)),
+        approve: (field, value) => edit(current => approveNative(current, field, value, savedEnvironment, nativeCapability.policy)),
       },
       recovery: recoveryHandlers(workspace),
       start: () => void startRun(workspace),
@@ -1826,7 +1825,10 @@ export default function App() {
     onRestore: () => void bootstrapAction('restoring', () => invoke<BootstrapStatus>('restore_snapshot', {
       archivePath: bootstrap.restore.archivePath.trim(), receiptGeneration, confirm: bootstrap.restore.confirm, discard: bootstrap.restore.discard,
     }), true),
-    onRecover: (rollback: boolean) => void bootstrapAction('recovering', () => invoke<BootstrapStatus>('recover_restore', {rollback, confirm: bootstrap.restore.recoverConfirm, discard: bootstrap.restore.recoverDiscard}), true),
+    onRecover: (rollback: boolean) => {
+      if (!status || !bootstrap.restore.recoverConfirm || recoveryBlock(status, admission, bootstrap.restore.recoverDiscard) !== null) return;
+      void bootstrapAction('recovering', () => invoke<BootstrapStatus>('recover_restore', {rollback, confirm:bootstrap.restore.recoverConfirm, discard:bootstrap.restore.recoverDiscard}), true);
+    },
     onExit: () => void exitApplication(),
     onDismiss: () => {setConfigurationOpen(false); menuButton.current?.focus();},
   };
@@ -2023,7 +2025,7 @@ export default function App() {
     : starting ? ui.operation(starting.kind === 'check' ? 'environment_check' : 'run') : ui.operation(view.operation);
   // The host's typed preparation state of the shown operation; nothing here is read from log or milestone wording.
   const preparation = starting || awaitingAuthoringWorker ? null : view.native_preparation ?? null;
-  const stripDetail = preparation && `${ui.run.nativeStatuses[preparation.status]} · ${ui.run.nativePhases[preparation.phase]}${preparation.launch === 'not_requested' ? '' : ` · ${ui.run.launchDispositions[preparation.launch]}`}`;
+  const stripDetail = preparation && `${ui.result.attempt(preparation.attempt)} · ${ui.run.nativeStatuses[preparation.status]} · ${ui.run.nativePhases[preparation.phase]}${preparation.launch === 'not_requested' ? '' : ` · ${ui.run.launchDispositions[preparation.launch]}`}`;
   const editVisible = selected !== undefined && selected.id === leaseOwnerId && selected.page === 'edit' && authoring !== null;
   // Every surface, dialogs included, keeps the operation's Stop and the Edit owner's Return to Edit reachable.
   const strip = (idPrefix: string, onReturn: () => void = returnToEdit): ReactNode => <>
@@ -2170,7 +2172,7 @@ export default function App() {
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)} snapshot={operation?.snapshot ?? null}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
             savedEnvironment={savedEnvironment} handlers={handlers(selected)} authoring={pageAuthoring(selected)}
-            nativeLimits={nativeCapability.limits} nativeError={nativeCapability.error}/>
+            nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error}/>
           : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
             recovery={recoveryHandlers(selected)} authoring={pageAuthoring(selected)} packagesRoot={packagesRoot}/>)}

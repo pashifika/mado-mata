@@ -1769,3 +1769,57 @@ fn committed_recovery_survives_catalog_read_failure() {
     }
     fs::write(receipt, serde_json::to_vec(&committed).unwrap()).unwrap();
 }
+
+#[test]
+fn unsupported_identity_is_not_a_schema_reconciliation_repair_or_reset_candidate() {
+    let fixture = Fixture::new();
+    let (path, selected) = initial(&fixture);
+    let saved = save(&fixture, &selected, "Old identity", json!({"count":9}));
+    let current_file = profile_path(&fixture, "Main", &saved);
+    let mut old = saved.clone();
+    old.id = crate::restore::cutover_tests::old_id(1);
+    let old_file = profile_path(&fixture, "Main", &old);
+    fs::rename(&current_file, &old_file).unwrap();
+    let bytes = serde_json::to_vec_pretty(&old).unwrap();
+    fs::write(&old_file, &bytes).unwrap();
+    install_schema(&path, &schema(5), json!({}));
+    let inspected = fixture
+        .application
+        .inspect(&path, &workspace_ref(&selected))
+        .unwrap();
+    assert!(inspected.outcomes.is_empty());
+    let recovery = inspected.workspace.recovery.unwrap();
+    assert_eq!(
+        recovery.profiles_error.as_ref().unwrap().category,
+        "ProfileIdentity"
+    );
+    assert_eq!(
+        fixture
+            .application
+            .repair_profile(&recovery.context, &old.id, json!({"count":2}))
+            .unwrap_err()
+            .category,
+        "ProfileNotFound"
+    );
+    assert_eq!(
+        fixture
+            .application
+            .reset_profile(&recovery.context, &old.id, true)
+            .unwrap_err()
+            .category,
+        "ProfileNotFound"
+    );
+    assert_eq!(fs::read(&old_file).unwrap(), bytes);
+    assert!(!current_file.exists());
+    let other = inspect_named(&fixture.application, "Other", &path).unwrap();
+    fixture
+        .application
+        .save_profile(
+            &workspace_ref(&other),
+            None,
+            "Unrelated owner",
+            json!({"count":2}),
+        )
+        .unwrap();
+    assert_eq!(fs::read(old_file).unwrap(), bytes);
+}

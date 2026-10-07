@@ -97,7 +97,7 @@ export function reconstructed(status:BootstrapStatus, current:readonly {id:strin
 }
 
 export type RestoreOutcome =
-  | 'unfinished' | 'rollbackFailed' | 'rolledBackAutomatically'
+  | 'unsupported' | 'blocked' | 'unfinished' | 'rollbackFailed' | 'rolledBackAutomatically'
   | 'installedNotReconstructed' | 'rolledBackNotReconstructed'
   | 'installedCleanupPending' | 'rolledBackCleanupPending'
   | 'installedCleanupUnconfirmed' | 'rolledBackCleanupUnconfirmed';
@@ -118,12 +118,11 @@ function cleanupDirection(context:Record<string,Json>):Direction|null {
   return nested.cleanup_incomplete === true ? direction(nested) : null;
 }
 
-// Recovery reached through a restore says what the managed configuration set now holds. The host's `pending_restore`
-// alone decides whether cleanup must still be finished with the recovery controls or Retry is offered. A replacement
-// without a verified generation (failed automatic rollback, interrupted or failed recovery, or an unrecognized
-// transaction diagnostic) never reads as untouched data. Only boolean flags select a verified outcome; a nested fault
-// counts by presence. No transaction signal reports nothing.
+// An unavailable recovery action is not proof of an unsupported protocol.
+// Only boolean flags select a verified outcome; a nested fault counts by presence.
 export function restoreOutcome(status:BootstrapStatus):RestoreOutcome|null {
+  if (status.pending_restore && status.recovery_supported !== true)
+    return status.fault?.category === 'RestoreUnsupported' ? 'unsupported' : 'blocked';
   const context = record(status.fault?.context);
   const cleanup = cleanupDirection(context);
   if (cleanup === 'installed') return status.pending_restore ? 'installedCleanupPending' : 'installedCleanupUnconfirmed';
@@ -195,4 +194,10 @@ export function reconstructionBlock(status:BootstrapStatus, admission:Admission,
   if (admission.command) return 'command';
   if ((status.application_available || admission.anyDirty) && !discard) return 'discard';
   return null;
+}
+
+// Pending evidence blocks replacement independently of whether this binary can safely recover it.
+export function recoveryBlock(status:BootstrapStatus, admission:Admission, discard:boolean):ReconstructionBlock|'pendingRestore'|null {
+  if (!status.pending_restore || status.recovery_supported !== true) return 'pendingRestore';
+  return reconstructionBlock(status, admission, discard);
 }

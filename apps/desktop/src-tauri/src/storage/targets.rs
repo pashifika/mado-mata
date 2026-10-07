@@ -105,7 +105,6 @@ impl Store {
                             .binding
                             .as_ref()
                             .is_none_or(|binding| binding.id != candidate)
-                            && !crate::identity_migrations::reserved(&self.root, &candidate)?
                         {
                             assigned = Some(candidate);
                             break;

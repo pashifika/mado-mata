@@ -3,8 +3,8 @@
 The optional `engine` feature consumes the public `mado-pilot` facade at
 `4b4f3296838a9eecdcb00e9d2bb3121a25cdc240`. The harness uses no sibling path
 dependency, fake OCR backend, or substitute input route. macOS startup adds
-read-only Foundation/libproc lifetime checks while waiting for the selected
-process's first eligible window; capture and input still use the public facade.
+read-only Foundation/libproc lifetime checks during startup and exact bound-lifetime
+checks during execution; capture and input still use the public facade.
 
 **Native integration is available; native qualification is not complete.** The
 facade now exposes optional retained-process provenance. The harness requires an
@@ -43,9 +43,33 @@ launch library, with separate launch approval and final resource, cancellation
 and discovery checks.
 The application derives process/lifetime/window authority; neither IPC nor Script
 can supply replacements. Script status probes drive bounded window preparation,
-never a duplicate launch or replacement lifetime. Reviewed budgets are
-60 s Startup, 30 s Readiness after capture availability and 30 s Workflow after
-explicit `Ready`, beneath an outer deadline fixed from their sum.
+never a duplicate launch or replacement lifetime within an attempt. Reviewed
+budgets default to 60 s Startup, 30 s Readiness and 30 s Workflow. The host publishes
+those defaults separately from the 900 s Workflow ceiling. The actual Run page
+accepts 1–900 whole seconds only through fresh per-Start review; invalid values
+refuse before native effects. Every duration edit withdraws all Native consents,
+and the effective tuple is captured immutably. New/reopened bindings return to
+30 s without approval; saved package/profile/target schemas are unchanged.
+Recovery is default-off; separate one-recovery consent plus launch-if-absent approval allows
+one fresh attempt only after a positively confirmed Workflow process exit and
+complete predecessor settlement. The same immutable Script reruns from entry.
+The original absolute deadline is the stage sum without recovery, or twice the
+sum plus the existing 3 s inter-attempt settlement allowance with recovery.
+Authenticated entry settlement ends the ordinary stage clock, not the outer
+Stop/deadline or the separate cleanup/containment bounds.
+Both attempts share 300 frames and 64 expanded input events; uncertain accounting
+or input cannot replenish credits. Stop remains latched across attempts.
+At the default, the outer allowances are 120/243 s without/with recovery; at the
+900 s Workflow maximum they are 990/1983 s. Cleanup remains 1 s, containment 2 s,
+per-call waits 1 s and pacing 100 ms. More duration grants no additional resource
+credits. The pinned SDK's monotonic timeout accepts this finite allowance; its
+separate 2 s maximum for an individual macOS native wait is unchanged.
+The larger ceiling does not qualify useful long-running Native work, late Stop,
+long-duration recovery or leak freedom; actual workload evidence remains separate.
+Typed attempt summaries retain the original exit, final Script result and cleanup;
+diagnostic truncation cannot discard the exit reason. An earlier capture fault
+outranks a later process exit. Window/permission/provider failure is not confirmed
+exit, and launch/capture availability is not a Script-observed usable screen.
 
 The independent CLI retains explicit `native_config` and its existing preparation
 contract. External `run`/`manual` plans cannot select Desktop-only `native_budgets`

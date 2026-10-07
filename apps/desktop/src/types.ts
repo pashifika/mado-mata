@@ -72,27 +72,29 @@ export interface RecoveryMutation {saved:Profile|null; draft:Record<string,Json>
 export interface WorkspaceCatalog {open:WorkspaceView[]; closed:TabRecord[]; faults:Fault[]}
 // `loading` is the transient first read before the shell has resolved the root; it carries no defaults or catalog.
 export type BootstrapState = 'loading'|'setup'|'ready'|'recovery';
-// Outcome of one explicit legacy-profile import; a partial batch keeps its committed subset.
+// Outcome of explicit current-XID profile import from the historical layout; partial batches keep their durable subset.
 export interface LegacyImport {imported:string[]; unchanged:string[]; fault:Fault|null}
 // Shell-owned bootstrap truth, independent of any Application. Paths are disclosed deliberately by the host.
 export interface BootstrapStatus {
   state:BootstrapState; stage:string; root:string|null; legacy_root:string|null; fault:Fault|null;
   default_packages_root:string|null;
-  settings:Settings|null; application_available:boolean; pending_restore:boolean; catalog:WorkspaceCatalog|null;
+  settings:Settings|null; application_available:boolean; pending_restore:boolean; recovery_supported:boolean; catalog:WorkspaceCatalog|null;
 }
 export interface SnapshotReceipt {path:string; generation:string; files:number; bytes:number}
 // Typed Native preparation state; the values mirror the host's snake_case enums.
-export type NativePhase = 'preflight'|'target_discovery'|'launch_submission'|'waiting_for_process'|'waiting_for_window'|'native_initialization'|'readiness'|'workflow';
+export type NativePhase = 'preflight'|'target_discovery'|'launch_submission'|'waiting_for_process'|'waiting_for_window'|'native_initialization'|'readiness'|'workflow'|'settling'|'recovering';
 export type LaunchDisposition = 'not_requested'|'accepted'|'rejected'|'uncertain';
 // Whether the Script has requested startup and whether capture is available. `capture_ready` is not game readiness.
 export type NativeTargetStatus = 'not_requested'|'pending'|'capture_ready';
-export interface NativeProgress {status:NativeTargetStatus; phase:NativePhase; launch:LaunchDisposition}
+export interface NativeProgress {attempt:number; status:NativeTargetStatus; phase:NativePhase; launch:LaunchDisposition}
 export interface ControllerView {
   run:string|null; state:string; operation:string; result:Record<string,Json>|null; error:Fault|null;
   progress:Record<string,Json>[]; dropped_logs:number;
   workspace_id:string|null; workspace_revision:number|null;
   // The host's retained target status, stage and launch disposition of this operation, kept through errors and Stop.
   native_preparation?:NativeProgress|null;
+  // Owner-retained summaries, independent of progress/log eviction and available during recovery.
+  attempts:Record<string,Json>[];
 }
 export interface LogEntry {
   sequence:number; time_ms:number; source:string; level:string; run:string|null; workspace_id:string|null;
@@ -107,17 +109,20 @@ export interface RetainedCheck {
 }
 // `authoring` is the host's single application-wide Edit lease, present in every Workspace view while held.
 export interface Poll {controller:ControllerView; logs:LogBatch; workspace_results:WorkspaceResult[]; last_check:RetainedCheck|null; authoring:AuthoringRef|null; native_selection:NativeSelectionView|null}
-// Host-issued finite Native policy (`native_run_limits`); null there means this platform/build offers no Native lane.
+// Reviewed per-Start tuple; capability defaults and ceilings are published separately.
 // Startup runs from reservation, readiness once from `capture_ready`, workflow once from `Ready`; none borrows another.
 export interface NativeLimits {
   startup_ms:number; readiness_ms:number; workflow_ms:number;
   max_frames:number; wait_ms:number; interval_ms:number; max_actions:number; cleanup_ms:number; containment_ms:number;
 }
+// `native_run_limits` returns this host policy, or null when this platform/build offers no Native lane.
+export interface NativeCapability {default_limits:NativeLimits; max_workflow_ms:number}
 // Bounded per-Start operator intent. It names the reviewed saved target and carries no executable, process or plan.
 // `launch_approved` separately permits one launch of the saved recipe when the game is confirmed absent.
 export interface NativeIntent {
   target_revision:number; target_binding_id:string; target_declaration_identity:string;
   capture_approved:boolean; input_approved:boolean; launch_approved:boolean; operation:string; visible_postcondition:string; limits:NativeLimits;
+  max_exit_recoveries:0|1;
 }
 export interface StartRequest {
   package_path:string; inventory_identity:string; package_id:string; schema_identity:string; profile_id:string;

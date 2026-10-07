@@ -6,14 +6,14 @@ use super::{
     MAX_VALUE_NODES, ProfileStore, Store, VERSION, check_budget, decode, encode, exists,
     filesystem_key, new_id, private_directory, read_bytes, validate_id, write_atomic,
 };
-use crate::configuration::{digest, publish_no_replace};
+use crate::configuration::{self, Capture, digest, publish_no_replace};
 use mado_runtime_comparison::host::{option_path, resolve_options};
 use mado_runtime_comparison::inventory::Inventory;
 use mado_runtime_comparison::model::{Fault, identity};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -51,6 +51,12 @@ impl Store {
         tab_name: &str,
         inventory: &Inventory,
     ) -> Result<LegacyImport, Fault> {
+        if crate::restore::pending(&self.root)? {
+            return Err(Fault::new(
+                "RestorePending",
+                "Resolve pending configuration evidence before importing profiles",
+            ));
+        }
         let scoped = self.profile_store(tab_name, &inventory.package_id)?;
         let schema_identity = identity(&inventory.schema)?;
         validate_identity(&inventory.package_id, &schema_identity)?;
@@ -87,7 +93,7 @@ impl Store {
                 let Some(id) = name.strip_suffix(".json") else {
                     continue;
                 };
-                crate::identity_migrations::validate_ingress_id(id)?;
+                validate_id(id).map_err(|fault| profile_fault(fault, id))?;
                 count += 1;
                 let bytes = read_bytes(&entry.path(), MAX_PROFILE_BYTES)
                     .map_err(|fault| profile_fault(fault, id))?;
@@ -99,8 +105,7 @@ impl Store {
                 }
                 let mut profile: Profile =
                     decode(&bytes).map_err(|fault| profile_fault(fault, id))?;
-                crate::identity_migrations::validate_profile(&mut profile, true)
-                    .map_err(|fault| profile_fault(fault, id))?;
+                validate_profile(&profile).map_err(|fault| profile_fault(fault, id))?;
                 if profile.id != id {
                     return Err(profile_fault(
                         Fault::new(
@@ -118,26 +123,23 @@ impl Store {
                 profile.values = validate_values(inventory, profile.values)
                     .map_err(|fault| profile_fault(fault, id))?;
                 scoped.profiles()?;
-                let (mapped, unchanged) =
-                    match crate::identity_migrations::import_profile(&self.root, tab_name, profile)
-                    {
-                        Ok(result) => result,
-                        Err(fault) => {
-                            if let Some(committed) = fault.context["committed_profile_id"].as_str()
-                            {
-                                if fault.context["already_imported"] == true {
-                                    result.unchanged.push(committed.to_owned());
-                                } else {
-                                    result.imported.push(committed.to_owned());
-                                }
+                let (imported_id, unchanged) = match import_profile(&self.root, tab_name, profile) {
+                    Ok(result) => result,
+                    Err(fault) => {
+                        if let Some(committed) = fault.context["committed_profile_id"].as_str() {
+                            if fault.context["already_imported"] == true {
+                                result.unchanged.push(committed.to_owned());
+                            } else {
+                                result.imported.push(committed.to_owned());
                             }
-                            return Err(profile_fault(fault, id));
                         }
-                    };
+                        return Err(profile_fault(fault, id));
+                    }
+                };
                 if unchanged {
-                    result.unchanged.push(mapped);
+                    result.unchanged.push(imported_id);
                 } else {
-                    result.imported.push(mapped);
+                    result.imported.push(imported_id);
                 }
             }
             Ok(())
@@ -147,6 +149,147 @@ impl Store {
         }
         Ok(result)
     }
+}
+
+/// Validate just this explicit owner's addition; unrelated records stay opaque.
+fn prepare_import(
+    before: &Capture,
+    tab: &str,
+    profile: &Profile,
+) -> Result<(String, Option<Vec<u8>>), Fault> {
+    validate_profile(profile)?;
+    super::validate_internal_name(tab)?;
+    super::validate_package_id(&profile.package_id)?;
+    let owner: super::TabRecord = decode(
+        before
+            .files
+            .get(&format!("tabs/{tab}/tab.config"))
+            .ok_or_else(|| Fault::new("LegacyImport", "import owner is missing"))?,
+    )?;
+    super::validate_tab(&owner)?;
+    if owner.internal_name != tab
+        || !owner.open
+        || !owner
+            .packages
+            .iter()
+            .any(|p| p.package_id == profile.package_id)
+    {
+        return Err(Fault::new(
+            "LegacyImport",
+            "import owner is not an open bound Tab",
+        ));
+    }
+    let source = before
+        .files
+        .get(&format!("profiles/{}.json", profile.id))
+        .ok_or_else(|| Fault::new("LegacyImport", "import source is missing"))?;
+    if decode::<Profile>(source)? != *profile {
+        return Err(Fault::new(
+            "LegacyConflict",
+            "import source changed before publication",
+        ));
+    }
+    let prefix = format!("tabs/{tab}/{}/", profile.package_id);
+    let destination = format!("{prefix}{}.config", profile.id);
+    if let Some(bytes) = before.files.get(&destination) {
+        let saved: Profile = decode(bytes)?;
+        validate_profile(&saved)?;
+        if saved != *profile {
+            return Err(Fault::new(
+                "LegacyConflict",
+                "saved profile differs from the imported content; neither file was changed",
+            ));
+        }
+        return Ok((destination, None));
+    }
+    let mut count = 0;
+    let mut total = 0;
+    for (path, bytes) in &before.files {
+        if path.starts_with(&prefix) && !path.ends_with("/target.config") {
+            let saved: Profile = decode(bytes)?;
+            validate_profile(&saved)?;
+            if saved.package_id != profile.package_id
+                || path != &format!("{prefix}{}.config", saved.id)
+            {
+                return Err(Fault::new(
+                    "LegacyImport",
+                    "existing profile differs from its owner or filename",
+                ));
+            }
+            count += 1;
+            total += bytes.len();
+        }
+    }
+    let bytes = encode(profile, MAX_PROFILE_BYTES)?;
+    if count >= MAX_PROFILES || total + bytes.len() > MAX_TOTAL_BYTES {
+        return Err(limit("import exceeds this Tab/package profile budget"));
+    }
+    Ok((destination, Some(bytes)))
+}
+
+pub(crate) fn validate_import_transition(
+    before: &Capture,
+    after: &Capture,
+    tab: &str,
+    package: &str,
+    source_id: &str,
+) -> Result<(), Fault> {
+    validate_id(source_id)?;
+    let source = before
+        .files
+        .get(&format!("profiles/{source_id}.json"))
+        .ok_or_else(|| Fault::new("LegacyImport", "import journal lacks its source preimage"))?;
+    let profile: Profile = decode(source)?;
+    if profile.id != source_id || profile.package_id != package {
+        return Err(Fault::new(
+            "LegacyImport",
+            "import journal source owner differs",
+        ));
+    }
+    let (destination, addition) = prepare_import(before, tab, &profile)?;
+    if after.files.len() != before.files.len() + usize::from(addition.is_some())
+        || before
+            .files
+            .iter()
+            .any(|(path, bytes)| after.files.get(path) != Some(bytes))
+        || addition
+            .as_ref()
+            .is_some_and(|bytes| after.files.get(&destination) != Some(bytes))
+        || before.root_present != after.root_present
+    {
+        return Err(Fault::new(
+            "LegacyImport",
+            "import journal changes unrelated configuration",
+        ));
+    }
+    Ok(())
+}
+
+fn import_profile(root: &Path, tab: &str, profile: Profile) -> Result<(String, bool), Fault> {
+    let before = configuration::capture(root)?;
+    let (destination, addition) = prepare_import(&before, tab, &profile)?;
+    let Some(bytes) = addition else {
+        return Ok((profile.id, true));
+    };
+    let mut files = before.files.clone();
+    files.insert(destination, bytes);
+    let after = Capture::from_files(files, true)?;
+    crate::restore::install_profile_import(
+        root,
+        before,
+        after,
+        tab,
+        &profile.package_id,
+        &profile.id,
+    )
+    .map_err(|mut fault| {
+        if fault.context["configuration_installed"] == true {
+            fault.context["committed_profile_id"] = json!(profile.id);
+            fault.context["already_imported"] = json!(false);
+        }
+        fault
+    })?;
+    Ok((profile.id, false))
 }
 
 impl ProfileStore {
@@ -326,10 +469,7 @@ impl ProfileStore {
         for _ in 0..16 {
             let id = new_id()?;
             let path = self.profile_path(&id);
-            if !exists(&path)?
-                && !exists(&path.with_extension("pending"))?
-                && !crate::identity_migrations::reserved(&self.root, &id)?
-            {
+            if !exists(&path)? && !exists(&path.with_extension("pending"))? {
                 return Ok(id);
             }
         }

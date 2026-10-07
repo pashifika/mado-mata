@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {acceptController,nativeOutcome,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,packageDestination,portableComponent,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
+import {acceptController,attemptOutcomes,nativeOutcome,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,packageDestination,portableComponent,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
 import {messages} from './i18n.ts';
 
 test('late predecessor result cannot replace the successor or its preparing state',()=>{
@@ -24,12 +24,70 @@ test('an OS launch completing after Stop is shown while stale and foreign prepar
   assert.equal(acceptController(settled,{...settled,native_preparation:{status:'pending',phase:'waiting_for_window',launch:'accepted'}},'owned'),settled);
 });
 
+test('the same Run never accepts an older attempt or a stale continuation after Stop or settlement',()=>{
+  const current={run:'owned',state:'running',result:null,attempts:[],native_preparation:{attempt:2,status:'capture_ready',phase:'workflow',launch:'accepted'}};
+  const old={...current,state:'terminal',native_preparation:{attempt:1,status:'capture_ready',phase:'workflow',launch:'not_requested'}};
+  assert.equal(acceptController(current,old,'owned'),current);
+  const stopping={...current,state:'stopping'};
+  const recovering={...current,state:'recovering',native_preparation:{...current.native_preparation,phase:'recovering'}};
+  assert.equal(acceptController(stopping,recovering,'owned'),stopping);
+  const terminal={...current,state:'terminal',result:{status:'PASS'}};
+  assert.equal(acceptController(terminal,current,'owned'),terminal);
+  assert.equal(acceptController(current,recovering,'owned'),recovering);
+});
+
+test('retained attempt projection preserves original typed exit and independent successor Script, receipts and cleanup',()=>{
+  const first={attempt:1,status:'FAIL',stage:'workflow',entry_outcome:'FailedOrNotStarted',primary:{category:'TargetExited',message:'private evidence',context:{exit_reason:'reused_pid',process_lifetime:'private'}},
+    native_preparation:{attempt:1,phase:'workflow',status:'capture_ready',launch:'not_requested'},cleanup:{clean:true},forced:false,exit_code:0,observations:{receipts:[{status:'completed'}]}};
+  const second={attempt:2,status:'PASS',stage:'workflow',entry_outcome:'Returned',primary:null,
+    native_preparation:{attempt:2,phase:'workflow',status:'capture_ready',launch:'accepted'},cleanup:{clean:true},forced:false,exit_code:0,observations:{receipts:[]}};
+  const live={run:'owned',state:'recovering',result:null,attempts:[first],progress:[],native_preparation:{attempt:1,phase:'settling',status:'capture_ready',launch:'not_requested'}};
+  const original=attemptOutcomes(live);
+  assert.equal(original[0].exitReason,'reused_pid');
+  assert.equal(original[0].primary,'TargetExited');
+  const final={...live,state:'terminal',result:{status:'PASS',recovery_count:1},attempts:[first,second]};
+  const projected=attemptOutcomes(final);
+  assert.deepEqual(projected.map(value=>[value.attempt,value.status,value.stage,value.entry,value.launch,value.receipts]),
+    [[1,'FAIL','workflow','FailedOrNotStarted','not_requested',1],[2,'PASS','workflow','Returned','accepted',0]]);
+  assert.equal(projected[0].cleanup,messages.en.validation.clean);
+  assert.equal(projected[1].cleanup,messages.en.validation.clean);
+  assert.deepEqual(projected.map(value=>value.phase),['workflow','workflow']);
+  assert.equal(projected[0].retained,first);
+  assert.equal(projected[1].retained,second);
+  assert.equal(first.primary.context.process_lifetime,'private');
+  const incomplete=attemptOutcomes({...final,attempts:[first,{...second,forced:true}]});
+  assert.equal(incomplete[1].cleanup,messages.en.validation.incomplete);
+});
+
+test('attempt summaries do not infer confirmed exit or Script completion from diagnostic text or capture-ready state',()=>{
+  const summary={attempt:1,status:'FAIL',stage:'workflow',primary:{category:'TargetLost',message:'TargetExited: bound process absent',context:{exit_reason:'absent'}},
+    native_preparation:{attempt:1,phase:'readiness',status:'capture_ready',launch:'accepted'},cleanup:{clean:true},forced:false,exit_code:0};
+  const projected=attemptOutcomes({attempts:[summary,{...summary,attempt:2},summary,{...summary,attempt:3}]});
+  assert.equal(projected.length,2);
+  assert.equal(projected[0].exitReason,null);
+  assert.equal(projected[0].entry,null);
+  assert.equal(projected[0].receipts,null);
+});
+for (const {scenario,category,reason,expected} of [
+  {scenario:'positive absence is retained as confirmed exit',category:'TargetExited',reason:'absent',expected:'absent'},
+  {scenario:'positive PID reuse is retained as old-lifetime exit',category:'TargetExited',reason:'reused_pid',expected:'reused_pid'},
+  {scenario:'verified same-lifetime zombie is retained as terminated',category:'TargetExited',reason:'zombie',expected:'zombie'},
+  {scenario:'unknown reason cannot classify confirmed exit',category:'TargetExited',reason:'unknown',expected:null},
+  {scenario:'generic target loss cannot inherit a typed exit reason',category:'TargetLost',reason:'zombie',expected:null},
+]) {
+  test(scenario,()=>{
+    const [summary]=attemptOutcomes({attempts:[{attempt:1,primary:{category,context:{exit_reason:reason}}}]});
+    assert.equal(summary.exitReason,expected);
+  });
+}
+
+
 const cancelled={category:'Cancelled',message:'attempt cancellation is latched',context:null};
 function fault(category) {
   return {category,message:`${category} fixture`,context:null};
 }
 function settledNative(preparation,{error=null,result=null,state='terminal'}={}) {
-  return {run:'owned',state,operation:'run',result,error,progress:[],dropped_logs:0,workspace_id:'a',workspace_revision:1,native_preparation:preparation};
+  return {run:'owned',state,operation:'run',result,error,progress:[],dropped_logs:0,workspace_id:'a',workspace_revision:1,native_preparation:preparation ? {attempt:1,...preparation} : null,attempts:[]};
 }
 for (const {scenario, view, expected} of [
   {scenario:'Stop after an accepted launch is no stage failure but warns that the game can still open',

@@ -62,8 +62,9 @@ function declarations(options) {
 type MadoOptions = ${options};
 // Desktop Native Readiness only. Exact empty payloads; no target or launch overrides.
 interface MadoNativeProgress {
+  readonly attempt: number;
   readonly status: "not_requested" | "pending" | "capture_ready";
-  readonly phase: "preflight" | "target_discovery" | "launch_submission" | "waiting_for_process" | "waiting_for_window" | "native_initialization" | "readiness" | "workflow";
+  readonly phase: "preflight" | "target_discovery" | "launch_submission" | "waiting_for_process" | "waiting_for_window" | "native_initialization" | "readiness" | "workflow" | "settling" | "recovering";
   readonly launch: "not_requested" | "accepted" | "rejected" | "uncertain";
 }
 interface MadoRegion { readonly x: number; readonly y: number; readonly width: number; readonly height: number }

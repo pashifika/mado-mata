@@ -2,7 +2,7 @@
 
 - Status: Accepted for the development checkout; native acceptance remains separate
 - Date: 2026-09-30
-- Scope: One saved macOS application bundle, attach or approved initial launch; no recovery
+- Scope: One saved macOS application bundle, attach or approved launch, optional one-time exit recovery
 
 ## Decision
 
@@ -12,7 +12,7 @@ Capture remains a separate input-free owner; neither its historical frames nor
 Target Check authorize a Script run.
 
 The trusted Run page submits current package/profile/target expectations, separate
-launch-if-absent/capture/input consent, reviewed operation/postcondition text, and finite limits.
+launch-if-absent/capture/input/recovery consent, reviewed operation/postcondition text, and finite limits.
 Approval is transient and spent on every Start. Relevant edits, including a target
 draft changed back to its saved value, invalidate it. The text describes the
 operator's review, not a hostile-script sandbox. IPC cannot supply a Plan, process
@@ -38,6 +38,41 @@ status probes drive bounded preparation for the first exact eligible window.
 Read-only Foundation/libproc checks retain the selected lifetime while windowless;
 the public SDK independently binds its window. Process loss/replacement refuses
 the attempt, not a new target selection.
+
+## One-time confirmed-exit recovery
+
+`max_exit_recoveries` is per-Start authority: absent means zero; only zero or one
+is accepted. One requires separate recovery consent and launch-if-absent approval.
+It is not saved in settings or packages and grants no termination authority.
+Recovery reruns the same captured `readiness()` and `workflow()` from entry;
+it does not resume a statement or promise exactly-once business actions.
+
+Only attempt 1's positively confirmed bound-process exit after Workflow entry
+is eligible. The existing macOS adapter compares the retained kernel start
+identity: explicit process absence, a verified reused PID or the bound zombie
+lifetime produces typed `TargetExited` evidence. Failed/partial lookups,
+unverifiable metadata, window loss, permission/provider errors and launcher exit
+do not prove game exit. No error message or Script log is parsed for eligibility.
+Generic facade target loss is refined only by an independent positive lifetime
+proof. The public facade's first capture fault wins over a later process exit;
+capture, recognition and input remain facade-owned.
+
+Keep one reservation, immutable snapshot and irreversible outer Stop owner.
+Before admitting attempt 2, require clean native/input settlement, child reap,
+joined parent startup work and complete resource accounting. Forced, incomplete,
+uncertain or missing outcomes refuse recovery. A fresh child/VM/state, resolver,
+session and handle namespace receive only remaining credits; nothing is retargeted
+in place. The captured resolver factory cannot reread mutable settings.
+The same one-shot startup contract rechecks correspondence: attach a unique
+external restart, otherwise submit the reviewed recipe once on confirmed absence.
+
+Recovery admission and launch share Stop's serialization fence. Stop cannot be
+cleared by fresh attempt construction. Late work stays attributed to its original
+attempt and cannot advance the successor. Retain at most two attempt summaries
+independently of logs, including the original exit and separate final Script,
+receipts and cleanup outcomes. Bounded diagnostic truncation preserves the typed
+exit reason. Start remains reserved and Stop available through settlement and
+recovery, including Workspace navigation.
 
 ## Script-requested startup
 
@@ -115,28 +150,50 @@ fault does not revoke historical results or turn them into current input authori
 
 ## Bounds and termination
 
-The reviewed host tuple has positive defaults/ceilings of **60 s Startup**,
-**30 s Readiness** and **30 s Workflow**. Smaller valid tuples are accepted;
-invalid tuples refuse, without clamping. Startup begins at reservation and
+The reviewed host tuple defaults to **60 s Startup**, **30 s Readiness** and
+**30 s Workflow**. Startup/Readiness defaults are also their ceilings; Workflow
+has a separately published **900 s** ceiling. One shared duration policy owns
+backend validation and the capability response. The Run page accepts **1–900
+whole seconds** as a transient per-Start draft, never persisted or package-selected
+authority. Invalid drafts block approval/Start; the backend independently refuses
+invalid tuples without clamping. Duration edits, including edit-back, withdraw
+every Native consent. The effective tuple binds consent and the immutable request
+and result snapshot; new/reopened bindings default to 30 s without restored approval.
+Startup begins at reservation and
 includes preflight, Script work before capture availability, launch, bounded
 process/window preparation and native initialization. Readiness starts once at
 `capture_ready`; Workflow starts once after `"Ready"`. No phase borrows unused
 time or renews its own budget.
 
-At reservation the host fixes an absolute outer deadline from the sum
-(**120 s** for the default tuple). The supervisor transfers shared-OS-monotonic
-deadlines conservatively; spawn, payload transfer, validation and later phase
-transitions cannot extend that outer bound. The former shared 30-second policy
+At reservation the host fixes an absolute outer deadline. For stage sum `B` and
+admitted recovery count `r`, it is `(1 + r) * B + r * 3000 ms`: **120 s** by
+default, or **243 s** with one recovery. Selecting the maximum Workflow produces
+**990 s** without recovery and **1983 s** with one recovery, below the general
+one-hour plan ceiling. The extra 3 s is the existing inter-attempt
+cleanup/containment allowance, not permission to continue after incomplete cleanup.
+Each fresh attempt retains the same stage ceilings capped by that deadline.
+Authenticated entry settlement ends the ordinary stage clock. Cleanup and
+containment retain their independent limits; the original outer Stop/deadline
+still governs successor admission. A stage timeout earned before settlement
+remains terminal.
+The supervisor transfers shared-OS-monotonic deadlines conservatively; spawn,
+payload transfer, validation and later phase transitions cannot extend it.
+The former shared 30-second policy
 expired during native initialization in an observed cold start, before Script
 entry. Desktop Native no longer inherits the generic hidden 2-second Readiness
 bound. The pinned SDK accepts the finite operation duration; its separate
 2-second maximum for an individual macOS native wait is unchanged.
 
-Other bounds remain 300 acquired frames, 1 s waits, 100 ms pacing, and 64
-cumulative expanded input events. A click consumes three events, or four with a
-hold; each key press/release consumes one. Uncertain submission does not refund
-authority. Cleanup releases use the separate restricted path, with 1 s cleanup
-and 2 s containment bounds.
+Other bounds remain 300 acquired frames across both attempts, 1 s waits, 100 ms
+pacing, and 64 cumulative expanded input events. A click consumes three events,
+or four with a hold; each key press/release consumes one. Only verified terminal
+accounting transfers unused credits. Partial or uncertain input never permits
+recovery or refunds authority. Final cleanup retains its separate restricted
+path, with 1 s cleanup and 2 s containment bounds.
+The Workflow ceiling is a finite admission boundary, not a reliability
+qualification. Useful uninterrupted Native execution, late owner-bound Stop and
+a clean explicit successor require separate actual Desktop evidence; controlled
+tests do not establish long-duration recovery or arbitrary-duration support.
 
 Preserve explicit cancellation versus whole-operation timeout through the typed
 supervisor verdict. The child closes admission at its deadline, but keeps its own
@@ -172,8 +229,31 @@ Actual WebView review/refusal and controlled Stop/rerun are distinct from the
 separately authorized authored native workflow, newer-frame visible effect,
 normal Stop and clean rerun. Useful acceptance covers both already-running and
 initially absent games, plus an authorized installed separate-launcher recipe.
-OS acceptance alone is insufficient. Missing native authority/resources remain
-explicitly incomplete. Windows Native Desktop, requested activation, automatic
-recovery, the broader M0/R6 matrix and release qualification remain out of scope.
-See the [Desktop procedure](../desktop.md#reviewed-macos-native-start)
+OS acceptance alone is insufficient. Recovery acceptance additionally requires
+the initial Script to remain active through a separately authorized normal game
+close, then the same Script in a fresh attempt to establish its own usable-screen
+postcondition. A newer compatible image after any reviewed startup click, complete
+receipts and independent physical cleanup are required; `Ready`, launch acceptance
+and `capture_ready` alone are not recovered usability. Verify a second separately
+reviewed run, default-off no-recovery and normal Stop during recovery. Same-Run
+second-exit acceptance requires another positively identified lifetime exit
+during recovered Workflow, both retained outcomes and no attempt 3 or renewed
+deadline/credits. A freshly reviewed successor is a new Run, not continuation.
+
+Later recovery Stop acceptance must identify the authoritative stage at the
+latch: after OS launch submission before capture-ready, during genuine Readiness
+before Ready, and during active Workflow after independent usability and settled
+work. Preserve admitted launch effects and ownership until settlement. A prior
+UI label or an unresolvable race does not qualify a stage. Use the ordinary
+60/30/30-second tuple and existing limits; no production timing hooks or
+fabricated Native results. Deterministic safety coverage and earlier pre-launch
+Stop evidence do not complete these later-stage Native cases.
+
+Deterministic recognition corpora must exercise the authored predicates, not a
+Ready echo. Missing current authority, geometry/images, stage interception or a
+supported launcher recipe remains explicitly incomplete. Windows Native Desktop,
+requested activation, arbitrary retries, the broader M0/R6 matrix and release
+qualification remain out of scope. See the
+[general Desktop procedure](../desktop.md#reviewed-macos-native-start),
+[ordered six-Run acceptance](../desktop.md#repeated-exits-and-recovery-stage-stop-acceptance)
 and [engine prerequisites](../runtime-native.md).

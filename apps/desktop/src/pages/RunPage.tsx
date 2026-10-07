@@ -12,7 +12,7 @@ import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, chooseLane, editDraft, hasWo
 import type {Bound, BoundWorkspace, Derived, NativeConsent} from '../workspace.ts';
 import {AUTHORING_RECOVERY, recoveryPath} from '../authoring.ts';
 import type {PageAuthoring} from './EditPage.tsx';
-import type {ControllerView, Fault, Json, NativeIntent, NativeLimits, OcrEnvironment} from '../types.ts';
+import type {ControllerView, Fault, Json, NativeCapability, NativeIntent, OcrEnvironment} from '../types.ts';
 import {messages, renderMessage} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
@@ -31,7 +31,7 @@ export interface RunHandlers {
   newDraft: (preset?: string) => void; selectProfile: (id: string) => void;
   reinspect: () => void; inspectPath: (value: string) => void; importLegacy: () => void; start: () => void; stop: () => void;
   // Native review text edits withdraw consent; consent binds to the request as it is now.
-  native: {edit: (field: 'operation' | 'postcondition', value: string) => void; approve: (field: NativeConsent, value: boolean) => void};
+  native: {edit: (field: 'operation' | 'postcondition' | 'workflowSeconds', value: string) => void; approve: (field: NativeConsent, value: boolean) => void};
   target: TargetHandlers;
   recovery: RecoveryHandlers;
 }
@@ -41,12 +41,12 @@ interface Props {
   locked: boolean; active: boolean; pickerBusy: boolean; starting: boolean; stopping: boolean; closing: boolean;
   savedEnvironment: OcrEnvironment | null; handlers: RunHandlers;
   // Host-issued Native policy; null when this platform/build offers none. `nativeError` is a failed availability read.
-  nativeLimits: NativeLimits | null; nativeError: Fault | null;
+  nativeCapability: NativeCapability | null; nativeError: Fault | null;
   // While any Tab owns Edit, Start is refused everywhere; the owner additionally waits to exit before reinspecting.
   authoring: PageAuthoring;
 }
 
-export default function RunPage({workspace, label, derived, run, snapshot, locked, active, pickerBusy, starting, stopping, closing, savedEnvironment, handlers, authoring, nativeLimits, nativeError}: Props) {
+export default function RunPage({workspace, label, derived, run, snapshot, locked, active, pickerBusy, starting, stopping, closing, savedEnvironment, handlers, authoring, nativeCapability, nativeError}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const bound = workspace.bound;
@@ -99,10 +99,13 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   // Launch recipe validity is conditional on host-confirmed absence, not a gate on attaching.
   const approvalOpen = native !== null && (native.block === null || native.block === 'nativeApproval') && !locked;
   const outcome = nativeOutcome(run.view);
-  // Phase budgets are reviewed apart from the unchanged per-run limits; every value is the host-issued tuple consent binds.
+  // Invalid Workflow text has no effective duration; never display a clamped or fallback budget.
+  const nativeLimits = nativeCapability?.default_limits ?? null;
+  const selectedLimits = native?.limits ?? null;
   const nativeBudgetRows = nativeLimits && [
-    [t.run.nativeStartup, nativeLimits.startup_ms], [t.run.nativeReadiness, nativeLimits.readiness_ms], [t.run.nativeWorkflow, nativeLimits.workflow_ms],
+    [t.run.nativeStartup, nativeLimits.startup_ms], [t.run.nativeReadiness, nativeLimits.readiness_ms], [t.run.nativeWorkflow, selectedLimits?.workflow_ms ?? null],
   ] as const;
+  const nativeDuration = selectedLimits ? (1 + (native?.recovery ? 1 : 0)) * (selectedLimits.startup_ms + selectedLimits.readiness_ms + selectedLimits.workflow_ms) + (native?.recovery ? 3000 : 0) : null;
   const nativeLimitRows = nativeLimits && [
     [t.run.nativeFrames, String(nativeLimits.max_frames)],
     [t.run.nativeWait, `${nativeLimits.wait_ms} ms`], [t.run.nativeInterval, `${nativeLimits.interval_ms} ms`],
@@ -199,6 +202,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           </div>
           <details className="legacy-import"><summary>{t.run.legacyHeading}</summary>
             <p className="field-help">{t.run.legacyHelp}</p>
+            <p className="field-help">{t.bootstrap.converterHelp}</p>
             <div className="button-row"><button id="import-legacy-profiles" disabled={locked} onClick={handlers.importLegacy}>{t.run.legacyImport}</button></div>
             {legacy && <dl className="run-identity">
               <dt>{t.run.legacyImported}</dt><dd>{legacy.imported.length ? legacy.imported.join(', ') : t.run.legacyNone}</dd>
@@ -215,7 +219,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
               <Select id="lane" value={bound.lane} disabled={locked} onChange={lane => handlers.change(item => chooseLane(item, lane))}
                 options={[{value: 'controlled', label: t.run.controlled},
                   {value: 'replay', label: t.run.replay},
-                  {value: 'native', label: nativeLimits ? t.run.native : t.run.nativeUnavailable, disabled: nativeLimits === null}]}/></div>
+                  {value: 'native', label: nativeCapability ? t.run.native : t.run.nativeUnavailable, disabled: nativeCapability === null}]}/></div>
             <div className="field"><label htmlFor="scenario">{t.run.scenario}</label>
               <Select id="scenario" value={bound.lane === 'controlled' ? bound.scenario : 'workflow'} disabled={locked || bound.lane !== 'controlled'}
                 onChange={scenario => handlers.change(item => ({...item, scenario}))}
@@ -245,8 +249,15 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                   {recipe.workingDirectory !== null && <><code>{recipe.workingDirectory}</code> · </>}{t.run.nativeDirectories[recipe.directory]}</dd>
               </dl>
               {recipe.recipient === 'launcher' && <p className="field-help">{t.run.nativeForwarding}</p>}</>}
+            {nativeCapability && <div className="field"><label htmlFor="native-workflow-seconds">{t.run.nativeWorkflowSeconds}</label>
+              <input id="native-workflow-seconds" type="text" inputMode="numeric" value={native.workflowSeconds} disabled={locked} spellCheck={false}
+                aria-invalid={native.workflowError} aria-describedby={`native-workflow-help${native.workflowError ? ' native-workflow-error' : ''}`}
+                onChange={event => handlers.native.edit('workflowSeconds', event.target.value)}/>
+              {native.workflowError && <p className="field-error" id="native-workflow-error">{t.run.nativeWorkflowError(nativeCapability.max_workflow_ms / 1000)}</p>}
+              <p className="field-help" id="native-workflow-help">{t.run.nativeWorkflowHelp(nativeCapability.default_limits.workflow_ms / 1000, nativeCapability.max_workflow_ms / 1000)}</p></div>}
             {nativeBudgetRows && <><span className="eyebrow">{t.run.nativeBudgets}</span>
-              <dl className="run-identity" id="native-budgets">{nativeBudgetRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value} ms</dd></Fragment>)}</dl>
+              <dl className="run-identity" id="native-budgets">{nativeBudgetRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value === null ? t.common.none : `${value} ms`}</dd></Fragment>)}</dl>
+              <dl className="run-identity"><dt>{t.run.nativeDuration}</dt><dd id="native-duration">{nativeDuration === null ? t.common.none : t.run.nativeEnvelope(nativeDuration)}</dd></dl>
               <p className="field-help" id="native-budget-help">{t.run.nativeBudgetHelp}</p>
               <p className="field-help" id="native-startup-help">{t.run.nativeStartupHelp}</p></>}
             {nativeLimitRows && <><span className="eyebrow">{t.run.nativeLimits}</span>
@@ -269,6 +280,9 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
               <label className="checkbox-label"><input id="native-launch-consent" type="checkbox" checked={native.launch} disabled={!approvalOpen}
                 onChange={event => handlers.native.approve('launch', event.target.checked)}/>{t.run.nativeLaunch}</label>
               <p className="field-help" id="native-launch-help">{t.run.nativeLaunchHelp}</p>
+              <label className="checkbox-label"><input id="native-recovery-consent" type="checkbox" checked={native.recovery} disabled={!approvalOpen || !native.launch}
+                aria-describedby="native-recovery-help" onChange={event => handlers.native.approve('recovery', event.target.checked)}/>{t.run.nativeRecovery}</label>
+              <p className="field-help" id="native-recovery-help">{t.run.nativeRecoveryHelp}</p>
               <p className="field-help">{t.run.nativeApprovalHelp}</p></div>
           </div>}
           <div className="field"><label htmlFor="descriptor-path">{t.run.descriptor}</label>
@@ -292,7 +306,8 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           <p className="authority-note">{t.run.authority}</p>
           <dl className="run-identity"><dt>{t.run.operationId}</dt><dd id="run-id">{view.run ?? t.common.noOperation}</dd>
             <dt>{t.run.kind}</dt><dd id="operation-kind">{view.run ? check ? t.run.checkKind : t.run.runKind(t.lane(snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane) ?? t.common.unknown)) : t.phase('idle')}</dd>
-            {view.native_preparation && <><dt>{t.run.nativeTargetStatus}</dt><dd id="native-target-status">{t.run.nativeStatuses[view.native_preparation.status]}</dd>
+            {view.native_preparation && <><dt>{t.run.nativeAttempt}</dt><dd id="native-attempt">{view.native_preparation.attempt}</dd>
+              <dt>{t.run.nativeTargetStatus}</dt><dd id="native-target-status">{t.run.nativeStatuses[view.native_preparation.status]}</dd>
               <dt>{t.run.nativeStage}</dt><dd id="native-stage">{t.run.nativePhases[view.native_preparation.phase]}</dd>
               <dt>{t.run.nativeLaunchRequest}</dt><dd id="native-launch">{t.run.launchDispositions[view.native_preparation.launch]}</dd></>}
             {snapshot?.kind === 'run' && snapshot.run === view.run && <><dt>{t.run.capturedProfile}</dt><dd>{snapshot.profileName || t.run.untitled} · {snapshot.profileId}</dd><dt>{t.run.packageScenario}</dt><dd>{snapshot.packageId} / {snapshot.scenario}</dd>
@@ -301,6 +316,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                 <dt>{t.run.nativePostcondition}</dt><dd>{snapshot.native.visible_postcondition}</dd>
                 <dt>{t.run.nativeBinding}</dt><dd><code>{snapshot.native.target_binding_id}</code> · {t.target.revision(snapshot.native.target_revision)}</dd>
                 <dt>{t.run.nativeLaunchApproval}</dt><dd>{snapshot.native.launch_approved ? t.run.nativeLaunchApproved : t.run.nativeLaunchNotApproved}</dd>
+                <dt>{t.run.nativeRecoveryApproval}</dt><dd id="captured-native-recoveries">{snapshot.native.max_exit_recoveries}</dd>
                 <dt>{t.run.capturedBudgets}</dt><dd id="captured-native-budgets">{t.run.nativeStartup} {snapshot.native.limits.startup_ms} ms · {t.run.nativeReadiness} {snapshot.native.limits.readiness_ms} ms · {t.run.nativeWorkflow} {snapshot.native.limits.workflow_ms} ms</dd></>}</>}
             {snapshot?.kind === 'check' && snapshot.run === view.run && <><dt>{t.run.checkedProfile}</dt><dd>{snapshot.association.environment?.profile ?? t.common.unconfigured}</dd>
               <dt>{t.common.descriptor}</dt><dd>{snapshot.association.descriptorPath ?? t.run.noInitialization}</dd></>}
@@ -309,7 +325,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           {snapshot?.kind === 'run' && snapshot.run === view.run && snapshot.native && <details><summary>{t.run.capturedLimits}</summary><pre>{JSON.stringify(snapshot.native.limits, null, 2)}</pre></details>}
           {snapshot?.kind === 'check' && snapshot.run === view.run && <details><summary>{t.run.capturedEnvironment}</summary><pre>{JSON.stringify(snapshot.association.environment, null, 2)}</pre></details>}
           <h3>{t.run.milestones}</h3><ol className="progress-list">{view.progress.map((event, index) => <li key={`${view.run}-${index}`}>
-            <details><summary>{String(event.event ?? t.run.milestone)}{text(event.stage) ? ` · ${event.stage}` : ''}{typeof event.at_us === 'number' ? ` · ${(event.at_us / 1000).toFixed(1)} ms` : ''}</summary><pre>{JSON.stringify(event, null, 2)}</pre></details>
+            <details><summary>{String(event.event ?? t.run.milestone)}{typeof event.attempt === 'number' ? ` · ${t.result.attempt(event.attempt)}` : ''}{text(event.stage) ? ` · ${event.stage}` : ''}{typeof event.at_us === 'number' ? ` · ${(event.at_us / 1000).toFixed(1)} ms` : ''}</summary><pre>{JSON.stringify(event, null, 2)}</pre></details>
           </li>)}</ol>{view.progress.length === 0 && <p className="muted">{t.run.noMilestones}</p>}
           <ResultPanel view={view} disclosed={view.run !== null && bound.disclosedRun === view.run} onDisclose={next => handlers.disclose(next ? view.run : null)}/>
         </div>

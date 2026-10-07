@@ -9,7 +9,7 @@ mod recognition;
 mod test_support;
 
 use crate::inventory::TargetDeclaration;
-use crate::model::{Control, Fault, Plan};
+use crate::model::{Control, Fault, NativeBudgets, Plan};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -58,6 +58,8 @@ pub struct NativeIntent {
     pub input_approved: bool,
     #[serde(default)]
     pub launch_approved: bool,
+    #[serde(default)]
+    pub max_exit_recoveries: u8,
     pub operation: String,
     pub visible_postcondition: String,
     pub limits: NativeLimits,
@@ -78,8 +80,8 @@ pub struct NativeLimits {
 }
 
 impl NativeLimits {
-    pub fn budgets(&self) -> crate::model::NativeBudgets {
-        crate::model::NativeBudgets {
+    pub fn budgets(&self) -> NativeBudgets {
+        NativeBudgets {
             startup_ms: self.startup_ms,
             readiness_ms: self.readiness_ms,
             workflow_ms: self.workflow_ms,
@@ -87,12 +89,26 @@ impl NativeLimits {
     }
 }
 
-/// Per-Start defaults and ceilings; containment is the fixed supervisor bound.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCapability {
+    pub default_limits: NativeLimits,
+    pub max_workflow_ms: u64,
+}
+
+pub fn native_capability() -> NativeCapability {
+    NativeCapability {
+        default_limits: native_limits(),
+        max_workflow_ms: NativeBudgets::CEILINGS.workflow_ms,
+    }
+}
+
+/// Per-Start defaults; containment is the fixed supervisor bound.
 pub fn native_limits() -> NativeLimits {
     NativeLimits {
-        startup_ms: 60_000,
-        readiness_ms: 30_000,
-        workflow_ms: 30_000,
+        startup_ms: NativeBudgets::DEFAULT.startup_ms,
+        readiness_ms: NativeBudgets::DEFAULT.readiness_ms,
+        workflow_ms: NativeBudgets::DEFAULT.workflow_ms,
         max_frames: 300,
         wait_ms: 1_000,
         interval_ms: 100,
@@ -138,6 +154,8 @@ pub enum NativePhase {
     NativeInitialization,
     Readiness,
     Workflow,
+    Settling,
+    Recovering,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +177,7 @@ pub enum NativeTargetStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeProgress {
+    pub attempt: u64,
     pub status: NativeTargetStatus,
     pub phase: NativePhase,
     pub launch: LaunchDisposition,
@@ -186,6 +205,7 @@ pub struct ControllerView {
     pub error: Option<Fault>,
     pub progress: Vec<Value>,
     pub native_preparation: Option<NativeProgress>,
+    pub attempts: Vec<Value>,
     pub logs: Vec<Value>,
     pub dropped_logs: u64,
 }
@@ -196,6 +216,8 @@ struct Active {
     progress: mpsc::Receiver<Value>,
     logs: mpsc::Receiver<Value>,
     dropped_logs: Arc<AtomicU64>,
+    attempts: Arc<Mutex<Vec<Value>>>,
+    native_preparation: Arc<Mutex<Option<NativeProgress>>>,
 }
 
 struct State {
@@ -209,7 +231,8 @@ struct State {
     native_preparation: Option<NativeProgress>,
     progress: Vec<Value>,
     logs: VecDeque<Value>,
-    seen_logs: BTreeSet<u64>,
+    attempts: Vec<Value>,
+    seen_logs: BTreeSet<(u64, u64)>,
     dropped_logs: u64,
 }
 
@@ -227,6 +250,7 @@ impl State {
             progress: Vec::new(),
             logs: VecDeque::new(),
             seen_logs: BTreeSet::new(),
+            attempts: Vec::new(),
             dropped_logs: 0,
         }
     }
@@ -286,13 +310,9 @@ mod tests {
             DesktopController::new("missing-controlled".into(), "missing-engine".into());
         let mut native = request.clone();
         native.lane = "native".into();
-        controller.start(native, None).unwrap();
-        let terminal = settled(&controller);
-        let fault = terminal.error.unwrap();
-        assert_eq!(fault.category, "NativeRefused");
         assert_eq!(
-            fault.context["cleanup"],
-            json!({"clean":true,"child_started":false})
+            controller.start(native, None).unwrap_err().category,
+            "NativeRefused"
         );
         let mut replay = request;
         replay.lane = "replay".into();

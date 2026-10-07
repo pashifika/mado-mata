@@ -8,6 +8,8 @@ mod evidence;
 mod payload;
 mod protocol;
 mod recognition;
+mod recovery;
+pub(crate) use recovery::{attempt_summary, recovery_allowance};
 mod startup;
 mod supervision;
 pub(crate) use startup::{NativePreparation, StartupLink, StartupReply, emit_native_transition};
@@ -30,6 +32,7 @@ pub(crate) struct PreparedExecution<'a> {
     pub modules: Option<&'a crate::typescript::PreparedModules>,
     pub images: Option<&'a crate::images::PayloadReservation>,
     pub startup: Option<&'a NativePreparation>,
+    pub identity: Option<(&'a str, u64)>,
 }
 pub use supervision::{
     intentional_exit_evidence, parent_loss_evidence, parent_probe,

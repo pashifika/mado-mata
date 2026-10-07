@@ -241,11 +241,42 @@ fn native_request(selection: &crate::application::Selection) -> StartRequest {
         capture_approved: true,
         input_approved: true,
         launch_approved: false,
+        max_exit_recoveries: 0,
         operation: "One reviewed click".into(),
         visible_postcondition: "The reviewed label changes".into(),
         limits: mado_runtime_comparison::desktop::native_limits(),
     });
     request
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn incompatible_recovery_review_refuses_before_capturing_a_saved_target() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let package = fixture.package_at("native-package");
+    declare_target(&package, Some("native-target"));
+    let selection = inspect_named(application, "Main", &package).unwrap();
+    let workspace = workspace_ref(&selection);
+    for (max_exit_recoveries, launch_approved) in [(1, false), (2, true)] {
+        let mut request = native_request(&selection);
+        let intent = request.native_intent.as_mut().unwrap();
+        intent.max_exit_recoveries = max_exit_recoveries;
+        intent.launch_approved = launch_approved;
+        assert_eq!(
+            application.start(&workspace, request).unwrap_err().category,
+            "NativeRefused"
+        );
+        assert_eq!(application.poll().controller["state"], "idle");
+        assert!(
+            application
+                .read_target(&workspace)
+                .unwrap()
+                .record
+                .binding
+                .is_none()
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]

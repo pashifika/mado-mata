@@ -5,7 +5,7 @@ import {mutatedRecovery, recoveryState, retriedRecovery, sameRecoveryContext, up
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {targetDirty, targetExpectation, targetState} from './target.ts';
 import type {TargetState} from './target.ts';
-import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, NativeIntent, NativeLimits, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, TargetBinding, TargetLocation, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, NativeCapability, NativeIntent, NativeLimits, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, TargetBinding, TargetLocation, WorkspaceRef, WorkspaceView} from './types.ts';
 
 export const WORKSPACE_LIMIT = 8;
 export const SAVED_LIMIT = 64;
@@ -18,11 +18,11 @@ export const DESCRIPTOR_LIMIT = 4096;
 const NATIVE_TEXT_LIMIT = 4096;
 // The host's category for a saved custom-archive reference; every other source fault is an unavailable directory.
 export const UNSUPPORTED_SOURCE = 'UnsupportedPackageSource';
-const BUSY_PHASES: Record<string, true> = {preparing: true, running: true, stopping: true};
+const BUSY_PHASES: Record<string, true> = {preparing: true, running: true, recovering: true, stopping: true};
 const INTERNAL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const CONTROL = /\p{Cc}/u;
 
-// The three lifecycle phases during which the runner is reserved by one operation.
+// The lifecycle phases during which the runner is reserved by one operation.
 export function busy(state:string):boolean {
   return BUSY_PHASES[state] === true;
 }
@@ -46,10 +46,14 @@ export interface Bound {
   native:NativeReview;
 }
 
-// Operator-authored intent plus separate capture, input and launch-if-absent consent. `key` names the exact request the
-// consent approved: consent granted for any other key is not approval.
-export interface NativeReview {operation:string; postcondition:string; capture:boolean; input:boolean; launch:boolean; key:string|null}
-export type NativeConsent = 'capture'|'input'|'launch';
+// Operator-authored intent plus separate capture, input, launch and recovery consent for this exact request.
+export interface NativeReview {
+  operation:string; postcondition:string;
+  // Null is untouched: resolve the host default even when capability arrives after the binding. Empty text is invalid.
+  workflowSeconds:string|null;
+  capture:boolean; input:boolean; launch:boolean; recovery:boolean; key:string|null;
+}
+export type NativeConsent = 'capture'|'input'|'launch'|'recovery';
 
 // Session-local UI state for one open named Tab. The host persists names and package references; nothing here is.
 export interface Workspace {
@@ -115,7 +119,7 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
     draftRevision: (previous?.draftRevision ?? 0) + 1, validation: null,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
     disclosedRun: null, touched: false, target: targetState(selection),
-    native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', capture: false, input: false, launch: false, key: null},
+    native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', workflowSeconds: null, capture: false, input: false, launch: false, recovery: false, key: null},
   };
 }
 
@@ -315,6 +319,19 @@ export function applyCommand(list:Workspace[], origin:Origin, command:WorkspaceC
   return next === list || !command.catalog ? next : updateWorkspace(next, origin.id, item => applyCatalog(item, command.catalog!));
 }
 
+// The caller keeps command ownership and guards publication by the originating Workspace/revision. The durable
+// Import reply is visible before a catalog read can block or fail; that read never decides what was committed.
+export async function importProfileCommand(
+  importSource:() => Promise<LegacyImport>,
+  publish:(update:(workspace:Workspace) => Workspace) => void,
+  readCatalog:() => Promise<ProfileCatalog>,
+):Promise<WorkspaceCommand> {
+  const result = await importSource();
+  publish(item => ({...item, legacyImport:result,
+    notice:{key:result.fault ? 'profilesImportPartial' : 'profilesImported', args:[result.imported.length, result.unchanged.length]}}));
+  return {catalog:await readCatalog(), update:item => item};
+}
+
 export function updateWorkspace(list:Workspace[], id:string, update:(workspace:Workspace) => Workspace):Workspace[] {
   const index = list.findIndex(item => item.id === id);
   if (index < 0) return list;
@@ -340,7 +357,7 @@ export interface Derived {
 const encoder = new TextEncoder();
 
 export type NativeTextError = 'blank'|'long'|'control';
-export type NativeBlock = 'nativeUnavailable'|'nativeTarget'|'nativeBinding'|'nativeTargetDirty'|'nativeEnvironment'|'nativeText'|'nativeApproval';
+export type NativeBlock = 'nativeUnavailable'|'nativeWorkflow'|'nativeTarget'|'nativeBinding'|'nativeTargetDirty'|'nativeEnvironment'|'nativeText'|'nativeApproval';
 // The working directory a launch would give its recipient: macOS defines it for bundles, where an explicit directory is
 // refused rather than ignored; an executable launcher gets the explicit directory or its own parent folder.
 export type NativeDirectory = 'os'|'refused'|'explicit'|'parent';
@@ -349,8 +366,9 @@ export interface NativeRecipe {
   recipient:'game'|'launcher'; location:TargetLocation; arguments:string[]; directory:NativeDirectory; workingDirectory:string|null;
 }
 export interface NativeFacts {
-  binding:TargetBinding|null; recipe:NativeRecipe|null; capture:boolean; input:boolean; launch:boolean;
+  binding:TargetBinding|null; recipe:NativeRecipe|null; capture:boolean; input:boolean; launch:boolean; recovery:boolean;
   operationError:NativeTextError|null; postconditionError:NativeTextError|null;
+  workflowSeconds:string; workflowError:boolean; limits:NativeLimits|null;
   block:NativeBlock|null; intent:NativeIntent|null;
 }
 
@@ -378,6 +396,16 @@ function nativeRecipe(binding:TargetBinding):NativeRecipe {
   return {recipient: configuration.launcher ? 'launcher' : 'game', location, arguments: configuration.arguments, directory, workingDirectory};
 }
 
+// The only editable budget is whole-second Workflow time; invalid text never becomes an effective tuple.
+function nativeDuration(review:NativeReview, capability:NativeCapability|null):{workflowSeconds:string; limits:NativeLimits|null} {
+  const workflowSeconds = review.workflowSeconds ?? (capability ? String(capability.default_limits.workflow_ms / 1000) : '');
+  const seconds = Number(workflowSeconds);
+  const limits = capability && /^\d+$/.test(workflowSeconds.trim()) && Number.isFinite(seconds) && Number.isInteger(seconds)
+    && seconds >= 1 && seconds <= capability.max_workflow_ms / 1000
+    ? {...capability.default_limits, workflow_ms: seconds * 1000} : null;
+  return {workflowSeconds, limits};
+}
+
 // Everything the consent covers. Revisions are monotonic, so an edited-back draft or reissued selection stays stale.
 function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null):string {
   const target = bound.target;
@@ -388,19 +416,22 @@ function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLi
 }
 
 // Consent given for another request starts over rather than carrying the other consent forward.
-export function approveNative(bound:Bound, field:NativeConsent, value:boolean, environment:OcrEnvironment|null, limits:NativeLimits|null):Bound {
+export function approveNative(bound:Bound, field:NativeConsent, value:boolean, environment:OcrEnvironment|null, capability:NativeCapability|null):Bound {
+  const {limits} = nativeDuration(bound.native, capability);
+  if (limits === null) return clearNativeApproval(bound);
   const key = nativeKey(bound, environment, limits);
-  const review = bound.native.key === key ? bound.native : {...bound.native, capture: false, input: false, launch: false};
-  return {...bound, native: {...review, [field]: value, key}};
+  const review = bound.native.key === key ? bound.native : {...bound.native, capture: false, input: false, launch: false, recovery: false};
+  if (field === 'recovery' && value && !review.launch) return bound;
+  return {...bound, native: {...review, [field]: value, recovery: field === 'launch' && !value ? false : field === 'recovery' ? value : review.recovery, key}};
 }
 
 export function clearNativeApproval(bound:Bound):Bound {
   const review = bound.native;
-  return review.key === null && !review.capture && !review.input && !review.launch ? bound
-    : {...bound, native: {...review, capture: false, input: false, launch: false, key: null}};
+  return review.key === null && !review.capture && !review.input && !review.launch && !review.recovery ? bound
+    : {...bound, native: {...review, capture: false, input: false, launch: false, recovery: false, key: null}};
 }
 
-export function editNativeReview(bound:Bound, field:'operation'|'postcondition', value:string):Bound {
+export function editNativeReview(bound:Bound, field:'operation'|'postcondition'|'workflowSeconds', value:string):Bound {
   return clearNativeApproval({...bound, native: {...bound.native, [field]: value}});
 }
 
@@ -409,18 +440,22 @@ export function chooseLane(bound:Bound, lane:string):Bound {
   return clearNativeApproval({...bound, lane});
 }
 
-export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null):NativeFacts {
+export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capability:NativeCapability|null):NativeFacts {
   const target = bound.target;
   const binding = nativeBinding(target);
   const recipe = binding && nativeRecipe(binding);
   const review = bound.native;
-  const current = review.key !== null && review.key === nativeKey(bound, environment, limits);
+  const {workflowSeconds, limits} = nativeDuration(review, capability);
+  const workflowError = capability !== null && limits === null;
+  const current = limits !== null && review.key !== null && review.key === nativeKey(bound, environment, limits);
   const capture = current && review.capture;
   const input = current && review.input;
   const launch = current && review.launch;
+  const recovery = current && launch && review.recovery;
   const operationError = nativeTextError(review.operation);
   const postconditionError = nativeTextError(review.postcondition);
-  const block:NativeBlock|null = limits === null ? 'nativeUnavailable'
+  const block:NativeBlock|null = capability === null ? 'nativeUnavailable'
+    : workflowError ? 'nativeWorkflow'
     : targetExpectation(target) === null || target.operation !== null || target.review !== null ? 'nativeTarget'
     : binding === null ? 'nativeBinding'
     : targetDirty(target) ? 'nativeTargetDirty'
@@ -431,12 +466,13 @@ export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, limits
   const intent = block === null && binding && limits && target.view && declaration !== null ? {
     target_revision: target.view.record.revision, target_binding_id: binding.id, target_declaration_identity: declaration,
     capture_approved: capture, input_approved: input, launch_approved: launch,
+    max_exit_recoveries: recovery ? 1 as const : 0 as const,
     operation: review.operation, visible_postcondition: review.postcondition, limits,
   } : null;
-  return {binding, recipe, capture, input, launch, operationError, postconditionError, block, intent};
+  return {binding, recipe, capture, input, launch, recovery, operationError, postconditionError, workflowSeconds, workflowError, limits, block, intent};
 }
 
-export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en', nativeLimits:NativeLimits|null = null):Derived {
+export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en', nativeCapability:NativeCapability|null = null):Derived {
   const t = messages[locale].app;
   const parsed = readDraft(bound.package.schema, bound.draft, locale);
   const numericErrors = Object.keys(parsed.errors).length > 0;
@@ -445,7 +481,7 @@ export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, l
   const dirty = valuesDirty || bound.name !== selectedProfile?.name;
   const profileBound = !selectedProfile || (selectedProfile.package_id === bound.package.package_id && selectedProfile.schema_identity === bound.package.schema_identity);
   const descriptor = bound.descriptorPath.trim();
-  const native = bound.lane === 'native' ? nativeFacts(bound, savedEnvironment, nativeLimits) : null;
+  const native = bound.lane === 'native' ? nativeFacts(bound, savedEnvironment, nativeCapability) : null;
   const startBlock = bound.lane === 'replay' && !descriptor ? t.replayDescriptor
     : bound.lane === 'replay' && !savedEnvironment ? t.replayEnvironment
     : native?.block ? t[native.block] : null;

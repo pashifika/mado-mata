@@ -12,6 +12,8 @@ fn target_save_before_inspection_does_not_bind_run_or_enable_profiles() {
     let store = directory.store();
     let tab = store.create_tab("Owner", "Authoring").unwrap();
     store.create_tab("Other", "Other").unwrap();
+    let ledger = directory.0.join(crate::configuration::HISTORICAL_LEDGER);
+    put(&ledger, b"opaque historical ledger\xff");
     let package = inventory().package_id;
     let empty = store.read_target("Owner", &package).unwrap();
     assert_eq!(empty.binding, None);
@@ -54,6 +56,7 @@ fn target_save_before_inspection_does_not_bind_run_or_enable_profiles() {
     assert_eq!(removed.binding, None);
     assert_eq!(removed.revision, saved.revision + 1);
     assert_eq!(reopened.tab("Owner").unwrap(), tab);
+    assert_eq!(fs::read(ledger).unwrap(), b"opaque historical ledger\xff");
 }
 
 #[test]

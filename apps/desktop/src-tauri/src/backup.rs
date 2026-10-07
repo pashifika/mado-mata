@@ -99,10 +99,7 @@ fn bounded_manifest_entries<'de, D: serde::Deserializer<'de>>(
 impl Manifest {
     pub(crate) fn new(capture: &Capture) -> Self {
         Self {
-            version: if capture
-                .files
-                .contains_key(crate::identity_migrations::LEDGER)
-            {
+            version: if capture.files.contains_key(configuration::HISTORICAL_LEDGER) {
                 2
             } else {
                 1
@@ -579,7 +576,7 @@ mod tests {
         root.put("settings.json", b"malformed\0raw");
         root.put("tabs/Closed/tab.config", br#"{"open":false}"#);
         root.put(
-            crate::identity_migrations::LEDGER,
+            configuration::HISTORICAL_LEDGER,
             b"malformed mapping bytes preserved",
         );
         let original = capture(&root.0).unwrap();

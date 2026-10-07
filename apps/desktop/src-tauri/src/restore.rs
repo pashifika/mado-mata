@@ -24,18 +24,6 @@ const MAX_JOURNAL: usize = 2 * MAX_MANIFEST + 1024;
 /// Preservation archives can contain malformed or future documents. Only a
 /// complete, supported and ownership-consistent set may be installed.
 pub fn validate(capture: &Capture) -> Result<(), Fault> {
-    validate_set(capture, true, true)
-}
-
-pub(crate) fn validate_installed(capture: &Capture) -> Result<(), Fault> {
-    validate_set(capture, false, true)
-}
-
-pub(crate) fn validate_owned(capture: &Capture, allow_legacy: bool) -> Result<(), Fault> {
-    validate_set(capture, allow_legacy, false)
-}
-
-fn validate_set(capture: &Capture, allow_legacy: bool, unassigned: bool) -> Result<(), Fault> {
     capture.check()?;
     let settings = capture.files.get("settings.json").ok_or_else(|| {
         invalid("snapshot has no App settings; it is preservation material, not a complete restore")
@@ -61,17 +49,9 @@ fn validate_set(capture: &Capture, allow_legacy: bool, unassigned: bool) -> Resu
     for (path, bytes) in &capture.files {
         let result = (|| {
             match path_kind(path)? {
-                Kind::Settings | Kind::Tab => {}
-                Kind::IdentityMigrations => crate::identity_migrations::validate_ledger(capture)?,
+                Kind::Settings | Kind::Tab | Kind::IdentityMigrations => {}
                 Kind::LegacyProfile => {
-                    if !unassigned {
-                        return Ok(());
-                    }
-                    let mut profile: Profile = decode(bytes)?;
-                    crate::identity_migrations::validate_profile(&mut profile, true)?;
-                    if path != &format!("profiles/{}.json", profile.id) {
-                        return Err(invalid("legacy profile identity differs from its filename"));
-                    }
+                    // Historical sources are bounded preservation bytes, not active records.
                     budget(&mut budgets, "profiles", bytes.len())?;
                 }
                 Kind::Package => {
@@ -84,13 +64,8 @@ fn validate_set(capture: &Capture, allow_legacy: bool, unassigned: bool) -> Resu
                         if bytes.len() > MAX_TARGET_BYTES {
                             return Err(invalid("target configuration exceeds its byte bound"));
                         }
-                        let mut target: TargetRecord = decode(bytes)?;
-                        crate::identity_migrations::validate_target(
-                            &mut target,
-                            parts[1],
-                            parts[2],
-                            allow_legacy,
-                        )?;
+                        let target: TargetRecord = decode(bytes)?;
+                        target.validate_owned(parts[1], parts[2])?;
                         // Target has its own per-file limit; Capture enforces the shared
                         // file/byte budget without consuming a portable-profile slot.
                         return Ok(());
@@ -104,10 +79,10 @@ fn validate_set(capture: &Capture, allow_legacy: bool, unassigned: bool) -> Resu
                             "package configuration is not owned by a saved Tab reference",
                         ));
                     }
-                    let mut profile: Profile = decode(bytes).map_err(|_| {
+                    let profile: Profile = decode(bytes).map_err(|_| {
                         invalid("unsupported or malformed package configuration owner")
                     })?;
-                    crate::identity_migrations::validate_profile(&mut profile, allow_legacy)?;
+                    storage::validate_profile(&profile)?;
                     if parts[3] != format!("{}.config", profile.id)
                         || profile.package_id != parts[2]
                     {
@@ -151,25 +126,76 @@ pub fn pending(root: &Path) -> Result<bool, Fault> {
         return Ok(false);
     }
     check_directory(root)?;
-    Ok(exists(&root.join(JOURNAL))? || exists(&root.join(COMPLETION))?)
+    Ok(exists(&root.join(JOURNAL))?
+        || exists(&root.join(COMPLETION))?
+        || exists(&root.join("identity-migrations.pending"))?)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Operation {
+    Restore,
+    ProfileImport {
+        internal_name: String,
+        package_id: String,
+        source_id: String,
+    },
+}
+
+impl Operation {
+    fn check(&self) -> Result<(), Fault> {
+        if let Self::ProfileImport {
+            internal_name,
+            package_id,
+            source_id,
+        } = self
+        {
+            storage::validate_internal_name(internal_name)?;
+            storage::validate_package_id(package_id)?;
+            storage::validate_id(source_id)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_transition(
+    before: &Capture,
+    after: &Capture,
+    operation: &Operation,
+) -> Result<(), Fault> {
+    // Exact rollback uses the already bounded preimage, with no metadata merge.
+    before.check()?;
+    after.check()?;
+    operation.check()?;
+    match operation {
+        Operation::Restore => validate(after),
+        Operation::ProfileImport {
+            internal_name,
+            package_id,
+            source_id,
+        } => {
+            storage::validate_import_transition(before, after, internal_name, package_id, source_id)
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
     version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    operation: Option<crate::identity_migrations::Operation>,
+    operation: Operation,
     before: Manifest,
     after: Manifest,
 }
 
 impl Journal {
     fn check(&self) -> Result<(), Fault> {
-        match (self.version, &self.operation) {
-            (1, None) | (2, Some(_)) => Ok(()),
-            _ => Err(invalid("unsupported or ambiguous configuration journal")),
+        if self.version != 3 {
+            return Err(unsupported());
         }
+        self.before.check()?;
+        self.after.check()?;
+        self.operation.check()
     }
 }
 
@@ -177,8 +203,97 @@ impl Journal {
 #[serde(deny_unknown_fields)]
 struct Completion {
     version: u32,
+    operation: Operation,
     rollback: bool,
     target: Manifest,
+}
+
+fn unsupported() -> Fault {
+    Fault::new(
+        "RestoreUnsupported",
+        "Unsupported pending configuration evidence was preserved. Use checkout 824d1b7bd001efb025e53a3becb9e5521af677cf to settle a preserved pre-upgrade copy; do not downgrade this root.",
+    )
+}
+
+fn read_protocol<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Fault> {
+    #[derive(Deserialize)]
+    struct Version {
+        version: u32,
+    }
+    let bytes = read_bytes(path, MAX_JOURNAL)?;
+    let header: Version = decode(&bytes)?;
+    if header.version != 3 {
+        return Err(unsupported());
+    }
+    decode(&bytes)
+}
+
+fn refuse_pending_ledger(root: &Path) -> Result<(), Fault> {
+    if exists(&root.join("identity-migrations.pending"))? {
+        return Err(unsupported().with_context(json!({"path": "identity-migrations.pending"})));
+    }
+    Ok(())
+}
+
+/// Read-only eligibility shared by Bootstrap and recovery command admission.
+pub(crate) fn check_recovery(root: &Path) -> Result<(), Fault> {
+    if !pending(root)? {
+        return Err(invalid(
+            "there is no pending configuration operation to recover",
+        ));
+    }
+    refuse_pending_ledger(root)?;
+    let directory = root.join(JOURNAL);
+    if exists(&root.join(COMPLETION))? {
+        let completion = read_completion(root)?;
+        verify_completion(root, &completion.target)
+    } else {
+        check_directory(&directory)?;
+        let journal: Journal = read_protocol(&directory.join("journal.json"))?;
+        journal.check()?;
+        let before = load_capture(&directory, "old", &journal.before)?;
+        let after = load_capture(&directory, "new", &journal.after)?;
+        validate_transition(&before, &after, &journal.operation)?;
+        let mut aliases = BTreeMap::new();
+        for path in before.files.keys().chain(after.files.keys()) {
+            configuration::check_aliases(path, &mut aliases)?;
+        }
+        let live = capture(root)?;
+        for (path, bytes) in &live.files {
+            if before.files.get(path) != Some(bytes) && after.files.get(path) != Some(bytes) {
+                return Err(invalid(
+                    "live configuration differs from both journal generations",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn read_completion(root: &Path) -> Result<Completion, Fault> {
+    let completion: Completion = read_protocol(&root.join(COMPLETION))?;
+    completion.operation.check()?;
+    // The journal may already be partly removed by committed cleanup. A
+    // retained older journal still blocks cleanup, even beside a current marker.
+    let directory = root.join(JOURNAL);
+    if exists(&directory)? {
+        check_directory(&directory)?;
+        if exists(&directory.join("journal.json"))? {
+            let journal: Journal = read_protocol(&directory.join("journal.json"))?;
+            journal.check()?;
+            let target = if completion.rollback {
+                &journal.before
+            } else {
+                &journal.after
+            };
+            if journal.operation != completion.operation
+                || target.generation != completion.target.generation
+            {
+                return Err(invalid("completion differs from its retained journal"));
+            }
+        }
+    }
+    Ok(completion)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,14 +311,14 @@ enum Point {
     CompletionMarkerRemoved,
 }
 
-/// A normalized Restore generation whose deterministic publication checks passed.
+/// A Restore generation whose deterministic publication checks passed.
 /// Only Bootstrap supplies session receipt, confirmation, and discard authority.
 pub(crate) struct PreparedRestore(PreparedPublication);
 
 struct PreparedPublication {
     observed: Capture,
     new: Capture,
-    operation: crate::identity_migrations::Operation,
+    operation: Operation,
 }
 
 /// Bind the preparation to the preserved live generation without retiring its session.
@@ -220,11 +335,10 @@ pub(crate) fn prepare(
             "a separately requested snapshot matching the current configuration is required",
         ));
     }
-    let new = crate::identity_migrations::normalize_restore(new, &observed)?;
     Ok(PreparedRestore(prepare_publication(
         observed,
         new,
-        crate::identity_migrations::Operation::Restore,
+        Operation::Restore,
     )?))
 }
 
@@ -240,22 +354,33 @@ fn install_with(
     publish(root, plan.0, hook)
 }
 
-pub(crate) fn install_migration(
+pub(crate) fn install_profile_import(
     root: &Path,
-    plan: crate::identity_migrations::Plan,
+    before: Capture,
+    after: Capture,
+    tab: &str,
+    package: &str,
+    source_id: &str,
 ) -> Result<(), Fault> {
-    let (before, after, operation) = plan.into_parts();
+    let operation = Operation::ProfileImport {
+        internal_name: tab.into(),
+        package_id: package.into(),
+        source_id: source_id.into(),
+    };
     let prepared = prepare_publication(before, after, operation)?;
-    publish(root, prepared, &mut |_| Ok(()))
+    publish(root, prepared, &mut |_point| {
+        #[cfg(test)]
+        tests::import_hook(root, _point);
+        Ok(())
+    })
 }
 
 fn prepare_publication(
     observed: Capture,
     new: Capture,
-    operation: crate::identity_migrations::Operation,
+    operation: Operation,
 ) -> Result<PreparedPublication, Fault> {
-    crate::identity_migrations::validate_transition(&observed, &new, &operation)?;
-    crate::identity_migrations::check_rollback_budget(&observed, &new)?;
+    validate_transition(&observed, &new, &operation)?;
     // Changing the spelling of an existing directory is not an authorized tree
     // migration, and may alias a retained empty container after replacement.
     let mut aliases = BTreeMap::new();
@@ -295,8 +420,8 @@ fn publish(
     let staging = configuration::temporary(root, "restore-stage");
     configuration::create_private_directory(&staging)?;
     let journal = Journal {
-        version: 2,
-        operation: Some(operation),
+        version: 3,
+        operation,
         before: Manifest::new(&before),
         after: Manifest::new(&new),
     };
@@ -370,20 +495,17 @@ fn recover_with(
     if !pending(root)? {
         return Err(invalid("there is no pending restore to recover"));
     }
+    refuse_pending_ledger(root)?;
     if exists(&root.join(COMPLETION))? {
         return finish(root, rollback, None, hook);
     }
     let directory = root.join(JOURNAL);
     check_directory(&directory)?;
-    let journal: Journal = decode(&read_bytes(&directory.join("journal.json"), MAX_JOURNAL)?)?;
+    let journal: Journal = read_protocol(&directory.join("journal.json"))?;
     journal.check()?;
     let before = load_capture(&directory, "old", &journal.before)?;
     let after = load_capture(&directory, "new", &journal.after)?;
-    if let Some(operation) = &journal.operation {
-        crate::identity_migrations::validate_transition(&before, &after, operation)?;
-    } else {
-        validate(&after)?;
-    }
+    validate_transition(&before, &after, &journal.operation)?;
     let mut aliases = BTreeMap::new();
     for path in before.files.keys().chain(after.files.keys()) {
         configuration::check_aliases(path, &mut aliases)?;
@@ -426,13 +548,7 @@ fn apply(
     rollback: bool,
     hook: &mut impl FnMut(Point) -> Result<(), Fault>,
 ) -> Result<(), Fault> {
-    let retained;
-    let target = if rollback {
-        retained = crate::identity_migrations::rollback_capture(before, after)?;
-        &retained
-    } else {
-        after
-    };
+    let target = if rollback { before } else { after };
     let live = capture(root)?;
     let paths: BTreeSet<_> = before
         .files
@@ -629,10 +745,7 @@ fn finish(
     let result = (|| {
         hook(Point::BeforeCleanup)?;
         let completion = if exists(&marker)? {
-            let completion: Completion = decode(&read_bytes(&marker, MAX_JOURNAL)?)?;
-            if completion.version != 1 {
-                return Err(invalid("unsupported restore completion version"));
-            }
+            let completion = read_completion(root)?;
             committed_rollback = Some(completion.rollback);
             if completion.rollback != rollback {
                 return Err(invalid(
@@ -641,21 +754,17 @@ fn finish(
             }
             completion
         } else {
-            let journal: Journal =
-                decode(&read_bytes(&directory.join("journal.json"), MAX_JOURNAL)?)?;
+            let journal: Journal = read_protocol(&directory.join("journal.json"))?;
             journal.check()?;
             let target = if rollback {
-                let before = load_capture(&directory, "old", &journal.before)?;
-                let after = load_capture(&directory, "new", &journal.after)?;
-                Manifest::new(&crate::identity_migrations::rollback_capture(
-                    &before, &after,
-                )?)
+                journal.before
             } else {
                 journal.after
             };
             verify_completion(root, &target)?;
             let completion = Completion {
-                version: 1,
+                version: 3,
+                operation: journal.operation,
                 rollback,
                 target,
             };
@@ -765,6 +874,52 @@ pub(crate) mod tests {
     use crate::configuration::tests::Root;
     use crate::storage::{PackageReference, PackageSource, Store};
     use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    type ImportHook = (std::path::PathBuf, fn(&Path, Point));
+    thread_local! {
+        static IMPORT_HOOK: std::cell::RefCell<Option<ImportHook>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn import_hook(root: &Path, point: Point) {
+        IMPORT_HOOK.with(|slot| {
+            if let Some((owner, hook)) = slot.borrow().as_ref() {
+                if owner == root {
+                    hook(root, point);
+                }
+            }
+        });
+    }
+
+    fn with_import_hook<T>(root: &Path, hook: fn(&Path, Point), action: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                IMPORT_HOOK.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        IMPORT_HOOK.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some((root.to_path_buf(), hook));
+        });
+        let _reset = Reset;
+        action()
+    }
+
+    pub(crate) fn with_import_cleanup_failure<T>(root: &Path, action: impl FnOnce() -> T) -> T {
+        with_import_hook(
+            root,
+            |root, point| {
+                if point == (Point::CleanupRemoved { index: 0 }) {
+                    // Enumeration has validated every staged file and journal.json has
+                    // been removed. The next actual remove_file must fail on a directory.
+                    let obstacle = root.join(JOURNAL).join("new-0");
+                    fs::remove_file(&obstacle).unwrap();
+                    configuration::create_private_directory(&obstacle).unwrap();
+                }
+            },
+            action,
+        )
+    }
 
     pub(crate) fn interrupt_install(root: &Path, new: Capture, expected_generation: &str) {
         let plan = prepare(new, capture(root).unwrap(), Some(expected_generation)).unwrap();
@@ -1641,4 +1796,4 @@ pub(crate) mod tests {
 }
 
 #[cfg(test)]
-pub(crate) mod migration_tests;
+pub(crate) mod cutover_tests;

@@ -1,11 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {INITIAL_BOOTSTRAP,PollGate,initialSettings,reconstructed,reconstructionBlock,reduceBootstrap,restoreBlock,restoreOutcome,surface} from './bootstrap.ts';
+import {INITIAL_BOOTSTRAP,PollGate,initialSettings,reconstructed,reconstructionBlock,recoveryBlock,reduceBootstrap,restoreBlock,restoreOutcome,surface} from './bootstrap.ts';
 import {DEFAULT_NOTIFICATIONS} from './state.ts';
 
 const fault={category:'StorageFormat',message:'settings.json is not valid JSON',context:{stage:'settings'}};
 function status(overrides={}){
-  return {state:'ready',stage:'ready',root:'/data',legacy_root:null,fault:null,settings:null,application_available:true,pending_restore:false,catalog:null,...overrides};
+  return {state:'ready',stage:'ready',root:'/data',legacy_root:null,fault:null,settings:null,application_available:true,pending_restore:false,recovery_supported:false,catalog:null,...overrides};
 }
 function catalog(...ids){
   return {open:ids.map(id=>({workspace_id:id,revision:0,internal_name:id,display_name:id,selection:null,source_error:null,saved_package:null})),closed:[],faults:[]};
@@ -113,6 +113,62 @@ test('retry and recovery require settled operations and explicit retained-sessio
   assert.equal(reconstructionBlock(recovery,idle,false),null);
 });
 
+for (const {scenario,supported,context} of [
+  {scenario:'an earlier journal',supported:false,context:{path:'/data/.restore-journal',version:2}},
+  {scenario:'an unknown journal',supported:false,context:{path:'/data/.restore-journal',version:99}},
+  {scenario:'an earlier completion-only marker',supported:false,context:{path:'/data/.restore-completion',version:1,configuration_installed:true,cleanup_incomplete:true}},
+  {scenario:'a retired-ledger pending write',supported:false,context:{path:'/data/identity-migrations.pending'}},
+]) {
+  test(`unsupported recovery admission preserves ${scenario} and permits only a settled Retry`,()=>{
+    const cause={category:'RestoreUnsupported',message:'unsupported pending evidence',context};
+    const current=status({state:'recovery',stage:'restore',application_available:false,pending_restore:true,recovery_supported:supported,fault:cause});
+    assert.equal(recoveryBlock(current,idle,true),'pendingRestore');
+    assert.equal(restoreBlock(current,{archivePath:'/a',confirm:true,discard:true},idle),'pendingRestore');
+    assert.equal(reconstructionBlock(current,idle,false),null);
+    assert.equal(reconstructionBlock(current,{...idle,command:true},true),'command');
+    assert.equal(restoreOutcome(current),'unsupported');
+    let ui=reduceBootstrap(INITIAL_BOOTSTRAP,{type:'status',status:current});
+    ui=reduceBootstrap(ui,{type:'pending',action:'retrying'});
+    ui=reduceBootstrap(ui,{type:'actionFailed',fault:{category:'Admission',message:'still blocked',context:null}});
+    ui=reduceBootstrap(ui,{type:'pending',action:null});
+    assert.equal(ui.status,current);
+    assert.equal(ui.status.fault,cause);
+    assert.equal(ui.status.pending_restore,true);
+  });
+}
+
+for (const {scenario,category,supported} of [
+  {scenario:'a current transaction with an external edit',category:'RestoreJournal',supported:false},
+  {scenario:'a current transaction with an unreadable preimage',category:'Storage',supported:false},
+  {scenario:'a host reply without explicit recovery admission',category:'RestorePending',supported:undefined},
+]) {
+  test(`blocked recovery keeps repair and Retry available for ${scenario}`,()=>{
+    const current=status({state:'recovery',stage:'restore',application_available:false,pending_restore:true,
+      recovery_supported:supported,fault:{category,message:'recovery validation failed',context:null}});
+    assert.equal(restoreOutcome(current),'blocked');
+    assert.equal(recoveryBlock(current,idle,true),'pendingRestore');
+    assert.equal(restoreBlock(current,{archivePath:'/a',confirm:true,discard:true},idle),'pendingRestore');
+    assert.equal(reconstructionBlock(current,idle,false),null);
+    const repaired={...current,recovery_supported:true,fault:{category:'RestorePending',message:'validated pending operation',context:null}};
+    assert.equal(restoreOutcome(repaired),'unfinished');
+    assert.equal(recoveryBlock(repaired,idle,false),null);
+  });
+}
+
+for (const {scenario,current,admission,discard,block} of [
+  {scenario:'an idle supported transaction',current:status({application_available:false,pending_restore:true,recovery_supported:true}),admission:idle,discard:false,block:null},
+  {scenario:'a supported transaction with an active operation',current:status({pending_restore:true,recovery_supported:true}),admission:{...idle,active:true},discard:true,block:'active'},
+  {scenario:'a supported transaction with an Edit lease',current:status({pending_restore:true,recovery_supported:true}),admission:{...idle,authoring:true},discard:true,block:'authoring'},
+  {scenario:'a supported transaction with a pending command',current:status({pending_restore:true,recovery_supported:true}),admission:{...idle,command:true},discard:true,block:'command'},
+  {scenario:'a retained session without disposal consent',current:status({pending_restore:true,recovery_supported:true}),admission:idle,discard:false,block:'discard'},
+  {scenario:'a retained session with disposal consent',current:status({pending_restore:true,recovery_supported:true}),admission:idle,discard:true,block:null},
+  {scenario:'a settled transaction with an obsolete support flag',current:status({recovery_supported:true}),admission:idle,discard:true,block:'pendingRestore'},
+]) {
+  test(`version-3 recovery admission: ${scenario}`,()=>{
+    assert.equal(recoveryBlock(current,admission,discard),block);
+  });
+}
+
 test('settled reconstruction consumes every action consent without erasing the snapshot outcome or recovery cause',()=>{
   const receipt={path:'/backups/app.config.42',generation:'g1',files:1,bytes:20};
   let ui=reduceBootstrap(INITIAL_BOOTSTRAP,{type:'snapshotSettled',outcome:{kind:'receipt',receipt}});
@@ -143,7 +199,7 @@ function finishFault(rollback,pending){
     retained_staging:'/data/.restore-journal',completion_marker:'/data/.restore-completion'},{category:'Storage',message:'remove completed restore marker: permission denied'});
 }
 function recovering(fault,pending,stage='restore'){
-  return status({state:'recovery',stage,fault,application_available:false,pending_restore:pending});
+  return status({state:'recovery',stage,fault,application_available:false,pending_restore:pending,recovery_supported:pending});
 }
 const rollbackFailure={rollback_failure:failed(null,{category:'Storage',message:'retain displaced configuration: disk full'}),pending_restore:true};
 

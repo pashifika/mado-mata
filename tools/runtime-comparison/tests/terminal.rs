@@ -192,6 +192,8 @@ fn parent_deadline_reaches_the_child_without_erasing_receipts_or_cleanup() {
     let (progress, events) = std::sync::mpsc::sync_channel::<Value>(32);
     let (logs, _messages) = std::sync::mpsc::sync_channel(1);
     let observer = Observer {
+        native_preparation: Default::default(),
+        attempts: Default::default(),
         progress,
         logs,
         dropped_logs: std::sync::Arc::new(AtomicU64::new(0)),

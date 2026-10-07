@@ -154,22 +154,27 @@ The full check has these responsibilities:
   consent invalidation), and
   type-check/build its trusted UI and bundled language worker.
 - Test the Rust application core with `--no-default-features --lib`: explicit
-  setup/recovery, named Tab ownership, scoped profiles, source-preserving legacy
-  imports, bounded snapshots, and journaled restore/rollback are checked alongside
-  bounded logging and the shared controller contracts. Log-content,
+  setup/recovery, named Tab ownership, scoped profiles, source-preserving
+  historical-layout imports, bounded snapshots, and journaled restore/rollback
+  are checked alongside bounded logging and shared controller contracts. Log-content,
   initialization-error and successful receipt-restore assertions join the real
   writer independently of the production shutdown deadline; a separate stalled-worker
   test checks the bounded shutdown and incomplete-cleanup outcome.
   Command-retirement checks accept settled logging or an explicit `LoggingShutdown`
   refusal with retirement and closed admission; they do not assume disk-sync latency.
-  Identifier regressions cover
-  canonical XIDs, typed owner-scoped conversion, bounded durable mappings,
-  repeat ingress/conflicts, stale-schema preservation, and reservation retention
-  through interrupted publication and recovery. Completion-preference regressions
-  cover old-file defaults without rewriting, strict object/range refusal, atomic
-  write failure, Edit/busy/restore admission, and configuration restore/restart.
-  Restore/migration regressions cover discoverable cleanup after restart, not
-  physical power loss. The
+  Identifier cutover checks must cover canonical-XID lifecycle and unchanged
+  ownership, effect-free old active-ID refusal, source-preserving current-XID
+  Import/repeat/conflicts and durable-subset reporting. Snapshot/Restore checks
+  must cover inactive unassigned originals, opaque ledger bytes or absence,
+  exact preimage rollback, supported version-3 recovery, and untouched refusal
+  of old/unknown journals, completion-only markers and pending-ledger writes.
+  Historical-root staging keeps the managed-path byte budget even when an inert
+  source is named `settings.json`. Recovery UI checks distinguish unsupported
+  protocols from current-transaction validation failures and preserve repair/Retry.
+  Completion-preference regressions cover old-file defaults without rewriting,
+  strict object/range refusal, atomic write failure, Edit/busy/restore admission,
+  and configuration restore/restart. Restore/Import regressions exercise
+  discoverable cleanup after restart, not physical power loss. The
   [configuration recovery ADR](adr/0005-desktop-configuration-recovery.md) records
   the storage boundaries and Windows directory-sync qualification limitation.
   Optional OCR settings, bounded replay projection, admission races, and
@@ -229,6 +234,23 @@ Hosted Windows enables Git symlink checkout before fetching the repository.
 The two narrower modes are mutually exclusive. Missing tools, invalid input,
 or failing commands remain failures; neither mode substitutes for the full gate.
 These checks do not install remote rulesets or verify live GitHub enforcement.
+
+Desktop `0.2.0` marks the first rejecting development version, not a runtime
+version or saved-schema bump. The retained converter checkout is
+`824d1b7bd001efb025e53a3becb9e5521af677cf`, tree
+`090c1d9fed7c6470ef31548060a629086fdf9783`; its recorded successful
+[CI run](https://github.com/pashifika/mado-mata/actions/runs/37592403434) is baseline
+evidence, not acceptance of the rejecting version. No converter release/tag
+identified the boundary; `0.1.0` alone is not a converter guarantee.
+Use the [two-checkout procedure](desktop.md#development-transition-notes), each
+checkout's pinned installation guide, separate frontend/compiler dependencies
+and shell outputs, and each checkout's fixed controlled-runner path. Record
+revision/tree and executable hashes plus source/archive comparisons privately.
+The root and backup upgrade routes, old pending-operation settlement,
+owner-selected Import, and actual
+[cutover WebView acceptance](desktop.md#identifier-cutover-acceptance) remain
+separate local obligations. Neither hosted success nor the presence of these
+instructions claims that local acceptance has passed.
 
 ## Controlled results and concise logs
 
@@ -407,9 +429,10 @@ It does not use secrets, administration tokens, `pull_request_target`, private
 Rasen access, or self-hosted interactive desktops. Superseding one PR run must
 not cancel another PR's run or turn a cancellation into success.
 Local macOS GUI acceptance is separate: exercise Loading, Setup, Recovery, named
-Tabs, legacy imports, snapshot/restore confirmation, package selection, scoped
-profiles, actual runs, source errors, Stop, window closure, and logs using the
-[desktop procedure](desktop.md#local-gui-acceptance). Hosted compilation and core
+Tabs, current-XID historical-layout imports, snapshot/restore confirmation,
+package selection, scoped profiles, actual runs, source errors, Stop, window
+closure, and logs using the [desktop procedure](desktop.md#local-gui-acceptance).
+Hosted compilation and core
 tests do not prove those interactions or additional-OS desktop support. A passed
 local setup smoke does not pass the remaining GUI scenarios, full CI, or native
 qualification. Normal builds and release builds have no WebDriver listener; CI
