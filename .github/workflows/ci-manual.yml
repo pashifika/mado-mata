@@ -1,11 +1,7 @@
-name: CI
+name: CI (manual)
 
 'on':
-  pull_request:
-    branches: [main, 'dev/**']
-    # Exclude edited: title/body/checkbox changes must not create workflow runs.
-    # After a base retarget, reopen the PR or push a new commit to revalidate.
-    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -35,7 +31,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 tools/ci/select_checks.py
 
-  # Non-PR events use separate workflows and cannot publish the required gate.
+  # Push statuses must not satisfy PR validation when duplicate work is skipped.
   branch-flow:
     name: Branch flow
     needs: dev-push-policy
@@ -161,7 +157,7 @@ jobs:
           if-no-files-found: warn
 
   gate:
-    name: CI Gate
+    name: CI Gate (manual)
     if: ${{ always() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
     needs: [dev-push-policy, branch-flow, repository, runtime-macos, runtime-windows]
     runs-on: ubuntu-24.04
