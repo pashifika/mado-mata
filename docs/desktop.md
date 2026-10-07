@@ -2011,11 +2011,27 @@ acceptance open. These steps do not authorize operations by themselves.
 
 ### Repeated exits and recovery-stage Stop acceptance
 
-This procedure is not a completed Native qualification. Existing one-recovery,
-pre-launch Stop and recovery-disabled repeated/long-Workflow evidence does not
-establish a second exit or later recovery-stage Stop. Deterministic owner,
-supervisor and startup tests remain separate from actual Desktop/OS observations.
-Deliver CI-verifiable coverage and guidance without checking off unexecuted rows.
+Bounded macOS acceptance on 2026-10-07 at product revision
+`2c1a79e280eb3d9bf3bc31ef2fdb8d3fa78dd0bf`, with engine revision
+`4b4f3296838a9eecdcb00e9d2bb3121a25cdc240`, completed the six rows below
+in one actual Desktop process using a separately authorized saved launcher and
+CPU OCR environment. Both exits were retained without a third attempt; the fresh
+recovery and final recovery-disabled Runs succeeded. Cross-Workspace Stop was
+observed after accepted recovery launch before capture-ready, during recovered
+Readiness without Workflow admission, and during recovered Workflow after an
+independent usable-screen checkpoint. All attempts settled cleanly without forced
+containment or owned descendants; the admitted game was left running after Stop.
+
+The three Stop-to-visible-terminal upper bounds were 137–203 ms; supervisor-clock
+receipt and admission-closure latencies were each below 7 ms. Each Run retained
+independent target-only checkpoint images and passive observation through
+settlement plus ten seconds.
+Qualification preserved one fresh-recognition refusal without input before the
+successful Workflow-Stop qualification; it was not counted as a measured pass,
+and no predicate, input route or product code was changed to obtain acceptance.
+This is revision-bound primary-OS evidence, not broader Native qualification.
+Deterministic owner, supervisor and startup tests remain separate from actual
+Desktop/OS observations. Reusing this procedure still requires fresh authority.
 
 Use one Desktop process, an isolated private configuration and a fingerprinted
 copy of the useful recognition workflow. Obtain current explicit approval for
