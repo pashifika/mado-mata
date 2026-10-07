@@ -14,7 +14,9 @@ pub(crate) use fs::{
     check_directory, checked_file, decode, encode, exists, filesystem_key, private_directory,
     read_bytes, write_atomic,
 };
-pub(crate) use profiles::{RecoveryRecord, portable_values, validate_profile};
+pub(crate) use profiles::{
+    RecoveryRecord, portable_values, validate_import_transition, validate_profile,
+};
 pub(crate) use settings::validate_settings;
 pub(crate) use tabs::{validate_internal_name, validate_tab};
 
@@ -209,7 +211,7 @@ impl Budget<'_> {
                         &name,
                         &key,
                         &metadata,
-                        crate::identity_migrations::MAX_LEDGER_BYTES,
+                        crate::configuration::MAX_LEDGER_BYTES,
                     );
                 }
                 "profiles" => {
@@ -345,7 +347,10 @@ pub(crate) fn new_id() -> Result<String, Fault> {
 pub(crate) fn validate_id(id: &str) -> Result<(), Fault> {
     id.parse::<xid::Id>()
         .map(|_| ())
-        .map_err(|_| Fault::new("ProfileIdentity", "invalid canonical XID"))
+        .map_err(|_| Fault::new(
+            "ProfileIdentity",
+            "Unsupported identity: a canonical XID is required. Convert a preserved pre-upgrade copy with checkout 824d1b7bd001efb025e53a3becb9e5521af677cf; do not downgrade this root.",
+        ))
 }
 
 #[cfg(test)]

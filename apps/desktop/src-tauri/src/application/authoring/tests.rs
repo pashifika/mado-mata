@@ -881,7 +881,11 @@ fn host_publication_refuses_unsafe_and_incoherent_edits_without_touching_source(
 
 #[test]
 fn pending_restore_evidence_blocks_commands_but_not_close_and_survives_shutdown() {
-    for marker in [".restore-journal", ".restore-completion"] {
+    for marker in [
+        ".restore-journal",
+        ".restore-completion",
+        "identity-migrations.pending",
+    ] {
         let sources = Sources::new();
         let app = sources.app();
         let selection = inspect_named(app, "owner", &sources.package).unwrap();

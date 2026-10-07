@@ -72,13 +72,13 @@ export interface RecoveryMutation {saved:Profile|null; draft:Record<string,Json>
 export interface WorkspaceCatalog {open:WorkspaceView[]; closed:TabRecord[]; faults:Fault[]}
 // `loading` is the transient first read before the shell has resolved the root; it carries no defaults or catalog.
 export type BootstrapState = 'loading'|'setup'|'ready'|'recovery';
-// Outcome of one explicit legacy-profile import; a partial batch keeps its committed subset.
+// Outcome of explicit current-XID profile import from the historical layout; partial batches keep their durable subset.
 export interface LegacyImport {imported:string[]; unchanged:string[]; fault:Fault|null}
 // Shell-owned bootstrap truth, independent of any Application. Paths are disclosed deliberately by the host.
 export interface BootstrapStatus {
   state:BootstrapState; stage:string; root:string|null; legacy_root:string|null; fault:Fault|null;
   default_packages_root:string|null;
-  settings:Settings|null; application_available:boolean; pending_restore:boolean; catalog:WorkspaceCatalog|null;
+  settings:Settings|null; application_available:boolean; pending_restore:boolean; recovery_supported:boolean; catalog:WorkspaceCatalog|null;
 }
 export interface SnapshotReceipt {path:string; generation:string; files:number; bytes:number}
 // Typed Native preparation state; the values mirror the host's snake_case enums.

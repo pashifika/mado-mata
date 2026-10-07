@@ -319,6 +319,19 @@ export function applyCommand(list:Workspace[], origin:Origin, command:WorkspaceC
   return next === list || !command.catalog ? next : updateWorkspace(next, origin.id, item => applyCatalog(item, command.catalog!));
 }
 
+// The caller keeps command ownership and guards publication by the originating Workspace/revision. The durable
+// Import reply is visible before a catalog read can block or fail; that read never decides what was committed.
+export async function importProfileCommand(
+  importSource:() => Promise<LegacyImport>,
+  publish:(update:(workspace:Workspace) => Workspace) => void,
+  readCatalog:() => Promise<ProfileCatalog>,
+):Promise<WorkspaceCommand> {
+  const result = await importSource();
+  publish(item => ({...item, legacyImport:result,
+    notice:{key:result.fault ? 'profilesImportPartial' : 'profilesImported', args:[result.imported.length, result.unchanged.length]}}));
+  return {catalog:await readCatalog(), update:item => item};
+}
+
 export function updateWorkspace(list:Workspace[], id:string, update:(workspace:Workspace) => Workspace):Workspace[] {
   const index = list.findIndex(item => item.id === id);
   if (index < 0) return list;

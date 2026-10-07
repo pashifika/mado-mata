@@ -302,11 +302,11 @@ fn portability_checks_fields_paths_and_defaults_not_arbitrary_words() {
     assert_eq!(fs::read(&path).unwrap(), before);
 }
 
-fn legacy_profile(sequence: u64, name: &str) -> Profile {
+fn current_profile(sequence: u64, name: &str) -> Profile {
     let inv = inventory();
     Profile {
         version: VERSION,
-        id: format!("p-{sequence:032x}-{:08x}-{:016x}", 1, 1),
+        id: format!("{sequence:019x}0"),
         name: name.into(),
         package_id: inv.package_id,
         schema_identity: identity(&inv.schema).unwrap(),
@@ -314,21 +314,10 @@ fn legacy_profile(sequence: u64, name: &str) -> Profile {
     }
 }
 
-fn current_profile(sequence: u64, name: &str) -> Profile {
-    let mut profile = legacy_profile(sequence, name);
-    profile.id = format!("{sequence:019x}0");
-    profile
-}
-
 fn assert_imported(scoped: &ProfileStore, id: &str, source: &Profile) {
     validate_id(id).unwrap();
-    let actual = scoped.read_profile(id).unwrap().0;
-    let mut expected = source.clone();
-    expected.id = id.into();
-    assert_eq!(
-        serde_json::to_value(actual).unwrap(),
-        serde_json::to_value(expected).unwrap()
-    );
+    assert_eq!(id, source.id);
+    assert_eq!(scoped.read_profile(id).unwrap().0, *source);
 }
 
 fn legacy(directory: &Directory, profile: &Profile) -> Vec<u8> {
@@ -348,7 +337,7 @@ fn explicit_legacy_import_is_exact_idempotent_and_not_shared() {
     let directory = Directory::new();
     let first = directory.profiles("First");
     let second = directory.profiles("Second");
-    let profile = legacy_profile(1, "Legacy");
+    let profile = current_profile(1, "Historical source");
     let bytes = legacy(&directory, &profile);
     let inv = inventory();
     assert!(
@@ -361,7 +350,7 @@ fn explicit_legacy_import_is_exact_idempotent_and_not_shared() {
     let store = directory.store();
     let imported = store.import_legacy_profiles("First", &inv).unwrap();
     let id = imported.imported[0].clone();
-    assert_ne!(id, profile.id);
+    assert_eq!(id, profile.id);
     assert!(imported.fault.is_none());
     assert_imported(&first, &id, &profile);
     let retry = store.import_legacy_profiles("First", &inv).unwrap();
@@ -386,7 +375,7 @@ fn explicit_legacy_import_is_exact_idempotent_and_not_shared() {
         bytes
     );
     let other = store.import_legacy_profiles("Second", &inv).unwrap();
-    assert_ne!(other.imported[0], id);
+    assert_eq!(other.imported[0], id);
     assert_imported(&second, &other.imported[0], &profile);
     first.delete(&id).unwrap();
     let restarted = directory
@@ -401,8 +390,8 @@ fn explicit_legacy_import_is_exact_idempotent_and_not_shared() {
 fn legacy_conflict_reports_committed_subset_and_retry_preserves_sources() {
     let directory = Directory::new();
     let scoped = directory.profiles("Owner");
-    let first = legacy_profile(1, "First");
-    let second = legacy_profile(2, "Second");
+    let first = current_profile(1, "First");
+    let second = current_profile(2, "Second");
     let second_bytes = legacy(&directory, &second);
     let store = directory.store();
     let initial = store.import_legacy_profiles("Owner", &inventory()).unwrap();
@@ -443,8 +432,8 @@ fn legacy_conflict_reports_committed_subset_and_retry_preserves_sources() {
 fn interrupted_legacy_batch_resumes_after_external_source_repair() {
     let directory = Directory::new();
     let scoped = directory.profiles("Owner");
-    let first = legacy_profile(1, "First");
-    let second = legacy_profile(2, "Second");
+    let first = current_profile(1, "First");
+    let second = current_profile(2, "Second");
     legacy(&directory, &first);
     let broken = directory
         .0
@@ -469,7 +458,7 @@ fn interrupted_legacy_batch_resumes_after_external_source_repair() {
 fn legacy_import_skips_incompatible_data_and_preserves_malformed_sources() {
     let directory = Directory::new();
     let scoped = directory.profiles("Owner");
-    let mut profile = legacy_profile(1, "Other package");
+    let mut profile = current_profile(1, "Other package");
     profile.package_id = "different-package".into();
     legacy(&directory, &profile);
     let store = directory.store();
@@ -994,7 +983,7 @@ fn os_metadata_preserves_profile_listing_recovery_save_and_legacy_import() {
         "Renamed"
     );
 
-    let imported = legacy_profile(1, "Legacy");
+    let imported = current_profile(1, "Historical source");
     let bytes = legacy(&directory, &imported);
     let sidecar = directory.0.join(format!("profiles/._{}.json", imported.id));
     fs::write(&sidecar, b"legacy metadata").unwrap();
@@ -1091,12 +1080,7 @@ fn current_xid_import_retains_identity_and_compares_typed_content() {
     assert_eq!(result.imported, [source.id.clone()]);
     assert!(result.fault.is_none());
     assert_imported(&scoped, &source.id, &source);
-    assert!(
-        !directory
-            .0
-            .join(crate::identity_migrations::LEDGER)
-            .exists()
-    );
+    assert!(!directory.0.join(configuration::HISTORICAL_LEDGER).exists());
     // Source formatting changes are not an identity or payload conflict.
     put(
         &directory.0.join(format!("profiles/{}.json", source.id)),
@@ -1113,4 +1097,237 @@ fn current_xid_import_retains_identity_and_compares_typed_content() {
         fs::read(directory.0.join(format!("profiles/{}.json", source.id))).unwrap(),
         original
     );
+}
+
+#[test]
+fn mixed_current_and_unsupported_sources_stop_at_sorted_first_fault() {
+    let directory = Directory::new();
+    let scoped = directory.profiles("Owner");
+    let first = current_profile(1, "First");
+    let mut old = current_profile(2, "Unsupported");
+    old.id = crate::restore::cutover_tests::old_id(2);
+    let mut later = current_profile(3, "Later");
+    later.id = format!("s{:018x}0", 3);
+    let sources = [&first, &old, &later].map(|profile| {
+        (
+            format!("profiles/{}.json", profile.id),
+            legacy(&directory, profile),
+        )
+    });
+    let result = directory
+        .store()
+        .import_legacy_profiles("Owner", &inventory())
+        .unwrap();
+    assert_eq!(result.imported, [first.id.clone()]);
+    assert!(result.unchanged.is_empty());
+    let fault = result.fault.unwrap();
+    assert_eq!(fault.category, "ProfileIdentity");
+    assert_eq!(fault.context["profile_id"], old.id);
+    assert_eq!(fault.context["internal_name"], "Owner");
+    assert_imported(&scoped, &first.id, &first);
+    assert!(!scoped.profile_path(&old.id).exists());
+    assert!(!scoped.profile_path(&later.id).exists());
+    let retry = directory
+        .store()
+        .import_legacy_profiles("Owner", &inventory())
+        .unwrap();
+    assert!(retry.imported.is_empty());
+    assert_eq!(retry.unchanged, [first.id.clone()]);
+    assert_eq!(retry.fault.unwrap().context["profile_id"], old.id);
+    for (path, bytes) in sources {
+        assert_eq!(
+            configuration::digest(&fs::read(directory.0.join(path)).unwrap()),
+            configuration::digest(&bytes)
+        );
+    }
+    assert!(!directory.0.join(configuration::HISTORICAL_LEDGER).exists());
+}
+
+#[test]
+fn opaque_ledger_never_reserves_or_rewrites_current_profile_lifecycle() {
+    let directory = Directory::new();
+    let first = directory.profiles("First");
+    let second = directory.profiles("Second");
+    let ledger = b"not an assignment document\xff\0";
+    put(&directory.0.join(configuration::HISTORICAL_LEDGER), ledger);
+    let inv = inventory();
+    let saved = first.save(&inv, None, "Original", options()).unwrap();
+    validate_id(&saved.id).unwrap();
+    let other = second.save(&inv, None, "Other", options()).unwrap();
+    let other_bytes = fs::read(second.profile_path(&other.id)).unwrap();
+    let renamed = first.rename(&inv, &saved.id, "Renamed").unwrap();
+    assert_eq!(renamed.id, saved.id);
+    let updated = first
+        .save(
+            &inv,
+            Some(&saved.id),
+            "Saved",
+            json!({"priorities":["left"]}),
+        )
+        .unwrap();
+    let reopened = directory
+        .store()
+        .profile_store("First", &inv.package_id)
+        .unwrap();
+    assert_eq!(reopened.read_profile(&saved.id).unwrap().0, updated);
+    assert_eq!(
+        fs::read(second.profile_path(&other.id)).unwrap(),
+        other_bytes
+    );
+    let source = current_profile(1, "Import");
+    let original = legacy(&directory, &source);
+    let imported = directory
+        .store()
+        .import_legacy_profiles("First", &inv)
+        .unwrap();
+    assert!(imported.fault.is_none());
+    assert_eq!(imported.imported, [source.id.clone()]);
+    assert_eq!(
+        fs::read(directory.0.join(configuration::HISTORICAL_LEDGER)).unwrap(),
+        ledger
+    );
+    assert_eq!(
+        fs::read(directory.0.join(format!("profiles/{}.json", source.id))).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn real_store_import_cleanup_failure_reports_durable_subset_and_duplicate_free_retry() {
+    let directory = Directory::new();
+    let scoped = directory.profiles("Owner");
+    directory.profiles("Other");
+    let store = directory.store();
+    let first = current_profile(1, "Already installed");
+    legacy(&directory, &first);
+    assert!(
+        store
+            .import_legacy_profiles("Owner", &inventory())
+            .unwrap()
+            .fault
+            .is_none()
+    );
+    let second = current_profile(2, "Committed before failure");
+    let third = current_profile(3, "Not reached");
+    legacy(&directory, &second);
+    legacy(&directory, &third);
+    put(
+        &directory.0.join(configuration::HISTORICAL_LEDGER),
+        b"opaque historical metadata\0",
+    );
+    let unrelated = directory.0.join(format!(
+        "tabs/Other/{}/00000000000000000000.config",
+        inventory().package_id
+    ));
+    put(&unrelated, b"scoped malformed original");
+    let before = configuration::capture(&directory.0).unwrap();
+    let result = crate::restore::tests::with_import_cleanup_failure(&directory.0, || {
+        store.import_legacy_profiles("Owner", &inventory()).unwrap()
+    });
+    assert_eq!(result.imported, [second.id.clone()]);
+    assert_eq!(result.unchanged, [first.id.clone()]);
+    let wire = serde_json::to_value(&result).unwrap();
+    assert_eq!(wire.as_object().unwrap().len(), 3);
+    let fault = result.fault.unwrap();
+    assert_eq!(fault.category, "ConfigurationIo");
+    assert_eq!(
+        fault.context["operation"],
+        "remove owned restore staging file"
+    );
+    assert_eq!(fault.context["configuration_installed"], true);
+    assert_eq!(fault.context["rolled_back"], false);
+    assert_eq!(fault.context["cleanup_incomplete"], true);
+    assert_eq!(fault.context["pending_restore"], true);
+    assert_eq!(fault.context["profile_id"], second.id);
+    assert_eq!(fault.context["internal_name"], "Owner");
+    assert_imported(&scoped, &second.id, &second);
+    assert!(!scoped.profile_path(&third.id).exists());
+    let committed = configuration::capture(&directory.0).unwrap();
+    assert_eq!(committed.files.len(), before.files.len() + 1);
+    for (path, bytes) in &before.files {
+        assert_eq!(
+            configuration::digest(&committed.files[path]),
+            configuration::digest(bytes)
+        );
+    }
+    let marker = directory.0.join(".restore-completion");
+    let marker_bytes = fs::read(&marker).unwrap();
+    let completion: Value = serde_json::from_slice(&marker_bytes).unwrap();
+    assert_eq!(completion["version"], 3);
+    assert_eq!(completion["operation"]["kind"], "profile_import");
+    assert!(!directory.0.join(".restore-journal/journal.json").exists());
+    assert!(directory.0.join(".restore-journal/new-0").is_dir());
+    crate::restore::check_recovery(&directory.0).unwrap();
+    let bootstrap = crate::bootstrap::Bootstrap::new(
+        Ok(directory.0.clone()),
+        None,
+        directory.0.join("no-runner"),
+        directory.0.join("no-engine"),
+    );
+    let status = bootstrap.ensure_started().unwrap();
+    assert!(status.pending_restore);
+    assert!(status.recovery_supported);
+    assert!(!status.application_available);
+    assert_eq!(
+        store
+            .import_legacy_profiles("Owner", &inventory())
+            .unwrap_err()
+            .category,
+        "RestorePending"
+    );
+    let wrong = crate::restore::recover(&directory.0, true).unwrap_err();
+    assert_eq!(wrong.context["configuration_installed"], true);
+    assert_eq!(fs::read(&marker).unwrap(), marker_bytes);
+    assert_eq!(configuration::capture(&directory.0).unwrap(), committed);
+    bootstrap.shutdown().unwrap();
+    // Remove only the test-created obstacle. Recovery still owns all retained evidence.
+    fs::remove_dir(directory.0.join(".restore-journal/new-0")).unwrap();
+    crate::restore::recover(&directory.0, false).unwrap();
+    assert!(!crate::restore::pending(&directory.0).unwrap());
+    assert_eq!(configuration::capture(&directory.0).unwrap(), committed);
+    let retry = directory
+        .store()
+        .import_legacy_profiles("Owner", &inventory())
+        .unwrap();
+    assert_eq!(retry.unchanged, [first.id.clone(), second.id.clone()]);
+    assert_eq!(retry.imported, [third.id.clone()]);
+    assert!(retry.fault.is_none());
+    assert_eq!(
+        scoped
+            .list(&inventory().package_id, &first.schema_identity)
+            .unwrap()
+            .profiles
+            .len(),
+        3
+    );
+    for source in [&first, &second, &third] {
+        let path = format!("profiles/{}.json", source.id);
+        assert_eq!(
+            configuration::digest(&fs::read(directory.0.join(&path)).unwrap()),
+            configuration::digest(&before.files[&path])
+        );
+    }
+    assert_eq!(fs::read(unrelated).unwrap(), b"scoped malformed original");
+}
+
+#[test]
+fn strict_xid_validation_never_normalizes_or_accepts_the_retired_format() {
+    for id in ["00000000000000000000", "9m4e2mr0ui3e8a215n4g"] {
+        validate_id(id).unwrap();
+    }
+    for id in [
+        "",
+        "9M4E2MR0UI3E8A215N4G",
+        "9m4e2mr0ui3e8a215n4",
+        "9m4e2mr0ui3e8a215n4gg",
+        "9m4e2mr0ui3e8a215n4h",
+        "9m4e2mr0ui3e8a215n4z",
+        "p-00000000000000000000000000000001-00000001-0000000000000001",
+    ] {
+        assert_eq!(
+            validate_id(id).unwrap_err().category,
+            "ProfileIdentity",
+            "{id}"
+        );
+    }
 }

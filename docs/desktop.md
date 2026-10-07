@@ -142,16 +142,16 @@ An absent root is not created merely by launching the application.
 New application-owned directories use private Unix permissions. Existing managed
 directories or files with group/other access, unsafe types, or links are refused
 without changing their modes. Root and configuration failures open **Recovery**.
-Only supported, owner-scoped legacy identifiers are converted automatically;
+Unsupported profile and target-binding IDs are refused without conversion;
 schema/value repair, elevation, and fallback to another root remain prohibited.
 See [ADR 0005](adr/0005-desktop-configuration-recovery.md) for the configuration
 ownership and reconstruction boundary.
 
 ## Setup and Recovery
 
-**Loading** waits for the selected root, saved configuration, and any supported
-legacy-ID conversion. Conversion finishes before Application publication or
-normal polling; it never supplies default settings or repairs profile values.
+**Loading** waits for the selected root, saved configuration, and saved-source
+revalidation. Pending transactions block Application publication and normal
+polling; loading never supplies default settings or repairs profile values.
 A missing root or missing `settings.json` leads to **Setup**. Choose **Saved
 language** and an optional backup directory, then click **Initialize**. The host
 validates before publishing missing settings without replacement. Existing data
@@ -198,12 +198,14 @@ historical root** before Initialize. Explicit `--data-dir` roots do not discover
 or import this location.
 
 Import captures the bounded managed configuration into private staging, validates
-its ownership, and converts eligible owned profile/target IDs before publishing
-the complete root without replacement. It refuses an existing destination,
+its ownership and current-XID active identities, and publishes the complete root
+without replacement. It refuses unsupported active IDs, an existing destination,
 source changes, unsafe input, and pending transactions; it neither merges nor
 deletes the source. The [managed configuration limits](#configuration-files-and-limits)
 apply. Logs, backups, package payloads, and unrecognized files stay in the old
-root. Unassigned `profiles/*.json` remain byte-identical and require the separate
+root. Unassigned `profiles/*.json` and finalized ledger bytes remain inactive and
+byte-identical. Each unassigned source's 64 KiB limit follows the managed path,
+even for `profiles/settings.json`. Profiles require the separate
 per-workspace import below; a historical package-location hint never creates or
 binds a Tab.
 
@@ -1390,8 +1392,8 @@ Paths below are relative to the selected root:
 | `tabs/<internal_name>/tab.config` | Version, names, open state, package references, and selected package ID; **128 KiB**, **16 references per Tab** |
 | `tabs/<internal_name>/<package_id>/<profile_id>.config` | One saved profile; **64 KiB**, **64 profiles / 1 MiB per Tab/package** |
 | `tabs/<internal_name>/<package_id>/target.config` | Versioned local target record, revision, and optional binding; **64 KiB** |
-| `profiles/<profile_id>.json` | Recognized legacy profiles; explicit import only |
-| `identity-migrations.config` | Versioned legacy-to-XID reservations; **4,096 entries / 4 MiB**, included in the shared managed-set limits |
+| `profiles/<profile_id>.json` | Recognized historical profile sources; inactive until explicit current-XID import |
+| `identity-migrations.config` | Opaque historical bytes; **4 MiB**, included in the shared managed-set limits |
 | `logs/` | File diagnostics; not configuration |
 | `backups/app.config.<unix_time>` | Default manual snapshot destination |
 
@@ -1419,39 +1421,37 @@ Start. Other regular entries such as filesystem metadata are ignored without
 being opened but still count toward directory-entry limits. An invalid owned
 profile file is not ignored.
 
-An interrupted save may leave a `.pending` file. The application preserves it
-instead of silently discarding evidence or overwriting it. Close the app and move
-that file outside the data root before explicitly retrying; keep the prior
-valid `.config` or `.json` file intact.
+An interrupted ordinary save may leave a `.pending` file. The application
+preserves it instead of silently discarding evidence or overwriting it. Close
+the app and move that file outside the data root before explicitly retrying
+an ordinary profile/settings save; keep the prior valid `.config` or `.json`
+file intact. This is not a recovery procedure for `identity-migrations.pending`
+or shared transaction evidence: retain those files and follow the
+[pre-upgrade procedure](#development-transition-notes).
 
-### Persisted identifiers and automatic conversion
+### Persisted identifiers
 
-New profile and target-binding identities use canonical **20-character XIDs**
+Profile and target-binding identities must be canonical **20-character XIDs**
 from the immutable public Fork revision pinned in Cargo. Save, rename, schema
 repair, and restart retain the current ID. Allocation failures or exhausted
 collision attempts refuse the operation; they never overwrite an existing
 profile or fall back to an application-specific generator.
 
-During Loading, supported owned `p-<32hex>-<8hex>-<16hex>` identities are converted
-before ordinary commands can run. Only typed IDs, profile `.config` basenames,
-and their typed references change. Names, values, schema identity, target
-configuration and revisions remain unchanged. Schema-rejected profiles remain
-rejected until explicit repair. Package IDs and payloads, Region IDs, assets,
-aliases, pasted source, and unassigned `profiles/*.json` are not rewritten.
+Desktop `0.2.0` rejects the former `p-<32hex>-<8hex>-<16hex>` identities at typed
+loading, historical-root installation, explicit profile Import, and Restore.
+It does not decode, normalize, allocate replacements, rename records, or consult
+old mappings. Unsupported IDs cannot be repaired through schema reconciliation
+or Reset. Existing XIDs, values, owners, target revisions and null bindings remain
+unchanged; unrelated package, Recognition, and settings compatibility remains.
 
-`identity-migrations.config` reserves each assignment by entity kind, Tab internal
-name, package ID, and old ID. Identical old text in another owner or entity kind
-does not share an identity. Reservations survive rollback, deletion, and owner
-retirement; they do not recreate missing entities. Limits, invalid metadata,
-conflicting mappings, or unsafe records refuse conversion without eviction or
-best-effort replacement. Do not edit or delete the ledger to retry a failed import.
-
-Conversion uses the same bounded journal and explicit pending-Recovery controls
-as Restore, without creating an automatic backup or bypassing Restore consent.
-Rollback preserves assignments while restoring original user configuration.
-After interruption, use the displayed transaction controls; do not remove
-`.restore-journal` or `.restore-completion` to force Ready. Old session/profile/
-target expectations are not translated into fresh command authority.
+`identity-migrations.config` is bounded opaque preservation data, not an active
+reservation database. Startup, ordinary writes, and Import neither interpret,
+create, modify, nor delete it. Snapshots preserve its exact bytes, including
+malformed-but-bounded content. Protected Restore selects the archive's exact
+ledger bytes or absence, never merges assignments, and preserves the displaced
+state in the matching preimage archive. Do not edit or delete metadata to force
+Ready. Unassigned `profiles/*.json` likewise remain inactive and byte-preserved;
+their presence does not authorize an owner or an unsupported active identity.
 
 XIDs are not secrets, capabilities, or anonymous identifiers. Their time,
 machine-derived, process-derived, and counter components are observable.
@@ -1460,30 +1460,135 @@ original creation time or creation order. It grants no native authority.
 
 ### Development transition notes
 
-This converter is an **unreleased development change**. The pre-converter
-`dev/m3` baseline is `64e1dc8f5f37cfbd4eaacef7de0bce67763e93ef`.
-No product release or tag existed when this transition was introduced; the
-manifest's `0.1.0` is not a published release boundary. The first published
-converter release must identify itself and the last released legacy writer, if
-one exists, rather than infer either from the unchanged development version.
+**Breaking change:** Desktop `0.2.0` is the first rejecting development version.
+The retained converter is exactly
+`824d1b7bd001efb025e53a3becb9e5521af677cf`, tree
+`090c1d9fed7c6470ef31548060a629086fdf9783`. No published converter release or tag
+identified this boundary when it was decided; **not every `0.1.0` checkout is a
+converter**. This source boundary does not announce release packaging or change
+runtime versions, saved record schemas, or the pinned XID provider.
 
-Keep automatic legacy conversion enabled until a separate approved Change names
-the first rejecting product version, retains an available converter-release path
-for old roots/backups, and decides ledger retirement. There is no date-based
-expiry or timer cleanup. Converted roots and version-2 archives are not supported
-by legacy-only binaries; do not downgrade in place or delete retained backups.
+Use two separate checkouts and private copies on macOS. Stop applications using
+the old root before copying; never run the converter on the live root or a root
+already edited by `0.2.0`. Start in the rejecting checkout and install the
+[pinned tools](ci.md#install-the-pinned-tools). The retained checkout's own
+`docs/ci.md` and `docs/desktop.md` own its build prerequisites.
 
-### Import legacy profiles
+```sh
+NEW_CHECKOUT="$PWD"
+CUTOVER="$(mktemp -d "${TMPDIR:-/tmp}/mado-mata-cutover.XXXXXX")"
+git clone --no-hardlinks "$NEW_CHECKOUT" "$CUTOVER/converter"
+git -C "$CUTOVER/converter" checkout --detach 824d1b7bd001efb025e53a3becb9e5521af677cf
+git -C "$CUTOVER/converter" rev-parse HEAD 'HEAD^{tree}'
+git -C "$NEW_CHECKOUT" rev-parse HEAD 'HEAD^{tree}'
+```
 
-After real inspection, **Import legacy profiles** imports compatible
+Keep `CUTOVER` and its contents until qualification and rollback retention are
+complete. Record any uncommitted changes in the rejecting checkout separately
+from its commit identity. Use distinct shell outputs; each controlled runner
+must remain at its own checkout's fixed path:
+
+```sh
+for checkout in "$CUTOVER/converter" "$NEW_CHECKOUT"; do
+  (
+    cd "$checkout" || exit 1
+    unset CARGO_BUILD_TARGET CARGO_TARGET_DIR
+    npm ci --ignore-scripts --no-audit --no-fund --prefix tools/runtime-comparison/compiler &&
+    npm ci --ignore-scripts --no-audit --no-fund --prefix apps/desktop &&
+    cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml --target-dir tools/runtime-comparison/target &&
+    npm run build --prefix apps/desktop &&
+    cargo +1.98.1 build --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --features custom-protocol --target-dir "$checkout/.cache/id-cutover-desktop"
+  ) || break
+done
+```
+
+Stop if either build fails; do not launch a leftover binary. Do not share output
+directories or copy binaries between checkouts. No engine or `webdriver` feature
+is needed. Record executable hashes alongside the revisions:
+
+```sh
+OLD_DESKTOP="$CUTOVER/converter/.cache/id-cutover-desktop/debug/mado-mata-desktop"
+NEW_DESKTOP="$NEW_CHECKOUT/.cache/id-cutover-desktop/debug/mado-mata-desktop"
+shasum -a 256 "$OLD_DESKTOP" "$NEW_DESKTOP" \
+  "$CUTOVER/converter/tools/runtime-comparison/target/debug/mado-runtime-comparison" \
+  "$NEW_CHECKOUT/tools/runtime-comparison/target/debug/mado-runtime-comparison"
+```
+
+For retained-root input, enter the absolute existing root path. Preserve one
+untouched copy and operate only on a second copy:
+
+```sh
+printf 'Old configuration root: '
+IFS= read -r OLD_ROOT
+cp -pR "$OLD_ROOT" "$CUTOVER/original-root"
+cp -pR "$CUTOVER/original-root" "$CUTOVER/converter-root"
+"$OLD_DESKTOP" --data-dir "$CUTOVER/converter-root"
+```
+
+In that converter session, settle any supported pending operation with its
+explicit recovery controls before further work. Unresolved or unsupported
+evidence stops the upgrade; never delete a journal, completion marker, preimage,
+or pending ledger to force readiness. Select each intended open Tab and inspect
+its real package, then explicitly **Import legacy profiles** for every wanted
+unassigned old-ID profile **before upgrading**. Conversion does not repair stale
+schemas or values. Verify saved XIDs, values, owners and target revisions, retain
+the original `profiles/*.json` and ledger, then take a final snapshot to an
+explicit private destination under `CUTOVER` and close the converter.
+
+For retained-backup input, preserve the original archive and use another copy
+with a separate absent root:
+
+```sh
+printf 'Old configuration archive: '
+IFS= read -r OLD_ARCHIVE
+cp -p "$OLD_ARCHIVE" "$CUTOVER/original-archive"
+cp -p "$CUTOVER/original-archive" "$CUTOVER/converter-archive"
+printf '%s\n' "$CUTOVER/converter-archive"
+"$OLD_DESKTOP" --data-dir "$CUTOVER/converter-backup-root"
+```
+
+In Setup, Restore `converter-archive` from `CUTOVER`; do not initialize substitute
+settings. Apply the same pending-operation settlement, owner-selected Import and
+final-snapshot steps, then close the converter. If the destination contains managed
+data, Restore still requires a separately clicked matching preimage snapshot
+and replacement confirmation. Never rewrite the source archive.
+
+Preserve both prepared converter roots and make separate upgrade candidates:
+
+```sh
+cp -pR "$CUTOVER/converter-root" "$CUTOVER/upgrade-root"
+cp -pR "$CUTOVER/converter-backup-root" "$CUTOVER/upgrade-backup-root"
+"$NEW_DESKTOP" --data-dir "$CUTOVER/upgrade-root"
+"$NEW_DESKTOP" --data-dir "$CUTOVER/upgrade-backup-root"
+```
+
+Finish and close each session before opening the next. For each candidate,
+compare source/installed file hashes, stable XIDs and values; exercise a fresh
+snapshot, protected Restore, restart, and current-XID Import with an existing
+valid package. Retained old unassigned sources remain inert; importing those
+old IDs now refuses. Do not remove them or the ledger to obtain acceptance.
+Record both input routes, revisions, executable identities, source/archive
+hashes, and refusal/success outcomes privately. Follow
+[identifier cutover acceptance](#identifier-cutover-acceptance); build or hosted
+CI success alone does not establish this route or WebView acceptance.
+
+Rollback means returning to an untouched pre-upgrade copy with the retained
+converter. **Never downgrade an evolved `0.2.0` root in place.** Preserve the
+failed candidate for diagnosis; do not merge its ledger back into old copies.
+
+### Import historical profile sources
+
+After real inspection, **Import current-XID profiles** imports compatible
 `profiles/*.json` into the explicitly selected Tab/package and keeps source bytes
-unchanged. Legacy IDs use that owner's reserved XIDs; current XIDs stay unchanged.
-Each committed profile and its mapping form one recoverable unit. A repeated
-import skips identical normalized content, refuses edited-destination conflicts
-without overwrite, and recreates an explicitly reimported deleted profile with
-its reserved ID. Another Tab receives a separate mapping. A later-file failure
-retains the actual committed subset, reported separately from already-present
-and failed entries.
+unchanged. Historical layout remains supported; historical IDs do not. Import
+validates the current ID, owner, schema, and values without ledger lookup.
+Repeated Import reports identical installed content as unchanged and refuses
+edited-destination conflicts without overwrite. An explicit import into another
+Tab retains the same source XID in an independent store, not shared mutable data.
+Files are processed in sorted order until the first fault; earlier durable
+imports and unchanged entries remain reported, including when committed cleanup
+fails. Later entries are not claimed imported. Settle eligible pending recovery
+before retry; identical completed entries must not be duplicated.
 Journal admission captures the bounded managed set: an unresolved pending write
 or unsafe entry in another owner can refuse Import until repaired. This does not
 broaden the existing owner-scoped admission for ordinary profile edits.
@@ -1511,7 +1616,8 @@ do not authenticate the archive or grant execution authority.
 A snapshot includes present `settings.json`, all saved open and closed Tab
 `tab.config` files, package `.config` files, recognized legacy profiles, and
 `identity-migrations.config` when present. Ledger-bearing snapshots use archive
-version 2; the delivered version-1 archives remain readable during the transition.
+version 2; supported version-1 archives remain readable. These container versions
+do not admit old active IDs or earlier transaction protocols.
 Back up now neither converts IDs nor creates a missing ledger.
 Capture is structural, not dependent on successfully decoding a registry:
 safe readable malformed, unsupported, and orphaned configuration is preserved
@@ -1581,26 +1687,26 @@ are not permission to publish its contents.
    again.
 
 Restore replaces the managed user configuration, not package payloads, file logs,
-backups, or unrelated data. Eligible legacy identities are normalized only in the
-validated proposed generation; archive bytes remain unchanged. Compatible live
-and archived reservations coalesce, and ledger-free archives retain live
-reservations. Normalization, conflicting mappings, filesystem aliases, and rollback
-budgets are checked before retiring a Ready session; these refusals preserve its
-workspaces and unsaved drafts. Publication rechecks the live generation and pending
-recovery before writing. Repeated restoration preserves mapped IDs within one
-maintained root; independent empty roots restoring a ledger-free archive need not
-assign equal IDs.
+backups, or unrelated data. Active identities must already be canonical XIDs;
+archive bytes remain unchanged. Inactive unassigned sources and opaque ledger
+bytes are preserved without parsing old IDs or assigning an owner. The selected
+archive determines ledger presence or absence exactly, without semantic merge;
+the matching preimage archive retains the displaced state. Active-identity,
+filesystem-alias, and rollback-budget refusals precede Ready session retirement,
+preserving its workspaces and unsaved drafts. Publication rechecks the live
+generation and pending recovery before writing.
 
-Before the first identity replacement, the host stages incoming bytes, durable
-reservations, and rollback preimages and persists `.restore-journal`. Completion
-requires checking the entire installed generation. Failure restores original user
-configuration while retaining reservations, or keeps Recovery and its evidence
-if publication, reservation preservation, or cleanup remains unresolved.
+Before the first managed replacement, the host stages incoming bytes and exact
+rollback preimages and persists a version-3 `.restore-journal`. Completion
+requires checking the entire installed generation. Failure restores the exact
+prior managed bytes and absence, including historical metadata, or keeps Recovery
+and its evidence if publication or cleanup remains unresolved.
 Installed configuration and successful Application reconstruction are separate.
 
-Before deleting preimages, cleanup publishes `.restore-completion`. This marker
-keeps restart admission blocked even after partial journal deletion. Restart with
-either artifact enters Recovery, not a mixed configuration. Explicitly confirm
+Before deleting preimages, cleanup publishes a version-3 `.restore-completion`.
+This marker keeps restart admission blocked even after partial journal deletion.
+Restart with either artifact enters Recovery, not a mixed configuration.
+For supported version-3 Restore or current-XID ProfileImport, explicitly confirm
 the recovery scope and choose **Complete operation** or **Roll back operation**.
 Once the completion marker commits a direction, only that same direction can
 finish cleanup; the opposite action is refused. Do not delete these artifacts
@@ -1618,13 +1724,27 @@ claimed to be intact. Resolve the displayed cause before continuing.
 Interrupted-write and alias refusals identify the relative managed path. Private
 file-read and directory-enumeration failures also retain their path attribution.
 
-While a restore remains pending, use the transaction controls in its committed
-direction; **Retry** is unavailable. An unreadable or unsupported completion
-marker does not establish either direction or verify the live configuration.
-Repair the cause without deleting the recovery evidence. If the completion
-marker was removed but the final directory sync failed, cleanup completion is
-unconfirmed although no transaction remains pending. Recovery then offers
-**Retry** after repair, not controls for a transaction that no longer exists.
+Earlier or unknown journals and completion markers, including completion-only
+remnants, are unsupported even when their visible records contain XIDs.
+`identity-migrations.pending` also remains a blocker, not finalized opaque
+metadata. These states block ordinary admission, Initialize, and replacement.
+Recovery offers no Complete/Rollback repair for unsupported evidence; **Retry**
+rereads without discarding it and **Exit** preserves it. Settle old supported
+operations only in a preserved pre-upgrade copy with the
+[retained converter](#development-transition-notes); unknown evidence may still
+refuse there.
+
+A failed recovery validation is not proof of an unsupported transaction version.
+For example, external edits or unreadable preimages can block a current version-3
+transaction. Complete/Rollback remain unavailable: preserve the evidence, repair
+the reported cause externally, then **Retry** to recheck eligibility in this
+version. Do not send a version-3 transaction to the old converter.
+
+Once supported recovery is eligible, use its recovery direction, not Retry.
+An unreadable marker does not establish a direction or verify live data.
+If the completion marker was removed but the final directory sync failed,
+cleanup completion is unconfirmed although no transaction remains pending.
+Recovery then offers **Retry** after repair, not transaction controls.
 
 ## Save and check an OCR environment
 
@@ -2194,27 +2314,35 @@ separately.
    confirmation, source preservation, bounded recognized-file copying, and
    refusal of a conflicting destination or invalid source. Repeat launch with
    `--data-dir` and confirm discovery is skipped. Within a bound Tab, explicitly
-   import compatible legacy profiles: check unchanged source bytes, stable
-   owner-scoped XIDs, idempotent retry, conflict refusal, partial-success reporting,
-   and independence from another Tab inspecting the same source.
+   import compatible current-XID profiles from the historical layout: check
+   unchanged source bytes, stable IDs, idempotent retry, conflict refusal,
+   partial-success reporting, and independence from another Tab inspecting the
+   same source.
 
-### Identifier migration acceptance
+### Identifier cutover acceptance
 
-1. Copy a legacy root into a private isolated location with multiple Tabs/packages,
-   profiles, target bindings, and a structurally safe stale-schema profile. Launch
-   the actual app with that root. Observe Loading followed by Ready or an
-   attributed Recovery; never admit a mixed generation.
-2. Compare saved user content, package hashes, ownership, target revisions, and
-   unassigned sources. Active IDs must be canonical 20-character XIDs; the
-   stale-schema profile must still require explicit recovery. Rename, save,
-   delete/reimport, close, and restart; surviving/reserved IDs must stay stable.
-3. Repeat explicit Import and legacy archive Restore, including after restart.
-   Verify no duplicates, edited-import conflict refusal, unchanged archive bytes,
-   and the still-required clicked current preimage receipt and disposal consent.
-4. Where safe interruption can be observed in a disposable generation, restart
-   with the retained journal. Exercise validated recovery and stable assignments,
-   stale-command refusal, visible cleanup failure, and reachable Exit. Record
-   unexecuted crash or platform scenarios separately from core regression checks.
+1. Follow the [two-checkout procedure](#development-transition-notes) for copied
+   roots and archives. Record exact revisions, executable hashes and original
+   bytes. Settle supported old pending transactions and explicitly import wanted
+   old source profiles into real intended owners with the retained converter.
+2. In `0.2.0`, verify unchanged active XIDs, values, owners, target revisions and
+   null bindings. Retain unassigned old sources and opaque ledger bytes through
+   snapshot, protected Restore and restart. Test selected ledger presence,
+   absence and different bounded bytes without merge or renumbering.
+3. Verify effect-free old active-ID refusal at loading, historical-root
+   installation, explicit Import and Restore. Schema repair must not admit an
+   unsupported ID. Supported current-XID Import must retain source bytes,
+   identical retry, conflict refusal and independent owner storage.
+4. With disposable evidence, verify that old/unknown journals, completion-only
+   remnants and pending ledgers retain their bytes and block admission. Check
+   actionable English/Japanese guidance, absent unavailable Complete/Rollback
+   actions, Retry and reachable Exit. Separately exercise supported version-3
+   recovery, committed-direction cleanup, stale-command refusal and restart.
+5. Observe actual Import committed-subset presentation after a real publication
+   or cleanup failure. Record the exact unexecuted UI boundary if that failure
+   cannot be exercised; ordinary-success smoke does not close that coverage.
+   Edit/save/validate a current profile and run controlled, non-native work.
+   Record unexecuted crash/platform scenarios; no native authority is granted.
 
 ### Configuration snapshot and restore acceptance
 
