@@ -9,7 +9,7 @@ mod recognition;
 mod test_support;
 
 use crate::inventory::TargetDeclaration;
-use crate::model::{Control, Fault, Plan};
+use crate::model::{Control, Fault, NativeBudgets, Plan};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -80,8 +80,8 @@ pub struct NativeLimits {
 }
 
 impl NativeLimits {
-    pub fn budgets(&self) -> crate::model::NativeBudgets {
-        crate::model::NativeBudgets {
+    pub fn budgets(&self) -> NativeBudgets {
+        NativeBudgets {
             startup_ms: self.startup_ms,
             readiness_ms: self.readiness_ms,
             workflow_ms: self.workflow_ms,
@@ -89,12 +89,26 @@ impl NativeLimits {
     }
 }
 
-/// Per-Start defaults and ceilings; containment is the fixed supervisor bound.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCapability {
+    pub default_limits: NativeLimits,
+    pub max_workflow_ms: u64,
+}
+
+pub fn native_capability() -> NativeCapability {
+    NativeCapability {
+        default_limits: native_limits(),
+        max_workflow_ms: NativeBudgets::CEILINGS.workflow_ms,
+    }
+}
+
+/// Per-Start defaults; containment is the fixed supervisor bound.
 pub fn native_limits() -> NativeLimits {
     NativeLimits {
-        startup_ms: 60_000,
-        readiness_ms: 30_000,
-        workflow_ms: 30_000,
+        startup_ms: NativeBudgets::DEFAULT.startup_ms,
+        readiness_ms: NativeBudgets::DEFAULT.readiness_ms,
+        workflow_ms: NativeBudgets::DEFAULT.workflow_ms,
         max_frames: 300,
         wait_ms: 1_000,
         interval_ms: 100,

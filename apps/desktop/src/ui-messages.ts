@@ -84,6 +84,8 @@ function catalog(data: typeof enData) {
       stopTarget: (operation: string | null) => interpolate(data.run.stopTarget, {operation: operation ?? data.common.none}),
       runKind: (lane: string) => interpolate(data.run.runKind, {lane}),
       nativeEnvelope: (duration: number) => interpolate(data.run.nativeEnvelope, {duration}),
+      nativeWorkflowHelp: (defaultSeconds: number, maxSeconds: number) => interpolate(data.run.nativeWorkflowHelp, {defaultSeconds, maxSeconds}),
+      nativeWorkflowError: (maxSeconds: number) => interpolate(data.run.nativeWorkflowError, {maxSeconds}),
     },
     target: {
       ...data.target,

@@ -34,11 +34,9 @@ pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
         ));
     }
     let limits = &intent.limits;
+    limits.budgets().total_ms()?;
     let ceiling = native_limits();
     for (value, maximum) in [
-        (limits.startup_ms, ceiling.startup_ms),
-        (limits.readiness_ms, ceiling.readiness_ms),
-        (limits.workflow_ms, ceiling.workflow_ms),
         (limits.max_frames, ceiling.max_frames),
         (limits.wait_ms, ceiling.wait_ms),
         (limits.interval_ms, ceiling.interval_ms),
@@ -63,7 +61,6 @@ pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
             "Native stage limits exceed their enclosing bound or fixed containment policy",
         ));
     }
-    limits.budgets().total_ms()?;
     Ok(())
 }
 

@@ -109,6 +109,7 @@
     "nativeTargetDirty": "Save or discard target edits first; Native uses only the saved binding.",
     "nativeEnvironment": "Native needs a saved OCR environment.",
     "nativeText": "Describe the intended operation and its visible postcondition on one line each.",
+    "nativeWorkflow": "Correct the Workflow duration in Native review before approving or starting.",
     "nativeApproval": "Approve live capture and input for this Start.",
     "descriptorLimit": "The descriptor path exceeds {limit} bytes and cannot be retained by the host.",
     "profileBinding": "This saved profile belongs to a different package or schema. Reinspect; it cannot be rebound.",

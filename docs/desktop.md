@@ -1724,8 +1724,9 @@ than being substituted with supervisor metadata.
 
 Controlled execution has a **10 s** operation deadline; replay, Check and
 saved-image trials use **30 s**, including input preparation. Desktop Native
-instead reviews separate **60 s Startup**, **30 s Readiness** and **30 s Workflow**
-budgets, under an outer deadline fixed at reservation. Timeout remains distinct
+instead defaults to separate **60 s Startup**, **30 s Readiness** and **30 s Workflow**
+budgets. Per-Start review can select **1–900 whole seconds** for Workflow, under
+an outer deadline fixed at reservation. Timeout remains distinct
 from explicit Stop. Repeated parent/child resource verification is not skipped
 to fit an execution budget.
 Cleanup remains **1 s** and containment **2 s**. Controller shutdown waits at most
@@ -1763,18 +1764,31 @@ successful Check is not permission, native qualification, or proof of game effec
    enter the intended operation and what a newer frame must show. This text records
    the human review; the package must implement its recognition and postcondition.
    It is not a script sandbox or an automatic assertion generated from prose.
-4. Review the host phase budgets: **60 s Startup** from reservation,
-   **30 s Readiness** from capture availability, and **30 s Workflow** after
-   `"Ready"`. These are defaults and ceilings; invalid tuples refuse rather than
-   clamp. Each attempt's phases cannot borrow unused time or extend the original
-   absolute deadline: **120 s** by default, or **243 s** with one reviewed recovery
-   (twice the stage sum plus **3 s** for inter-attempt cleanup/containment).
+4. Review **60 s Startup** from reservation and **30 s Readiness** from capture
+   availability. **Workflow duration (seconds)** defaults to **30** after `"Ready"`;
+   explicitly select **1–900 whole seconds** for this Start. Startup/Readiness
+   defaults are also their ceilings. Blank, fractional, nonfinite or out-of-range
+   duration drafts block approval and Start; invalid host tuples refuse rather
+   than clamp. Duration is transient, not a package/profile or App setting.
+   Every duration edit withdraws capture/input/launch/recovery consent, even when
+   edited back. A new/reopened binding starts at 30 without approval; later drafts
+   cannot alter the active Run's captured tuple.
+   Each attempt's phases cannot borrow unused time or extend the original absolute
+   deadline: **120 s** by default, or **243 s** with one reviewed recovery.
+   Selecting 900 s makes those allowances **990 s** and **1983 s**, respectively:
+   `(1 + r) * (startup + readiness + workflow) + r * 3 s`, with `r` still 0 or 1.
+   The extra 3 s is inter-attempt cleanup/containment, not renewed work authority.
    The aggregate limits remain **300** acquired frames and **64** expanded input
    events across both attempts, with **1 s** waits and **100 ms** pacing.
    Final cleanup retains its separate **1 s** cleanup and **2 s** containment bounds.
    A click consumes three events, or four with a hold; key press/release each
    consume one. Producer frames and restricted cleanup releases are not ordinary
    acquisition/input budget entries. Any reviewed-tuple change withdraws consent.
+   Longer duration grants no extra frames, input, attempts or cleanup time.
+   The 900-second ceiling is an admission policy, not proof of useful ten-minute
+   Native execution, late Stop, long-duration recovery or arbitrary-duration
+   reliability. Those require separately authorized actual Desktop acceptance;
+   deterministic tests and hosted CI cannot replace it.
 5. Review the saved launch recipient and literal ordered arguments. The recipient
    is the separate launcher when configured, otherwise the outer game bundle.
    Bundle launch uses macOS `NSWorkspace`, not a shell or its inner executable;
