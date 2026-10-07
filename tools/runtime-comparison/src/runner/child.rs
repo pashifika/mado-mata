@@ -124,6 +124,9 @@ pub fn child() -> Result<bool, Fault> {
     invocation.plan.validate()?;
     invocation.inventory.validate()?;
     invocation.operation.validate(&invocation.plan)?;
+    if !(1..=2).contains(&invocation.attempt) {
+        return Err(Fault::new("StaleIdentity", "Unsupported attempt identity"));
+    }
     if let Some(modules) = &invocation.prepared_modules {
         modules.parser(&invocation.inventory)?;
     }
@@ -198,6 +201,12 @@ pub fn child() -> Result<bool, Fault> {
                         let reply: super::StartupReply =
                             serde_json::from_value(value["reply"].take())
                                 .map_err(|error| Fault::new("Transport", error.to_string()))?;
+                        if reply.progress.attempt != attempt {
+                            return Err(Fault::new(
+                                "StaleIdentity",
+                                "startup reply belongs to another attempt",
+                            ));
+                        }
                         input_startup
                             .as_ref()
                             .ok_or_else(|| {
@@ -271,11 +280,12 @@ pub fn child() -> Result<bool, Fault> {
             })
     };
     let prepared = options.and_then(|options| {
-        Host::new(
+        Host::new_attempt(
             invocation.plan.clone(),
             options,
             invocation.inventory.assets.clone(),
             control.clone(),
+            invocation.attempt,
         )
     });
     let host = match prepared {
@@ -398,6 +408,13 @@ pub fn child() -> Result<bool, Fault> {
     let mut cleanup = host.finish();
     let mut observations = host.snapshot();
     observations["snapshot_stage"] = json!("post_cleanup");
+    observations["workflow_entered"] = host.workflow_entered().into();
+    if cleanup["clean"] == true {
+        match host.terminal_accounting() {
+            Ok(accounting) => observations["accounting"] = accounting,
+            Err(fault) => observations["accounting_failure"] = json!(fault),
+        }
+    }
     retain_script_logs(&mut observations);
     drop(host);
     if cleanup["clean"] == true {

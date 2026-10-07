@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyInvalidatedViews,applyRecoveryMutation,applyWorkspaceView,approveNative,bindSelection,chooseLane,clearNativeApproval,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,editNativeReview,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
+import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyInvalidatedViews,applyRecoveryMutation,applyWorkspaceView,approveNative,bindSelection,busy,chooseLane,clearNativeApproval,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,editNativeReview,hasWorkspaceEdits,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
 import {LocalFault} from './i18n.ts';
 import {currentRecoveryDraft,editRecovery,issuePath,readRecoveryDraft,recoveryIssue,recoveryState,recoveryTicket,selectRecovery} from './recovery.ts';
 import {optionPath,readDraft} from './state.ts';
@@ -1415,7 +1415,7 @@ test('a Native intent names the current saved binding only after both separate c
   const facts=deriveBound(approved,nativeEnvironment,'en',nativeLimits);
   assert.equal(facts.startBlock,null);
   assert.deepEqual(facts.native.intent,{target_revision:1,target_binding_id:'binding-1',target_declaration_identity:'declaration-1',
-    capture_approved:true,input_approved:true,launch_approved:false,operation:'Press Confirm once',visible_postcondition:'Result dialog is shown',limits:nativeLimits});
+    capture_approved:true,input_approved:true,launch_approved:false,max_exit_recoveries:0,operation:'Press Confirm once',visible_postcondition:'Result dialog is shown',limits:nativeLimits});
   // Consent given for an older request does not combine with consent given after an edit.
   const edited=approveNative(editDraft(captureOnly,{count:2}),'input',true,nativeEnvironment,nativeLimits);
   assert.equal(nativeOf(edited).capture,false);
@@ -1492,6 +1492,47 @@ test('launch-if-absent approval neither substitutes for capture/input consent no
   assert.deepEqual([attachOnly.capture_approved,attachOnly.input_approved,attachOnly.launch_approved],[true,true,false]);
 });
 
+test('recovery is default off, separate from launch and cannot grant launch approval',()=>{
+  const bound=approve(nativeDraft().bound);
+  assert.deepEqual([nativeOf(bound).recovery,nativeOf(bound).intent.max_exit_recoveries],[false,0]);
+  const refused=approveNative(bound,'recovery',true,nativeEnvironment,nativeLimits);
+  assert.equal(refused,bound);
+  const launch=approveNative(bound,'launch',true,nativeEnvironment,nativeLimits);
+  assert.equal(nativeOf(launch).intent.max_exit_recoveries,0);
+  const recovery=approveNative(launch,'recovery',true,nativeEnvironment,nativeLimits);
+  assert.deepEqual([nativeOf(recovery).intent.launch_approved,nativeOf(recovery).intent.max_exit_recoveries],[true,1]);
+  const withdrawn=approveNative(recovery,'launch',false,nativeEnvironment,nativeLimits);
+  assert.equal(withdrawn.native.recovery,false);
+  assert.equal(nativeOf(approveNative(withdrawn,'launch',true,nativeEnvironment,nativeLimits)).intent.max_exit_recoveries,0);
+  const submitted=structuredClone(nativeOf(recovery).intent);
+  const spent=clearNativeApproval(recovery);
+  assert.deepEqual([spent.native.capture,spent.native.input,spent.native.launch,spent.native.recovery,spent.native.key],[false,false,false,false,null]);
+  assert.equal(submitted.max_exit_recoveries,1);
+  assert.equal(nativeOf(approve(approveNative(spent,'launch',true,nativeEnvironment,nativeLimits))).intent.max_exit_recoveries,0);
+});
+
+test('recovery consent is not restored by a newly inspected or reopened workspace',()=>{
+  const approved=approveNative(approve(approveNative(nativeDraft().bound,'launch',true,nativeEnvironment,nativeLimits)),'recovery',true,nativeEnvironment,nativeLimits);
+  const previous=updateBound(nativeDraft(),()=>approved);
+  const fresh=bindSelection(previous,targetSelection('a'));
+  assert.equal(fresh.bound.native.recovery,false);
+  assert.equal(fresh.bound.native.key,null);
+  assert.equal(workspaceFromView(view('a',{selection:targetSelection('a')})).bound.native.recovery,false);
+});
+
+test('recovering holds the shared operation across navigation and retains both attempts independently of logs',()=>{
+  assert.equal(busy('recovering'),true);
+  assert.equal(busy('terminal'),false);
+  const attempts=[{attempt:1,primary:{category:'TargetExited',context:{exit_reason:'absent'}},cleanup:{clean:true}},
+    {attempt:2,primary:null,status:'PASS',cleanup:{clean:true}}];
+  const recovered=terminal('stable',{result:{status:'PASS',recovery_count:1,attempts,cleanup:{clean:true},forced:false,exit_code:0}});
+  const open=sameSourceTabs();
+  const retained=ingestResults({},[{workspace:{workspace_id:'a',revision:1},controller:recovered}],open);
+  assert.equal(retained.a.view.result.attempts,attempts);
+  assert.equal(ingestResults(retained,[{workspace:{workspace_id:'a',revision:1},controller:recovered}],open),retained);
+  assert.equal(needsAttention(recovered),false);
+});
+
 for (const {scenario, change, environment=nativeEnvironment, limits=nativeLimits} of [
   {scenario:'a submitted Start spends launch approval even when the host refuses it',change:bound=>clearNativeApproval(bound)},
   {scenario:'a newer saved recipe with other arguments needs fresh launch approval',
@@ -1505,14 +1546,15 @@ for (const {scenario, change, environment=nativeEnvironment, limits=nativeLimits
   {scenario:'a different host workflow budget needs fresh launch approval',change:bound=>bound,limits:{...nativeLimits,workflow_ms:20000}},
 ]) {
   test(scenario,()=>{
-    const approved=approve(approveNative(nativeDraft().bound,'launch',true,nativeEnvironment,nativeLimits));
-    assert.equal(nativeOf(approved).intent.launch_approved,true);
+    const approved=approveNative(approve(approveNative(nativeDraft().bound,'launch',true,nativeEnvironment,nativeLimits)),'recovery',true,nativeEnvironment,nativeLimits);
+    assert.deepEqual([nativeOf(approved).intent.launch_approved,nativeOf(approved).intent.max_exit_recoveries],[true,1]);
     // Consent given for one request is not approval of another, and a request without fresh capture/input has no intent.
     assert.equal(nativeOf(change(approved),environment,limits).intent,null);
     // Renewing only capture and input must not revive the spent or stale launch consent.
     const renewed=nativeOf(approve(change(approved),environment,limits),environment,limits);
     assert.equal(renewed.launch,false);
     assert.equal(renewed.intent.launch_approved,false);
+    assert.equal(renewed.intent.max_exit_recoveries,0);
     // The submitted intent carries exactly the tuple the renewed consent reviewed.
     assert.deepEqual(renewed.intent.limits,limits);
   });

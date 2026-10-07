@@ -284,7 +284,12 @@ fn supervise(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| Fault::new("Clock", e.to_string()))?
         .as_nanos();
-    let run = format!("{}-{}-{nonce}", plan.id, std::process::id());
+    let (run, attempt) = preparation
+        .and_then(|prepared| prepared.identity)
+        .map_or_else(
+            || (format!("{}-{}-{nonce}", plan.id, std::process::id()), 1),
+            |(run, attempt)| (run.to_owned(), attempt),
+        );
     let _image_reservation = if preparation.is_some_and(|prepared| prepared.images.is_some()) {
         None
     } else {
@@ -312,7 +317,7 @@ fn supervise(
     let deadline = owner_control.outer_deadline();
     let mut invocation = Invocation {
         run: run.clone(),
-        attempt: 1,
+        attempt,
         operation,
         plan: plan.clone(),
         inventory: inventory.clone(),
@@ -404,15 +409,15 @@ fn supervise(
     let mut metric_samples = 0usize;
     let mut probe_sequence = 0u64;
     let mut pending_probe = None;
-    let mut entry_settled = false;
+    let mut entry_settled = None;
     let exit;
     loop {
         while let Ok(message) = receiver.try_recv() {
             match message {
-                Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
+                Ok(mut value) if value["run"] == run && value["attempt"] == attempt => {
                     if value["event"] == "TargetProbe" {
                         let result = (|| {
-                            if entry_settled
+                            if entry_settled.is_some()
                                 || pending_probe.is_some()
                                 || value["sequence"].as_u64() != probe_sequence.checked_add(1)
                             {
@@ -436,7 +441,7 @@ fn supervise(
                     }
                     if value["event"] == "NativeTransition" {
                         let result = (|| {
-                            if plan.lane != "native" || entry_settled {
+                            if plan.lane != "native" || entry_settled.is_some() {
                                 return Err(Fault::new(
                                     "Authority",
                                     "Native transition outside admitted operation",
@@ -457,10 +462,11 @@ fn supervise(
                         }
                     }
                     if value["event"] == "EntrySettled" || value["event"] == "Terminal" {
-                        entry_settled = true;
+                        entry_settled.get_or_insert_with(Instant::now);
                         if pending_probe.is_some() {
                             owner_control.cancel();
                         }
+                        owner_control.settle_native();
                     }
                     if value["event"] == "ChildStarted" {
                         if let Err(error) = retain_child_build(&value, child.id(), &mut child_build)
@@ -493,14 +499,17 @@ fn supervise(
         }
         if let Some(startup) = startup
             && let Some(sequence) = pending_probe
-            && let Some(reply) = startup.poll()
+            && let Some(mut reply) = startup.poll()
         {
             pending_probe = None;
-            if !entry_settled && stop_sent_at.is_none() {
+            reply.progress.attempt = attempt;
+            if entry_settled.is_none() && stop_sent_at.is_none() {
                 if let Some(sender) = &commands {
                     if sender
-                        .try_send(json!({"command":"TargetPrepared","run":run,"attempt":1,
-                        "sequence":sequence,"reply":reply}))
+                        .try_send(
+                            json!({"command":"TargetPrepared","run":run,"attempt":attempt,
+                        "sequence":sequence,"reply":reply}),
+                        )
                         .is_err()
                     {
                         protocol_fault =
@@ -553,11 +562,13 @@ fn supervise(
                     }
                 });
                 owner_control.stop(reason);
-                let _ = sender.try_send(json!({"command":reason,"run":run,"attempt":1}));
+                let _ = sender.try_send(json!({"command":reason,"run":run,"attempt":attempt}));
             }
         }
         if stop_sent_at
             .is_some_and(|stop| stop.elapsed() >= Duration::from_millis(plan.limits.cleanup_ms))
+            || entry_settled
+                .is_some_and(|at| at.elapsed() >= Duration::from_millis(plan.limits.containment_ms))
             || Instant::now() >= deadline + Duration::from_millis(plan.limits.containment_ms)
         {
             forced = true;
@@ -585,6 +596,28 @@ fn supervise(
     }
     let exit_us = started.elapsed().as_micros() as u64;
     drop(commands);
+    if let Some(observer) = observer
+        && plan.lane == "native"
+    {
+        let status = milestones
+            .iter()
+            .rev()
+            .find(|value| value["event"] == "NativePreparation")
+            .and_then(|value| {
+                serde_json::from_value::<crate::desktop::NativeTargetStatus>(
+                    value["status"].clone(),
+                )
+                .ok()
+            })
+            .unwrap_or_else(|| {
+                startup
+                    .map(|startup| startup.progress().status)
+                    .unwrap_or(crate::desktop::NativeTargetStatus::NotRequested)
+            });
+        observer.progress(&json!({"event":"NativePreparation","run":run,"attempt":attempt,
+            "phase":"settling","status":status,
+            "launch":startup.map(|startup| startup.progress().launch).unwrap_or(crate::desktop::LaunchDisposition::NotRequested)}));
+    }
     // A reaped child does not settle a parent-owned launch callback or probe.
     // Retain this supervisor (and the Desktop reservation) until physical return.
     let preparation_fault = startup.and_then(super::NativePreparation::settle);
@@ -594,9 +627,15 @@ fn supervise(
     let _ = reader.join();
     while let Ok(message) = receiver.try_recv() {
         match message {
-            Ok(mut value) if value["run"] == run && value["attempt"] == 1 => {
+            Ok(mut value) if value["run"] == run && value["attempt"] == attempt => {
                 if value["event"] == "TargetProbe" {
                     continue;
+                }
+                if value["event"] == "EntrySettled" || value["event"] == "Terminal" {
+                    if pending_probe.is_some() {
+                        owner_control.cancel();
+                    }
+                    owner_control.settle_native();
                 }
                 if value["event"] == "ChildStarted" {
                     if let Err(error) = retain_child_build(&value, child.id(), &mut child_build) {
@@ -634,6 +673,17 @@ fn supervise(
             Fault::new("Transport", "terminal evidence lacks child build identity")
         });
     }
+    let terminal_accounted = terminal
+        .as_ref()
+        .is_some_and(|terminal| terminal["entry_emission_failure"].is_null())
+        && !milestones
+            .iter()
+            .any(|value| value["event"] == "StopRequested")
+        && protocol_fault.is_none()
+        && preparation_fault.is_none()
+        && stop_sent_at.is_none()
+        && exit.success()
+        && !forced;
     let terminal = settled_evidence(terminal, &milestones);
     let primary = if child_build.is_none() {
         Some(child_startup_fault(
@@ -717,6 +767,10 @@ fn supervise(
         .cloned()
         .unwrap_or_default();
     observations.insert("operation".into(), json!(operation.name()));
+    observations.insert("attempt".into(), json!(attempt));
+    observations.insert("terminal_accounted".into(), json!(terminal_accounted));
+    observations.insert("child_reaped".into(), json!(true));
+    observations.insert("startup_settled".into(), json!(preparation_fault.is_none()));
     if let Some(fault) = preparation_fault {
         observations.insert("native_preparation_fault".into(), json!(fault));
     }
@@ -1132,3 +1186,6 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         "observed":response,"build":crate::report::build_identity()}),
     )
 }
+
+#[cfg(all(test, unix))]
+mod tests;

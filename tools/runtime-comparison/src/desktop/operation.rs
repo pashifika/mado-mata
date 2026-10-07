@@ -24,6 +24,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 impl State {
     fn progress(&mut self, mut value: Value) {
         let Some(run) = &self.run else { return };
+        let attempt = value["attempt"].as_u64().unwrap_or(1);
+        if self
+            .native_preparation
+            .is_some_and(|current| attempt < current.attempt)
+        {
+            return;
+        }
         if value["event"] == "NativePreparation" {
             if value
                 .get("app_run")
@@ -36,7 +43,9 @@ impl State {
                 serde_json::from_value(value["status"].clone()),
                 serde_json::from_value(value["launch"].clone()),
             ) {
-                let previous = self.native_preparation;
+                let previous = self
+                    .native_preparation
+                    .filter(|current| current.attempt == attempt);
                 let launch = previous
                     .map(|progress| progress.launch)
                     .filter(|launch| *launch != LaunchDisposition::NotRequested)
@@ -51,6 +60,7 @@ impl State {
                     phase = previous.phase;
                 }
                 self.native_preparation = Some(NativeProgress {
+                    attempt,
                     status,
                     phase,
                     launch,
@@ -58,6 +68,13 @@ impl State {
                 value["status"] = json!(status);
                 value["phase"] = json!(phase);
                 value["launch"] = json!(launch);
+                if self.phase != "stopping" {
+                    self.phase = match phase {
+                        NativePhase::Settling | NativePhase::Recovering => "recovering",
+                        NativePhase::Workflow | NativePhase::Readiness => "running",
+                        _ => "preparing",
+                    };
+                }
             }
         }
         value["child_run"] = value["run"].clone();
@@ -75,7 +92,10 @@ impl State {
         let Some(sequence) = value["sequence"].as_u64() else {
             return;
         };
-        if !self.seen_logs.insert(sequence) {
+        if !self
+            .seen_logs
+            .insert((value["attempt"].as_u64().unwrap_or(1), sequence))
+        {
             return;
         }
         value["child_run"] = value["run"].clone();
@@ -87,18 +107,65 @@ impl State {
         self.logs.push_back(value);
     }
 
+    fn retained_logs(&mut self, record: &Value) {
+        if let Some(logs) = record
+            .pointer("/observations/script_logs")
+            .and_then(Value::as_array)
+        {
+            for log in logs {
+                let attempt = log["attempt"]
+                    .as_u64()
+                    .unwrap_or_else(|| record["attempt"].as_u64().unwrap_or(1));
+                let Some(sequence) = log["sequence"].as_u64() else {
+                    continue;
+                };
+                if self.seen_logs.contains(&(attempt, sequence)) {
+                    continue;
+                }
+                let mut value = log.clone();
+                value["run"] = record["run"].clone();
+                value["attempt"] = json!(attempt);
+                self.log(value);
+            }
+        }
+    }
+
     fn refresh(&mut self) {
         let Some(active) = &self.active else { return };
         let progress: Vec<_> = active.progress.try_iter().take(PROGRESS_CAPACITY).collect();
         let logs: Vec<_> = active.logs.try_iter().take(LOG_CAPACITY).collect();
         let dropped = active.dropped_logs.swap(0, Ordering::Relaxed);
         let finished = active.worker.is_finished();
+        let imported_attempts = self.attempts.len();
+        {
+            let attempts = active.attempts.lock().unwrap_or_else(|e| e.into_inner());
+            if attempts.len() != self.attempts.len() {
+                self.attempts.clone_from(&attempts);
+            }
+        }
+        let native_preparation = *active
+            .native_preparation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         self.dropped_logs = self.dropped_logs.saturating_add(dropped);
         for value in progress {
             self.progress(value);
         }
         for value in logs {
             self.log(value);
+        }
+        let attempts = std::mem::take(&mut self.attempts);
+        for attempt in attempts.iter().skip(imported_attempts) {
+            self.retained_logs(attempt);
+        }
+        self.attempts = attempts;
+        if let Some(progress) = native_preparation
+            && self.native_preparation != Some(progress)
+        {
+            self.progress(
+                json!({"event":"NativePreparation","attempt":progress.attempt,
+                "status":progress.status,"phase":progress.phase,"launch":progress.launch}),
+            );
         }
         if !finished {
             return;
@@ -116,6 +183,11 @@ impl State {
                 "cleanup":{"clean":false,"child_started":null}
             })))
         });
+        self.attempts = active
+            .attempts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         // A final event may have arrived between the first drain and is_finished().
         for value in active.progress.try_iter() {
             self.progress(value);
@@ -126,23 +198,25 @@ impl State {
         self.dropped_logs = self
             .dropped_logs
             .saturating_add(active.dropped_logs.load(Ordering::Relaxed));
+        let attempts = std::mem::take(&mut self.attempts);
+        for attempt in &attempts {
+            self.retained_logs(attempt);
+            for field in ["dropped_logs", "script_logs_dropped"] {
+                self.dropped_logs = self
+                    .dropped_logs
+                    .saturating_add(attempt["observations"][field].as_u64().unwrap_or(0));
+            }
+        }
+        self.attempts = attempts;
         match result {
             Ok(value) => {
-                // Retained Script records recover delivery races without double-importing.
-                if let Some(logs) = value
-                    .pointer("/observations/script_logs")
-                    .and_then(Value::as_array)
-                {
-                    for log in logs {
-                        let mut log = log.clone();
-                        log["run"] = value["run"].clone();
-                        self.log(log);
+                self.retained_logs(&value);
+                if self.attempts.is_empty() {
+                    for field in ["dropped_logs", "script_logs_dropped"] {
+                        self.dropped_logs = self
+                            .dropped_logs
+                            .saturating_add(value["observations"][field].as_u64().unwrap_or(0));
                     }
-                }
-                for field in ["dropped_logs", "script_logs_dropped"] {
-                    self.dropped_logs = self
-                        .dropped_logs
-                        .saturating_add(value["observations"][field].as_u64().unwrap_or(0));
                 }
                 if let Ok(progress) = serde_json::from_value(value["native_preparation"].clone()) {
                     self.native_preparation = Some(progress);
@@ -188,43 +262,60 @@ impl DesktopController {
                     native: (),
                 })
             },
-            |_, _, _, _| Ok(None),
+            |_, _| {
+                |_: &Control, _: &dyn Fn(NativeProgress), _: &dyn Fn() -> Result<(), Fault>| {
+                    Ok(None)
+                }
+            },
         )
     }
 
-    /// Capture immutable application inputs under the reservation. Each Native
-    /// Script probe calls the resolver at most once; None means still pending.
-    /// The resolver must check the resource snapshot before launch admission.
-    pub fn start_with_preparation<P: Send + 'static>(
+    /// Capture once; construct a fresh resolver from that immutable capture for
+    /// each admitted attempt. No successor rereads application settings.
+    pub fn start_with_preparation<P: Send + 'static, R>(
         &self,
         mut request: StartRequest,
         capture: impl FnOnce(&mut StartRequest, &Control) -> Result<StartPreparation<P>, Fault>
         + Send
         + 'static,
-        mut resolve: impl FnMut(
-            &mut P,
-            &Control,
-            &dyn Fn(NativeProgress),
-            &dyn Fn() -> Result<(), Fault>,
-        ) -> Result<Option<NativeTarget>, Fault>
-        + Send
-        + 'static,
-    ) -> Result<String, Fault> {
+        mut create_resolver: impl FnMut(&P, u64) -> R + Send + 'static,
+    ) -> Result<String, Fault>
+    where
+        R: FnMut(
+                &Control,
+                &dyn Fn(NativeProgress),
+                &dyn Fn() -> Result<(), Fault>,
+            ) -> Result<Option<NativeTarget>, Fault>
+            + Send
+            + 'static,
+    {
         let duration_ms = match request.lane.as_str() {
-            "native" => Some(
-                request
-                    .native_intent
-                    .as_ref()
-                    .and_then(|intent| intent.limits.budgets().total_ms().ok())
-                    .unwrap_or(120_000),
-            ),
+            "native" => {
+                let intent = request.native_intent.as_ref().ok_or_else(|| {
+                    Fault::new("NativeRefused", "Native requires explicit per-Start review")
+                })?;
+                super::native::validate_intent(intent)?;
+                Some(
+                    intent
+                        .limits
+                        .budgets()
+                        .operation_ms(intent.max_exit_recoveries)?,
+                )
+            }
             "replay" => Some(REPLAY_DURATION_MS),
             _ => None,
         };
         self.reserve(
             "run",
             duration_ms,
-            move |app_run, control, observer, controlled, engine| {
+            move |app_run, owner, observer, controlled, engine| {
+                let initial_control;
+                let control = if request.lane == "native" {
+                    initial_control = Arc::new(Control::for_attempt(Arc::clone(owner), &manual_plan()?.limits, true));
+                    &initial_control
+                } else {
+                    owner
+                };
                 let mut evidence = Evidence::new(
                     "run",
                     app_run,
@@ -234,6 +325,7 @@ impl DesktopController {
                 if request.lane == "native" {
                     evidence.native_progress(
                         NativeProgress {
+                            attempt: 1,
                             status: NativeTargetStatus::NotRequested,
                             phase: NativePhase::Preflight,
                             launch: LaunchDisposition::NotRequested,
@@ -280,59 +372,78 @@ impl DesktopController {
                     &mut evidence,
                 )
                 .map_err(|error| evidence.fault(error, true))?;
-                verify_resources(
-                    prepared.environment.as_ref(),
-                    prepared.engine.as_ref(),
-                    control,
-                )
-                .map_err(|error| evidence.fault(error, true))?;
                 let PreparedRun { inventory, environment, engine, templates, modules } = prepared;
                 let executable = engine.as_ref().map_or(executable, |artifact| artifact.path.as_path()).to_owned();
                 let templates = templates.map(Arc::new);
-                let startup = if plan.lane == "native" {
+                let environment = environment.map(Arc::new);
+                let engine = engine.map(Arc::new);
+                if plan.lane == "native" {
                     plan.native_config = Some(environment.as_ref()
                         .expect("native preflight captures environment").configuration.clone());
                     evidence.fields["native_intent_identity"] = json!(identity(&request.native_intent)?);
-                    let mut native = preparation.native;
-                    let mut projected = plan.clone();
-                    let probe_templates = Arc::clone(templates.as_ref().expect("native templates"));
-                    let probe_executable = executable.clone();
-                    let progress_observer = observer.clone();
-                    let owner = app_run.to_owned();
-                    Some(crate::runner::NativePreparation::new(Arc::clone(control), move |control, report| {
-                        let report = |progress: NativeProgress| {
-                            report(progress);
-                            let _ = progress_observer.progress.try_send(json!({
-                                "event":"NativePreparation", "app_run":owner,
-                                "status":progress.status,"phase":progress.phase,"launch":progress.launch,
-                            }));
-                        };
-                        let verify = || verify_resources(environment.as_ref(), engine.as_ref(), control);
-                        let target = resolve(&mut native, control, &report, &verify)?;
-                        control.check()?;
-                        let Some(target) = target else { return Ok(None); };
-                        super::native::validate_target(Some(&target))?;
-                        verify()?;
-                        super::native::project(
-                            &mut projected, &request, &target, &probe_executable, &probe_templates,
-                            environment.as_ref().expect("native environment").configuration.clone(),
-                        )?;
-                        verify()?;
-                        Ok(projected.native_config.take())
-                    }))
-                } else {
-                    None
-                };
-                execute(
-                    &executable, &inventory, plan,
-                    crate::runner::PreparedExecution {
-                        control,
-                        modules: modules.as_ref(),
-                        images: templates.as_ref().map(|templates| &templates.images),
-                        startup: startup.as_ref(),
-                    },
-                    observer, evidence,
-                )
+                }
+                let request = Arc::new(request);
+                run_attempts(
+                    owner,
+                    Arc::clone(control),
+                    &plan,
+                    &request,
+                    observer,
+                    &evidence,
+                    |attempt, attempt_control, remaining| {
+                    let startup = if plan.lane == "native" {
+                        let mut resolve = create_resolver(&preparation.native, attempt);
+                        let mut projected = plan.clone();
+                        let probe_templates = Arc::clone(templates.as_ref().expect("native templates"));
+                        let probe_executable = executable.clone();
+                        let progress_observer = observer.clone();
+                        let app_run = app_run.to_owned();
+                        let environment = environment.clone();
+                        let engine = engine.clone();
+                        let request = Arc::clone(&request);
+                        let (frames, actions) = remaining.expect("native allowances");
+                        Some(crate::runner::NativePreparation::new(Arc::clone(attempt_control), attempt, move |control, report| {
+                            let report = |mut progress: NativeProgress| {
+                                progress.attempt = attempt;
+                                report(progress);
+                                progress_observer.progress(&json!({
+                                    "event":"NativePreparation", "app_run":app_run,"attempt":attempt,
+                                    "status":progress.status,"phase":progress.phase,"launch":progress.launch,
+                                }));
+                            };
+                            let verify = || verify_resources(environment.as_deref(), engine.as_deref(), control);
+                            let target = resolve(control, &report, &verify)?;
+                            control.check()?;
+                            let Some(target) = target else { return Ok(None); };
+                            super::native::validate_target(Some(&target))?;
+                            verify()?;
+                            super::native::project(
+                                &mut projected, &request, &target, &probe_executable, &probe_templates,
+                                environment.as_ref().expect("native environment").configuration.clone(),
+                            )?;
+                            let config = projected.native_config.as_mut().expect("native projection");
+                            config["native"]["capture"]["max_frames"] = json!(frames);
+                            config["native"]["input"]["max_actions"] = json!(actions);
+                            verify()?;
+                            Ok(projected.native_config.take())
+                        }))
+                    } else {
+                        None
+                    };
+                    verify_resources(environment.as_deref(), engine.as_deref(), attempt_control)
+                        .map_err(|fault| evidence.fault(fault, true))
+                        .and_then(|()| execute(
+                        &executable, &inventory, plan.clone(),
+                        crate::runner::PreparedExecution {
+                            control: attempt_control,
+                            modules: modules.as_ref(),
+                            images: templates.as_ref().map(|templates| &templates.images),
+                            startup: startup.as_ref(),
+                            identity: Some((app_run, attempt)),
+                        },
+                        observer, evidence.clone(),
+                    ))
+                })
             },
         )
     }
@@ -459,11 +570,15 @@ impl DesktopController {
         if let Some(duration_ms) = duration_ms {
             limits.duration_ms = duration_ms;
         }
-        let control = Arc::new(Control::new(&limits));
+        let control = Arc::new(Control::reserved(&limits)?);
         let (progress_send, progress) = mpsc::sync_channel(PROGRESS_CAPACITY);
         let (log_send, logs) = mpsc::sync_channel(LOG_CAPACITY);
         let dropped_logs = Arc::new(AtomicU64::new(0));
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let native_preparation = Arc::new(std::sync::Mutex::new(None));
         let observer = Observer {
+            attempts: Arc::clone(&attempts),
+            native_preparation: Arc::clone(&native_preparation),
             progress: progress_send,
             logs: log_send,
             dropped_logs: dropped_logs.clone(),
@@ -486,11 +601,14 @@ impl DesktopController {
         state.logs.clear();
         state.seen_logs.clear();
         state.dropped_logs = 0;
+        state.attempts.clear();
         state.active = Some(Active {
             control,
             worker,
             progress,
             logs,
+            attempts,
+            native_preparation,
             dropped_logs,
         });
         Ok(run)
@@ -529,6 +647,7 @@ impl DesktopController {
             result: state.result.clone(),
             error: state.error.clone(),
             progress: state.progress.clone(),
+            attempts: state.attempts.clone(),
             native_preparation: state.native_preparation,
             logs: state.logs.drain(..).collect(),
             dropped_logs: state.dropped_logs,
@@ -562,6 +681,103 @@ impl DesktopController {
             }
             thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+/// Keep the reservation and immutable Run authority while each owned executor
+/// returns only after child/native settlement and terminal accounting.
+fn run_attempts(
+    owner: &Arc<Control>,
+    mut attempt_control: Arc<Control>,
+    plan: &Plan,
+    request: &StartRequest,
+    observer: &Observer,
+    evidence: &Evidence,
+    mut execute_attempt: impl FnMut(u64, &Arc<Control>, Option<(u64, usize)>) -> Result<Value, Fault>,
+) -> Result<Value, Fault> {
+    let mut attempt = 1;
+    let mut remaining = request
+        .native_intent
+        .as_ref()
+        .map(|intent| (intent.limits.max_frames, intent.limits.max_actions));
+    let mut attempts = Vec::with_capacity(2);
+    loop {
+        let mut result = match execute_attempt(attempt, &attempt_control, remaining) {
+            Ok(result) => result,
+            Err(mut fault) => {
+                let failed = json!({
+                    "run":evidence.fields["app_run"],"attempt":attempt,"status":"FAIL","primary":fault,
+                    "reason":fault.to_string(),"entry_outcome":"Unobserved",
+                    "stage":fault.context["stage"],"completed_stages":fault.context["completed_stages"],
+                    "native_preparation":fault.context["native_preparation"],
+                    "cleanup":fault.context["cleanup"],"observations":{},
+                    "forced":null,"exit_code":null,
+                });
+                attempts.push(failed);
+                *observer.attempts.lock().unwrap_or_else(|e| e.into_inner()) = attempts.clone();
+                fault.context["attempts"] = json!(attempts);
+                fault.context["attempt"] = json!(attempt);
+                fault.context["recovery_count"] = json!(attempt - 1);
+                return Err(fault);
+            }
+        };
+        result["attempt"] = json!(attempt);
+        let next = remaining.and_then(|(frames, actions)| {
+            crate::runner::recovery_allowance(&result, frames, actions)
+        });
+        attempts.push(crate::runner::attempt_summary(&result));
+        *observer.attempts.lock().unwrap_or_else(|e| e.into_inner()) = attempts.clone();
+        let approved = attempt == 1
+            && request
+                .native_intent
+                .as_ref()
+                .is_some_and(|intent| intent.max_exit_recoveries == 1);
+        let progress =
+            serde_json::from_value::<NativeProgress>(result["native_preparation"].clone()).ok();
+        if approved && let (Some((frames, actions)), Some(mut progress)) = (next, progress) {
+            // EntrySettled retired the ordinary stage clock. This check retains
+            // earlier attempt stops; owner admission still serializes Run Stop
+            // and the original absolute deadline against successor creation.
+            let admission = attempt_control.check().and_then(|()| {
+                if frames == 0 || actions == 0 {
+                    return Err(Fault::new(
+                        if frames == 0 {
+                            "CaptureLimit"
+                        } else {
+                            "ActionLimit"
+                        },
+                        "Aggregate Run allowance is exhausted",
+                    ));
+                }
+                owner.admit_recovery()
+            });
+            if let Err(fault) = admission {
+                result["reason"] = json!(fault.to_string());
+                result["primary"] = json!(fault);
+                result["status"] = json!("FAIL");
+            } else {
+                progress.phase = NativePhase::Recovering;
+                evidence.native_progress(progress, observer);
+                remaining = next;
+                attempt = 2;
+                attempt_control =
+                    Arc::new(Control::for_attempt(Arc::clone(owner), &plan.limits, false));
+                attempt_control.start_native(plan.native_budgets.expect("native budgets"), None)?;
+                evidence.native_progress(
+                    NativeProgress {
+                        attempt,
+                        status: NativeTargetStatus::NotRequested,
+                        phase: NativePhase::Preflight,
+                        launch: LaunchDisposition::NotRequested,
+                    },
+                    observer,
+                );
+                continue;
+            }
+        }
+        result["attempts"] = json!(attempts);
+        result["recovery_count"] = json!(attempt - 1);
+        return Ok(result);
     }
 }
 
@@ -637,6 +853,7 @@ pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
     Ok(plan)
 }
 
+#[derive(Clone)]
 struct Evidence {
     fields: Value,
     stage: &'static str,
@@ -666,15 +883,17 @@ impl Evidence {
 
     fn native_progress(&self, progress: NativeProgress, observer: &Observer) {
         self.native.set(Some(progress));
-        let _ = observer.progress.try_send(json!({
+        observer.progress(&json!({
             "event":"NativePreparation","app_run":self.fields["app_run"],
+            "attempt":progress.attempt,
             "status":progress.status,"phase":progress.phase,"launch":progress.launch,
         }));
     }
     fn stage(&mut self, stage: &'static str, observer: &Observer) {
         self.stage = stage;
         let _ = observer.progress.try_send(json!({
-            "event":"PreparationStage","stage":stage
+            "event":"PreparationStage","stage":stage,"app_run":self.fields["app_run"],
+            "attempt":self.native.get().map_or(1, |progress| progress.attempt),
         }));
     }
 

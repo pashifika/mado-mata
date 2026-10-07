@@ -56,13 +56,57 @@ pub struct Observer {
     pub progress: mpsc::SyncSender<Value>,
     pub logs: mpsc::SyncSender<Value>,
     pub dropped_logs: Arc<AtomicU64>,
+    pub attempts: Arc<Mutex<Vec<Value>>>,
+    pub native_preparation: Arc<Mutex<Option<NativeProgress>>>,
 }
 
 impl Observer {
-    pub(super) fn progress(&self, value: &Value) {
+    pub(crate) fn progress(&self, value: &Value) {
+        if value["event"] == "NativePreparation"
+            && let (Some(attempt), Ok(status), Ok(phase), Ok(launch)) = (
+                value["attempt"].as_u64(),
+                serde_json::from_value(value["status"].clone()),
+                serde_json::from_value(value["phase"].clone()),
+                serde_json::from_value(value["launch"].clone()),
+            )
+        {
+            let mut retained = self
+                .native_preparation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if retained.is_none_or(|previous| attempt >= previous.attempt) {
+                let mut incoming = NativeProgress {
+                    attempt,
+                    status,
+                    phase,
+                    launch,
+                };
+                if let Some(previous) = *retained
+                    && previous.attempt == attempt
+                {
+                    if previous.launch != LaunchDisposition::NotRequested {
+                        incoming.launch = previous.launch;
+                    }
+                    if previous.status == NativeTargetStatus::CaptureReady {
+                        incoming.status = previous.status;
+                    }
+                    if matches!(
+                        previous.phase,
+                        NativePhase::Settling | NativePhase::Recovering
+                    ) && !matches!(
+                        incoming.phase,
+                        NativePhase::Settling | NativePhase::Recovering
+                    ) {
+                        incoming.phase = previous.phase;
+                    }
+                }
+                *retained = Some(incoming);
+            }
+        }
         let mut progress = serde_json::Map::new();
         for key in [
             "event",
+            "app_run",
             "run",
             "attempt",
             "at_us",
@@ -171,6 +215,7 @@ pub(crate) fn emit_native_status(control: &Control, progress: NativeProgress) {
 
 fn native_projection(phase: NativePhase) -> NativeProgress {
     NativeProgress {
+        attempt: 1,
         status: match NATIVE_STATUS.load(Ordering::Acquire) {
             0 => NativeTargetStatus::NotRequested,
             1 => NativeTargetStatus::Pending,
@@ -342,6 +387,7 @@ pub(super) fn receive_evidence(
         stdout,
         observer,
         &invocation.run,
+        invocation.attempt,
         if observer.is_some() {
             invocation.plan.limits.log_records
         } else {
@@ -355,6 +401,7 @@ pub(super) fn receive_frames(
     stdout: impl Read + Send + 'static,
     observer: Option<&Observer>,
     run: &str,
+    attempt: u64,
     log_limit: usize,
     frame_bytes: usize,
 ) -> (mpsc::Receiver<Result<Value, Fault>>, thread::JoinHandle<()>) {
@@ -375,7 +422,7 @@ pub(super) fn receive_frames(
                     if let Ok(value) = &result
                         && value["event"] == "TargetProbe"
                         && value["run"] == event_run
-                        && value["attempt"] == 1
+                        && value["attempt"] == attempt
                     {
                         if sender.try_send(result).is_err() {
                             return;
@@ -385,7 +432,7 @@ pub(super) fn receive_frames(
                     if let Ok(value) = &result
                         && value["event"] == "ScriptLog"
                         && value["run"] == event_run
-                        && value["attempt"] == 1
+                        && value["attempt"] == attempt
                         && log_records < log_limit
                     {
                         log_records += 1;

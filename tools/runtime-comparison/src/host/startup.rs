@@ -16,9 +16,10 @@ pub(super) struct Startup {
 }
 
 impl Startup {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(attempt: u64) -> Self {
         Self {
             progress: NativeProgress {
+                attempt,
                 status: NativeTargetStatus::NotRequested,
                 phase: NativePhase::Readiness,
                 launch: LaunchDisposition::NotRequested,

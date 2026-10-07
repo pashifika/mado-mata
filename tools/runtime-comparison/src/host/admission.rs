@@ -282,6 +282,7 @@ impl Host {
             self.close_admission();
             return Err(error);
         }
+        lock(&self.inner.state).workflow_entered = true;
         if self.script_startup() {
             self.native_phase(crate::desktop::NativePhase::Workflow);
         } else if self.inner.plan.lane == "native" {

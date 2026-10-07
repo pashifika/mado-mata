@@ -1,4 +1,4 @@
-import {DISCLOSURE_LIMIT, boundedText, cleanupLabel, initializationLabel, record, text} from '../state.ts';
+import {DISCLOSURE_LIMIT, attemptOutcomes, boundedText, cleanupLabel, initializationLabel, record, text} from '../state.ts';
 import type {ControllerView, Fault, Json} from '../types.ts';
 import {LocalFault, messages, renderMessage} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
@@ -43,8 +43,9 @@ export default function ResultPanel({view, disclosed, onDisclose}: {view: Contro
   const check = view.operation === 'environment_check';
   const lane = text(result?.lane) ?? text(source.lane);
   // Replay observations and script decisions can carry recognized text: private until disclosed.
-  const privateDetail = !check && lane !== null && lane !== 'controlled';
+  const privateDetail = !check && (view.native_preparation != null || (lane !== null && lane !== 'controlled'));
   const completed = Array.isArray(source.completed_stages) ? source.completed_stages.map(String) : [];
+  const attempts = attemptOutcomes(view, locale);
   return <>
     <div className="result-facts">
       <div><span>{t.result.status}</span><strong>{String(result?.status ?? (view.state === 'terminal' && view.error ? view.error.category : t.result.notSettled))}</strong></div>
@@ -60,6 +61,26 @@ export default function ResultPanel({view, disclosed, onDisclose}: {view: Contro
       {check && <><dt>{t.common.selection}</dt><dd><code>{text(source.selection_identity) ?? t.common.unobserved}</code></dd><dt>{t.common.initialization}</dt><dd id="initialization">{initializationLabel(view.progress, locale)}</dd></>}
       <dt>{t.result.childBuild}</dt><dd>{build.engine_enabled === undefined ? t.result.noBuild : <>{build.engine_enabled === true ? t.result.engineEnabled : t.result.engineAbsent} · <code>{text(build.executable_sha256) ?? t.result.unhashed}</code></>}</dd>
     </dl>
+    {attempts.length > 0 && <section id="attempt-results" className="outcome-details">
+      <h3>{t.result.attempts}</h3>
+      <p className="muted">{t.result.attemptHelp}</p>
+      <dl className="run-identity"><dt>{t.result.recoveries}</dt><dd id="recovery-count">{String(result?.recovery_count ?? Math.max(0, (view.native_preparation?.attempt ?? 1) - 1))}</dd></dl>
+      {attempts.map(attempt => <section key={attempt.attempt} id={`attempt-result-${attempt.attempt}`}>
+        <h4>{t.result.attempt(attempt.attempt)}</h4>
+        <dl className="run-identity">
+          <dt>{t.result.status}</dt><dd>{attempt.status ?? t.common.unobserved}</dd>
+          <dt>{t.common.stage}</dt><dd>{attempt.stage ?? t.common.unobserved}</dd>
+          {attempt.phase && <><dt>{t.run.nativeStage}</dt><dd>{t.run.nativePhases[attempt.phase]}</dd></>}
+          <dt>{t.result.primary}</dt><dd>{attempt.primary ?? t.common.noneRecorded}</dd>
+          {attempt.exitReason && <><dt>{t.result.exitReason}</dt><dd>{t.result.exitReasons[attempt.exitReason]}</dd></>}
+          <dt>{t.run.nativeLaunchRequest}</dt><dd>{attempt.launch ? t.run.launchDispositions[attempt.launch] : t.common.unobserved}</dd>
+          <dt>{t.result.entry}</dt><dd>{attempt.entry ? t.entryOutcome(attempt.entry) : t.common.unobserved}</dd>
+          <dt>{t.common.cleanup}</dt><dd>{attempt.cleanup}</dd>
+          <dt>{t.result.receipts}</dt><dd>{attempt.receipts ?? t.common.unobserved}</dd>
+        </dl>
+        {disclosed && <details><summary>{t.result.disclose}</summary><BoundedRecord value={attempt.retained}/></details>}
+      </section>)}
+    </section>}
     {result && check && <div className="outcome-details">
       <p className="muted">{t.result.checkHelp}</p>
       <details><summary>{t.result.engine}</summary><BoundedRecord value={observations.engine ?? null}/></details>
@@ -81,9 +102,9 @@ export default function ResultPanel({view, disclosed, onDisclose}: {view: Contro
       <details><summary>{t.result.cleanupEvidence}</summary><pre>{JSON.stringify(result.cleanup ?? null, null, 2)}</pre></details>
     </div>}
     <div id="result" className="private-disclosure">
-      <button id="disclose-result" disabled={!result && !view.error} onClick={() => onDisclose(!disclosed)}>{disclosed ? t.result.hide : t.result.disclose}</button>
+      <button id="disclose-result" disabled={!result && !view.error && attempts.length === 0} onClick={() => onDisclose(!disclosed)}>{disclosed ? t.result.hide : t.result.disclose}</button>
       <span className="muted">{t.result.disclosureHelp(privateDetail, DISCLOSURE_LIMIT / 1024)}</span>
-      {disclosed && <BoundedRecord value={result ?? (view.error ? {category: view.error.category, message: view.error.message, context: view.error.context} : null)}/>}
+      {disclosed && <BoundedRecord value={result ?? (view.error ? {category: view.error.category, message: view.error.message, context: view.error.context} : {attempts:view.attempts})}/>}
     </div>
   </>;
 }

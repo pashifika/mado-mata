@@ -14,6 +14,13 @@ fn text(value: &str, bound: usize) -> bool {
 }
 
 pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
+    if intent.max_exit_recoveries > 1
+        || (intent.max_exit_recoveries == 1 && !intent.launch_approved)
+    {
+        return Err(refused(
+            "One exit recovery requires separate launch approval",
+        ));
+    }
     if intent.target_revision == 0
         || !text(&intent.target_binding_id, 256)
         || !text(&intent.target_declaration_identity, 256)

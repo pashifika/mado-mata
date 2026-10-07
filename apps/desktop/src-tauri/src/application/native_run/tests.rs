@@ -80,12 +80,40 @@ fn inputs() -> (StartRequest, PackageInfo, TargetRecord) {
             capture_approved: true,
             input_approved: true,
             launch_approved: false,
+            max_exit_recoveries: 0,
             operation: "Click the declared button once".into(),
             visible_postcondition: "The declared label changes".into(),
             limits: native_limits(),
         }),
     };
     (request, package, record)
+}
+
+#[test]
+fn start_request_defaults_recovery_to_zero_at_the_real_json_boundary() {
+    let (request, _, _) = inputs();
+    let mut encoded = serde_json::to_value(request).unwrap();
+    encoded["native_intent"]
+        .as_object_mut()
+        .unwrap()
+        .remove("max_exit_recoveries");
+    let decoded: StartRequest = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(decoded.native_intent.unwrap().max_exit_recoveries, 0);
+    encoded["native_intent"]["max_exit_recoveries"] = json!(1);
+    encoded["native_intent"]["launch_approved"] = json!(true);
+    let decoded: StartRequest = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(decoded.native_intent.unwrap().max_exit_recoveries, 1);
+    for invalid in [
+        json!(-1),
+        json!(1.5),
+        json!(256),
+        json!(true),
+        json!("1"),
+        json!(null),
+    ] {
+        encoded["native_intent"]["max_exit_recoveries"] = invalid;
+        assert!(serde_json::from_value::<StartRequest>(encoded.clone()).is_err());
+    }
 }
 
 #[test]
@@ -320,6 +348,98 @@ fn unique(pid: u32) -> Result<NativeDiscovery, Fault> {
         processes: vec![process(pid)],
         installation: "verified".into(),
     }))
+}
+
+#[test]
+fn fresh_attempts_recreate_the_one_shot_resolver_from_the_original_capture() {
+    let (mut request, package, mut record) = inputs();
+    request.native_intent.as_mut().unwrap().launch_approved = true;
+    let original = record.binding.clone().unwrap();
+    let captured = NativeBinding::capture(&request, &package, record.clone()).unwrap();
+    record.binding.as_mut().unwrap().configuration.window_title = "Edited later".into();
+    record.binding.as_mut().unwrap().configuration.input = None;
+    record
+        .binding
+        .as_mut()
+        .unwrap()
+        .configuration
+        .arguments
+        .push("--later".into());
+    let mut first = captured.for_attempt(1);
+    let mut first_platform = ScriptedPreparation::new([
+        Ok(NativeDiscovery::Absent),
+        Ok(NativeDiscovery::Absent),
+        unique(7),
+    ]);
+    let first_control = control();
+    assert!(
+        first
+            .resolve_with(&first_control, &|_| {}, &|| Ok(()), &mut first_platform)
+            .unwrap()
+            .is_none()
+    );
+    let first_target = first
+        .resolve_with(&first_control, &|_| {}, &|| Ok(()), &mut first_platform)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_target.window_title, "Game");
+    assert!(first.finished);
+    assert!(first.binding.configuration.input.is_none());
+    assert_eq!(first_platform.launches, 1);
+    let mut successor = captured.for_attempt(2);
+    assert!(!successor.finished);
+    assert_eq!(successor.progress.attempt, 2);
+    assert_eq!(successor.progress.launch, LaunchDisposition::NotRequested);
+    assert_eq!(successor.binding, original);
+    let mut external_restart = ScriptedPreparation::new([unique(17)]);
+    let target = successor
+        .resolve_with(
+            &control(),
+            &|progress| assert_eq!(progress.attempt, 2),
+            &|| Ok(()),
+            &mut external_restart,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(target.process_id, 17);
+    assert_eq!(target.window_title, first_target.window_title);
+    assert_eq!(target.input.route, first_target.input.route);
+    assert_eq!(external_restart.launches, 0);
+    assert_eq!(captured.binding, original);
+    assert!(!captured.finished);
+}
+
+#[test]
+fn a_fresh_absent_attempt_gets_one_launch_without_inheriting_the_old_receipt() {
+    let captured = binding(true);
+    for attempt in [1, 2] {
+        let mut resolver = captured.for_attempt(attempt);
+        let mut platform = ScriptedPreparation::new([
+            Ok(NativeDiscovery::Absent),
+            Ok(NativeDiscovery::Absent),
+            Ok(NativeDiscovery::Absent),
+        ]);
+        let control = control();
+        assert!(
+            resolver
+                .resolve_with(
+                    &control,
+                    &|progress| assert_eq!(progress.attempt, attempt),
+                    &|| Ok(()),
+                    &mut platform,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resolver
+                .resolve_with(&control, &|_| {}, &|| Ok(()), &mut platform)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(platform.launches, 1);
+        assert_eq!(resolver.progress.launch, LaunchDisposition::Accepted);
+    }
 }
 
 #[test]

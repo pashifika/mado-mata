@@ -270,9 +270,18 @@ impl Application {
                         native: binding,
                     })
                 },
-                |binding, control, report, verify_resources| match binding.as_mut() {
-                    Some(binding) => binding.resolve(control, report, verify_resources),
-                    None => Ok(None),
+                |captured, attempt| {
+                    let mut binding = captured
+                        .as_ref()
+                        .map(|binding| binding.for_attempt(attempt));
+                    move |control: &mado_runtime_comparison::model::Control,
+                          report: &dyn Fn(mado_runtime_comparison::desktop::NativeProgress),
+                          verify_resources: &dyn Fn() -> Result<(), Fault>| {
+                        match binding.as_mut() {
+                            Some(binding) => binding.resolve(control, report, verify_resources),
+                            None => Ok(None),
+                        }
+                    }
                 },
             )?;
             state.owner = Some(OperationOwner {
