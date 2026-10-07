@@ -12,7 +12,7 @@ import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, chooseLane, editDraft, hasWo
 import type {Bound, BoundWorkspace, Derived, NativeConsent} from '../workspace.ts';
 import {AUTHORING_RECOVERY, recoveryPath} from '../authoring.ts';
 import type {PageAuthoring} from './EditPage.tsx';
-import type {ControllerView, Fault, Json, NativeIntent, NativeLimits, OcrEnvironment} from '../types.ts';
+import type {ControllerView, Fault, Json, NativeCapability, NativeIntent, OcrEnvironment} from '../types.ts';
 import {messages, renderMessage} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
@@ -31,7 +31,7 @@ export interface RunHandlers {
   newDraft: (preset?: string) => void; selectProfile: (id: string) => void;
   reinspect: () => void; inspectPath: (value: string) => void; importLegacy: () => void; start: () => void; stop: () => void;
   // Native review text edits withdraw consent; consent binds to the request as it is now.
-  native: {edit: (field: 'operation' | 'postcondition', value: string) => void; approve: (field: NativeConsent, value: boolean) => void};
+  native: {edit: (field: 'operation' | 'postcondition' | 'workflowSeconds', value: string) => void; approve: (field: NativeConsent, value: boolean) => void};
   target: TargetHandlers;
   recovery: RecoveryHandlers;
 }
@@ -41,12 +41,12 @@ interface Props {
   locked: boolean; active: boolean; pickerBusy: boolean; starting: boolean; stopping: boolean; closing: boolean;
   savedEnvironment: OcrEnvironment | null; handlers: RunHandlers;
   // Host-issued Native policy; null when this platform/build offers none. `nativeError` is a failed availability read.
-  nativeLimits: NativeLimits | null; nativeError: Fault | null;
+  nativeCapability: NativeCapability | null; nativeError: Fault | null;
   // While any Tab owns Edit, Start is refused everywhere; the owner additionally waits to exit before reinspecting.
   authoring: PageAuthoring;
 }
 
-export default function RunPage({workspace, label, derived, run, snapshot, locked, active, pickerBusy, starting, stopping, closing, savedEnvironment, handlers, authoring, nativeLimits, nativeError}: Props) {
+export default function RunPage({workspace, label, derived, run, snapshot, locked, active, pickerBusy, starting, stopping, closing, savedEnvironment, handlers, authoring, nativeCapability, nativeError}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const bound = workspace.bound;
@@ -99,11 +99,13 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   // Launch recipe validity is conditional on host-confirmed absence, not a gate on attaching.
   const approvalOpen = native !== null && (native.block === null || native.block === 'nativeApproval') && !locked;
   const outcome = nativeOutcome(run.view);
-  // Phase budgets are reviewed apart from the unchanged per-run limits; every value is the host-issued tuple consent binds.
+  // Invalid Workflow text has no effective duration; never display a clamped or fallback budget.
+  const nativeLimits = nativeCapability?.default_limits ?? null;
+  const selectedLimits = native?.limits ?? null;
   const nativeBudgetRows = nativeLimits && [
-    [t.run.nativeStartup, nativeLimits.startup_ms], [t.run.nativeReadiness, nativeLimits.readiness_ms], [t.run.nativeWorkflow, nativeLimits.workflow_ms],
+    [t.run.nativeStartup, nativeLimits.startup_ms], [t.run.nativeReadiness, nativeLimits.readiness_ms], [t.run.nativeWorkflow, selectedLimits?.workflow_ms ?? null],
   ] as const;
-  const nativeDuration = nativeLimits ? (1 + (native?.recovery ? 1 : 0)) * (nativeLimits.startup_ms + nativeLimits.readiness_ms + nativeLimits.workflow_ms) + (native?.recovery ? 3000 : 0) : null;
+  const nativeDuration = selectedLimits ? (1 + (native?.recovery ? 1 : 0)) * (selectedLimits.startup_ms + selectedLimits.readiness_ms + selectedLimits.workflow_ms) + (native?.recovery ? 3000 : 0) : null;
   const nativeLimitRows = nativeLimits && [
     [t.run.nativeFrames, String(nativeLimits.max_frames)],
     [t.run.nativeWait, `${nativeLimits.wait_ms} ms`], [t.run.nativeInterval, `${nativeLimits.interval_ms} ms`],
@@ -216,7 +218,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
               <Select id="lane" value={bound.lane} disabled={locked} onChange={lane => handlers.change(item => chooseLane(item, lane))}
                 options={[{value: 'controlled', label: t.run.controlled},
                   {value: 'replay', label: t.run.replay},
-                  {value: 'native', label: nativeLimits ? t.run.native : t.run.nativeUnavailable, disabled: nativeLimits === null}]}/></div>
+                  {value: 'native', label: nativeCapability ? t.run.native : t.run.nativeUnavailable, disabled: nativeCapability === null}]}/></div>
             <div className="field"><label htmlFor="scenario">{t.run.scenario}</label>
               <Select id="scenario" value={bound.lane === 'controlled' ? bound.scenario : 'workflow'} disabled={locked || bound.lane !== 'controlled'}
                 onChange={scenario => handlers.change(item => ({...item, scenario}))}
@@ -246,9 +248,15 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                   {recipe.workingDirectory !== null && <><code>{recipe.workingDirectory}</code> · </>}{t.run.nativeDirectories[recipe.directory]}</dd>
               </dl>
               {recipe.recipient === 'launcher' && <p className="field-help">{t.run.nativeForwarding}</p>}</>}
+            {nativeCapability && <div className="field"><label htmlFor="native-workflow-seconds">{t.run.nativeWorkflowSeconds}</label>
+              <input id="native-workflow-seconds" type="text" inputMode="numeric" value={native.workflowSeconds} disabled={locked} spellCheck={false}
+                aria-invalid={native.workflowError} aria-describedby={`native-workflow-help${native.workflowError ? ' native-workflow-error' : ''}`}
+                onChange={event => handlers.native.edit('workflowSeconds', event.target.value)}/>
+              {native.workflowError && <p className="field-error" id="native-workflow-error">{t.run.nativeWorkflowError(nativeCapability.max_workflow_ms / 1000)}</p>}
+              <p className="field-help" id="native-workflow-help">{t.run.nativeWorkflowHelp(nativeCapability.default_limits.workflow_ms / 1000, nativeCapability.max_workflow_ms / 1000)}</p></div>}
             {nativeBudgetRows && <><span className="eyebrow">{t.run.nativeBudgets}</span>
-              <dl className="run-identity" id="native-budgets">{nativeBudgetRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value} ms</dd></Fragment>)}</dl>
-              <dl className="run-identity"><dt>{t.run.nativeDuration}</dt><dd id="native-duration">{t.run.nativeEnvelope(nativeDuration ?? 0)}</dd></dl>
+              <dl className="run-identity" id="native-budgets">{nativeBudgetRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value === null ? t.common.none : `${value} ms`}</dd></Fragment>)}</dl>
+              <dl className="run-identity"><dt>{t.run.nativeDuration}</dt><dd id="native-duration">{nativeDuration === null ? t.common.none : t.run.nativeEnvelope(nativeDuration)}</dd></dl>
               <p className="field-help" id="native-budget-help">{t.run.nativeBudgetHelp}</p>
               <p className="field-help" id="native-startup-help">{t.run.nativeStartupHelp}</p></>}
             {nativeLimitRows && <><span className="eyebrow">{t.run.nativeLimits}</span>

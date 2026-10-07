@@ -407,42 +407,64 @@ fn native_run_latches_first_authoritative_geometry_and_refuses_later_movement() 
 
 #[test]
 fn native_capture_budget_and_expanded_held_click_budget_apply_without_dispatch() {
-    let mut engine = placed_replay();
-    engine.native.as_mut().unwrap().capture.max_frames = 1;
-    let observation = engine.call("observe", json!({})).unwrap();
-    assert_eq!(
-        engine.call("observe", json!({})).unwrap_err().category,
-        "CaptureLimit"
-    );
-    engine.control.admission.store(true, Ordering::Release);
-    let request = DispatchRequest {
-        observation,
-        actions: vec![Action::Click {
-            x: 1.0,
-            y: 2.0,
-            button: PointerButton::Left,
-        }],
-    };
-    let mut state = engine.lock().unwrap();
-    let input = engine.input_request(&state, &request).unwrap();
-    assert_eq!(input.sequence().len(), 4);
-    state.input_events = 1;
-    assert_eq!(
-        engine.input_request(&state, &request).unwrap_err().category,
-        "ActionLimit"
-    );
-    state.input_events = 0;
-    state.input_cleanup_incomplete = true;
-    assert_eq!(
-        engine.input_request(&state, &request).unwrap_err().category,
-        "IncompleteCleanup"
-    );
-    drop(state);
-    assert_eq!(engine.cleanup_limit_ms(), 500);
-    let cleanup = engine.finish();
-    assert_eq!(cleanup["clean"], false);
-    assert_eq!(cleanup["session_closed"], true);
-    assert_eq!(cleanup["native_input_release"], "incomplete");
+    for workflow_ms in [30_000, 900_000] {
+        let mut limits = crate::desktop::native_limits();
+        limits.workflow_ms = workflow_ms;
+        let mut engine = placed_replay();
+        let native = engine.native.as_mut().unwrap();
+        native.capture.duration_ms = limits.budgets().total_ms().unwrap();
+        native.input.duration_ms = native.capture.duration_ms;
+        native.capture.max_frames = limits.max_frames;
+        native.input.max_actions = limits.max_actions;
+        // Seed only consumed accounting; the last acquisition uses the real facade.
+        engine.lock().unwrap().captured_frames = limits.max_frames - 1;
+        let observation = engine.call("observe", json!({})).unwrap();
+        assert_eq!(
+            engine.call("observe", json!({})).unwrap_err().category,
+            "CaptureLimit"
+        );
+        engine.control.admission.store(true, Ordering::Release);
+        let request = DispatchRequest {
+            observation,
+            actions: vec![Action::Click {
+                x: 1.0,
+                y: 2.0,
+                button: PointerButton::Left,
+            }],
+        };
+        let mut state = engine.lock().unwrap();
+        state.input_events = limits.max_actions - 4;
+        let input = engine.input_request(&state, &request).unwrap();
+        assert_eq!(input.sequence().len(), 4);
+        for spent in [limits.max_actions - 3, limits.max_actions] {
+            state.input_events = spent;
+            assert_eq!(
+                engine.input_request(&state, &request).unwrap_err().category,
+                "ActionLimit"
+            );
+        }
+        state.input_cleanup_incomplete = true;
+        assert_eq!(
+            engine.input_request(&state, &request).unwrap_err().category,
+            "IncompleteCleanup"
+        );
+        drop(state);
+        engine
+            .call("release", json!({"id":request.observation["id"]}))
+            .unwrap();
+        assert_eq!(
+            engine.call("observe", json!({})).unwrap_err().category,
+            "CaptureLimit"
+        );
+        assert_eq!(engine.lock().unwrap().captured_frames, 300);
+        assert_eq!(engine.lock().unwrap().input_events, 64);
+        engine.control.check().unwrap();
+        assert_eq!(engine.cleanup_limit_ms(), 500);
+        let cleanup = engine.finish();
+        assert_eq!(cleanup["clean"], false);
+        assert_eq!(cleanup["session_closed"], true);
+        assert_eq!(cleanup["native_input_release"], "incomplete");
+    }
 }
 
 #[test]

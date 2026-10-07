@@ -286,113 +286,161 @@ fn settle_controlled_host(
 
 #[test]
 fn owned_recovery_loop_settles_past_workflow_without_renewing_run_authority() {
-    for case in ["clean", "stop", "stage_timeout", "incomplete"] {
+    for case in [
+        "clean",
+        "extended",
+        "stop",
+        "stage_timeout",
+        "incomplete",
+        "frames_exhausted",
+        "actions_exhausted",
+    ] {
         let controller = DesktopController::new("unused-controlled".into(), "unused-engine".into());
         let (entered, started) = mpsc::sync_channel(1);
         let (release, wait) = mpsc::sync_channel(1);
+        let mut limits = crate::desktop::native_limits();
+        if matches!(case, "extended" | "frames_exhausted" | "actions_exhausted") {
+            limits.workflow_ms = crate::desktop::native_capability().max_workflow_ms;
+        }
+        let budgets = limits.budgets();
         let run = controller
-            .reserve("run", Some(30_000), move |run, owner, observer, _, _| {
-                let mut plan = manual_plan().unwrap();
-                let mut request = request(&fixture());
-                let mut limits = crate::desktop::native_limits();
-                limits.startup_ms = 5_000;
-                limits.readiness_ms = 5_000;
-                limits.workflow_ms = 100;
-                let budgets = limits.budgets();
-                request.native_intent = Some(crate::desktop::NativeIntent {
-                    target_revision: 1,
-                    target_binding_id: "controlled-owner-loop".into(),
-                    target_declaration_identity: "controlled-only".into(),
-                    capture_approved: true,
-                    input_approved: true,
-                    launch_approved: true,
-                    max_exit_recoveries: 1,
-                    operation: "Controlled owner-loop regression".into(),
-                    visible_postcondition: "Fresh attempt completes".into(),
-                    limits,
-                });
-                plan.native_budgets = Some(budgets);
-                let initial = Arc::new(Control::for_attempt(Arc::clone(owner), &plan.limits, true));
-                initial.start_native(budgets, None).unwrap();
-                let outer = owner.outer_deadline();
-                let evidence = Evidence::new("run", run, None, None).unwrap();
-                run_attempts(
-                    owner,
-                    Arc::clone(&initial),
-                    &plan,
-                    &request,
-                    observer,
-                    &evidence,
-                    |attempt, control, remaining| {
-                        assert_eq!(control.outer_deadline(), outer);
-                        assert_eq!(owner.outer_deadline(), outer);
-                        assert_eq!(remaining, Some((if attempt == 1 { 300 } else { 298 }, 64)));
-                        if attempt == 2 {
-                            assert_eq!(case, "clean");
-                            assert!(!Arc::ptr_eq(control, &initial));
-                            assert!(owner.check().is_ok());
-                        }
-                        let mut controlled_plan = plan.clone();
-                        controlled_plan.lane = "controlled".into();
-                        controlled_plan.native_budgets = None;
-                        let host = crate::host::Host::new_attempt(
-                            controlled_plan,
-                            json!({}),
-                            Default::default(),
-                            Arc::clone(control),
-                            attempt,
-                        )
-                        .unwrap();
-                        assert_eq!(host.snapshot()["observations"], 0);
-                        control.native_transition(1, None).unwrap();
-                        host.begin_readiness().unwrap();
-                        host.begin_workflow().unwrap();
-                        let observation = host.call("observe", json!({})).unwrap();
-                        host.call("release", json!({"id":observation["id"]}))
-                            .unwrap();
-                        let old_workflow = control.native_transition(2, None).unwrap();
-                        let primary = if attempt == 1 {
-                            host.call("fixture", json!({"event":"confirmed_exit"}))
-                                .unwrap();
-                            let fault = host.call("observe", json!({})).unwrap_err();
-                            assert_eq!(fault.category, "TargetExited");
-                            assert_eq!(fault.context["exit_reason"], "absent");
-                            if case == "stage_timeout" {
-                                thread::sleep(
-                                    old_workflow.saturating_duration_since(Instant::now()),
-                                );
-                                assert_eq!(control.check().unwrap_err().category, "Timeout");
-                            }
-                            Some(fault)
-                        } else {
-                            None
-                        };
-                        // Mirror authenticated EntrySettled, before cleanup.
-                        control.settle_native();
-                        if attempt == 1 {
-                            evidence.native_progress(
-                                NativeProgress {
-                                    attempt,
-                                    status: NativeTargetStatus::CaptureReady,
-                                    phase: NativePhase::Settling,
-                                    launch: LaunchDisposition::NotRequested,
-                                },
-                                observer,
+            .reserve(
+                "run",
+                Some(budgets.operation_ms(1).unwrap()),
+                move |run, owner, observer, _, _| {
+                    let mut plan = manual_plan().unwrap();
+                    let mut request = request(&fixture());
+                    request.native_intent = Some(crate::desktop::NativeIntent {
+                        target_revision: 1,
+                        target_binding_id: "controlled-owner-loop".into(),
+                        target_declaration_identity: "controlled-only".into(),
+                        capture_approved: true,
+                        input_approved: true,
+                        launch_approved: true,
+                        max_exit_recoveries: 1,
+                        operation: "Controlled owner-loop regression".into(),
+                        visible_postcondition: "Fresh attempt completes".into(),
+                        limits,
+                    });
+                    plan.native_budgets = Some(budgets);
+                    plan.limits.duration_ms = budgets.total_ms().unwrap();
+                    plan.limits.readiness_ms = budgets.readiness_ms;
+                    let initial =
+                        Arc::new(Control::for_attempt(Arc::clone(owner), &plan.limits, true));
+                    initial.start_native(budgets, None).unwrap();
+                    let outer = owner.outer_deadline();
+                    let evidence = Evidence::new("run", run, None, None).unwrap();
+                    run_attempts(
+                        owner,
+                        Arc::clone(&initial),
+                        &plan,
+                        &request,
+                        observer,
+                        &evidence,
+                        |attempt, control, remaining| {
+                            assert_eq!(control.outer_deadline(), outer);
+                            assert_eq!(owner.outer_deadline(), outer);
+                            assert_eq!(
+                                remaining,
+                                Some(if attempt == 1 { (300, 64) } else { (298, 62) })
                             );
-                            entered.send(old_workflow).unwrap();
-                            wait.recv_timeout(Duration::from_secs(5)).unwrap();
-                            assert!(Instant::now() >= old_workflow);
-                            if case == "incomplete" {
-                                host.fail(
-                                    Fault::new("Cleanup", "unverified ownership")
-                                        .with_context(json!({"native_cleanup":"unverified"})),
-                                );
+                            if attempt == 2 {
+                                assert!(matches!(case, "clean" | "extended"));
+                                assert!(!Arc::ptr_eq(control, &initial));
+                                assert!(owner.check().is_ok());
                             }
-                        }
-                        Ok(settle_controlled_host(run, attempt, &host, primary))
-                    },
-                )
-            })
+                            let mut controlled_plan = plan.clone();
+                            controlled_plan.lane = "controlled".into();
+                            controlled_plan.native_budgets = None;
+                            controlled_plan.limits.max_actions = remaining.unwrap().1;
+                            let host = crate::host::Host::new_attempt(
+                                controlled_plan,
+                                json!({}),
+                                Default::default(),
+                                Arc::clone(control),
+                                attempt,
+                            )
+                            .unwrap();
+                            assert_eq!(host.snapshot()["observations"], 0);
+                            control.native_transition(1, None).unwrap();
+                            host.begin_readiness().unwrap();
+                            host.begin_workflow().unwrap();
+                            let observation = host.call("observe", json!({})).unwrap();
+                            let action_count = if case == "actions_exhausted" { 64 } else { 2 };
+                            let actions: Vec<_> = (0..action_count)
+                                .map(|index| {
+                                    json!({
+                                        "kind":if index % 2 == 0 {"key_down"} else {"key_up"},
+                                        "key":"A"
+                                    })
+                                })
+                                .collect();
+                            let queued = host
+                                .call(
+                                    "submit",
+                                    json!({"observation":observation,"actions":actions}),
+                                )
+                                .unwrap();
+                            let receipt = host.call("settle", json!({"id":queued["id"]})).unwrap();
+                            assert_eq!(receipt["status"], "Submitted");
+                            host.call("release", json!({"id":queued["id"]})).unwrap();
+                            host.call("release", json!({"id":observation["id"]}))
+                                .unwrap();
+                            if case == "frames_exhausted" {
+                                for _ in 1..299 {
+                                    let frame = host.call("observe", json!({})).unwrap();
+                                    host.call("release", json!({"id":frame["id"]})).unwrap();
+                                }
+                            }
+                            let old_workflow = control
+                                .native_transition(
+                                    2,
+                                    Some(Instant::now() + Duration::from_millis(100)),
+                                )
+                                .unwrap();
+                            let primary = if attempt == 1 {
+                                host.call("fixture", json!({"event":"confirmed_exit"}))
+                                    .unwrap();
+                                let fault = host.call("observe", json!({})).unwrap_err();
+                                assert_eq!(fault.category, "TargetExited");
+                                assert_eq!(fault.context["exit_reason"], "absent");
+                                if case == "stage_timeout" {
+                                    thread::sleep(
+                                        old_workflow.saturating_duration_since(Instant::now()),
+                                    );
+                                    assert_eq!(control.check().unwrap_err().category, "Timeout");
+                                }
+                                Some(fault)
+                            } else {
+                                None
+                            };
+                            // Mirror authenticated EntrySettled, before cleanup.
+                            control.settle_native();
+                            if attempt == 1 {
+                                evidence.native_progress(
+                                    NativeProgress {
+                                        attempt,
+                                        status: NativeTargetStatus::CaptureReady,
+                                        phase: NativePhase::Settling,
+                                        launch: LaunchDisposition::NotRequested,
+                                    },
+                                    observer,
+                                );
+                                entered.send(old_workflow).unwrap();
+                                wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                                assert!(Instant::now() >= old_workflow);
+                                if case == "incomplete" {
+                                    host.fail(
+                                        Fault::new("Cleanup", "unverified ownership")
+                                            .with_context(json!({"native_cleanup":"unverified"})),
+                                    );
+                                }
+                            }
+                            Ok(settle_controlled_host(run, attempt, &host, primary))
+                        },
+                    )
+                },
+            )
             .unwrap();
         let old_workflow = started.recv_timeout(Duration::from_secs(5)).unwrap();
         thread::sleep(old_workflow.saturating_duration_since(Instant::now()));
@@ -421,10 +469,14 @@ fn owned_recovery_loop_settles_past_workflow_without_renewing_run_authority() {
         );
         assert_eq!(
             result["recovery_count"],
-            if case == "clean" { 1 } else { 0 }
+            if matches!(case, "clean" | "extended") {
+                1
+            } else {
+                0
+            }
         );
         match case {
-            "clean" => {
+            "clean" | "extended" => {
                 assert_eq!(terminal.attempts.len(), 2);
                 assert_eq!(result["status"], "PASS");
                 assert_eq!(result["attempt"], 2);
@@ -439,6 +491,17 @@ fn owned_recovery_loop_settles_past_workflow_without_renewing_run_authority() {
                 assert_eq!(result["primary"]["category"], "TargetExited");
                 assert_eq!(result["cleanup"]["clean"], false);
                 assert_eq!(result["cleanup"]["native_cleanup"], "unverified");
+            }
+            "frames_exhausted" => {
+                assert_eq!(result["primary"]["category"], "CaptureLimit");
+                assert_eq!(result["observations"]["accounting"]["frames"], 300);
+            }
+            "actions_exhausted" => {
+                assert_eq!(result["primary"]["category"], "ActionLimit");
+                assert_eq!(
+                    result["observations"]["accounting"]["expanded_input_events"],
+                    64
+                );
             }
             _ => unreachable!(),
         }

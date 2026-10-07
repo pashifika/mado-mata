@@ -60,6 +60,8 @@ const adapterArguments = {
   'ui.run.olderRevision': [[1,2]], 'ui.run.stopTarget': [[null],['run-A']],
   'ui.run.runKind': [['controlled']],
   'ui.run.nativeEnvelope': [[120000],[243000]],
+  'ui.run.nativeWorkflowHelp': [[30,900],[12,45]],
+  'ui.run.nativeWorkflowError': [[900],[45]],
   'ui.target.argument': [[1],[32]], 'ui.target.revision': [[0],[2]],
   'ui.result.truncated': [[1],[2]], 'ui.result.disclosureHelp': [[false,512],[true,512]],
   'ui.result.attempt': [[1],[2]],

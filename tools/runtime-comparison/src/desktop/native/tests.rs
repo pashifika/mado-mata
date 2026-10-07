@@ -1,10 +1,8 @@
 use super::*;
-#[cfg(target_os = "macos")]
 use crate::desktop::StartPreparation;
 use crate::desktop::test_support::{fixture, request, settled};
 use crate::desktop::{DesktopController, NativeInputPolicy, NativeLimits};
 use crate::images::{DecodedImage, PayloadBytes, encode_crop};
-#[cfg(target_os = "macos")]
 use crate::model::Control;
 use crate::model::identity;
 use crate::recognition::{self, RecognitionDocument};
@@ -64,6 +62,34 @@ fn target() -> NativeTarget {
 
 #[test]
 fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
+    let controller = DesktopController::new(
+        "must-not-launch-controlled".into(),
+        "must-not-launch-engine".into(),
+    );
+    let inventory = fixture();
+    let refused_before_effects = |intent| {
+        let mut request = request(&inventory);
+        request.lane = "native".into();
+        request.native_intent = Some(intent);
+        let fault = controller
+            .start_with_preparation(
+                request,
+                |_, _| -> Result<StartPreparation, Fault> {
+                    panic!("invalid review reached host preparation")
+                },
+                |_, _| {
+                    |_: &Control,
+                     _: &dyn Fn(crate::desktop::NativeProgress),
+                     _: &dyn Fn() -> Result<(), Fault>|
+                     -> Result<Option<NativeTarget>, Fault> {
+                        panic!("invalid review reached target resolution")
+                    }
+                },
+            )
+            .unwrap_err();
+        assert_eq!(fault.category, "NativeRefused");
+        assert!(controller.poll().run.is_none());
+    };
     for (field, invalid) in [
         ("target_revision", json!(0)),
         ("target_binding_id", json!("")),
@@ -77,11 +103,7 @@ fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
         let mut raw = serde_json::to_value(intent()).unwrap();
         raw[field] = invalid;
         let invalid = serde_json::from_value(raw).unwrap();
-        assert_eq!(
-            validate_intent(&invalid).unwrap_err().category,
-            "NativeRefused",
-            "{field}"
-        );
+        refused_before_effects(invalid);
     }
     for field in [
         "startup_ms",
@@ -94,22 +116,17 @@ fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
         "cleanup_ms",
         "containment_ms",
     ] {
-        for value in [
-            0,
+        let maximum = if field == "workflow_ms" {
+            crate::desktop::native_capability().max_workflow_ms
+        } else {
             serde_json::to_value(native_limits()).unwrap()[field]
                 .as_u64()
                 .unwrap()
-                + 1,
-        ] {
+        };
+        for value in [0, maximum + 1, u64::MAX] {
             let mut raw = serde_json::to_value(intent()).unwrap();
             raw["limits"][field] = json!(value);
-            assert_eq!(
-                validate_intent(&serde_json::from_value(raw).unwrap())
-                    .unwrap_err()
-                    .category,
-                "NativeRefused",
-                "{field}"
-            );
+            refused_before_effects(serde_json::from_value(raw).unwrap());
         }
     }
     for limits in [
@@ -122,16 +139,24 @@ fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
             ..native_limits()
         },
         NativeLimits {
+            readiness_ms: 999,
+            ..native_limits()
+        },
+        NativeLimits {
+            workflow_ms: 999,
+            ..native_limits()
+        },
+        NativeLimits {
             containment_ms: 1999,
             ..native_limits()
         },
     ] {
-        assert_eq!(
-            validate_intent(&NativeIntent { limits, ..intent() })
-                .unwrap_err()
-                .category,
-            "NativeRefused"
-        );
+        refused_before_effects(NativeIntent { limits, ..intent() });
+    }
+    for invalid in [json!(-1), json!(1.5), json!("900000"), Value::Null] {
+        let mut raw = serde_json::to_value(intent()).unwrap();
+        raw["limits"]["workflow_ms"] = invalid;
+        assert!(serde_json::from_value::<NativeIntent>(raw).is_err());
     }
 }
 
@@ -273,58 +298,144 @@ fn authored_inventory() -> Inventory {
 
 #[test]
 fn native_projection_freezes_exact_host_target_review_and_declared_template_assets() {
+    let capability = crate::desktop::native_capability();
+    let published = serde_json::to_value(&capability).unwrap();
+    assert_eq!(
+        published,
+        json!({
+            "default_limits":{
+                "startup_ms":60000,"readiness_ms":30000,"workflow_ms":30000,
+                "max_frames":300,"wait_ms":1000,"interval_ms":100,"max_actions":64,
+                "cleanup_ms":1000,"containment_ms":2000
+            },
+            "max_workflow_ms":900000
+        })
+    );
     let inventory = authored_inventory();
-    let mut request = request(&inventory);
-    request.lane = "native".into();
-    request.native_intent = Some(intent());
-    let mut target = target();
-    let mut plan = crate::desktop::manual_plan().unwrap();
-    plan.lane = "native".into();
-    plan.native_budgets = Some(native_limits().budgets());
-    plan.limits.duration_ms = native_limits().budgets().total_ms().unwrap();
-    plan.limits.readiness_ms = native_limits().readiness_ms;
-    let environment = json!({"version":1,"ocr":{"language":crate::environment::LANGUAGE},"native_libraries":[],"replay":null,"native":null});
-    let templates = prepare_templates(&inventory, &plan.limits).unwrap();
-    project(
-        &mut plan,
-        &request,
-        &target,
-        &target.executable,
-        &templates,
-        environment,
-    )
-    .unwrap();
-    let configuration = plan.native_config.as_ref().unwrap();
-    let frozen = identity(configuration).unwrap();
-    let native = &configuration["native"];
-    assert_eq!(native["executable_or_bundle"], json!(target.executable));
-    assert_eq!(native["process_lifetime"], target.process_lifetime);
-    assert_eq!(native["input"]["route"], "process_directed");
-    assert_eq!(
-        native["input"]["macos_process_pointer_mode"],
-        "appkit_background"
-    );
-    assert_eq!(native["input"]["click_hold_ms"], 50);
-    assert_eq!(
-        native["input"]["reviewed_operation"],
-        request.native_intent.as_ref().unwrap().operation
-    );
-    assert!(native["input"].get("representative_actions").is_none());
-    assert!(native["geometry"].is_null());
-    assert_eq!(
-        native["templates"]["reviewed_crop"],
-        "recognition.reviewed_crop"
-    );
-    assert_eq!(
-        native["package_entries"]["templates/reviewed_crop.png"],
-        "reviewed_crop"
-    );
-    target.window_title = "replacement".into();
-    request.native_intent.as_mut().unwrap().input_approved = false;
-    assert_eq!(
-        identity(plan.native_config.as_ref().unwrap()).unwrap(),
-        frozen
-    );
+    for (workflow_ms, total_ms) in [(30_000, 120_000), (900_000, 990_000)] {
+        let mut selected = intent();
+        selected.limits = capability.default_limits.clone();
+        selected.limits.workflow_ms = workflow_ms;
+        let mut request = request(&inventory);
+        request.lane = "native".into();
+        request.native_intent = Some(selected);
+        let mut target = target();
+        let mut plan = if cfg!(target_os = "macos") {
+            crate::desktop::operation::requested_plan(&request).unwrap()
+        } else {
+            // Non-macOS admission remains unavailable; test pure projection only.
+            let mut plan = crate::desktop::manual_plan().unwrap();
+            let limits = &request.native_intent.as_ref().unwrap().limits;
+            plan.lane = "native".into();
+            plan.native_budgets = Some(limits.budgets());
+            plan.limits.duration_ms = limits.budgets().total_ms().unwrap();
+            plan.limits.readiness_ms = limits.readiness_ms;
+            plan
+        };
+        assert_eq!(plan.limits.duration_ms, total_ms);
+        assert_eq!(plan.native_budgets.unwrap().workflow_ms, workflow_ms);
+        let environment = json!({"version":1,"ocr":{"language":crate::environment::LANGUAGE},"native_libraries":[],"replay":null,"native":null});
+        let templates = prepare_templates(&inventory, &plan.limits).unwrap();
+        project(
+            &mut plan,
+            &request,
+            &target,
+            &target.executable,
+            &templates,
+            environment,
+        )
+        .unwrap();
+        let frozen = identity(&plan).unwrap();
+        let native = &plan.native_config.as_ref().unwrap()["native"];
+        assert_eq!(native["capture"]["duration_ms"], total_ms);
+        assert_eq!(native["input"]["duration_ms"], total_ms);
+        assert_eq!(native["capture"]["max_frames"], 300);
+        assert_eq!(native["input"]["max_actions"], 64);
+        assert_eq!(native["cleanup_ms"], 1_000);
+        assert_eq!(native["containment_ms"], 2_000);
+        assert_eq!(native["executable_or_bundle"], json!(target.executable));
+        assert_eq!(native["process_lifetime"], target.process_lifetime);
+        assert_eq!(native["input"]["route"], "process_directed");
+        assert_eq!(
+            native["input"]["macos_process_pointer_mode"],
+            "appkit_background"
+        );
+        assert_eq!(native["input"]["click_hold_ms"], 50);
+        assert_eq!(
+            native["input"]["reviewed_operation"],
+            request.native_intent.as_ref().unwrap().operation
+        );
+        assert!(native["input"].get("representative_actions").is_none());
+        assert!(native["geometry"].is_null());
+        assert_eq!(
+            native["templates"]["reviewed_crop"],
+            "recognition.reviewed_crop"
+        );
+        assert_eq!(
+            native["package_entries"]["templates/reviewed_crop.png"],
+            "reviewed_crop"
+        );
+        target.window_title = "replacement".into();
+        let review = request.native_intent.as_mut().unwrap();
+        review.input_approved = false;
+        review.limits.workflow_ms = 1_000;
+        assert_eq!(identity(&plan).unwrap(), frozen);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_admission_reserves_selected_duration_before_preparation() {
+    use std::time::{Duration, Instant};
+
+    for (workflow_ms, recoveries, operation_ms) in [
+        (30_000, 0, 120_000),
+        (30_000, 1, 243_000),
+        (900_000, 0, 990_000),
+        (900_000, 1, 1_983_000),
+    ] {
+        let controller = DesktopController::new(
+            "must-not-launch-controlled".into(),
+            "must-not-launch-engine".into(),
+        );
+        let mut request = request(&fixture());
+        request.lane = "native".into();
+        let mut selected = intent();
+        selected.limits.workflow_ms = workflow_ms;
+        selected.max_exit_recoveries = recoveries;
+        selected.launch_approved = recoveries == 1;
+        request.native_intent = Some(selected);
+        let before = Instant::now();
+        controller
+            .start_with_preparation(
+                request,
+                move |_, control| -> Result<StartPreparation, Fault> {
+                    let now = Instant::now();
+                    let duration = Duration::from_millis(operation_ms);
+                    assert!(control.outer_deadline() >= before + duration);
+                    assert!(control.outer_deadline() <= now + duration);
+                    assert!(control.deadline() >= before + Duration::from_millis(60_000));
+                    assert!(control.deadline() <= now + Duration::from_millis(60_000));
+                    // End at the public preparation boundary, before any native work.
+                    Err(Fault::new("NativeFreeBoundary", "reservation observed"))
+                },
+                |_, _| {
+                    |_: &Control,
+                     _: &dyn Fn(crate::desktop::NativeProgress),
+                     _: &dyn Fn() -> Result<(), Fault>|
+                     -> Result<Option<NativeTarget>, Fault> {
+                        panic!("native-free admission must not resolve a target")
+                    }
+                },
+            )
+            .unwrap();
+        let fault = settled(&controller).error.unwrap();
+        assert_eq!(fault.category, "NativeFreeBoundary");
+        assert_eq!(
+            fault.context["cleanup"],
+            json!({"clean":true,"child_started":false})
+        );
+    }
 }
 
 #[test]

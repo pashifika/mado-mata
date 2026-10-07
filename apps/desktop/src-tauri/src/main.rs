@@ -8,7 +8,7 @@ use mado_mata_desktop::backup::SnapshotReceipt;
 use mado_mata_desktop::bootstrap::{Bootstrap, BootstrapStatus, selected_roots};
 use mado_mata_desktop::storage::{EditableSettings, LegacyImport, Profile, Settings};
 use mado_mata_desktop::target::{TargetConfiguration, TargetExpectation, TargetResolution};
-use mado_runtime_comparison::desktop::{NativeLimits, StartRequest};
+use mado_runtime_comparison::desktop::{NativeCapability, StartRequest};
 use mado_runtime_comparison::model::Fault;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -396,8 +396,8 @@ async fn delete_profile(
 }
 
 #[tauri::command]
-fn native_run_limits() -> Option<NativeLimits> {
-    cfg!(target_os = "macos").then(mado_runtime_comparison::desktop::native_limits)
+fn native_run_limits() -> Option<NativeCapability> {
+    cfg!(target_os = "macos").then(mado_runtime_comparison::desktop::native_capability)
 }
 
 #[tauri::command]

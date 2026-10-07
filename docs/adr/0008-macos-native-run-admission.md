@@ -150,9 +150,16 @@ fault does not revoke historical results or turn them into current input authori
 
 ## Bounds and termination
 
-The reviewed host tuple has positive defaults/ceilings of **60 s Startup**,
-**30 s Readiness** and **30 s Workflow**. Smaller valid tuples are accepted;
-invalid tuples refuse, without clamping. Startup begins at reservation and
+The reviewed host tuple defaults to **60 s Startup**, **30 s Readiness** and
+**30 s Workflow**. Startup/Readiness defaults are also their ceilings; Workflow
+has a separately published **900 s** ceiling. One shared duration policy owns
+backend validation and the capability response. The Run page accepts **1–900
+whole seconds** as a transient per-Start draft, never persisted or package-selected
+authority. Invalid drafts block approval/Start; the backend independently refuses
+invalid tuples without clamping. Duration edits, including edit-back, withdraw
+every Native consent. The effective tuple binds consent and the immutable request
+and result snapshot; new/reopened bindings default to 30 s without restored approval.
+Startup begins at reservation and
 includes preflight, Script work before capture availability, launch, bounded
 process/window preparation and native initialization. Readiness starts once at
 `capture_ready`; Workflow starts once after `"Ready"`. No phase borrows unused
@@ -160,7 +167,9 @@ time or renews its own budget.
 
 At reservation the host fixes an absolute outer deadline. For stage sum `B` and
 admitted recovery count `r`, it is `(1 + r) * B + r * 3000 ms`: **120 s** by
-default, or **243 s** with one recovery. The extra 3 s is the existing inter-attempt
+default, or **243 s** with one recovery. Selecting the maximum Workflow produces
+**990 s** without recovery and **1983 s** with one recovery, below the general
+one-hour plan ceiling. The extra 3 s is the existing inter-attempt
 cleanup/containment allowance, not permission to continue after incomplete cleanup.
 Each fresh attempt retains the same stage ceilings capped by that deadline.
 Authenticated entry settlement ends the ordinary stage clock. Cleanup and
@@ -181,6 +190,10 @@ or four with a hold; each key press/release consumes one. Only verified terminal
 accounting transfers unused credits. Partial or uncertain input never permits
 recovery or refunds authority. Final cleanup retains its separate restricted
 path, with 1 s cleanup and 2 s containment bounds.
+The Workflow ceiling is a finite admission boundary, not a reliability
+qualification. Useful uninterrupted Native execution, late owner-bound Stop and
+a clean explicit successor require separate actual Desktop evidence; controlled
+tests do not establish long-duration recovery or arbitrary-duration support.
 
 Preserve explicit cancellation versus whole-operation timeout through the typed
 supervisor verdict. The child closes admission at its deadline, but keeps its own

@@ -44,8 +44,13 @@ and discovery checks.
 The application derives process/lifetime/window authority; neither IPC nor Script
 can supply replacements. Script status probes drive bounded window preparation,
 never a duplicate launch or replacement lifetime within an attempt. Reviewed
-budgets remain 60 s Startup, 30 s Readiness and 30 s Workflow. Recovery is
-default-off; separate one-recovery consent plus launch-if-absent approval allows
+budgets default to 60 s Startup, 30 s Readiness and 30 s Workflow. The host publishes
+those defaults separately from the 900 s Workflow ceiling. The actual Run page
+accepts 1–900 whole seconds only through fresh per-Start review; invalid values
+refuse before native effects. Every duration edit withdraws all Native consents,
+and the effective tuple is captured immutably. New/reopened bindings return to
+30 s without approval; saved package/profile/target schemas are unchanged.
+Recovery is default-off; separate one-recovery consent plus launch-if-absent approval allows
 one fresh attempt only after a positively confirmed Workflow process exit and
 complete predecessor settlement. The same immutable Script reruns from entry.
 The original absolute deadline is the stage sum without recovery, or twice the
@@ -54,6 +59,13 @@ Authenticated entry settlement ends the ordinary stage clock, not the outer
 Stop/deadline or the separate cleanup/containment bounds.
 Both attempts share 300 frames and 64 expanded input events; uncertain accounting
 or input cannot replenish credits. Stop remains latched across attempts.
+At the default, the outer allowances are 120/243 s without/with recovery; at the
+900 s Workflow maximum they are 990/1983 s. Cleanup remains 1 s, containment 2 s,
+per-call waits 1 s and pacing 100 ms. More duration grants no additional resource
+credits. The pinned SDK's monotonic timeout accepts this finite allowance; its
+separate 2 s maximum for an individual macOS native wait is unchanged.
+The larger ceiling does not qualify useful long-running Native work, late Stop,
+long-duration recovery or leak freedom; actual workload evidence remains separate.
 Typed attempt summaries retain the original exit, final Script result and cleanup;
 diagnostic truncation cannot discard the exit reason. An earlier capture fault
 outranks a later process exit. Window/permission/provider failure is not confirmed
