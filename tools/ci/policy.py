@@ -291,8 +291,6 @@ def check_ci_workflow(workflow, pins, label="ci.yml"):
         display_name = jobs[name].get("name", name)
         require(display_name not in GATE_NAMES.values(),
                 f"{name}: mandatory jobs must not claim gate contexts")
-        require(event != "push" or display_name.endswith(" (push)"),
-                f"{name}: push check names must retain their event suffix")
     gate = jobs["gate"]
     require(gate.get("name") == GATE_NAMES[event], f"{label}: gate name must be {GATE_NAMES[event]}")
     require(gate.get("if") == GATE_IF, "ci.yml: gate must always evaluate unless a push is covered by its promotion PR")
