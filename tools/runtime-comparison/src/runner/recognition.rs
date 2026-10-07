@@ -198,7 +198,7 @@ fn supervise(
         })();
         write.map_err(|_| Fault::new("Transport", "recognition input channel closed"))
     });
-    let (receiver, reader) = receive_frames(stdout, None, run, 0, RESULT_FRAME_BYTES);
+    let (receiver, reader) = receive_frames(stdout, None, run, 1, 0, RESULT_FRAME_BYTES);
     // Drain, but never publish library stderr containing local paths or recognized data.
     let errors = thread::spawn(move || {
         let mut buffer = [0u8; 4096];

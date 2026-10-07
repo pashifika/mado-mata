@@ -1,6 +1,6 @@
 import {messages} from './i18n.ts';
 import type {Locale} from './i18n.ts';
-import type {ControllerView, EditableSettings, EditorCompletionPreferences, Fault, LogEntry, NativePhase, NativeProgress, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Settings, Json, WorkspaceRef} from './types.ts';
+import type {ControllerView, EditableSettings, EditorCompletionPreferences, Fault, LaunchDisposition, LogEntry, NativePhase, NativeProgress, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Settings, Json, WorkspaceRef} from './types.ts';
 
 export const DISCLOSURE_LIMIT = 512 * 1024;
 
@@ -16,8 +16,9 @@ export function faultSummary(value:Fault|Record<string,Json>, includeMessage = f
 export function acceptController(current:ControllerView, incoming:ControllerView, expectedRun:string|null):ControllerView {
   if (expectedRun !== null && incoming.run !== expectedRun) return current;
   if (incoming.run !== current.run) return incoming;
-  if (current.state === 'stopping' && (incoming.state === 'preparing' || incoming.state === 'running')) return current;
-  return current.state === 'terminal' && incoming.state === 'terminal' ? current : incoming;
+  if (current.state === 'stopping' && (incoming.state === 'preparing' || incoming.state === 'running' || incoming.state === 'recovering')) return current;
+  if ((incoming.native_preparation?.attempt ?? 0) < (current.native_preparation?.attempt ?? 0)) return current;
+  return current.state === 'terminal' ? current : incoming;
 }
 
 export type NativeCause = 'missing'|'ambiguous'|'unverifiable';
@@ -31,6 +32,7 @@ const READINESS_REFUSALS:Record<string, true> = {Script:true, ReadinessContract:
 
 function nativeFailure({phase, status}:NativeProgress, category:string|null):NativeFailure {
   if (phase === 'preflight') return phase;
+  if (phase === 'settling' || phase === 'recovering') return phase;
   if (status === 'not_requested') return 'unrequested';
   if (status === 'pending' && category !== null && Object.hasOwn(READINESS_REFUSALS, category)) return 'readinessPending';
   return phase === 'readiness' ? 'readinessCriteria' : phase;
@@ -58,6 +60,36 @@ export function record(value:Json|undefined):Record<string,Json> {
 
 export function text(value:Json|undefined):string|null {
   return typeof value === 'string' && value !== '' ? value : null;
+}
+
+export interface AttemptOutcome {
+  attempt:1|2; status:string|null; stage:string|null; phase:NativePhase|null; primary:string|null; exitReason:'absent'|'reused_pid'|'zombie'|null;
+  launch:LaunchDisposition|null; entry:string|null; cleanup:string; receipts:number|null; retained:Record<string,Json>;
+}
+
+// Project owner-retained typed outcomes only. Script logs never classify an exit or successful recovery.
+export function attemptOutcomes(view:ControllerView, locale:Locale = 'en'):AttemptOutcome[] {
+  const outcomes:AttemptOutcome[] = [];
+  for (const retained of view.attempts) {
+    const attempt = retained.attempt;
+    if ((attempt !== 1 && attempt !== 2) || outcomes.some(value => value.attempt === attempt)) continue;
+    const primary = record(retained.primary);
+    const reason = record(primary.context).exit_reason;
+    const observations = record(retained.observations);
+    const launch = record(retained.native_preparation).launch;
+    const phase = text(record(retained.native_preparation).phase);
+    outcomes.push({
+      attempt, status:text(retained.status), stage:text(retained.stage), primary:text(primary.category),
+      phase:phase !== null && Object.hasOwn(messages.en.ui.run.nativePhases, phase) ? phase as NativePhase : null,
+      exitReason:primary.category === 'TargetExited' && (reason === 'absent' || reason === 'reused_pid' || reason === 'zombie') ? reason : null,
+      launch:launch === 'not_requested' || launch === 'accepted' || launch === 'rejected' || launch === 'uncertain' ? launch : null,
+      entry:text(retained.entry_outcome),
+      cleanup:cleanupLabel(retained, retained, locale),
+      receipts:Array.isArray(observations.receipts) ? observations.receipts.length : null,
+      retained,
+    });
+  }
+  return outcomes;
 }
 
 export interface LogStore {items:LogEntry[]; evicted:number}

@@ -17,9 +17,33 @@ fn intent() -> NativeIntent {
         capture_approved: true,
         input_approved: true,
         launch_approved: false,
+        max_exit_recoveries: 0,
         operation: "Submit the reviewed package action once".into(),
         visible_postcondition: "The selected result is visible".into(),
         limits: native_limits(),
+    }
+}
+
+#[test]
+fn recovery_is_default_zero_and_requires_separate_launch_approval() {
+    let mut raw = serde_json::to_value(intent()).unwrap();
+    raw.as_object_mut().unwrap().remove("max_exit_recoveries");
+    let legacy: NativeIntent = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(legacy.max_exit_recoveries, 0);
+    validate_intent(&legacy).unwrap();
+    for recoveries in [1, 2] {
+        raw["max_exit_recoveries"] = json!(recoveries);
+        let denied: NativeIntent = serde_json::from_value(raw.clone()).unwrap();
+        assert!(validate_intent(&denied).is_err());
+    }
+    raw["max_exit_recoveries"] = json!(1);
+    raw["launch_approved"] = json!(true);
+    validate_intent(&serde_json::from_value(raw.clone()).unwrap()).unwrap();
+    raw["max_exit_recoveries"] = json!(2);
+    assert!(validate_intent(&serde_json::from_value(raw.clone()).unwrap()).is_err());
+    for invalid in [json!(-1), json!(256), json!(0.5), json!(true)] {
+        raw["max_exit_recoveries"] = invalid;
+        assert!(serde_json::from_value::<NativeIntent>(raw.clone()).is_err());
     }
 }
 
@@ -341,7 +365,13 @@ fn native_stop_during_host_preparation_retains_the_slot_and_prevents_child_launc
                     native: (),
                 })
             },
-            |_, _, _, _| panic!("cancelled capture must not reach target resolution"),
+            |_, _| {
+                |_: &Control,
+                 _: &dyn Fn(crate::desktop::NativeProgress),
+                 _: &dyn Fn() -> Result<(), Fault>| {
+                    panic!("cancelled capture must not reach target resolution")
+                }
+            },
         )
         .unwrap();
     started.recv_timeout(Duration::from_secs(5)).unwrap();

@@ -18,11 +18,11 @@ export const DESCRIPTOR_LIMIT = 4096;
 const NATIVE_TEXT_LIMIT = 4096;
 // The host's category for a saved custom-archive reference; every other source fault is an unavailable directory.
 export const UNSUPPORTED_SOURCE = 'UnsupportedPackageSource';
-const BUSY_PHASES: Record<string, true> = {preparing: true, running: true, stopping: true};
+const BUSY_PHASES: Record<string, true> = {preparing: true, running: true, recovering: true, stopping: true};
 const INTERNAL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const CONTROL = /\p{Cc}/u;
 
-// The three lifecycle phases during which the runner is reserved by one operation.
+// The lifecycle phases during which the runner is reserved by one operation.
 export function busy(state:string):boolean {
   return BUSY_PHASES[state] === true;
 }
@@ -46,10 +46,9 @@ export interface Bound {
   native:NativeReview;
 }
 
-// Operator-authored intent plus separate capture, input and launch-if-absent consent. `key` names the exact request the
-// consent approved: consent granted for any other key is not approval.
-export interface NativeReview {operation:string; postcondition:string; capture:boolean; input:boolean; launch:boolean; key:string|null}
-export type NativeConsent = 'capture'|'input'|'launch';
+// Operator-authored intent plus separate capture, input, launch and recovery consent for this exact request.
+export interface NativeReview {operation:string; postcondition:string; capture:boolean; input:boolean; launch:boolean; recovery:boolean; key:string|null}
+export type NativeConsent = 'capture'|'input'|'launch'|'recovery';
 
 // Session-local UI state for one open named Tab. The host persists names and package references; nothing here is.
 export interface Workspace {
@@ -115,7 +114,7 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
     draftRevision: (previous?.draftRevision ?? 0) + 1, validation: null,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
     disclosedRun: null, touched: false, target: targetState(selection),
-    native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', capture: false, input: false, launch: false, key: null},
+    native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', capture: false, input: false, launch: false, recovery: false, key: null},
   };
 }
 
@@ -349,7 +348,7 @@ export interface NativeRecipe {
   recipient:'game'|'launcher'; location:TargetLocation; arguments:string[]; directory:NativeDirectory; workingDirectory:string|null;
 }
 export interface NativeFacts {
-  binding:TargetBinding|null; recipe:NativeRecipe|null; capture:boolean; input:boolean; launch:boolean;
+  binding:TargetBinding|null; recipe:NativeRecipe|null; capture:boolean; input:boolean; launch:boolean; recovery:boolean;
   operationError:NativeTextError|null; postconditionError:NativeTextError|null;
   block:NativeBlock|null; intent:NativeIntent|null;
 }
@@ -390,14 +389,15 @@ function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLi
 // Consent given for another request starts over rather than carrying the other consent forward.
 export function approveNative(bound:Bound, field:NativeConsent, value:boolean, environment:OcrEnvironment|null, limits:NativeLimits|null):Bound {
   const key = nativeKey(bound, environment, limits);
-  const review = bound.native.key === key ? bound.native : {...bound.native, capture: false, input: false, launch: false};
-  return {...bound, native: {...review, [field]: value, key}};
+  const review = bound.native.key === key ? bound.native : {...bound.native, capture: false, input: false, launch: false, recovery: false};
+  if (field === 'recovery' && value && !review.launch) return bound;
+  return {...bound, native: {...review, [field]: value, recovery: field === 'launch' && !value ? false : field === 'recovery' ? value : review.recovery, key}};
 }
 
 export function clearNativeApproval(bound:Bound):Bound {
   const review = bound.native;
-  return review.key === null && !review.capture && !review.input && !review.launch ? bound
-    : {...bound, native: {...review, capture: false, input: false, launch: false, key: null}};
+  return review.key === null && !review.capture && !review.input && !review.launch && !review.recovery ? bound
+    : {...bound, native: {...review, capture: false, input: false, launch: false, recovery: false, key: null}};
 }
 
 export function editNativeReview(bound:Bound, field:'operation'|'postcondition', value:string):Bound {
@@ -418,6 +418,7 @@ export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, limits
   const capture = current && review.capture;
   const input = current && review.input;
   const launch = current && review.launch;
+  const recovery = current && launch && review.recovery;
   const operationError = nativeTextError(review.operation);
   const postconditionError = nativeTextError(review.postcondition);
   const block:NativeBlock|null = limits === null ? 'nativeUnavailable'
@@ -431,9 +432,10 @@ export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, limits
   const intent = block === null && binding && limits && target.view && declaration !== null ? {
     target_revision: target.view.record.revision, target_binding_id: binding.id, target_declaration_identity: declaration,
     capture_approved: capture, input_approved: input, launch_approved: launch,
+    max_exit_recoveries: recovery ? 1 as const : 0 as const,
     operation: review.operation, visible_postcondition: review.postcondition, limits,
   } : null;
-  return {binding, recipe, capture, input, launch, operationError, postconditionError, block, intent};
+  return {binding, recipe, capture, input, launch, recovery, operationError, postconditionError, block, intent};
 }
 
 export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en', nativeLimits:NativeLimits|null = null):Derived {

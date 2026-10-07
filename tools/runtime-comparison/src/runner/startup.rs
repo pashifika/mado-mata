@@ -23,8 +23,9 @@ pub(crate) fn emit_native_transition(phase: u8, deadline: Instant) -> Result<(),
     Ok(())
 }
 
-pub(crate) fn initial_progress() -> NativeProgress {
+fn initial_progress(attempt: u64) -> NativeProgress {
     NativeProgress {
+        attempt,
         status: NativeTargetStatus::NotRequested,
         phase: NativePhase::Readiness,
         launch: LaunchDisposition::NotRequested,
@@ -60,13 +61,14 @@ pub(crate) struct NativePreparation {
 impl NativePreparation {
     pub(crate) fn new(
         control: Arc<Control>,
+        attempt: u64,
         probe: impl FnMut(&Control, &dyn Fn(NativeProgress)) -> Result<Option<Value>, Fault>
         + Send
         + 'static,
     ) -> Self {
         Self {
             control,
-            progress: Arc::new(Mutex::new(initial_progress())),
+            progress: Arc::new(Mutex::new(initial_progress(attempt))),
             state: Mutex::new(PreparationState {
                 probe: Some(Box::new(probe)),
                 worker: None,
@@ -95,6 +97,7 @@ impl NativePreparation {
             .ok_or_else(|| Fault::new("Transport", "startup resolver unavailable"))?;
         let control = Arc::clone(&self.control);
         let progress = Arc::clone(&self.progress);
+        let attempt = self.progress().attempt;
         {
             let mut progress = progress.lock().unwrap_or_else(|e| e.into_inner());
             if progress.status == NativeTargetStatus::NotRequested {
@@ -106,8 +109,10 @@ impl NativePreparation {
             thread::Builder::new()
                 .name("native-target-probe".into())
                 .spawn(move || {
-                    let report =
-                        |value| *progress.lock().unwrap_or_else(|e| e.into_inner()) = value;
+                    let report = |mut value: NativeProgress| {
+                        value.attempt = attempt;
+                        *progress.lock().unwrap_or_else(|e| e.into_inner()) = value;
+                    };
                     let result = control
                         .check()
                         .and_then(|()| probe(&control, &report))

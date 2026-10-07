@@ -83,6 +83,7 @@ function catalog(data: typeof enData) {
       olderRevision: (old: number, current: number) => interpolate(data.run.olderRevision, {old, current}),
       stopTarget: (operation: string | null) => interpolate(data.run.stopTarget, {operation: operation ?? data.common.none}),
       runKind: (lane: string) => interpolate(data.run.runKind, {lane}),
+      nativeEnvelope: (duration: number) => interpolate(data.run.nativeEnvelope, {duration}),
     },
     target: {
       ...data.target,
@@ -93,6 +94,7 @@ function catalog(data: typeof enData) {
       ...data.result,
       truncated: (count: number) => interpolate(data.result.truncated[count === 1 ? 'one' : 'other'], {count}),
       disclosureHelp: (privateDetail: boolean, kib: number) => interpolate(data.result.disclosureHelp[privateDetail ? 'private' : 'ordinary'], {kib}),
+      attempt: (attempt: number) => interpolate(data.result.attempt, {attempt}),
     },
     schema: {
       ...data.schema,

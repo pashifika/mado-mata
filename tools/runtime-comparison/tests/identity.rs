@@ -57,6 +57,8 @@ fn run_separately(
     let (progress, events) = mpsc::sync_channel::<Value>(16);
     let (logs, _messages) = mpsc::sync_channel(plan.limits.log_records);
     let observer = runner::Observer {
+        native_preparation: Default::default(),
+        attempts: Default::default(),
         progress,
         logs,
         dropped_logs: Arc::new(AtomicU64::new(0)),
@@ -91,6 +93,8 @@ fn pre_spawn_stop_retains_known_no_child_cleanup() {
     let (progress, _events) = mpsc::sync_channel(16);
     let (logs, _messages) = mpsc::sync_channel(1);
     let observer = runner::Observer {
+        native_preparation: Default::default(),
+        attempts: Default::default(),
         progress,
         logs,
         dropped_logs: Arc::new(AtomicU64::new(0)),
@@ -211,6 +215,8 @@ fn child_exit_before_rust_startup_is_not_a_successful_check() {
     let (progress, _events) = mpsc::sync_channel(16);
     let (logs, _messages) = mpsc::sync_channel(1);
     let observer = runner::Observer {
+        native_preparation: Default::default(),
+        attempts: Default::default(),
         progress,
         logs,
         dropped_logs: Arc::new(AtomicU64::new(0)),

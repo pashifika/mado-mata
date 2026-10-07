@@ -13,8 +13,9 @@ does not capture, initialize OCR, or request permissions. Separately reviewed
 macOS **Native** Start runs the authored `readiness()` before target attachment.
 Its explicit startup request can attach to a verified saved application through
 the fixed engine child, or submit its saved recipe once when absence is confirmed
-and launch is separately approved. Activation, automatic recovery and Windows
-Native Start remain refused.
+and launch is separately approved. A separate default-off review can admit one
+fresh attempt after confirmed Workflow process exit and complete settlement.
+Activation, game termination, arbitrary retries and Windows Native Start remain refused.
 
 The checkout includes macOS and Windows shells; Linux checks the frontend and
 shell-independent core. Windows interactive authoring and both-OS native
@@ -1748,8 +1749,8 @@ successful Check is not permission, native qualification, or proof of game effec
    approval permits one saved-recipe submission after a final discovery recheck.
    Missing windows, ambiguity, overflow or unverifiable candidates never authorize
    launch. Script status probes drive bounded preparation for the selected
-   lifetime's exact eligible window; loss or replacement fails rather than
-   attaching a successor. Check running application remains historical information.
+   lifetime's exact eligible window; loss or replacement fails that attempt rather
+   than retargeting it. Check running application remains historical information.
 3. Select **Native**. Review package/profile, target binding/revision and policy;
    enter the intended operation and what a newer frame must show. This text records
    the human review; the package must implement its recognition and postcondition.
@@ -1757,10 +1758,12 @@ successful Check is not permission, native qualification, or proof of game effec
 4. Review the host phase budgets: **60 s Startup** from reservation,
    **30 s Readiness** from capture availability, and **30 s Workflow** after
    `"Ready"`. These are defaults and ceilings; invalid tuples refuse rather than
-   clamp. Each phase starts once, cannot borrow unused time, and cannot extend
-   the absolute outer deadline fixed from the reviewed sum (**120 s** by default).
-   Other limits remain **300** acquired frames, **1 s** waits, **100 ms** pacing,
-   **64** input events across the run, **1 s** cleanup and **2 s** containment.
+   clamp. Each attempt's phases cannot borrow unused time or extend the original
+   absolute deadline: **120 s** by default, or **243 s** with one reviewed recovery
+   (twice the stage sum plus **3 s** for inter-attempt cleanup/containment).
+   The aggregate limits remain **300** acquired frames and **64** expanded input
+   events across both attempts, with **1 s** waits and **100 ms** pacing.
+   Final cleanup retains its separate **1 s** cleanup and **2 s** containment bounds.
    A click consumes three events, or four with a hold; key press/release each
    consume one. Producer frames and restricted cleanup releases are not ordinary
    acquisition/input budget entries. Any reviewed-tuple change withdraws consent.
@@ -1770,6 +1773,11 @@ successful Check is not permission, native qualification, or proof of game effec
    direct-executable launchers use their reviewed working-directory policy.
    The launcher owns onward game arguments/cwd; its PID or exit is not game
    identity or readiness. Approve **launch if absent** only when permitted.
+   Recovery is default-off and not saved. To allow one confirmed-exit recovery,
+   separately approve **recovery** as well as **launch if absent**. The same
+   captured readiness/workflow starts again from entry, not the interrupted
+   statement; authors must make re-entry safe. No exactly-once business-action
+   or game-termination authority is implied.
 6. Approve capture and input separately, then Start. Every submission consumes
    all approvals, even a refusal. Relevant edits, target edit/discard, environment
    changes and leaving the workspace withdraw them. Unrelated settings changes
@@ -1795,6 +1803,15 @@ successful Check is not permission, native qualification, or proof of game effec
    a newer frame alone does not establish the expected effect. Independently
    confirm the authorized visible effect. First-frame placement is authoritative;
    later geometry changes are refused, not silently rescaled.
+9. With recovery approved, only a positively confirmed bound-process exit after
+   initial Workflow entry can admit attempt 2. Window loss, permission/provider
+   failures, startup/Readiness failure, a second exit, Stop, incomplete cleanup,
+   partial/uncertain input or missing accounting remain terminal.
+   The reservation stays held while the old child and parent startup work settle.
+   A fresh attempt uses the original snapshot and only verified remaining credits;
+   it attaches a unique external restart or conditionally launches the saved recipe
+   once. The result retains both attempts' exit/Script/receipt/cleanup outcomes.
+   Neither launch acceptance nor `capture_ready` proves recovered usability.
 
 Insert explicit startup/polling before the package's existing Native Readiness
 recognition criteria. For example, this finite polling fragment does not itself
@@ -1836,6 +1853,19 @@ leaves the corresponding acceptance open. Do not kill, move or resize the game
 to manufacture target loss; disruptive cases need separate approval. Controlled
 target-loss regressions do not replace native evidence or the independent
 Windows/M0/R6 obligations.
+
+For exit-recovery acceptance, keep attempt 1's Script in a bounded observation/wait
+phase after its usable-screen checkpoint. Obtain separate approval for the normal
+game-close action and begin passive observation before that action interval.
+An exit after Script completion does not count. Revalidate current recognition
+geometry and positive/negative predicates before input; preserve the failing
+private frame/stage instead of weakening a predicate or declaring the game failed.
+After verified predecessor settlement, the same Script in attempt 2 must establish
+its own usable-screen predicate from fresh compatible observations, with full
+receipts and separate physical cleanup. Repeat a clean separately approved run,
+default-off no-recovery and ordinary Stop during recovery; cover direct and saved
+separate-launcher recipes when authorized. Missing authority or recipe leaves that
+acceptance open. These steps do not authorize operations by themselves.
 
 ## Logs and retention
 

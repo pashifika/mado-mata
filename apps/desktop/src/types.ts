@@ -82,17 +82,19 @@ export interface BootstrapStatus {
 }
 export interface SnapshotReceipt {path:string; generation:string; files:number; bytes:number}
 // Typed Native preparation state; the values mirror the host's snake_case enums.
-export type NativePhase = 'preflight'|'target_discovery'|'launch_submission'|'waiting_for_process'|'waiting_for_window'|'native_initialization'|'readiness'|'workflow';
+export type NativePhase = 'preflight'|'target_discovery'|'launch_submission'|'waiting_for_process'|'waiting_for_window'|'native_initialization'|'readiness'|'workflow'|'settling'|'recovering';
 export type LaunchDisposition = 'not_requested'|'accepted'|'rejected'|'uncertain';
 // Whether the Script has requested startup and whether capture is available. `capture_ready` is not game readiness.
 export type NativeTargetStatus = 'not_requested'|'pending'|'capture_ready';
-export interface NativeProgress {status:NativeTargetStatus; phase:NativePhase; launch:LaunchDisposition}
+export interface NativeProgress {attempt:number; status:NativeTargetStatus; phase:NativePhase; launch:LaunchDisposition}
 export interface ControllerView {
   run:string|null; state:string; operation:string; result:Record<string,Json>|null; error:Fault|null;
   progress:Record<string,Json>[]; dropped_logs:number;
   workspace_id:string|null; workspace_revision:number|null;
   // The host's retained target status, stage and launch disposition of this operation, kept through errors and Stop.
   native_preparation?:NativeProgress|null;
+  // Owner-retained summaries, independent of progress/log eviction and available during recovery.
+  attempts:Record<string,Json>[];
 }
 export interface LogEntry {
   sequence:number; time_ms:number; source:string; level:string; run:string|null; workspace_id:string|null;
@@ -118,6 +120,7 @@ export interface NativeLimits {
 export interface NativeIntent {
   target_revision:number; target_binding_id:string; target_declaration_identity:string;
   capture_approved:boolean; input_approved:boolean; launch_approved:boolean; operation:string; visible_postcondition:string; limits:NativeLimits;
+  max_exit_recoveries:0|1;
 }
 export interface StartRequest {
   package_path:string; inventory_identity:string; package_id:string; schema_identity:string; profile_id:string;

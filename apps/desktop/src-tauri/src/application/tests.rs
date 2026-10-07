@@ -63,9 +63,10 @@ fn target_owner_conflicts_reinspection_and_native_refusal_preserve_configuration
 
     let mut native = request(&first);
     native.lane = "native".into();
-    application.start(&first_ref, native).unwrap();
-    let terminal = settled(application);
-    assert_eq!(terminal.error.unwrap().category, "NativeRefused");
+    assert_eq!(
+        application.start(&first_ref, native).unwrap_err().category,
+        "NativeRefused"
+    );
     assert_eq!(fs::read(&file).unwrap(), bytes);
 
     declare_target(&path, Some("changed-target"));

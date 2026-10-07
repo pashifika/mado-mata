@@ -139,6 +139,7 @@ fn pending_responses_require_a_script_poll_and_typed_fault_closes_continuation()
     host.call("target_start", json!({})).unwrap();
     assert_eq!(requests.try_recv().unwrap(), 1);
     let progress = NativeProgress {
+        attempt: 1,
         status: NativeTargetStatus::Pending,
         phase: NativePhase::WaitingForProcess,
         launch: LaunchDisposition::Accepted,

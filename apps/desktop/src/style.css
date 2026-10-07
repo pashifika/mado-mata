@@ -122,7 +122,7 @@ details[open] > summary { font-weight: 600; }
 .tag, .phase, .level { display: inline-block; border-radius: var(--radius-sm); padding: 3px 7px; font-size: 10px; font-weight: 600; background: var(--surface-muted); color: #576b85; white-space: nowrap; }
 .phase, .level { text-transform: uppercase; letter-spacing: .5px; }
 .phase-running, .phase-preparing { color: #285e9e; background: var(--info-soft); }
-.phase-stopping { color: #945513; background: var(--warn-soft); }
+.phase-stopping, .phase-recovering { color: #945513; background: var(--warn-soft); }
 .phase-terminal { color: #304660; background: #e6eaf0; }
 .tag.unsaved, .tag.stale { color: var(--warn); background: var(--warn-soft); }
 .tag.current { color: var(--ok); background: var(--ok-soft); }
@@ -223,7 +223,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .state-line .phase { font-size: 14px; padding: 4px 10px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: #9aa9bb; display: inline-block; }
 .dot.phase-running, .dot.phase-preparing { background: #285e9e; }
-.dot.phase-stopping { background: #c07a1c; }
+.dot.phase-stopping, .dot.phase-recovering { background: #c07a1c; }
 .dot.phase-terminal { background: #304660; }
 .summary-value { font-size: 17px; font-weight: 600; letter-spacing: -.3px; margin-top: 6px; overflow-wrap: anywhere; }
 .summary-caption { font-size: 11px; color: var(--text-muted); margin: 4px 0 0; }

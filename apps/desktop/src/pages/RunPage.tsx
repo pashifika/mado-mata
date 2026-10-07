@@ -103,6 +103,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   const nativeBudgetRows = nativeLimits && [
     [t.run.nativeStartup, nativeLimits.startup_ms], [t.run.nativeReadiness, nativeLimits.readiness_ms], [t.run.nativeWorkflow, nativeLimits.workflow_ms],
   ] as const;
+  const nativeDuration = nativeLimits ? (1 + (native?.recovery ? 1 : 0)) * (nativeLimits.startup_ms + nativeLimits.readiness_ms + nativeLimits.workflow_ms) + (native?.recovery ? 3000 : 0) : null;
   const nativeLimitRows = nativeLimits && [
     [t.run.nativeFrames, String(nativeLimits.max_frames)],
     [t.run.nativeWait, `${nativeLimits.wait_ms} ms`], [t.run.nativeInterval, `${nativeLimits.interval_ms} ms`],
@@ -247,6 +248,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
               {recipe.recipient === 'launcher' && <p className="field-help">{t.run.nativeForwarding}</p>}</>}
             {nativeBudgetRows && <><span className="eyebrow">{t.run.nativeBudgets}</span>
               <dl className="run-identity" id="native-budgets">{nativeBudgetRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value} ms</dd></Fragment>)}</dl>
+              <dl className="run-identity"><dt>{t.run.nativeDuration}</dt><dd id="native-duration">{t.run.nativeEnvelope(nativeDuration ?? 0)}</dd></dl>
               <p className="field-help" id="native-budget-help">{t.run.nativeBudgetHelp}</p>
               <p className="field-help" id="native-startup-help">{t.run.nativeStartupHelp}</p></>}
             {nativeLimitRows && <><span className="eyebrow">{t.run.nativeLimits}</span>
@@ -269,6 +271,9 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
               <label className="checkbox-label"><input id="native-launch-consent" type="checkbox" checked={native.launch} disabled={!approvalOpen}
                 onChange={event => handlers.native.approve('launch', event.target.checked)}/>{t.run.nativeLaunch}</label>
               <p className="field-help" id="native-launch-help">{t.run.nativeLaunchHelp}</p>
+              <label className="checkbox-label"><input id="native-recovery-consent" type="checkbox" checked={native.recovery} disabled={!approvalOpen || !native.launch}
+                aria-describedby="native-recovery-help" onChange={event => handlers.native.approve('recovery', event.target.checked)}/>{t.run.nativeRecovery}</label>
+              <p className="field-help" id="native-recovery-help">{t.run.nativeRecoveryHelp}</p>
               <p className="field-help">{t.run.nativeApprovalHelp}</p></div>
           </div>}
           <div className="field"><label htmlFor="descriptor-path">{t.run.descriptor}</label>
@@ -292,7 +297,8 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           <p className="authority-note">{t.run.authority}</p>
           <dl className="run-identity"><dt>{t.run.operationId}</dt><dd id="run-id">{view.run ?? t.common.noOperation}</dd>
             <dt>{t.run.kind}</dt><dd id="operation-kind">{view.run ? check ? t.run.checkKind : t.run.runKind(t.lane(snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane) ?? t.common.unknown)) : t.phase('idle')}</dd>
-            {view.native_preparation && <><dt>{t.run.nativeTargetStatus}</dt><dd id="native-target-status">{t.run.nativeStatuses[view.native_preparation.status]}</dd>
+            {view.native_preparation && <><dt>{t.run.nativeAttempt}</dt><dd id="native-attempt">{view.native_preparation.attempt}</dd>
+              <dt>{t.run.nativeTargetStatus}</dt><dd id="native-target-status">{t.run.nativeStatuses[view.native_preparation.status]}</dd>
               <dt>{t.run.nativeStage}</dt><dd id="native-stage">{t.run.nativePhases[view.native_preparation.phase]}</dd>
               <dt>{t.run.nativeLaunchRequest}</dt><dd id="native-launch">{t.run.launchDispositions[view.native_preparation.launch]}</dd></>}
             {snapshot?.kind === 'run' && snapshot.run === view.run && <><dt>{t.run.capturedProfile}</dt><dd>{snapshot.profileName || t.run.untitled} · {snapshot.profileId}</dd><dt>{t.run.packageScenario}</dt><dd>{snapshot.packageId} / {snapshot.scenario}</dd>
@@ -301,6 +307,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                 <dt>{t.run.nativePostcondition}</dt><dd>{snapshot.native.visible_postcondition}</dd>
                 <dt>{t.run.nativeBinding}</dt><dd><code>{snapshot.native.target_binding_id}</code> · {t.target.revision(snapshot.native.target_revision)}</dd>
                 <dt>{t.run.nativeLaunchApproval}</dt><dd>{snapshot.native.launch_approved ? t.run.nativeLaunchApproved : t.run.nativeLaunchNotApproved}</dd>
+                <dt>{t.run.nativeRecoveryApproval}</dt><dd id="captured-native-recoveries">{snapshot.native.max_exit_recoveries}</dd>
                 <dt>{t.run.capturedBudgets}</dt><dd id="captured-native-budgets">{t.run.nativeStartup} {snapshot.native.limits.startup_ms} ms · {t.run.nativeReadiness} {snapshot.native.limits.readiness_ms} ms · {t.run.nativeWorkflow} {snapshot.native.limits.workflow_ms} ms</dd></>}</>}
             {snapshot?.kind === 'check' && snapshot.run === view.run && <><dt>{t.run.checkedProfile}</dt><dd>{snapshot.association.environment?.profile ?? t.common.unconfigured}</dd>
               <dt>{t.common.descriptor}</dt><dd>{snapshot.association.descriptorPath ?? t.run.noInitialization}</dd></>}
@@ -309,7 +316,7 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
           {snapshot?.kind === 'run' && snapshot.run === view.run && snapshot.native && <details><summary>{t.run.capturedLimits}</summary><pre>{JSON.stringify(snapshot.native.limits, null, 2)}</pre></details>}
           {snapshot?.kind === 'check' && snapshot.run === view.run && <details><summary>{t.run.capturedEnvironment}</summary><pre>{JSON.stringify(snapshot.association.environment, null, 2)}</pre></details>}
           <h3>{t.run.milestones}</h3><ol className="progress-list">{view.progress.map((event, index) => <li key={`${view.run}-${index}`}>
-            <details><summary>{String(event.event ?? t.run.milestone)}{text(event.stage) ? ` · ${event.stage}` : ''}{typeof event.at_us === 'number' ? ` · ${(event.at_us / 1000).toFixed(1)} ms` : ''}</summary><pre>{JSON.stringify(event, null, 2)}</pre></details>
+            <details><summary>{String(event.event ?? t.run.milestone)}{typeof event.attempt === 'number' ? ` · ${t.result.attempt(event.attempt)}` : ''}{text(event.stage) ? ` · ${event.stage}` : ''}{typeof event.at_us === 'number' ? ` · ${(event.at_us / 1000).toFixed(1)} ms` : ''}</summary><pre>{JSON.stringify(event, null, 2)}</pre></details>
           </li>)}</ol>{view.progress.length === 0 && <p className="muted">{t.run.noMilestones}</p>}
           <ResultPanel view={view} disclosed={view.run !== null && bound.disclosedRun === view.run} onDisclose={next => handlers.disclose(next ? view.run : null)}/>
         </div>

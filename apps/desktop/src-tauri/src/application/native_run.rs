@@ -9,7 +9,7 @@ use mado_runtime_comparison::desktop::{
 use mado_runtime_comparison::inventory::TargetDeclaration;
 use mado_runtime_comparison::model::{Control, Fault};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct NativeBinding {
     binding: TargetBinding,
     declaration: TargetDeclaration,
@@ -79,11 +79,24 @@ impl NativeBinding {
             launch_approved: intent.launch_approved,
             progress: NativeProgress {
                 phase: NativePhase::TargetDiscovery,
+                attempt: 1,
                 launch: LaunchDisposition::NotRequested,
                 status: NativeTargetStatus::Pending,
             },
             finished: false,
         })
+    }
+
+    pub(super) fn for_attempt(&self, attempt: u64) -> Self {
+        let mut binding = self.clone();
+        binding.progress = NativeProgress {
+            attempt,
+            phase: NativePhase::TargetDiscovery,
+            launch: LaunchDisposition::NotRequested,
+            status: NativeTargetStatus::Pending,
+        };
+        binding.finished = false;
+        binding
     }
 
     pub(super) fn resolve(

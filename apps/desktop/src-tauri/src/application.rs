@@ -378,7 +378,7 @@ impl Application {
             owner: None,
             controller: Arc::new(json!({
                 "state":"idle","run":null,"operation":"run","result":null,
-                "error":null,"progress":[],"logs":[],"dropped_logs":0,
+                "error":null,"progress":[],"logs":[],"dropped_logs":0,"attempts":[],
                 "workspace_id":null,"workspace_revision":null
             })),
             last_check: None,

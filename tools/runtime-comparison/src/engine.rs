@@ -1,5 +1,8 @@
 //! Public-facade replay and strictly provenance-bound native capture, OCR, and input.
 
+#[cfg(any(all(feature = "engine", target_os = "macos"), test))]
+mod lifetime;
+
 use crate::model::Fault;
 #[cfg(feature = "engine")]
 use crate::model::{Control, Plan};
@@ -219,6 +222,9 @@ mod enabled {
         queries: BTreeMap<String, Managed<Query>>,
         active_queries: usize,
         latest: Option<mp::FrameStamp>,
+        // One shared frame keeps macOS terminal-aware admission available after Script release.
+        // This is not another capture or Script handle; finish drops it before close.
+        native_frame: Option<mp::Frame>,
         serial: u64,
         cleanup: Option<Value>,
         process_lifetime: String,
@@ -228,6 +234,7 @@ mod enabled {
         last_capture: Option<Instant>,
         input_events: usize,
         input_cleanup_incomplete: bool,
+        input_uncertain: bool,
         placement: Option<mp::TargetPlacement>,
     }
 
@@ -302,6 +309,8 @@ mod enabled {
         handles: AtomicUsize,
         handle_budget: Arc<HandleBudget>,
         native: Option<NativeConfig>,
+        #[cfg(all(test, target_os = "macos"))]
+        process_probe: Option<Box<super::lifetime::ScriptedProbe>>,
     }
 
     impl Engine {
@@ -557,6 +566,7 @@ mod enabled {
                     queries: BTreeMap::new(),
                     active_queries: 0,
                     latest: None,
+                    native_frame: None,
                     serial: 0,
                     cleanup: None,
                     process_lifetime,
@@ -565,6 +575,7 @@ mod enabled {
                     last_capture: None,
                     input_events: 0,
                     input_cleanup_incomplete: false,
+                    input_uncertain: false,
                     placement: None,
                 }),
                 control,
@@ -577,6 +588,8 @@ mod enabled {
                 handles: AtomicUsize::new(0),
                 handle_budget,
                 native: config.native,
+                #[cfg(all(test, target_os = "macos"))]
+                process_probe: None,
             })
         }
 
@@ -756,6 +769,7 @@ mod enabled {
                     queries: BTreeMap::new(),
                     active_queries: 0,
                     latest: None,
+                    native_frame: None,
                     serial: 0,
                     cleanup: None,
                     process_lifetime: attempt_id.into(),
@@ -764,6 +778,7 @@ mod enabled {
                     last_capture: None,
                     input_events: 0,
                     input_cleanup_incomplete: false,
+                    input_uncertain: false,
                     placement: None,
                 }),
                 bridge: CancellationBridge::new(Arc::clone(&control), None).expect("bridge"),
@@ -776,16 +791,42 @@ mod enabled {
                 handles: AtomicUsize::new(0),
                 handle_budget,
                 native: None,
+                #[cfg(target_os = "macos")]
+                process_probe: None,
             }
         }
 
         pub fn call(&self, method: &str, args: Value) -> Result<Value, Fault> {
+            let result = self.call_inner(method, args);
+            if method != "release"
+                && result
+                    .as_ref()
+                    .is_err_and(|fault| fault.category == "TargetLost")
+            {
+                let state = self.lock()?;
+                let process = self.check_bound_process(&state);
+                self.check()?;
+                if let Err(fault) = process
+                    && fault.category == "TargetExited"
+                {
+                    return Err(fault);
+                }
+            }
+            result
+        }
+
+        fn call_inner(&self, method: &str, args: Value) -> Result<Value, Fault> {
             if method != "release" {
                 self.check()?;
             }
             let mut state = self.lock()?;
             if method != "release" {
                 self.check_session(&state)?;
+                if self.native.is_some()
+                    && let Some(frame) = &state.native_frame
+                {
+                    self.check_process_frame(&state, frame)?;
+                }
             }
             let result = match method {
                 "observe" => {
@@ -915,12 +956,61 @@ mod enabled {
             Ok(())
         }
 
+        fn check_bound_process(&self, state: &State) -> Result<(), Fault> {
+            self.check()?;
+            #[cfg(target_os = "macos")]
+            if let Some(native) = &self.native {
+                let expected = state.native_process_started.ok_or_else(|| {
+                    blocked(
+                        "target_identity_unavailable",
+                        "bound kernel lifetime is missing",
+                    )
+                })?;
+                let pid = i32::try_from(native.process_id).map_err(|_| selected_process_lost())?;
+                #[cfg(test)]
+                let current = self
+                    .process_probe
+                    .as_ref()
+                    .map_or_else(|| super::lifetime::probe(pid), |probe| probe(pid));
+                #[cfg(not(test))]
+                let current = super::lifetime::probe(pid);
+                self.check()?;
+                super::lifetime::require_current(Some(expected), current?)?;
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = state;
+            Ok(())
+        }
+
+        fn check_process_frame(&self, state: &State, frame: &mp::Frame) -> Result<(), Fault> {
+            let process = self.check_bound_process(state);
+            if process.is_err() {
+                // A kernel proof must not hide an earlier provider/permission fault.
+                // Commit is public, terminal-aware, and neither captures nor maps pixels.
+                let operation = self.operation(self.limits.wait_ms)?;
+                state
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| Fault::new("Closed", "session closed"))?
+                    .commit_frame(frame, &operation)
+                    .map_err(|error| engine_error("target_lifetime", error))?;
+            }
+            process
+        }
+
         fn check_session(&self, state: &State) -> Result<(), Fault> {
             self.check()?;
             if state.session.is_none() {
                 return Err(Fault::new("Closed", "session closed"));
             }
-            // This is ownership/cancellation only. The public facade orders each
+            #[cfg(target_os = "macos")]
+            if self.native.is_some() && state.native_process_started.is_none() {
+                return Err(blocked(
+                    "target_identity_unavailable",
+                    "bound kernel lifetime is missing",
+                ));
+            }
+            // This is ownership/cancellation and binding only. The public facade orders each
             // actual result against capture termination; is_closed proves cleanup,
             // not live admission, and must not replace the original capture fault.
             Ok(())
@@ -1001,6 +1091,9 @@ mod enabled {
                 .map_err(|error| engine_error("capture", error))?;
             state.captured_frames += 1;
             state.last_capture = Some(Instant::now());
+            if self.native.is_some() {
+                self.check_process_frame(state, &frame)?;
+            }
             let geometry = if let Some(native) = &self.native {
                 let actual = frame.transform().target().ok_or_else(|| {
                     Fault::new(
@@ -1023,10 +1116,13 @@ mod enabled {
                 None
             };
             let stamp = frame.stamp();
+            let native_frame =
+                (cfg!(target_os = "macos") && self.native.is_some()).then(|| frame.clone());
             let value = self.retain_observation(state, frame, permit, &operation)?;
             // Latch only a committed frame; a rejected candidate establishes no baseline.
             state.placement = geometry;
             state.latest = Some(stamp);
+            state.native_frame = native_frame;
             Ok(value)
         }
 
@@ -1506,11 +1602,17 @@ mod enabled {
                 .session
                 .as_ref()
                 .ok_or_else(|| Fault::new("Closed", "session closed"))?;
-            let receipt = session
-                .send_input(&input, &operation)
-                .map_err(|error| engine_error("native_input", error))?;
+            let receipt = match session.send_input(&input, &operation) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    state.input_uncertain = true;
+                    return Err(engine_error("native_input", error));
+                }
+            };
             // A receipt survives cancellation: replacing it would erase possible native effect.
             state.input_cleanup_incomplete |= receipt.cleanup().may_leave_state_held();
+            state.input_uncertain |= receipt.outcome() != mp::SequenceOutcome::Complete
+                || receipt.cleanup().may_leave_state_held();
             Ok(native_receipt(
                 &receipt,
                 &request.actions,
@@ -1522,6 +1624,26 @@ mod enabled {
             json!({"configuration":self.resources.facts,"script_handles":self.handles.load(Ordering::Acquire),
                 "in_flight":self.in_flight.load(Ordering::Acquire),"runner_engines":1,"runner_models":1,
                 "closing":self.closing.load(Ordering::Acquire)})
+        }
+
+        pub(crate) fn terminal_accounting(&self) -> Result<Value, Fault> {
+            let state = self.lock()?;
+            if state
+                .cleanup
+                .as_ref()
+                .is_none_or(|cleanup| cleanup["clean"] != true)
+                || state.session.is_some()
+                || state.native_frame.is_some()
+                || self.in_flight.load(Ordering::Acquire) != 0
+            {
+                return Err(Fault::new(
+                    "IncompleteCleanup",
+                    "native accounting is not settled",
+                ));
+            }
+            Ok(json!({"frames":state.captured_frames,
+                "expanded_input_events":state.input_events,
+                "input_uncertain":state.input_uncertain}))
         }
 
         pub fn finish(&self) -> Value {
@@ -1548,6 +1670,7 @@ mod enabled {
             state.queries.clear();
             state.results.clear();
             state.observations.clear();
+            state.native_frame = None;
             self.handles.store(0, Ordering::Release);
             let close = remaining_ms_from(budget.saturating_sub(started.elapsed()))
                 .and_then(|remaining| operation(&mp::CancellationToken::new(), remaining))
@@ -1917,10 +2040,7 @@ mod enabled {
 
         control.check()?;
         let pid = i32::try_from(config.process_id).map_err(|_| selected_process_lost())?;
-        let before = native_process_started(pid)?;
-        if started.is_some_and(|expected| before != expected) {
-            return Err(selected_process_lost());
-        }
+        let before = super::lifetime::require_current(*started, super::lifetime::probe(pid)?)?;
         let result = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
             autoreleasepool(|_| {
                 let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
@@ -1993,54 +2113,10 @@ mod enabled {
         })??;
         // AppKit caches time-varying properties until its main run loop turns.
         // Kernel lifetime checks remain live in this non-AppKit engine child.
-        if native_process_started(pid)? != before {
-            return Err(selected_process_lost());
-        }
+        super::lifetime::require_current(Some(before), super::lifetime::probe(pid)?)?;
         control.check()?;
         *started = Some(before);
         Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    fn native_process_started(pid: i32) -> Result<(u64, u64), Fault> {
-        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
-        let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
-            .map_err(|_| internal("process description size is not representable"))?;
-        // SAFETY: the SDK writes synchronously into aligned storage of exactly size bytes.
-        #[expect(unsafe_code, reason = "audited libproc output buffer and SDK layout")]
-        let returned = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDTBSDINFO,
-                0,
-                info.as_mut_ptr().cast(),
-                size,
-            )
-        };
-        if returned != size {
-            if returned <= 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-            {
-                return Err(selected_process_lost());
-            }
-            return Err(blocked(
-                "target_identity_unavailable",
-                "selected process is absent or its kernel lifetime cannot be read",
-            ));
-        }
-        // SAFETY: libproc reported that the entire proc_bsdinfo was initialized.
-        #[expect(
-            unsafe_code,
-            reason = "complete libproc output checked before initialization"
-        )]
-        let info = unsafe { info.assume_init() };
-        if info.pbi_pid != pid as u32
-            || info.pbi_status == libc::SZOMB
-            || info.pbi_start_tvsec == 0
-            || info.pbi_start_tvusec >= 1_000_000
-        {
-            return Err(selected_process_lost());
-        }
-        Ok((info.pbi_start_tvsec, info.pbi_start_tvusec))
     }
 
     fn select_native_target<'a>(

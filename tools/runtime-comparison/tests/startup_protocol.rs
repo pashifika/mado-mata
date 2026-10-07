@@ -24,11 +24,30 @@ struct OwnedProtocol {
 
 impl OwnedProtocol {
     fn start(source: &str, startup_ms: u64) -> Self {
+        Self::start_attempt(source, startup_ms, 1, true)
+    }
+
+    fn start_attempt(source: &str, startup_ms: u64, attempt: u64, native: bool) -> Self {
+        Self::start_case(source, startup_ms, attempt, native, "success", None)
+    }
+
+    fn start_case(
+        source: &str,
+        startup_ms: u64,
+        attempt: u64,
+        native: bool,
+        scenario: &str,
+        actions: Option<usize>,
+    ) -> Self {
         let serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
         let mut plan: Plan =
             serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
         plan.candidate = "javascript".into();
-        plan.lane = "native".into();
+        plan.lane = if native { "native" } else { "controlled" }.into();
+        plan.scenario = scenario.into();
+        if let Some(actions) = actions {
+            plan.limits.max_actions = actions;
+        }
         let budgets = NativeBudgets {
             startup_ms,
             readiness_ms: 1_000,
@@ -37,7 +56,7 @@ impl OwnedProtocol {
         plan.limits.duration_ms = budgets.total_ms().unwrap();
         plan.limits.readiness_ms = budgets.readiness_ms;
         plan.limits.wait_ms = 100;
-        plan.native_budgets = Some(budgets);
+        plan.native_budgets = native.then_some(budgets);
         let mut inventory = Inventory::capture(
             Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/javascript")),
             &plan.limits,
@@ -54,9 +73,9 @@ impl OwnedProtocol {
         // the child's admitted limits. Clock-transfer precision has separate tests.
         const HORIZON_US: u64 = 100 * 365 * 24 * 60 * 60 * 1_000_000;
         let header = json!({"version":1,"invocation":{
-            "run":"startup-protocol","attempt":1,"operation":"run","plan":plan,
+            "run":"startup-protocol","attempt":attempt,"operation":"run","plan":plan,
             "inventory":inventory,"observe_logs":true,"prepared_modules":null,
-            "deadline":HORIZON_US,"startup_deadline":HORIZON_US,"prepare_target":true
+            "deadline":HORIZON_US,"startup_deadline":HORIZON_US,"prepare_target":native
         },"asset_lengths":lengths});
         let mut child = Command::new(env!("CARGO_BIN_EXE_mado-runtime-comparison"))
             .arg("child")
@@ -101,7 +120,7 @@ impl OwnedProtocol {
 
     fn reply(&mut self, sequence: u64, status: &str, fault: Value) {
         self.command(json!({"command":"TargetPrepared","run":"startup-protocol","attempt":1,
-            "sequence":sequence,"reply":{"progress":{"status":status,"phase":"waiting_for_process","launch":"accepted"},
+            "sequence":sequence,"reply":{"progress":{"attempt":1,"status":status,"phase":"waiting_for_process","launch":"accepted"},
             "configuration":null,"fault":fault}}));
     }
 
@@ -293,4 +312,321 @@ fn stop_and_forged_capture_readiness_cannot_admit_late_native_initialization() {
         assert_eq!(terminal["observations"]["dispatches"], 0);
         assert_eq!(terminal["cleanup"]["clean"], true);
     }
+}
+
+#[test]
+fn settled_real_children_keep_attempt_identity_and_fresh_vm_handles_and_accounts() {
+    let source = r"
+        export function readiness() {
+            if (Object.keys(host.state).length !== 0) throw new Error('inherited state');
+            host.state.entered = true;
+            return 'Ready';
+        }
+        export function workflow() {
+            const observation = host.call('observe', {});
+            host.call('log', {message: JSON.stringify(observation)});
+            const sequence = host.call('submit', {observation, actions:[{kind:'key_down',key:'ENTER'},{kind:'key_up',key:'ENTER'}]});
+            const receipt = host.call('settle', {id:sequence.id});
+            if (receipt.status !== 'Submitted') throw new Error('receipt');
+            host.call('release', {id:sequence.id});
+            host.call('release', {id:observation.id});
+            if (observation.attempt === 1) {
+                host.call('fixture', {event:'confirmed_exit'});
+                host.call('observe', {});
+            }
+        }
+    ";
+    let mut observations = Vec::new();
+    let mut totals = (0, 0);
+    for attempt in [1, 2] {
+        let mut child = OwnedProtocol::start_attempt(source, 3_000, attempt, false);
+        let (terminal, _) = child.finish();
+        assert_eq!(terminal["attempt"], attempt);
+        assert_eq!(terminal["cleanup"]["clean"], true);
+        assert_eq!(terminal["observations"]["workflow_entered"], true);
+        let account = &terminal["observations"]["accounting"];
+        assert_eq!(account["complete"], true);
+        assert_eq!(account["input_uncertain"], false);
+        totals.0 += account["frames"].as_u64().unwrap();
+        totals.1 += account["expanded_input_events"].as_u64().unwrap();
+        let logs = terminal["observations"]["script_logs"].as_array().unwrap();
+        let observation: Value =
+            serde_json::from_str(logs[0]["message"].as_str().unwrap()).unwrap();
+        assert_eq!(observation["attempt"], attempt);
+        observations.push(observation);
+        if attempt == 1 {
+            assert_eq!(terminal["primary"]["category"], "TargetExited");
+            assert_eq!(terminal["primary"]["context"]["exit_reason"], "absent");
+        } else {
+            assert!(terminal["primary"].is_null());
+            assert_eq!(terminal["entry_outcome"], "Returned");
+        }
+    }
+    assert_ne!(observations[0]["id"], observations[1]["id"]);
+    assert_eq!(observations[0]["run"], observations[1]["run"]);
+    assert_ne!(
+        observations[0]["process_lifetime"],
+        observations[1]["process_lifetime"]
+    );
+    assert_eq!(totals, (4, 4));
+}
+
+#[test]
+fn real_child_pre_workflow_exit_and_stale_stop_do_not_continue() {
+    let mut child = OwnedProtocol::start_attempt(
+        r"
+        export function readiness() {
+            host.call('fixture', {event:'confirmed_exit'});
+            host.call('observe', {});
+            return 'Ready';
+        }
+        export function workflow() { throw new Error('must not enter'); }
+    ",
+        3_000,
+        1,
+        false,
+    );
+    let (terminal, _) = child.finish();
+    assert_eq!(terminal["primary"]["category"], "TargetExited");
+    assert_eq!(terminal["observations"]["workflow_entered"], false);
+    assert_eq!(terminal["observations"]["accounting"]["complete"], true);
+    drop(child);
+
+    let mut child = OwnedProtocol::start_attempt(
+        r"
+        export function readiness() { return 'Ready'; }
+        export function workflow() {
+            const observation = host.call('observe', {});
+            host.call('log', {message:'ready-for-stop'});
+            while (true) { host.call('wait', {duration_ms:10}); }
+        }
+    ",
+        3_000,
+        2,
+        false,
+    );
+    loop {
+        let event = child.next();
+        if event["event"] == "ScriptLog" {
+            break;
+        }
+        assert_ne!(event["event"], "Terminal");
+    }
+    child.command(json!({"command":"Stop","run":"startup-protocol","attempt":1}));
+    let (terminal, _) = child.finish();
+    assert_eq!(terminal["attempt"], 2);
+    assert_eq!(terminal["primary"]["category"], "Cancelled");
+    assert_eq!(terminal["cleanup"]["clean"], true);
+}
+
+#[test]
+fn old_attempt_startup_reply_cannot_initialize_a_fresh_child() {
+    let mut child = OwnedProtocol::start_attempt(
+        r"
+        export function readiness() {
+            host.call('target_start', {});
+            while (true) { host.call('target_status', {}); host.call('wait', {duration_ms:10}); }
+        }
+        export function workflow() { throw new Error('must not enter'); }
+    ",
+        3_000,
+        2,
+        true,
+    );
+    loop {
+        let event = child.next();
+        if event["event"] == "TargetProbe" {
+            assert_eq!(event["attempt"], 2);
+            break;
+        }
+        assert_ne!(event["event"], "Terminal");
+    }
+    child.reply(1, "pending", Value::Null);
+    let (terminal, _) = child.finish();
+    assert_eq!(terminal["attempt"], 2);
+    assert_eq!(terminal["primary"]["category"], "Cancelled");
+    assert_eq!(
+        terminal["observations"]["native_initialization_started"],
+        false
+    );
+    assert_eq!(terminal["cleanup"]["clean"], true);
+}
+
+#[test]
+fn real_child_partial_and_uncertain_input_never_report_refundable_authority() {
+    for scenario in ["partial", "uncertain"] {
+        let mut child = OwnedProtocol::start_case(
+            r"
+            export function readiness() { return 'Ready'; }
+            export function workflow() {
+                const observation = host.call('observe', {});
+                const sequence = host.call('submit', {observation, actions:[{kind:'key_down',key:'ENTER'},{kind:'key_up',key:'ENTER'}]});
+                host.call('settle', {id:sequence.id});
+                host.call('release', {id:sequence.id});
+                host.call('release', {id:observation.id});
+                host.call('fixture', {event:'confirmed_exit'});
+                host.call('observe', {});
+            }
+        ",
+            3_000,
+            1,
+            false,
+            scenario,
+            None,
+        );
+        let (terminal, _) = child.finish();
+        assert_eq!(terminal["primary"]["category"], "TargetExited");
+        assert_eq!(terminal["cleanup"]["clean"], true);
+        assert_eq!(terminal["observations"]["accounting"]["complete"], true);
+        assert_eq!(
+            terminal["observations"]["accounting"]["expanded_input_events"],
+            2
+        );
+        assert_eq!(
+            terminal["observations"]["accounting"]["input_uncertain"],
+            true
+        );
+    }
+}
+
+#[test]
+fn fresh_child_cannot_spend_beyond_transferred_expanded_event_allowance() {
+    let mut child = OwnedProtocol::start_case(
+        r"
+        export function readiness() { return 'Ready'; }
+        export function workflow() {
+            const observation = host.call('observe', {});
+            for (let i=0;i<2;i++) {
+                const actions = Array.from({length:20}, (_, i) => ({kind:i % 2 ? 'key_up' : 'key_down',key:'ENTER'}));
+                const sequence = host.call('submit', {observation, actions});
+                host.call('settle', {id:sequence.id});
+                host.call('release', {id:sequence.id});
+            }
+        }
+    ",
+        3_000,
+        2,
+        false,
+        "success",
+        Some(30),
+    );
+    let (terminal, _) = child.finish();
+    assert_eq!(terminal["attempt"], 2);
+    assert_eq!(terminal["primary"]["category"], "ActionLimit");
+    assert_eq!(terminal["cleanup"]["clean"], true);
+    assert_eq!(
+        terminal["observations"]["accounting"]["expanded_input_events"],
+        20
+    );
+}
+
+#[test]
+fn desktop_default_off_retains_one_real_child_result_under_its_reservation() {
+    use mado_runtime_comparison::desktop::{DesktopController, StartRequest};
+    use mado_runtime_comparison::inventory::PackageDraft;
+    use mado_runtime_comparison::model::identity;
+    struct Package(std::path::PathBuf);
+    impl Drop for Package {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    let plan: Plan = serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let package = Package(
+        std::env::temp_dir().join(format!("mado-exit-default-{}-{nonce}", std::process::id())),
+    );
+    let draft = PackageDraft::capture(
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/javascript")),
+        &plan.limits,
+    )
+    .unwrap();
+    for (path, bytes) in draft.files() {
+        let destination = package.0.join(path);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, bytes).unwrap();
+    }
+    std::fs::write(
+        package.0.join("main.js"),
+        r"
+        export function readiness() { return 'Ready'; }
+        export function workflow() {
+            host.call('wait', {duration_ms:1000});
+            host.call('fixture', {event:'confirmed_exit'});
+            host.call('observe', {});
+        }
+    ",
+    )
+    .unwrap();
+    let executable = std::path::PathBuf::from(env!("CARGO_BIN_EXE_mado-runtime-comparison"));
+    let controller = DesktopController::new(executable.clone(), executable);
+    let inventory = controller.inspect(&package.0).unwrap();
+    let request = StartRequest {
+        package_path: package.0.to_str().unwrap().into(),
+        inventory_identity: inventory.inventory_identity.clone(),
+        package_id: inventory.package_id.clone(),
+        schema_identity: identity(&inventory.schema).unwrap(),
+        profile_id: "saved-choice".into(),
+        values: inventory.profiles["ocr-first"]["options"].clone(),
+        lane: "controlled".into(),
+        scenario: "workflow".into(),
+        replay_descriptor_path: None,
+        native_intent: None,
+    };
+    let run = controller.start(request.clone(), None).unwrap();
+    assert_eq!(
+        controller.start(request, None).unwrap_err().category,
+        "RunActive"
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let terminal = loop {
+        let view = controller.poll();
+        if view.state == "terminal" {
+            break view;
+        }
+        assert_eq!(view.run.as_deref(), Some(run.as_str()));
+        assert!(Instant::now() < deadline, "owned child did not settle");
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert!(terminal.error.is_none(), "{:?}", terminal.error);
+    assert_eq!(terminal.attempts.len(), 1);
+    let result = terminal.result.unwrap();
+    assert_eq!(result["run"], run);
+    assert_eq!(result["recovery_count"], 0);
+    assert_eq!(result["primary"]["category"], "TargetExited");
+    assert_eq!(result["cleanup"]["clean"], true);
+    assert_eq!(result["observations"]["terminal_accounted"], true);
+    assert_eq!(result["observations"]["workflow_entered"], true);
+}
+
+#[test]
+fn real_child_large_exit_attribution_preserves_the_typed_cause() {
+    let function = format!("observe_exit_{}", "x".repeat(6_000));
+    let source = format!(
+        "export function readiness() {{ return 'Ready'; }}\n\
+         function {function}(depth) {{\n\
+             if (depth > 0) {{ {function}(depth - 1); return depth; }}\n\
+             host.call('fixture', {{event:'confirmed_exit'}});\n\
+             host.call('observe', {{}});\n\
+         }}\n\
+         export function workflow() {{ {function}(2); }}"
+    );
+    let mut child = OwnedProtocol::start_attempt(&source, 3_000, 1, false);
+    let (terminal, _) = child.finish();
+    assert_eq!(
+        terminal["primary"]["category"], "TargetExited",
+        "{terminal}"
+    );
+    assert_eq!(terminal["primary"]["context"]["exit_reason"], "absent");
+    assert_eq!(
+        terminal["primary"]["context"]["diagnostic_truncation"]["context_omitted"],
+        true
+    );
+    assert_eq!(terminal["observations"]["workflow_entered"], true);
+    assert_eq!(terminal["observations"]["accounting"]["complete"], true);
+    assert_eq!(terminal["cleanup"]["clean"], true);
 }

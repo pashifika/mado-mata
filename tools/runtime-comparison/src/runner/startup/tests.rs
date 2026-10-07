@@ -26,7 +26,7 @@ fn requests_own_one_probe_and_pending_does_not_schedule_a_successor() {
     let observed = Arc::clone(&calls);
     let (entered, arrival) = mpsc::sync_channel(1);
     let (release, wait) = mpsc::sync_channel(1);
-    let preparation = NativePreparation::new(control(), move |_, _| {
+    let preparation = NativePreparation::new(control(), 1, move |_, _| {
         let count = observed.fetch_add(1, Ordering::AcqRel);
         if count == 0 {
             entered.send(()).unwrap();
@@ -62,8 +62,9 @@ fn requests_own_one_probe_and_pending_does_not_schedule_a_successor() {
 
 #[test]
 fn typed_failure_is_terminal_not_another_pending_probe() {
-    let preparation = NativePreparation::new(control(), |_, report| {
+    let preparation = NativePreparation::new(control(), 1, |_, report| {
         report(NativeProgress {
+            attempt: 1,
             status: NativeTargetStatus::Pending,
             phase: NativePhase::LaunchSubmission,
             launch: LaunchDisposition::Uncertain,
@@ -92,11 +93,13 @@ fn stop_retains_physical_callback_and_late_launch_disposition_without_late_targe
     let (release, wait) = mpsc::sync_channel(1);
     let preparation = Arc::new(NativePreparation::new(
         Arc::clone(&control),
+        1,
         move |control, report| {
             control.admit_launch()?;
             entered.send(()).unwrap();
             wait.recv_timeout(Duration::from_secs(5)).unwrap();
             report(NativeProgress {
+                attempt: 1,
                 status: NativeTargetStatus::Pending,
                 phase: NativePhase::LaunchSubmission,
                 launch: LaunchDisposition::Accepted,
@@ -130,8 +133,9 @@ fn stop_retains_physical_callback_and_late_launch_disposition_without_late_targe
 #[test]
 fn cancellation_before_the_first_request_never_enters_the_resolver() {
     let control = control();
-    let preparation =
-        NativePreparation::new(Arc::clone(&control), |_, _| panic!("no startup authority"));
+    let preparation = NativePreparation::new(Arc::clone(&control), 1, |_, _| {
+        panic!("no startup authority")
+    });
     control.cancel();
     assert_eq!(preparation.request().unwrap_err().category, "Cancelled");
     assert_eq!(
@@ -143,7 +147,7 @@ fn cancellation_before_the_first_request_never_enters_the_resolver() {
 
 #[test]
 fn a_consumed_probe_panic_still_prevents_a_clean_preparation_settlement() {
-    let preparation = NativePreparation::new(control(), |_, _| panic!("initializer fault"));
+    let preparation = NativePreparation::new(control(), 1, |_, _| panic!("initializer fault"));
     preparation.request().unwrap();
     let fault = completed(&preparation).fault.unwrap();
     assert_eq!(fault.category, "Controller");
@@ -151,4 +155,30 @@ fn a_consumed_probe_panic_still_prevents_a_clean_preparation_settlement() {
     assert!(preparation.request().is_err());
     let retained = preparation.settle().unwrap();
     assert_eq!(retained.context["native_cleanup"], "unverified");
+}
+
+#[test]
+fn fresh_preparation_owns_its_identity_and_does_not_inherit_one_shot_state() {
+    for attempt in [1, 2] {
+        let preparation = NativePreparation::new(control(), attempt, |_, report| {
+            report(NativeProgress {
+                attempt: 1,
+                status: NativeTargetStatus::Pending,
+                phase: NativePhase::WaitingForProcess,
+                launch: LaunchDisposition::NotRequested,
+            });
+            Ok(Some(serde_json::json!({"captured":"unchanged"})))
+        });
+        assert_eq!(preparation.progress().attempt, attempt);
+        assert_eq!(
+            preparation.progress().status,
+            NativeTargetStatus::NotRequested
+        );
+        preparation.request().unwrap();
+        let reply = completed(&preparation);
+        assert_eq!(reply.progress.attempt, attempt);
+        assert_eq!(reply.configuration.unwrap()["captured"], "unchanged");
+        assert!(preparation.request().is_err());
+        assert!(preparation.settle().is_none());
+    }
 }

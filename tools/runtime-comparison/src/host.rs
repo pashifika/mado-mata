@@ -191,6 +191,7 @@ impl Phase {
 
 struct State {
     phase: Phase,
+    workflow_entered: bool,
     readiness_started: Option<Instant>,
     next_id: u64,
     session: u64,
@@ -307,11 +308,26 @@ impl Host {
         assets: BTreeMap<String, PayloadBytes>,
         control: Arc<Control>,
     ) -> Result<Self, Fault> {
+        Self::new_attempt(
+            plan,
+            options,
+            assets,
+            control,
+            NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed),
+        )
+    }
+
+    pub(crate) fn new_attempt(
+        plan: Plan,
+        options: Value,
+        assets: BTreeMap<String, PayloadBytes>,
+        control: Arc<Control>,
+        attempt: u64,
+    ) -> Result<Self, Fault> {
         plan.limits.validate()?;
         if !options.is_object() {
             return Err(Fault::new("Profile", "resolved options must be an object"));
         }
-        let attempt = NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| Fault::new("Clock", "system clock precedes Unix epoch"))?
@@ -352,6 +368,7 @@ impl Host {
                 lifetime: lifetime.clone(),
                 state: Mutex::new(State {
                     phase: Phase::Instantiating,
+                    workflow_entered: false,
                     readiness_started: None,
                     next_id: 1,
                     session: 1,
@@ -396,7 +413,7 @@ impl Host {
                 metrics: std::array::from_fn(|_| OperationMetrics::default()),
                 #[cfg(feature = "engine")]
                 engine,
-                startup: Mutex::new(startup::Startup::new()),
+                startup: Mutex::new(startup::Startup::new(attempt)),
                 startup_link: OnceLock::new(),
             }),
         })
@@ -491,7 +508,10 @@ impl Host {
     }
 
     fn retain_terminal_fault(&self, error: &Fault) {
-        if matches!(error.category.as_str(), "TargetLost" | "Closed") {
+        if matches!(
+            error.category.as_str(),
+            "TargetExited" | "TargetLost" | "Closed"
+        ) {
             self.fail(error.clone());
         }
     }
@@ -1080,6 +1100,14 @@ impl Host {
             return Ok(json!({"applied":true}));
         }
         self.check()?;
+        if event == "confirmed_exit" {
+            self.fail(
+                Fault::new("TargetExited", "Controlled exact-lifetime exit").with_context(
+                    json!({"exit_reason":"absent","evidence":"controlled-non-native"}),
+                ),
+            );
+            return Ok(json!({"applied":true}));
+        }
         let mut state = lock(&self.inner.state);
         match event {
             "geometry" => state.geometry += 1,
@@ -1101,6 +1129,38 @@ impl Host {
             _ => return Err(argument("unknown controlled fixture event")),
         }
         Ok(json!({"applied":true}))
+    }
+    pub(crate) fn workflow_entered(&self) -> bool {
+        lock(&self.inner.state).workflow_entered
+    }
+    pub(crate) fn terminal_accounting(&self) -> Result<Value, Fault> {
+        let state = lock(&self.inner.state);
+        if state
+            .cleanup
+            .as_ref()
+            .is_none_or(|cleanup| cleanup["clean"] != true)
+            || self.inner.physical.load(Ordering::Acquire) != 0
+            || self.inner.handle_budget.live.load(Ordering::Acquire) != 0
+        {
+            return Err(Fault::new("Accounting", "Attempt ownership is not settled"));
+        }
+        let input_uncertain = state.receipts.values().any(|receipt| {
+            matches!(
+                receipt.value["status"].as_str(),
+                Some("Partial" | "Uncertain")
+            )
+        });
+        #[cfg(feature = "engine")]
+        if let Some(engine) = self.inner.engine.get() {
+            drop(state);
+            let mut account = engine.terminal_accounting()?;
+            account["input_uncertain"] =
+                json!(input_uncertain || account["input_uncertain"] != false);
+            account["complete"] = json!(true);
+            return Ok(account);
+        }
+        Ok(json!({"complete":true,"frames":state.observations,
+            "expanded_input_events":state.admitted_actions,"input_uncertain":input_uncertain}))
     }
 
     pub fn snapshot(&self) -> Value {
