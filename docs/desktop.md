@@ -1135,7 +1135,9 @@ diagnostics; **Close window** follows the bounded shutdown path.
 
 During Edit, the owner strip's small **i** beside the workspace name shows
 **Save and Inspect guidance** on hover, focus, or click, including inside dialogs.
-Escape dismisses the focused hint before the dialog handles another Escape.
+A focused information or action hint consumes Escape while visible and keeps
+focus on its trigger. Once hidden, Escape reaches the existing Help or dialog
+handler. This applies to shared hints in the main window and detached Preview.
 The settings strip keeps **Return to Edit** at the upper right.
 At narrow widths, category tabs use their content height rather than stretching
 with the selected panel. Scroll the dialog when needed to reach Save/Close.

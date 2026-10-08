@@ -1,5 +1,5 @@
 import {cloneElement, createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
-import type {ButtonHTMLAttributes, CSSProperties, ReactElement, ReactNode, RefObject} from 'react';
+import type {ButtonHTMLAttributes, CSSProperties, KeyboardEvent, ReactElement, ReactNode, RefObject} from 'react';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import './contextual-help.css';
@@ -135,11 +135,17 @@ function useHint(text: string, anchor: RefObject<HTMLElement | null>) {
     };
   }, [open, text, anchor]);
   return {
-    open, show: () => setOpen(true),
+    show: () => setOpen(true),
     id, hide: () => setOpen(false),
     events: {
       onMouseEnter: () => setOpen(true), onMouseLeave: () => setOpen(false),
       onFocus: () => setOpen(true), onBlur: () => setOpen(false),
+      onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
+        if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing || !open) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+      },
     },
     tooltip: <span ref={element} id={id} className="contextual-help-hint" role="tooltip" hidden={!open} style={position}>{text}</span>,
   };
@@ -165,13 +171,7 @@ export function InfoHint({id, label, hint}: {id?: string; label: string; hint: s
   return <button ref={anchor} id={id} type="button"
     className="contextual-help-trigger contextual-help-icon-button"
     aria-label={label} aria-describedby={description.id}
-    {...description.events} onClick={description.show}
-    onKeyDown={event => {
-      if (event.key !== 'Escape' || !description.open) return;
-      event.preventDefault();
-      event.stopPropagation();
-      description.hide();
-    }}>
+    {...description.events} onClick={description.show}>
     <span className="contextual-help-icon" aria-hidden="true">i</span>
     {description.tooltip}
   </button>;
