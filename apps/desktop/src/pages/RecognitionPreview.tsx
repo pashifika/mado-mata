@@ -14,6 +14,7 @@ import type {PixelRect, PreviewAction, PreviewActionMessage, PreviewCloseFailure
 import type {Fault} from '../types.ts';
 import {PixelInspection, rgbHex} from '../recognitionInspection.ts';
 import type {InspectionState, PixelSample} from '../recognitionInspection.ts';
+import {PreviewImageLoad, previewActionAvailable} from '../recognitionPreviewLoad.ts';
 
 // The main window's label in tauri.conf.json; it owns the Edit session and applies every relayed edit.
 const MAIN_LABEL = 'main';
@@ -35,6 +36,8 @@ export default function RecognitionPreview() {
   const [received, setReceived] = useState(false);
   const [raster, setRaster] = useState<Raster | null>(null);
   const [rasterError, setRasterError] = useState<Fault | null>(null);
+  const [imageLoad] = useState(() => new PreviewImageLoad());
+  const [, refreshImageLoad] = useState(0);
   const [sendError, setSendError] = useState<Fault | null>(null);
   const [stopError, setStopError] = useState<Fault | null>(null);
   const [closeError, setCloseError] = useState<Fault | null>(null);
@@ -44,6 +47,7 @@ export default function RecognitionPreview() {
     request => invoke<PixelSample>('recognition_pixel', {...request}), setInspectionState, fault));
   const inspected = inspection.value;
   const [closing, setClosing] = useState(false);
+  const closingRef = useRef(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [trialEpoch, setTrialEpoch] = useState(0);
   const trialEpochRef = useRef(0);
@@ -91,6 +95,7 @@ export default function RecognitionPreview() {
       if (!alive) return;
       inspection.close();
       invalidateContent();
+      closingRef.current = true;
       setClosing(true);
     }, {target:{kind:'Window', label:PREVIEW_LABEL}}));
     register(listen<PreviewCloseFailure>('recognition-preview-close-failed', event => {
@@ -100,6 +105,7 @@ export default function RecognitionPreview() {
         || event.payload.generation !== (current.nativeSelection?.selection_generation ?? 0)) return;
       setCloseError(event.payload.error);
       inspection.open();
+      closingRef.current = false;
       setClosing(false);
     }));
     return () => {alive = false; for (const stop of stops) stop();};
@@ -115,6 +121,8 @@ export default function RecognitionPreview() {
   const frameId = snapshot?.frame?.id ?? null;
   const frameRevision = snapshot?.frame?.revision ?? null;
   const captureId = snapshot?.capture_id ?? null;
+  const loadEpoch = frameId !== null && captureId !== null ? inspectionEpoch : null;
+  const imageLoading = imageLoad.pending(loadEpoch);
   const image = raster?.epoch === inspectionEpoch && raster?.token === token && raster?.captureId === captureId && raster?.frameId === frameId
     && raster?.frameRevision === frameRevision ? raster.url : null;
   const trialKey = JSON.stringify([trialEpoch, contentIdentity(snapshot), closing, display.tool, image]);
@@ -135,6 +143,7 @@ export default function RecognitionPreview() {
     }
     let alive = true;
     let url: string | null = null;
+    const request = imageLoad.begin(inspectionEpoch);
     setRasterError(null);
     invoke<ArrayBuffer>('recognition_preview', {owner: snapshot.owner, frameId, captureId}).then(bytes => {
       if (!alive || inspection.sourceEpoch !== inspectionEpoch) return;
@@ -147,9 +156,13 @@ export default function RecognitionPreview() {
         setRaster(null);
         setRasterError(fault(cause));
       }
+    }).finally(() => {
+      request.settle();
+      refreshImageLoad(value => value + 1);
     });
     return () => {
       alive = false;
+      request.invalidate();
       if (url !== null) URL.revokeObjectURL(url);
     };
   }, [token, captureId, frameId, frameRevision, inspectionEpoch, closing]);
@@ -179,7 +192,8 @@ export default function RecognitionPreview() {
     send({kind: 'display', display: next});
   }
   function action(next:PreviewAction) {
-    if (snapshot === null) return;
+    if (snapshot === null || snapshot !== snapshotRef.current || inspectionEpoch !== inspection.sourceEpoch
+      || !previewActionAvailable(snapshot, closingRef.current, imageLoad.pending(loadEpoch), next)) return;
     invalidateContent();
     inspection.clear();
     const message:PreviewActionMessage = {token:snapshot.owner.token, revision:snapshot.revision,
@@ -194,6 +208,7 @@ export default function RecognitionPreview() {
     if (!snapshot || closing) return;
     invalidateContent();
     inspection.close();
+    closingRef.current = true;
     setClosing(true);
     setCloseError(null);
     try {
@@ -203,6 +218,7 @@ export default function RecognitionPreview() {
     } catch (cause) {
       setCloseError(fault(cause));
       inspection.open();
+      closingRef.current = false;
       setClosing(false);
     }
   }
@@ -312,7 +328,7 @@ export default function RecognitionPreview() {
               // The independent authoring Stop: no geometry fence, no relay through the main window.
               invoke<boolean>('authoring_stop', {owner: snapshot.owner}).catch(cause => setStopError(fault(cause)));
             }}>{r.stop}</button>
-          <NativeCaptureControls disabled={!snapshot || closing || snapshot.commandBusy || snapshot.running || !snapshot.editable} cancelDisabled={closing}
+          <NativeCaptureControls disabled={!previewActionAvailable(snapshot, closing, imageLoading, 'select')} cancelDisabled={closing}
             selection={snapshot?.nativeSelection ?? null} onSelect={() => action('select')} onStart={() => action('start')}
             onCapture={newCapture => action(newCapture ? 'newCapture' : 'capture')} onCancel={() => action('cancel')}/>
           <button id="preview-done" type="button" disabled={!snapshot || closing}

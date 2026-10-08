@@ -8,6 +8,7 @@ import {
   trialFreshness, trialTicket, undoRecognition, captureDocuments, aggregateDefinitions, canUndoRecognition, discardPixelCrops, canReleaseImage, rebaseFrame, nativePrimaryAction,
 } from './recognition.ts';
 import {PixelInspection, clientToPixel, pixelCenter, rgbHex} from './recognitionInspection.ts';
+import {PreviewImageLoad, previewActionAvailable} from './recognitionPreviewLoad.ts';
 
 const MIB=1_048_576;
 const owner={workspace:{workspace_id:'a',revision:1},token:'lease-1'};
@@ -1579,4 +1580,66 @@ test('display synchronization retains local zoom through repeated polls but acce
   assert.deepEqual(h.inspection.incoming(replaced),{tool:'content',zoom:200});
   assert.equal(h.inspection.inspecting,false);
   assert.equal(h.inspection.available,false);
+});
+
+test('Preview loading refuses every ordinary target action before admission and while outstanding',()=>{
+  const load=new PreviewImageLoad();
+  const snapshot=inspectionSnapshot();
+  assert.equal(previewActionAvailable({...snapshot,frame:null},false,load.pending(null),'select'),true);
+  for (const action of ['select','start','capture','newCapture']) {
+    assert.equal(previewActionAvailable(snapshot,false,load.pending(1),action),false,action);
+  }
+  const request=load.begin(1);
+  assert.equal(previewActionAvailable(snapshot,false,load.pending(1),'select'),false);
+  assert.equal(previewActionAvailable(snapshot,false,load.pending(1),'cancel'),true);
+  assert.equal(previewActionAvailable(snapshot,true,load.pending(1),'cancel'),false);
+  request.settle();
+  assert.equal(previewActionAvailable(snapshot,false,load.pending(1),'select'),true);
+});
+
+test('Preview settlement needs no raster and preserves independent host restrictions',()=>{
+  const load=new PreviewImageLoad();
+  const request=load.begin(1);
+  request.settle();
+  const snapshot=inspectionSnapshot({error:{category:'Image',message:'preview encoding failed',context:null}});
+  assert.equal(previewActionAvailable(snapshot,false,load.pending(1),'start'),true);
+  for (const restriction of [{editable:false},{commandBusy:true},{running:true},{nativeSelection:{busy:true}},{nativeSelection:{platform:'unsupported'}}]) {
+    assert.equal(previewActionAvailable({...snapshot,...restriction},false,load.pending(1),'start'),false);
+  }
+  assert.equal(previewActionAvailable(null,false,load.pending(null),'select'),false);
+});
+
+test('Preview invalidation cannot release an outstanding request even when the successor is empty',()=>{
+  const load=new PreviewImageLoad();
+  const request=load.begin(1);
+  request.invalidate();
+  assert.equal(load.pending(null),true);
+  request.settle();
+  assert.equal(load.pending(null),false);
+  assert.equal(load.pending(1),true,'reopening the same source must await a fresh load');
+  const reopened=load.begin(1);
+  request.invalidate();
+  request.settle();
+  assert.equal(load.pending(1),true);
+  reopened.settle();
+  assert.equal(load.pending(1),false);
+});
+
+for (const {scenario,first} of [
+  {scenario:'old completion precedes the successor',first:'old'},
+  {scenario:'successor completion precedes the old request',first:'new'},
+]) test(`Preview overlapping settlement: ${scenario}`,()=>{
+  const load=new PreviewImageLoad();
+  const old=load.begin(1);
+  old.invalidate();
+  const current=load.begin(2);
+  const requests=first==='old'?[old,current]:[current,old];
+  requests[0].settle();
+  assert.equal(load.pending(2),true);
+  requests[1].settle();
+  assert.equal(load.pending(2),false);
+  old.invalidate();
+  old.settle();
+  assert.equal(load.pending(2),false,'old cleanup cannot erase successor settlement');
+  assert.equal(load.pending(3),true,'a new source is blocked before its effect starts');
 });
