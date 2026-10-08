@@ -861,6 +861,107 @@ mod tests {
         (bootstrap, incoming, preimage)
     }
 
+    fn stored_snapshot(
+        path: &Path,
+        capture: &configuration::Capture,
+        version: u32,
+        extra: Option<&str>,
+    ) -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, ZipWriter};
+
+        let mut manifest = backup::Manifest::new(capture);
+        manifest.version = version;
+        manifest.check().unwrap();
+        let bytes = storage::encode(&manifest, backup::MAX_MANIFEST).unwrap();
+        let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .unix_permissions(0o600);
+        archive.start_file("manifest.json", options).unwrap();
+        archive.write_all(&bytes).unwrap();
+        for (name, bytes) in &capture.files {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(bytes).unwrap();
+        }
+        if let Some(name) = extra {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(b"foreign metadata").unwrap();
+        }
+        let bytes = archive.finish().unwrap().into_inner();
+        put(path, &bytes);
+        bytes
+    }
+
+    #[test]
+    fn metadata_snapshots_refuse_before_session_retirement_or_installation() {
+        for (version, extra) in [
+            (1, None),
+            (2, None),
+            (1, Some(".DS_Store")),
+            (1, Some("__MACOSX/._settings.json")),
+        ] {
+            let home = Home::new();
+            let (bootstrap, incoming, preimage) = restore_fixture(&home);
+            let root = home.0.join("selected");
+            put(&root.join("profiles/._retained.json"), b"destination metadata");
+            let before = configuration::capture(&root).unwrap();
+            let application = bootstrap.application().unwrap();
+            let preimage_bytes = fs::read(&preimage.path).unwrap();
+            let mut files = backup::read(Path::new(&incoming.path)).unwrap().files;
+            if extra.is_none() {
+                files.insert("profiles/._legacy.json".into(), b"historical bytes".to_vec());
+            }
+            let capture = configuration::Capture::from_files(files, true).unwrap();
+            restore::validate(&capture).unwrap();
+            let archive = home.0.join("metadata.config");
+            let archive_bytes = stored_snapshot(&archive, &capture, version, extra);
+            assert!(backup::read(&archive).is_err());
+            let logs = application.finish_log_output();
+            assert!(logs.shutdown_complete);
+            let result =
+                bootstrap.restore_snapshot(&archive, Some(&preimage.generation), true, true);
+            assert_eq!(result.err().unwrap().category, "Snapshot");
+            assert!(Arc::ptr_eq(&application, &bootstrap.application().unwrap()));
+            assert!(matches!(bootstrap.status().state, Phase::Ready));
+            assert_eq!(configuration::capture(&root).unwrap(), before);
+            assert!(!root.join("profiles/._legacy.json").exists());
+            assert_eq!(fs::read(root.join("profiles/._retained.json")).unwrap(), b"destination metadata");
+            assert!(!restore::pending(&root).unwrap());
+            assert!(!root.join(".restore-journal").exists());
+            assert_eq!(fs::read(&archive).unwrap(), archive_bytes);
+            assert_eq!(fs::read(&preimage.path).unwrap(), preimage_bytes);
+            assert_eq!(lock(&bootstrap.state).receipt.as_ref().unwrap().generation, preimage.generation);
+            bootstrap.shutdown().unwrap();
+        }
+    }
+
+    #[test]
+    fn clean_snapshot_versions_restore_non_reserved_historical_bytes() {
+        for version in [1, 2] {
+            let home = Home::new();
+            let (bootstrap, incoming, preimage) = restore_fixture(&home);
+            let root = home.0.join("selected");
+            let mut files = backup::read(Path::new(&incoming.path)).unwrap().files;
+            files.insert("profiles/.retained.json".into(), b"opaque historical bytes\0".to_vec());
+            let capture = configuration::Capture::from_files(files, true).unwrap();
+            let archive = home.0.join("clean.config");
+            let archive_bytes = stored_snapshot(&archive, &capture, version, None);
+            assert_eq!(backup::read(&archive).unwrap(), capture);
+            let logs = bootstrap.application().unwrap().finish_log_output();
+            assert!(logs.shutdown_complete);
+            let restored = bootstrap
+                .restore_snapshot(&archive, Some(&preimage.generation), true, true)
+                .unwrap();
+            assert!(matches!(restored.state, Phase::Ready));
+            assert_eq!(configuration::capture(&root).unwrap(), capture);
+            assert_eq!(fs::read(&archive).unwrap(), archive_bytes);
+            assert!(!restore::pending(&root).unwrap());
+            bootstrap.shutdown().unwrap();
+        }
+    }
+
     fn construction_fault() -> Fault {
         Fault::new(
             "LoggingInitialization",

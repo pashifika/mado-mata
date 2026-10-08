@@ -963,7 +963,7 @@
     "receiptFiles": "Files",
     "receiptBytes": "Bytes",
     "restoreHeading": "Restore a snapshot",
-    "restoreHelp": "The archive is validated before replacing saved App, Tab and package configuration. Active profiles and target bindings must already use current XIDs; old active IDs are refused without conversion, and current IDs remain unchanged. Unassigned profiles/*.json and historical ledger bytes stay inactive and byte-preserved; the archive selects ledger bytes or absence without merging. Unsaved drafts, runs, package payloads and logs are not merged. Present configuration requires a matching snapshot clicked in this session.",
+    "restoreHelp": "The archive is validated before replacing saved App, Tab and package configuration. Reserved OS metadata filenames are refused before session disposal, even in older snapshots with valid manifests; the original archive is not rewritten. Clean version-1/version-2 snapshots remain supported. Active profiles and target bindings must already use current XIDs; old active IDs are refused without conversion, and current IDs remain unchanged. Unassigned profiles/*.json and historical ledger bytes stay inactive and byte-preserved; the archive selects ledger bytes or absence without merging. Unsaved drafts, runs, package payloads and logs are not merged. Present configuration requires a matching snapshot clicked in this session.",
     "archivePath": "Snapshot archive path",
     "archivePlaceholder": "Absolute path to app.config.<seconds>",
     "preimage": "Preimage snapshot",
