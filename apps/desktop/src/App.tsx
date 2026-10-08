@@ -29,7 +29,7 @@ import ExecutionPage from './pages/ExecutionPage.tsx';
 import type {RunSnapshot, RunView} from './pages/ExecutionPage.tsx';
 import StatusSurface from './components/StatusSurface.tsx';
 import {InfoHint} from './components/ContextualHelp.tsx';
-import {scopedAuthoring, workspaceStatus} from './status.ts';
+import {applicationStatus, scopedAuthoring, workspaceStatus} from './status.ts';
 import type {StatusItem} from './status.ts';
 import SavedWorkspacesDialog from './components/SavedWorkspacesDialog.tsx';
 import Select from './components/Select.tsx';
@@ -2090,9 +2090,11 @@ export default function App() {
   const activeOwner = (workspace: Workspace): ActiveOwner => !active || owner === workspace.id ? null : owner === null ? 'application' : 'other';
   const selectedAuthoring = scopedAuthoring(selected, authoring);
   const selectedRun = selected ? runView(selected) : null;
+  const applicationPending = closing ? t.closing : appBusy ? t[appBusy] : bootstrap.pending ? t[bootstrap.pending]
+    : bootstrap.snapshotPending ? ui.bootstrap.snapshotting : null;
   const statusItems: StatusItem[] = selected
     ? workspaceStatus(selected, derived[selected.id], selectedRun?.view ?? null, authoring, locale, starting?.workspaceId === selected.id, leaseLost)
-    : [];
+    : nav.kind === 'closed' ? [] : applicationStatus(view, locale, applicationPending, starting?.workspaceId === null);
   if (pollError) statusItems.unshift({id: 'poll', severity: 'error', text: `${t.application} · ${pollError.category}`, action: null});
   const currentPage = selected?.page === 'edit' && !editVisible ? 'run' : selected?.page;
   const pageTitle = currentPage === 'execution' ? ui.status.execution : currentPage === 'logs' ? t.logs
@@ -2106,7 +2108,7 @@ export default function App() {
 
   return <LocaleContext value={locale}><div className="app">
     <StatusSurface scopeKey={statusScope} scopeLabel={selected ? workspaceLabel(selected, workspaces) : nav.kind === 'closed' ? t.closedLabel(closedSelected?.label ?? nav.id) : t.application}
-      pageTitle={pageTitle} pageHelp={<p>{pageHelp}</p>} items={statusItems} session={selectedAuthoring}
+      pageTitle={pageTitle} pageHelp={<p>{pageHelp}</p>} runLabel={selected && isBound(selected) ? t.runControl : t.guidance} items={statusItems} session={selectedAuthoring}
       recognitionDirty={selectedAuthoring !== null && recognitionDirty} validating={selectedAuthoring !== null && validationActive}
       profile={selected?.bound ? selected.bound.validation === null ? 'none' : selected.bound.validation.draftRevision === selected.bound.draftRevision ? 'valid' : 'stale' : null}
       onNavigate={page => {if (selected) {if (page === 'edit') returnToEdit(); else change(selected.id, item => ({...item, page}));}}}
@@ -2203,7 +2205,7 @@ export default function App() {
         {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (isBound(selected)
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id}
-            handlers={handlers(selected)} authoring={pageAuthoring(selected)}
+            handlers={handlers(selected)} authoring={pageAuthoring(selected)} environment={savedEnvironment}
             nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error}/>
           : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}

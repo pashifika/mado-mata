@@ -127,7 +127,8 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
       <div className="button-row"><button id="guidance-return-to-edit" type="button" className="primary" onClick={authoring.onReturn}>{a.returnToEdit}</button></div>
     </div></section>}
     {!owner && <section id="edit-form" className="panel open-form" aria-labelledby="edit-heading"><div className="panel-body">
-      <h2 id="edit-heading">{a.openHeading}</h2>
+      <h2 aria-labelledby="edit-heading"><span id="edit-heading">{a.openHeading}</span>
+        <HelpTrigger title={a.openHeading} hint={a.openHeadingHint}><p>{a.openHelp}</p></HelpTrigger></h2>
       <div className="open-row"><div className="field"><div className="field-heading"><label htmlFor="authoring-package-id">{a.packageId}</label>
         <HelpTrigger title={a.packageId} hint={a.packageIdHint}><p>{a.packageIdHelp}</p></HelpTrigger></div>
         <input id="authoring-package-id" type="text" value={workspace.editPackageId} disabled={workspace.busy !== null || confirmEdit !== null} spellCheck={false}
@@ -155,7 +156,8 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
     <ProfileRecovery idPrefix="recovery" label={label} state={workspace.recovery} outcomes={workspace.recoveryOutcomes} locked={locked} handlers={recovery}/>
     <section className="panel open-form" aria-labelledby="inspect-heading">
       <div className="panel-body">
-        <h2 id="inspect-heading">{g.inspectHeading}</h2>
+        <h2 aria-labelledby="inspect-heading"><span id="inspect-heading">{g.inspectHeading}</span>
+          <HelpTrigger title={g.inspectHeading} hint={g.inspectHint}><p>{g.inspectHelp}</p></HelpTrigger></h2>
         <div className="open-row"><div className="field"><label htmlFor="package-path">{g.packageDirectory}</label>
           <input id="package-path" type="text" value={path} disabled={workspace.busy !== null} placeholder={g.packagePlaceholder} spellCheck={false}
             onChange={event => onPath(event.target.value)} onKeyDown={event => {if (event.key === 'Enter') confirmedInspect();}}/></div>

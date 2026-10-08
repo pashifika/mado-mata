@@ -4,6 +4,7 @@ import {LocalFault, messages, renderMessage} from './i18n.ts';
 import type {Locale} from './i18n.ts';
 import {cleanupLabel, faultSummary, record, text} from './state.ts';
 import type {ControllerView, Fault} from './types.ts';
+import {currentTargetDraft} from './target.ts';
 import {busy, needsAttention} from './workspace.ts';
 import type {Derived, Workspace} from './workspace.ts';
 
@@ -12,6 +13,7 @@ export interface StatusItem {
   severity: 'error' | 'warning' | 'progress' | 'info';
   text: string;
   action: 'run' | 'execution' | 'edit' | null;
+  earlierDraft?: boolean;
 }
 
 export function scopedAuthoring(workspace: Workspace | undefined, session: AuthoringSession | null): AuthoringSession | null {
@@ -29,6 +31,17 @@ export function packageValidation(session: AuthoringSession, validating: boolean
   };
 }
 
+export function applicationStatus(operation: ControllerView, locale: Locale, pending: string | null = null, starting = false): StatusItem[] {
+  const ui = messages[locale].ui;
+  const items: StatusItem[] = [];
+  if (pending) items.push({id: 'command', severity: 'progress', text: pending, action: null});
+  if (starting || (operation.workspace_id === null && busy(operation.state))) {
+    items.push({id: 'operation', severity: 'progress',
+      text: `${ui.operation(starting ? 'environment_check' : operation.operation)} · ${ui.phase(starting ? 'preparing' : operation.state)}`, action: null});
+  }
+  return items;
+}
+
 // The ordered list is a projection, not a last-message store. Private operation text stays in Execution.
 export function workspaceStatus(workspace: Workspace, facts: Derived | undefined, operation: ControllerView | null,
   authoring: AuthoringSession | null, locale: Locale, starting = false, leaseLost = false): StatusItem[] {
@@ -36,11 +49,11 @@ export function workspaceStatus(workspace: Workspace, facts: Derived | undefined
   const ui = messages[locale].ui;
   const session = scopedAuthoring(workspace, authoring);
   const items: StatusItem[] = [];
-  const add = (id: string, severity: StatusItem['severity'], value: string | null, action: StatusItem['action']) => {
-    if (value) items.push({id, severity, text: value, action});
+  const add = (id: string, severity: StatusItem['severity'], value: string | null, action: StatusItem['action'], earlierDraft?: boolean) => {
+    if (value) items.push({id, severity, text: value, action, earlierDraft});
   };
-  const fault = (id: string, value: Fault | null | undefined, action: StatusItem['action']) => {
-    if (value) add(id, 'error', value instanceof LocalFault ? renderMessage(locale, value.presentation) : `${value.category} · ${value.message}`, action);
+  const fault = (id: string, value: Fault | null | undefined, action: StatusItem['action'], earlierDraft?: boolean) => {
+    if (value) add(id, 'error', value instanceof LocalFault ? renderMessage(locale, value.presentation) : `${value.category} · ${value.message}`, action, earlierDraft);
   };
   const owned = operation?.workspace_id === workspace.id ? operation : null;
   if (needsAttention(owned) && owned) {
@@ -50,8 +63,10 @@ export function workspaceStatus(workspace: Workspace, facts: Derived | undefined
   fault('workspace-error', workspace.error, 'run');
   fault('source-error', workspace.sourceError, 'run');
   fault('profiles-error', workspace.bound?.profilesError, 'run');
-  fault('target-read', workspace.bound?.target.readError, 'run');
-  fault('target-action', workspace.bound?.target.issue?.fault, 'run');
+  const target = workspace.bound?.target;
+  fault('target-read', target?.readError, 'run');
+  fault('target-action', target?.issue?.fault, 'run', target?.issue ? !currentTargetDraft(target, target.issue.ticket) : undefined);
+  add('target-conflict', 'warning', target?.reconcile ? ui.target.conflict : null, 'run');
   if (session) {
     fault('edit-error', session.error, 'edit');
     fault('edit-refresh-error', session.refreshError, 'edit');

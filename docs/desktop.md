@@ -257,6 +257,8 @@ Validate checks the profile draft; it is not a Start token or saved-package
 validation. Start revalidates each submitted request and does not navigate away.
 Configuration and **Target** appear side by side when space permits, then stack
 in that order. Execution mode is distinct from Target's native Input route.
+The line below the summary identifies the next-run profile or draft; Replay also
+names the saved OCR environment and descriptor before Start.
 
 **Execution**, beside Run control and Logs, shows the selected workspace's
 captured operation, progress, retained outcome and independent cleanup evidence.
@@ -273,6 +275,8 @@ and blockers take priority over progress and ordinary notices. Closing details
 does not clear them. Profile-draft validation, saved-package validation and
 unsaved drafts retain distinct labels; another workspace's late response cannot
 become the selected workspace's notice.
+Application-scoped work reports its own progress. Target failures retain their
+earlier-draft attribution; an unresolved saved-record conflict still requires reload.
 
 **Help** opens the current page's explanation. Small information circles sit close
 to their labels, aligned to the upper-right within the text height. Their wider
@@ -284,6 +288,8 @@ explanation. Disabled actions retain hover descriptions without becoming enabled
 Close or an unconsumed Escape returns focus to the opener, respecting modal/editor
 Escape ownership. Help and status/validation details share one bounded drawer;
 changing page or workspace closes it without clearing the underlying state.
+Corrective and diagnostic actions preserve a usable focus target; source diagnostics
+continue into the editor.
 Detached Preview uses the same interaction in its existing overlay without
 resizing the image or changing Fit scale.
 

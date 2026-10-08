@@ -413,9 +413,10 @@ export default function EditPage({session, label, handlers, recognition, recogni
         onCompositionEnd={() => handlers.compositionEnd(editable.path)}
         onUndo={() => handlers.undo(editable.path)} onRedo={() => handlers.redo(editable.path)} onSave={() => handlers.save(editable.path)}
         onFind={() => {searchInput.current?.focus(); searchInput.current?.select();}} onFindNext={find}/>
-      <div className="completion-status" role="status">
-        <span id="authoring-completion-status">{a.completionStatuses[completionStatus]}</span>
-        {!optionsAvailable && <span id="authoring-options-unavailable">{a.optionsCompletionUnavailable}</span>}
+      <div className="completion-status">
+        <span>{a.completionList}<HelpTrigger title={a.completionList} hint={a.completionHint}><p>{a.completionScope}</p></HelpTrigger></span>
+        <span role="status"><span id="authoring-completion-status">{a.completionStatuses[completionStatus]}</span>
+          {!optionsAvailable && <> <span id="authoring-options-unavailable">{a.optionsCompletionUnavailable}</span></>}</span>
       </div>
     </>}
     {text?.kind === 'manifest' && <ManifestEditor key={text.path} draft={text} disabled={formDisabled}

@@ -12,7 +12,7 @@ import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, chooseLane, editDraft, hasWo
 import type {Bound, BoundWorkspace, Derived, NativeConsent} from '../workspace.ts';
 import {AUTHORING_RECOVERY, recoveryPath} from '../authoring.ts';
 import type {PageAuthoring} from './EditPage.tsx';
-import type {Fault, NativeCapability} from '../types.ts';
+import type {Fault, NativeCapability, Settings} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import './run-control.css';
@@ -32,14 +32,15 @@ export interface RunHandlers {
 interface Props {
   workspace: BoundWorkspace; label: string; derived: Derived; run: RunView;
   locked: boolean; active: boolean; pickerBusy: boolean; starting: boolean;
-  handlers: RunHandlers;
+  // The saved App settings environment that Replay Start reads; unsaved settings drafts never stand in for it.
+  environment: Settings['ocr_environment']; handlers: RunHandlers;
   // Host-issued Native policy; null when this platform/build offers none. `nativeError` is a failed availability read.
   nativeCapability: NativeCapability | null; nativeError: Fault | null;
   // While any Tab owns Edit, Start is refused everywhere; the owner additionally waits to exit before reinspecting.
   authoring: PageAuthoring;
 }
 
-export default function RunPage({workspace, label, derived, run, locked, active, pickerBusy, starting, handlers, authoring, nativeCapability, nativeError}: Props) {
+export default function RunPage({workspace, label, derived, run, locked, active, pickerBusy, starting, environment, handlers, authoring, nativeCapability, nativeError}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const bound = workspace.bound;
@@ -121,10 +122,11 @@ export default function RunPage({workspace, label, derived, run, locked, active,
       <div className="actions run-summary-actions">
         <ButtonHint hint={t.run.validateHint}><button id="validate" disabled={locked || numericErrors || !profileBound} onClick={handlers.validate}>{t.run.validate}</button></ButtonHint>
         <ButtonHint hint={t.run.startHint}><button id="start" className="primary" disabled={!canStart}
-          aria-describedby={[authoring.role !== null ? 'app-authoring-strip' : null, startBlock ? 'start-block' : null].filter(Boolean).join(' ') || undefined}
+          aria-describedby={['run-start-uses', authoring.role !== null ? 'app-authoring-strip' : null, startBlock ? 'start-block' : null].filter(Boolean).join(' ')}
           onClick={handlers.start}>{t.run.start}</button></ButtonHint>
       </div>
     </section>
+    <p id="run-start-uses" className="muted">{t.run.startUses(selectedProfile && !valuesDirty ? selectedProfile.name : null, bound.lane === 'replay', environment?.profile ?? null, bound.descriptorPath.trim() || null)}</p>
     <div className="run-grid">
       <section className="panel" aria-labelledby="config-heading">
         <div className="panel-heading"><h2 id="config-heading">{t.run.configuration}</h2><span className="tag">{dirty ? t.common.unsavedChanges : t.run.savedValues}</span></div>
@@ -176,6 +178,9 @@ export default function RunPage({workspace, label, derived, run, locked, active,
             <button id="delete-profile" className="danger-text" disabled={!bound.selectedId || locked} onClick={handlers.deleteProfile}>{t.run.deleteProfile}</button>
           </div>
           <details className="legacy-import"><summary>{t.run.legacyHeading}</summary>
+            <p className="field-help">{t.run.legacyHint}<HelpTrigger title={t.run.legacyHeading} hint={t.run.legacyHelpHint}>
+              <p>{t.run.legacyHelp}</p><p>{t.bootstrap.converterHelp}</p>
+            </HelpTrigger></p>
             <div className="button-row"><ButtonHint hint={t.run.legacyHint}><button id="import-legacy-profiles" disabled={locked} onClick={handlers.importLegacy}>{t.run.legacyImport}</button></ButtonHint></div>
             {legacy && <dl className="run-identity">
               <dt>{t.run.legacyImported}</dt><dd>{legacy.imported.length ? legacy.imported.join(', ') : t.run.legacyNone}</dd>

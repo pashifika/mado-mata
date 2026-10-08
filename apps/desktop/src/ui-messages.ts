@@ -80,6 +80,7 @@ function catalog(data: typeof enData) {
       settled: (operation: string | null) => interpolate(data.run.settled, {operation: operation ?? data.common.none}),
       inspected: (revision: number) => interpolate(data.run.inspected, {revision}),
       descriptorHelp: (limit: number) => interpolate(data.run.descriptorHelp, {limit}),
+      startUses: (profile: string | null, replay: boolean, environment: string | null, descriptor: string | null) => interpolate(data.run.startUses[replay ? profile === null ? 'replayDraft' : 'replayProfile' : profile === null ? 'draft' : 'profile'], {profile: profile ?? '', environment: environment ?? data.run.noSavedEnvironment, descriptor: descriptor ?? data.common.none}),
       olderRevision: (old: number, current: number) => interpolate(data.run.olderRevision, {old, current}),
       runKind: (lane: string) => interpolate(data.run.runKind, {lane}),
       nativeEnvelope: (duration: number) => interpolate(data.run.nativeEnvelope, {duration}),

@@ -53,6 +53,8 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
   const running = application.result?.response.observation;
   const observedAt = running ? new Date(running.observed_at_ms) : null;
   const runningIssue = application.issue?.fault;
+  // A missing saved-bundle prerequisite stays visible and outranks the generic action hint.
+  const runningUnavailable = eligibleRunningApplication(state) === null;
   const diagnostic = running ? boundedText(JSON.stringify(running.diagnostics, null, 2), 64 * 1024) : null;
   const issueDiagnostic = runningIssue ? boundedText(JSON.stringify(runningIssue.context, null, 2), 64 * 1024) : null;
   // A pending metadata command need not freeze typing; its ticket guards any later response.
@@ -264,10 +266,11 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
         <dl className="run-identity"><dt>{t.configurationIdentity}</dt><dd><code>{observation.check.configuration_identity}</code></dd>
           <dt>{t.gameBundleId}</dt><dd>{currentObservation ? observation.check.game_bundle_id ?? t.noBundleId : t.earlier}</dd></dl>
         <BoundedRecord value={observation.check as unknown as Json}/></details>}
-      {state.declaration && <section id="target-running-application" className="legacy-box" aria-labelledby="target-running-heading">
-        <h3 id="target-running-heading">{t.runningHeading}</h3>
+      {state.declaration && <section id="target-running-application" className="legacy-box" aria-labelledby="target-running-heading-label">
+        <h3 id="target-running-heading"><span id="target-running-heading-label">{t.runningHeading}</span><HelpTrigger title={t.runningHeading} hint={t.runningHint}>{t.runningHelp}</HelpTrigger></h3>
+        {runningUnavailable && <p id="target-running-prerequisite" className="field-help">{t.runningHelp}</p>}
         <div className="button-row"><ButtonHint hint={t.runningHint}><button id="target-check-running" type="button"
-          disabled={locked || active || pickerBusy || eligibleRunningApplication(state) === null} onClick={handlers.checkApplication}>{t.checkRunning}</button></ButtonHint>
+          disabled={locked || active || pickerBusy || runningUnavailable} title={runningUnavailable ? t.runningHelp : undefined} onClick={handlers.checkApplication}>{t.checkRunning}</button></ButtonHint>
           {application.pending && <button id="target-cancel-running" type="button" onClick={handlers.cancelApplication}>{t.cancelRunning}</button>}</div>
         {application.pending && <p role="status">{t.runningPending}</p>}
         {application.cancelled && <p role="status">{t.runningCancelled}</p>}

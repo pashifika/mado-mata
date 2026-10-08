@@ -11,7 +11,7 @@ import AuthoringValidation from './AuthoringValidation.tsx';
 import {HelpPanel, HelpProvider, HelpTrigger, useHelp} from './ContextualHelp.tsx';
 
 interface Props {
-  scopeKey: string; scopeLabel: string; pageTitle: string; pageHelp: ReactNode;
+  scopeKey: string; scopeLabel: string; pageTitle: string; pageHelp: ReactNode; runLabel: string;
   items: StatusItem[]; session: AuthoringSession | null; recognitionDirty: boolean; validating: boolean;
   profile: 'valid' | 'none' | 'stale' | null;
   onNavigate: (action: NonNullable<StatusItem['action']>) => void;
@@ -19,7 +19,7 @@ interface Props {
   children: ReactNode;
 }
 
-export default function StatusSurface({scopeKey, scopeLabel, pageTitle, pageHelp, items, session, recognitionDirty, validating, profile, onNavigate, onDiagnostic, children}: Props) {
+export default function StatusSurface({scopeKey, scopeLabel, pageTitle, pageHelp, runLabel, items, session, recognitionDirty, validating, profile, onNavigate, onDiagnostic, children}: Props) {
   const locale = useLocale();
   const ui = messages[locale].ui;
   const [panel, setPanel] = useState<'help' | 'status' | 'validation'>('help');
@@ -55,11 +55,11 @@ export default function StatusSurface({scopeKey, scopeLabel, pageTitle, pageHelp
     setPanel(kind);
   };
   const details = panel === 'status' ? <ul className="status-details">{items.map(item => <li key={item.id} className={`status-${item.severity}`}>
-    <span>{item.text}</span>{item.action && <button type="button" onClick={() => {help.close(false); onNavigate(item.action!);}}>
-      {item.action === 'execution' ? ui.status.execution : item.action === 'edit' ? messages[locale].app.edit : messages[locale].app.runControl}
+    <span>{item.earlierDraft && <>{ui.target.earlier} · </>}{item.text}</span>{item.action && <button type="button" onClick={() => {help.close(); onNavigate(item.action!);}}>
+      {item.action === 'execution' ? ui.status.execution : item.action === 'edit' ? messages[locale].app.edit : runLabel}
     </button>}
   </li>)}</ul> : panel === 'validation' && session ? <AuthoringValidation session={session} recognitionDirty={recognitionDirty} validating={validating}
-    onNavigate={fault => {help.close(false); onDiagnostic(fault);}}/> : undefined;
+    onNavigate={fault => {help.close(); onDiagnostic(fault);}}/> : undefined;
   return <HelpProvider controller={help}>
     {children}
     {help.topic && <div ref={drawer} className="workspace-drawer">
@@ -70,7 +70,7 @@ export default function StatusSurface({scopeKey, scopeLabel, pageTitle, pageHelp
       <button id="status-details" className={`status-message status-${items[0]?.severity ?? 'info'}`} type="button"
         aria-expanded={help.topic !== null && panel === 'status'} aria-controls="workspace-help-panel"
         onClick={event => openDetails('status', event.currentTarget)}>
-        <span role="status" aria-live="polite">{items[0]?.text ?? ui.status.ready}</span>
+        <span role="status" aria-live="polite">{items[0] ? <>{items[0].earlierDraft && <>{ui.target.earlier} · </>}{items[0].text}</> : ui.status.ready}</span>
       </button>
       <div className="status-facts">
         {profile !== null && <span id="profile-validation-status" className={`tag ${profile === 'valid' ? 'current' : ''}`}>{ui.status.profile} · {ui.status[profile]}</span>}

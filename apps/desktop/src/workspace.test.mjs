@@ -1,11 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyInvalidatedViews,applyRecoveryMutation,applyWorkspaceView,approveNative,bindSelection,busy,chooseLane,clearNativeApproval,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,editNativeReview,hasWorkspaceEdits,importProfileCommand,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
-import {LocalFault} from './i18n.ts';
+import {LocalFault,messages} from './i18n.ts';
 import {currentRecoveryDraft,editRecovery,issuePath,readRecoveryDraft,recoveryIssue,recoveryState,recoveryTicket,selectRecovery} from './recovery.ts';
 import {optionPath,readDraft} from './state.ts';
 import {beginApplicationPicker,beginRunningApplication,beginTarget,cancelRunningApplication,checkedTarget,completeApplicationPicker,completeRunningApplication,currentTargetDraft,discardTarget,editTarget,eligibleRunningApplication,failRunningApplication,invalidateApplicationPicker,invalidateRunningApplication,moveTargetArgument,readTarget,readTargetDraft,removedTarget,savedTarget,targetDirty,targetExpectation,targetFailed,targetReadFailed,targetState,targetTicket} from './target.ts';
-import {workspaceStatus,scopedAuthoring} from './status.ts';
+import {applicationStatus,workspaceStatus,scopedAuthoring} from './status.ts';
 
 const schema={type:'object',properties:{count:{type:'integer',default:1},mode:{type:'string'}}};
 function profile(id,name,values,packageId='pkg-a',schemaIdentity='schema-1'){
@@ -1822,6 +1822,65 @@ test('status preserves unresolved execution cleanup and inspection ahead of unre
   const inspected=bindSelection(workspace,selection('a',2));
   assert.equal(workspaceStatus(inspected,deriveBound(inspected.bound,null),failed,null,'en').some(item=>item.id==='inspection'),false);
   assert.equal(workspaceStatus(inspected,deriveBound(inspected.bound,null),failed,null,'en')[0].id,'execution');
+});
+
+test('status attributes a late Target failure to the earlier draft without certifying current edits',()=>{
+  const initial=loadedTarget();
+  const missing=editTarget(initial,{...initial.draft,gamePath:'/metadata/missing'});
+  const ticket=targetTicket(missing);
+  const pending=beginTarget(missing,'check');
+  const repaired=editTarget(pending,{...pending.draft,gamePath:initial.draft.gamePath});
+  const metadata={category:'TargetMetadata',message:'Selected target metadata is unavailable',context:{field:'game',stage:'canonicalize'}};
+  const failed=targetFailed(repaired,ticket,metadata);
+  const tab=withTarget(bindSelection(workspaceFromView(view('a')),targetSelection()),failed);
+  const issue=workspaceStatus(tab,deriveBound(tab.bound,null),null,null,'en').find(item=>item.id==='target-action');
+  assert.equal(issue.earlierDraft,true);
+  assert.equal(issue.severity,'error');
+  assert.equal(issue.action,'run');
+  assert.equal(failed.issue.fault,metadata);
+  assert.equal(failed.draft.gamePath,initial.draft.gamePath);
+  assert.equal(failed.observation,null);
+  assert.equal(failed.reconcile,false);
+  const current=withTarget(tab,targetFailed(missing,ticket,metadata));
+  assert.equal(workspaceStatus(current,deriveBound(current.bound,null),null,null,'en')
+    .find(item=>item.id==='target-action').earlierDraft,false);
+});
+
+test('status retains a late Target conflict and its reload requirement after further draft edits',()=>{
+  const initial=loadedTarget();
+  const ticket=targetTicket(initial);
+  const edited=editTarget(beginTarget(initial,'check'),{...initial.draft,gamePath:'/metadata/edited'});
+  const failed=targetFailed(edited,ticket,{category:'TargetConflict',message:'Saved target record changed',context:null});
+  let tab=withTarget(bindSelection(workspaceFromView(view('a')),targetSelection()),failed);
+  const items=workspaceStatus(tab,deriveBound(tab.bound,null),null,null,'en');
+  assert.equal(items.find(item=>item.id==='target-action').earlierDraft,true);
+  assert.equal(items.find(item=>item.id==='target-conflict').severity,'warning');
+  tab=withTarget(tab,editTarget(failed,{...failed.draft,arguments:['later']}));
+  assert.equal(tab.bound.target.issue,null);
+  assert.equal(targetTicket(tab.bound.target),null);
+  assert.equal(workspaceStatus(tab,deriveBound(tab.bound,null),null,null,'en')
+    .find(item=>item.id==='target-conflict').action,'run');
+  tab=withTarget(tab,readTarget(tab.bound.target,tab.bound.target.view));
+  assert.equal(workspaceStatus(tab,deriveBound(tab.bound,null),null,null,'en')
+    .some(item=>item.id==='target-conflict'),false);
+});
+
+test('Application status projects package-less Check admission and settlement without borrowing workspace work',()=>{
+  const previous=terminal('workspace-run');
+  const admitting=applicationStatus(previous,'en',null,true);
+  assert.equal(admitting[0].id,'operation');
+  assert.equal(admitting[0].severity,'progress');
+  assert.equal(admitting[0].action,null);
+  const check=terminal('application-check',{state:'preparing',operation:'environment_check',workspace_id:null,workspace_revision:null});
+  assert.equal(applicationStatus(check,'en')[0].id,'operation');
+  assert.equal(applicationStatus({...check,state:'running'},'en')[0].severity,'progress');
+  assert.equal(applicationStatus({...check,state:'stopping'},'en')[0].severity,'progress');
+  assert.deepEqual(applicationStatus({...check,state:'terminal'},'en'),[]);
+  assert.deepEqual(applicationStatus({...previous,state:'running'},'en'),[]);
+  const saving=applicationStatus(previous,'en',messages.en.app.savingSettings);
+  assert.equal(saving[0].id,'command');
+  assert.equal(saving[0].severity,'progress');
+  assert.equal(saving.length,1);
 });
 
 test('selected workspace status does not borrow a foreign late notice, validation or operation',()=>{

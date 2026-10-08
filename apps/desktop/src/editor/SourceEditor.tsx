@@ -174,7 +174,7 @@ export default function SourceEditor(props: Props) {
     const {props: current, a: labels} = latest.current;
     return [EditorState.readOnly.of(current.readOnly), EditorView.editable.of(!current.readOnly),
       EditorView.contentAttributes.of({id: 'authoring-editor', 'aria-label': labels.editorLabel(current.draft.path),
-        'aria-describedby': 'authoring-editor-help', 'aria-readonly': String(current.readOnly),
+        'aria-describedby': 'authoring-editor-help authoring-completion-scope', 'aria-readonly': String(current.readOnly),
         'data-path': current.draft.path, 'data-draft-revision': String(current.draft.revision),
         spellcheck: 'false', autocapitalize: 'off', autocorrect: 'off', tabindex: '0'}),
       EditorState.phrases.of(labels.completionPhrases)];
@@ -445,6 +445,7 @@ export default function SourceEditor(props: Props) {
   return <div className="code-editor">
     <div ref={mount} className="source-editor"/>
     <div className="editor-status"><span id="authoring-caret">{a.position(caret.line, caret.column)}</span><span>{a.lines(caret.lines)}</span>
-      <span id="authoring-editor-help">{a.editorHelp}</span></div>
+      <span id="authoring-editor-help">{a.editorHelp}</span>
+      <span id="authoring-completion-scope" className="visually-hidden">{a.completionScope}</span></div>
   </div>;
 }
