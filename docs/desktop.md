@@ -332,10 +332,11 @@ Neither action inspects, binds, or runs the package.
   **Recognition**.
   Script actions share one compact row, with **Find** at the right.
   **Find** or **Cmd/Ctrl+F** opens a floating search area over the editor's upper
-  right, without moving or resizing the editor. Check **Replace** to reveal
-  replacement controls below Find inside that area. Unchecking Replace or
-  closing Find keeps both text fields for reopening. Close or Escape in the
-  search area returns focus to the Script without discarding edits.
+  right, without moving or resizing the editor. Toggle the **Replace** icon to
+  reveal replacement controls below Find inside that area; its highlighted
+  state indicates that the row is open. Hiding Replace or closing Find keeps
+  both text fields for reopening. Close or Escape in the search area returns
+  focus to the Script without discarding edits.
   **Discard changes** affects only the selected file; other file drafts are kept.
 - **Metadata** opens structured manifest, option-schema and packaged preset
   controls; generated source maps are read-only facts. Metadata never

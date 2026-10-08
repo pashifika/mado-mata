@@ -548,11 +548,11 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .source-editing-area { position: relative; min-width: 0; }
 .editor-find-panel { position: absolute; z-index: 10; top: 8px; right: 8px; width: min(520px, calc(100% - 16px)); display: grid; gap: 8px; padding: 8px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: 0 4px 14px #12223b22; }
 .editor-search, .editor-replacement { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.editor-find-panel input:not([type="checkbox"]) { flex: 1 1 120px; min-width: 0; width: auto; min-height: 28px; padding: 4px 8px; font-size: 11px; }
+.editor-find-panel input { flex: 1 1 120px; min-width: 0; width: auto; min-height: 28px; padding: 4px 8px; font-size: 11px; }
 .editor-find-panel button { flex-shrink: 0; min-height: 28px; padding: 4px 8px; font-size: 11px; white-space: nowrap; }
 .editor-search .muted { white-space: nowrap; }
-.editor-replace-toggle { display: inline-flex; flex: none; align-items: center; gap: 4px; font-size: 11px; white-space: nowrap; }
-.editor-replace-toggle input { margin: 0; }
+.editor-find-panel .editor-replace-toggle { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; }
+.editor-replace-toggle[aria-expanded="true"] { background: var(--info-soft); border-color: var(--accent); color: var(--accent); }
 .editor-replacement-notice { font-size: 11px; color: var(--text-muted); }
 .editor-replacement-notice:empty { display: none; }
 .code-editor { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }

@@ -405,8 +405,14 @@ export default function EditPage({session, label, handlers, recognition, recogni
           <button id="authoring-search-previous" type="button" disabled={!query} onClick={() => find(true)}>{a.previous}</button>
           <button id="authoring-search-next" type="button" disabled={!query} onClick={() => find(false)}>{a.next}</button>
           <span id="authoring-search-count" className="muted" role="status">{summary ? a.matches(summary.count, summary.current, summary.capped) : ''}</span>
-          <label className="editor-replace-toggle"><input id="authoring-replace-toggle" type="checkbox" checked={replaceOpen}
-            aria-controls="authoring-replacement-row" onChange={event => setReplaceOpen(event.target.checked)}/>{a.replace}</label>
+          <button id="authoring-replace-toggle" className="editor-replace-toggle" type="button" aria-label={a.replace} title={a.replace}
+            aria-controls="authoring-replacement-row" aria-expanded={replaceOpen} onClick={() => setReplaceOpen(current => !current)}>
+            <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <text x="2" y="9" fill="currentColor" fontFamily="monospace" fontSize="11">a</text>
+              <text x="10" y="19" fill="currentColor" fontFamily="monospace" fontSize="11">b</text>
+              <path d="M11 4h5v7m-3-3 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
           <button id="authoring-find-close" type="button" aria-label={t.common.close} title={t.common.close} onClick={closeSearch}>×</button>
         </span>
         {replaceOpen && <span id="authoring-replacement-row" className="editor-replacement" role="group" aria-label={a.replacement}>
