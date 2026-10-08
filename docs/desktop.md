@@ -330,6 +330,13 @@ Neither action inspects, binds, or runs the package.
   its line endings and UTF-16 positions, including non-BMP characters. File-tree assets
   are inventory facts, not decoded or text-edited; image authoring belongs to
   **Recognition**.
+  Script actions share one compact row, with **Find** at the right.
+  **Find** or **Cmd/Ctrl+F** opens a floating search area over the editor's upper
+  right, without moving or resizing the editor. Check **Replace** to reveal
+  replacement controls below Find inside that area. Unchecking Replace or
+  closing Find keeps both text fields for reopening. Close or Escape in the
+  search area returns focus to the Script without discarding edits.
+  **Discard changes** affects only the selected file; other file drafts are kept.
 - **Metadata** opens structured manifest, option-schema and packaged preset
   controls; generated source maps are read-only facts. Metadata never
   opens in the source editor. Manifest controls preserve package identity and

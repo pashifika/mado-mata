@@ -109,6 +109,8 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const editable = text?.kind === 'source' ? text : undefined;
   const selection = useRef<TextRange>(selected?.range ?? {start: 0, end: 0});
   const searchInput = useRef<HTMLInputElement>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [duplicateId, setDuplicateId] = useState('');
   const [replacement, setReplacement] = useState('');
@@ -214,6 +216,16 @@ export default function EditPage({session, label, handlers, recognition, recogni
       client.current = null;
     };
   }, [session.owner.token]);
+
+  function openSearch() {
+    flushSync(() => setSearchOpen(true));
+    searchInput.current?.focus();
+    searchInput.current?.select();
+  }
+  function closeSearch() {
+    setSearchOpen(false);
+    sourceEditor.current?.focus();
+  }
 
   function invalidateCompletion(next?: Snapshot) {
     const context = currentContext.current;
@@ -363,7 +375,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
       </ButtonHint>
     </div>}
     {editable && <>
-      <div className="editor-toolbar">
+      <div className="editor-toolbar source-toolbar">
         <button id="authoring-undo" type="button" disabled={sourceReadOnly || editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
         <button id="authoring-redo" type="button" disabled={sourceReadOnly || editable.redo.length === 0 || editable.composing !== null} onClick={() => handlers.redo(editable.path)}>{a.redo}</button>
         <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(editable) || readOnly || editable.composing !== null} onClick={() => handlers.discard(editable.path)}>{a.discardFile}</button>
@@ -371,33 +383,45 @@ export default function EditPage({session, label, handlers, recognition, recogni
           <button id="authoring-complete" type="button" disabled={!completionContext} aria-keyshortcuts="Control+Space"
             onClick={() => sourceEditor.current?.complete()}>{a.complete}</button>
         </ButtonHint>
-        <span className="editor-search" role="search">
+        <button id="authoring-find" type="button" aria-expanded={searchOpen} aria-controls="authoring-find-panel"
+          onClick={() => searchOpen ? closeSearch() : openSearch()}>{a.find}</button>
+      </div>
+      <div className="source-editing-area">
+      {searchOpen && <div id="authoring-find-panel" className="editor-find-panel" role="search" aria-label={a.search}
+        onKeyDown={event => {
+          if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
+          event.preventDefault();
+          event.stopPropagation();
+          closeSearch();
+        }}>
+        <span className="editor-search">
           <label className="visually-hidden" htmlFor="authoring-search">{a.search}</label>
           <input id="authoring-search" ref={searchInput} type="search" value={query} spellCheck={false} placeholder={a.searchPlaceholder}
             onChange={event => setQuery(event.target.value)}
             onKeyDown={event => {
               if (event.nativeEvent.isComposing || event.keyCode === 229) return;
               if (event.key === 'Enter') {event.preventDefault(); find(event.shiftKey);}
-              if (event.key === 'Escape') {event.preventDefault(); sourceEditor.current?.focus();}
             }}/>
           <button id="authoring-search-previous" type="button" disabled={!query} onClick={() => find(true)}>{a.previous}</button>
           <button id="authoring-search-next" type="button" disabled={!query} onClick={() => find(false)}>{a.next}</button>
           <span id="authoring-search-count" className="muted" role="status">{summary ? a.matches(summary.count, summary.current, summary.capped) : ''}</span>
+          <label className="editor-replace-toggle"><input id="authoring-replace-toggle" type="checkbox" checked={replaceOpen}
+            aria-controls="authoring-replacement-row" onChange={event => setReplaceOpen(event.target.checked)}/>{a.replace}</label>
+          <button id="authoring-find-close" type="button" aria-label={t.common.close} title={t.common.close} onClick={closeSearch}>×</button>
         </span>
-      </div>
-      <div className="editor-toolbar editor-replacement">
-        <label htmlFor="authoring-replacement">{a.replacement}</label>
-        <input id="authoring-replacement" type="text" value={replacement} spellCheck={false} placeholder={a.replacementPlaceholder}
-          onChange={event => setReplacement(event.target.value)}
-          onKeyDown={event => {
-            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-            if (event.key === 'Enter') {event.preventDefault(); replaceMatch(false);}
-            if (event.key === 'Escape') {event.preventDefault(); sourceEditor.current?.focus();}
-          }}/>
-        <button id="authoring-replace" type="button" disabled={!query || sourceReadOnly || editable.composing !== null} onClick={() => replaceMatch(false)}>{a.replace}</button>
-        <button id="authoring-replace-all" type="button" disabled={!query || sourceReadOnly || editable.composing !== null} onClick={() => replaceMatch(true)}>{a.replaceAll}</button>
-        <span role="status">{replacementNotice === null ? '' : a.replacementRefusals[replacementNotice]}</span>
-      </div>
+        {replaceOpen && <span id="authoring-replacement-row" className="editor-replacement" role="group" aria-label={a.replacement}>
+          <label className="visually-hidden" htmlFor="authoring-replacement">{a.replacement}</label>
+          <input id="authoring-replacement" type="text" value={replacement} spellCheck={false} placeholder={a.replacementPlaceholder}
+            onChange={event => setReplacement(event.target.value)}
+            onKeyDown={event => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+              if (event.key === 'Enter') {event.preventDefault(); replaceMatch(false);}
+            }}/>
+          <button id="authoring-replace" type="button" disabled={!query || sourceReadOnly || editable.composing !== null} onClick={() => replaceMatch(false)}>{a.replace}</button>
+          <button id="authoring-replace-all" type="button" disabled={!query || sourceReadOnly || editable.composing !== null} onClick={() => replaceMatch(true)}>{a.replaceAll}</button>
+        </span>}
+        <div className="editor-replacement-notice" role="status">{replacementNotice === null ? '' : a.replacementRefusals[replacementNotice]}</div>
+      </div>}
       <SourceEditor key={`${session.owner.token}:${editable.path}`} draft={editable} reveal={session.reveal} readOnly={sourceReadOnly}
         selection={selection} control={sourceEditor} context={completionContext} request={requestCompletion} accepts={acceptsCompletion}
         completionPreferences={completionPreferences}
@@ -411,7 +435,8 @@ export default function EditPage({session, label, handlers, recognition, recogni
         onCompositionStart={range => {invalidateCompletion(); handlers.compositionStart(editable.path, range);}}
         onCompositionEnd={() => handlers.compositionEnd(editable.path)}
         onUndo={() => handlers.undo(editable.path)} onRedo={() => handlers.redo(editable.path)} onSave={() => handlers.save(editable.path)}
-        onFind={() => {searchInput.current?.focus(); searchInput.current?.select();}} onFindNext={find}/>
+        onFind={openSearch} onFindNext={find}/>
+      </div>
       <div className="completion-status">
         <span>{a.completionList}<HelpTrigger title={a.completionList} hint={a.completionHint}><p>{a.completionScope}</p></HelpTrigger></span>
         <span role="status"><span id="authoring-completion-status">{a.completionStatuses[completionStatus]}</span>

@@ -159,7 +159,7 @@
     "authoringCatalogSaved": "Package files updated · revision {revision}. Imports were not rewritten; Validate reports broken ones.",
     "authoringCatalogRefreshFailed": "The file change was committed · revision {revision}, but refreshing the package view failed. Do not repeat it; refresh the view before further changes.",
     "authoringRefreshed": "Package view refreshed · revision {revision}. Unsaved drafts were kept.",
-    "authoringDiskChanged": "Package view refreshed. {count} unsaved drafts differ from the latest disk text and are marked: Save replaces the disk text, Discard file changes adopts it.",
+    "authoringDiskChanged": "Package view refreshed. {count} unsaved drafts differ from the latest disk text and are marked: Save replaces the disk text, Discard changes adopts it.",
     "authoringConflict": "The package changed on disk since this view was read. Nothing was saved and your draft is kept. Refresh the package view, then save again.",
     "authoringValidated": "Revision {revision} passed validation. Exit Edit, then Inspect or Reinspect before running it.",
     "authoringInvalid": "Revision {revision} failed validation · {count} diagnostics. Package code was not run.",
