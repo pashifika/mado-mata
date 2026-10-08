@@ -25,8 +25,7 @@ export default function AuthoringValidation({session, recognitionDirty, validati
       {!validation && !validating && <p className="muted">{a.validationNone}</p>}
       {validation?.valid && <p id="authoring-validation-count" className="muted">{a.validationDiagnosticCount(validation.diagnostics.length)}</p>}
       {validation && !current && <p className="inline-warning">{a.staleValidation(shortRevision(validation.revision))}</p>}
-      {unsaved > 0 && <><span id="authoring-validation-unsaved" className="tag unsaved">{a.unsavedFiles(unsaved)}</span>
-        <p className="field-help">{a.unsavedNotValidated}</p></>}
+      {unsaved > 0 && <p className="field-help">{a.unsavedNotValidated}</p>}
       {validation && validation.diagnostics.length > 0 && <ol id="authoring-diagnostics" className="diagnostic-list">
         {validation.diagnostics.map((item, index) => {
           const location = diagnosticLocation(item);

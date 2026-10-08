@@ -62,9 +62,12 @@ export default function StatusSurface({scopeKey, scopeLabel, pageTitle, pageHelp
     onNavigate={fault => {help.close(); onDiagnostic(fault);}}/> : undefined;
   return <HelpProvider controller={help}>
     {children}
-    {help.topic && <div ref={drawer} className="workspace-drawer">
-      <HelpPanel controller={help} title={panel === 'status' ? ui.status.details : panel === 'validation' ? ui.authoring.savedValidationHeading : undefined}>{details}</HelpPanel>
-    </div>}
+    <div ref={drawer} className="workspace-feedback">
+      {help.topic && <div className="workspace-drawer">
+        <HelpPanel controller={help} title={panel === 'status' ? ui.status.details : panel === 'validation' ? ui.authoring.savedValidationHeading : undefined}>{details}</HelpPanel>
+      </div>}
+      {unsaved > 0 && <span id="status-unsaved" className="unsaved-bubble" title={ui.authoring.unsavedNotValidated}>{ui.authoring.unsavedFiles(unsaved)}</span>}
+    </div>
     <footer ref={bar} id="workspace-status" className="status-bar" aria-label={ui.status.heading}>
       <strong className="status-scope" title={scopeLabel}>{scopeLabel}</strong>
       <button id="status-details" className={`status-message status-${items[0]?.severity ?? 'info'}`} type="button"
@@ -80,7 +83,6 @@ export default function StatusSurface({scopeKey, scopeLabel, pageTitle, pageHelp
           {ui.authoring.savedValidationHeading} · {validation.state === 'running' ? ui.authoring.validating : ui.status[validation.state]}
           {validation.revision !== null && <> · {shortRevision(validation.revision)} · {ui.authoring.validationDiagnosticCount(validation.count)}</>}
         </button>}
-        {unsaved > 0 && <span id="status-unsaved" className="tag unsaved" title={ui.authoring.unsavedNotValidated}>{ui.authoring.unsavedFiles(unsaved)}</span>}
         <HelpTrigger id="workspace-help" label={ui.status.help} title={pageTitle} hint={ui.status.helpHint}>{pageHelp}</HelpTrigger>
       </div>
     </footer>

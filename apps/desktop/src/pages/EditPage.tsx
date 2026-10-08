@@ -102,7 +102,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const a = t.authoring;
   const drafts = draftList(session);
   const dirty = dirtyDrafts(session);
-  const unsaved = dirty.length + Number(recognitionDirty);
   const recognitionSelected = session.destination === 'recognition';
   const selected = recognitionSelected || session.selected === null ? undefined : session.drafts.get(session.selected);
   // Only sources get the text editor; declared metadata opens as structured views and assets as inventory facts.
@@ -461,7 +460,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
         <div><dt>{a.path}</dt><dd id="authoring-package-path" className="mono">{session.packagePath}</dd></div>
         <div><dt>{a.revision}</dt><dd id="authoring-revision" className="mono" title={session.revision}>{shortRevision(session.revision)}</dd></div>
       </dl>
-      {unsaved > 0 && <span id="authoring-unsaved-count" className="tag unsaved">{a.unsavedFiles(unsaved)}</span>}
     </div>
     <div className={railOpen ? 'repo' : 'repo rail-closed'}>
       <aside id="authoring-rail" className="panel repo-rail" aria-labelledby="authoring-rail-heading" hidden={!railOpen} onContextMenu={event => event.preventDefault()}>

@@ -97,8 +97,8 @@ function OperationStrip({idPrefix, owner, kind, phase, run, detail = null, messa
 }
 
 // The application-wide Edit lease stays visible with Return to Edit wherever the editor itself is not shown.
-function AuthoringStrip({idPrefix, owner, packageId, unsaved, showReturn, onReturn}: {
-  idPrefix: string; owner: string; packageId: string | null; unsaved: number; showReturn: boolean; onReturn: () => void;
+function AuthoringStrip({idPrefix, owner, packageId, showReturn, onReturn}: {
+  idPrefix: string; owner: string; packageId: string | null; showReturn: boolean; onReturn: () => void;
 }) {
   const locale = useLocale();
   const a = messages[locale].ui.authoring;
@@ -107,7 +107,6 @@ function AuthoringStrip({idPrefix, owner, packageId, unsaved, showReturn, onRetu
       <span className="strip-owner"><span className="eyebrow">{a.ownerEyebrow}</span>
         <span><strong>{owner}</strong><InfoHint id={`${idPrefix}-authoring-help`} label={a.details} hint={a.authority}/></span></span>
       <span className="strip-kind">{packageId === null ? a.stripUnknown : a.stripKind(packageId)}</span>
-      {unsaved > 0 && <span className="tag unsaved">{a.unsavedFiles(unsaved)}</span>}
       <span id={`${idPrefix}-authoring-reason`} className="strip-note">{a.stripNote}</span>
     </div>
     {showReturn && <button id={`${idPrefix}-return-to-edit`} type="button" onClick={onReturn}>{a.returnToEdit}</button>}
@@ -2039,7 +2038,7 @@ export default function App() {
       message={stripMessage && {text: renderMessage(locale, stripMessage.text), error: stripMessage.error}}
       stopDisabled={stopping || closing || (!authoringWorkerPending && (!view.run || !busy(view.state) || view.state === 'stopping' || starting !== null))}
       onStop={() => void (authoringWorkerPending || validationActive || recognitionActive ? stopValidation() : stopRun())}/>}
-    {leaseOwnerId !== null && <AuthoringStrip idPrefix={idPrefix} owner={labelOf(leaseOwnerId)} packageId={authoring?.packageId ?? null} unsaved={unsavedCount}
+    {leaseOwnerId !== null && <AuthoringStrip idPrefix={idPrefix} owner={labelOf(leaseOwnerId)} packageId={authoring?.packageId ?? null}
       showReturn={!(idPrefix === 'app' && editVisible)} onReturn={onReturn}/>}
   </>;
 
@@ -2156,7 +2155,7 @@ export default function App() {
             onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'execution'}));}}>{ui.status.execution}{needsAttention(runView(selected).view) && <span className="execution-attention" aria-label={t.attention(t.unresolved)}>!</span>}</button>
           <button id="page-logs" type="button" className="nav-item" aria-current={selected.page === 'logs' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'logs'}));}}>{t.logs}<span className="count">{logCounts[selected.id] ?? 0}</span></button>
           {selected.id === leaseOwnerId && <button id="page-edit" type="button" className="nav-item" aria-current={selected.page === 'edit' && authoring !== null ? 'page' : undefined}
-            onClick={() => {setReveal(null); returnToEdit();}}>{t.edit}{unsavedCount > 0 && <span className="count">{unsavedCount}</span>}</button>}
+            onClick={() => {setReveal(null); returnToEdit();}}>{t.edit}</button>}
         </>}
         {nav.kind === 'application' && <span className="scope-label">{t.applicationLogs}</span>}
         {nav.kind === 'closed' && <span className="scope-label">{t.closedDiagnostics}</span>}

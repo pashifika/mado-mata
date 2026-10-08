@@ -370,6 +370,11 @@ Neither action inspects, binds, or runs the package.
   earlier Save response arrives afterward. Composition, paste, completion and
   replacement use the same file-local history as typing; package-supplied
   WebView code is never loaded.
+  The total unsaved-draft count appears once, in a small lower-left bubble above
+  the status bar, and disappears when all drafts are saved or discarded.
+  Per-file dirty markers and the exit confirmation's affected-file list remain.
+  The bubble belongs to the Edit owner's Workspace; it is not another Workspace's
+  or Application's status.
 - **Validate** checks one saved revision through the existing inventory and
   trusted compiler without evaluating package code. Unsaved text is excluded.
   **Saved-package validation** in the bottom bar shows not checked, running,
