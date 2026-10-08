@@ -706,6 +706,12 @@ The toolbar's rightmost **Done** button uses the primary accent color and closes
 only the preview, including when no image is loaded. It does not save, discard,
 exit Edit, or stop a running trial.
 Reopen with **Open preview** to continue the same draft.
+While Preview loads its display image, target selection, saved-target startup,
+**Capture**, and **New capture** are unavailable and are not queued. They become
+available after all outstanding image requests settle, subject to the existing
+owner and operation restrictions. A failed load keeps its error visible without
+blocking target selection permanently; an empty Preview still allows initial
+selection. Loading alone does not disable **Stop**, cancellation, or **Done**.
 At the default Preview width, **Capture** and **Done** stay on the same toolbar
 row as the editing controls. Narrow windows use fixed additional rows; tool,
 capture, and feedback state do not change the image viewport's height.
@@ -2286,6 +2292,16 @@ separately.
    order; the preview must not remain above the main window. Record whether
    pointer actions were WebView events or physical OS input; one does not
    qualify the other.
+   While the display image request is pending, attempt target selection and
+   confirm no competing command or new `WorkspaceBusy` is emitted. After success
+   or failure, verify a new deliberate action is available, the current failure
+   remains visible, and no blocked action is replayed. Check first use without
+   an image, replacement with held late success/failure, and close/reopen:
+   obsolete replies must not replace the current image/error or unlock another
+   outstanding request. Keep Stop/cancel/Done independently available.
+   Native picker or window observation requires fresh target/environment/operation
+   approval; this check authorizes no capture, input, OCR, or game launch.
+   Distinguish temporary held-response observations from real backend requests.
    For **Inspect**, use a deterministic supported PNG and an independent source
    byte oracle, including more than 4,194,304 pixels so the display is reduced.
    Include a source pixel omitted by reduction, first/last and outside-Game-content
