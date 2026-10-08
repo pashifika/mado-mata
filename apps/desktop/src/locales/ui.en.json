@@ -1190,6 +1190,7 @@
     "previous": "Previous",
     "replacement": "Replace with",
     "replacementPlaceholder": "Replacement text (empty deletes)",
+    "toggleReplacement": "Show or hide replacement controls",
     "replace": "Replace",
     "replaceAll": "Replace all",
     "replacementRefusals": {

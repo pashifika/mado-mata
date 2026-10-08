@@ -37,14 +37,18 @@ export default function StatusSurface({scopeKey, scopeLabel, pageTitle, pageHelp
     const measure = () => {
       const statusHeight = element.getBoundingClientRect().height;
       const drawerHeight = drawer.current?.getBoundingClientRect().height ?? 0;
+      const helpHeight = drawer.current?.querySelector('.workspace-drawer')?.getBoundingClientRect().height ?? 0;
       shell.style.setProperty('--status-height', `${statusHeight}px`);
       shell.style.setProperty('--drawer-height', `${drawerHeight}px`);
+      shell.style.setProperty('--unsaved-height', `${drawerHeight - helpHeight}px`);
       page.style.scrollPaddingBottom = `${statusHeight + drawerHeight + 8}px`;
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     if (drawer.current) observer.observe(drawer.current);
+    const unsavedStatus = drawer.current?.querySelector('.unsaved-status');
+    if (unsavedStatus) observer.observe(unsavedStatus);
     return () => {
       observer.disconnect();
       page.style.scrollPaddingBottom = previousPadding;
@@ -66,7 +70,7 @@ export default function StatusSurface({scopeKey, scopeLabel, pageTitle, pageHelp
       {help.topic && <div className="workspace-drawer">
         <HelpPanel controller={help} title={panel === 'status' ? ui.status.details : panel === 'validation' ? ui.authoring.savedValidationHeading : undefined}>{details}</HelpPanel>
       </div>}
-      {unsaved > 0 && <span id="status-unsaved" className="unsaved-bubble" title={ui.authoring.unsavedNotValidated}>{ui.authoring.unsavedFiles(unsaved)}</span>}
+      <div className="unsaved-status" role="status">{unsaved > 0 && <span id="status-unsaved" className="unsaved-bubble" title={ui.authoring.unsavedNotValidated}>{ui.authoring.unsavedFiles(unsaved)}</span>}</div>
     </div>
     <footer ref={bar} id="workspace-status" className="status-bar" aria-label={ui.status.heading}>
       <strong className="status-scope" title={scopeLabel}>{scopeLabel}</strong>

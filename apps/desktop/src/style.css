@@ -397,6 +397,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 /* Shared modal dialogs (creation, saved workspaces) reuse the settings dialog chrome. */
 .modal { width: min(620px, calc(100vw - 30px)); max-height: calc(100vh - 60px); border: 1px solid #c8d2de; border-radius: 12px; padding: 0; color: var(--text); box-shadow: 0 22px 75px #12223b3d; }
 .modal::backdrop { background: #18293f66; }
+.app:has(.unsaved-bubble) :is(.settings-dialog, .modal) { inset-block: 12px calc(var(--status-height, 60px) + var(--unsaved-height, 0px) + 12px); margin-block: auto; max-height: calc(100dvh - var(--status-height, 60px) - var(--unsaved-height, 0px) - 24px); }
 .modal .operation-strip { border-bottom: 1px solid var(--border); }
 .dialog-body { padding: 20px 24px 0; max-height: calc(100vh - 220px); overflow: auto; }
 .dialog-body .dialog-footer { margin: 12px -24px 0; }
@@ -544,6 +545,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .source-toolbar { position: relative; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; padding: 3px; }
 .source-toolbar > *, .source-toolbar button { flex-shrink: 0; }
 .source-toolbar button { min-height: 28px; white-space: nowrap; }
+.source-toolbar button:focus-visible { outline-offset: -3px; }
 .source-toolbar #authoring-find { margin-left: auto; }
 .source-editing-area { position: relative; min-width: 0; }
 .editor-find-panel { position: absolute; z-index: 10; top: 8px; right: 8px; width: min(520px, calc(100% - 16px)); display: grid; gap: 8px; padding: 8px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: 0 4px 14px #12223b22; }
@@ -554,11 +556,11 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .editor-find-panel .editor-replace-toggle { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; }
 .editor-replace-toggle[aria-expanded="true"] { background: var(--info-soft); border-color: var(--accent); color: var(--accent); }
 .editor-replacement-notice { font-size: 11px; color: var(--text-muted); }
-.editor-replacement-notice:empty { display: none; }
+.editor-replacement-notice:empty { position: absolute; }
 .code-editor { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
 .source-editor .cm-editor { height: clamp(320px, 62vh, 900px); font-family: var(--mono); font-size: 12px; color: var(--text); }
 .source-editor .cm-scroller { overflow: auto; font-family: inherit; line-height: 18px; }
-.source-editor .cm-content { padding: 8px 0; caret-color: var(--text); }
+.source-editor .cm-content { padding: calc(8px + var(--source-top-inset, 0px)) 0 8px; caret-color: var(--text); }
 .source-editor .cm-line { padding: 0 10px; }
 .source-editor .cm-gutters { color: var(--text-faint); background: var(--surface-alt); border-right: 1px solid var(--border); }
 /* drawSelection paints below the text, so the active line must not cover its background. */
@@ -685,6 +687,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .status-progress { color: var(--accent); }
 .workspace-feedback { position: fixed; z-index: 45; bottom: var(--status-height, 60px); inset-inline: 0; display: flex; flex-direction: column; max-height: calc(100dvh - var(--navigation-clearance, 0px) - var(--status-height, 60px) - 16px); pointer-events: none; }
 .workspace-drawer { flex: 0 1 auto; min-height: 0; margin-inline: 16px; max-height: 42dvh; overflow-y: auto; overscroll-behavior: contain; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px 8px 0 0; box-shadow: 0 -6px 24px #12223b1f; padding: 12px 16px; pointer-events: auto; }
+.unsaved-status { display: flex; flex-shrink: 0; }
 .unsaved-bubble { position: relative; flex-shrink: 0; align-self: flex-start; max-width: calc(100% - 36px); margin: 8px 18px 12px; padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--warn-soft); color: var(--warn); box-shadow: 0 2px 8px #12223b14; font-size: 11px; font-weight: 600; overflow-wrap: anywhere; pointer-events: auto; }
 .unsaved-bubble::after { content: ''; position: absolute; left: 14px; bottom: -4px; width: 6px; height: 6px; background: inherit; border-right: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); transform: rotate(45deg); }
 .workspace-drawer p { overflow-wrap: anywhere; }

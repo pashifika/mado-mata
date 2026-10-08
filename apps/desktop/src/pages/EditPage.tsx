@@ -109,6 +109,8 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const editable = text?.kind === 'source' ? text : undefined;
   const selection = useRef<TextRange>(selected?.range ?? {start: 0, end: 0});
   const searchInput = useRef<HTMLInputElement>(null);
+  const searchPanel = useRef<HTMLDivElement>(null);
+  const [searchInset, setSearchInset] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -216,6 +218,16 @@ export default function EditPage({session, label, handlers, recognition, recogni
       client.current = null;
     };
   }, [session.owner.token]);
+
+  useLayoutEffect(() => {
+    const panel = searchPanel.current;
+    if (!panel) {setSearchInset(0); return;}
+    const measure = () => setSearchInset(panel.offsetTop + panel.offsetHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, [searchOpen, editable?.path]);
 
   function openSearch() {
     flushSync(() => setSearchOpen(true));
@@ -387,7 +399,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
           onClick={() => searchOpen ? closeSearch() : openSearch()}>{a.find}</button>
       </div>
       <div className="source-editing-area">
-      {searchOpen && <div id="authoring-find-panel" className="editor-find-panel" role="search" aria-label={a.search}
+      {searchOpen && <div ref={searchPanel} id="authoring-find-panel" className="editor-find-panel" role="search" aria-label={a.search}
         onKeyDown={event => {
           if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
           event.preventDefault();
@@ -405,7 +417,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
           <button id="authoring-search-previous" type="button" disabled={!query} onClick={() => find(true)}>{a.previous}</button>
           <button id="authoring-search-next" type="button" disabled={!query} onClick={() => find(false)}>{a.next}</button>
           <span id="authoring-search-count" className="muted" role="status">{summary ? a.matches(summary.count, summary.current, summary.capped) : ''}</span>
-          <button id="authoring-replace-toggle" className="editor-replace-toggle" type="button" aria-label={a.replace} title={a.replace}
+          <button id="authoring-replace-toggle" className="editor-replace-toggle" type="button" aria-label={a.toggleReplacement} title={a.toggleReplacement}
             aria-controls="authoring-replacement-row" aria-expanded={replaceOpen} onClick={() => setReplaceOpen(current => !current)}>
             <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
               <text x="2" y="9" fill="currentColor" fontFamily="monospace" fontSize="11">a</text>
@@ -430,7 +442,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
       </div>}
       <SourceEditor key={`${session.owner.token}:${editable.path}`} draft={editable} reveal={session.reveal} readOnly={sourceReadOnly}
         selection={selection} control={sourceEditor} context={completionContext} request={requestCompletion} accepts={acceptsCompletion}
-        completionPreferences={completionPreferences}
+        completionPreferences={completionPreferences} topInset={searchOpen ? searchInset : 0}
         completionUnavailable={completionStatus === 'unavailable' || completionStatus === 'oversized'}
         onCompletionRefused={() => setCompletionStatus('oversized')}
         onEdit={(next, before, input) => {

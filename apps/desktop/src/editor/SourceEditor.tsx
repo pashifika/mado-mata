@@ -23,6 +23,7 @@ interface Props {
   draft: FileDraft & {text: string};
   reveal: number;
   readOnly: boolean;
+  topInset: number;
   completionPreferences: EditorCompletionPreferences;
   selection: RefObject<TextRange>;
   control: RefObject<SourceEditorHandle | null>;
@@ -161,6 +162,7 @@ export default function SourceEditor(props: Props) {
   const settings = useRef(new Compartment());
   const completion = useRef<CompletionSession | null>(null);
   const [caret, setCaret] = useState({line: 1, column: 1, lines: 1});
+  const previousInset = useRef(0);
 
   useImperativeHandle(props.control, () => ({complete: () => {
     const view = editor.current;
@@ -249,6 +251,7 @@ export default function SourceEditor(props: Props) {
         indentUnit.of('  '), lineNumbers(), drawSelection(), highlightActiveLine(),
         javascript({typescript: /\.[cm]?tsx?$/i.test(first.draft.path), jsx: /\.[jt]sx$/i.test(first.draft.path)}),
         syntaxHighlighting(defaultHighlightStyle),
+        EditorView.scrollMargins.of(() => ({top: latest.current.props.topInset})),
         EditorView.scrollHandler.of((view, range, options) => {
           // Let CodeMirror reveal inside its scroller first; then clear the fixed shell.
           view.requestMeasure({
@@ -433,6 +436,26 @@ export default function SourceEditor(props: Props) {
     view.dispatch({selection: {anchor, head}, effects: EditorView.scrollIntoView(head, {y: 'nearest'}), annotations: synchronize.of(true)});
     view.focus();
   }, [props.reveal, props.draft.path]);
+
+  useLayoutEffect(() => {
+    const view = editor.current;
+    if (!view) return;
+    const scrollTop = view.scrollDOM.scrollTop;
+    const delta = props.topInset - previousInset.current;
+    previousInset.current = props.topInset;
+    view.dom.style.setProperty('--source-top-inset', `${props.topInset}px`);
+    if (scrollTop > 0) view.scrollDOM.scrollTop = scrollTop + delta;
+    view.requestMeasure({
+      key: previousInset,
+      read: () => {
+        const bounds = view.scrollDOM.getBoundingClientRect();
+        const caret = view.coordsAtPos(view.state.selection.main.head);
+        if (!caret || caret.top < bounds.top || caret.bottom > bounds.bottom) return 0;
+        return Math.min(0, caret.top - bounds.top - latest.current.props.topInset - 8);
+      },
+      write: adjustment => {if (adjustment < 0) view.scrollDOM.scrollTop += adjustment;},
+    });
+  }, [props.topInset]);
 
   useLayoutEffect(() => {
     completion.current?.synchronize();

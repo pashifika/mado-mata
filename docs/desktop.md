@@ -337,6 +337,10 @@ Neither action inspects, binds, or runs the package.
   state indicates that the row is open. Hiding Replace or closing Find keeps
   both text fields for reopening. Close or Escape in the search area returns
   focus to the Script without discarding edits.
+  The floating area reserves scrollable space above the source and keeps revealed
+  matches below it, including the first line; the editor frame does not resize.
+  Opening or closing these controls preserves a scrolled source view rather than
+  jumping to an offscreen caret.
   **Discard changes** affects only the selected file; other file drafts are kept.
 - **Metadata** opens structured manifest, option-schema and packaged preset
   controls; generated source maps are read-only facts. Metadata never
@@ -383,6 +387,8 @@ Neither action inspects, binds, or runs the package.
   Per-file dirty markers and the exit confirmation's affected-file list remain.
   The bubble belongs to the Edit owner's Workspace; it is not another Workspace's
   or Application's status.
+  Settings and confirmation dialogs reserve room below them for that single
+  count; their content remains scrollable at constrained window heights.
 - **Validate** checks one saved revision through the existing inventory and
   trusted compiler without evaluating package code. Unsaved text is excluded.
   **Saved-package validation** in the bottom bar shows not checked, running,
