@@ -73,9 +73,9 @@ fn os_metadata_preserves_strict_inventory_draft_and_recovery_identity() {
     let names = [
         ".DS_Store",
         "._package.json",
-        "Thumbs.db",
-        "ehthumbs.db",
-        "ehthumbs_vista.db",
+        "tHuMbS.dB",
+        "EHTHUMBS.DB",
+        "EhThumbs_Vista.Db",
         "DESKTOP.INI",
         "folder/.DS_Store",
         "folder/._local file.png",
@@ -154,6 +154,7 @@ fn unknown_files_and_metadata_named_directories_are_not_ignored() {
     let fixture = Fixture::new();
     for name in [
         ".gitignore",
+        ".ds_store",
         "._",
         ".DS_Store.backup",
         "Thumbs.db.bak",
@@ -182,6 +183,22 @@ fn unknown_files_and_metadata_named_directories_are_not_ignored() {
     assert!(Inventory::capture(&fixture.root, &fixture.limits).is_err());
     assert!(PackageDraft::capture(&fixture.root, &fixture.limits).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn appledouble_dot_suffixes_are_not_ignored() {
+    let fixture = Fixture::new();
+    for name in ["._.", "._.."] {
+        let path = fixture.root.join(name);
+        fs::write(&path, b"retained invalid suffix bytes").unwrap();
+        assert!(Inventory::capture(&fixture.root, &fixture.limits).is_err());
+        assert!(PackageDraft::capture(&fixture.root, &fixture.limits).is_err());
+        assert!(PackageDraft::capture_recovery_bytes(&fixture.root, &fixture.limits).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"retained invalid suffix bytes");
+        fs::remove_file(path).unwrap();
+    }
+}
+
 
 #[test]
 fn os_metadata_names_cannot_be_declared_as_package_files() {

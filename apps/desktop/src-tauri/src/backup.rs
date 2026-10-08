@@ -5,6 +5,7 @@ use crate::configuration::{
 use crate::storage::{
     MAX_PATH_BYTES, decode, encode, filesystem_key, private_directory, read_bytes,
 };
+use mado_runtime_comparison::inventory::os_metadata_name;
 use mado_runtime_comparison::model::Fault;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -496,6 +497,10 @@ fn preflight(bytes: &[u8]) -> Result<(), Fault> {
             .ok_or_else(|| invalid("truncated ZIP filename"))?;
         let name =
             std::str::from_utf8(name_bytes).map_err(|_| invalid("ZIP filenames must be UTF-8"))?;
+        if name.rsplit('/').next().is_some_and(os_metadata_name) {
+            return Err(invalid("snapshot contains a reserved OS metadata filename")
+                .with_context(json!({"path": name})));
+        }
         if !names.insert(name) {
             return Err(invalid("duplicate ZIP entry"));
         }

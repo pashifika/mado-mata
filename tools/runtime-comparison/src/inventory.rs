@@ -20,8 +20,8 @@ const MAX_PATH_BYTES: usize = 240;
 const MAX_FILES: usize = 65_536;
 const MAX_BYTES: usize = crate::images::PACKAGE_BYTES;
 
-/// Only these OS-owned file names are outside package and workspace content.
-fn os_metadata_name(name: &str) -> bool {
+/// Reserved file basenames, regardless of payload bytes; not a directory policy.
+pub fn os_metadata_name(name: &str) -> bool {
     name == ".DS_Store"
         || name
             .strip_prefix("._")

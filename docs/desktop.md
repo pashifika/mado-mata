@@ -309,8 +309,12 @@ Neither action inspects, binds, or runs the package.
   `ehthumbs_vista.db`, and `desktop.ini`). These files are left untouched and do
   not affect package revisions or application-owned storage; links, special
   files, directories with those names, and explicit package declarations of
-  reserved metadata names are still refused. This is not a general hidden-file
-  exception.
+  reserved metadata names are still refused. **Duplicate** preserves supported
+  declared files under `__MACOSX`, except for its existing identity/recognition-copy
+  transformations. Package path components beginning with `.` remain forbidden
+  by the portable-path rules; metadata exclusion does not grant them admission.
+  Duplicate never deletes source metadata or silently drops a reserved
+  declaration from a successful copy. This is not a package-backup/export format.
   Both the main and Recognition preview windows disable the ordinary Web
   Inspector, including debug builds; normal text-editing clipboard menus remain
   available outside these owned menus.
@@ -1637,6 +1641,17 @@ silently omitted. Unsafe, unreadable, linked, aliased, oversized, or changing
 managed data is refused. Capture serializes with configuration writers; archive
 I/O does not hold the operation-control lock, so owner-bound Stop stays available.
 
+Ordinary regular files with reserved metadata basenames are omitted without
+reading their contents: exact case-sensitive `.DS_Store`; `._` followed by a
+nonempty suffix other than `.` or `..`; and ASCII-case-insensitive `Thumbs.db`,
+`ehthumbs.db`, `ehthumbs_vista.db`, and `desktop.ini`. This is a name reservation,
+not proof of OS provenance: intentional user bytes under these names are not
+backed up. They remain on the source and restore destination unchanged and do
+not affect the managed generation or receipt counts. Raw enumeration bounds and
+unsafe-entry checks still apply. Non-reserved managed dotfiles retain their exact
+bytes, including malformed preservation-only data. `__MACOSX` is not recursively
+ignored; ordinary managed-path ownership determines inclusion.
+
 Limits are **4,096 payload files**, **16 MiB payload bytes**, **4 MiB manifest**,
 and **32 MiB archive**. The host creates a missing private destination and refuses
 an unsafe existing one without chmod. Explicit destinations cannot enter the
@@ -1677,6 +1692,12 @@ are not permission to publish its contents.
    supported document schemas, and owning identities are validated before live
    mutation. Traversal, links, duplicate/aliased paths, encryption, unsupported
    ZIP features, unknown owners/versions, and unlisted payloads are refused.
+   Reserved metadata payload basenames also refuse before session disposal,
+   even when an older snapshot declares them with consistent hashes and
+   generation (for example `profiles/._legacy.json`). Undeclared metadata and
+   foreign `__MACOSX/._settings.json` decorations are refused, not stripped.
+   The input archive is never rewritten. Clean supported version-1/version-2
+   snapshots need no conversion.
    Target records are validated structurally without requiring their referenced
    installation to exist on this machine; restored bindings remain unchecked.
    A raw preservation snapshot with malformed data, orphaned package files, or
