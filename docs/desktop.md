@@ -1597,11 +1597,27 @@ edited-destination conflicts without overwrite. An explicit import into another
 Tab retains the same source XID in an independent store, not shared mutable data.
 Files are processed in sorted order until the first fault; earlier durable
 imports and unchanged entries remain reported, including when committed cleanup
-fails. Later entries are not claimed imported. Settle eligible pending recovery
-before retry; identical completed entries must not be duplicated.
+fails. Later entries are not claimed imported. A subsequent catalog read can
+separately report `RestorePending`; it does not erase the Import IDs or undo
+durable publication. Preserve the original fault and transaction evidence.
+Use Recovery's **Complete operation** for committed cleanup, with its explicit
+confirmations, after repairing the reported filesystem obstacle. Do not delete
+the journal or completion marker to bypass admission. Recovery reconstructs the
+session and drops transient results; reselect the owner before explicitly
+retrying Import. Identical completed entries must be unchanged, not duplicated.
 Journal admission captures the bounded managed set: an unresolved pending write
 or unsafe entry in another owner can refuse Import until repaired. This does not
 broaden the existing owner-scoped admission for ordinary profile edits.
+
+For local acceptance, use private disposable roots and a real inspected package.
+Exercise sorted sources A (already identical), B (newly durable when cleanup
+fails), and C (unreached). Compare the displayed imported B / unchanged A,
+original cleanup fault and separate catalog failure with saved bytes, absent C,
+unchanged sources/unrelated owners, and retained transaction evidence. After
+supported recovery, retry must import only C and report A/B unchanged; verify
+ordinary close/reopen as well. Store regressions or mocked UI replies alone do
+not establish this Desktop boundary. Any temporary fault instrumentation belongs
+only in an isolated debug acceptance build, never the delivered application.
 
 ## Configuration snapshots and restore
 
