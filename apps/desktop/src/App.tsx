@@ -28,6 +28,7 @@ import type {RunHandlers} from './pages/RunPage.tsx';
 import ExecutionPage from './pages/ExecutionPage.tsx';
 import type {RunSnapshot, RunView} from './pages/ExecutionPage.tsx';
 import StatusSurface from './components/StatusSurface.tsx';
+import {InfoHint} from './components/ContextualHelp.tsx';
 import {scopedAuthoring, workspaceStatus} from './status.ts';
 import type {StatusItem} from './status.ts';
 import SavedWorkspacesDialog from './components/SavedWorkspacesDialog.tsx';
@@ -103,15 +104,12 @@ function AuthoringStrip({idPrefix, owner, packageId, unsaved, showReturn, onRetu
   const a = messages[locale].ui.authoring;
   return <div id={`${idPrefix}-authoring-strip`} className="operation-strip authoring-strip notice-info">
     <div className="authoring-status" role="status" aria-live="polite">
-      <span className="strip-owner"><span className="eyebrow">{a.ownerEyebrow}</span><strong>{owner}</strong></span>
+      <span className="strip-owner"><span className="eyebrow">{a.ownerEyebrow}</span>
+        <span><strong>{owner}</strong><InfoHint id={`${idPrefix}-authoring-help`} label={a.details} hint={a.authority}/></span></span>
       <span className="strip-kind">{packageId === null ? a.stripUnknown : a.stripKind(packageId)}</span>
       {unsaved > 0 && <span className="tag unsaved">{a.unsavedFiles(unsaved)}</span>}
       <span id={`${idPrefix}-authoring-reason`} className="strip-note">{a.stripNote}</span>
     </div>
-    <details id={`${idPrefix}-authoring-details`} className="strip-details">
-      <summary>{a.details}</summary>
-      <p id={`${idPrefix}-authoring-guidance`}>{a.authority}</p>
-    </details>
     {showReturn && <button id={`${idPrefix}-return-to-edit`} type="button" onClick={onReturn}>{a.returnToEdit}</button>}
   </div>;
 }

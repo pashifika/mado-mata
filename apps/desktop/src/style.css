@@ -193,9 +193,6 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .strip-error { color: var(--danger); flex: 1; min-width: 160px; font-weight: 600; }
 .operation-strip .stop-button { margin-left: auto; }
 .authoring-status { display: flex; flex: 1 1 540px; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
-.strip-details { flex: 0 1 260px; }
-.strip-details summary { font-size: 11px; }
-.strip-details p { margin: 4px 0; font-size: 11px; color: var(--text-muted); }
 .content-wide { padding: var(--space-4) var(--space-5) 0; }
 
 /* Workspace layout */
@@ -381,6 +378,9 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .dialog-header h2 { font-size: 20px; letter-spacing: -.5px; margin-bottom: 0; }
 .dialog-header p { font-size: 11px; color: var(--text-muted); margin: 5px 0 0; }
 .settings-dialog .operation-strip { border-bottom: 1px solid var(--border); }
+.settings-dialog .authoring-strip { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.settings-dialog .authoring-status { grid-column: 1; }
+.settings-dialog .authoring-strip > button { grid-column: 2; grid-row: 1; align-self: start; }
 .dialog-layout { display: grid; grid-template-columns: 160px minmax(0, 1fr); min-height: 340px; }
 .settings-nav { padding: 18px 12px; background: var(--surface-alt); border-right: 1px solid var(--border); max-height: calc(100vh - 260px); overflow: auto; }
 .settings-nav button { display: block; width: 100%; border: 0; background: transparent; text-align: left; font-size: 12px; font-weight: 500; padding: 9px 10px; margin-bottom: 3px; border-radius: 6px; }
@@ -472,7 +472,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
    selected file: the native textarea editor with a synchronized line-number gutter, a structured form or facts.
    Validation results follow. File changes live in row menus and small dialogs. */
 .authoring-strip { background: var(--info-soft); border-left-color: var(--accent); }
-.authoring-strip button { margin-left: auto; }
+.authoring-strip > button { margin-left: auto; }
 .repo-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; font-size: 11px; }
 .repo-facts dl { display: flex; flex-wrap: wrap; gap: 4px 18px; min-width: 0; margin: 0; }
 .repo-facts dl > div { display: flex; gap: 6px; min-width: 0; }
@@ -639,7 +639,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
   .log-entry { grid-template-columns: 70px 60px minmax(0, 1fr); }
   .log-source { grid-column: 3; }
   .log-event { grid-column: 1 / -1; }
-  .dialog-layout { grid-template-columns: minmax(0, 1fr); }
+  .dialog-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   .settings-nav { display: flex; gap: 4px; padding: 8px; border-right: 0; border-bottom: 1px solid var(--border); }
   .settings-nav button { margin: 0; text-align: center; }
   .repo { grid-template-columns: minmax(170px, 220px) minmax(0, 1fr); gap: 10px; }

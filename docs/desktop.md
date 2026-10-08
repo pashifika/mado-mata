@@ -1133,6 +1133,13 @@ Active operations keep the settings they already captured.
 **Application → Application logs** opens application-wide
 diagnostics; **Close window** follows the bounded shutdown path.
 
+During Edit, the owner strip's small **i** beside the workspace name shows
+**Save and Inspect guidance** on hover, focus, or click, including inside dialogs.
+Escape dismisses the focused hint before the dialog handles another Escape.
+The settings strip keeps **Return to Edit** at the upper right.
+At narrow widths, category tabs use their content height rather than stretching
+with the selected panel. Scroll the dialog when needed to reach Save/Close.
+
 ### Editor completion preferences
 
 **Editor → Show completions automatically** defaults to on; **Automatic opening

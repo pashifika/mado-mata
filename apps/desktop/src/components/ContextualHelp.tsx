@@ -135,6 +135,7 @@ function useHint(text: string, anchor: RefObject<HTMLElement | null>) {
     };
   }, [open, text, anchor]);
   return {
+    open, show: () => setOpen(true),
     id, hide: () => setOpen(false),
     events: {
       onMouseEnter: () => setOpen(true), onMouseLeave: () => setOpen(false),
@@ -156,6 +157,24 @@ export function ButtonHint({hint, children}: {
     })}
     {description.tooltip}
   </span>;
+}
+
+export function InfoHint({id, label, hint}: {id?: string; label: string; hint: string}) {
+  const anchor = useRef<HTMLButtonElement>(null);
+  const description = useHint(hint, anchor);
+  return <button ref={anchor} id={id} type="button"
+    className="contextual-help-trigger contextual-help-icon-button"
+    aria-label={label} aria-describedby={description.id}
+    {...description.events} onClick={description.show}
+    onKeyDown={event => {
+      if (event.key !== 'Escape' || !description.open) return;
+      event.preventDefault();
+      event.stopPropagation();
+      description.hide();
+    }}>
+    <span className="contextual-help-icon" aria-hidden="true">i</span>
+    {description.tooltip}
+  </button>;
 }
 
 export function HelpTrigger({title, hint, children, id, label}: {
