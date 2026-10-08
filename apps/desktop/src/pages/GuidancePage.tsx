@@ -1,4 +1,5 @@
 import {useEffect, useRef, useState} from 'react';
+import {HelpTrigger} from '../components/ContextualHelp.tsx';
 import ProfileRecovery from '../components/ProfileRecovery.tsx';
 import type {RecoveryHandlers} from '../components/ProfileRecovery.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
@@ -7,7 +8,7 @@ import type {PageAuthoring} from './EditPage.tsx';
 import {packageDestination} from '../state.ts';
 import {UNSUPPORTED_SOURCE, hasWorkspaceEdits} from '../workspace.ts';
 import type {Workspace} from '../workspace.ts';
-import {messages, renderMessage} from '../i18n.ts';
+import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
 // Who holds the single operation slot while this Tab is shown: the Application (a package-less check) or another Tab.
@@ -109,16 +110,15 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
   return <>
     <div className="page-heading"><div><span className="eyebrow">{g.scope(label)}</span><h1>{heading}</h1>
       <p>{intro}</p></div></div>
-    <div className="operation-status" role="status">{renderMessage(locale, workspace.busy ?? workspace.notice)}</div>
     <section className="panel guidance-panel" aria-labelledby="guidance-heading">
-      <div className="panel-heading"><div><span className="eyebrow">{eyebrow}</span><h2 id="guidance-heading">{heading}</h2></div>
+      <div className="panel-heading"><div><span className="eyebrow">{eyebrow}</span><h2 aria-labelledby="guidance-heading"><span id="guidance-heading">{heading}</span>
+        {activeOwner !== null && <HelpTrigger title={heading} hint={g.stopHint}><p>{activeOwner === 'application' ? g.applicationStopHelp : g.stopHelp}</p></HelpTrigger>}</h2></div>
         <span className="tag">{workspace.internalName}</span></div>
       <div className="panel-body">
         {source !== null && <FaultMessage title={sourceHeading} value={source}/>}
         {source === null && saved !== null && <p id="saved-unbound" className="muted">{g.savedUnbound}</p>}
         {source === null && saved === null && <p className="muted">{context !== null ? g.noSavedBinding : g.where}</p>}
         {saved !== null && <dl className="run-identity"><dt>{saved.source.kind === 'directory' ? t.reopen.directory(saved.package_id) : t.reopen.archive(saved.package_id)}</dt><dd className="mono">{saved.source.path}</dd></dl>}
-        {activeOwner !== null && <p className="authority-note">{activeOwner === 'application' ? g.applicationStopHelp : g.stopHelp}</p>}
       </div>
     </section>
     {owner && <section id="guidance-edit-owner" className="panel open-form" aria-labelledby="guidance-edit-owner-heading"><div className="panel-body">
@@ -128,13 +128,15 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
     </div></section>}
     {!owner && <section id="edit-form" className="panel open-form" aria-labelledby="edit-heading"><div className="panel-body">
       <h2 id="edit-heading">{a.openHeading}</h2>
-      <p className="muted">{a.openHelp}</p>
-      <div className="open-row"><div className="field"><label htmlFor="authoring-package-id">{a.packageId}</label>
+      <div className="open-row"><div className="field"><div className="field-heading"><label htmlFor="authoring-package-id">{a.packageId}</label>
+        <HelpTrigger title={a.packageId} hint={a.packageIdHint}><p>{a.packageIdHelp}</p></HelpTrigger></div>
         <input id="authoring-package-id" type="text" value={workspace.editPackageId} disabled={workspace.busy !== null || confirmEdit !== null} spellCheck={false}
           onChange={event => authoring.onPackageId(event.target.value)}/></div>
-        <button id="authoring-create" type="button" className="primary" disabled={authoring.block !== null || destination === null} onClick={event => confirmedEdit('create', event.currentTarget)}>{a.create}</button>
+        <span className="button-help">
+          <button id="authoring-create" type="button" className="primary" disabled={authoring.block !== null || destination === null} onClick={event => confirmedEdit('create', event.currentTarget)}>{a.create}</button>
+          <HelpTrigger corner title={a.create} hint={a.createHint}><p>{a.openHelp}</p></HelpTrigger>
+        </span>
       </div>
-      <p className="field-help">{a.packageIdHelp}</p>
       <dl className="run-identity"><dt>{a.packagesRoot}</dt><dd className="mono">{packagesRoot}</dd>
         {destination && <><dt>{a.createDestination}</dt><dd id="authoring-destination" className="mono">{destination}</dd></>}</dl>
       <div id="authoring-block" className="muted" role="status">{authoring.block ?? ''}</div>
@@ -142,7 +144,10 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
       <div className="open-row"><div className="field"><label htmlFor="authoring-path">{a.packageDirectory}</label>
         <input id="authoring-path" type="text" value={workspace.editPath} disabled={workspace.busy !== null || confirmEdit !== null} placeholder={a.packagePlaceholder} spellCheck={false}
           onChange={event => authoring.onPath(event.target.value)}/></div>
-        <button id="authoring-open" type="button" disabled={authoring.block !== null || !workspace.editPath.trim()} onClick={event => confirmedEdit('open', event.currentTarget)}>{a.open}</button>
+        <span className="button-help">
+          <button id="authoring-open" type="button" disabled={authoring.block !== null || !workspace.editPath.trim()} onClick={event => confirmedEdit('open', event.currentTarget)}>{a.open}</button>
+          <HelpTrigger corner title={a.open} hint={a.openHint}><p>{a.openHelp}</p></HelpTrigger>
+        </span>
       </div>
       {confirmEdit !== null && <div ref={editConfirmRow} className="confirm-row" role="alertdialog" aria-labelledby="confirm-edit-text">
         <span id="confirm-edit-text">{a.confirmEdit}</span>
@@ -153,13 +158,15 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
     <section className="panel open-form" aria-labelledby="inspect-heading">
       <div className="panel-body">
         <h2 id="inspect-heading">{g.inspectHeading}</h2>
-        <p className="muted">{g.inspectHelp}</p>
         <div className="open-row"><div className="field"><label htmlFor="package-path">{g.packageDirectory}</label>
           <input id="package-path" type="text" value={path} disabled={workspace.busy !== null} placeholder={g.packagePlaceholder} spellCheck={false}
             onChange={event => onPath(event.target.value)} onKeyDown={event => {if (event.key === 'Enter') confirmedInspect();}}/></div>
-          <button id="inspect" ref={inspectButton} className="primary" disabled={locked || owner || !path.trim()}
-            aria-describedby={inspectReason ? 'inspect-block' : undefined}
-            title={inspectReason ?? undefined} onClick={confirmedInspect}>{g.inspect}</button></div>
+          <span className="button-help">
+            <button id="inspect" ref={inspectButton} className="primary" disabled={locked || owner || !path.trim()}
+              aria-describedby={inspectReason ? 'inspect-block' : undefined}
+              title={inspectReason ?? undefined} onClick={confirmedInspect}>{g.inspect}</button>
+            <HelpTrigger corner title={g.inspect} hint={g.inspectHint}><p>{g.inspectHelp}</p></HelpTrigger>
+          </span></div>
         {confirmInspect && <div ref={confirmRow} className="confirm-row" role="alertdialog" aria-labelledby="confirm-inspect-text">
           <span id="confirm-inspect-text">{g.confirmInspect}</span>
           <button id="inspect-discard" type="button" className="danger-text" onClick={() => closeConfirm(true)}>{g.discardInspect}</button>

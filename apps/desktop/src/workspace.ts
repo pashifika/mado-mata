@@ -28,7 +28,7 @@ export function busy(state:string):boolean {
 }
 
 // `edit` is shown only for the Tab owning the Edit lease; otherwise it renders as `run`.
-export type Page = 'run' | 'logs' | 'edit';
+export type Page = 'run' | 'execution' | 'logs' | 'edit';
 
 // Package-bound session state. Present only after real inspection in this session or host revalidation at bootstrap.
 export interface Bound {
@@ -37,8 +37,8 @@ export interface Bound {
   profiles:Profile[]; profilesError:Fault|null;
   selectedId:string|null; name:string; preset:string; draft:Record<string,Json>;
   // Local edit counter: a validation or save that raced a later edit must not overwrite it.
-  draftRevision:number; validation:Record<string,Json>|null;
-  lane:string; scenario:string; descriptorPath:string; disclosedRun:string|null;
+  draftRevision:number; validation:{draftRevision:number;values:Record<string,Json>}|null;
+  lane:string; scenario:string; descriptorPath:string;
   // True once the operator changed profile/draft state; a pristine default draft closes without confirmation.
   touched:boolean;
   target:TargetState;
@@ -64,6 +64,7 @@ export interface Workspace {
   // The Tab's selected durable reference as the host stores it; display and prefill only, never authority to run.
   savedPackage:PackageReference|null;
   page:Page; error:Fault|null; notice:Message|null; logFilter:LogFilter;
+  disclosedRun:string|null;
   // Label of the in-flight state-changing command owned by this workspace, if any.
   busy:Message|null;
   // Inspect form draft for this Tab; a path is only a request, never a binding.
@@ -118,7 +119,7 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
     selectedId: null, name: '', preset: '', draft: defaultDraft(selection.package.schema),
     draftRevision: (previous?.draftRevision ?? 0) + 1, validation: null,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
-    disclosedRun: null, touched: false, target: targetState(selection),
+    touched: false, target: targetState(selection),
     native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', workflowSeconds: null, capture: false, input: false, launch: false, recovery: false, key: null},
   };
 }
@@ -132,7 +133,7 @@ export function workspaceFromView(view:WorkspaceView, notice:Message|null = null
   return {
     id: view.workspace_id, revision: view.revision, internalName: view.internal_name, displayName: view.display_name,
     bound: view.selection ? fromSelection(view.selection) : null, sourceError: view.source_error, savedPackage: saved,
-    page: 'run', error: null, notice, logFilter: {text: '', level: ''}, busy: null,
+    page: 'run', error: null, notice, logFilter: {text: '', level: ''}, busy: null, disclosedRun: null,
     inspectPath: path, editPath: path, editPackageId: '', legacyImport: null,
     recovery: view.recovery ? recoveryState(view.recovery, null) : null, recoveryOutcomes: [],
   };
@@ -144,7 +145,7 @@ export function bindSelection(workspace:Workspace, selection:Selection, notice:M
   return {
     ...workspace, revision: selection.revision, bound: fromSelection(selection, workspace.bound ?? undefined), sourceError: null,
     savedPackage: {package_id: selection.package.package_id, source: {kind: 'directory', path: selection.package_path}},
-    error: null, notice, inspectPath: selection.package_path, legacyImport: null,
+    error: null, notice, inspectPath: selection.package_path, legacyImport: null, disclosedRun: null,
   };
 }
 
@@ -219,7 +220,7 @@ export function applyWorkspaceView(workspace:Workspace, view:WorkspaceView, noti
   const selection = view.selection;
   const bound = workspace.bound;
   const base = selection === null
-    ? {...workspace, revision: view.revision, bound: null, error: null, notice, legacyImport: null}
+    ? {...workspace, revision: view.revision, bound: null, error: null, notice, legacyImport: null, disclosedRun: null}
     : bound !== null && selection.revision === workspace.revision
       ? applyCatalog({...workspace, error: null, notice}, selection)
       : bound !== null && retained && sameSession(bound, selection)
@@ -504,12 +505,12 @@ export function commandValues(workspace:Workspace, facts:Derived|undefined):Reco
 }
 
 export function editDraft(bound:Bound, draft:Record<string,Json>):Bound {
-  return {...bound, draft, draftRevision: bound.draftRevision + 1, validation: null, touched: true};
+  return {...bound, draft, draftRevision: bound.draftRevision + 1, touched: true};
 }
 
 export function newDraft(bound:Bound, presetName = ''):Bound {
   const preset = presetName ? bound.package.profiles[presetName] : undefined;
-  return editDraft({...bound, selectedId: null, name: presetName, preset: presetName},
+  return editDraft({...bound, selectedId: null, name: presetName, preset: presetName, validation: null},
     preset ? structuredClone(preset.options) : defaultDraft(bound.package.schema));
 }
 
@@ -517,7 +518,7 @@ export function selectProfile(bound:Bound, id:string):Bound {
   if (!id) return newDraft(bound);
   const profile = bound.profiles.find(item => item.id === id);
   if (!profile) return bound;
-  return editDraft({...bound, selectedId: profile.id, name: profile.name, preset: ''}, structuredClone(profile.values));
+  return editDraft({...bound, selectedId: profile.id, name: profile.name, preset: '', validation: null}, structuredClone(profile.values));
 }
 
 export function workspaceRef(workspace:Pick<Workspace,'id'|'revision'>):WorkspaceRef {

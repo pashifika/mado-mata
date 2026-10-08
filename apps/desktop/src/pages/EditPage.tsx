@@ -5,6 +5,7 @@ import CatalogDialog from '../components/CatalogDialog.tsx';
 import type {CatalogIntent} from '../components/CatalogDialog.tsx';
 import ContextMenu, {elementAnchor, menuEvents} from '../components/ContextMenu.tsx';
 import type {MenuAction, MenuAnchor} from '../components/ContextMenu.tsx';
+import {HelpTrigger} from '../components/ContextualHelp.tsx';
 import FileTree from '../components/FileTree.tsx';
 import ManifestEditor from '../components/ManifestEditor.tsx';
 import Modal from '../components/Modal.tsx';
@@ -16,12 +17,12 @@ import SourceEditor from '../editor/SourceEditor.tsx';
 import type {SourceEditorHandle} from '../editor/SourceEditor.tsx';
 import {CompletionClient} from '../editor/completion-client.ts';
 import type {CompletionContext, CompletionKey, CompletionStatus} from '../editor/completion-types.ts';
-import {AUTHORING_RECOVERY, catalogBlock, diagnosticLocation, dirtyDrafts, draftList, fileDirty, findMatch, matchSummary, offsetAt, otherNonImageBytes, replacementEdit, saveBlock, shortRevision, validationCurrent} from '../authoring.ts';
+import {AUTHORING_RECOVERY, catalogBlock, dirtyDrafts, draftList, fileDirty, findMatch, matchSummary, otherNonImageBytes, replacementEdit, saveBlock, shortRevision, validationCurrent} from '../authoring.ts';
 import type {AuthoringSession, EditInput, FileDraft, Snapshot, TextRange, TypedText} from '../authoring.ts';
 import {parseJson, readManifest, schemaIssues, treeKind} from '../metadata.ts';
 import {packageDestination} from '../state.ts';
-import type {AuthoringFileKind, CatalogEdit, EditorCompletionPreferences, Fault} from '../types.ts';
-import {messages, renderMessage} from '../i18n.ts';
+import type {AuthoringFileKind, CatalogEdit, EditorCompletionPreferences} from '../types.ts';
+import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
 // Metadata row order in the tree's Metadata group; the Files group holds sources and assets.
@@ -56,7 +57,7 @@ export interface EditHandlers {
   replace: (path: string, text: string, typed?: TypedText[]) => void;
   discard: (path: string) => void;
   save: (path: string) => void; saveAll: () => void;
-  validate: () => void; stopValidation: () => void;
+  validate: () => void;
   refresh: () => void; recover: () => void;
   // Resolves true once the host committed the edit, so the Add, Rename or Remove dialog can close.
   catalog: (edit: CatalogEdit) => Promise<boolean>;
@@ -134,16 +135,16 @@ export default function EditPage({session, label, handlers, recognition, recogni
   // Rename) opens the group in the same render, so the row is visible when the page reveals it.
   const selectedGroup = selected ? groupOf(selected) : null;
   const [groups, setGroups] = useState<Record<Group, boolean>>({files: true, metadata: true});
-  const [revealRequest, setRevealRequest] = useState(0);
-  const revealKey = `${revealRequest}:${session.selected ?? ''}`;
+  const revealRequest = session.reveal;
+  const revealKey = `${session.owner.token}:${revealRequest}:${session.selected ?? ''}`;
   const [revealedKey, setRevealedKey] = useState(revealKey);
   if (revealedKey !== revealKey) {
     setRevealedKey(revealKey);
     if (selectedGroup !== null && !groups[selectedGroup]) setGroups({...groups, [selectedGroup]: true});
   }
-  // A diagnostic brings the file into sight on both sides; the editor itself focuses without scrolling the page.
+  // Host-driven reveals bring the file into sight on both sides; the editor focuses without scrolling the page.
   useEffect(() => {
-    if (revealRequest === 0) return;
+    if (revealRequest === 0 || recognitionSelected) return;
     const main = document.getElementById('authoring-main');
     const top = main?.getBoundingClientRect().top ?? 0;
     const shell = main?.closest('.app');
@@ -155,7 +156,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
     if (!body || !row) return;
     const offset = row.getBoundingClientRect().top - body.getBoundingClientRect().top;
     if (offset < 0 || offset + row.offsetHeight > body.clientHeight) body.scrollTop += offset - body.clientHeight / 3;
-  }, [revealRequest]);
+  }, [session.owner.token, revealRequest, recognitionSelected]);
 
   const [railOpen, setRailOpen] = useState(true);
   const railToggle = useRef<HTMLButtonElement>(null);
@@ -258,18 +259,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
   }
   // The outgoing selection matters only for the text editor, whose caret is restored when returning to the file.
   const previous = () => editable ? selection.current : null;
-  function goTo(item: Fault) {
-    const location = diagnosticLocation(item);
-    const target = location ? session.drafts.get(location.path) : undefined;
-    if (!location || !target) return;
-    setRevealRequest(count => count + 1);
-    if (target.kind !== 'source' || target.text === null) {
-      handlers.select(location.path, previous());
-      return;
-    }
-    const offset = offsetAt(target.text, location.line, location.column);
-    handlers.reveal(location.path, {start: offset, end: offset});
-  }
   const presetIds = new Map(manifest?.profiles.map(([id, path]): [string, string] => [path, id]) ?? []);
   const mapModules = new Map(manifest?.sourceMaps.map(([module, path]): [string, string] => [path, module]) ?? []);
   const metadata = drafts.filter(draft => !draft.missing && !treeKind(draft.kind)).sort((left, right) => METADATA_ORDER[left.kind] - METADATA_ORDER[right.kind]);
@@ -359,7 +348,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
   }
   const validation = session.validation;
   const current = validationCurrent(session);
-  const statusText = renderMessage(locale, session.notice) || (lockReason ?? '');
   // A publication or a validation that reached disk capture can report an interrupted save that needs recovery.
   const recoveryFault = session.error?.category === AUTHORING_RECOVERY || (current && validation?.diagnostics.some(item => item.category === AUTHORING_RECOVERY) === true);
 
@@ -371,16 +359,21 @@ export default function EditPage({session, label, handlers, recognition, recogni
     {selected.diskChanged && <p className="inline-warning">{a.diskChangedHelp}</p>}
     {selected.missing && <p className="inline-warning">{a.missingHelp}</p>}
     {text && (text.kind === 'manifest' || text.kind === 'schema' || text.kind === 'profile') && <div className="editor-toolbar">
-      <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(text) || readOnly} onClick={() => handlers.discard(text.path)}>{a.discardFile}</button>
-      <span className="muted">{a.structuredHelp}</span>
+      <span className="button-help">
+        <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(text) || readOnly} onClick={() => handlers.discard(text.path)}>{a.discardFile}</button>
+        <HelpTrigger corner title={a.discardFile} hint={a.discardHint}><p>{a.structuredHelp}</p></HelpTrigger>
+      </span>
     </div>}
     {editable && <>
       <div className="editor-toolbar">
         <button id="authoring-undo" type="button" disabled={sourceReadOnly || editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
         <button id="authoring-redo" type="button" disabled={sourceReadOnly || editable.redo.length === 0 || editable.composing !== null} onClick={() => handlers.redo(editable.path)}>{a.redo}</button>
         <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(editable) || readOnly || editable.composing !== null} onClick={() => handlers.discard(editable.path)}>{a.discardFile}</button>
-        <button id="authoring-complete" type="button" disabled={!completionContext} aria-keyshortcuts="Control+Space"
-          onClick={() => sourceEditor.current?.complete()}>{a.complete}</button>
+        <span className="button-help">
+          <button id="authoring-complete" type="button" disabled={!completionContext} aria-keyshortcuts="Control+Space"
+            onClick={() => sourceEditor.current?.complete()}>{a.complete}</button>
+          <HelpTrigger corner title={a.complete} hint={a.completionHint}><p>{a.completionScope}</p></HelpTrigger>
+        </span>
         <span className="editor-search" role="search">
           <label className="visually-hidden" htmlFor="authoring-search">{a.search}</label>
           <input id="authoring-search" ref={searchInput} type="search" value={query} spellCheck={false} placeholder={a.searchPlaceholder}
@@ -426,7 +419,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
         <span id="authoring-completion-status">{a.completionStatuses[completionStatus]}</span>
         {!optionsAvailable && <span id="authoring-options-unavailable">{a.optionsCompletionUnavailable}</span>}
       </div>
-      <p id="authoring-completion-scope" className="field-help">{a.completionScope}</p>
     </>}
     {text?.kind === 'manifest' && <ManifestEditor key={text.path} draft={text} disabled={formDisabled}
       onReplace={next => handlers.replace(text.path, next)} onOpen={path => handlers.select(path, null)}/>}
@@ -439,19 +431,25 @@ export default function EditPage({session, label, handlers, recognition, recogni
   </>;
 
   return <>
-    <div className="page-heading"><div><span className="eyebrow">{a.scope(label)}</span><h1 id="authoring-heading">{session.packageId}</h1>
-      <p>{a.intro}</p></div>
+    <div className="page-heading"><div><span className="eyebrow">{a.scope(label)}</span><h1 aria-labelledby="authoring-heading"><span id="authoring-heading">{session.packageId}</span>
+      <HelpTrigger title={a.scope(label)} hint={a.introHint}><p>{a.intro}</p><p>{a.authority}</p></HelpTrigger></h1></div>
       <div className="actions">
         <button id="authoring-save" type="button" className="primary" disabled={publishLocked || !selected || saveReason !== null}
           title={saveReason ? a.block(saveReason) : undefined} onClick={() => selected && handlers.save(selected.path)}>{pending?.kind === 'save' ? a.working : a.save}</button>
         <button id="authoring-save-all" type="button" disabled={publishLocked || (savable.length === 0 && (!recognitionDirty || recognitionSaveBlock !== null)) || saveAllReason !== null}
           title={saveAllReason ?? recognitionSaveBlock ?? undefined} onClick={handlers.saveAll}>{a.saveAll}</button>
-        <button id="authoring-validate" type="button" disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button>
-        <button id="authoring-exit" type="button" disabled={locked || (pending !== null && pending.kind !== 'recognition_trial' && pending.kind !== 'validate')}
-          title={a.exitHelp} onClick={handlers.exit}>{pending?.kind === 'exit' ? a.working : a.exit}</button>
+        <span className="button-help">
+          <button id="authoring-validate" type="button" disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button>
+          <HelpTrigger corner title={a.validate} hint={a.validationHelp}><p>{a.validationHelp}</p><p>{a.unsavedNotValidated}</p></HelpTrigger>
+        </span>
+        <span className="button-help">
+          <button id="authoring-exit" type="button" disabled={locked || (pending !== null && pending.kind !== 'recognition_trial' && pending.kind !== 'validate')}
+            onClick={handlers.exit}>{pending?.kind === 'exit' ? a.working : a.exit}</button>
+          <HelpTrigger corner title={a.exit} hint={a.exitHint}><p>{a.exitHelp}</p></HelpTrigger>
+        </span>
       </div>
     </div>
-    <div id="authoring-status" className="operation-status" role="status">{statusText}</div>
+    {locked && lockReason && <p id="authoring-lock-reason" className="operation-status" role="status">{lockReason}</p>}
     {leaseLost && <p id="authoring-lease-lost" className="inline-warning" role="alert">{a.leaseLost}</p>}
     {session.error && <div id="authoring-error"><FaultMessage title={a.actionFailed} value={session.error}/></div>}
     {recoveryFault && <div className="button-row"><button id="authoring-recover" type="button" disabled={locked} onClick={handlers.recover}>{a.recover}</button>
@@ -470,7 +468,8 @@ export default function EditPage({session, label, handlers, recognition, recogni
     </div>
     <div className={railOpen ? 'repo' : 'repo rail-closed'}>
       <aside id="authoring-rail" className="panel repo-rail" aria-labelledby="authoring-rail-heading" hidden={!railOpen} onContextMenu={event => event.preventDefault()}>
-        <div className="rail-heading"><h2 id="authoring-rail-heading">{a.railHeading}</h2>
+        <div className="rail-heading"><h2 aria-labelledby="authoring-rail-heading"><span id="authoring-rail-heading">{a.railHeading}</span>
+          <HelpTrigger title={a.railHeading} hint={a.filesHint}><p>{a.filesHelp}</p></HelpTrigger></h2>
           <button id="authoring-tree-add" type="button" className="icon-button" aria-label={a.addFile} title={addReason ?? a.addFile}
             disabled={addReason !== null} onClick={() => setIntent({kind: 'add'})}><span aria-hidden="true">+</span></button>
           {railOpen && railButton}</div>
@@ -524,7 +523,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
                 <span className="copy-icon" aria-hidden="true"/><span className="tree-name">{a.duplicateOpen}</span></button>
             </div></li>
           </ul>
-          <p className="field-help rail-help">{a.filesHelp}</p>
         </div>
       </aside>
       <section id="authoring-main" className="panel repo-main" aria-labelledby="authoring-file-heading">
@@ -564,27 +562,5 @@ export default function EditPage({session, label, handlers, recognition, recogni
         </div>
       </form>
     </Modal>
-    <section id="authoring-validation" className="panel validation-panel" aria-labelledby="authoring-validation-heading">
-      <div className="panel-heading"><h2 id="authoring-validation-heading">{a.validationHeading}</h2>
-        {validation && <span id="authoring-validation-state" className={`tag ${!current ? 'stale' : validation.valid ? 'current' : 'unsaved'}`}>
-          {validation.valid ? a.valid(shortRevision(validation.revision)) : a.invalid(shortRevision(validation.revision), validation.diagnostics.length)}</span>}</div>
-      <div className="panel-body">
-        {validating && <div className="button-row"><span className="muted" role="status">{a.validating}</span>
-          <button id="authoring-validate-stop" type="button" className="stop-button" onClick={handlers.stopValidation}>{a.stopValidation}</button></div>}
-        {!validation && !validating && <p className="muted">{a.validationNone}</p>}
-        {validation && !current && <p className="inline-warning">{a.staleValidation(shortRevision(validation.revision))}</p>}
-        {unsaved > 0 && <p className="field-help">{a.unsavedNotValidated}</p>}
-        {validation && validation.diagnostics.length > 0 && <ol id="authoring-diagnostics" className="diagnostic-list">
-          {validation.diagnostics.map((item, index) => {
-            const location = diagnosticLocation(item);
-            const where = location ? a.location(location.path, location.line, location.column) : null;
-            return <li key={index}>
-              {where && session.drafts.has(location!.path)
-                ? <button type="button" className="link diagnostic-location" data-path={location!.path} aria-label={a.goTo(where)} onClick={() => goTo(item)}>{where}</button>
-                : <span className="muted">{where ?? a.unlocated}</span>}
-              <strong> {item.category}</strong> <span>{item.message}</span></li>;
-          })}</ol>}
-      </div>
-    </section>
   </>;
 }

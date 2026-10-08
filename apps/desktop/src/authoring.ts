@@ -428,6 +428,20 @@ export function diagnosticLocation(fault:Fault):SourceLocation|null {
   return {path, line: lineNumber, column: columnNumber};
 }
 
+// Retired drawer callbacks cannot navigate a replacement lease or a newer diagnostic result.
+export function revealDiagnostic(session:AuthoringSession, token:string, fault:Fault):AuthoringSession {
+  if (session.owner.token !== token || !session.validation?.diagnostics.includes(fault)) return session;
+  const location = diagnosticLocation(fault);
+  const target = location ? session.drafts.get(location.path) : undefined;
+  if (!location || !target || target.missing) return session;
+  if (target.kind !== 'source' || target.text === null) {
+    const selected = selectFile(session, location.path, null);
+    return selected === session ? {...session, reveal: session.reveal + 1} : selected;
+  }
+  const offset = offsetAt(target.text, location.line, location.column);
+  return revealRange(session, location.path, {start: offset, end: offset});
+}
+
 export function offsetAt(text:string, line:number, column:number):number {
   const breaks = /\r\n|\r|\n/g;
   let offset = 0;

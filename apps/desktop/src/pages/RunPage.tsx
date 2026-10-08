@@ -5,31 +5,24 @@ import SchemaForm from '../components/SchemaForm.tsx';
 import Select from '../components/Select.tsx';
 import TargetPanel from '../components/TargetPanel.tsx';
 import type {TargetHandlers} from '../components/TargetPanel.tsx';
-import ResultPanel, {FaultMessage, fault} from '../components/ResultPanel.tsx';
-import {faultSummary, nativeOutcome, text} from '../state.ts';
-import type {CheckAssociation} from '../state.ts';
+import {FaultMessage} from '../components/ResultPanel.tsx';
+import {HelpTrigger} from '../components/ContextualHelp.tsx';
+import type {RunView} from './ExecutionPage.tsx';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, chooseLane, editDraft, hasWorkspaceEdits} from '../workspace.ts';
 import type {Bound, BoundWorkspace, Derived, NativeConsent} from '../workspace.ts';
 import {AUTHORING_RECOVERY, recoveryPath} from '../authoring.ts';
 import type {PageAuthoring} from './EditPage.tsx';
-import type {ControllerView, Fault, Json, NativeCapability, NativeIntent, OcrEnvironment} from '../types.ts';
-import {messages, renderMessage} from '../i18n.ts';
+import type {Fault, NativeCapability, OcrEnvironment} from '../types.ts';
+import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
-
-// Immutable facts captured when this frontend submitted the operation; the host view is authoritative.
-export type RunSnapshot =
-  | {kind: 'run'; run: string; lane: string; packageId: string; profileName: string; profileId: string; scenario: string; descriptorPath: string | null; values: Record<string, Json>; native: NativeIntent | null}
-  | {kind: 'check'; run: string; association: CheckAssociation};
-
-export interface RunView {view: ControllerView; live: boolean; olderRevision: number | null}
+import './run-control.css';
 
 export interface RunHandlers {
-  // Draft-affecting edits; they clear the transient notice. Disclosure toggles do not.
+  // Draft-affecting edits clear the transient notice.
   change: (update: (bound: Bound) => Bound) => void;
-  disclose: (run: string | null) => void;
   validate: () => void; saveProfile: () => void; renameProfile: () => void; deleteProfile: () => void;
   newDraft: (preset?: string) => void; selectProfile: (id: string) => void;
-  reinspect: () => void; inspectPath: (value: string) => void; importLegacy: () => void; start: () => void; stop: () => void;
+  reinspect: () => void; inspectPath: (value: string) => void; importLegacy: () => void; start: () => void;
   // Native review text edits withdraw consent; consent binds to the request as it is now.
   native: {edit: (field: 'operation' | 'postcondition' | 'workflowSeconds', value: string) => void; approve: (field: NativeConsent, value: boolean) => void};
   target: TargetHandlers;
@@ -37,8 +30,8 @@ export interface RunHandlers {
 }
 
 interface Props {
-  workspace: BoundWorkspace; label: string; derived: Derived; run: RunView; snapshot: RunSnapshot | null;
-  locked: boolean; active: boolean; pickerBusy: boolean; starting: boolean; stopping: boolean; closing: boolean;
+  workspace: BoundWorkspace; label: string; derived: Derived; run: RunView;
+  locked: boolean; active: boolean; pickerBusy: boolean; starting: boolean;
   savedEnvironment: OcrEnvironment | null; handlers: RunHandlers;
   // Host-issued Native policy; null when this platform/build offers none. `nativeError` is a failed availability read.
   nativeCapability: NativeCapability | null; nativeError: Fault | null;
@@ -46,7 +39,7 @@ interface Props {
   authoring: PageAuthoring;
 }
 
-export default function RunPage({workspace, label, derived, run, snapshot, locked, active, pickerBusy, starting, stopping, closing, savedEnvironment, handlers, authoring, nativeCapability, nativeError}: Props) {
+export default function RunPage({workspace, label, derived, run, locked, active, pickerBusy, starting, savedEnvironment, handlers, authoring, nativeCapability, nativeError}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const bound = workspace.bound;
@@ -83,12 +76,8 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   }
   const view = run.view;
   const phase = starting ? 'preparing' : view.state;
-  const check = view.operation === 'environment_check';
-  const primary = view.error ?? (view.result?.primary ? fault(view.result.primary) : null);
-  const privatePrimary = !check && (snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane)) !== 'controlled';
   const selectedDescriptor = bound.descriptorPath.trim() || null;
   const canStart = !locked && !active && !pickerBusy && authoring.role === null && !numericErrors && profileBound && startBlock === null && descriptorError === null;
-  const stopAvailable = run.live && view.run !== null && busy(view.state) && view.state !== 'stopping' && !stopping && !starting && !closing;
   const executionCaption = starting ? t.run.submitted : run.live && busy(view.state) ? t.run.owned(view.run) : view.state === 'terminal' ? t.run.settled(view.run) : t.run.noOperations;
   const heading = selectedProfile && !valuesDirty ? selectedProfile.name : bound.name || t.run.untitled;
   const legacy = workspace.legacyImport;
@@ -98,7 +87,6 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
   const recipe = native?.recipe ?? null;
   // Launch recipe validity is conditional on host-confirmed absence, not a gate on attaching.
   const approvalOpen = native !== null && (native.block === null || native.block === 'nativeApproval') && !locked;
-  const outcome = nativeOutcome(run.view);
   // Invalid Workflow text has no effective duration; never display a clamped or fallback budget.
   const nativeLimits = nativeCapability?.default_limits ?? null;
   const selectedLimits = native?.limits ?? null;
@@ -113,39 +101,33 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
     [t.run.nativeContainment, `${nativeLimits.containment_ms} ms`],
   ];
   return <>
-    <div className="page-heading"><div><span className="eyebrow">{t.run.heading(label)}</span><h1>{heading}</h1>
-      <p>{t.run.introduction}</p></div>
-      <div className="actions">
-        <button id="validate" disabled={locked || numericErrors || !profileBound} onClick={handlers.validate}>{t.run.validate}</button>
-        <button id="start" className="primary" disabled={!canStart}
-          aria-describedby={[authoring.role !== null ? 'app-authoring-strip' : null, startBlock ? 'start-block' : null].filter(Boolean).join(' ') || undefined}
-          onClick={handlers.start}>{t.run.start}</button>
-      </div>
-    </div>
+    <div className="page-heading"><div><span className="eyebrow">{t.run.heading(label)}</span><h1>{heading}<HelpTrigger title={t.run.heading(label)} hint={t.run.introductionHint}>{t.run.introduction}</HelpTrigger></h1></div></div>
     <div id="error">
       {workspace.error && <FaultMessage title={t.run.actionFailed} value={workspace.error}/>}
       {workspace.error?.category === AUTHORING_RECOVERY && <div className="button-row">
         <button id="workspace-recover" type="button" disabled={locked} onClick={() => authoring.onRecover(recoveryPath(workspace.error!, bound.packagePath))}>{a.recover}</button>
         <span className="muted">{a.recoverHelp}</span></div>}
       {workspace.sourceError && <FaultMessage title={workspace.sourceError.category === UNSUPPORTED_SOURCE ? t.guidance.unsupportedHeading : t.guidance.unavailableHeading} value={workspace.sourceError}/>}
-      {primary && (privatePrimary || check
-        ? <section className="fault" role="alert"><strong>{check ? t.run.checkError : t.run.runError} · {faultSummary(primary, !privatePrimary)}</strong>
-            <p>{t.run.diagnosticHelp}</p></section>
-        : <FaultMessage title={t.run.runError} value={primary}/>)}
-      {outcome?.failure && <p className="fault" id="native-failure">{outcome.cause ? t.run.nativeCauses[outcome.cause] : t.run.nativeFailures[outcome.failure]}</p>}
-      {outcome?.launch && <p className="inline-warning" id="native-launch-outcome">{t.run.nativeLaunchOutcomes[outcome.launch]}</p>}
     </div>
-    <div className="operation-status" role="status">{renderMessage(locale, workspace.busy ?? workspace.notice)}</div>
-    <section className="panel summary-panel" aria-label={t.run.summary}>
-      <div className="summary-item"><span className="eyebrow">{t.common.execution}</span>
+    <section className="panel summary-panel run-summary" aria-label={t.run.summary}>
+      <div className="summary-item"><span className="eyebrow">{t.run.status}</span>
         <div className="state-line"><span className={`dot phase-${phase}`} aria-hidden="true"/><span id="state" className={`phase phase-${phase}`}>{t.phase(phase)}</span></div>
         <p className="summary-caption">{executionCaption}</p></div>
-      <div className="summary-item"><span className="eyebrow">{t.common.profile}</span>
+      <div className="summary-item"><span className="eyebrow">{t.run.nextRunProfile}</span>
         <div className="summary-value">{selectedProfile ? selectedProfile.name : bound.name || t.run.untitled}</div>
         <p className={`summary-caption save-status ${dirty ? 'unsaved' : ''}`}>{selectedProfile ? dirty ? t.run.profileChanged : t.run.profileSaved : t.run.profileDraft}</p></div>
-      <div className="summary-item"><span className="eyebrow">{t.run.inputRoute}</span>
-        <div className="summary-value">{t.lane(bound.lane)}</div>
-        <p className="summary-caption">{bound.lane === 'replay' ? t.run.replaySummary : bound.lane === 'native' ? t.run.nativeSummary : t.run.controlledSummary}</p></div>
+      <div className="summary-item"><span className="eyebrow">{t.run.executionMode}<HelpTrigger title={t.run.executionMode} hint={bound.lane === 'replay' ? t.run.replaySummary : bound.lane === 'native' ? t.run.nativeSummary : t.run.controlledSummary}>
+        {bound.lane === 'replay' ? t.run.replaySummary : bound.lane === 'native' ? t.run.nativeSummary : t.run.controlledSummary}
+      </HelpTrigger></span><div className="summary-value">{t.lane(bound.lane)}</div></div>
+      <div className="actions run-summary-actions">
+        <span className="button-help"><button id="validate" disabled={locked || numericErrors || !profileBound} onClick={handlers.validate}>{t.run.validate}</button>
+          <HelpTrigger title={t.run.validate} hint={t.run.validateHint} corner>{t.run.validateHelp}</HelpTrigger></span>
+        <span className="button-help"><button id="start" className="primary" disabled={!canStart}
+          aria-describedby={[authoring.role !== null ? 'app-authoring-strip' : null, startBlock ? 'start-block' : null].filter(Boolean).join(' ') || undefined}
+          onClick={handlers.start}>{t.run.start}</button><HelpTrigger title={t.run.start} hint={t.run.startHint} corner>
+            <p>{t.run.introduction}</p><p>{t.run.startUses(selectedProfile && !valuesDirty ? selectedProfile.name : null, bound.lane === 'replay', savedEnvironment?.profile ?? null, selectedDescriptor)}</p>
+          </HelpTrigger></span>
+      </div>
     </section>
     <div className="run-grid">
       <section className="panel" aria-labelledby="config-heading">
@@ -161,9 +143,10 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                 <span id="confirm-reinspect-text">{t.run.confirmReinspect}</span>
                 <button type="button" className="danger-text" onClick={() => closeConfirm(true)}>{t.run.discardReinspect}</button>
                 <button type="button" autoFocus onClick={() => closeConfirm(false)}>{t.run.keepDraft}</button></div>
-              : <button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()}
+              : <span className="button-help"><button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()}
                 aria-describedby={editOwner ? 'app-authoring-guidance' : undefined}
-                title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button>}
+                title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button>
+                <HelpTrigger title={t.run.reinspect} hint={t.run.reinspectHint} corner><p>{t.run.reinspectHelp}</p></HelpTrigger></span>}
             {editOwner
               ? <button id="edit-package-return" type="button" onClick={authoring.onReturn}>{a.returnToEdit}</button>
               : confirmEdit
@@ -173,10 +156,9 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                   <button id="edit-keep" type="button" autoFocus onClick={() => setConfirmEdit(false)}>{t.run.keepDraft}</button></div>
                 : <button id="edit-package" type="button" disabled={authoring.block !== null} title={authoring.block ?? undefined} onClick={confirmedEdit}>{a.editPackage}</button>}
           </div>
-          <div className="field"><label htmlFor="package-path">{t.guidance.packageDirectory}</label>
+          <div className="field"><div className="field-heading"><label htmlFor="package-path">{t.guidance.packageDirectory}</label><HelpTrigger title={t.guidance.packageDirectory} hint={t.run.packageDirectoryHint}>{t.run.reinspectHelp}</HelpTrigger></div>
             <input id="package-path" type="text" value={workspace.inspectPath} disabled={locked} spellCheck={false} placeholder={t.guidance.packagePlaceholder}
-              onChange={event => handlers.inspectPath(event.target.value)}/>
-            <p className="field-help">{t.run.reinspectHelp}</p></div>
+              onChange={event => handlers.inspectPath(event.target.value)}/></div>
           {bound.profilesError && <><FaultMessage title={t.run.profilesError} value={bound.profilesError}/>
             {bound.profilesError.category === 'ProfileRejected' && workspace.recovery === null
               ? <p className="muted">{t.run.rejectedHelp} <button id="recover-reinspect" type="button" className="link" disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()} onClick={confirmedReinspect}>{t.run.recoverReinspect}</button></p>
@@ -187,10 +169,9 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                 options={[{value: '', label: t.run.unsavedDraft}, ...bound.profiles.map(profile => ({value: profile.id, label: profile.name}))]}/>
               {selectedProfile && <p className="identity-text">{selectedProfile.id}</p>}
               {!profileBound && <p className="inline-warning">{t.run.staleSchema}</p>}</div>
-            <div className="field"><label htmlFor="preset-select">{t.run.preset}</label>
+            <div className="field"><div className="field-heading"><label htmlFor="preset-select">{t.run.preset}</label><HelpTrigger title={t.run.preset} hint={t.run.presetHelp}>{t.run.presetHelp}</HelpTrigger></div>
               <Select id="preset-select" value={bound.preset} disabled={locked} onChange={handlers.newDraft}
-                options={[{value: '', label: t.run.defaults}, ...Object.keys(bound.package.profiles).map(key => ({value: key, label: key}))]}/>
-              <p className="field-help">{t.run.presetHelp}</p></div>
+                options={[{value: '', label: t.run.defaults}, ...Object.keys(bound.package.profiles).map(key => ({value: key, label: key}))]}/></div>
           </div>
           <div className="field"><label htmlFor="profile-name">{t.run.profileName}</label>
             <input id="profile-name" value={bound.name} disabled={locked} onChange={event => handlers.change(item => ({...item, name: event.target.value, touched: true}))}/></div>
@@ -201,21 +182,19 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
             <button id="delete-profile" className="danger-text" disabled={!bound.selectedId || locked} onClick={handlers.deleteProfile}>{t.run.deleteProfile}</button>
           </div>
           <details className="legacy-import"><summary>{t.run.legacyHeading}</summary>
-            <p className="field-help">{t.run.legacyHelp}</p>
-            <p className="field-help">{t.bootstrap.converterHelp}</p>
-            <div className="button-row"><button id="import-legacy-profiles" disabled={locked} onClick={handlers.importLegacy}>{t.run.legacyImport}</button></div>
+            <div className="button-row"><span className="button-help"><button id="import-legacy-profiles" disabled={locked} onClick={handlers.importLegacy}>{t.run.legacyImport}</button>
+              <HelpTrigger title={t.run.legacyImport} hint={t.run.legacyHint} corner><p>{t.run.legacyHelp}</p><p>{t.bootstrap.converterHelp}</p></HelpTrigger></span></div>
             {legacy && <dl className="run-identity">
               <dt>{t.run.legacyImported}</dt><dd>{legacy.imported.length ? legacy.imported.join(', ') : t.run.legacyNone}</dd>
               <dt>{t.run.legacyUnchanged}</dt><dd>{legacy.unchanged.length ? legacy.unchanged.join(', ') : t.run.legacyNone}</dd></dl>}
             {legacy?.fault && <FaultMessage title={t.run.legacyFault} value={legacy.fault}/>}
           </details>
-          <h3>{t.run.options}</h3>
-          <p className="field-help">{t.run.optionsHelp}</p>
+          <h3>{t.run.options}<HelpTrigger title={t.run.options} hint={t.run.optionsHint}>{t.run.optionsHelp}</HelpTrigger></h3>
           <SchemaForm schema={bound.package.schema} value={bound.draft} onChange={draft => handlers.change(item => editDraft(item, draft))} errors={parsed.errors}/>
-          {bound.validation && <details className="validated"><summary>{t.run.valid}</summary><pre>{JSON.stringify(bound.validation, null, 2)}</pre></details>}
-          <h3>{t.run.route}</h3>
+          {bound.validation?.draftRevision === bound.draftRevision && <details className="validated"><summary>{t.run.valid}</summary><pre>{JSON.stringify(bound.validation.values, null, 2)}</pre></details>}
+          <h3>{t.run.executionMode}</h3>
           <div className="two-col">
-            <div className="field"><label htmlFor="lane">{t.run.lane}</label>
+            <div className="field"><label htmlFor="lane">{t.run.executionMode}</label>
               <Select id="lane" value={bound.lane} disabled={locked} onChange={lane => handlers.change(item => chooseLane(item, lane))}
                 options={[{value: 'controlled', label: t.run.controlled},
                   {value: 'replay', label: t.run.replay},
@@ -255,11 +234,11 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
                 onChange={event => handlers.native.edit('workflowSeconds', event.target.value)}/>
               {native.workflowError && <p className="field-error" id="native-workflow-error">{t.run.nativeWorkflowError(nativeCapability.max_workflow_ms / 1000)}</p>}
               <p className="field-help" id="native-workflow-help">{t.run.nativeWorkflowHelp(nativeCapability.default_limits.workflow_ms / 1000, nativeCapability.max_workflow_ms / 1000)}</p></div>}
-            {nativeBudgetRows && <><span className="eyebrow">{t.run.nativeBudgets}</span>
+            {nativeBudgetRows && <><span className="eyebrow">{t.run.nativeBudgets}<HelpTrigger title={t.run.nativeBudgets} hint={t.run.nativeBudgetHint}>
+              <p>{t.run.nativeBudgetHelp}</p><p>{t.run.nativeStartupHelp}</p>
+            </HelpTrigger></span>
               <dl className="run-identity" id="native-budgets">{nativeBudgetRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value === null ? t.common.none : `${value} ms`}</dd></Fragment>)}</dl>
-              <dl className="run-identity"><dt>{t.run.nativeDuration}</dt><dd id="native-duration">{nativeDuration === null ? t.common.none : t.run.nativeEnvelope(nativeDuration)}</dd></dl>
-              <p className="field-help" id="native-budget-help">{t.run.nativeBudgetHelp}</p>
-              <p className="field-help" id="native-startup-help">{t.run.nativeStartupHelp}</p></>}
+              <dl className="run-identity"><dt>{t.run.nativeDuration}</dt><dd id="native-duration">{nativeDuration === null ? t.common.none : t.run.nativeEnvelope(nativeDuration)}</dd></dl></>}
             {nativeLimitRows && <><span className="eyebrow">{t.run.nativeLimits}</span>
               <dl className="run-identity" id="native-limits">{nativeLimitRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value}</dd></Fragment>)}</dl></>}
             <div className="field"><label htmlFor="native-operation">{t.run.nativeOperation}</label>
@@ -285,53 +264,15 @@ export default function RunPage({workspace, label, derived, run, snapshot, locke
               <p className="field-help" id="native-recovery-help">{t.run.nativeRecoveryHelp}</p>
               <p className="field-help">{t.run.nativeApprovalHelp}</p></div>
           </div>}
-          <div className="field"><label htmlFor="descriptor-path">{t.run.descriptor}</label>
+          <div className="field"><div className="field-heading"><label htmlFor="descriptor-path">{t.run.descriptor}</label><HelpTrigger title={t.run.descriptor} hint={t.run.descriptorHint}>{t.run.descriptorHelp(DESCRIPTOR_LIMIT)}</HelpTrigger></div>
             <input id="descriptor-path" type="text" value={bound.descriptorPath} disabled={locked} spellCheck={false} aria-invalid={descriptorError !== null}
               placeholder={t.run.descriptorPlaceholder} onChange={event => handlers.change(item => ({...item, descriptorPath: event.target.value}))}/>
-            {descriptorError && <p className="field-error">{descriptorError}</p>}
-            <p className="field-help">{t.run.descriptorHelp(DESCRIPTOR_LIMIT)}</p></div>
-          <p className="muted">{t.run.startUses(selectedProfile && !valuesDirty ? selectedProfile.name : null, bound.lane === 'replay', savedEnvironment?.profile ?? null, selectedDescriptor)}</p>
+            {descriptorError && <p className="field-error">{descriptorError}</p>}</div>
           {startBlock && <p className="inline-warning" id="start-block">{startBlock}</p>}
         </div>
       </section>
-      <section className="panel" aria-labelledby="run-heading">
-        <div className="panel-heading"><div><span className="eyebrow">{t.run.immutable}</span><h2 id="run-heading">{check ? t.run.environmentCheck : t.common.execution}</h2></div>
-          <span className={`phase phase-${phase}`}>{t.phase(phase)}</span></div>
-        <div className="panel-body">
-          {run.olderRevision !== null && <p className="inline-warning">{t.run.olderRevision(run.olderRevision, workspace.revision)}</p>}
-          <div className="run-buttons">
-            <button id="stop" className="stop-button" disabled={!stopAvailable} onClick={handlers.stop}>{stopping ? t.run.requestingStop : t.run.stop}</button>
-            <span className="muted">{t.run.stopTarget(run.live && view.run ? view.run : null)}</span>
-          </div>
-          <p className="authority-note">{t.run.authority}</p>
-          <dl className="run-identity"><dt>{t.run.operationId}</dt><dd id="run-id">{view.run ?? t.common.noOperation}</dd>
-            <dt>{t.run.kind}</dt><dd id="operation-kind">{view.run ? check ? t.run.checkKind : t.run.runKind(t.lane(snapshot?.kind === 'run' && snapshot.run === view.run ? snapshot.lane : text(view.result?.lane) ?? t.common.unknown)) : t.phase('idle')}</dd>
-            {view.native_preparation && <><dt>{t.run.nativeAttempt}</dt><dd id="native-attempt">{view.native_preparation.attempt}</dd>
-              <dt>{t.run.nativeTargetStatus}</dt><dd id="native-target-status">{t.run.nativeStatuses[view.native_preparation.status]}</dd>
-              <dt>{t.run.nativeStage}</dt><dd id="native-stage">{t.run.nativePhases[view.native_preparation.phase]}</dd>
-              <dt>{t.run.nativeLaunchRequest}</dt><dd id="native-launch">{t.run.launchDispositions[view.native_preparation.launch]}</dd></>}
-            {snapshot?.kind === 'run' && snapshot.run === view.run && <><dt>{t.run.capturedProfile}</dt><dd>{snapshot.profileName || t.run.untitled} · {snapshot.profileId}</dd><dt>{t.run.packageScenario}</dt><dd>{snapshot.packageId} / {snapshot.scenario}</dd>
-              {snapshot.lane === 'replay' && <><dt>{t.common.descriptor}</dt><dd>{snapshot.descriptorPath}</dd></>}
-              {snapshot.native && <><dt>{t.run.nativeOperation}</dt><dd>{snapshot.native.operation}</dd>
-                <dt>{t.run.nativePostcondition}</dt><dd>{snapshot.native.visible_postcondition}</dd>
-                <dt>{t.run.nativeBinding}</dt><dd><code>{snapshot.native.target_binding_id}</code> · {t.target.revision(snapshot.native.target_revision)}</dd>
-                <dt>{t.run.nativeLaunchApproval}</dt><dd>{snapshot.native.launch_approved ? t.run.nativeLaunchApproved : t.run.nativeLaunchNotApproved}</dd>
-                <dt>{t.run.nativeRecoveryApproval}</dt><dd id="captured-native-recoveries">{snapshot.native.max_exit_recoveries}</dd>
-                <dt>{t.run.capturedBudgets}</dt><dd id="captured-native-budgets">{t.run.nativeStartup} {snapshot.native.limits.startup_ms} ms · {t.run.nativeReadiness} {snapshot.native.limits.readiness_ms} ms · {t.run.nativeWorkflow} {snapshot.native.limits.workflow_ms} ms</dd></>}</>}
-            {snapshot?.kind === 'check' && snapshot.run === view.run && <><dt>{t.run.checkedProfile}</dt><dd>{snapshot.association.environment?.profile ?? t.common.unconfigured}</dd>
-              <dt>{t.common.descriptor}</dt><dd>{snapshot.association.descriptorPath ?? t.run.noInitialization}</dd></>}
-          </dl>
-          {snapshot?.kind === 'run' && snapshot.run === view.run && <details><summary>{t.run.capturedOptions}</summary><pre>{JSON.stringify(snapshot.values, null, 2)}</pre></details>}
-          {snapshot?.kind === 'run' && snapshot.run === view.run && snapshot.native && <details><summary>{t.run.capturedLimits}</summary><pre>{JSON.stringify(snapshot.native.limits, null, 2)}</pre></details>}
-          {snapshot?.kind === 'check' && snapshot.run === view.run && <details><summary>{t.run.capturedEnvironment}</summary><pre>{JSON.stringify(snapshot.association.environment, null, 2)}</pre></details>}
-          <h3>{t.run.milestones}</h3><ol className="progress-list">{view.progress.map((event, index) => <li key={`${view.run}-${index}`}>
-            <details><summary>{String(event.event ?? t.run.milestone)}{typeof event.attempt === 'number' ? ` · ${t.result.attempt(event.attempt)}` : ''}{text(event.stage) ? ` · ${event.stage}` : ''}{typeof event.at_us === 'number' ? ` · ${(event.at_us / 1000).toFixed(1)} ms` : ''}</summary><pre>{JSON.stringify(event, null, 2)}</pre></details>
-          </li>)}</ol>{view.progress.length === 0 && <p className="muted">{t.run.noMilestones}</p>}
-          <ResultPanel view={view} disclosed={view.run !== null && bound.disclosedRun === view.run} onDisclose={next => handlers.disclose(next ? view.run : null)}/>
-        </div>
-      </section>
+      <TargetPanel state={bound.target} handlers={handlers.target} locked={locked} active={active} pickerBusy={pickerBusy}/>
     </div>
     <ProfileRecovery idPrefix="recovery" label={label} state={workspace.recovery} outcomes={workspace.recoveryOutcomes} locked={locked} handlers={handlers.recovery}/>
-    <TargetPanel state={bound.target} handlers={handlers.target} locked={locked} active={active} pickerBusy={pickerBusy}/>
   </>;
 }

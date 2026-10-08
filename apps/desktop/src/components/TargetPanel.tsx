@@ -2,6 +2,7 @@ import {useEffect, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
 import Select from './Select.tsx';
 import {BoundedRecord} from './ResultPanel.tsx';
+import {HelpTrigger} from './ContextualHelp.tsx';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import {boundedText, record, text} from '../state.ts';
@@ -70,18 +71,18 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
     const error = draft[name] === '' ? undefined : parsed.errors[name];
     return error ? t.fieldErrors[error] : null;
   }
-  function fieldBox(name:TargetField, id:string, label:string, control:ReactNode) {
+  function fieldBox(name:TargetField, id:string, label:string, control:ReactNode, help?:string) {
     const error = fieldError(name);
-    return <div className="field"><label htmlFor={id}>{label}</label>{control}
+    return <div className="field"><div className="field-heading"><label htmlFor={id}>{label}</label>{help && <HelpTrigger title={label} hint={help}>{help}</HelpTrigger>}</div>{control}
       {error && <p id={`${id}-error`} className="field-error">{error}</p>}</div>;
   }
   function attributes(name:TargetField, id:string) {
     return {'aria-invalid':fieldError(name) !== null, 'aria-describedby':fieldError(name) ? `${id}-error` : undefined};
   }
   function input(name:'gamePath'|'launcherPath'|'workingDirectory'|'windowTitle'|'clickHold', id:string, label:string, readOnly = false) {
-    return fieldBox(name, id, label, <input id={id} value={draft[name]} spellCheck={false} readOnly={readOnly}
+    return fieldBox(name, id, label, <input id={id} value={draft[name]} spellCheck={false} readOnly={readOnly} disabled={editingDisabled}
       inputMode={name === 'clickHold' ? 'numeric' : undefined} {...attributes(name, id)}
-      onChange={event => handlers.edit({...draft, [name]:event.target.value})}/>);
+      onChange={event => handlers.edit({...draft, [name]:event.target.value})}/>, name === 'windowTitle' ? t.windowHelp : undefined);
   }
   const kinds = [{value:'', label:t.choose}, {value:'executable', label:t.executable}, {value:'bundle', label:t.bundle}];
   const status = currentIssue ? t.failed : review ? t.changed : currentObservation ? t.passed : targetDirty(state) ? t.modified
@@ -97,10 +98,9 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
     setConfirmRemove(false);
     if (remove) handlers.remove();
   }
-  return <section id="target-panel" className="panel target-panel" aria-labelledby="target-heading">
-    <div className="panel-heading"><h2 id="target-heading" tabIndex={-1}>{t.heading}</h2><span className="tag">{draft.platform === 'windows' ? 'Windows' : 'macOS'}</span></div>
+  return <section id="target-panel" className="panel target-panel" aria-labelledby="target-heading-label">
+    <div className="panel-heading"><h2 id="target-heading" tabIndex={-1} aria-labelledby="target-heading-label"><span id="target-heading-label">{t.heading}</span><HelpTrigger title={t.heading} hint={t.introductionHint}>{t.introduction}</HelpTrigger></h2><span className="tag">{draft.platform === 'windows' ? 'Windows' : 'macOS'}</span></div>
     <div className="panel-body">
-      <p className="field-help">{t.introduction}</p>
       {state.declaration ? <dl className="run-identity">
         <dt>{t.declaration}</dt><dd>{state.declaration.id}</dd>
         <dt>{t.declarationIdentity}</dt><dd><code>{state.context.declaration_identity}</code></dd>
@@ -132,7 +132,7 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
       </>}
       {state.declaration && <>
         <p className="authority-note">{t.privacy}</p>
-        <fieldset className="target-fields" disabled={editingDisabled} aria-describedby="target-required-fields">
+        <fieldset className="target-fields" aria-describedby="target-required-fields">
           <legend>{t.configuration}</legend>
           <p id="target-required-fields" className="field-help">{t.requiredFields}</p>
           <h3>{t.game}</h3>
@@ -141,29 +141,28 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
               <Select id="target-game-kind" value={draft.gameKind} options={kinds} disabled={editingDisabled} {...attributes('gameKind', 'target-game-kind')}
                 onChange={value => handlers.edit({...draft, gameKind:value as TargetDraft['gameKind']})}/>)}
             <div>{input('gamePath', 'target-game-path', t.gamePath)}
-              <button id="target-choose-game" type="button" disabled={chooseDisabled} onClick={() => handlers.chooseApplication('game')}>{state.picker?.field === 'game' ? t.choosing : t.chooseApplication}</button></div>
+              <button id="target-choose-game" type="button" disabled={editingDisabled || chooseDisabled} onClick={() => handlers.chooseApplication('game')}>{state.picker?.field === 'game' ? t.choosing : t.chooseApplication}</button></div>
           </div>
-          <h3>{t.launcher}</h3>
-          <label className="checkbox-label"><input id="target-separate-launcher" type="checkbox" checked={draft.separateLauncher}
+          <h3>{t.launcher}<HelpTrigger title={t.launcher} hint={t.launcherHelp}>{t.launcherHelp}</HelpTrigger></h3>
+          <label className="checkbox-label"><input id="target-separate-launcher" type="checkbox" checked={draft.separateLauncher} disabled={editingDisabled}
             onChange={event => handlers.edit({...draft, separateLauncher:event.target.checked})}/>{t.separateLauncher}</label>
-          <p className="field-help">{t.launcherHelp}</p>
           {draft.separateLauncher && <div className="two-col">
             {fieldBox('launcherKind', 'target-launcher-kind', t.launcherKind,
               <Select id="target-launcher-kind" value={draft.launcherKind} options={kinds} disabled={editingDisabled} {...attributes('launcherKind', 'target-launcher-kind')}
                 onChange={value => handlers.edit({...draft, launcherKind:value as TargetDraft['launcherKind']})}/>)}
             <div>{input('launcherPath', 'target-launcher-path', t.launcherPath)}
-              <button id="target-choose-launcher" type="button" disabled={chooseDisabled} onClick={() => handlers.chooseApplication('launcher')}>{state.picker?.field === 'launcher' ? t.choosing : t.chooseApplication}</button></div>
+              <button id="target-choose-launcher" type="button" disabled={editingDisabled || chooseDisabled} onClick={() => handlers.chooseApplication('launcher')}>{state.picker?.field === 'launcher' ? t.choosing : t.chooseApplication}</button></div>
           </div>}
-          <h3 id="target-arguments-label">{t.arguments}</h3><p id="target-arguments-help" className="field-help">{t.argumentsHelp}</p>
-          <ol id="target-arguments" className="target-arguments" aria-labelledby="target-arguments-label" aria-describedby="target-arguments-help">
+          <h3 aria-labelledby="target-arguments-label"><span id="target-arguments-label">{t.arguments}</span><HelpTrigger title={t.arguments} hint={t.argumentsHint} id="target-arguments-help">{t.argumentsHelp}</HelpTrigger></h3>
+          <ol id="target-arguments" className="target-arguments" aria-labelledby="target-arguments-label" aria-describedby={fieldError('arguments') ? 'target-arguments-error' : undefined}>
             {draft.arguments.map((value, index) => <li key={index}>
               <div className="field"><label htmlFor={`target-argument-${index}`}>{t.argument(index + 1)}</label>
-                <input id={`target-argument-${index}`} value={value} spellCheck={false} {...attributes('arguments', 'target-arguments')}
+                <input id={`target-argument-${index}`} value={value} spellCheck={false} disabled={editingDisabled} {...attributes('arguments', 'target-arguments')}
                   onChange={event => handlers.edit({...draft, arguments:draft.arguments.map((arg, at) => at === index ? event.target.value : arg)})}/></div>
               <div className="button-row">
-                <button type="button" disabled={index === 0} aria-label={`${t.moveUp} · ${t.argument(index + 1)}`} onClick={() => moveArgument(index, -1)}>{t.moveUp}</button>
-                <button type="button" disabled={index === draft.arguments.length - 1} aria-label={`${t.moveDown} · ${t.argument(index + 1)}`} onClick={() => moveArgument(index, 1)}>{t.moveDown}</button>
-                <button type="button" aria-label={`${t.removeArgument} · ${t.argument(index + 1)}`} onClick={() => {
+                <button type="button" disabled={editingDisabled || index === 0} aria-label={`${t.moveUp} · ${t.argument(index + 1)}`} onClick={() => moveArgument(index, -1)}>{t.moveUp}</button>
+                <button type="button" disabled={editingDisabled || index === draft.arguments.length - 1} aria-label={`${t.moveDown} · ${t.argument(index + 1)}`} onClick={() => moveArgument(index, 1)}>{t.moveDown}</button>
+                <button type="button" disabled={editingDisabled} aria-label={`${t.removeArgument} · ${t.argument(index + 1)}`} onClick={() => {
                   handlers.edit({...draft, arguments:draft.arguments.filter((_, at) => at !== index)});
                   document.getElementById('target-add-argument')?.focus();
                 }}>{t.removeArgument}</button>
@@ -171,13 +170,12 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
             </li>)}
           </ol>
           {fieldError('arguments') && <p id="target-arguments-error" className="field-error">{fieldError('arguments')}</p>}
-          <button id="target-add-argument" type="button" disabled={draft.arguments.length >= 32} onClick={() => {
+          <button id="target-add-argument" type="button" disabled={editingDisabled || draft.arguments.length >= 32} onClick={() => {
             focusArgument.current = draft.arguments.length;
             handlers.edit({...draft, arguments:[...draft.arguments, '']});
           }}>{t.addArgument}</button>
           <div className="two-col">{input('workingDirectory', 'target-working-directory', t.workingDirectory)}{input('windowTitle', 'target-window-title', t.windowTitle, state.declaration.window_title !== null)}</div>
-          <p className="field-help">{t.windowHelp}</p>
-          {draft.platform === 'macos' && <><h3>{t.policy}</h3><p className="field-help">{t.policyHelp}</p>
+          {draft.platform === 'macos' && <><h3>{t.policy}<HelpTrigger title={t.policy} hint={t.policyHint}>{t.policyHelp}</HelpTrigger></h3>
           <div className="two-col">
             {fieldBox('route', 'target-route', t.route, <Select id="target-route" value={draft.route} disabled={editingDisabled} {...attributes('route', 'target-route')}
               options={[{value:'', label:t.choose}, {value:'process_directed', label:t.processDirected}, {value:'system', label:t.system}]}
@@ -193,8 +191,10 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
           </div></>}
         </fieldset>
         <div className="button-row">
-          <button id="target-save" type="button" className="primary" disabled={disabled || !parsed.configuration || review !== null} onClick={() => handlers.save()}>{binding && !state.view?.compatible ? t.replace : t.save}</button>
-          <button id="target-check" type="button" disabled={disabled || !parsed.configuration} onClick={handlers.check}>{t.check}</button>
+          <span className="button-help"><button id="target-save" type="button" className="primary" disabled={disabled || !parsed.configuration || review !== null} onClick={() => handlers.save()}>{binding && !state.view?.compatible ? t.replace : t.save}</button>
+            <HelpTrigger title={binding && !state.view?.compatible ? t.replace : t.save} hint={t.saveHint} corner>{t.introduction}</HelpTrigger></span>
+          <span className="button-help"><button id="target-check" type="button" disabled={disabled || !parsed.configuration} onClick={handlers.check}>{t.check}</button>
+            <HelpTrigger title={t.check} hint={t.checkHint} corner>{t.introduction}</HelpTrigger></span>
           <button id="target-discard" type="button" disabled={state.operation !== null || expectation === null || !targetDirty(state)} onClick={handlers.discard}>{t.discard}</button>
         </div>
       </>}
@@ -210,9 +210,9 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
         <BoundedRecord value={observation.check as unknown as Json}/></details>}
       {state.declaration && <section id="target-running-application" className="legacy-box" aria-labelledby="target-running-heading">
         <h3 id="target-running-heading">{t.runningHeading}</h3>
-        <p className="field-help">{t.runningHelp}</p>
-        <div className="button-row"><button id="target-check-running" type="button"
+        <div className="button-row"><span className="button-help"><button id="target-check-running" type="button"
           disabled={locked || active || pickerBusy || eligibleRunningApplication(state) === null} onClick={handlers.checkApplication}>{t.checkRunning}</button>
+          <HelpTrigger title={t.checkRunning} hint={t.runningHint} corner>{t.runningHelp}</HelpTrigger></span>
           {application.pending && <button id="target-cancel-running" type="button" onClick={handlers.cancelApplication}>{t.cancelRunning}</button>}</div>
         {application.pending && <p role="status">{t.runningPending}</p>}
         {application.cancelled && <p role="status">{t.runningCancelled}</p>}

@@ -221,12 +221,13 @@ TSX files under `apps/desktop/src/` are grouped by responsibility:
 | Path | Responsibility |
 | --- | --- |
 | `main.tsx`, `App.tsx` | Bootstrap and application composition |
-| `components/` | Shared selection, schema forms, results, notifications, and named-workspace dialogs/navigation |
-| `pages/` | Setup/Recovery, unbound-package guidance, Edit, Run, and Logs views |
+| `components/` | Shared selection, schema forms, results, status/Help, notifications, and named-workspace dialogs/navigation |
+| `pages/` | Setup/Recovery, unbound-package guidance, Edit, Run, Execution, and Logs views |
 | `settings/` | App settings dialog and OCR environment view |
 | `locales/` | Bundled English/Japanese JSON text resources |
 | `i18n.ts`, `ui-messages.ts`, `locale.tsx` | Typed formatting and saved-locale presentation |
 | `authoring.ts` | Per-file drafts/history, revision-bound save responses, search, and diagnostic navigation |
+| `status.ts` | Scoped notice priority and saved-package validation presentation |
 
 Imports point directly to the owning file. Non-visual TypeScript modules and
 their tests remain at the source root.
@@ -247,6 +248,42 @@ Bootstrap, snapshots, restore, configuration primitives, logging, and target
 metadata validation keep their existing separate modules. Tests follow their
 behavior owner; cross-owner tests stay at the root. Module extraction does not
 change persisted formats, filesystem protections, or runtime authority.
+
+## Workspace navigation, status and Help
+
+**Run control** prepares the next operation. Its summary groups Status,
+Profile · next run, Execution mode, and separate **Validate** / **Start** actions.
+Validate checks the profile draft; it is not a Start token or saved-package
+validation. Start revalidates each submitted request and does not navigate away.
+Configuration and **Target** appear side by side when space permits, then stack
+in that order. Execution mode is distinct from Target's native Input route.
+
+**Execution**, beside Run control and Logs, shows the selected workspace's
+captured operation, progress, retained outcome and independent cleanup evidence.
+It remains available after Edit invalidates the selection and when logs are
+evicted. Older selection revisions are identified; missing captured inputs are
+not reconstructed from current settings. Private records still require explicit
+disclosure. The shared pinned operation strip identifies the actual owner and
+provides **Stop** across pages; dialogs keep their own owner-bound strip.
+Execution has no second Stop button.
+
+The bottom status bar identifies its Workspace or Application scope. Click its
+message for full current details and corrective navigation. Unresolved failures
+and blockers take priority over progress and ordinary notices. Closing details
+does not clear them. Profile-draft validation, saved-package validation and
+unsaved drafts retain distinct labels; another workspace's late response cannot
+become the selected workspace's notice.
+
+**Help** opens the current page's explanation. Small raised information circles
+open a specific topic; button circles overlap the upper-right corner as independent
+controls, including when the action is disabled. Hover and keyboard focus show a
+short hint; click or keyboard activation keeps the long explanation open.
+Close or an unconsumed Escape returns focus to the opener, respecting modal/editor
+Escape ownership. Help and status/validation details share one bounded drawer;
+changing page or workspace closes it without clearing the underlying state.
+Detached Preview uses the same interaction in its existing overlay without
+resizing the image or changing Fit scale.
+
 
 ## Edit directory packages
 
@@ -326,9 +363,14 @@ Neither action inspects, binds, or runs the package.
   WebView code is never loaded.
 - **Validate** checks one saved revision through the existing inventory and
   trusted compiler without evaluating package code. Unsaved text is excluded.
-  Diagnostics identify their revision and link to declared source locations.
-  The finite validation child occupies the existing operation slot; **Stop**
-  requests cancellation and retains ownership until the worker settles.
+  **Saved-package validation** in the bottom bar shows not checked, running,
+  valid, invalid or earlier-revision state and the retained diagnostic count.
+  Open it for source locations; selecting an available location returns to the
+  owning Edit session without losing drafts. Later saves make the old result
+  stale; unsaved changes remain independently identified. Details are available
+  from the owner's other pages until Edit exits. The finite validation child
+  occupies the existing operation slot; the shared **Stop** requests cancellation
+  even with details closed and retains ownership until the worker settles.
 - One Edit session owns the application. Ordinary **Start**, independent OCR
   **Check**, a second editor, and configuration reconstruction are refused.
   One shared application strip explains this exclusion, including when another
@@ -2629,8 +2671,9 @@ Keep package presets valid when changing the schema; do not edit tracked fixture
    refusal, immediate trimming, and restart persistence. Verify card overflow,
    deduplication, hover/focus pause, failure visibility, and origin-linked Logs
    after workspace switches, closure, and log eviction.
-8. Verify Run, Logs, the Application menu, and App settings at 1440, 1024, and
-   900 CSS-pixel widths, including keyboard navigation and modal Stop.
+8. Verify Run, Execution, Logs, the status/validation/Help drawers, the Application
+   menu, and App settings at 1440, 1024, 900 and the supported minimum 760
+   CSS-pixel widths, including keyboard navigation and modal Stop.
    Verify the compact aggregate counters, conditional Errors count, shared
    selectors, and combined level/text log-search field. Check Native review/refusal
    on macOS (disabled elsewhere), Replay's scenario lock, preset/profile round trips, empty enum
