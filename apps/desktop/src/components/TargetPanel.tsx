@@ -2,7 +2,7 @@ import {useEffect, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
 import Select from './Select.tsx';
 import {BoundedRecord} from './ResultPanel.tsx';
-import {HelpTrigger} from './ContextualHelp.tsx';
+import {ButtonHint, HelpTrigger} from './ContextualHelp.tsx';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import {boundedText, record, text} from '../state.ts';
@@ -191,10 +191,8 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
           </div></>}
         </fieldset>
         <div className="button-row">
-          <span className="button-help"><button id="target-save" type="button" className="primary" disabled={disabled || !parsed.configuration || review !== null} onClick={() => handlers.save()}>{binding && !state.view?.compatible ? t.replace : t.save}</button>
-            <HelpTrigger title={binding && !state.view?.compatible ? t.replace : t.save} hint={t.saveHint} corner>{t.introduction}</HelpTrigger></span>
-          <span className="button-help"><button id="target-check" type="button" disabled={disabled || !parsed.configuration} onClick={handlers.check}>{t.check}</button>
-            <HelpTrigger title={t.check} hint={t.checkHint} corner>{t.introduction}</HelpTrigger></span>
+          <ButtonHint hint={t.saveHint}><button id="target-save" type="button" className="primary" disabled={disabled || !parsed.configuration || review !== null} onClick={() => handlers.save()}>{binding && !state.view?.compatible ? t.replace : t.save}</button></ButtonHint>
+          <ButtonHint hint={t.checkHint}><button id="target-check" type="button" disabled={disabled || !parsed.configuration} onClick={handlers.check}>{t.check}</button></ButtonHint>
           <button id="target-discard" type="button" disabled={state.operation !== null || expectation === null || !targetDirty(state)} onClick={handlers.discard}>{t.discard}</button>
         </div>
       </>}
@@ -210,9 +208,8 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
         <BoundedRecord value={observation.check as unknown as Json}/></details>}
       {state.declaration && <section id="target-running-application" className="legacy-box" aria-labelledby="target-running-heading">
         <h3 id="target-running-heading">{t.runningHeading}</h3>
-        <div className="button-row"><span className="button-help"><button id="target-check-running" type="button"
-          disabled={locked || active || pickerBusy || eligibleRunningApplication(state) === null} onClick={handlers.checkApplication}>{t.checkRunning}</button>
-          <HelpTrigger title={t.checkRunning} hint={t.runningHint} corner>{t.runningHelp}</HelpTrigger></span>
+        <div className="button-row"><ButtonHint hint={t.runningHint}><button id="target-check-running" type="button"
+          disabled={locked || active || pickerBusy || eligibleRunningApplication(state) === null} onClick={handlers.checkApplication}>{t.checkRunning}</button></ButtonHint>
           {application.pending && <button id="target-cancel-running" type="button" onClick={handlers.cancelApplication}>{t.cancelRunning}</button>}</div>
         {application.pending && <p role="status">{t.runningPending}</p>}
         {application.cancelled && <p role="status">{t.runningCancelled}</p>}

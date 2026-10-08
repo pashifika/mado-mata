@@ -274,10 +274,13 @@ does not clear them. Profile-draft validation, saved-package validation and
 unsaved drafts retain distinct labels; another workspace's late response cannot
 become the selected workspace's notice.
 
-**Help** opens the current page's explanation. Small raised information circles
-open a specific topic; button circles overlap the upper-right corner as independent
-controls, including when the action is disabled. Hover and keyboard focus show a
-short hint; click or keyboard activation keeps the long explanation open.
+**Help** opens the current page's explanation. Small information circles sit close
+to their labels, aligned to the upper-right within the text height. Their wider
+clickable area does not add a visible gap. Hover or keyboard focus shows a short
+hint; activating a circle keeps its topic's long explanation open.
+Action buttons have no information icon: hover or focus shows only a short
+explanation. Disabled actions retain hover descriptions without becoming enabled.
+
 Close or an unconsumed Escape returns focus to the opener, respecting modal/editor
 Escape ownership. Help and status/validation details share one bounded drawer;
 changing page or workspace closes it without clearing the underlying state.

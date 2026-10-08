@@ -2205,7 +2205,7 @@ export default function App() {
         {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (isBound(selected)
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id}
-            savedEnvironment={savedEnvironment} handlers={handlers(selected)} authoring={pageAuthoring(selected)}
+            handlers={handlers(selected)} authoring={pageAuthoring(selected)}
             nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error}/>
           : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}

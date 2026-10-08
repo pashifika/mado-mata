@@ -208,9 +208,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .page-heading > div { min-width: 0; }
 .page-heading p { font-size: 12px; color: var(--text-muted); margin: 8px 0 0; }
 .page-heading .actions { display: flex; gap: 9px; flex-shrink: 0; align-items: flex-end; }
-/* Keep contextual-help hitboxes and action-end reservations independent of heading buttons. */
-.page-heading .actions > button, .page-heading .actions .button-help > button:not(.contextual-help-trigger) { padding: 9px 16px; }
-.page-heading .actions .button-help > button:not(.contextual-help-trigger) { padding-inline-end: 18px; }
+.page-heading .actions > button, .page-heading .actions .button-hint > button { padding: 9px 16px; }
 .inline-label { display: grid; gap: 4px; min-width: 200px; }
 .operation-status { min-height: 30px; padding: 0 2px 8px; color: #52657c; font-size: 12px; overflow-wrap: anywhere; }
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 2px 3px #12223b06; min-width: 0; }
@@ -306,7 +304,6 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .field-heading label { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
 .field > .field-heading { align-items: center; margin-bottom: 5px; }
 .field > .field-heading label { font-size: 11px; }
-.field > .field-heading > .contextual-help-trigger { margin-block: -4px; }
 .field-type { font-size: 10px; color: #7b8799; }
 .text-button { background: transparent; border: 0; color: #3f6c9f; font-size: 10px; padding: 1px 3px; margin-left: auto; }
 .object-fields .object-fields { border-left: 2px solid #e4eaf2; padding-left: 11px; }

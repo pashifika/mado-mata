@@ -56,7 +56,6 @@ const adapterArguments = {
   'ui.run.heading': [['profile-A']], 'ui.run.owned': [[null],['run-A']],
   'ui.run.settled': [[null],['run-A']], 'ui.run.inspected': [[2]],
   'ui.run.descriptorHelp': [[4096]],
-  'ui.run.startUses': [[null,false,null,null],['profile-A',false,null,null],[null,true,null,null],['profile-A',true,'environment-A','corpus-A']],
   'ui.run.olderRevision': [[1,2]],
   'ui.run.runKind': [['controlled']],
   'ui.run.nativeEnvelope': [[120000],[243000]],

@@ -1,5 +1,5 @@
-import {createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
-import type {CSSProperties, ReactNode} from 'react';
+import {cloneElement, createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
+import type {ButtonHTMLAttributes, CSSProperties, ReactElement, ReactNode, RefObject} from 'react';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import './contextual-help.css';
@@ -108,8 +108,58 @@ export function HelpProvider({controller, children, panelId = DEFAULT_PANEL_ID}:
   return <HelpContext value={value}>{children}</HelpContext>;
 }
 
-export function HelpTrigger({title, hint, children, corner = false, id, label}: {
-  title: string; hint: string; children: ReactNode; corner?: boolean; id?: string; label?: string;
+function useHint(text: string, anchor: RefObject<HTMLElement | null>) {
+  const element = useRef<HTMLSpanElement>(null);
+  const id = useId();
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<CSSProperties>({left: 12, top: 12});
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      if (!anchor.current || !element.current) return;
+      const bounds = anchor.current.getBoundingClientRect();
+      const box = element.current.getBoundingClientRect();
+      const width = document.documentElement.clientWidth;
+      const height = document.documentElement.clientHeight;
+      const left = Math.max(12, Math.min(bounds.left + (bounds.width - box.width) / 2, width - box.width - 12));
+      const above = bounds.top - box.height - 6;
+      const top = Math.max(12, above >= 12 ? above : Math.min(bounds.bottom + 6, height - box.height - 12));
+      setPosition(current => current.left === left && current.top === top ? current : {left, top});
+    };
+    place();
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    };
+  }, [open, text, anchor]);
+  return {
+    id, hide: () => setOpen(false),
+    events: {
+      onMouseEnter: () => setOpen(true), onMouseLeave: () => setOpen(false),
+      onFocus: () => setOpen(true), onBlur: () => setOpen(false),
+    },
+    tooltip: <span ref={element} id={id} className="contextual-help-hint" role="tooltip" hidden={!open} style={position}>{text}</span>,
+  };
+}
+
+export function ButtonHint({hint, children}: {
+  hint: string; children: ReactElement<ButtonHTMLAttributes<HTMLButtonElement>>;
+}) {
+  const anchor = useRef<HTMLSpanElement>(null);
+  const description = useHint(children.props.title || hint, anchor);
+  return <span ref={anchor} className="button-hint" {...description.events}>
+    {cloneElement(children, {
+      title: undefined,
+      'aria-describedby': [children.props['aria-describedby'], description.id].filter(Boolean).join(' '),
+    })}
+    {description.tooltip}
+  </span>;
+}
+
+export function HelpTrigger({title, hint, children, id, label}: {
+  title: string; hint: string; children: ReactNode; id?: string; label?: string;
 }) {
   const context = useContext(HelpContext);
   if (context === null) throw new Error('HelpTrigger requires HelpProvider');
@@ -117,10 +167,7 @@ export function HelpTrigger({title, hint, children, corner = false, id, label}: 
   const locale = useLocale();
   const helpLabel = messages[locale].ui.recognition.previewHelpButton;
   const trigger = useRef<HTMLButtonElement>(null);
-  const hintElement = useRef<HTMLSpanElement>(null);
-  const hintId = useId();
-  const [hintOpen, setHintOpen] = useState(false);
-  const [hintPosition, setHintPosition] = useState<CSSProperties>({left: 12, top: 12});
+  const description = useHint(hint, trigger);
   const [liveTopic] = useState(() => new LiveHelpTopic(title, children));
   const expanded = controller.topic === liveTopic;
 
@@ -128,34 +175,21 @@ export function HelpTrigger({title, hint, children, corner = false, id, label}: 
   const close = controller.close;
   useLayoutEffect(() => () => {close(true, liveTopic);}, [close, liveTopic]);
 
-  useLayoutEffect(() => {
-    if (!hintOpen || !trigger.current || !hintElement.current) return;
-    const anchor = trigger.current.getBoundingClientRect();
-    const box = hintElement.current.getBoundingClientRect();
-    const width = document.documentElement.clientWidth;
-    const height = document.documentElement.clientHeight;
-    const left = Math.max(12, Math.min(anchor.left + (anchor.width - box.width) / 2, width - box.width - 12));
-    const above = anchor.top - box.height - 6;
-    const top = above >= 12 ? above : Math.min(anchor.bottom + 6, height - box.height - 12);
-    setHintPosition({left, top: Math.max(12, top)});
-  }, [hintOpen, hint]);
 
   return <button ref={trigger} id={id} type="button"
-    className={`contextual-help-trigger ${label === undefined ? 'contextual-help-icon-button' : 'contextual-help-text'}${corner ? ' contextual-help-corner' : ''}`}
-    aria-label={`${helpLabel} · ${title}`} aria-describedby={hintId} aria-expanded={expanded} aria-controls={panelId}
-    onMouseEnter={() => setHintOpen(true)} onMouseLeave={() => setHintOpen(false)}
-    onFocus={() => setHintOpen(true)} onBlur={() => setHintOpen(false)}
+    className={`contextual-help-trigger ${label === undefined ? 'contextual-help-icon-button' : 'contextual-help-text'}`}
+    aria-label={`${helpLabel} · ${title}`} aria-describedby={description.id} aria-expanded={expanded} aria-controls={panelId}
+    {...description.events}
     onClick={event => {
       // Keep Help activation independent of the adjacent field or action.
       event.preventDefault();
       event.stopPropagation();
-      setHintOpen(false);
+      description.hide();
       if (expanded) {controller.close(); return;}
       controller.open(liveTopic, event.currentTarget);
     }}>
     {label ?? <span className="contextual-help-icon" aria-hidden="true">i</span>}
-    <span ref={hintElement} id={hintId} className="contextual-help-hint" role="tooltip" hidden={!hintOpen}
-      style={hintPosition}>{hint}</span>
+    {description.tooltip}
   </button>;
 }
 

@@ -5,7 +5,7 @@ import CatalogDialog from '../components/CatalogDialog.tsx';
 import type {CatalogIntent} from '../components/CatalogDialog.tsx';
 import ContextMenu, {elementAnchor, menuEvents} from '../components/ContextMenu.tsx';
 import type {MenuAction, MenuAnchor} from '../components/ContextMenu.tsx';
-import {HelpTrigger} from '../components/ContextualHelp.tsx';
+import {ButtonHint, HelpTrigger} from '../components/ContextualHelp.tsx';
 import FileTree from '../components/FileTree.tsx';
 import ManifestEditor from '../components/ManifestEditor.tsx';
 import Modal from '../components/Modal.tsx';
@@ -359,21 +359,19 @@ export default function EditPage({session, label, handlers, recognition, recogni
     {selected.diskChanged && <p className="inline-warning">{a.diskChangedHelp}</p>}
     {selected.missing && <p className="inline-warning">{a.missingHelp}</p>}
     {text && (text.kind === 'manifest' || text.kind === 'schema' || text.kind === 'profile') && <div className="editor-toolbar">
-      <span className="button-help">
+      <ButtonHint hint={a.discardHint}>
         <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(text) || readOnly} onClick={() => handlers.discard(text.path)}>{a.discardFile}</button>
-        <HelpTrigger corner title={a.discardFile} hint={a.discardHint}><p>{a.structuredHelp}</p></HelpTrigger>
-      </span>
+      </ButtonHint>
     </div>}
     {editable && <>
       <div className="editor-toolbar">
         <button id="authoring-undo" type="button" disabled={sourceReadOnly || editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
         <button id="authoring-redo" type="button" disabled={sourceReadOnly || editable.redo.length === 0 || editable.composing !== null} onClick={() => handlers.redo(editable.path)}>{a.redo}</button>
         <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(editable) || readOnly || editable.composing !== null} onClick={() => handlers.discard(editable.path)}>{a.discardFile}</button>
-        <span className="button-help">
+        <ButtonHint hint={a.completionHint}>
           <button id="authoring-complete" type="button" disabled={!completionContext} aria-keyshortcuts="Control+Space"
             onClick={() => sourceEditor.current?.complete()}>{a.complete}</button>
-          <HelpTrigger corner title={a.complete} hint={a.completionHint}><p>{a.completionScope}</p></HelpTrigger>
-        </span>
+        </ButtonHint>
         <span className="editor-search" role="search">
           <label className="visually-hidden" htmlFor="authoring-search">{a.search}</label>
           <input id="authoring-search" ref={searchInput} type="search" value={query} spellCheck={false} placeholder={a.searchPlaceholder}
@@ -438,15 +436,13 @@ export default function EditPage({session, label, handlers, recognition, recogni
           title={saveReason ? a.block(saveReason) : undefined} onClick={() => selected && handlers.save(selected.path)}>{pending?.kind === 'save' ? a.working : a.save}</button>
         <button id="authoring-save-all" type="button" disabled={publishLocked || (savable.length === 0 && (!recognitionDirty || recognitionSaveBlock !== null)) || saveAllReason !== null}
           title={saveAllReason ?? recognitionSaveBlock ?? undefined} onClick={handlers.saveAll}>{a.saveAll}</button>
-        <span className="button-help">
+        <ButtonHint hint={a.validationHelp}>
           <button id="authoring-validate" type="button" disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button>
-          <HelpTrigger corner title={a.validate} hint={a.validationHelp}><p>{a.validationHelp}</p><p>{a.unsavedNotValidated}</p></HelpTrigger>
-        </span>
-        <span className="button-help">
+        </ButtonHint>
+        <ButtonHint hint={a.exitHint}>
           <button id="authoring-exit" type="button" disabled={locked || (pending !== null && pending.kind !== 'recognition_trial' && pending.kind !== 'validate')}
             onClick={handlers.exit}>{pending?.kind === 'exit' ? a.working : a.exit}</button>
-          <HelpTrigger corner title={a.exit} hint={a.exitHint}><p>{a.exitHelp}</p></HelpTrigger>
-        </span>
+        </ButtonHint>
       </div>
     </div>
     {locked && lockReason && <p id="authoring-lock-reason" className="operation-status" role="status">{lockReason}</p>}

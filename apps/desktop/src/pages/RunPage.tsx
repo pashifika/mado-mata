@@ -6,13 +6,13 @@ import Select from '../components/Select.tsx';
 import TargetPanel from '../components/TargetPanel.tsx';
 import type {TargetHandlers} from '../components/TargetPanel.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
-import {HelpTrigger} from '../components/ContextualHelp.tsx';
+import {ButtonHint, HelpTrigger} from '../components/ContextualHelp.tsx';
 import type {RunView} from './ExecutionPage.tsx';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, chooseLane, editDraft, hasWorkspaceEdits} from '../workspace.ts';
 import type {Bound, BoundWorkspace, Derived, NativeConsent} from '../workspace.ts';
 import {AUTHORING_RECOVERY, recoveryPath} from '../authoring.ts';
 import type {PageAuthoring} from './EditPage.tsx';
-import type {Fault, NativeCapability, OcrEnvironment} from '../types.ts';
+import type {Fault, NativeCapability} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import './run-control.css';
@@ -32,14 +32,14 @@ export interface RunHandlers {
 interface Props {
   workspace: BoundWorkspace; label: string; derived: Derived; run: RunView;
   locked: boolean; active: boolean; pickerBusy: boolean; starting: boolean;
-  savedEnvironment: OcrEnvironment | null; handlers: RunHandlers;
+  handlers: RunHandlers;
   // Host-issued Native policy; null when this platform/build offers none. `nativeError` is a failed availability read.
   nativeCapability: NativeCapability | null; nativeError: Fault | null;
   // While any Tab owns Edit, Start is refused everywhere; the owner additionally waits to exit before reinspecting.
   authoring: PageAuthoring;
 }
 
-export default function RunPage({workspace, label, derived, run, locked, active, pickerBusy, starting, savedEnvironment, handlers, authoring, nativeCapability, nativeError}: Props) {
+export default function RunPage({workspace, label, derived, run, locked, active, pickerBusy, starting, handlers, authoring, nativeCapability, nativeError}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const bound = workspace.bound;
@@ -76,7 +76,6 @@ export default function RunPage({workspace, label, derived, run, locked, active,
   }
   const view = run.view;
   const phase = starting ? 'preparing' : view.state;
-  const selectedDescriptor = bound.descriptorPath.trim() || null;
   const canStart = !locked && !active && !pickerBusy && authoring.role === null && !numericErrors && profileBound && startBlock === null && descriptorError === null;
   const executionCaption = starting ? t.run.submitted : run.live && busy(view.state) ? t.run.owned(view.run) : view.state === 'terminal' ? t.run.settled(view.run) : t.run.noOperations;
   const heading = selectedProfile && !valuesDirty ? selectedProfile.name : bound.name || t.run.untitled;
@@ -120,13 +119,10 @@ export default function RunPage({workspace, label, derived, run, locked, active,
         {bound.lane === 'replay' ? t.run.replaySummary : bound.lane === 'native' ? t.run.nativeSummary : t.run.controlledSummary}
       </HelpTrigger></span><div className="summary-value">{t.lane(bound.lane)}</div></div>
       <div className="actions run-summary-actions">
-        <span className="button-help"><button id="validate" disabled={locked || numericErrors || !profileBound} onClick={handlers.validate}>{t.run.validate}</button>
-          <HelpTrigger title={t.run.validate} hint={t.run.validateHint} corner>{t.run.validateHelp}</HelpTrigger></span>
-        <span className="button-help"><button id="start" className="primary" disabled={!canStart}
+        <ButtonHint hint={t.run.validateHint}><button id="validate" disabled={locked || numericErrors || !profileBound} onClick={handlers.validate}>{t.run.validate}</button></ButtonHint>
+        <ButtonHint hint={t.run.startHint}><button id="start" className="primary" disabled={!canStart}
           aria-describedby={[authoring.role !== null ? 'app-authoring-strip' : null, startBlock ? 'start-block' : null].filter(Boolean).join(' ') || undefined}
-          onClick={handlers.start}>{t.run.start}</button><HelpTrigger title={t.run.start} hint={t.run.startHint} corner>
-            <p>{t.run.introduction}</p><p>{t.run.startUses(selectedProfile && !valuesDirty ? selectedProfile.name : null, bound.lane === 'replay', savedEnvironment?.profile ?? null, selectedDescriptor)}</p>
-          </HelpTrigger></span>
+          onClick={handlers.start}>{t.run.start}</button></ButtonHint>
       </div>
     </section>
     <div className="run-grid">
@@ -143,10 +139,9 @@ export default function RunPage({workspace, label, derived, run, locked, active,
                 <span id="confirm-reinspect-text">{t.run.confirmReinspect}</span>
                 <button type="button" className="danger-text" onClick={() => closeConfirm(true)}>{t.run.discardReinspect}</button>
                 <button type="button" autoFocus onClick={() => closeConfirm(false)}>{t.run.keepDraft}</button></div>
-              : <span className="button-help"><button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()}
+              : <ButtonHint hint={t.run.reinspectHint}><button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()}
                 aria-describedby={editOwner ? 'app-authoring-guidance' : undefined}
-                title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button>
-                <HelpTrigger title={t.run.reinspect} hint={t.run.reinspectHint} corner><p>{t.run.reinspectHelp}</p></HelpTrigger></span>}
+                title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button></ButtonHint>}
             {editOwner
               ? <button id="edit-package-return" type="button" onClick={authoring.onReturn}>{a.returnToEdit}</button>
               : confirmEdit
@@ -182,8 +177,7 @@ export default function RunPage({workspace, label, derived, run, locked, active,
             <button id="delete-profile" className="danger-text" disabled={!bound.selectedId || locked} onClick={handlers.deleteProfile}>{t.run.deleteProfile}</button>
           </div>
           <details className="legacy-import"><summary>{t.run.legacyHeading}</summary>
-            <div className="button-row"><span className="button-help"><button id="import-legacy-profiles" disabled={locked} onClick={handlers.importLegacy}>{t.run.legacyImport}</button>
-              <HelpTrigger title={t.run.legacyImport} hint={t.run.legacyHint} corner><p>{t.run.legacyHelp}</p><p>{t.bootstrap.converterHelp}</p></HelpTrigger></span></div>
+            <div className="button-row"><ButtonHint hint={t.run.legacyHint}><button id="import-legacy-profiles" disabled={locked} onClick={handlers.importLegacy}>{t.run.legacyImport}</button></ButtonHint></div>
             {legacy && <dl className="run-identity">
               <dt>{t.run.legacyImported}</dt><dd>{legacy.imported.length ? legacy.imported.join(', ') : t.run.legacyNone}</dd>
               <dt>{t.run.legacyUnchanged}</dt><dd>{legacy.unchanged.length ? legacy.unchanged.join(', ') : t.run.legacyNone}</dd></dl>}
