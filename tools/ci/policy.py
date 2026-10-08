@@ -8,14 +8,15 @@ import subprocess
 import yaml
 
 from check import NODE_VERSION, RUST_VERSION
-from gate import CHECKS_IF, EXPECTED_JOBS, GATE_IF, GATE_NAME_EXPRESSION, GATE_NAMES, SELECTOR_JOB
+from gate import CHECKS_IF, EXPECTED_JOBS, GATE_IF, GATE_NAMES, SELECTOR_JOB
 
 PRIVATE_ROOTS = {"rasen", ".rasen", "examples", "local_docs", ".cache", ".venv"}
 SHARED_RULE = ".omp/rules/mado-mata-execution.md"
 REQUIRED_FILES = {
     "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", SHARED_RULE,
     "docs/ci.md", "docs/repository-governance.md", "docs/development-guidance.md",
-    ".github/workflows/ci.yml", ".github/rulesets/main.json",
+    ".github/workflows/ci.yml", ".github/workflows/ci-push.yml",
+    ".github/workflows/ci-manual.yml", ".github/rulesets/main.json",
     ".github/rulesets/topic-development.json", "tools/ci/toolchain.json",
     "tools/ci/check.py", "tools/ci/branch_flow.py", "tools/ci/gate.py", "tools/ci/select_checks.py",
     "tools/ci/policy.py", "tools/ci/tooling.py", "tools/ci/install_tools.py",
@@ -26,7 +27,11 @@ REQUIRED_FILES = {
 }
 CONCURRENCY_GROUP = "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}"
 PR_TYPES = {"opened", "synchronize", "reopened", "ready_for_review"}
-PUSH_NAME_SUFFIX = "${{ github.event_name == 'push' && ' (push)' || '' }}"
+CI_WORKFLOWS = {
+    "ci.yml": "pull_request",
+    "ci-push.yml": "push",
+    "ci-manual.yml": "workflow_dispatch",
+}
 HOSTED_RUNNERS = {
     SELECTOR_JOB: "ubuntu-24.04",
     "branch-flow": "ubuntu-24.04",
@@ -179,11 +184,14 @@ def check_workflow_hygiene(workflow, pins, label):
     for name, job in jobs.items():
         where = f"{label}/{name}"
         require(isinstance(job, dict), f"{where}: job must be an object")
-        expected_runner = HOSTED_RUNNERS.get(name, "ubuntu-24.04") if label == "ci.yml" else "ubuntu-24.04"
+        display_name = job.get("name", name)
+        require(isinstance(display_name, str) and display_name.strip() and "${{" not in display_name,
+                f"{where}: job names must be literal, including when skipped")
+        expected_runner = HOSTED_RUNNERS.get(name, "ubuntu-24.04") if label in CI_WORKFLOWS else "ubuntu-24.04"
         require(job.get("runs-on") == expected_runner, f"{where}: use the declared hosted runner {expected_runner}")
         timeout = job.get("timeout-minutes")
         require(type(timeout) is int and 1 <= timeout <= 30, f"{where}: timeout must be 1-30 minutes")
-        if label == "ci.yml" and name == SELECTOR_JOB:
+        if label in CI_WORKFLOWS and name == SELECTOR_JOB:
             require(job.get("permissions") == {"contents": "read", "pull-requests": "read"},
                     f"{where}: only the selector may read promotion PR metadata")
         else:
@@ -198,7 +206,7 @@ def check_workflow_hygiene(workflow, pins, label):
             require(isinstance(step, dict), f"{where}: each step must be an object")
             require(("uses" in step) != ("run" in step), f"{where}: step must have exactly one of uses or run")
             runtime_upload = (
-                label == "ci.yml" and name in {"repository", "runtime-macos", "runtime-windows"}
+                label in CI_WORKFLOWS and name in {"repository", "runtime-macos", "runtime-windows"}
                 and isinstance(step.get("uses"), str)
                 and step["uses"].startswith("actions/upload-artifact@")
             )
@@ -233,18 +241,23 @@ def check_workflow_hygiene(workflow, pins, label):
         require(checkouts == 1, f"{where}: exactly one credential-free checkout is required")
 
 
-def check_ci_workflow(workflow, pins):
-    check_workflow_hygiene(workflow, pins, "ci.yml")
+def check_ci_workflow(workflow, pins, label="ci.yml"):
+    require(label in CI_WORKFLOWS, f"unknown CI workflow: {label}")
+    check_workflow_hygiene(workflow, pins, label)
+    event = CI_WORKFLOWS[label]
     triggers = workflow["on"]
-    require(set(triggers) == {"pull_request", "push", "workflow_dispatch"}, "ci.yml: unexpected triggers")
-    pr = triggers["pull_request"]
-    require(isinstance(pr, dict) and set(pr) == {"branches", "types"},
-            "ci.yml: PR trigger requires branches and types, with no path filters")
-    require(pr["branches"] == ["main", "dev/**"], "ci.yml: incorrect PR target branches")
-    require(isinstance(pr["types"], list) and all(isinstance(item, str) for item in pr["types"])
-            and set(pr["types"]) == PR_TYPES, "ci.yml: PR triggers must use only validation activities, not metadata edits")
-    require(triggers["push"] == {"branches": ["main", "dev/**"]}, "ci.yml: incorrect push trigger or path filter")
-    require(triggers["workflow_dispatch"] in (None, {}), "ci.yml: manual dispatch must not require inputs")
+    require(set(triggers) == {event}, f"{label}: only {event} may publish this workflow's check names")
+    if event == "pull_request":
+        pr = triggers[event]
+        require(isinstance(pr, dict) and set(pr) == {"branches", "types"},
+                f"{label}: PR trigger requires branches and types, with no path filters")
+        require(pr["branches"] == ["main", "dev/**"], f"{label}: incorrect PR target branches")
+        require(isinstance(pr["types"], list) and all(isinstance(item, str) for item in pr["types"])
+                and set(pr["types"]) == PR_TYPES, f"{label}: PR triggers must use only validation activities, not metadata edits")
+    elif event == "push":
+        require(triggers[event] == {"branches": ["main", "dev/**"]}, f"{label}: incorrect push trigger or path filter")
+    else:
+        require(triggers[event] in (None, {}), f"{label}: manual dispatch must not require inputs")
     require(workflow.get("concurrency") == {"group": CONCURRENCY_GROUP, "cancel-in-progress": True},
             "ci.yml: concurrency must isolate events/PRs/refs and cancel superseded runs")
     jobs = workflow["jobs"]
@@ -275,14 +288,11 @@ def check_ci_workflow(workflow, pins):
         require(jobs[name].get("if") == CHECKS_IF
                 and jobs[name].get("needs") in (SELECTOR_JOB, [SELECTOR_JOB]),
                 f"{name}: mandatory checks may skip only a push covered by its promotion PR")
-        display_name = jobs[name].get("name")
-        require(isinstance(display_name, str) and display_name.endswith(PUSH_NAME_SUFFIX)
-                and bool(display_name.removesuffix(PUSH_NAME_SUFFIX).strip())
-                and "${{" not in display_name.removesuffix(PUSH_NAME_SUFFIX)
-                and display_name.removesuffix(PUSH_NAME_SUFFIX).strip() not in GATE_NAMES.values(),
-                f"{name}: mandatory job names must distinguish push checks without claiming gate contexts")
+        display_name = jobs[name].get("name", name)
+        require(display_name not in GATE_NAMES.values(),
+                f"{name}: mandatory jobs must not claim gate contexts")
     gate = jobs["gate"]
-    require(gate.get("name") == GATE_NAME_EXPRESSION, "ci.yml: gate names must distinguish PR, push, and manual events")
+    require(gate.get("name") == GATE_NAMES[event], f"{label}: gate name must be {GATE_NAMES[event]}")
     require(gate.get("if") == GATE_IF, "ci.yml: gate must always evaluate unless a push is covered by its promotion PR")
     needs = gate.get("needs")
     dependencies = EXPECTED_JOBS | {SELECTOR_JOB}
@@ -358,10 +368,11 @@ def check_repository(root, paths, manifest):
     for path in paths:
         if path.startswith(".github/workflows/") and Path(path).suffix in {".yml", ".yaml"}:
             workflow = read_workflow(root / path)
-            if path == ".github/workflows/ci.yml":
-                check_ci_workflow(workflow, manifest["actions"])
+            label = Path(path).name
+            if path == f".github/workflows/{label}" and label in CI_WORKFLOWS:
+                check_ci_workflow(workflow, manifest["actions"], label)
             else:
                 check_workflow_hygiene(workflow, manifest["actions"], path)
                 require(all(job.get("name", name) not in GATE_NAMES.values()
                             for name, job in workflow["jobs"].items()),
-                        f"{path}: gate contexts are reserved for ci.yml")
+                        f"{path}: gate contexts are reserved for the event-specific CI workflows")

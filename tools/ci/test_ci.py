@@ -669,6 +669,42 @@ class RepositoryPolicyTests(unittest.TestCase):
         self.manifest = load_manifest()
         self.workflow = read_workflow(ROOT / ".github/workflows/ci.yml")
 
+    def test_dynamic_check_name_is_refused_even_when_its_expression_is_valid(self):
+        workflow = deepcopy(self.workflow)
+        workflow["jobs"]["branch-flow"]["name"] = (
+            "Branch flow${{ github.event_name == 'push' && ' (push)' || '' }}"
+        )
+        with self.assertRaisesRegex(ValueError, "literal"):
+            check_ci_workflow(workflow, self.manifest["actions"])
+
+    def test_event_workflows_cannot_publish_each_others_gate_contexts(self):
+        cases = (
+            ("ci.yml", "pull_request", "CI Gate"),
+            ("ci-push.yml", "push", "CI Gate (push)"),
+            ("ci-manual.yml", "workflow_dispatch", "CI Gate (manual)"),
+        )
+        for filename, event, _ in cases:
+            source = read_workflow(ROOT / ".github/workflows" / filename)
+            check_ci_workflow(source, self.manifest["actions"], filename)
+            for _, other_event, other_gate in cases:
+                if other_event == event:
+                    continue
+                with self.subTest(workflow=filename, extra_event=other_event):
+                    workflow = deepcopy(source)
+                    workflow["on"][other_event] = {}
+                    with self.assertRaisesRegex(ValueError, f"only {event}"):
+                        check_ci_workflow(workflow, self.manifest["actions"], filename)
+                with self.subTest(workflow=filename, gate=other_gate):
+                    workflow = deepcopy(source)
+                    workflow["jobs"]["gate"]["name"] = other_gate
+                    with self.assertRaisesRegex(ValueError, "gate name must be"):
+                        check_ci_workflow(workflow, self.manifest["actions"], filename)
+            with self.subTest(workflow=filename, ordinary_job_claims_gate=True):
+                workflow = deepcopy(source)
+                workflow["jobs"]["branch-flow"]["name"] = "CI Gate"
+                with self.assertRaisesRegex(ValueError, "must not claim gate contexts"):
+                    check_ci_workflow(workflow, self.manifest["actions"], filename)
+
     def test_ruleset_rejects_weakened_or_inoperable_protection(self):
         for topic in (False, True):
             name = "topic-development" if topic else "main"
@@ -708,7 +744,7 @@ class RepositoryPolicyTests(unittest.TestCase):
     def test_workflow_refuses_gate_bypass_and_privileged_execution(self):
         check_ci_workflow(self.workflow, self.manifest["actions"])
         cases = []
-        for field, value in (("name", "CI Gate"), ("if", "${{ success() }}"), ("needs", ["repository"])):
+        for field, value in (("if", "${{ success() }}"), ("needs", ["repository"])):
             workflow = deepcopy(self.workflow)
             workflow["jobs"]["gate"][field] = value
             cases.append(workflow)
@@ -846,8 +882,6 @@ class RepositoryPolicyTests(unittest.TestCase):
                 ("if", "${{ needs.dev-push-policy.outputs.skip-checks != 'true' }}"),
                 ("needs", []),
                 ("needs", [SELECTOR_JOB, "gate"]),
-                ("name", "Shared check context"),
-                ("name", "CI Gate${{ github.event_name == 'push' && ' (push)' || '' }}"),
             ):
                 with self.subTest(job=name, field=field, value=value):
                     workflow = deepcopy(self.workflow)
@@ -871,10 +905,10 @@ class RepositoryPolicyTests(unittest.TestCase):
                     check_ci_workflow(workflow, self.manifest["actions"])
         for push in ({"branches": ["dev/**"]}, {"branches": ["main", "dev/**"], "paths": ["src/**"]}):
             with self.subTest(push=push):
-                workflow = deepcopy(self.workflow)
+                workflow = read_workflow(ROOT / ".github/workflows/ci-push.yml")
                 workflow["on"]["push"] = push
                 with self.assertRaises(ValueError):
-                    check_ci_workflow(workflow, self.manifest["actions"])
+                    check_ci_workflow(workflow, self.manifest["actions"], "ci-push.yml")
 
     def test_controlled_lanes_cannot_skip_execution_or_change_toolchains(self):
         for name in ("repository", "runtime-macos", "runtime-windows"):
