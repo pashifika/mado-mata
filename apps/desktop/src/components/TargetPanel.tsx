@@ -1,12 +1,12 @@
 import {useEffect, useRef, useState} from 'react';
-import type {ReactNode} from 'react';
+import type {DragEvent, ReactNode} from 'react';
 import Select from './Select.tsx';
 import {BoundedRecord} from './ResultPanel.tsx';
 import {ButtonHint, HelpTrigger} from './ContextualHelp.tsx';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import {boundedText, record, text} from '../state.ts';
-import {currentTargetDraft, eligibleRunningApplication, readTargetDraft, targetDirty, targetExpectation} from '../target.ts';
+import {currentTargetDraft, eligibleRunningApplication, moveTargetArgument, readTargetDraft, targetDirty, targetExpectation} from '../target.ts';
 import type {TargetDraft, TargetField, TargetPickerField, TargetState} from '../target.ts';
 import type {Json, TargetResolution} from '../types.ts';
 
@@ -21,12 +21,15 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
   state:TargetState; handlers:TargetHandlers; locked:boolean; active:boolean; pickerBusy:boolean;
 }) {
   const locale = useLocale();
-  const t = messages[locale].ui.target;
+  const ui = messages[locale].ui;
+  const t = ui.target;
   const [confirmRemove, setConfirmRemove] = useState(false);
   const removeButton = useRef<HTMLButtonElement>(null);
   const cancelRemove = useRef<HTMLButtonElement>(null);
   const refocusRemove = useRef(false);
-  const focusArgument = useRef<number|null>(null);
+  const focusArgument = useRef<{index:number; handle?:boolean}|null>(null);
+  const [argumentDrag, setArgumentDrag] = useState<{index:number; arguments:string[]}|null>(null);
+  const [argumentDrop, setArgumentDrop] = useState<number|null>(null);
   useEffect(() => {
     if (confirmRemove) cancelRemove.current?.focus();
     else if (refocusRemove.current) {
@@ -37,7 +40,8 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
   }, [confirmRemove]);
   useEffect(() => {
     if (focusArgument.current === null) return;
-    document.getElementById(`target-argument-${focusArgument.current}`)?.focus();
+    const {index, handle} = focusArgument.current;
+    document.getElementById(handle ? `target-argument-handle-${index}` : `target-argument-${index}`)?.focus();
     focusArgument.current = null;
   }, [state.draft.arguments]);
   const draft = state.draft;
@@ -53,6 +57,7 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
   const issueDiagnostic = runningIssue ? boundedText(JSON.stringify(runningIssue.context, null, 2), 64 * 1024) : null;
   // A pending metadata command need not freeze typing; its ticket guards any later response.
   const editingDisabled = state.view === null || (locked && state.operation === null);
+  const draggingArgument = !editingDisabled && argumentDrag?.arguments === draft.arguments ? argumentDrag : null;
   const binding = state.view?.record.binding;
   const observation = state.observation;
   const currentObservation = observation && currentTargetDraft(state, observation.ticket);
@@ -79,19 +84,40 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
   function attributes(name:TargetField, id:string) {
     return {'aria-invalid':fieldError(name) !== null, 'aria-describedby':fieldError(name) ? `${id}-error` : undefined};
   }
-  function input(name:'gamePath'|'launcherPath'|'workingDirectory'|'windowTitle'|'clickHold', id:string, label:string, readOnly = false) {
+  function input(name:'workingDirectory'|'windowTitle'|'clickHold', id:string, label:string, readOnly = false) {
     return fieldBox(name, id, label, <input id={id} value={draft[name]} spellCheck={false} readOnly={readOnly} disabled={editingDisabled}
       inputMode={name === 'clickHold' ? 'numeric' : undefined} {...attributes(name, id)}
       onChange={event => handlers.edit({...draft, [name]:event.target.value})}/>, name === 'windowTitle' ? t.windowHelp : undefined);
   }
+  function applicationPath(kind:TargetPickerField) {
+    const name = kind === 'game' ? 'gamePath' : 'launcherPath';
+    const id = `target-${kind}-path`;
+    return fieldBox(name, id, t[name], <div className="input-select-group target-path-control">
+      <input id={id} value={draft[name]} spellCheck={false} disabled={editingDisabled} {...attributes(name, id)}
+        onChange={event => handlers.edit({...draft, [name]:event.target.value})}/>
+      <button id={`target-choose-${kind}`} type="button" disabled={editingDisabled || chooseDisabled}
+        aria-label={`${t.chooseApplication} · ${t[name]}`} onClick={() => handlers.chooseApplication(kind)}>
+        {state.picker?.field === kind ? t.choosing : t.chooseApplication}
+      </button>
+    </div>);
+  }
   const kinds = [{value:'', label:t.choose}, {value:'executable', label:t.executable}, {value:'bundle', label:t.bundle}];
   const status = currentIssue ? t.failed : review ? t.changed : currentObservation ? t.passed : targetDirty(state) ? t.modified
     : binding ? state.view?.compatible ? t.unchecked : state.declaration ? t.incompatibleStatus : t.undeclaredStatus : t.noBinding;
-  function moveArgument(index:number, offset:number) {
-    const arguments_ = [...draft.arguments];
-    [arguments_[index], arguments_[index + offset]] = [arguments_[index + offset], arguments_[index]];
-    handlers.edit({...draft, arguments:arguments_});
-    document.getElementById(`target-argument-${index + offset}`)?.focus();
+  function moveArgument(index:number, to:number, handle = false) {
+    if (editingDisabled) return;
+    const next = moveTargetArgument(draft, index, to);
+    if (next === draft) return;
+    focusArgument.current = {index:to, handle};
+    handlers.edit(next);
+  }
+  function argumentSlot(event:DragEvent<HTMLLIElement>, index:number) {
+    const row = event.currentTarget.getBoundingClientRect();
+    return index + (event.clientY >= row.top + row.height / 2 ? 1 : 0);
+  }
+  function endArgumentDrag() {
+    setArgumentDrag(null);
+    setArgumentDrop(null);
   }
   function closeRemoval(remove:boolean) {
     refocusRemove.current = true;
@@ -136,45 +162,77 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
           <legend>{t.configuration}</legend>
           <p id="target-required-fields" className="field-help">{t.requiredFields}</p>
           <h3>{t.game}</h3>
-          <div className="two-col">
+          <div className="target-field-stack">
             {fieldBox('gameKind', 'target-game-kind', t.gameKind,
               <Select id="target-game-kind" value={draft.gameKind} options={kinds} disabled={editingDisabled} {...attributes('gameKind', 'target-game-kind')}
                 onChange={value => handlers.edit({...draft, gameKind:value as TargetDraft['gameKind']})}/>)}
-            <div>{input('gamePath', 'target-game-path', t.gamePath)}
-              <button id="target-choose-game" type="button" disabled={editingDisabled || chooseDisabled} onClick={() => handlers.chooseApplication('game')}>{state.picker?.field === 'game' ? t.choosing : t.chooseApplication}</button></div>
+            {applicationPath('game')}
           </div>
           <h3>{t.launcher}<HelpTrigger title={t.launcher} hint={t.launcherHelp}>{t.launcherHelp}</HelpTrigger></h3>
           <label className="checkbox-label"><input id="target-separate-launcher" type="checkbox" checked={draft.separateLauncher} disabled={editingDisabled}
             onChange={event => handlers.edit({...draft, separateLauncher:event.target.checked})}/>{t.separateLauncher}</label>
-          {draft.separateLauncher && <div className="two-col">
+          {draft.separateLauncher && <div className="target-field-stack">
             {fieldBox('launcherKind', 'target-launcher-kind', t.launcherKind,
               <Select id="target-launcher-kind" value={draft.launcherKind} options={kinds} disabled={editingDisabled} {...attributes('launcherKind', 'target-launcher-kind')}
                 onChange={value => handlers.edit({...draft, launcherKind:value as TargetDraft['launcherKind']})}/>)}
-            <div>{input('launcherPath', 'target-launcher-path', t.launcherPath)}
-              <button id="target-choose-launcher" type="button" disabled={editingDisabled || chooseDisabled} onClick={() => handlers.chooseApplication('launcher')}>{state.picker?.field === 'launcher' ? t.choosing : t.chooseApplication}</button></div>
+            {applicationPath('launcher')}
           </div>}
-          <h3 aria-labelledby="target-arguments-label"><span id="target-arguments-label">{t.arguments}</span><HelpTrigger title={t.arguments} hint={t.argumentsHint} id="target-arguments-help">{t.argumentsHelp}</HelpTrigger></h3>
-          <ol id="target-arguments" className="target-arguments" aria-labelledby="target-arguments-label" aria-describedby={fieldError('arguments') ? 'target-arguments-error' : undefined}>
-            {draft.arguments.map((value, index) => <li key={index}>
-              <div className="field"><label htmlFor={`target-argument-${index}`}>{t.argument(index + 1)}</label>
-                <input id={`target-argument-${index}`} value={value} spellCheck={false} disabled={editingDisabled} {...attributes('arguments', 'target-arguments')}
-                  onChange={event => handlers.edit({...draft, arguments:draft.arguments.map((arg, at) => at === index ? event.target.value : arg)})}/></div>
-              <div className="button-row">
-                <button type="button" disabled={editingDisabled || index === 0} aria-label={`${t.moveUp} · ${t.argument(index + 1)}`} onClick={() => moveArgument(index, -1)}>{t.moveUp}</button>
-                <button type="button" disabled={editingDisabled || index === draft.arguments.length - 1} aria-label={`${t.moveDown} · ${t.argument(index + 1)}`} onClick={() => moveArgument(index, 1)}>{t.moveDown}</button>
+          <fieldset className="metadata-group target-argument-group">
+            <legend aria-labelledby="target-arguments-label"><span id="target-arguments-label">{t.arguments}</span><HelpTrigger title={t.arguments} hint={t.argumentsHint} id="target-arguments-help">{t.argumentsHelp}</HelpTrigger></legend>
+            <ol id="target-arguments" className="target-arguments" role="list" aria-labelledby="target-arguments-label" aria-describedby={fieldError('arguments') ? 'target-arguments-error' : undefined}>
+              {draft.arguments.map((value, index) => <li key={index} className="enum-item"
+                data-dragging={draggingArgument?.index === index || undefined}
+                data-drop-before={draggingArgument !== null && argumentDrop === index || undefined}
+                data-drop-after={draggingArgument !== null && argumentDrop === draft.arguments.length && index === draft.arguments.length - 1 || undefined}
+                onDragOver={event => {
+                  if (!draggingArgument) return;
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = 'move';
+                  setArgumentDrop(argumentSlot(event, index));
+                }}
+                onDrop={event => {
+                  if (!draggingArgument) return;
+                  event.preventDefault();
+                  const slot = argumentSlot(event, index);
+                  moveArgument(draggingArgument.index, slot > draggingArgument.index ? slot - 1 : slot);
+                  endArgumentDrag();
+                }}>
+                <ButtonHint hint={t.reorderHelp}><button id={`target-argument-handle-${index}`} type="button" className="target-argument-handle"
+                  disabled={editingDisabled || draft.arguments.length < 2} draggable={!editingDisabled && draft.arguments.length > 1}
+                  aria-label={`${t.reorderArgument} · ${t.argument(index + 1)}`} aria-keyshortcuts="ArrowUp ArrowDown"
+                  onDragStart={event => {
+                    if (editingDisabled || draft.arguments.length < 2) {event.preventDefault(); return;}
+                    event.dataTransfer.effectAllowed = 'move';
+                    event.dataTransfer.setData('application/x-madomata-target-argument', String(index));
+                    setArgumentDrag({index, arguments:draft.arguments});
+                  }} onDragEnd={endArgumentDrag}
+                  onKeyDown={event => {
+                    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+                    event.preventDefault();
+                    moveArgument(index, index + (event.key === 'ArrowUp' ? -1 : 1), true);
+                  }}>
+                  <svg width="12" height="16" viewBox="0 0 12 16" aria-hidden="true" focusable="false" fill="currentColor">
+                    <circle cx="3" cy="3" r="1.3"/><circle cx="9" cy="3" r="1.3"/>
+                    <circle cx="3" cy="8" r="1.3"/><circle cx="9" cy="8" r="1.3"/>
+                    <circle cx="3" cy="13" r="1.3"/><circle cx="9" cy="13" r="1.3"/>
+                  </svg>
+                </button></ButtonHint>
+                <input id={`target-argument-${index}`} aria-label={t.argument(index + 1)} value={value} spellCheck={false} disabled={editingDisabled}
+                  {...attributes('arguments', 'target-arguments')}
+                  onChange={event => handlers.edit({...draft, arguments:draft.arguments.map((arg, at) => at === index ? event.target.value : arg)})}/>
                 <button type="button" disabled={editingDisabled} aria-label={`${t.removeArgument} · ${t.argument(index + 1)}`} onClick={() => {
                   handlers.edit({...draft, arguments:draft.arguments.filter((_, at) => at !== index)});
                   document.getElementById('target-add-argument')?.focus();
-                }}>{t.removeArgument}</button>
-              </div>
-            </li>)}
-          </ol>
-          {fieldError('arguments') && <p id="target-arguments-error" className="field-error">{fieldError('arguments')}</p>}
-          <button id="target-add-argument" type="button" disabled={editingDisabled || draft.arguments.length >= 32} onClick={() => {
-            focusArgument.current = draft.arguments.length;
-            handlers.edit({...draft, arguments:[...draft.arguments, '']});
-          }}>{t.addArgument}</button>
-          <div className="two-col">{input('workingDirectory', 'target-working-directory', t.workingDirectory)}{input('windowTitle', 'target-window-title', t.windowTitle, state.declaration.window_title !== null)}</div>
+                }}>{ui.schema.remove}</button>
+              </li>)}
+            </ol>
+            {fieldError('arguments') && <p id="target-arguments-error" className="field-error">{fieldError('arguments')}</p>}
+            <button id="target-add-argument" type="button" disabled={editingDisabled || draft.arguments.length >= 32} onClick={() => {
+              focusArgument.current = {index:draft.arguments.length};
+              handlers.edit({...draft, arguments:[...draft.arguments, '']});
+            }}>{t.addArgument}</button>
+          </fieldset>
+          <div className="target-field-stack">{input('workingDirectory', 'target-working-directory', t.workingDirectory)}{input('windowTitle', 'target-window-title', t.windowTitle, state.declaration.window_title !== null)}</div>
           {draft.platform === 'macos' && <><h3>{t.policy}<HelpTrigger title={t.policy} hint={t.policyHint}>{t.policyHelp}</HelpTrigger></h3>
           <div className="two-col">
             {fieldBox('route', 'target-route', t.route, <Select id="target-route" value={draft.route} disabled={editingDisabled} {...attributes('route', 'target-route')}

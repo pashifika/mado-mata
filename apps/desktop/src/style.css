@@ -437,9 +437,21 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .target-fields { min-width: 0; margin: 18px 0; padding: 0; border: 0; }
 .target-fields > legend { font-weight: 650; margin-bottom: 12px; }
 .target-fields h3 { margin-top: 18px; }
-.target-arguments { display: grid; gap: 12px; padding-left: 24px; }
+.target-field-stack { margin-top: 14px; }
+.target-path-control > input { min-width: 0; border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.target-path-control > button { flex: none; border: 0; border-inline-start: 1px solid var(--border); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; white-space: nowrap; }
+.target-path-control > button:focus-visible { outline-offset: -3px; }
+.target-path-control:has(input[aria-invalid="true"]) { border-color: var(--danger); }
+.target-argument-group { display: grid; gap: 6px; }
+.target-argument-group > button { justify-self: start; }
+.target-arguments { display: grid; gap: 6px; list-style: none; margin: 0; padding: 0; }
 .target-arguments li { min-width: 0; }
-.target-arguments .field { margin-bottom: 6px; }
+.target-arguments input { min-width: 0; }
+.target-arguments [data-dragging] { opacity: .55; }
+.target-arguments [data-drop-before] { box-shadow: 0 -2px 0 var(--accent); }
+.target-arguments [data-drop-after] { box-shadow: 0 2px 0 var(--accent); }
+.target-argument-handle { display: inline-flex; align-items: center; justify-content: center; padding: 7px 5px; border-color: transparent; background: transparent; color: var(--text-muted); cursor: grab; }
+.target-argument-handle:active:not(:disabled) { cursor: grabbing; }
 .target-panel details { margin: 12px 0; }
 .target-panel code, .target-panel dd { overflow-wrap: anywhere; }
 .target-panel .two-col { margin-top: 14px; }

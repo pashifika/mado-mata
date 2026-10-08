@@ -4,7 +4,7 @@ import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyInvalidate
 import {LocalFault} from './i18n.ts';
 import {currentRecoveryDraft,editRecovery,issuePath,readRecoveryDraft,recoveryIssue,recoveryState,recoveryTicket,selectRecovery} from './recovery.ts';
 import {optionPath,readDraft} from './state.ts';
-import {beginApplicationPicker,beginRunningApplication,beginTarget,cancelRunningApplication,checkedTarget,completeApplicationPicker,completeRunningApplication,currentTargetDraft,discardTarget,editTarget,eligibleRunningApplication,failRunningApplication,invalidateApplicationPicker,invalidateRunningApplication,readTarget,readTargetDraft,removedTarget,savedTarget,targetDirty,targetExpectation,targetFailed,targetReadFailed,targetState,targetTicket} from './target.ts';
+import {beginApplicationPicker,beginRunningApplication,beginTarget,cancelRunningApplication,checkedTarget,completeApplicationPicker,completeRunningApplication,currentTargetDraft,discardTarget,editTarget,eligibleRunningApplication,failRunningApplication,invalidateApplicationPicker,invalidateRunningApplication,moveTargetArgument,readTarget,readTargetDraft,removedTarget,savedTarget,targetDirty,targetExpectation,targetFailed,targetReadFailed,targetState,targetTicket} from './target.ts';
 import {workspaceStatus,scopedAuthoring} from './status.ts';
 
 const schema={type:'object',properties:{count:{type:'integer',default:1},mode:{type:'string'}}};
@@ -480,6 +480,19 @@ test('target form preserves literal argument boundaries, empty arguments and ind
   assert.equal(saved.draft.launcherPath,'/metadata/Launcher.app');
   assert.equal(saved.observation,null);
   assert.equal(targetDirty(saved),false);
+});
+
+for (const {scenario,from,to,expected} of [
+  {scenario:'first argument moves to the end',from:0,to:4,expected:['two words','"quoted"','$(literal)','','']},
+  {scenario:'last argument moves to the start',from:4,to:0,expected:['','','two words','"quoted"','$(literal)']},
+  {scenario:'literal argument moves across duplicate empty values',from:3,to:1,expected:['','$(literal)','two words','"quoted"','']},
+]) test(`target argument reordering: ${scenario}`,()=>{
+  const draft={...loadedTarget().draft,arguments:['','two words','"quoted"','$(literal)','']};
+  const moved=moveTargetArgument(draft,from,to);
+  const {configuration,errors}=readTargetDraft(moved);
+  assert.deepEqual(errors,{});
+  assert.deepEqual(configuration.arguments,expected);
+  assert.deepEqual(draft.arguments,['','two words','"quoted"','$(literal)','']);
 });
 
 test('native application choice edits only the issuing game or launcher and cancellation leaves the draft untouched',()=>{

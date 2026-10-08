@@ -1191,19 +1191,22 @@ as described in [the manifest contract](runtime-comparison.md#optional-portable-
 A targetless package still runs existing controlled/replay workflows; a missing,
 invalid, or incompatible local target is not an execution prerequisite.
 
-1. For the **actual game**, choose **Application bundle (.app)** and
-   **Choose application…** to select the outer application, including a supported
-   iOS-on-Mac wrapper. Do not navigate to its internal executable. Cancel keeps
-   the draft. Manual absolute paths and direct executable configuration remain
-   available. A separate bundle launcher uses the same picker; it does not
-   identify or replace the game.
-2. Add arguments as ordered individual fields. Empty fields remain empty
-   arguments; spaces and shell syntax are literal, never split or expanded.
+1. For the **actual game**, choose **Application bundle (.app)** and use
+   **Open…** at the right edge of its path field to select the outer application,
+   including a supported iOS-on-Mac wrapper. Game and launcher paths each occupy
+   their own full-width row. Do not navigate to the internal executable. Cancel
+   keeps the draft. Manual absolute paths and direct executable configuration
+   remain available. A separate bundle launcher uses the same picker; it does
+   not identify or replace the game.
+2. Add or remove arguments as individual rows, like schema **Allowed values**.
+   Drag the left handle to reorder; with the handle focused, Up/Down arrow keys
+   move that argument one position. Empty fields remain empty arguments; spaces
+   and shell syntax are literal, never split or expanded.
    A direct-executable launcher uses an explicit absolute working directory or
    its executable's parent directory. Bundle launch uses the OS-defined working
    directory; an explicit directory for a bundle recipient is refused before
-   launch, not ignored. Supply an exact window title when the package leaves it
-   local; a package-required title is read-only.
+   launch, not ignored. The exact window title has its own full-width row.
+   Supply it when the package leaves it local; a package-required title is read-only.
 3. Leave all input fields blank for capture-only use. To configure future input,
    explicitly select a complete policy. Process-directed input requires a pointer
    mode: Core Graphics permits either focus policy; AppKit background requires
