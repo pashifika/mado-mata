@@ -1890,10 +1890,12 @@ Recovery then offers **Retry** after repair, not transaction controls.
    `/opt/homebrew` and `/usr/local`; folder selection checks the approved
    roots and catalog-defined candidate directories. On Windows, selecting the
    OpenCV installation root also resolves known x64 MSVC runtime DLLs already
-   installed in the system directory returned by the Windows API. Explicitly
-   selected copies take precedence; the system directory is not enumerated or
-   used to find OpenCV or arbitrary third-party DLLs. These runtime files remain
-   part of the validated dependency list, not assumed-present system imports.
+   installed in the system directory returned by the Windows API. Known runtime
+   basenames are matched without ASCII case sensitivity, including the final
+   canonical filename. Explicitly selected copies take precedence; the system
+   directory is not enumerated or used to find OpenCV or arbitrary third-party
+   DLLs. These runtime files remain part of the validated dependency list, not
+   assumed-present system imports.
    Required modules and their non-system dependency closure are resolved from
    bounded binary metadata without loading libraries, running inspection tools
    or scanning the disk/PATH. If a dependency is genuinely absent, install it

@@ -611,18 +611,19 @@ fn windows_system_directory() -> Result<Option<PathBuf>, Fault> {
 }
 
 fn windows_msvc_runtime(name: &str) -> bool {
-    matches!(
-        name,
-        "concrt140.dll"
-            | "msvcp140.dll"
-            | "msvcp140_1.dll"
-            | "msvcp140_2.dll"
-            | "msvcp140_atomic_wait.dll"
-            | "msvcp140_codecvt_ids.dll"
-            | "vcruntime140.dll"
-            | "vcruntime140_1.dll"
-            | "vcomp140.dll"
-    )
+    [
+        "concrt140.dll",
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+        "msvcp140_atomic_wait.dll",
+        "msvcp140_codecvt_ids.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "vcomp140.dll",
+    ]
+    .iter()
+    .any(|known| name.eq_ignore_ascii_case(known))
 }
 
 fn windows_system(name: &str) -> bool {

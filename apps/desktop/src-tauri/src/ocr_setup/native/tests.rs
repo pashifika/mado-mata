@@ -410,6 +410,56 @@ fn windows_system_runtime_completes_the_selected_opencv_installation() {
 }
 
 #[test]
+fn windows_system_scope_accepts_canonical_runtime_filename_case_only() {
+    let fixture = Fixture::new();
+    let system = Fixture::new();
+    let runtime = system.put("MSVCP140.dll", &pe(&[], &[], &[]));
+    let vendor = system.put("VENDOR.dll", &pe(&[], &[], &[]));
+    let nested = system.put("nested/MSVCP140.dll", &pe(&[], &[], &[]));
+    let mut scope =
+        Scope::new(&[text(&fixture.0)], &[], false, &AtomicBool::new(false)).unwrap();
+    scope.system_directory = Some(system.0.clone());
+    assert_eq!(
+        scope.resolve(&runtime).unwrap(),
+        Some(runtime.canonicalize().unwrap())
+    );
+    assert!(
+        scope
+            .resolve(&vendor)
+            .unwrap_err()
+            .message
+            .contains("outside approved folders")
+    );
+    assert!(
+        scope
+            .resolve(&nested)
+            .unwrap_err()
+            .message
+            .contains("outside approved folders")
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_system_runtime_resolves_mixed_case_canonical_filenames() {
+    let fixture = Fixture::new();
+    let system = Fixture::new();
+    let world = fixture.put(WORLD, &pe(&["msvcp140.dll"], &[], &[]));
+    let cpp = system.put("MSVCP140.dll", &pe(&["vcruntime140.dll"], &[], &[]));
+    let runtime = system.put("VCRUNTIME140.dll", &pe(&["KERNEL32.dll"], &[], &[]));
+    assert_paths(
+        discover_with_system_directory(
+            &platform("windows"),
+            &fixture.folders(),
+            Some(system.0.clone()),
+            &AtomicBool::new(false),
+        )
+        .unwrap(),
+        vec![world, cpp, runtime],
+    );
+}
+
+#[test]
 fn windows_system_candidates_remain_bounded_and_validated() {
     let fixture = Fixture::new();
     let system = Fixture::new();
