@@ -37,6 +37,21 @@ pub(super) fn discover(
     cancel: &AtomicBool,
 ) -> Result<Vec<String>, Fault> {
     check_cancel(cancel)?;
+    let system_directory = if platform.os == "windows" {
+        windows_system_directory()?
+    } else {
+        None
+    };
+    discover_with_system_directory(platform, selection, system_directory, cancel)
+}
+
+fn discover_with_system_directory(
+    platform: &Platform,
+    selection: &NativeSelection,
+    system_directory: Option<PathBuf>,
+    cancel: &AtomicBool,
+) -> Result<Vec<String>, Fault> {
+    check_cancel(cancel)?;
     if !matches!(
         (platform.os.as_str(), platform.arch.as_str()),
         ("macos", "aarch64") | ("windows", "x86_64")
@@ -58,12 +73,15 @@ pub(super) fn discover(
         }
         NativeSelection::Folders { paths } => (paths.as_slice(), false),
     };
-    let scope = Scope::new(
+    let mut scope = Scope::new(
         paths,
         &platform.native.search_subdirectories,
         optional,
         cancel,
     )?;
+    if platform.os == "windows" {
+        scope.system_directory = system_directory;
+    }
     let candidates = scope.enumerate(&platform.os, cancel)?;
     let mut pending = VecDeque::new();
     for module in &platform.native.required_modules {
@@ -188,6 +206,8 @@ struct Scope {
     roots: Vec<PathBuf>,
     lexical_roots: Vec<PathBuf>,
     directories: Vec<PathBuf>,
+    // Exact runtime basenames only; this directory is never enumerated.
+    system_directory: Option<PathBuf>,
 }
 
 impl Scope {
@@ -252,6 +272,7 @@ impl Scope {
             roots: roots.into_iter().collect(),
             lexical_roots,
             directories: Vec::new(),
+            system_directory: None,
         };
         let mut directories = BTreeSet::new();
         for root in &scope.roots {
@@ -279,6 +300,13 @@ impl Scope {
 
     fn contains(&self, path: &Path) -> bool {
         self.roots.iter().any(|root| path.starts_with(root))
+            || self.system_directory.as_deref().is_some_and(|directory| {
+                path.parent() == Some(directory)
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(windows_msvc_runtime)
+            })
     }
 
     fn resolve(&self, path: &Path) -> Result<Option<PathBuf>, Fault> {
@@ -413,6 +441,15 @@ fn resolve_pe(
             );
         }
     }
+    // Prefer an explicitly selected installation. Only missing, known MSVC
+    // imports may use the OS-reported directory, never PATH or an arbitrary DLL.
+    if matches.is_empty()
+        && windows_msvc_runtime(name)
+        && let Some(directory) = &scope.system_directory
+        && let Some(path) = scope.resolve(&directory.join(name))?
+    {
+        matches.insert(path);
+    }
     unique(matches, name, Some(loader)).map(Some)
 }
 
@@ -535,6 +572,57 @@ fn mac_system(path: &Path) -> bool {
         && !path
             .components()
             .any(|component| matches!(component, Component::ParentDir))
+}
+
+#[cfg(windows)]
+fn windows_system_directory() -> Result<Option<PathBuf>, Fault> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = [0_u16; MAX_PATH];
+    #[expect(unsafe_code, reason = "bounded OS system-directory query")]
+    // SAFETY: buffer is writable for the supplied number of UTF-16 units;
+    // the API retains no pointer. The returned length is checked before use.
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    if length == 0 {
+        return Err(fault(
+            "native",
+            &format!(
+                "cannot locate Windows system directory: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+    if length >= buffer.len() {
+        return Err(fault(
+            "native",
+            "Windows system directory exceeds path limit",
+        ));
+    }
+    let path = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length]));
+    let canonical = fs::canonicalize(&path).map_err(|error| path_fault(&path, error))?;
+    path_text(&canonical)?;
+    Ok(Some(canonical))
+}
+
+#[cfg(not(windows))]
+fn windows_system_directory() -> Result<Option<PathBuf>, Fault> {
+    Ok(None)
+}
+
+fn windows_msvc_runtime(name: &str) -> bool {
+    matches!(
+        name,
+        "concrt140.dll"
+            | "msvcp140.dll"
+            | "msvcp140_1.dll"
+            | "msvcp140_2.dll"
+            | "msvcp140_atomic_wait.dll"
+            | "msvcp140_codecvt_ids.dll"
+            | "vcruntime140.dll"
+            | "vcruntime140_1.dll"
+            | "vcomp140.dll"
+    )
 }
 
 fn windows_system(name: &str) -> bool {

@@ -65,7 +65,7 @@ fn platform(os: &str) -> Platform {
         .unwrap()
 }
 fn run(platform: &Platform, selection: &NativeSelection) -> Result<Vec<String>, Fault> {
-    discover(platform, selection, &AtomicBool::new(false))
+    discover_with_system_directory(platform, selection, None, &AtomicBool::new(false))
 }
 fn assert_paths(actual: Vec<String>, expected: Vec<PathBuf>) {
     assert_eq!(
@@ -378,6 +378,86 @@ fn missing_msvc_runtime_requires_an_additional_approved_folder() {
         paths: vec![text(&fixture.0), text(&extra.0)],
     };
     assert_paths(run(&platform, &folders).unwrap(), vec![world, runtime]);
+}
+
+#[test]
+fn windows_system_runtime_completes_the_selected_opencv_installation() {
+    let fixture = Fixture::new();
+    let system = Fixture::new();
+    let world = fixture.put(
+        &format!("build/x64/vc16/bin/{WORLD}"),
+        &pe(&["CONCRT140.dll"], &[], &[]),
+    );
+    let concrt = system.put("concrt140.dll", &pe(&["MSVCP140.dll"], &[], &[]));
+    let cpp = system.put("msvcp140.dll", &pe(&["VCRUNTIME140.dll"], &[], &[]));
+    let runtime = system.put("vcruntime140.dll", &pe(&["KERNEL32.dll"], &[], &[]));
+    let discover = || {
+        discover_with_system_directory(
+            &platform("windows"),
+            &fixture.folders(),
+            Some(system.0.clone()),
+            &AtomicBool::new(false),
+        )
+    };
+    assert_paths(
+        discover().unwrap(),
+        vec![world.clone(), concrt, cpp, runtime],
+    );
+
+    // An explicit app-local runtime wins over the machine installation.
+    let local = fixture.put("bin/concrt140.dll", &pe(&["KERNEL32.dll"], &[], &[]));
+    assert_paths(discover().unwrap(), vec![world, local]);
+}
+
+#[test]
+fn windows_system_candidates_remain_bounded_and_validated() {
+    let fixture = Fixture::new();
+    let system = Fixture::new();
+    let discover = || {
+        discover_with_system_directory(
+            &platform("windows"),
+            &fixture.folders(),
+            Some(system.0.clone()),
+            &AtomicBool::new(false),
+        )
+    };
+    fixture.put(WORLD, &pe(&["concrt140.dll"], &[], &[]));
+    assert_eq!(discover().unwrap_err().context["stage"], "missing");
+    let mut wrong_arch = pe(&[], &[], &[]);
+    put16(&mut wrong_arch, 0x84, 0xaa64);
+    system.put("concrt140.dll", &wrong_arch);
+    assert!(discover().unwrap_err().message.contains("x64 PE DLL"));
+
+    // A known runtime cannot authorize unrelated dependencies in System32.
+    system.put("concrt140.dll", &pe(&["vendor.dll"], &[], &[]));
+    system.put("vendor.dll", &pe(&[], &[], &[]));
+    let error = discover().unwrap_err();
+    assert_eq!(error.context["stage"], "missing");
+    assert!(error.message.contains("vendor.dll"));
+
+    // System32 is not another OpenCV installation search root.
+    fs::remove_file(fixture.0.join(WORLD)).unwrap();
+    system.put(WORLD, &pe(&[], &[], &[]));
+    assert!(discover().unwrap_err().message.contains(WORLD));
+}
+
+#[test]
+#[cfg(unix)]
+fn windows_system_runtime_links_cannot_escape_the_system_directory() {
+    let fixture = Fixture::new();
+    let system = Fixture::new();
+    let external = Fixture::new();
+    fixture.put(WORLD, &pe(&["concrt140.dll"], &[], &[]));
+    let runtime = external.put("concrt140.dll", &pe(&[], &[], &[]));
+    std::os::unix::fs::symlink(runtime, system.0.join("concrt140.dll")).unwrap();
+    let error = discover_with_system_directory(
+        &platform("windows"),
+        &fixture.folders(),
+        Some(system.0.clone()),
+        &AtomicBool::new(false),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("outside approved folders"));
 }
 
 #[test]

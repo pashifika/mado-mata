@@ -1887,11 +1887,17 @@ Recovery then offers **Retry** after repair, not transaction controls.
 3. For **Image-processing libraries**, install a build-compatible OpenCV copy
    using the instructions in **Details**, then choose **Find Homebrew installation**
    on macOS or **Choose installation folder**. Homebrew detection checks only
-   `/opt/homebrew` and `/usr/local`; folder selection checks only the approved
-   roots and catalog-defined candidate directories. Required modules and their
-   non-system dependency closure are resolved from bounded binary metadata,
-   without loading libraries, running inspection tools or scanning the disk/PATH.
-   Add a missing dependency's folder explicitly when needed (**8 folders** maximum).
+   `/opt/homebrew` and `/usr/local`; folder selection checks the approved
+   roots and catalog-defined candidate directories. On Windows, selecting the
+   OpenCV installation root also resolves known x64 MSVC runtime DLLs already
+   installed in the system directory returned by the Windows API. Explicitly
+   selected copies take precedence; the system directory is not enumerated or
+   used to find OpenCV or arbitrary third-party DLLs. These runtime files remain
+   part of the validated dependency list, not assumed-present system imports.
+   Required modules and their non-system dependency closure are resolved from
+   bounded binary metadata without loading libraries, running inspection tools
+   or scanning the disk/PATH. If a dependency is genuinely absent, install it
+   externally or add its folder explicitly (**8 selected folders** maximum).
    **Copy command** only copies text: no shell, package manager or installer runs.
    A moving Homebrew formula is not an ABI guarantee.
 4. **Recheck resources** reuses complete downloads and repeats the installation

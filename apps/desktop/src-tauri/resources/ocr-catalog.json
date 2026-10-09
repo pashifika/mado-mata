@@ -132,8 +132,8 @@
         "id": "native-libraries",
         "name": {"en": "OpenCV libraries", "ja": "OpenCVライブラリ"},
         "detail": {
-          "en": "Choose the folder containing your OpenCV 4.14.0 Windows installation. Add another approved folder if its x64 MSVC runtime or other non-system dependencies are elsewhere. The app checks files without running them. Preserve supplied licenses; Save and Check tests engine compatibility.",
-          "ja": "Windows版OpenCV 4.14.0のインストールフォルダを選択してください。x64 MSVCランタイムなどの非システム依存が別の場所にある場合は、そのフォルダも追加します。ファイルを実行せずに調べます。付属ライセンスを保持し、保存後のCheckでエンジン互換性を確認してください。"
+          "en": "Choose the folder containing your OpenCV 4.14.0 Windows installation. Installed x64 MSVC runtime DLLs are also checked in the Windows system directory automatically. If a dependency is still missing, install it or add its installation folder. The app checks files without running them. Preserve supplied licenses; Save and Check tests engine compatibility.",
+          "ja": "Windows版OpenCV 4.14.0のインストールフォルダを選択してください。Windowsのシステムディレクトリに導入済みのx64 MSVCランタイムDLLも自動確認します。依存が不足する場合は、導入するかインストールフォルダを追加してください。ファイルを実行せずに調べます。付属ライセンスを保持し、保存後のCheckでエンジン互換性を確認してください。"
         },
         "version": "engine-linked-opencv-4.14.0",
         "license": "Apache-2.0; dependencies retain their own licenses",
