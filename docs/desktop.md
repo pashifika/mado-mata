@@ -1873,27 +1873,39 @@ Recovery then offers **Retry** after repair, not transaction controls.
 
 ## Save and check an OCR environment
 
-1. Open **Application → App settings → OCR environment**, choose an offered
-   supported profile, and enter the absolute model root, pinned ONNX Runtime
-   library, and reviewed non-system
-   library locations, **1–64 libraries**, one per line. Blank lines are ignored
-   and surrounding whitespace is trimmed. Use the pinned
-   [engine prerequisites](runtime-native.md#install-the-engine-prerequisites).
-   Model bytes must match the selected profile; a filename alone is insufficient.
-   Rust resolves selected aliases to canonical paths and derives byte lengths,
-   hashes, and SDK identity; operators do not edit identity fields.
-2. **Save changes** validates and atomically saves the dialog's editable settings.
+1. Open **Application → App settings → OCR environment**. Under **OCR resources**,
+   choose **Download** for the verified models. The shared set is about 26 MB;
+   the application checks exact sizes and SHA-256 values before publishing it.
+   Source, license and hosting-term links are available before downloading.
+2. Follow the separate runtime and native-library guidance. Download and unpack
+   the official ONNX Runtime **1.29.0** archive for your platform, retaining its
+   notices. OpenCV and every linked non-system dependency must match the engine
+   runner's build. **Copy command** copies text only: MadoMata never runs a shell,
+   package manager or installer. A moving Homebrew formula is not an ABI guarantee;
+   its current deprecation and version caveats are shown with the command.
+3. Expand **Manual paths · existing configuration** and enter the absolute runtime
+   path and the complete reviewed native-library list, **1–64 libraries**, one per
+   line. Blank lines and surrounding whitespace are ignored. A blank model root
+   lets Recheck use the downloaded set; an explicit model root is never replaced
+   automatically. Existing supported manual environments remain usable.
+4. Choose **Recheck resources**, then **Use in settings** when all required files
+   resolve. This fills only the OCR draft; it does not save or initialize an
+   engine. Editing the draft invalidates an earlier Recheck result. File checks
+   identify the exact accepted models and official runtime; native-library checks
+   verify required module names and CPU headers, not dependency closure or ABI.
+   Continue to the existing saved-environment Check for initialization evidence.
+5. **Save changes** validates and atomically saves the dialog's editable settings.
    It does not load libraries, models, or a backend. **Clear draft** followed by
    **Save changes** removes the optional environment. Existing settings with no
    environment remain unconfigured without a read-time rewrite. Failed saves and
    incompatible stored data preserve the previous bytes.
-3. On the selected workspace's **Run control** page, enter a **Recorded corpus
+6. On the selected workspace's **Run control** page, enter a **Recorded corpus
    descriptor** for its inspected recorded package.
    The descriptor is the `replay` object from the [existing replay format](runtime-native.md#prepare-a-private-replay-package-and-plan),
    not a Plan or complete `native_config`. Its assets must already belong to the
    inspected package inventory. No arbitrary asset paths, executable override,
    native authority, or unknown fields are accepted.
-4. Return to **App settings → OCR environment** and choose **Check saved
+7. Return to **App settings → OCR environment** and choose **Check saved
    environment**. Unsaved environment edits must be saved first. Check uses that
    workspace and selection revision; its target is shown in the dialog. With no
    selected workspace, it can validate environment files but cannot initialize a
@@ -1902,12 +1914,42 @@ Recovery then offers **Retry** after repair, not transaction controls.
    I/O; it is cancellable
    through **Stop**. Without a corpus it reports file-validation progress and the
    missing prerequisite, never readiness.
-5. With a valid corpus, Check starts the real owned engine child and initializes
+8. With a valid corpus, Check starts the real owned engine child and initializes
    the replay backend. It does not resolve a workload profile, compile or
    evaluate package modules, or call readiness/workflow. `NotExecuted`, absent
    VM/workflow metrics, initialization milestones, and independent cleanup are
    intentional. A prerequisite refusal, loader failure, and interrupted
    initialization are different outcomes.
+
+Downloads are retained under `<data-dir>/ocr-resources/`, outside configuration
+snapshots, packages and profiles. **Cancel setup** requests cancellation; the
+operation remains busy until its worker and staging cleanup settle. Closing
+settings also cancels its pending work, but neither action uninstalls complete
+verified downloads or changes saved settings. A late cancellation after atomic
+publication reports the installed result. Setup excludes Start, Check, Edit and
+configuration maintenance until settlement. Incomplete cleanup remains visible
+and blocks further setup; restart before retrying after resolving the cause.
+On the next explicit setup action, an OS file lock protects recovery of recognized
+incomplete staging. Unknown files are retained, not recursively removed.
+
+The embedded [OCR catalog](../apps/desktop/src-tauri/resources/ocr-catalog.json)
+owns fixed sources, model identities, platform-specific dependency guidance and
+license links. Model installs include
+[LICENSE](../apps/desktop/src-tauri/resources/ocr-model-LICENSE.txt),
+[NOTICE](../apps/desktop/src-tauri/resources/ocr-model-NOTICE.txt) and a receipt;
+the receipt never replaces byte verification. Maintainers can edit transport
+sources and guidance in the catalog, then run the offline resource tests:
+
+```sh
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib ocr_setup
+```
+
+Review licenses, notices, host terms and exact downloaded bytes before enabling a
+new source. Catalog edits do not extend the engine's accepted model/profile set.
+Automatic acquisition covers the verified model set on supported macOS arm64
+and Windows x64 targets; runtime/native libraries use manual guidance. No archive
+installer, automatic update, custom-model selector or new native authority is
+provided. See the [engine prerequisites](runtime-native.md#install-the-engine-prerequisites).
 
 The descriptor is a session location hint, not persisted native authority.
 It is bounded to **256 KiB**. Inspection, Check, and both Start lanes use the

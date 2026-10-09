@@ -149,9 +149,12 @@ command and do not qualify a native OS/workload.
 
 ### Accepted OCR content
 
-Both supported profiles use these exact Apache-2.0 model bytes. Obtain them
-through the pinned upstream acquisition procedure; do not rename arbitrary
-models to these paths.
+Both supported profiles use these exact Apache-2.0 model bytes. Desktop
+[OCR resource setup](desktop.md#save-and-check-an-ocr-environment) can download and
+verify the shared set, including its license and source notices. Manual acquisition
+through the pinned upstream procedure remains supported; do not rename arbitrary
+models to these paths. Runtime and native-library guidance does not install them
+or prove that a particular OpenCV build matches the engine runner.
 
 | Relative path under `model_root` | Bytes | SHA-256 |
 |---|---:|---|

@@ -325,6 +325,24 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .check-card .panel-heading { padding: 0; margin-bottom: 8px; }
 .check-card .run-identity { grid-template-columns: 90px minmax(0, 1fr); }
 .check-card .authority-note { margin: 10px 0 0; }
+.ocr-setup { margin: 14px 0 18px; }
+.ocr-setup h4 { font-size: 12px; margin: 0 0 6px; }
+.ocr-setup-items { list-style: none; padding: 0; margin: 12px 0; }
+.ocr-setup-item { padding: 11px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 8px; }
+.ocr-setup-item .section-heading { margin-bottom: 0; align-items: center; flex-wrap: wrap; }
+.ocr-setup-item strong { font-size: 12px; }
+.ocr-setup-item .button-row { margin: 8px 0 0; gap: 8px 12px; }
+.ocr-setup-item .tag { white-space: normal; }
+.ocr-setup-command { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; }
+.ocr-setup-command pre { flex: 1; min-width: 0; margin: 0; padding: 7px; background: var(--surface-muted); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; }
+.ocr-setup-command button { flex-shrink: 0; }
+.ocr-setup-progress { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 0; font-size: 11px; }
+.ocr-setup-progress progress { width: 100%; accent-color: var(--accent); }
+.ocr-setup-id { font-size: 10px; overflow-wrap: anywhere; }
+.ocr-setup .fixed-facts dd { white-space: pre-wrap; }
+.ocr-manual { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+.ocr-manual summary { cursor: pointer; font-size: 12px; font-weight: 600; }
+.ocr-manual > .field-help { margin-bottom: 12px; }
 
 /* Logs: one shared store, several filtered views */
 .logs-panel { margin-bottom: 14px; }

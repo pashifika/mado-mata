@@ -65,6 +65,7 @@ The version and integrity sources are:
 | Desktop Rust | Tauri 2.11.6, tauri-build 2.6.3, tracing 0.1.41, tracing-subscriber 0.3.20 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Saved-image payloads | png 0.18.1; flate2 1.1.9 (default features disabled; `rust_backend`) | [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock) |
 | Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Desktop model downloads | ureq 3.4.2 with only `rustls`; rustls 0.23.45 in the lockfile | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock); fixed HTTPS sources, bounded streaming, exact hashes, no shell or archive installer |
 | Desktop persisted identifiers | Public `pashifika/xid-rs` Git dependency at the immutable `rev` in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml), repeated in its [lockfile](../apps/desktop/src-tauri/Cargo.lock); default features disabled | The public checkout fetches the Fork directly; no maintenance checkout or local path override is required |
 | macOS application metadata, picker, and clipboard | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Application launch library | libc 0.2.189 on Unix; objc2 0.6.4, block2 0.6.2 and objc2-foundation/objc2-app-kit 0.3.2 on macOS | [Library manifest](../crates/application-launch/Cargo.toml) and [lockfile](../crates/application-launch/Cargo.lock); no Desktop or runtime dependency |
@@ -171,6 +172,12 @@ The full check has these responsibilities:
   Historical-root staging keeps the managed-path byte budget even when an inert
   source is named `settings.json`. Recovery UI checks distinguish unsupported
   protocols from current-transaction validation failures and preserve repair/Retry.
+  OCR resource tests validate the embedded catalog offline, exact-byte publication,
+  cancellation, filesystem failures, staging ownership/file locks, dependency
+  recheck, snapshot exclusion, and setup admission without turning a temporary
+  busy state into configuration Recovery. Frontend tests cover late/closed setup
+  responses and explicit draft application. Live model hosts, native link/clipboard
+  behavior and actual engine OCR remain separate local smoke/acceptance work.
   Completion-preference regressions cover old-file defaults without rewriting,
   strict object/range refusal, atomic write failure, Edit/busy/restore admission,
   and configuration restore/restart. Restore/Import regressions exercise

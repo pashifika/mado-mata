@@ -2,6 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {acceptController,attemptOutcomes,nativeOutcome,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,packageDestination,portableComponent,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
 import {messages} from './i18n.ts';
+import {OcrSetupSession,setupEnvironment} from './settings/ocr-setup.ts';
 
 test('late predecessor result cannot replace the successor or its preparing state',()=>{
   const current={run:'next',state:'preparing',result:null};
@@ -458,4 +459,301 @@ test('ordinary replay fault summaries do not disclose recognized text or diagnos
   assert.ok(summary.includes('workflow'));
   assert.ok(!summary.includes(privateText));
   assert.ok(!summary.includes('private_detail'));
+});
+
+function deferredSetup() {
+  let resolve, reject;
+  const promise=new Promise((yes,no)=>{resolve=yes; reject=no;});
+  return {promise,resolve,reject};
+}
+
+function setupOperation({id='owned',active=false,stage='complete',result=null,error=null,cleanup_error=null}={}) {
+  return {id,active,progress:{stage,resource_id:'models',bytes:100,total:100},result,error,cleanup_error};
+}
+
+function setupHarness(draft=validSettingsDraft, overrides={}) {
+  const calls=[], published=[];
+  const client={
+    catalog:async()=>{calls.push({kind:'catalog'}); return overrides.catalog ? overrides.catalog() : {items:[],environment:null};},
+    start:async(resourceId,environment)=>{calls.push({kind:'start',resourceId,environment}); return overrides.start ? overrides.start() : 'owned';},
+    poll:async()=>{calls.push({kind:'poll'}); return overrides.poll ? overrides.poll() : setupOperation();},
+    cancel:async(operationId)=>{calls.push({kind:'cancel',operationId}); if (overrides.cancel) await overrides.cancel();},
+    openLink:async(resourceId,index)=>{calls.push({kind:'link',resourceId,index}); if (overrides.openLink) await overrides.openLink();},
+    copyCommand:async(resourceId,index)=>{calls.push({kind:'copy',resourceId,index}); if (overrides.copyCommand) await overrides.copyCommand();},
+  };
+  const session=new OcrSetupSession(client,draft,state=>published.push(state));
+  return {session,calls,published};
+}
+
+test('resource catalog and manual guidance never start a setup job or apply settings',async()=>{
+  const {session,calls}=setupHarness();
+  await session.load();
+  await session.guidance('link','runtime',0);
+  await session.guidance('copy','libraries',1);
+  assert.deepEqual(calls,[{kind:'catalog'},{kind:'poll'},{kind:'link',resourceId:'runtime',index:0},{kind:'copy',resourceId:'libraries',index:1}]);
+  assert.equal(session.snapshot.copied,'copy:libraries:1');
+  assert.equal(session.snapshot.view.environment,null);
+  assert.equal(session.apply(validSettingsDraft),null);
+});
+
+test('Recheck preserves partial dependency hints and unsupported nonblank profiles without relaxing Save',()=>{
+  assert.equal(setupEnvironment(environmentDraft(null)),null);
+  const partial={profile:'',model_root:'',runtime_path:' /runtime ',library_paths:' /library-a \n\n /library-b '};
+  const hints=setupEnvironment(partial);
+  assert.equal(hints.profile,'');
+  assert.equal(hints.runtime_path,'/runtime');
+  assert.deepEqual(hints.native_library_paths,['/library-a','/library-b']);
+  assert.equal(readEnvironment(partial).environment,null);
+  assert.equal(setupEnvironment({...partial,profile:'unsupported'}).profile,'unsupported');
+  assert.equal(setupEnvironment({...partial,profile:SUPPORTED_PROFILES[1].profile}).model,SUPPORTED_PROFILES[1].model);
+});
+
+for (const {scenario,resourceId} of [
+  {scenario:'a download',resourceId:'models'},
+  {scenario:'a Recheck',resourceId:'inspect'},
+]) {
+  test(`closing before ${scenario} returns cancels only its late operation, never the successor`,async()=>{
+    const start=deferredSetup();
+    const old=setupHarness(validSettingsDraft,{start:()=>start.promise});
+    const pending=old.session.start(resourceId,validSettingsDraft);
+    assert.equal(old.session.busy,true);
+    old.session.close();
+    const publications=old.published.length;
+    const successor=setupHarness(validSettingsDraft,{start:async()=> 'successor'});
+    await successor.session.start('inspect',validSettingsDraft);
+    start.resolve('predecessor');
+    await pending;
+    assert.deepEqual(old.calls.filter(call=>call.kind==='cancel'),[{kind:'cancel',operationId:'predecessor'}]);
+    assert.equal(old.published.length,publications);
+    assert.equal(old.session.apply(validSettingsDraft),null);
+    assert.equal(successor.session.snapshot.id,'successor');
+    assert.deepEqual(successor.calls.filter(call=>call.kind==='cancel'),[]);
+  });
+}
+
+test('Cancel before Start returns remains latched and publication still reports retained verified files',async()=>{
+  const start=deferredSetup();
+  const original=structuredClone(validSettingsDraft);
+  const {session,calls}=setupHarness(validSettingsDraft,{start:()=>start.promise});
+  const pending=session.start('models',validSettingsDraft);
+  await session.cancel();
+  assert.deepEqual(calls.filter(call=>call.kind==='cancel'),[]);
+  start.resolve('owned');
+  await pending;
+  assert.deepEqual(calls.filter(call=>call.kind==='cancel'),[{kind:'cancel',operationId:'owned'}]);
+  assert.equal(session.busy,true);
+  await session.poll();
+  assert.equal(session.snapshot.operation.progress.stage,'complete');
+  assert.equal(session.busy,false);
+  assert.equal(session.currentEnvironment(validSettingsDraft),null);
+  assert.deepEqual(validSettingsDraft,original);
+  session.close();
+  assert.equal(calls.filter(call=>call.kind==='cancel').length,1);
+});
+
+test('a foreign poll result is never adopted and Cancel still targets only the dialog-owned ID',async()=>{
+  const {session,calls}=setupHarness(validSettingsDraft,{poll:async()=>setupOperation({id:'foreign',result:{items:[],environment:checkedEnvironment}})});
+  await session.start('inspect',validSettingsDraft);
+  await session.poll();
+  assert.equal(session.snapshot.unavailable,true);
+  assert.equal(session.snapshot.operation,null);
+  assert.equal(session.currentEnvironment(validSettingsDraft),null);
+  await session.cancel();
+  assert.deepEqual(calls.filter(call=>call.kind==='cancel'),[{kind:'cancel',operationId:'owned'}]);
+});
+
+test('an inspection finishing after close cannot publish into a replacement dialog',async()=>{
+  const result=deferredSetup();
+  const old=setupHarness(validSettingsDraft,{poll:()=>result.promise});
+  await old.session.start('inspect',validSettingsDraft);
+  const pending=old.session.poll();
+  old.session.close();
+  const publications=old.published.length;
+  const successor=setupHarness(validSettingsDraft,{start:async()=> 'successor',poll:async()=>setupOperation({id:'successor',result:{items:[],environment:checkedEnvironment}})});
+  await successor.session.start('inspect',validSettingsDraft);
+  await successor.session.poll();
+  result.resolve(setupOperation({result:{items:[],environment:{...checkedEnvironment,runtime_path:'/old-runtime'}}}));
+  await pending;
+  assert.equal(old.published.length,publications);
+  assert.equal(old.session.currentEnvironment(validSettingsDraft),null);
+  assert.deepEqual(successor.session.currentEnvironment(validSettingsDraft),checkedEnvironment);
+  assert.deepEqual(old.calls.filter(call=>call.kind==='cancel'),[{kind:'cancel',operationId:'owned'}]);
+});
+
+for (const {scenario,edit} of [
+  {scenario:'an OCR path edit',edit:draft=>({...draft,environment:{...draft.environment,runtime_path:'/edited-runtime'}})},
+  {scenario:'an unrelated settings edit',edit:draft=>({...draft,backupDirectory:'/edited-backups'})},
+]) {
+  test(`${scenario} invalidates an in-flight Recheck even when the draft is later reverted`,async()=>{
+    const result=deferredSetup();
+    const {session}=setupHarness(validSettingsDraft,{poll:()=>result.promise});
+    await session.start('inspect',validSettingsDraft);
+    const pending=session.poll();
+    const edited=edit(validSettingsDraft);
+    session.observeDraft(edited);
+    result.resolve(setupOperation({result:{items:[],environment:checkedEnvironment}}));
+    await pending;
+    assert.equal(session.currentEnvironment(edited),null);
+    assert.equal(session.apply(edited),null);
+    assert.equal(session.currentEnvironment(validSettingsDraft),null);
+    assert.equal(session.apply(validSettingsDraft),null);
+  });
+}
+
+test('Use applies only a current complete OCR proposal, keeps other edits and leaves saved settings unchanged',async()=>{
+  const saved={version:1,package_path:null,...readSettingsDraft(validSettingsDraft).settings};
+  const original=structuredClone(saved);
+  const draft={...validSettingsDraft,backupDirectory:'/draft-backups',logLimit:'500'};
+  const environment={...checkedEnvironment,model_root:'/managed-models',runtime_path:'/reviewed-runtime'};
+  const {session,calls}=setupHarness(draft,{poll:async()=>setupOperation({result:{items:[],environment}})});
+  await session.start('inspect',draft);
+  assert.deepEqual(calls[0],{kind:'start',resourceId:'inspect',environment:checkedEnvironment});
+  await session.poll();
+  const applied=session.apply(draft);
+  assert.deepEqual(applied.environment,environmentDraft(environment));
+  assert.equal(applied.backupDirectory,draft.backupDirectory);
+  assert.equal(applied.logLimit,draft.logLimit);
+  assert.equal(applied.notifications,draft.notifications);
+  assert.deepEqual(readSettingsDraft(applied).settings.ocr_environment,environment);
+  assert.deepEqual(saved,original);
+  assert.equal(session.snapshot.applied,true);
+  assert.equal(session.currentEnvironment(applied),null);
+  session.close();
+  assert.deepEqual(calls.filter(call=>call.kind==='cancel'),[]);
+});
+
+test('an edit immediately before Use refuses the proposal and a fresh Recheck can recover',async()=>{
+  const {session}=setupHarness(validSettingsDraft,{poll:async()=>setupOperation({result:{items:[],environment:checkedEnvironment}})});
+  await session.start('inspect',validSettingsDraft);
+  await session.poll();
+  const edited={...validSettingsDraft,environment:{...validSettingsDraft.environment,runtime_path:'/new-runtime'}};
+  assert.equal(session.apply(edited),null);
+  await session.start('inspect',edited);
+  await session.poll();
+  assert.deepEqual(session.currentEnvironment(edited),checkedEnvironment);
+});
+
+for (const {scenario,stage,error,cleanup_error,expectedBusy} of [
+  {scenario:'a cancelled Recheck',stage:'cancelled',error:{category:'Cancelled',message:'cancelled',context:null},cleanup_error:null,expectedBusy:false},
+  {scenario:'a failed Recheck',stage:'failed',error:{category:'Storage',message:'unreadable',context:null},cleanup_error:null,expectedBusy:false},
+  {scenario:'incomplete Recheck cleanup',stage:'complete',error:null,cleanup_error:{category:'Storage',message:'cleanup failed',context:null},expectedBusy:true},
+]) {
+  test(`${scenario} remains visible and cannot supply a settings proposal`,async()=>{
+    const {session}=setupHarness(validSettingsDraft,{poll:async()=>setupOperation({stage,error,cleanup_error,result:{items:[],environment:checkedEnvironment}})});
+    await session.start('inspect',validSettingsDraft);
+    await session.poll();
+    assert.equal(session.snapshot.operation.error,error);
+    assert.equal(session.snapshot.operation.cleanup_error,cleanup_error);
+    assert.equal(session.busy,expectedBusy);
+    assert.equal(session.currentEnvironment(validSettingsDraft),null);
+    assert.equal(session.apply(validSettingsDraft),null);
+  });
+}
+
+test('polling is single-flight and transport failures do not release setup ownership',async()=>{
+  const result=deferredSetup();
+  const {session,calls}=setupHarness(validSettingsDraft,{poll:()=>result.promise});
+  await session.start('models',validSettingsDraft);
+  const pending=session.poll();
+  await session.poll();
+  assert.equal(calls.filter(call=>call.kind==='poll').length,1);
+  const failure={category:'Transport',message:'temporarily unavailable',context:null};
+  result.reject(failure);
+  await pending;
+  assert.equal(session.snapshot.pollError,failure);
+  assert.equal(session.busy,true);
+  result.promise=Promise.resolve(setupOperation());
+  await session.poll();
+  assert.equal(session.snapshot.pollError,null);
+  assert.equal(session.busy,false);
+});
+
+test('a failed cancellation is actionable and a terminal poll does not admit new work before Cancel returns',async()=>{
+  const failure={category:'Transport',message:'cancel unavailable',context:null};
+  const cancellation=deferredSetup();
+  let failed=true;
+  const {session,calls}=setupHarness(validSettingsDraft,{cancel:async()=>{if (failed) throw failure; await cancellation.promise;}});
+  await session.start('models',validSettingsDraft);
+  await session.cancel();
+  assert.equal(session.snapshot.error,failure);
+  assert.equal(session.snapshot.cancelPending,false);
+  assert.equal(session.busy,true);
+  failed=false;
+  const pending=session.cancel();
+  await session.poll();
+  assert.equal(session.snapshot.operation.active,false);
+  assert.equal(session.busy,true);
+  await session.start('inspect',validSettingsDraft);
+  assert.equal(calls.filter(call=>call.kind==='start').length,1);
+  cancellation.resolve();
+  await pending;
+  assert.equal(session.snapshot.error,null);
+  assert.equal(session.busy,false);
+});
+
+test('reopening observes a settling predecessor without cancelling it or using its old proposal',async()=>{
+  let operation=setupOperation({id:'predecessor',active:true,stage:'verifying',result:{items:[],environment:checkedEnvironment}});
+  const {session,calls}=setupHarness(validSettingsDraft,{poll:async()=>operation});
+  await session.load();
+  assert.equal(session.snapshot.id,'predecessor');
+  assert.equal(session.snapshot.owned,false);
+  assert.equal(session.busy,true);
+  assert.equal(session.currentEnvironment(validSettingsDraft),null);
+  await session.cancel();
+  await session.start('inspect',validSettingsDraft);
+  assert.deepEqual(calls.filter(call=>call.kind==='cancel'||call.kind==='start'),[]);
+  operation=setupOperation({id:'predecessor',result:{items:[],environment:checkedEnvironment}});
+  await session.poll();
+  assert.equal(session.busy,false);
+  assert.equal(session.currentEnvironment(validSettingsDraft),null);
+  assert.equal(session.apply(validSettingsDraft),null);
+  await session.start('inspect',validSettingsDraft);
+  operation=setupOperation({result:{items:[],environment:checkedEnvironment}});
+  await session.poll();
+  assert.equal(session.snapshot.owned,true);
+  assert.deepEqual(session.currentEnvironment(validSettingsDraft),checkedEnvironment);
+});
+
+test('closing a progress-only observer never cancels a predecessor or its successor',async()=>{
+  let operation=setupOperation({id:'predecessor',active:true,stage:'downloading'});
+  const {session,calls}=setupHarness(validSettingsDraft,{poll:async()=>operation});
+  await session.load();
+  operation=setupOperation({id:'successor',active:true,stage:'verifying'});
+  await session.poll();
+  assert.equal(session.snapshot.id,'successor');
+  assert.equal(session.snapshot.owned,false);
+  session.close();
+  assert.deepEqual(calls.filter(call=>call.kind==='cancel'),[]);
+});
+
+test('reopened incomplete cleanup stays visible and blocks new setup until restart',async()=>{
+  const cleanup_error={category:'Storage',message:'could not remove staging',context:null};
+  const {session,calls}=setupHarness(validSettingsDraft,{poll:async()=>setupOperation({id:'predecessor',cleanup_error})});
+  await session.load();
+  assert.equal(session.busy,true);
+  assert.equal(session.snapshot.operation.cleanup_error,cleanup_error);
+  await session.start('inspect',validSettingsDraft);
+  await session.cancel();
+  session.close();
+  assert.deepEqual(calls.filter(call=>call.kind==='cancel'||call.kind==='start'),[]);
+  assert.equal(session.currentEnvironment(validSettingsDraft),null);
+});
+
+test('retrying initial status failure remains read-only and discovers the still-settling predecessor',async()=>{
+  const failure={category:'Transport',message:'status unavailable',context:null};
+  let failed=true;
+  const {session,calls}=setupHarness(validSettingsDraft,{poll:async()=>{
+    if (failed) throw failure;
+    return setupOperation({id:'predecessor',active:true,stage:'downloading'});
+  }});
+  await session.load();
+  assert.equal(session.snapshot.pollError,failure);
+  assert.deepEqual(session.snapshot.view,{items:[],environment:null});
+  failed=false;
+  await session.load();
+  assert.equal(session.snapshot.pollError,null);
+  assert.equal(session.busy,true);
+  assert.equal(session.snapshot.owned,false);
+  assert.equal(session.snapshot.id,'predecessor');
+  assert.deepEqual(calls.filter(call=>call.kind==='start'||call.kind==='cancel'),[]);
 });

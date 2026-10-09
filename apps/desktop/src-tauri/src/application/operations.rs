@@ -178,6 +178,7 @@ impl Application {
                     error
                 }
             })?;
+            self.setup_idle()?;
             self.collect(&mut state);
             state.idle()?;
             state.native_ready()?;
@@ -404,6 +405,7 @@ impl Application {
                 self.closing.store(true, Ordering::Release);
                 self.invalidate_target_observation(None);
                 self.cancel_native();
+                self.cancel_setup();
                 let mut outcome = self.runner.shutdown();
                 // Publication holds command admission, not the Stop/runner lock.
                 // A forced shutdown retains its lease/journal if storage cannot settle.
@@ -461,6 +463,9 @@ impl Application {
                             std::thread::sleep(Duration::from_millis(5));
                         }
                     }
+                }
+                if let Err(error) = self.settle_setup(deadline) {
+                    outcome = Err(error);
                 }
                 if let Some(bridge) = lock(&self.bridge).take() {
                     let _ = bridge.join();

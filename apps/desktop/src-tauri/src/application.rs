@@ -27,7 +27,9 @@ pub use authoring::{
     RecognitionView,
 };
 mod native_run;
+mod ocr_setup;
 mod operations;
+pub use ocr_setup::SetupOperation;
 mod profiles;
 mod recovery;
 mod target_observation;
@@ -291,6 +293,7 @@ pub struct Application {
     publisher: Arc<Publisher>,
     // Stop never waits for command, workspace, store, or publication locks.
     authoring_stop: Mutex<Option<authoring::StopOwner>>,
+    ocr_setup: Mutex<ocr_setup::SetupSlot>,
     native_engine: PathBuf,
     #[cfg(test)]
     command_admitted: AtomicBool,
@@ -437,6 +440,7 @@ impl Application {
             target_observation,
             publisher,
             authoring_stop: Mutex::new(None),
+            ocr_setup: Mutex::new(ocr_setup::SetupSlot::default()),
             native_engine: engine,
             #[cfg(test)]
             command_admitted: AtomicBool::new(false),
@@ -476,6 +480,7 @@ impl Application {
         Fault,
     > {
         let guards = self.reconstruction_state()?;
+        self.setup_idle()?;
         // Root lookup must not wait on a preparation worker's Store lock.
         if crate::restore::pending(&self.root)? {
             return Err(Fault::new(
@@ -595,6 +600,8 @@ impl Application {
     }
 
     pub fn capture_configuration(&self) -> Result<Capture, Fault> {
+        let (_command, _state) = self.reconstruction_state()?;
+        self.setup_idle()?;
         let store = lock(&self.store);
         configuration::capture(store.root())
     }

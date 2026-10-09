@@ -176,7 +176,10 @@ impl Bootstrap {
             match application.workspace_catalog() {
                 Ok(catalog) => status.catalog = Some(catalog),
                 Err(error) if matches!(status.state, Phase::Ready) => {
-                    let transient = error.category == "WorkspaceBusy";
+                    let transient = matches!(
+                        error.category.as_str(),
+                        "WorkspaceBusy" | "OcrSetupBusy" | "OcrSetupCleanup"
+                    );
                     status.stage = if error.category == "RestorePending" {
                         status.pending_restore = true;
                         "restore"
