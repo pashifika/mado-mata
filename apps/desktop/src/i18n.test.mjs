@@ -111,7 +111,7 @@ const adapterArguments = {
   'ui.authoring.renameHeading': [['src/main.ts']], 'ui.authoring.confirmRemove': [['src/main.ts']],
   'ui.authoring.fileActions': [['src/main.ts'],['src/lib/']],
   'ui.authoring.block': ['pending','refresh','missing','clean','binary','manifestDirty','fileDirty'].map(kind=>[kind]),
-  'ui.authoring.blockedOther': [['workspace-A']], 'ui.authoring.startBlocked': [['workspace-A']], 'ui.authoring.stripKind': [['pkg-A']],
+  'ui.authoring.blockedOther': [['workspace-A']], 'ui.authoring.startBlocked': [['workspace-A']],
   'ui.authoring.dirtyHeading': ['exit','duplicate','close','closeTab'].map(kind=>[kind]),
   'ui.authoring.presetLabel': [['default']], 'ui.authoring.sourceMapLabel': [['main.ts']],
   'ui.authoring.jsonLocation': ['unexpectedCharacter','unexpectedEnd','invalidString','invalidNumber','trailingContent','depth','future-problem'].map(problem=>[problem,3,7]),

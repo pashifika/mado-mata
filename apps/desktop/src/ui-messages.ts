@@ -194,7 +194,6 @@ function catalog(data: typeof enData) {
       block: (kind: keyof typeof data.authoring.block) => data.authoring.block[kind],
       blockedOther: (owner: string) => interpolate(data.authoring.blockedOther, {owner}),
       startBlocked: (owner: string) => interpolate(data.authoring.startBlocked, {owner}),
-      stripKind: (packageId: string) => interpolate(data.authoring.stripKind, {package: packageId}),
       dirtyHeading: (intent: keyof typeof data.authoring.dirtyHeading) => data.authoring.dirtyHeading[intent],
       presetLabel: (id: string) => interpolate(data.authoring.presetLabel, {id}),
       sourceMapLabel: (module: string) => interpolate(data.authoring.sourceMapLabel, {module}),

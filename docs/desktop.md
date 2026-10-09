@@ -265,8 +265,8 @@ captured operation, progress, retained outcome and independent cleanup evidence.
 It remains available after Edit invalidates the selection and when logs are
 evicted. Older selection revisions are identified; missing captured inputs are
 not reconstructed from current settings. Private records still require explicit
-disclosure. The shared pinned operation strip identifies the actual owner and
-provides **Stop** across pages; dialogs keep their own owner-bound strip.
+disclosure. Outside Edit, the shared pinned operation strip identifies the actual
+Run/Check owner and provides **Stop** across pages; dialogs keep their own controls.
 Execution has no second Stop button.
 
 The bottom status bar identifies its Workspace or Application scope. Click its
@@ -277,6 +277,15 @@ unsaved drafts retain distinct labels; another workspace's late response cannot
 become the selected workspace's notice.
 Application-scoped work reports its own progress. Target failures retain their
 earlier-draft attribution; an unresolved saved-record conflict still requires reload.
+
+During Edit, the bottom bar also identifies the actual Edit owner independently
+of the selected workspace. Its compact activity shows preparation, work and
+requested Stop without adding upper progress bands. **Stop**, retained capture
+**Release** and **Return to Edit** remain owner-bound; settings and workspace
+dialogs provide local equivalents. Stop acknowledgement is not worker settlement.
+**Attention** and **Cleanup incomplete** remain visible until their underlying
+outcomes change; **Details** retains attribution and navigation to diagnostics.
+Routine activity changes reserve the same footer space at a fixed window width.
 
 **Help** opens the current page's explanation. Small information circles sit close
 to their labels, aligned to the upper-right within the text height. Their wider
@@ -292,6 +301,11 @@ Corrective and diagnostic actions preserve a usable focus target; source diagnos
 continue into the editor.
 Detached Preview uses the same interaction in its existing overlay without
 resizing the image or changing Fit scale.
+
+Recognition groups general image, region, trial, Save and Copy explanations behind
+its existing information controls. Missing images/resources, confirmation, invalid
+fields, stale/unsaved state, results and failures remain at their decision points
+with Help closed. Opening Help starts no recognition or acquisition.
 
 
 ## Edit directory packages
@@ -401,11 +415,12 @@ Neither action inspects, binds, or runs the package.
   even with details closed and retains ownership until the worker settles.
 - One Edit session owns the application. Ordinary **Start**, independent OCR
   **Check**, a second editor, and configuration reconstruction are refused.
-  One shared application strip explains this exclusion, including when another
-  workspace is selected. Its expandable authority details explain Save/Inspect
-  as static content outside the live status announcement, not another warning.
-  Idle Edit has no timed runner. Navigation remains available; the owner strip
-  and **Return to Edit** preserve the session across workspaces and dialogs.
+  The bottom Edit summary retains its actual owner across navigation.
+  Its information circle explains exclusion and Save/Inspect on hover, focus or
+  click, including inside dialogs. Owner-bound Recognition OCR/template trials
+  remain allowed. Unavailable Start/Check actions retain their current reasons.
+  Idle Edit has no timed runner. **Return to Edit** preserves the session across
+  workspaces and dialogs.
 - Guidance **Open/Create**, like Run-page Edit, asks before leaving unsaved
   profile/recovery drafts, including an incomplete Reset's default-based draft.
   **Keep draft** cancels entry. Closing the choice restores focus to its entry

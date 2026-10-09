@@ -488,7 +488,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
         </ButtonHint>
       </div>
     </div>
-    {locked && lockReason && <p id="authoring-lock-reason" className="operation-status" role="status">{lockReason}</p>}
     {leaseLost && <p id="authoring-lease-lost" className="inline-warning" role="alert">{a.leaseLost}</p>}
     {session.error && <div id="authoring-error"><FaultMessage title={a.actionFailed} value={session.error}/></div>}
     {recoveryFault && <div className="button-row"><button id="authoring-recover" type="button" disabled={locked} onClick={handlers.recover}>{a.recover}</button>

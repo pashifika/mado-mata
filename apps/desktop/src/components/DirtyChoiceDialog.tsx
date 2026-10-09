@@ -1,4 +1,5 @@
 import Modal from './Modal.tsx';
+import type {ReactNode} from 'react';
 import type {FileDraft} from '../authoring.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
@@ -10,17 +11,19 @@ interface Props {
   // Why Save cannot complete (for example, the host no longer reports this Edit session, or the recognition draft
   // cannot be saved as it is); Discard and Cancel stay available.
   saveBlock: string | null;
+  strip: ReactNode;
   onSave: () => void; onDiscard: () => void; onCancel: () => void;
 }
 
 // Save/Discard/Cancel before an action that ends or replaces the Edit session. Cancel (including Escape) leaves the
 // lease, every draft and the selected file untouched; the dialog cannot be dismissed while a choice is being carried out.
-export default function DirtyChoiceDialog({intent, drafts, recognitionDirty, busy, saveBlock, onSave, onDiscard, onCancel}: Props) {
+export default function DirtyChoiceDialog({intent, drafts, recognitionDirty, busy, saveBlock, strip, onSave, onDiscard, onCancel}: Props) {
   const locale = useLocale();
   const a = messages[locale].ui.authoring;
   const unsavable = drafts.some(draft => draft.missing);
   return <Modal id="authoring-dirty-dialog" open={intent !== null} onCancel={onCancel} labelledBy="authoring-dirty-heading" locked={busy} initialFocus="#authoring-dirty-cancel">
     <div className="dialog-header"><div><h2 id="authoring-dirty-heading">{intent ? a.dirtyHeading(intent) : ''}</h2><p>{a.dirtyHelp}</p></div></div>
+    {strip}
     <div className="dialog-body">
       <ul id="authoring-dirty-files" className="saved-list">{drafts.map(draft => <li key={draft.path} className="saved-row">
         <span className="saved-text"><strong className="mono">{draft.path}</strong><span className="mono">{a.kind(draft.kind)}{draft.missing ? ` · ${a.missingHeading}` : ''}</span></span></li>)}
