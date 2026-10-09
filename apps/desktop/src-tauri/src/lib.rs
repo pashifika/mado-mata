@@ -5,6 +5,7 @@ pub mod bootstrap;
 pub mod capture_cache;
 pub mod configuration;
 pub mod logging;
+pub mod ocr_setup;
 pub mod restore;
 pub mod storage;
 pub mod target;

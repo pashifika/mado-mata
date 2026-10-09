@@ -73,6 +73,11 @@ function catalog(data: typeof enData) {
       profileLabel: (profile: keyof typeof data.environment.profileLabels) => data.environment.profileLabels[profile],
       mismatch: (model: string, language: string, provider: string, runtime: string) => interpolate(data.environment.mismatch, {model, language, provider, runtime}),
     },
+    ocrSetup: {
+      ...data.ocrSetup,
+      state: (value: string) => Object.hasOwn(data.ocrSetup.states, value) ? data.ocrSetup.states[value as keyof typeof data.ocrSetup.states] : data.ocrSetup.unknownState,
+      stage: (value: string) => Object.hasOwn(data.ocrSetup.stages, value) ? data.ocrSetup.stages[value as keyof typeof data.ocrSetup.stages] : data.ocrSetup.unknownStage,
+    },
     run: {
       ...data.run,
       heading: (label: string) => interpolate(data.run.heading, {label}),

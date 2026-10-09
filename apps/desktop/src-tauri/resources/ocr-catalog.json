@@ -1,0 +1,152 @@
+{
+  "schema": 1,
+  "engine_revision": "4b4f3296838a9eecdcb00e9d2bb3121a25cdc240",
+  "profiles": [
+    "g-004-rapidocr-ppocrv4-det-v6-rec-small-v1",
+    "phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2"
+  ],
+  "models": {
+    "id": "rapidocr-models",
+    "name": {"en": "OCR models", "ja": "OCRモデル"},
+    "detail": {
+      "en": "Download the files used to read text (26 MB). They are selected automatically in this settings draft. Cancelling settings keeps downloaded files.",
+      "ja": "文字認識に使うファイル（26 MB）を取得し、編集中の設定に自動で選択します。設定をキャンセルしても取得済みファイルは残ります。"
+    },
+    "version": "rapidocr-v3.9.2-g004",
+    "license": "Apache-2.0",
+    "license_url": "https://huggingface.co/DjB314/RapidOCR/blob/04e88d0483f0bfcdd0f29429594244c10bfc2867/LICENSE",
+    "links": [
+      {"label": {"en": "Model license and attribution", "ja": "モデルのライセンスと帰属"}, "url": "https://huggingface.co/DjB314/RapidOCR/blob/04e88d0483f0bfcdd0f29429594244c10bfc2867/LICENSE"},
+      {"label": {"en": "Hugging Face download terms", "ja": "Hugging Faceの利用規約"}, "url": "https://huggingface.co/terms-of-service"}
+    ],
+    "commands": [],
+    "assets": [
+      {
+        "path": "rapidocr-v3.9.2/ch_PP-OCRv4_det_mobile.onnx",
+        "bytes": 4745517,
+        "sha256": "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
+        "url": "https://huggingface.co/SWHL/RapidOCR/resolve/1cfba2e90fc938db55889873735088de210cc173/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx"
+      },
+      {
+        "path": "rapidocr-v3.9.2/PP-OCRv6_rec_small.onnx",
+        "bytes": 21234383,
+        "sha256": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
+        "url": "https://huggingface.co/DjB314/RapidOCR/resolve/04e88d0483f0bfcdd0f29429594244c10bfc2867/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx"
+      }
+    ]
+  },
+  "platforms": [
+    {
+      "os": "macos",
+      "arch": "aarch64",
+      "runtime": {
+        "id": "onnxruntime",
+        "name": {"en": "OCR runtime", "ja": "OCRランタイム"},
+        "detail": {
+          "en": "Download ONNX Runtime 1.29.0 from Microsoft (42 MB). The app verifies and installs it with its licenses, then selects it in this settings draft. No separate installation is needed.",
+          "ja": "MicrosoftからONNX Runtime 1.29.0（42 MB）を取得します。ライセンスとともに検証・保存し、編集中の設定に自動で選択します。別途インストールする必要はありません。"
+        },
+        "version": "1.29.0-api17-cpu",
+        "license": "MIT",
+        "license_url": "https://github.com/microsoft/onnxruntime/blob/v1.29.0/LICENSE",
+        "links": [
+          {"label": {"en": "Official macOS arm64 runtime", "ja": "公式macOS arm64ランタイム"}, "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/onnxruntime-osx-arm64-1.29.0.tgz"},
+          {"label": {"en": "Runtime license", "ja": "ランタイムのライセンス"}, "url": "https://github.com/microsoft/onnxruntime/blob/v1.29.0/LICENSE"}
+        ],
+        "commands": [],
+        "filename": "libonnxruntime.1.29.0.dylib",
+        "bytes": 43184400,
+        "sha256": "68f6e54e695583adc371aef610ec4abb1ffaa3df656582922de7690f7e2000eb",
+        "archive": {
+          "format": "tgz",
+          "asset": {
+            "path": "onnxruntime-osx-arm64-1.29.0.tgz",
+            "bytes": 41578864,
+            "sha256": "d0706fc34f315d8c88639d0a8c81f2e09e815f282cabed3493c06a054352cf92",
+            "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/onnxruntime-osx-arm64-1.29.0.tgz"
+          },
+          "members": [
+            {"archive_path": "onnxruntime-osx-arm64-1.29.0/lib/libonnxruntime.1.29.0.dylib", "path": "libonnxruntime.1.29.0.dylib", "bytes": 43184400, "sha256": "68f6e54e695583adc371aef610ec4abb1ffaa3df656582922de7690f7e2000eb"},
+            {"archive_path": "onnxruntime-osx-arm64-1.29.0/LICENSE", "path": "LICENSE", "bytes": 1073, "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"},
+            {"archive_path": "onnxruntime-osx-arm64-1.29.0/ThirdPartyNotices.txt", "path": "ThirdPartyNotices.txt", "bytes": 336906, "sha256": "53d3fa5821ac016ac24dd35775c996efec86e2ae0841e9a3a5e146c0ae916845"}
+          ]
+        }
+      },
+      "native": {
+        "id": "native-libraries",
+        "name": {"en": "OpenCV libraries", "ja": "OpenCVライブラリ"},
+        "detail": {
+          "en": "Find an existing Homebrew installation, or choose your OpenCV 4 installation folder. The app checks required libraries and their non-system dependencies without running them. Use the same OpenCV build as the engine; Homebrew versions can change. Save and Check to test compatibility.",
+          "ja": "既存のHomebrew環境を検索するか、OpenCV 4のインストールフォルダを選択します。必須ライブラリと非システム依存を実行せずに調べます。エンジンと同じOpenCVビルドを使用してください。Homebrewのバージョンは変更され得ます。保存後のCheckで互換性を確認します。"
+        },
+        "version": "engine-linked-opencv-4",
+        "license": "Apache-2.0; dependencies retain their own licenses",
+        "license_url": "https://github.com/opencv/opencv/blob/4.14.0/LICENSE",
+        "links": [
+          {"label": {"en": "Pinned native prerequisites", "ja": "固定リビジョンのネイティブ前提条件"}, "url": "https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/CONTRIBUTING.md#native-development-prerequisites"},
+          {"label": {"en": "Homebrew opencv@4 (version can change)", "ja": "Homebrew opencv@4（バージョンは変更され得ます）"}, "url": "https://formulae.brew.sh/formula/opencv@4"}
+        ],
+        "commands": ["brew install opencv@4"],
+        "required_modules": ["libopencv_core.4", "libopencv_imgproc.4", "libopencv_imgcodecs.4"],
+        "search_roots": ["/opt/homebrew", "/usr/local"],
+        "search_subdirectories": ["lib", "opt/opencv@4/lib", "opt/opencv/lib"]
+      }
+    },
+    {
+      "os": "windows",
+      "arch": "x86_64",
+      "runtime": {
+        "id": "onnxruntime",
+        "name": {"en": "OCR runtime", "ja": "OCRランタイム"},
+        "detail": {
+          "en": "Download ONNX Runtime 1.29.0 from Microsoft (80 MB). The app verifies and installs it with its licenses, then selects it in this settings draft. No separate installation is needed.",
+          "ja": "MicrosoftからONNX Runtime 1.29.0（80 MB）を取得します。ライセンスとともに検証・保存し、編集中の設定に自動で選択します。別途インストールする必要はありません。"
+        },
+        "version": "1.29.0-api17-cpu",
+        "license": "MIT",
+        "license_url": "https://github.com/microsoft/onnxruntime/blob/v1.29.0/LICENSE",
+        "links": [
+          {"label": {"en": "Official Windows x64 runtime", "ja": "公式Windows x64ランタイム"}, "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/onnxruntime-win-x64-1.29.0.zip"},
+          {"label": {"en": "Runtime license", "ja": "ランタイムのライセンス"}, "url": "https://github.com/microsoft/onnxruntime/blob/v1.29.0/LICENSE"}
+        ],
+        "commands": [],
+        "filename": "onnxruntime.dll",
+        "bytes": 16149344,
+        "sha256": "69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b847059738323404519ec471",
+        "archive": {
+          "format": "zip",
+          "asset": {
+            "path": "onnxruntime-win-x64-1.29.0.zip",
+            "bytes": 79645520,
+            "sha256": "c9b4b7086b529ad814f428c1bad028e20a25d7dc0699836775faace4ab5b78b2",
+            "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/onnxruntime-win-x64-1.29.0.zip"
+          },
+          "members": [
+            {"archive_path": "onnxruntime-win-x64-1.29.0/lib/onnxruntime.dll", "path": "onnxruntime.dll", "bytes": 16149344, "sha256": "69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b847059738323404519ec471"},
+            {"archive_path": "onnxruntime-win-x64-1.29.0/LICENSE", "path": "LICENSE", "bytes": 1094, "sha256": "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674"},
+            {"archive_path": "onnxruntime-win-x64-1.29.0/ThirdPartyNotices.txt", "path": "ThirdPartyNotices.txt", "bytes": 343249, "sha256": "4c5b864d8974c94b37461f38163facef79a1bb5dea461667ee9e5be6a8e73f83"}
+          ]
+        }
+      },
+      "native": {
+        "id": "native-libraries",
+        "name": {"en": "OpenCV libraries", "ja": "OpenCVライブラリ"},
+        "detail": {
+          "en": "Choose the folder containing your OpenCV 4.14.0 Windows installation. Installed x64 MSVC runtime DLLs are also checked in the Windows system directory automatically. If a dependency is still missing, install it or add its installation folder. The app checks files without running them. Preserve supplied licenses; Save and Check tests engine compatibility.",
+          "ja": "Windows版OpenCV 4.14.0のインストールフォルダを選択してください。Windowsのシステムディレクトリに導入済みのx64 MSVCランタイムDLLも自動確認します。依存が不足する場合は、導入するかインストールフォルダを追加してください。ファイルを実行せずに調べます。付属ライセンスを保持し、保存後のCheckでエンジン互換性を確認してください。"
+        },
+        "version": "engine-linked-opencv-4.14.0",
+        "license": "Apache-2.0; dependencies retain their own licenses",
+        "license_url": "https://github.com/opencv/opencv/blob/4.14.0/LICENSE",
+        "links": [
+          {"label": {"en": "Official OpenCV 4.14.0 Windows release", "ja": "公式OpenCV 4.14.0 Windowsリリース"}, "url": "https://github.com/opencv/opencv/releases/tag/4.14.0"},
+          {"label": {"en": "Pinned native prerequisites", "ja": "固定リビジョンのネイティブ前提条件"}, "url": "https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/CONTRIBUTING.md#native-development-prerequisites"}
+        ],
+        "commands": [],
+        "required_modules": ["opencv_world4140.dll"],
+        "search_roots": [],
+        "search_subdirectories": ["bin", "build/x64/vc16/bin", "x64/vc16/bin"]
+      }
+    }
+  ]
+}

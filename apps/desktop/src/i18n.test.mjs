@@ -53,6 +53,8 @@ const adapterArguments = {
   'ui.environment.wait': [['reason-A']], 'ui.environment.unsupported': [['profile-A']],
   'ui.environment.profileLabel': SUPPORTED_PROFILES.map(({profile})=>[profile]),
   'ui.environment.mismatch': [['model-A','language-A','provider-A','runtime-A']],
+  'ui.ocrSetup.state': [['missing'],['verified'],['manual'],['unsupported'],['future-state']],
+  'ui.ocrSetup.stage': [['downloading'],['verifying'],['complete'],['cancelled'],['future-stage']],
   'ui.run.heading': [['profile-A']], 'ui.run.owned': [[null],['run-A']],
   'ui.run.settled': [[null],['run-A']], 'ui.run.inspected': [[2]],
   'ui.run.descriptorHelp': [[4096]],

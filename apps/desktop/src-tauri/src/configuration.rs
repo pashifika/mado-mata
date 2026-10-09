@@ -520,6 +520,10 @@ pub(crate) fn create_private_file(path: &Path) -> Result<File, Fault> {
 }
 
 pub(crate) fn create_private_directory(path: &Path) -> Result<(), Fault> {
+    #[cfg_attr(
+        not(unix),
+        expect(unused_mut, reason = "only Unix sets the private directory mode")
+    )]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     builder.mode(0o700);

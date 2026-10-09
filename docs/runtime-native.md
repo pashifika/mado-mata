@@ -149,9 +149,16 @@ command and do not qualify a native OS/workload.
 
 ### Accepted OCR content
 
-Both supported profiles use these exact Apache-2.0 model bytes. Obtain them
-through the pinned upstream acquisition procedure; do not rename arbitrary
-models to these paths.
+Both supported profiles use these exact Apache-2.0 model bytes. Desktop
+[OCR resource setup](desktop.md#save-and-check-an-ocr-environment) can download
+the shared set and the reviewed ONNX Runtime 1.29.0 archive, retain their required
+notices, and select each verified path in the settings draft independently.
+Manual acquisition through the pinned upstream procedure remains supported; do
+not rename arbitrary models to these paths. OpenCV installation stays external.
+Desktop can resolve its required library closure from explicit Homebrew locations
+or selected folders, but metadata checks do not prove that a particular OpenCV
+build matches the engine runner. Save and run the real engine Check or a
+saved-image Recognition trial for initialization evidence.
 
 | Relative path under `model_root` | Bytes | SHA-256 |
 |---|---:|---|

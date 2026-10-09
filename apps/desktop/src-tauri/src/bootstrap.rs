@@ -176,7 +176,10 @@ impl Bootstrap {
             match application.workspace_catalog() {
                 Ok(catalog) => status.catalog = Some(catalog),
                 Err(error) if matches!(status.state, Phase::Ready) => {
-                    let transient = error.category == "WorkspaceBusy";
+                    let transient = matches!(
+                        error.category.as_str(),
+                        "WorkspaceBusy" | "OcrSetupBusy" | "OcrSetupCleanup"
+                    );
                     status.stage = if error.category == "RestorePending" {
                         status.pending_restore = true;
                         "restore"
@@ -710,6 +713,10 @@ fn import_legacy_with(
         std::process::id(),
         NEXT_IMPORT.fetch_add(1, Ordering::Relaxed)
     ));
+    #[cfg_attr(
+        not(unix),
+        expect(unused_mut, reason = "only Unix sets the private directory mode")
+    )]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {

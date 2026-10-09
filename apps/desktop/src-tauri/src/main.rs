@@ -19,6 +19,7 @@ use std::sync::{
 use tauri::{Emitter, Manager};
 
 mod cache_commands;
+mod ocr_setup_commands;
 #[cfg(target_os = "macos")]
 mod picker;
 mod recognition_commands;
@@ -654,6 +655,13 @@ fn main() {
             close_workspace,
             settings,
             save_settings,
+            ocr_setup_commands::ocr_setup_catalog,
+            ocr_setup_commands::ocr_setup_pick_folder,
+            ocr_setup_commands::ocr_setup_start,
+            ocr_setup_commands::ocr_setup_poll,
+            ocr_setup_commands::ocr_setup_cancel,
+            ocr_setup_commands::ocr_setup_open_link,
+            ocr_setup_commands::ocr_setup_copy_command,
             validate,
             profiles,
             read_target,

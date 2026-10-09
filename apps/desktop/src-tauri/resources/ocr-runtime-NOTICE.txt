@@ -1,0 +1,84 @@
+MadoMata ONNX Runtime acquisition review — 2026-10-09
+
+ONNX Runtime 1.29.0 CPU / API 17
+Copyright (c) Microsoft Corporation. MIT License.
+  https://github.com/microsoft/onnxruntime/releases/tag/v1.29.0
+  https://github.com/microsoft/onnxruntime/blob/v1.29.0/LICENSE
+  https://github.com/microsoft/onnxruntime/blob/v1.29.0/ThirdPartyNotices.txt
+Release metadata:
+  https://api.github.com/repos/microsoft/onnxruntime/releases/tags/v1.29.0
+
+The official release archives were fetched without execution. Their complete
+SHA-256 values and byte counts matched the release API asset digest and size.
+Selected regular members were separately read and hashed. The library hashes
+also match the previously reviewed runtime identities. ocr-catalog.json pins
+these archives and the exact platform-specific member bytes below. The Windows
+license files use different line endings and retain their distinct identities.
+
+macOS arm64 (release asset 511120373)
+  https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/onnxruntime-osx-arm64-1.29.0.tgz
+  Archive: 41578864 bytes
+    d0706fc34f315d8c88639d0a8c81f2e09e815f282cabed3493c06a054352cf92
+  Selected members under ./onnxruntime-osx-arm64-1.29.0/:
+    lib/libonnxruntime.1.29.0.dylib: 43184400 bytes
+      68f6e54e695583adc371aef610ec4abb1ffaa3df656582922de7690f7e2000eb
+    LICENSE: 1073 bytes
+      2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c
+    ThirdPartyNotices.txt: 336906 bytes
+      53d3fa5821ac016ac24dd35775c996efec86e2ae0841e9a3a5e146c0ae916845
+  The tar contains 53 entries: 37 regular files, 15 directories, one symlink.
+  Its expanded tar stream is 161482240 bytes, with no PAX/GNU extension entries.
+  The unselected lib/libonnxruntime.1.dylib symlink points to the selected
+  versioned filename. It is explicitly ignored, never followed or extracted.
+  The unversioned regular library copy, debug symbols, headers, test library
+  and other unselected files are not installed.
+
+Windows x64 (release asset 511115910)
+  https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/onnxruntime-win-x64-1.29.0.zip
+  Archive: 79645520 bytes
+    c9b4b7086b529ad814f428c1bad028e20a25d7dc0699836775faace4ab5b78b2
+  Selected members under onnxruntime-win-x64-1.29.0/:
+    lib/onnxruntime.dll: 16149344 bytes
+      69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b847059738323404519ec471
+    LICENSE: 1094 bytes
+      c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674
+    ThirdPartyNotices.txt: 343249 bytes
+      4c5b864d8974c94b37461f38163facef79a1bb5dea461667ee9e5be6a8e73f83
+  The ZIP has 34 entries, a single disk, no archive comment, no ZIP64, and only
+  stored/deflated entries. Total declared expanded payload is 432177543 bytes;
+  unselected debug symbols, headers and optional provider files are not expanded
+  or installed. The selected CPU runtime is not loaded by setup.
+
+Installation and license retention
+  The app streams the archive into its owned staging directory over HTTPS,
+  verifies its exact size and SHA-256, and copies only the three reviewed regular
+  members to flat, catalog-controlled filenames. LICENSE and
+  ThirdPartyNotices.txt are retained unchanged beside the runtime and receipt.
+  No license notice is shortened or replaced by this review note.
+  Directory rename publishes all four files together. A completed installation
+  is reused only after the receipt and every selected file are verified again.
+  Existing publications are never repaired in place or silently replaced.
+  Runtime and model stages/publications are independent and share the existing
+  exclusive setup lease. Recovery only removes known regular staging entries;
+  unknown entries and links remain with a distinct cleanup error.
+
+Archive safety
+  At most 256 entries, 512 MiB expanded data, and 1 MiB ZIP directory metadata.
+  Reject unsafe paths, case-insensitive duplicate destinations, file/directory
+  collisions, selected links, hardlinks, special entries and unsupported format
+  features. The one reviewed macOS unselected symlink is the only link exception;
+  it has no filesystem destination. ZIP duplicate names are rejected before the
+  archive library can collapse them. No unpack/extract-all operation, archive
+  permissions, shell, package manager, global installation, PATH search, loader
+  mutation, binary execution, OCR or engine initialization is used.
+
+Parser dependencies
+  tar 0.4.46 (MIT OR Apache-2.0), default features disabled, raw entry reads only.
+    https://docs.rs/tar/0.4.46/tar/
+  flate2 1.1.9 (MIT OR Apache-2.0), Rust/miniz backend for gzip and deflate.
+    https://docs.rs/flate2/1.1.9/flate2/
+  zip 8.6.0 (MIT), existing dependency with deflate-flate2 enabled; other optional
+  compression/encryption features remain disabled.
+    https://docs.rs/zip/8.6.0/zip/
+  No extracted code was run during source review. Local fixture regressions do
+  not download binaries or replace separate platform engine Check acceptance.

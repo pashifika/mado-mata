@@ -1873,27 +1873,55 @@ Recovery then offers **Retry** after repair, not transaction controls.
 
 ## Save and check an OCR environment
 
-1. Open **Application → App settings → OCR environment**, choose an offered
-   supported profile, and enter the absolute model root, pinned ONNX Runtime
-   library, and reviewed non-system
-   library locations, **1–64 libraries**, one per line. Blank lines are ignored
-   and surrounding whitespace is trimmed. Use the pinned
-   [engine prerequisites](runtime-native.md#install-the-engine-prerequisites).
-   Model bytes must match the selected profile; a filename alone is insufficient.
-   Rust resolves selected aliases to canonical paths and derives byte lengths,
-   hashes, and SDK identity; operators do not edit identity fields.
-2. **Save changes** validates and atomically saves the dialog's editable settings.
+1. Open **Application → App settings → OCR environment**. Under **Set up text
+   recognition**, choose **Download** for **Text recognition files**. The shared
+   model set is about 26 MB. Exact sizes and SHA-256 values are checked before
+   publication, then its path and an unset default profile are selected in the
+   draft automatically. Missing runtime or native libraries do not block this.
+   **Details** includes source, license and hosting-term links before download.
+2. Choose **Download** for **Recognition engine**. MadoMata acquires the fixed
+   official ONNX Runtime **1.29.0** archive for the supported platform, verifies
+   the archive and selected members, and retains the library, license and
+   third-party notices together. Its path is selected automatically; no installer
+   runs and no system directory is changed.
+3. For **Image-processing libraries**, install a build-compatible OpenCV copy
+   using the instructions in **Details**, then choose **Find Homebrew installation**
+   on macOS or **Choose installation folder**. Homebrew detection checks only
+   `/opt/homebrew` and `/usr/local`; folder selection checks the approved
+   roots and catalog-defined candidate directories. On Windows, selecting the
+   OpenCV installation root also resolves known x64 MSVC runtime DLLs already
+   installed in the system directory returned by the Windows API. Known runtime
+   basenames are matched without ASCII case sensitivity, including the final
+   canonical filename. Explicitly selected copies take precedence; the system
+   directory is not enumerated or used to find OpenCV or arbitrary third-party
+   DLLs. These runtime files remain part of the validated dependency list, not
+   assumed-present system imports.
+   Required modules and their non-system dependency closure are resolved from
+   bounded binary metadata without loading libraries, running inspection tools
+   or scanning the disk/PATH. If a dependency is genuinely absent, install it
+   externally or add its folder explicitly (**8 selected folders** maximum).
+   **Copy command** only copies text: no shell, package manager or installer runs.
+   A moving Homebrew formula is not an ABI guarantee.
+4. **Recheck resources** reuses complete downloads and repeats the installation
+   choice. Verified missing paths fill the draft automatically; explicit model
+   and runtime paths are preserved. A Download action deliberately selects that
+   resource's managed path. Results cannot overwrite newer OCR edits or enter a
+   closed/replacement dialog. **Advanced · manual configuration** remains
+   available for existing paths and a reviewed list of **1–64 libraries**, one
+   per line. File/dependency checks are not API/ABI or initialization evidence;
+   use the saved-environment Check below.
+5. **Save changes** validates and atomically saves the dialog's editable settings.
    It does not load libraries, models, or a backend. **Clear draft** followed by
    **Save changes** removes the optional environment. Existing settings with no
    environment remain unconfigured without a read-time rewrite. Failed saves and
    incompatible stored data preserve the previous bytes.
-3. On the selected workspace's **Run control** page, enter a **Recorded corpus
+6. On the selected workspace's **Run control** page, enter a **Recorded corpus
    descriptor** for its inspected recorded package.
    The descriptor is the `replay` object from the [existing replay format](runtime-native.md#prepare-a-private-replay-package-and-plan),
    not a Plan or complete `native_config`. Its assets must already belong to the
    inspected package inventory. No arbitrary asset paths, executable override,
    native authority, or unknown fields are accepted.
-4. Return to **App settings → OCR environment** and choose **Check saved
+7. Return to **App settings → OCR environment** and choose **Check saved
    environment**. Unsaved environment edits must be saved first. Check uses that
    workspace and selection revision; its target is shown in the dialog. With no
    selected workspace, it can validate environment files but cannot initialize a
@@ -1902,12 +1930,46 @@ Recovery then offers **Retry** after repair, not transaction controls.
    I/O; it is cancellable
    through **Stop**. Without a corpus it reports file-validation progress and the
    missing prerequisite, never readiness.
-5. With a valid corpus, Check starts the real owned engine child and initializes
+8. With a valid corpus, Check starts the real owned engine child and initializes
    the replay backend. It does not resolve a workload profile, compile or
    evaluate package modules, or call readiness/workflow. `NotExecuted`, absent
    VM/workflow metrics, initialization milestones, and independent cleanup are
    intentional. A prerequisite refusal, loader failure, and interrupted
    initialization are different outcomes.
+
+Downloads are retained under `<data-dir>/ocr-resources/`, outside configuration
+snapshots, packages and profiles. **Cancel setup** requests cancellation; the
+operation remains busy until its worker and staging cleanup settle. Closing
+settings also cancels its pending work, but neither action uninstalls complete
+verified downloads or changes saved settings. A late cancellation after atomic
+publication reports the installed result. Setup excludes Start, Check, Edit and
+configuration maintenance until settlement. Incomplete cleanup remains visible
+and blocks further setup; restart before retrying after resolving the cause.
+On the next explicit setup action, an OS file lock protects recovery of recognized
+incomplete staging. Unknown files are retained, not recursively removed.
+
+The embedded [OCR catalog](../apps/desktop/src-tauri/resources/ocr-catalog.json)
+owns fixed sources, content identities, platform archives, selected members,
+bounded search locations, display-only guidance and license links. Model installs
+include [LICENSE](../apps/desktop/src-tauri/resources/ocr-model-LICENSE.txt),
+[NOTICE](../apps/desktop/src-tauri/resources/ocr-model-NOTICE.txt) and a receipt.
+Runtime installs retain the official `LICENSE` and `ThirdPartyNotices.txt`; their
+reviewed provenance is recorded in the [runtime notice](../apps/desktop/src-tauri/resources/ocr-runtime-NOTICE.txt).
+Receipts never replace byte verification. Maintainers can edit transport sources
+and guidance in the catalog, then run the offline resource tests:
+
+```sh
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib ocr_setup
+```
+
+Review licenses, notices, host terms and exact downloaded bytes before enabling a
+new source. Catalog edits do not extend the engine's accepted model/profile set.
+Automatic acquisition covers the verified model set and reviewed ONNX Runtime
+archives on macOS arm64 and Windows x64. Archive extraction copies only pinned
+regular files into app-owned storage; archive links are never created or followed.
+OpenCV installation remains external. No automatic update, custom-model selector,
+global loader change or new native authority is provided. See the
+[engine prerequisites](runtime-native.md#install-the-engine-prerequisites).
 
 The descriptor is a session location hint, not persisted native authority.
 It is bounded to **256 KiB**. Inspection, Check, and both Start lanes use the
