@@ -24,7 +24,13 @@ import NavigationHeader from './components/NavigationHeader.tsx';
 import type {RecoveryHandlers} from './components/ProfileRecovery.tsx';
 import ResultPanel, {FaultMessage, fault} from './components/ResultPanel.tsx';
 import RunPage from './pages/RunPage.tsx';
-import type {RunHandlers, RunSnapshot, RunView} from './pages/RunPage.tsx';
+import type {RunHandlers} from './pages/RunPage.tsx';
+import ExecutionPage from './pages/ExecutionPage.tsx';
+import type {RunSnapshot, RunView} from './pages/ExecutionPage.tsx';
+import StatusSurface from './components/StatusSurface.tsx';
+import {InfoHint} from './components/ContextualHelp.tsx';
+import {applicationStatus, scopedAuthoring, workspaceStatus} from './status.ts';
+import type {StatusItem} from './status.ts';
 import SavedWorkspacesDialog from './components/SavedWorkspacesDialog.tsx';
 import Select from './components/Select.tsx';
 import SettingsDialog from './settings/SettingsDialog.tsx';
@@ -40,6 +46,7 @@ import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from '.
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {applyCatalogMutation, applyRecognitionMutation, applyRefresh, applySave, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, saveBlock, saveTicket, selectFile, selectRecognition, undoFile, validationTicket} from './authoring.ts';
 import type {AuthoringSession} from './authoring.ts';
+import {revealDiagnostic} from './authoring.ts';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, approveNative, busy, clearNativeApproval, closeWorkspace, commandValues, deriveBound, editNativeReview, hasWorkspaceEdits, importProfileCommand, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
 import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
@@ -90,22 +97,18 @@ function OperationStrip({idPrefix, owner, kind, phase, run, detail = null, messa
 }
 
 // The application-wide Edit lease stays visible with Return to Edit wherever the editor itself is not shown.
-function AuthoringStrip({idPrefix, owner, packageId, unsaved, showReturn, onReturn}: {
-  idPrefix: string; owner: string; packageId: string | null; unsaved: number; showReturn: boolean; onReturn: () => void;
+function AuthoringStrip({idPrefix, owner, packageId, showReturn, onReturn}: {
+  idPrefix: string; owner: string; packageId: string | null; showReturn: boolean; onReturn: () => void;
 }) {
   const locale = useLocale();
   const a = messages[locale].ui.authoring;
   return <div id={`${idPrefix}-authoring-strip`} className="operation-strip authoring-strip notice-info">
     <div className="authoring-status" role="status" aria-live="polite">
-      <span className="strip-owner"><span className="eyebrow">{a.ownerEyebrow}</span><strong>{owner}</strong></span>
+      <span className="strip-owner"><span className="eyebrow">{a.ownerEyebrow}</span>
+        <span><strong>{owner}</strong><InfoHint id={`${idPrefix}-authoring-help`} label={a.details} hint={a.authority}/></span></span>
       <span className="strip-kind">{packageId === null ? a.stripUnknown : a.stripKind(packageId)}</span>
-      {unsaved > 0 && <span className="tag unsaved">{a.unsavedFiles(unsaved)}</span>}
       <span id={`${idPrefix}-authoring-reason`} className="strip-note">{a.stripNote}</span>
     </div>
-    <details id={`${idPrefix}-authoring-details`} className="strip-details">
-      <summary>{a.details}</summary>
-      <p id={`${idPrefix}-authoring-guidance`}>{a.authority}</p>
-    </details>
     {showReturn && <button id={`${idPrefix}-return-to-edit`} type="button" onClick={onReturn}>{a.returnToEdit}</button>}
   </div>;
 }
@@ -777,7 +780,6 @@ export default function App() {
         checkApplication: () => {void checkRunningApplication(workspace);},
         cancelApplication: () => cancelRunningCheck(workspace),
       },
-      disclose: run => change(workspace.id, item => updateBound(item, current => ({...current, disclosedRun: run}))),
       selectProfile: id => edit(current => selectProfile(current, id)),
       newDraft: preset => edit(current => newDraft(current, preset)),
       inspectPath: value => change(workspace.id, item => ({...item, inspectPath: value, error: null})),
@@ -787,9 +789,10 @@ export default function App() {
         void runCommand(origin, 'validatingDraft', async () => {
           const values = valuesForCommand(workspace);
           const effective = await invoke<Record<string, Json>>('validate', {workspace: ref, values});
-          return {update: item => item.bound?.draftRevision === checked
-            ? {...updateBound(item, current => ({...current, validation: effective})), notice: {key: 'validated'}}
-            : {...item, notice: {key: 'earlierValidated'}}};
+          return {update: item => ({
+            ...updateBound(item, current => ({...current, validation: {draftRevision: checked, values: effective}})),
+            notice: {key: item.bound?.draftRevision === checked ? 'validated' : 'earlierValidated'},
+          })};
         });
       },
       saveProfile: () => {
@@ -802,7 +805,7 @@ export default function App() {
           return {catalog, update: item => ({...updateBound(item, current => ({
             ...current, profiles: [...current.profiles.filter(entry => entry.id !== profile.id), profile].sort((a, b) => a.name.localeCompare(b.name)),
             selectedId: profile.id, preset: '',
-            ...(current.draftRevision === checked ? {draft: structuredClone(profile.values), validation: null, touched: false} : {}),
+            ...(current.draftRevision === checked ? {draft: structuredClone(profile.values), touched: false} : {}),
           })), notice: {key: 'profileSaved', args: [profile.name, profile.id]}})};
         });
       },
@@ -840,7 +843,6 @@ export default function App() {
       },
       recovery: recoveryHandlers(workspace),
       start: () => void startRun(workspace),
-      stop: () => void stopRun(),
     };
   }
 
@@ -869,7 +871,7 @@ export default function App() {
     setStarting({workspaceId: workspace.id, kind: 'run'});
     setStripMessage(null);
     // Submission spends the Native approval whatever the host decides; a rerun needs a fresh one.
-    change(workspace.id, item => ({...updateBound(item, current => ({...clearNativeApproval(current), disclosedRun: null})), error: null, notice: null}));
+    change(workspace.id, item => ({...updateBound(item, clearNativeApproval), disclosedRun: null, error: null, notice: null}));
     try {
       const run = await invoke<string>('start', {workspace: ref, request});
       expectedRun.current = run;
@@ -1681,7 +1683,6 @@ export default function App() {
     save: path => void saveFile(path),
     saveAll: () => void saveAll(),
     validate: () => void ownAuthoringWorker(validateAuthoring),
-    stopValidation: () => void stopValidation(),
     refresh: () => void refreshAuthoring(),
     recover: () => void recoverAuthoringPackage(),
     catalog: edit => changeCatalog(edit),
@@ -2037,7 +2038,7 @@ export default function App() {
       message={stripMessage && {text: renderMessage(locale, stripMessage.text), error: stripMessage.error}}
       stopDisabled={stopping || closing || (!authoringWorkerPending && (!view.run || !busy(view.state) || view.state === 'stopping' || starting !== null))}
       onStop={() => void (authoringWorkerPending || validationActive || recognitionActive ? stopValidation() : stopRun())}/>}
-    {leaseOwnerId !== null && <AuthoringStrip idPrefix={idPrefix} owner={labelOf(leaseOwnerId)} packageId={authoring?.packageId ?? null} unsaved={unsavedCount}
+    {leaseOwnerId !== null && <AuthoringStrip idPrefix={idPrefix} owner={labelOf(leaseOwnerId)} packageId={authoring?.packageId ?? null}
       showReturn={!(idPrefix === 'app' && editVisible)} onReturn={onReturn}/>}
   </>;
 
@@ -2086,8 +2087,38 @@ export default function App() {
   const inShellRecovery = status !== null && status.state === 'recovery';
   // Guidance names the owner's scope truthfully: an Application-scoped check has no owning workspace.
   const activeOwner = (workspace: Workspace): ActiveOwner => !active || owner === workspace.id ? null : owner === null ? 'application' : 'other';
+  const selectedAuthoring = scopedAuthoring(selected, authoring);
+  const selectedRun = selected ? runView(selected) : null;
+  const applicationPending = closing ? t.closing : appBusy ? t[appBusy] : bootstrap.pending ? t[bootstrap.pending]
+    : bootstrap.snapshotPending ? ui.bootstrap.snapshotting : null;
+  const statusItems: StatusItem[] = selected
+    ? workspaceStatus(selected, derived[selected.id], selectedRun?.view ?? null, authoring, locale, starting?.workspaceId === selected.id, leaseLost)
+    : nav.kind === 'closed' ? [] : applicationStatus(view, locale, applicationPending, starting?.workspaceId === null);
+  if (pollError) statusItems.unshift({id: 'poll', severity: 'error', text: `${t.application} · ${pollError.category}`, action: null});
+  const currentPage = selected?.page === 'edit' && !editVisible ? 'run' : selected?.page;
+  const pageTitle = currentPage === 'execution' ? ui.status.execution : currentPage === 'logs' ? t.logs
+    : currentPage === 'edit' ? t.edit : selected ? isBound(selected) ? t.runControl : t.guidance
+    : nav.kind === 'closed' ? t.closedDiagnostics : t.application;
+  const pageHelp = currentPage === 'execution' ? ui.status.executionHelp : currentPage === 'logs' ? t.workspaceLogHelp
+    : currentPage === 'edit' ? `${ui.authoring.authority} ${ui.authoring.exitHelp}`
+    : selected ? isBound(selected) ? ui.run.introduction : ui.status.inspectionRequired
+    : nav.kind === 'closed' ? `${t.closedHelp} ${t.closedLogHelp}` : t.appLogHelp;
+  const statusScope = `${nav.kind}:${selected?.id ?? (nav.kind === 'closed' ? nav.id : '')}:${selected?.revision ?? ''}:${currentPage ?? ''}:${selectedAuthoring?.owner.token ?? ''}:${locale}`;
 
   return <LocaleContext value={locale}><div className="app">
+    <StatusSurface scopeKey={statusScope} scopeLabel={selected ? workspaceLabel(selected, workspaces) : nav.kind === 'closed' ? t.closedLabel(closedSelected?.label ?? nav.id) : t.application}
+      pageTitle={pageTitle} pageHelp={<p>{pageHelp}</p>} runLabel={selected && isBound(selected) ? t.runControl : t.guidance} items={statusItems} session={selectedAuthoring}
+      recognitionDirty={selectedAuthoring !== null && recognitionDirty} validating={selectedAuthoring !== null && validationActive}
+      profile={selected?.bound ? selected.bound.validation === null ? 'none' : selected.bound.validation.draftRevision === selected.bound.draftRevision ? 'valid' : 'stale' : null}
+      onNavigate={page => {if (selected) {if (page === 'edit') returnToEdit(); else change(selected.id, item => ({...item, page}));}}}
+      onDiagnostic={diagnostic => {
+        const current = authoringStore.current;
+        if (!selectedAuthoring || !current || selected?.id !== current.owner.workspace.workspace_id) return;
+        const next = revealDiagnostic(current, selectedAuthoring.owner.token, diagnostic);
+        if (next === current) return;
+        updateAuthoring(() => next);
+        change(current.owner.workspace.workspace_id, item => ({...item, page: 'edit'}));
+      }}>
     <NavigationHeader>
     <header className="topbar">
       <div className="brand"><span className="brandmark" aria-hidden="true">M</span><span>MadoMata</span><span className="divider" aria-hidden="true"/><span className="eyebrow">{t.workspace}</span></div>
@@ -2120,21 +2151,23 @@ export default function App() {
       <nav className="workspace-pages" aria-label={selected ? t.selectedPages : t.currentScope}>
         {selected && <>
           <button id="page-run" type="button" className="nav-item" aria-current={selected.page === 'run' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'run'}));}}>{isBound(selected) ? t.runControl : t.guidance}</button>
+          <button id="page-execution" type="button" className="nav-item" aria-current={selected.page === 'execution' ? 'page' : undefined}
+            onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'execution'}));}}>{ui.status.execution}{needsAttention(runView(selected).view) && <span className="execution-attention" aria-label={t.attention(t.unresolved)}>!</span>}</button>
           <button id="page-logs" type="button" className="nav-item" aria-current={selected.page === 'logs' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'logs'}));}}>{t.logs}<span className="count">{logCounts[selected.id] ?? 0}</span></button>
           {selected.id === leaseOwnerId && <button id="page-edit" type="button" className="nav-item" aria-current={selected.page === 'edit' && authoring !== null ? 'page' : undefined}
-            onClick={() => {setReveal(null); returnToEdit();}}>{t.edit}{unsavedCount > 0 && <span className="count">{unsavedCount}</span>}</button>}
+            onClick={() => {setReveal(null); returnToEdit();}}>{t.edit}</button>}
         </>}
         {nav.kind === 'application' && <span className="scope-label">{t.applicationLogs}</span>}
         {nav.kind === 'closed' && <span className="scope-label">{t.closedDiagnostics}</span>}
       </nav>
     </div>
+    {strip('app')}
     </NavigationHeader>
     {pendingClose && workspaces.some(workspace => workspace.id === pendingClose) && <div className="confirm-bar" role="alertdialog" aria-labelledby="confirm-close-text">
       <span id="confirm-close-text">{t.closeConfirm(labelOf(pendingClose))}</span>
       <button type="button" className="danger-text" onClick={() => {const workspace = workspaces.find(item => item.id === pendingClose); if (workspace) void closeTab(workspace, true);}}>{t.discardClose}</button>
       <button type="button" autoFocus onClick={() => {setPendingClose(null); focusWorkspaceSelection(workspaces.length);}}>{t.keepOpen}</button>
     </div>}
-    {strip('app')}
     {pollError && <div className="content-wide"><FaultMessage title={t.connectionFailed} value={pollError}/></div>}
     {(inShellRecovery || configurationOpen) && status && <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={true}/>}
     {status?.state === 'ready' && status.fault && <div className="content-wide"><FaultMessage title={`${ui.bootstrap.stage} · ${status.stage}`} value={status.fault}/>
@@ -2169,13 +2202,17 @@ export default function App() {
               <button id="recognition-reload" type="button" disabled={authoring.pending !== null || leaseLost || closing}
                 onClick={() => void readRecognition()}>{ui.authoring.refresh}</button></div>}/>}
         {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (isBound(selected)
-          ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)} snapshot={operation?.snapshot ?? null}
-            locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id} stopping={stopping} closing={closing}
-            savedEnvironment={savedEnvironment} handlers={handlers(selected)} authoring={pageAuthoring(selected)}
+          ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)}
+            locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id}
+            handlers={handlers(selected)} authoring={pageAuthoring(selected)} environment={savedEnvironment}
             nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error}/>
           : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
             recovery={recoveryHandlers(selected)} authoring={pageAuthoring(selected)} packagesRoot={packagesRoot}/>)}
+        {selected && selected.page === 'execution' && selectedRun && <ExecutionPage label={workspaceLabel(selected, workspaces)} revision={selected.revision}
+          run={selectedRun} snapshot={operation?.snapshot ?? null} starting={starting?.workspaceId === selected.id}
+          disclosed={selectedRun.view.run !== null && selected.disclosedRun === selectedRun.view.run}
+          onDisclose={next => change(selected.id, item => ({...item, disclosedRun: next ? selectedRun.view.run : null}))}/>}
         {selected && selected.page === 'logs' && <LogsPage eyebrow={t.activity(workspaceLabel(selected, workspaces))} heading={t.logs} description={t.workspaceLogHelp}
           items={logs.items} evicted={logs.evicted} limit={settings?.gui_log_limit ?? retention.current} scope={{kind: 'workspace', id: selected.id}}
           filter={selected.logFilter} onFilter={filter => {setReveal(null); change(selected.id, item => ({...item, logFilter: filter}));}}
@@ -2228,5 +2265,6 @@ export default function App() {
       saveBlock={leaseLost ? ui.authoring.leaseLost : recognitionSaveReason}
       onSave={() => {if (choice) void resolveChoice(choice, true);}} onDiscard={() => {if (choice) void resolveChoice(choice, false);}}
       onCancel={() => {if (!choiceBusy) setChoice(null);}}/>
+    </StatusSurface>
   </div></LocaleContext>;
 }

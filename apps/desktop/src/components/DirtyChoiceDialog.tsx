@@ -28,7 +28,7 @@ export default function DirtyChoiceDialog({intent, drafts, recognitionDirty, bus
       {unsavable && <p className="inline-warning">{a.dirtyUnsavable}</p>}
       {saveBlock && <p className="inline-warning">{saveBlock}</p>}
       <div className="dialog-footer">
-        <span role="status">{busy ? a.working : a.unsavedFiles(drafts.length + Number(recognitionDirty))}</span>
+        <span role="status">{busy ? a.working : ''}</span>
         <button id="authoring-dirty-cancel" type="button" disabled={busy} onClick={onCancel}>{a.dirtyCancel}</button>
         <button id="authoring-dirty-discard" type="button" className="danger-text" disabled={busy} onClick={onDiscard}>{a.dirtyDiscard}</button>
         <button id="authoring-dirty-save" type="button" className="primary" disabled={busy || unsavable || saveBlock !== null} onClick={onSave}>{a.dirtySave}</button>

@@ -221,12 +221,13 @@ TSX files under `apps/desktop/src/` are grouped by responsibility:
 | Path | Responsibility |
 | --- | --- |
 | `main.tsx`, `App.tsx` | Bootstrap and application composition |
-| `components/` | Shared selection, schema forms, results, notifications, and named-workspace dialogs/navigation |
-| `pages/` | Setup/Recovery, unbound-package guidance, Edit, Run, and Logs views |
+| `components/` | Shared selection, schema forms, results, status/Help, notifications, and named-workspace dialogs/navigation |
+| `pages/` | Setup/Recovery, unbound-package guidance, Edit, Run, Execution, and Logs views |
 | `settings/` | App settings dialog and OCR environment view |
 | `locales/` | Bundled English/Japanese JSON text resources |
 | `i18n.ts`, `ui-messages.ts`, `locale.tsx` | Typed formatting and saved-locale presentation |
 | `authoring.ts` | Per-file drafts/history, revision-bound save responses, search, and diagnostic navigation |
+| `status.ts` | Scoped notice priority and saved-package validation presentation |
 
 Imports point directly to the owning file. Non-visual TypeScript modules and
 their tests remain at the source root.
@@ -247,6 +248,51 @@ Bootstrap, snapshots, restore, configuration primitives, logging, and target
 metadata validation keep their existing separate modules. Tests follow their
 behavior owner; cross-owner tests stay at the root. Module extraction does not
 change persisted formats, filesystem protections, or runtime authority.
+
+## Workspace navigation, status and Help
+
+**Run control** prepares the next operation. Its summary groups Status,
+Profile · next run, Execution mode, and separate **Validate** / **Start** actions.
+Validate checks the profile draft; it is not a Start token or saved-package
+validation. Start revalidates each submitted request and does not navigate away.
+Configuration and **Target** appear side by side when space permits, then stack
+in that order. Execution mode is distinct from Target's native Input route.
+The line below the summary identifies the next-run profile or draft; Replay also
+names the saved OCR environment and descriptor before Start.
+
+**Execution**, beside Run control and Logs, shows the selected workspace's
+captured operation, progress, retained outcome and independent cleanup evidence.
+It remains available after Edit invalidates the selection and when logs are
+evicted. Older selection revisions are identified; missing captured inputs are
+not reconstructed from current settings. Private records still require explicit
+disclosure. The shared pinned operation strip identifies the actual owner and
+provides **Stop** across pages; dialogs keep their own owner-bound strip.
+Execution has no second Stop button.
+
+The bottom status bar identifies its Workspace or Application scope. Click its
+message for full current details and corrective navigation. Unresolved failures
+and blockers take priority over progress and ordinary notices. Closing details
+does not clear them. Profile-draft validation, saved-package validation and
+unsaved drafts retain distinct labels; another workspace's late response cannot
+become the selected workspace's notice.
+Application-scoped work reports its own progress. Target failures retain their
+earlier-draft attribution; an unresolved saved-record conflict still requires reload.
+
+**Help** opens the current page's explanation. Small information circles sit close
+to their labels, aligned to the upper-right within the text height. Their wider
+clickable area does not add a visible gap. Hover or keyboard focus shows a short
+hint; activating a circle keeps its topic's long explanation open.
+Action buttons have no information icon: hover or focus shows only a short
+explanation. Disabled actions retain hover descriptions without becoming enabled.
+
+Close or an unconsumed Escape returns focus to the opener, respecting modal/editor
+Escape ownership. Help and status/validation details share one bounded drawer;
+changing page or workspace closes it without clearing the underlying state.
+Corrective and diagnostic actions preserve a usable focus target; source diagnostics
+continue into the editor.
+Detached Preview uses the same interaction in its existing overlay without
+resizing the image or changing Fit scale.
+
 
 ## Edit directory packages
 
@@ -284,6 +330,18 @@ Neither action inspects, binds, or runs the package.
   its line endings and UTF-16 positions, including non-BMP characters. File-tree assets
   are inventory facts, not decoded or text-edited; image authoring belongs to
   **Recognition**.
+  Script actions share one compact row, with **Find** at the right.
+  **Find** or **Cmd/Ctrl+F** opens a floating search area over the editor's upper
+  right, without moving or resizing the editor. Toggle the **Replace** icon to
+  reveal replacement controls below Find inside that area; its highlighted
+  state indicates that the row is open. Hiding Replace or closing Find keeps
+  both text fields for reopening. Close or Escape in the search area returns
+  focus to the Script without discarding edits.
+  The floating area reserves scrollable space above the source and keeps revealed
+  matches below it, including the first line; the editor frame does not resize.
+  Opening or closing these controls preserves a scrolled source view rather than
+  jumping to an offscreen caret.
+  **Discard changes** affects only the selected file; other file drafts are kept.
 - **Metadata** opens structured manifest, option-schema and packaged preset
   controls; generated source maps are read-only facts. Metadata never
   opens in the source editor. Manifest controls preserve package identity and
@@ -324,11 +382,23 @@ Neither action inspects, binds, or runs the package.
   earlier Save response arrives afterward. Composition, paste, completion and
   replacement use the same file-local history as typing; package-supplied
   WebView code is never loaded.
+  The total unsaved-draft count appears once, in a small lower-left bubble above
+  the status bar, and disappears when all drafts are saved or discarded.
+  Per-file dirty markers and the exit confirmation's affected-file list remain.
+  The bubble belongs to the Edit owner's Workspace; it is not another Workspace's
+  or Application's status.
+  Settings and confirmation dialogs reserve room below them for that single
+  count; their content remains scrollable at constrained window heights.
 - **Validate** checks one saved revision through the existing inventory and
   trusted compiler without evaluating package code. Unsaved text is excluded.
-  Diagnostics identify their revision and link to declared source locations.
-  The finite validation child occupies the existing operation slot; **Stop**
-  requests cancellation and retains ownership until the worker settles.
+  **Saved-package validation** in the bottom bar shows not checked, running,
+  valid, invalid or earlier-revision state and the retained diagnostic count.
+  Open it for source locations; selecting an available location returns to the
+  owning Edit session without losing drafts. Later saves make the old result
+  stale; unsaved changes remain independently identified. Details are available
+  from the owner's other pages until Edit exits. The finite validation child
+  occupies the existing operation slot; the shared **Stop** requests cancellation
+  even with details closed and retains ownership until the worker settles.
 - One Edit session owns the application. Ordinary **Start**, independent OCR
   **Check**, a second editor, and configuration reconstruction are refused.
   One shared application strip explains this exclusion, including when another
@@ -1088,6 +1158,15 @@ Active operations keep the settings they already captured.
 **Application → Application logs** opens application-wide
 diagnostics; **Close window** follows the bounded shutdown path.
 
+During Edit, the owner strip's small **i** beside the workspace name shows
+**Save and Inspect guidance** on hover, focus, or click, including inside dialogs.
+A focused information or action hint consumes Escape while visible and keeps
+focus on its trigger. Once hidden, Escape reaches the existing Help or dialog
+handler. This applies to shared hints in the main window and detached Preview.
+The settings strip keeps **Return to Edit** at the upper right.
+At narrow widths, category tabs use their content height rather than stretching
+with the selected panel. Scroll the dialog when needed to reach Save/Close.
+
 ### Editor completion preferences
 
 **Editor → Show completions automatically** defaults to on; **Automatic opening
@@ -1146,19 +1225,22 @@ as described in [the manifest contract](runtime-comparison.md#optional-portable-
 A targetless package still runs existing controlled/replay workflows; a missing,
 invalid, or incompatible local target is not an execution prerequisite.
 
-1. For the **actual game**, choose **Application bundle (.app)** and
-   **Choose application…** to select the outer application, including a supported
-   iOS-on-Mac wrapper. Do not navigate to its internal executable. Cancel keeps
-   the draft. Manual absolute paths and direct executable configuration remain
-   available. A separate bundle launcher uses the same picker; it does not
-   identify or replace the game.
-2. Add arguments as ordered individual fields. Empty fields remain empty
-   arguments; spaces and shell syntax are literal, never split or expanded.
+1. For the **actual game**, choose **Application bundle (.app)** and use
+   **Open…** at the right edge of its path field to select the outer application,
+   including a supported iOS-on-Mac wrapper. Game and launcher paths each occupy
+   their own full-width row. Do not navigate to the internal executable. Cancel
+   keeps the draft. Manual absolute paths and direct executable configuration
+   remain available. A separate bundle launcher uses the same picker; it does
+   not identify or replace the game.
+2. Add or remove arguments as individual rows, like schema **Allowed values**.
+   Drag the left handle to reorder; with the handle focused, Up/Down arrow keys
+   move that argument one position. Empty fields remain empty arguments; spaces
+   and shell syntax are literal, never split or expanded.
    A direct-executable launcher uses an explicit absolute working directory or
    its executable's parent directory. Bundle launch uses the OS-defined working
    directory; an explicit directory for a bundle recipient is refused before
-   launch, not ignored. Supply an exact window title when the package leaves it
-   local; a package-required title is read-only.
+   launch, not ignored. The exact window title has its own full-width row.
+   Supply it when the package leaves it local; a package-required title is read-only.
 3. Leave all input fields blank for capture-only use. To configure future input,
    explicitly select a complete policy. Process-directed input requires a pointer
    mode: Core Graphics permits either focus policy; AppKit background requires
@@ -2629,8 +2711,9 @@ Keep package presets valid when changing the schema; do not edit tracked fixture
    refusal, immediate trimming, and restart persistence. Verify card overflow,
    deduplication, hover/focus pause, failure visibility, and origin-linked Logs
    after workspace switches, closure, and log eviction.
-8. Verify Run, Logs, the Application menu, and App settings at 1440, 1024, and
-   900 CSS-pixel widths, including keyboard navigation and modal Stop.
+8. Verify Run, Execution, Logs, the status/validation/Help drawers, the Application
+   menu, and App settings at 1440, 1024, 900 and the supported minimum 760
+   CSS-pixel widths, including keyboard navigation and modal Stop.
    Verify the compact aggregate counters, conditional Errors count, shared
    selectors, and combined level/text log-search field. Check Native review/refusal
    on macOS (disabled elsewhere), Replay's scenario lock, preset/profile round trips, empty enum

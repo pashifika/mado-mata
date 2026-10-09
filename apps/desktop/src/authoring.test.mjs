@@ -2,6 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {AUTHORING_CONFLICT,AUTHORING_NON_IMAGE_BYTES,AUTHORING_SOURCE_BYTES,MATCH_LIMIT,applyCatalogMutation,applyRecognitionMutation,applyRefresh,applySave,applyValidation,beginComposition,beginPending,catalogBlock,catalogTicket,diagnosticLocation,discardFile,editFile,endComposition,failCommand,fileDirty,findMatch,lineColumn,lineCount,matchSummary,offsetAt,openSession,otherNonImageBytes,recoveryPath,redoFile,replaceFile,replacementEdit,revealRange,saveBlock,saveTicket,selectFile,selectRecognition,undoFile,validationCurrent,validationTicket} from './authoring.ts';
 import {applyAuthoringExit,applyInvalidatedViews,editDraft,updateBound,workspaceFromView} from './workspace.ts';
+import {revealDiagnostic} from './authoring.ts';
+import {packageValidation} from './status.ts';
 
 const owner={workspace:{workspace_id:'a',revision:1},token:'lease-1'};
 const MAIN='export const a = 1;\n';
@@ -560,4 +562,47 @@ test('leaving Edit requires explicit reinspection and invalidates only the Tabs 
   assert.deepEqual([next[1].revision,next[1].bound,next[1].notice],[2,null,{key:'selectionInvalidated'}]);
   assert.equal(next[2],otherRoot);
   assert.equal(applyInvalidatedViews(next,[workspaceView('b',2,null)]),next);
+});
+
+test('saved-package summary separates running, invalid, current, unsaved and stale saved revisions',()=>{
+  let state=openSession(packageView('rev-1',files));
+  assert.equal(packageValidation(state,false).state,'none');
+  assert.equal(packageValidation(beginPending(state,{kind:'validate'}),false).state,'running');
+  const diagnostic={category:'TypeScript',message:'invalid source',context:{path:'main.ts',line:1,column:3}};
+  state=applyValidation(state,validationTicket(state),{owner,revision:'rev-1',valid:false,diagnostics:[diagnostic]});
+  assert.deepEqual(packageValidation(state,false),{state:'invalid',revision:'rev-1',count:1,unsaved:0});
+  state=applyValidation(state,validationTicket(state),{owner,revision:'rev-1',valid:true,diagnostics:[]});
+  state=type(state,'main.ts','A');
+  assert.deepEqual(packageValidation(state,false),{state:'valid',revision:'rev-1',count:0,unsaved:1});
+  state=applySave(state,saveTicket(state,'main.ts'),mutation('rev-2',packageView('rev-2',withText('main.ts','A'+MAIN))));
+  assert.deepEqual(packageValidation(state,false),{state:'stale',revision:'rev-1',count:0,unsaved:0});
+});
+
+test('diagnostics preserve drafts and reject retired owners, results and missing locations',()=>{
+  let state=type(openSession(packageView('rev-1',files)),'helper.ts','unsaved ');
+  const diagnostic={category:'TypeScript',message:'invalid source',context:{path:'main.ts',line:1,column:3}};
+  state=applyValidation(state,validationTicket(state),{owner,revision:'rev-1',valid:false,diagnostics:[diagnostic]});
+  const retained=state.validation.diagnostics[0];
+  const jumped=revealDiagnostic(state,owner.token,retained);
+  assert.equal(jumped.selected,'main.ts');
+  assert.deepEqual(jumped.drafts.get('main.ts').range,{start:2,end:2});
+  assert.equal(jumped.drafts.get('helper.ts'),state.drafts.get('helper.ts'));
+  assert.equal(revealDiagnostic(state,'retired-owner',retained),state);
+  const cleared=applyValidation(state,validationTicket(state),{owner,revision:'rev-1',valid:true,diagnostics:[]});
+  assert.equal(revealDiagnostic(cleared,owner.token,retained),cleared);
+  const missing={...state,drafts:new Map(state.drafts)};
+  missing.drafts.set('main.ts',{...missing.drafts.get('main.ts'),missing:true});
+  assert.equal(revealDiagnostic(missing,owner.token,retained),missing);
+});
+
+test('a diagnostic for an already-selected metadata file still requests an Edit reveal',()=>{
+  let state=openSession(packageView('rev-1',files));
+  const path=Array.from(state.drafts.values()).find(file=>file.kind!=='source').path;
+  state=selectFile(state,path,null);
+  const diagnostic={category:'Inventory',message:'invalid metadata',context:{path,line:1,column:1}};
+  state=applyValidation(state,validationTicket(state),{owner,revision:'rev-1',valid:false,diagnostics:[diagnostic]});
+  const next=revealDiagnostic(state,owner.token,state.validation.diagnostics[0]);
+  assert.equal(next.selected,path);
+  assert.equal(next.reveal,state.reveal+1);
+  assert.equal(next.drafts,state.drafts);
 });

@@ -10,6 +10,15 @@ export interface TargetDraft {
   route:TargetInputPolicy['route']|''; focus:TargetInputPolicy['focus']|'';
   pointerMode:Exclude<TargetInputPolicy['pointer_mode'],null>|''; clickHold:string;
 }
+
+export function moveTargetArgument(draft:TargetDraft, from:number, to:number):TargetDraft {
+  if (from === to || !Number.isInteger(from) || !Number.isInteger(to)
+    || from < 0 || to < 0 || from >= draft.arguments.length || to >= draft.arguments.length) return draft;
+  const arguments_ = [...draft.arguments];
+  const [value] = arguments_.splice(from, 1);
+  arguments_.splice(to, 0, value);
+  return {...draft, arguments:arguments_};
+}
 export type TargetOperation = 'read'|'check'|'save'|'remove';
 export interface TargetTicket {
   context:TargetContext; draftRevision:number; draftKey:string; expected:TargetExpectation;
