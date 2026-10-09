@@ -562,15 +562,17 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .catalog-dialog { width: min(500px, calc(100vw - 30px)); }
 .editor-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
 .editor-toolbar button { padding: 5px 10px; font-size: 11px; }
+.source-tools { position: relative; min-width: 0; margin-bottom: 8px; }
+.source-tools .source-toolbar { margin-bottom: 0; }
 .source-toolbar { position: relative; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; padding: 3px; }
 .source-toolbar > *, .source-toolbar button { flex-shrink: 0; }
 .source-toolbar button { min-height: 28px; white-space: nowrap; }
 .source-toolbar button:focus-visible { outline-offset: -3px; }
 .source-toolbar #authoring-find { margin-left: auto; }
 .source-editing-area { position: relative; min-width: 0; }
-.editor-find-panel { position: absolute; z-index: 10; top: 8px; right: 8px; width: min(520px, calc(100% - 16px)); display: grid; gap: 8px; padding: 8px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: 0 4px 14px #12223b22; }
-.editor-search, .editor-replacement { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.editor-find-panel input { flex: 1 1 120px; min-width: 0; width: auto; min-height: 28px; padding: 4px 8px; font-size: 11px; }
+.editor-find-panel { position: absolute; z-index: 10; bottom: calc(100% + 2px); right: 0; width: min(520px, 100%); display: grid; gap: 8px; padding: 3px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: 0 4px 14px #12223b22; }
+.editor-search, .editor-replacement { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.editor-find-panel input { flex: 1 1 120px; min-width: min(120px, 100%); width: auto; min-height: 28px; padding: 4px 8px; font-size: 11px; }
 .editor-find-panel button { flex-shrink: 0; min-height: 28px; padding: 4px 8px; font-size: 11px; white-space: nowrap; }
 .editor-search .muted { white-space: nowrap; }
 .editor-find-panel .editor-replace-toggle { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; }
@@ -580,7 +582,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .code-editor { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
 .source-editor .cm-editor { height: clamp(320px, 62vh, 900px); font-family: var(--mono); font-size: 12px; color: var(--text); }
 .source-editor .cm-scroller { overflow: auto; font-family: inherit; line-height: 18px; }
-.source-editor .cm-content { padding: calc(8px + var(--source-top-inset, 0px)) 0 8px; caret-color: var(--text); }
+.source-editor .cm-content { padding: 8px 0; caret-color: var(--text); }
 .source-editor .cm-line { padding: 0 10px; }
 .source-editor .cm-gutters { color: var(--text-faint); background: var(--surface-alt); border-right: 1px solid var(--border); }
 /* drawSelection paints below the text, so the active line must not cover its background. */
