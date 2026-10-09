@@ -98,6 +98,13 @@ and grant no native execution authority.
 The desktop crate denies `unsafe_code` and `unsafe_op_in_unsafe_fn` by default.
 Audited native FFI uses narrowly scoped `#[expect(unsafe_code)]` with a reason
 and documented safety conditions; no crate-wide warning suppression is used.
+The runtime's Windows file-identity FFI follows the same reason-bearing annotation
+convention at the function boundary; its crate-wide unsafe-code warning remains
+enabled.
+Platform-only test imports use `#[cfg]`; intentional cross-platform mutability
+and native discovery outcomes use reason-bearing `#[cfg_attr(..., expect(...))]`
+only for builds where their Unix/macOS consumers are absent. Global unused-code
+warnings remain enabled.
 
 ## Local check scope
 

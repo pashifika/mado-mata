@@ -1,5 +1,7 @@
 use super::*;
-use crate::target::{TargetConfiguration, TargetExpectation};
+use crate::target::TargetConfiguration;
+#[cfg(unix)]
+use crate::target::TargetExpectation;
 use mado_runtime_comparison::desktop::StartRequest;
 use std::fs;
 use std::path::Path;

@@ -1,5 +1,6 @@
 use super::*;
 use crate::application::test_support::*;
+#[cfg(unix)]
 use serde_json::json;
 
 #[test]

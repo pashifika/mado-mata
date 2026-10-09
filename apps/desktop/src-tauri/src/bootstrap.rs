@@ -713,6 +713,10 @@ fn import_legacy_with(
         std::process::id(),
         NEXT_IMPORT.fetch_add(1, Ordering::Relaxed)
     ));
+    #[cfg_attr(
+        not(unix),
+        expect(unused_mut, reason = "only Unix sets the private directory mode")
+    )]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {

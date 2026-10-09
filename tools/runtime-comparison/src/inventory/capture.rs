@@ -577,6 +577,10 @@ fn read_stable(
 }
 
 #[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "audited Windows file-identity FFI with a live handle and repr(C) output buffer"
+)]
 pub(super) fn windows_file_identity(file: &File) -> Result<(u32, u32, u32), Fault> {
     use std::os::windows::io::AsRawHandle;
     // BY_HANDLE_FILE_INFORMATION: DWORD fields and three FILETIME pairs.
