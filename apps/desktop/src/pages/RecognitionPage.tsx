@@ -1,5 +1,4 @@
 import {useState} from 'react';
-import {HelpTrigger} from '../components/ContextualHelp.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
 import Select from '../components/Select.tsx';
 import {messages} from '../i18n.ts';
@@ -145,11 +144,7 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
 
   return <section id="recognition" className="recognition-page" aria-labelledby="recognition-heading">
     <div className="recognition-header">
-      <div><h3 id="recognition-heading">{r.heading}<HelpTrigger title={r.heading} hint={r.previewHelp}>
-        <p>{r.intro}</p><p>{r.captureHelp}</p><p>{r.previewHelp}</p>
-        <p>{r.limits(Math.round(policy.input_bytes / MIB), policy.input_pixels.toLocaleString(locale), Math.round(policy.crop_bytes / MIB),
-          policy.crop_pixels.toLocaleString(locale))}</p>
-      </HelpTrigger></h3></div>
+      <div><h3 id="recognition-heading">{r.heading}</h3><p className="field-help">{r.intro}</p></div>
       <div className="button-row">
         <button id="recognition-add-capture" type="button" disabled={commands || running || pixelChoice !== null}
           onClick={() => requestCapture({kind: 'load', newCapture: true})}>{r.addCapture}</button>
@@ -164,6 +159,7 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
         options={view.captures.map(capture => ({value: capture.capture_id,
           label: `${capture.capture_id} · ${capture.document.basis.frame_width} × ${capture.document.basis.frame_height}`}))}
         onChange={captureId => {if (captureId !== view.capture_id) requestCapture({kind: 'select', captureId});}}/>
+      <p className="field-help">{r.captureHelp}</p>
       {view.migration_required && <p className="inline-warning">{r.migration}</p>}
     </div>
     <div className="button-row">
@@ -199,10 +195,12 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
         </dd></div>
       </dl>
     </div>
-    {(!frame || !confirmed) && <p className="field-help">{frame ? r.confirmHelp : document ? r.noFrameSaved : r.noFrame}</p>}
+    <p className="field-help">{frame ? confirmed ? r.previewHelp : r.confirmHelp : document ? r.noFrameSaved : r.noFrame}</p>
     {frame?.historical && <p id="recognition-historical" className="field-help">
       {messages[locale].ui.nativeCapture.historical}{frame.historical_capture_at_ms != null && ` ${new Date(frame.historical_capture_at_ms).toLocaleString(locale)}`}
     </p>}
+    <p className="field-help">{r.limits(Math.round(policy.input_bytes / MIB), policy.input_pixels.toLocaleString(locale), Math.round(policy.crop_bytes / MIB),
+      policy.crop_pixels.toLocaleString(locale))}</p>
 
     <section className="panel recognition-panel" aria-labelledby="recognition-definitions-heading">
       <div className="panel-heading"><h4 id="recognition-definitions-heading">{r.definitionsHeading}</h4>
@@ -240,10 +238,7 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
     </section>
 
     <section className="panel recognition-panel" aria-labelledby="recognition-selected-heading">
-      <div className="panel-heading"><h4 id="recognition-selected-heading">{r.selectedHeading}
-        {selected && <HelpTrigger title={r.selectedHeading} hint={r.kindHelp}>
-          <p>{r.kindHelp}</p>{selected.kind === 'ocr' && <p>{r.referenceTextHelp}</p>}
-        </HelpTrigger>}</h4>
+      <div className="panel-heading"><h4 id="recognition-selected-heading">{r.selectedHeading}</h4>
         {selected && <button id="recognition-delete" type="button" className="danger-text" disabled={leaseLost}
           onClick={() => onState(current => deleteDefinition(current, selected.id))}>{r.delete}</button>}</div>
       <div className="panel-body">
@@ -256,7 +251,7 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
             <Select id="recognition-kind" value={selected.kind} disabled={leaseLost}
               onChange={value => {if (value === 'ocr' || value === 'template') onState(current => setKind(current, selected.id, value));}}
               options={[{value: 'ocr', label: r.kindOcr}, {value: 'template', label: r.kindTemplate}]}/>
-          </div>
+            <p className="field-help">{r.kindHelp}</p></div>
           <dl className="recognition-geometry">
             <div><dt>{selected.kind === 'ocr' ? r.region : r.pattern}</dt><dd className="mono">{pixels(selected.region)}</dd></div>
             {selected.template && <div><dt>{r.search}</dt><dd className="mono">{pixels(selected.template.search_region)}</dd></div>}
@@ -271,17 +266,16 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
           {selected.kind === 'ocr' && <div className="field"><label htmlFor="recognition-reference-text">{r.referenceText}</label>
             <textarea id="recognition-reference-text" rows={2} value={selected.expected ?? ''} disabled={leaseLost} spellCheck={false}
               aria-describedby="recognition-reference-text-help" onChange={event => onState(current => setExpected(current, selected.id, event.target.value))}/>
-            <p id="recognition-reference-text-help" className="field-help">{r.bytes(utf8Bytes(selected.expected ?? ''), MAX_EXPECTED_BYTES)}</p></div>}
+            <p id="recognition-reference-text-help" className="field-help">{r.referenceTextHelp} {r.bytes(utf8Bytes(selected.expected ?? ''), MAX_EXPECTED_BYTES)}</p></div>}
         </>}
       </div>
     </section>
 
     <section className="panel recognition-panel" aria-labelledby="recognition-trial-heading">
-      <div className="panel-heading"><h4 id="recognition-trial-heading">{r.trialHeading}<HelpTrigger title={r.trialHeading} hint={r.trialHelp}>
-        <p>{r.trialHelp}</p><p>{r.sampleHelp}</p><p>{r.textContract}</p>
-      </HelpTrigger></h4>
+      <div className="panel-heading"><h4 id="recognition-trial-heading">{r.trialHeading}</h4>
         <span id="recognition-engine-limit" className="muted">{limit === null ? r.engineUnknown : r.engineLimit(limit)}</span></div>
       <div className="panel-body">
+        <p className="field-help">{r.trialHelp}</p>
         {limit === null && <div className="button-row"><span className="inline-warning">{r.capabilityMissing}</span>
           <button id="recognition-capabilities" type="button" disabled={commands || running} onClick={handlers.capabilities}>{r.capabilities}</button></div>}
         <div className="button-row">
@@ -301,6 +295,7 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
           {record.trial.controller.error && <FaultMessage title={r.primaryFailed} value={record.trial.controller.error}/>}
           {envelope?.primary && <FaultMessage title={r.primaryFailed} value={envelope.primary}/>}
           {result?.kind === 'ocr' && <>
+            <p className="field-help">{r.textContract}</p>
             {result.zones.map(zone => <article key={zone.id} className="recognition-result" data-id={zone.id}>
               <header><strong>{nameOf(zone.id)}</strong> {freshnessTag(zone.id)}
                 <span className="tag">{zone.outcome === 'recognized' ? r.recognized : r.noMatch}</span>
@@ -331,11 +326,10 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
     </section>
 
     <section className="panel recognition-panel" aria-labelledby="recognition-save-heading">
-      <div className="panel-heading"><h4 id="recognition-save-heading">{r.saveHeading}<HelpTrigger title={r.saveHeading} hint={r.saveHelp}>
-        <p>{r.saveHelp}</p>
-      </HelpTrigger></h4>
+      <div className="panel-heading"><h4 id="recognition-save-heading">{r.saveHeading}</h4>
         {dirty && <span className="tag unsaved">{r.unsaved}</span>}</div>
       <div className="panel-body">
+        <p className="field-help">{r.saveHelp}</p>
         {showRights && <fieldset className="recognition-rights">
           <legend>{r.rightsHeading}</legend>
           <p className="field-help">{r.rightsHelp}</p>
@@ -362,15 +356,15 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
     </section>
 
     <section className="panel recognition-panel" aria-labelledby="recognition-copy-heading">
-      <div className="panel-heading"><h4 id="recognition-copy-heading">{r.copyHeading}<HelpTrigger title={r.copyHeading} hint={r.copyHeading}>
-        <p>{r.copyHelp}</p><p><strong>{r.copySetup}</strong></p><p>{r.copySetupHelp}</p>
-        <p><strong>{r.copyOcr}</strong></p><p>{r.copyOcrHelp}</p>
-      </HelpTrigger></h4></div>
+      <div className="panel-heading"><h4 id="recognition-copy-heading">{r.copyHeading}</h4></div>
       <div className="panel-body">
+        <p className="field-help">{r.copyHelp}</p>
         <div className="button-row">{copyButton([], 'game_content', r.copySetup)}</div>
+        <p className="field-help">{r.copySetupHelp}</p>
         {setupReason && <p className="muted">{r.block(setupReason)}</p>}
         <div className="button-row">{copyButton(state.trialIds, 'ocr_recognize', r.copyOcr)}
           <span id="recognition-copy-ocr-selection" className={groupedReason === 'overLimit' ? 'inline-warning' : 'muted'}>{r.selection(state.trialIds.length, limit)}</span></div>
+        <p className="field-help">{r.copyOcrHelp}</p>
         <p id="recognition-copy-ocr-names" className="field-help">{state.trialIds.map(nameOf).join(', ') || r.block('empty')}</p>
         {groupedReason && groupedReason !== 'empty' && <p className="muted">{r.block(groupedReason)}</p>}
         {selected?.kind === 'template' ? <>

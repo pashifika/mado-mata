@@ -4,6 +4,7 @@
     "details": "Status details",
     "inspectionRequired": "Inspect or Reinspect this package before running it. Nothing is bound automatically.",
     "profile": "Profile draft",
+    "savedPackage": "Saved package",
     "none": "Not checked",
     "valid": "Valid",
     "invalid": "Invalid",

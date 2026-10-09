@@ -27,8 +27,8 @@ import RunPage from './pages/RunPage.tsx';
 import type {RunHandlers} from './pages/RunPage.tsx';
 import ExecutionPage from './pages/ExecutionPage.tsx';
 import type {RunSnapshot, RunView} from './pages/ExecutionPage.tsx';
-import StatusSurface, {AuthoringControls} from './components/StatusSurface.tsx';
-import type {AuthoringControlsProps} from './components/StatusSurface.tsx';
+import StatusSurface from './components/StatusSurface.tsx';
+import type {AuthoringStatusProps} from './components/StatusSurface.tsx';
 import {applicationStatus, authoringActivity, scopedAuthoring, workspaceStatus} from './status.ts';
 import type {StatusItem} from './status.ts';
 import SavedWorkspacesDialog from './components/SavedWorkspacesDialog.tsx';
@@ -2006,7 +2006,7 @@ export default function App() {
     : authoringWorkerPending ? leaseOwnerId : nativeOccupied ? nativeSelection.owner.workspace.workspace_id : view.workspace_id;
   const editVisible = selected !== undefined && selected.id === leaseOwnerId && selected.page === 'edit' && authoring !== null;
   const activity = authoringActivity(authoring, hostAuthoring, view, nativeSelection, locale, leaseLost);
-  const compactAuthoring = (onReturn: () => void, showReturn: boolean, returnDisabled = false): AuthoringControlsProps | null => activity && ({
+  const compactAuthoring = (onReturn: () => void, showReturn: boolean, returnDisabled = false): AuthoringStatusProps | null => activity && ({
     activity, ownerLabel: labelOf(activity.owner.workspace.workspace_id), showReturn, returnDisabled, stopDisabled: stopping || closing,
     onReturn: () => {
       if (sameAuthoringRef(authoringStore.current?.owner ?? hostAuthoringRef.current, activity.owner)) onReturn();
@@ -2051,11 +2051,6 @@ export default function App() {
       message={stripMessage && {text: renderMessage(locale, stripMessage.text), error: stripMessage.error}}
       stopDisabled={stopping || closing || (!authoringWorkerPending && (!view.run || !busy(view.state) || view.state === 'stopping' || starting !== null))}
       onStop={() => void (authoringWorkerPending || validationActive || recognitionActive ? stopValidation() : stopRun())}/> : null;
-  // Focus-contained dialogs cannot rely on an inert footer for cancellation or Return to Edit.
-  const strip = (idPrefix: string, onReturn: () => void = returnToEdit, returnDisabled = false): ReactNode => {
-    const controls = compactAuthoring(onReturn, true, returnDisabled);
-    return <>{ordinaryStrip(idPrefix)}{controls && <AuthoringControls key={activity!.owner.token} {...controls} idPrefix={idPrefix}/>}</>;
-  };
 
   if (shell !== 'shell') {
     // Before the first resolved status the shell is already real: presentation choice and Exit work, nothing is assumed.
@@ -2118,14 +2113,19 @@ export default function App() {
     : currentPage === 'edit' ? `${ui.authoring.authority} ${ui.authoring.exitHelp}`
     : selected ? isBound(selected) ? ui.run.introduction : ui.status.inspectionRequired
     : nav.kind === 'closed' ? `${t.closedHelp} ${t.closedLogHelp}` : t.appLogHelp;
+  const statusPhase = selected
+    ? starting?.workspaceId === selected.id || selected.busy ? 'preparing' : selectedRun!.view.state
+    : nav.kind === 'closed' ? null : starting?.workspaceId === null || applicationPending ? 'preparing'
+    : view.workspace_id === null ? view.state : 'idle';
   const statusScope = `${nav.kind}:${selected?.id ?? (nav.kind === 'closed' ? nav.id : '')}:${selected?.revision ?? ''}:${currentPage ?? ''}:${selectedAuthoring?.owner.token ?? ''}:${locale}`;
 
   return <LocaleContext value={locale}><div className="app">
     <StatusSurface scopeKey={statusScope} scopeLabel={selected ? workspaceLabel(selected, workspaces) : nav.kind === 'closed' ? t.closedLabel(closedSelected?.label ?? nav.id) : t.application}
+      scopePhase={statusPhase}
       pageTitle={pageTitle} pageHelp={<p>{pageHelp}</p>} runLabel={selected && isBound(selected) ? t.runControl : t.guidance} items={statusItems} session={selectedAuthoring}
       recognitionDirty={selectedAuthoring !== null && recognitionDirty} validating={selectedAuthoring !== null && validationActive}
       authoring={compactAuthoring(returnToEdit, !editVisible)}
-      profile={selected?.bound ? selected.bound.validation === null ? 'none' : selected.bound.validation.draftRevision === selected.bound.draftRevision ? 'valid' : 'stale' : null}
+      profile={currentPage !== 'edit' && selected?.bound ? selected.bound.validation === null ? 'none' : selected.bound.validation.draftRevision === selected.bound.draftRevision ? 'valid' : 'stale' : null}
       onNavigate={page => {if (selected) {if (page === 'edit') returnToEdit(); else change(selected.id, item => ({...item, page}));}}}
       onDiagnostic={diagnostic => {
         const current = authoringStore.current;
@@ -2265,20 +2265,23 @@ export default function App() {
       onInteract={(id, interaction) => setCards(old => interactCard(old, id, interaction))}/>
     <CreateWorkspaceDialog open={createOpen} draft={createDraft} onDraft={next => {setCreateDraft(next); setCreateError(null);}} onCancel={() => {if (appBusy !== 'creatingWorkspace') setCreateOpen(false);}}
       onCreate={() => void createWorkspace()} creating={appBusy === 'creatingWorkspace'} error={createError} openCount={workspaces.length} savedCount={savedCount}
-      busyReason={appBusy === 'creatingWorkspace' ? null : commandReason} strip={strip('create', () => {if (appBusy !== 'creatingWorkspace') {setCreateOpen(false); returnToEdit();}})}/>
+      busyReason={appBusy === 'creatingWorkspace' ? null : commandReason} strip={ordinaryStrip('create')}
+      authoring={compactAuthoring(() => {if (appBusy !== 'creatingWorkspace') {setCreateOpen(false); returnToEdit();}}, true, appBusy === 'creatingWorkspace')}/>
     <SavedWorkspacesDialog open={savedOpen} onCancel={() => {if (reopening === null) setSavedOpen(false);}} closed={savedClosed} faults={catalogFaults} listError={catalogError}
       openCount={workspaces.length} savedCount={savedCount} onRefresh={() => void refreshSaved()} onReopen={name => void reopenWorkspace(name)} reopening={reopening} reopenError={reopenError}
-      busyReason={appBusy === 'reopeningWorkspace' ? null : commandReason} strip={strip('saved', () => {if (reopening === null) {setSavedOpen(false); returnToEdit();}})}/>
+      busyReason={appBusy === 'reopeningWorkspace' ? null : commandReason} strip={ordinaryStrip('saved')}
+      authoring={compactAuthoring(() => {if (reopening === null) {setSavedOpen(false); returnToEdit();}}, true, reopening !== null)}/>
     <SettingsDialog open={dialogOpen} onCancel={() => setDialogOpen(false)} settings={settings} draft={settingsDraft} onDraft={next => {setSettingsDraft(next); setSaveNotice(null);}}
       defaultPackagesRoot={defaultPackagesRoot}
       parsed={parsedSettings} dirty={dialogDirty} saving={appBusy === 'savingSettings'} busyReason={commandReason} saveError={dialogError?.kind === 'save' ? dialogError.value : null} saveNotice={renderMessage(locale, saveNotice)} onSave={() => void saveSettings()}
       envDirty={envDirty} active={active} pickerBusy={pickerBusy} target={checkTarget} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale} originLabel={labelOf}
       checkError={dialogError?.kind === 'check' ? dialogError.value : null} authoringReason={authoringReason}
       retained={logs.items.length} evicted={logs.evicted}
-      onSnapshot={() => void snapshot(null)} snapshotPending={bootstrap.snapshotPending} snapshotOutcome={bootstrap.snapshotOutcome} strip={strip('dialog', () => {if (appBusy !== 'savingSettings') {setDialogOpen(false); returnToEdit();}})}/>
+      onSnapshot={() => void snapshot(null)} snapshotPending={bootstrap.snapshotPending} snapshotOutcome={bootstrap.snapshotOutcome} strip={ordinaryStrip('dialog')}
+      authoring={compactAuthoring(() => {if (appBusy !== 'savingSettings') {setDialogOpen(false); returnToEdit();}}, true, appBusy === 'savingSettings')}/>
     <DirtyChoiceDialog intent={choice?.kind ?? null} drafts={authoring ? dirtyDrafts(authoring) : []} recognitionDirty={recognitionDirty} busy={choiceBusy}
       saveBlock={leaseLost ? ui.authoring.leaseLost : recognitionSaveReason}
-      strip={strip('dirty', () => {if (!choiceBusy) {setChoice(null); returnToEdit();}}, choiceBusy)}
+      strip={ordinaryStrip('dirty')} authoring={compactAuthoring(() => {if (!choiceBusy) {setChoice(null); returnToEdit();}}, true, choiceBusy)}
       onSave={() => {if (choice) void resolveChoice(choice, true);}} onDiscard={() => {if (choice) void resolveChoice(choice, false);}}
       onCancel={() => {if (!choiceBusy) setChoice(null);}}/>
     </StatusSurface>

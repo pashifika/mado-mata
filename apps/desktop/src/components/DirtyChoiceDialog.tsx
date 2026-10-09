@@ -1,5 +1,7 @@
 import Modal from './Modal.tsx';
 import type {ReactNode} from 'react';
+import {AuthoringFooterStatus} from './StatusSurface.tsx';
+import type {AuthoringStatusProps} from './StatusSurface.tsx';
 import type {FileDraft} from '../authoring.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
@@ -11,13 +13,13 @@ interface Props {
   // Why Save cannot complete (for example, the host no longer reports this Edit session, or the recognition draft
   // cannot be saved as it is); Discard and Cancel stay available.
   saveBlock: string | null;
-  strip: ReactNode;
+  strip: ReactNode; authoring: AuthoringStatusProps | null;
   onSave: () => void; onDiscard: () => void; onCancel: () => void;
 }
 
 // Save/Discard/Cancel before an action that ends or replaces the Edit session. Cancel (including Escape) leaves the
 // lease, every draft and the selected file untouched; the dialog cannot be dismissed while a choice is being carried out.
-export default function DirtyChoiceDialog({intent, drafts, recognitionDirty, busy, saveBlock, strip, onSave, onDiscard, onCancel}: Props) {
+export default function DirtyChoiceDialog({intent, drafts, recognitionDirty, busy, saveBlock, strip, authoring, onSave, onDiscard, onCancel}: Props) {
   const locale = useLocale();
   const a = messages[locale].ui.authoring;
   const unsavable = drafts.some(draft => draft.missing);
@@ -30,12 +32,13 @@ export default function DirtyChoiceDialog({intent, drafts, recognitionDirty, bus
         {recognitionDirty && <li className="saved-row"><span className="saved-text"><strong>{a.recognitionDraft}</strong></span></li>}</ul>
       {unsavable && <p className="inline-warning">{a.dirtyUnsavable}</p>}
       {saveBlock && <p className="inline-warning">{saveBlock}</p>}
-      <div className="dialog-footer">
-        <span role="status">{busy ? a.working : ''}</span>
-        <button id="authoring-dirty-cancel" type="button" disabled={busy} onClick={onCancel}>{a.dirtyCancel}</button>
-        <button id="authoring-dirty-discard" type="button" className="danger-text" disabled={busy} onClick={onDiscard}>{a.dirtyDiscard}</button>
-        <button id="authoring-dirty-save" type="button" className="primary" disabled={busy || unsavable || saveBlock !== null} onClick={onSave}>{a.dirtySave}</button>
-      </div>
+    </div>
+    <div className="dialog-footer">
+      <span role="status">{busy ? a.working : ''}</span>
+      {authoring && <AuthoringFooterStatus key={authoring.activity.owner.token} {...authoring} idPrefix="dirty-authoring"/>}
+      <button id="authoring-dirty-cancel" type="button" disabled={busy} onClick={onCancel}>{a.dirtyCancel}</button>
+      <button id="authoring-dirty-discard" type="button" className="danger-text" disabled={busy} onClick={onDiscard}>{a.dirtyDiscard}</button>
+      <button id="authoring-dirty-save" type="button" className="primary" disabled={busy || unsavable || saveBlock !== null} onClick={onSave}>{a.dirtySave}</button>
     </div>
   </Modal>;
 }

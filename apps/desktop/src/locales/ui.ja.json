@@ -4,6 +4,7 @@
     "details": "状態の詳細",
     "inspectionRequired": "実行する前にパッケージを検査・再検査してください。自動では関連付けられません。",
     "profile": "プロファイルの下書き",
+    "savedPackage": "保存済みパッケージ",
     "none": "未検証",
     "valid": "有効",
     "invalid": "無効",

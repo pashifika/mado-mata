@@ -1,6 +1,8 @@
 import type {ReactNode} from 'react';
 import Modal from './Modal.tsx';
 import {FaultMessage} from './ResultPanel.tsx';
+import {AuthoringFooterStatus} from './StatusSurface.tsx';
+import type {AuthoringStatusProps} from './StatusSurface.tsx';
 import {DISPLAY_NAME_LIMIT, INTERNAL_NAME_LIMIT, SAVED_LIMIT, WORKSPACE_LIMIT, displayNameError, internalNameError} from '../workspace.ts';
 import type {Fault} from '../types.ts';
 import {messages} from '../i18n.ts';
@@ -14,12 +16,12 @@ interface Props {
   creating: boolean; error: Fault | null; openCount: number; savedCount: number;
   // Reason another command keeps Create unavailable; editing and Cancel stay possible.
   busyReason: string | null;
-  strip: ReactNode;
+  strip: ReactNode; authoring: AuthoringStatusProps | null;
 }
 
 // Two names, nothing else. The host refuses invalid or colliding names; the local checks only mirror its bounds so
 // the operator sees them before a round trip.
-export default function CreateWorkspaceDialog({open, draft, onDraft, onCancel, onCreate, creating, error, openCount, savedCount, busyReason, strip}: Props) {
+export default function CreateWorkspaceDialog({open, draft, onDraft, onCancel, onCreate, creating, error, openCount, savedCount, busyReason, strip, authoring}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const internalError = internalNameError(draft.internalName);
@@ -33,7 +35,7 @@ export default function CreateWorkspaceDialog({open, draft, onDraft, onCancel, o
     <div className="dialog-header"><div><h2 id="create-heading">{t.create.heading}</h2><p>{t.create.intro}</p></div>
       <button type="button" className="icon" aria-label={t.create.close} disabled={creating} onClick={onCancel}>×</button></div>
     {strip}
-    <form className="dialog-body" onSubmit={event => {event.preventDefault(); if (!blocked) onCreate();}}>
+    <form id="create-workspace-form" className="dialog-body" onSubmit={event => {event.preventDefault(); if (!blocked) onCreate();}}>
       <div className="field"><label htmlFor="internal-name">{t.create.internal}</label>
         <input id="internal-name" type="text" value={draft.internalName} disabled={creating} spellCheck={false} autoComplete="off"
           aria-invalid={shownInternal !== null} aria-describedby="internal-name-help" onChange={event => onDraft({...draft, internalName: event.target.value})}/>
@@ -45,11 +47,12 @@ export default function CreateWorkspaceDialog({open, draft, onDraft, onCancel, o
         {shownDisplay !== null && <p className="field-error">{t.create.errors(shownDisplay)}</p>}
         <p id="display-name-help" className="field-help">{t.create.displayHelp} <span className="mono">{t.create.count(Array.from(draft.displayName).length, DISPLAY_NAME_LIMIT)}</span></p></div>
       {error && <><FaultMessage title={t.create.failed} value={error}/><p className="muted">{t.create.failedHelp}</p></>}
-      <div className="dialog-footer">
-        <span role="status">{creating ? t.create.creating : limit ?? busyReason ?? ''}</span>
-        <button type="button" id="cancel-create" onClick={onCancel} disabled={creating}>{t.common.cancel}</button>
-        <button type="submit" id="submit-create" className="primary" disabled={blocked}>{t.create.create}</button>
-      </div>
     </form>
+    <div className="dialog-footer">
+      <span role="status">{creating ? t.create.creating : limit ?? busyReason ?? ''}</span>
+      {authoring && <AuthoringFooterStatus key={authoring.activity.owner.token} {...authoring} idPrefix="create-authoring"/>}
+      <button type="button" id="cancel-create" onClick={onCancel} disabled={creating}>{t.common.cancel}</button>
+      <button type="submit" form="create-workspace-form" id="submit-create" className="primary" disabled={blocked}>{t.create.create}</button>
+    </div>
   </Modal>;
 }
