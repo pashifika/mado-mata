@@ -491,6 +491,17 @@ impl Application {
         Ok(guards)
     }
 
+    fn command_guard(&self) -> Result<std::sync::MutexGuard<'_, ()>, Fault> {
+        match self.commands.try_lock() {
+            Ok(command) => Ok(command),
+            Err(TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+            Err(TryLockError::WouldBlock) => Err(Fault::new(
+                "WorkspaceBusy",
+                "Another workspace command is still in progress",
+            )),
+        }
+    }
+
     fn reconstruction_state(
         &self,
     ) -> Result<
@@ -503,16 +514,7 @@ impl Application {
         if self.closing.load(Ordering::Acquire) {
             return Err(Fault::new("Closing", "Application is closing"));
         }
-        let command = match self.commands.try_lock() {
-            Ok(command) => command,
-            Err(TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(TryLockError::WouldBlock) => {
-                return Err(Fault::new(
-                    "WorkspaceBusy",
-                    "Another workspace command is still in progress",
-                ));
-            }
-        };
+        let command = self.command_guard()?;
         // Recheck under admission: reconstruction may have closed the application
         // between the optimistic check above and acquiring this mutex.
         if self.closing.load(Ordering::Acquire) {
@@ -600,7 +602,9 @@ impl Application {
     }
 
     pub fn capture_configuration(&self) -> Result<Capture, Fault> {
-        let (_command, _state) = self.reconstruction_state()?;
+        // Read-only preservation remains available after shutdown, without holding
+        // workspace state while waiting for Store (Stop needs that state).
+        let _command = self.command_guard()?;
         self.setup_idle()?;
         let store = lock(&self.store);
         configuration::capture(store.root())
