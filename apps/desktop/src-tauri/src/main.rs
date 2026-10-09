@@ -656,6 +656,7 @@ fn main() {
             settings,
             save_settings,
             ocr_setup_commands::ocr_setup_catalog,
+            ocr_setup_commands::ocr_setup_pick_folder,
             ocr_setup_commands::ocr_setup_start,
             ocr_setup_commands::ocr_setup_poll,
             ocr_setup_commands::ocr_setup_cancel,

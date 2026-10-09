@@ -51,6 +51,98 @@ pub async fn choose_png(
     .await
 }
 
+pub async fn choose_directory(window: tauri::WebviewWindow) -> Result<Option<String>, Fault> {
+    let (send, mut receive) = tauri::async_runtime::channel(1);
+    let parent = window.clone();
+    window
+        .run_on_main_thread(move || {
+            let result = parent
+                .hwnd()
+                .map_err(|error| Fault::new("OcrSetupPicker", error.to_string()))
+                .and_then(|hwnd| open_directory(hwnd.0 as HWND));
+            let _ = send.try_send(result);
+        })
+        .map_err(|error| Fault::new("OcrSetupPicker", error.to_string()))?;
+    receive
+        .recv()
+        .await
+        .ok_or_else(|| Fault::new("OcrSetupPicker", "Folder selection did not complete"))?
+}
+
+#[expect(
+    unsafe_code,
+    reason = "audited owner-modal Windows folder selection and COM lifetime"
+)]
+fn open_directory(owner: HWND) -> Result<Option<String>, Fault> {
+    use windows_sys::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        BIF_EDITBOX, BIF_NEWDIALOGSTYLE, BIF_NONEWFOLDERBUTTON, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
+        SHBrowseForFolderW, SHGetPathFromIDListEx,
+    };
+    // SAFETY: Runs on the window thread; each successful COM initialization is balanced below.
+    let initialized = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+    if initialized < 0 {
+        return Err(Fault::new(
+            "OcrSetupPicker",
+            "Folder selection requires the UI COM apartment",
+        ));
+    }
+    let result = (|| {
+        let mut display = [0_u16; 260];
+        let dialog = BROWSEINFOW {
+            hwndOwner: owner,
+            pszDisplayName: display.as_mut_ptr(),
+            ulFlags: BIF_RETURNONLYFSDIRS
+                | BIF_NEWDIALOGSTYLE
+                | BIF_EDITBOX
+                | BIF_NONEWFOLDERBUTTON,
+            ..Default::default()
+        };
+        // SAFETY: Tauri retains the owner and buffers through the synchronous modal call.
+        let selected = unsafe { SHBrowseForFolderW(&dialog) };
+        if selected.is_null() {
+            return Ok(None);
+        }
+        let mut path = [0_u16; MAX_PATH_BYTES + 1];
+        // SAFETY: selected is the owned shell PIDL; the output buffer has the stated capacity.
+        let converted =
+            unsafe { SHGetPathFromIDListEx(selected, path.as_mut_ptr(), path.len() as u32, 0) };
+        // SAFETY: Release the shell-allocated PIDL exactly once after its last use.
+        unsafe { CoTaskMemFree(selected.cast()) };
+        if converted == 0 {
+            return Err(Fault::new(
+                "OcrSetupPicker",
+                "Select a filesystem folder within the path limit",
+            ));
+        }
+        let length = path.iter().position(|unit| *unit == 0).ok_or_else(|| {
+            Fault::new("OcrSetupPicker", "Selected folder path exceeds its bound")
+        })?;
+        let path = String::from_utf16(&path[..length]).map_err(|_| {
+            Fault::new(
+                "OcrSetupPicker",
+                "Selected folder path is not valid Unicode",
+            )
+        })?;
+        if path.len() > MAX_PATH_BYTES
+            || !Path::new(&path).is_absolute()
+            || path.chars().any(char::is_control)
+        {
+            return Err(Fault::new(
+                "OcrSetupPicker",
+                "Select a bounded absolute folder path",
+            ));
+        }
+        // Resource inspection independently checks this folder before reading any libraries.
+        Ok(Some(path))
+    })();
+    // SAFETY: Balance this function's successful initialization, including S_FALSE.
+    unsafe { CoUninitialize() };
+    result
+}
+
 #[expect(unsafe_code, reason = "audited owner-modal Win32 common file dialog")]
 fn open_file(owner: HWND) -> Result<Option<String>, Fault> {
     let filter = windows_sys::core::w!("PNG image (*.png)\0*.png\0");

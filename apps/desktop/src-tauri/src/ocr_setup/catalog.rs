@@ -84,6 +84,36 @@ pub(super) struct Dependency {
     pub sha256: String,
     #[serde(default)]
     pub required_modules: Vec<String>,
+    #[serde(default)]
+    pub search_roots: Vec<String>,
+    #[serde(default)]
+    pub search_subdirectories: Vec<String>,
+    #[serde(default)]
+    pub archive: Option<RuntimeArchive>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ArchiveFormat {
+    Tgz,
+    Zip,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RuntimeArchive {
+    pub format: ArchiveFormat,
+    pub asset: Asset,
+    pub members: Vec<RuntimeMember>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RuntimeMember {
+    pub archive_path: String,
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 impl Catalog {
@@ -171,6 +201,7 @@ impl Catalog {
                 }
                 https(&dependency.license_url)?;
             }
+            platform.validate_acquisition()?;
             let mut modules = BTreeSet::new();
             for module in &platform.native.required_modules {
                 safe_relative(module)?;
@@ -237,7 +268,7 @@ impl Catalog {
         let mut items = vec![SetupItem {
             id: self.models.id.clone(),
             name: self.models.name.clone(),
-            state: "missing".into(),
+            state: "not_checked".into(),
             detail: self.models.detail.clone(),
             downloadable: true,
             links: self.models.links.clone(),
@@ -265,12 +296,168 @@ impl Dependency {
         SetupItem {
             id: self.id.clone(),
             name: self.name.clone(),
-            state: "manual".into(),
+            state: if self.archive.is_some() {
+                "not_checked"
+            } else {
+                "manual"
+            }
+            .into(),
             detail: self.detail.clone(),
-            downloadable: false,
+            downloadable: self.archive.is_some(),
             links: self.links.clone(),
             commands: self.commands.clone(),
         }
+    }
+}
+
+impl Platform {
+    fn validate_acquisition(&self) -> Result<(), Fault> {
+        let (
+            prefix,
+            format,
+            bytes,
+            digest,
+            runtime_bytes,
+            runtime_digest,
+            license_bytes,
+            license_digest,
+            notice_bytes,
+            notice_digest,
+        ) = if self.os == "macos" {
+            (
+                "onnxruntime-osx-arm64-1.29.0",
+                ArchiveFormat::Tgz,
+                41_578_864,
+                "d0706fc34f315d8c88639d0a8c81f2e09e815f282cabed3493c06a054352cf92",
+                43_184_400,
+                "68f6e54e695583adc371aef610ec4abb1ffaa3df656582922de7690f7e2000eb",
+                1_073,
+                "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
+                336_906,
+                "53d3fa5821ac016ac24dd35775c996efec86e2ae0841e9a3a5e146c0ae916845",
+            )
+        } else {
+            (
+                "onnxruntime-win-x64-1.29.0",
+                ArchiveFormat::Zip,
+                79_645_520,
+                "c9b4b7086b529ad814f428c1bad028e20a25d7dc0699836775faace4ab5b78b2",
+                16_149_344,
+                "69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b847059738323404519ec471",
+                1_094,
+                "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674",
+                343_249,
+                "4c5b864d8974c94b37461f38163facef79a1bb5dea461667ee9e5be6a8e73f83",
+            )
+        };
+        let archive = self
+            .runtime
+            .archive
+            .as_ref()
+            .ok_or_else(|| fault("catalog", "runtime requires a reviewed archive"))?;
+        let extension = if format == ArchiveFormat::Tgz {
+            "tgz"
+        } else {
+            "zip"
+        };
+        if archive.format != format
+            || archive.asset.path != format!("{prefix}.{extension}")
+            || archive.asset.bytes != bytes
+            || archive.asset.sha256 != digest
+            || archive.members.len() != 3
+            || self.runtime.bytes != runtime_bytes
+            || self.runtime.sha256 != runtime_digest
+            || self.runtime.license != "MIT"
+            || self.native.archive.is_some()
+            || !self.runtime.search_roots.is_empty()
+            || !self.runtime.search_subdirectories.is_empty()
+        {
+            return Err(fault(
+                "catalog",
+                "runtime archive differs from the reviewed release",
+            ));
+        }
+        https(&archive.asset.url)?;
+        let expected = [
+            (
+                format!("lib/{}", self.runtime.filename),
+                self.runtime.filename.as_str(),
+                runtime_bytes,
+                runtime_digest,
+            ),
+            ("LICENSE".into(), "LICENSE", license_bytes, license_digest),
+            (
+                "ThirdPartyNotices.txt".into(),
+                "ThirdPartyNotices.txt",
+                notice_bytes,
+                notice_digest,
+            ),
+        ];
+        let mut destinations = BTreeSet::new();
+        for member in &archive.members {
+            safe_relative(&member.archive_path)?;
+            safe_relative(&member.path)?;
+            if !destinations.insert(&member.path)
+                || !expected.iter().any(|(source, path, bytes, digest)| {
+                    member.archive_path == format!("{prefix}/{source}")
+                        && member.path == *path
+                        && member.bytes == *bytes
+                        && member.sha256 == *digest
+                })
+            {
+                return Err(fault(
+                    "catalog",
+                    "runtime members differ from the reviewed release",
+                ));
+            }
+        }
+        let roots: &[&str] = if self.os == "macos" {
+            &["/opt/homebrew", "/usr/local"]
+        } else {
+            &[]
+        };
+        if self.native.search_roots.len() > 8
+            || self.native.search_subdirectories.len() > 8
+            || self
+                .native
+                .search_roots
+                .iter()
+                .any(|root| !roots.contains(&root.as_str()))
+            || self
+                .native
+                .search_roots
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != self.native.search_roots.len()
+        {
+            return Err(fault(
+                "catalog",
+                "native search roots must be bounded known absolute roots",
+            ));
+        }
+        let mut subdirectories = BTreeSet::new();
+        for subdirectory in &self.native.search_subdirectories {
+            safe_relative(subdirectory)?;
+            if subdirectory.len() > 256 || !subdirectories.insert(subdirectory) {
+                return Err(fault("catalog", "invalid native search subdirectories"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn runtime_installation_name(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.os.as_bytes());
+        hasher.update(self.arch.as_bytes());
+        if let Some(archive) = &self.runtime.archive {
+            for member in &archive.members {
+                hasher.update(member.path.as_bytes());
+                hasher.update(member.bytes.to_le_bytes());
+                hasher.update(member.sha256.as_bytes());
+            }
+        }
+        format!("runtime-{:x}", hasher.finalize())
     }
 }
 

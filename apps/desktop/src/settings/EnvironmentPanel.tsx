@@ -91,14 +91,16 @@ export default function EnvironmentPanel(props: Props) {
           ...SUPPORTED_PROFILES.map(item => ({value: item.profile, label: t.environment.profileLabel(item.profile)})),
           ...(draft.profile && !supported ? [{value: draft.profile, label: t.environment.unsupported(draft.profile), disabled: true}] : [])]}/>
       {errors.profile && <p className="field-error">{errors.profile}</p>}</div>
+    <details className="ocr-setup-details"><summary>{t.environment.technicalHeading}</summary>
     <dl className="fixed-facts">
       <dt>{t.common.model}</dt><dd>{supported?.model ?? '—'}</dd>
       <dt>{t.common.language}</dt><dd>{ENVIRONMENT_LANGUAGE}</dd>
       <dt>{t.common.provider}</dt><dd>{ENVIRONMENT_PROVIDER}</dd>
       <dt>{t.common.runtimeProfile}</dt><dd>{ENVIRONMENT_RUNTIME_PROFILE}</dd>
     </dl>
+    </details>
     {saved && fixedMismatch && <p className="inline-warning">{t.environment.mismatch(saved.model, saved.language, saved.provider, saved.runtime_profile)}</p>}
-    <details className="ocr-manual" open={fixedMismatch || Boolean(errors.model_root || errors.runtime_path || errors.library_paths)}>
+    <details className="ocr-manual" open={fixedMismatch || Boolean((draft.model_root.trim() && errors.model_root) || (draft.runtime_path.trim() && errors.runtime_path) || (draft.library_paths.trim() && errors.library_paths))}>
       <summary>{t.environment.manualHeading}</summary>
       <p className="field-help">{t.environment.manualHelp}</p>
     <div className="field"><label htmlFor="model-root">{t.environment.modelRoot}</label>
@@ -115,6 +117,7 @@ export default function EnvironmentPanel(props: Props) {
       {errors.library_paths && <p className="field-error">{errors.library_paths}</p>}
       <p className="field-help">{t.environment.librariesHelp}</p></div>
     <div className="button-row">
+      <button type="button" disabled={setupBlock !== null || setup.busy || setup.state.catalogPending} onClick={setup.manual}>{t.environment.checkManual}</button>
       <button id="clear-environment" disabled={locked || blank} onClick={() => onDraft({profile: '', model_root: '', runtime_path: '', library_paths: ''})}>{t.environment.clear}</button>
       <span className="muted">{blank ? t.environment.blank : t.environment.saveHelp}</span>
     </div>

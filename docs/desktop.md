@@ -1873,27 +1873,35 @@ Recovery then offers **Retry** after repair, not transaction controls.
 
 ## Save and check an OCR environment
 
-1. Open **Application → App settings → OCR environment**. Under **OCR resources**,
-   choose **Download** for the verified models. The shared set is about 26 MB;
-   the application checks exact sizes and SHA-256 values before publishing it.
-   Source, license and hosting-term links are available before downloading.
-2. Follow the separate runtime and native-library guidance. Download and unpack
-   the official ONNX Runtime **1.29.0** archive for your platform, retaining its
-   notices. OpenCV and every linked non-system dependency must match the engine
-   runner's build. **Copy command** copies text only: MadoMata never runs a shell,
-   package manager or installer. A moving Homebrew formula is not an ABI guarantee;
-   its current deprecation and version caveats are shown with the command.
-3. Expand **Manual paths · existing configuration** and enter the absolute runtime
-   path and the complete reviewed native-library list, **1–64 libraries**, one per
-   line. Blank lines and surrounding whitespace are ignored. A blank model root
-   lets Recheck use the downloaded set; an explicit model root is never replaced
-   automatically. Existing supported manual environments remain usable.
-4. Choose **Recheck resources**, then **Use in settings** when all required files
-   resolve. This fills only the OCR draft; it does not save or initialize an
-   engine. Editing the draft invalidates an earlier Recheck result. File checks
-   identify the exact accepted models and official runtime; native-library checks
-   verify required module names and CPU headers, not dependency closure or ABI.
-   Continue to the existing saved-environment Check for initialization evidence.
+1. Open **Application → App settings → OCR environment**. Under **Set up text
+   recognition**, choose **Download** for **Text recognition files**. The shared
+   model set is about 26 MB. Exact sizes and SHA-256 values are checked before
+   publication, then its path and an unset default profile are selected in the
+   draft automatically. Missing runtime or native libraries do not block this.
+   **Details** includes source, license and hosting-term links before download.
+2. Choose **Download** for **Recognition engine**. MadoMata acquires the fixed
+   official ONNX Runtime **1.29.0** archive for the supported platform, verifies
+   the archive and selected members, and retains the library, license and
+   third-party notices together. Its path is selected automatically; no installer
+   runs and no system directory is changed.
+3. For **Image-processing libraries**, install a build-compatible OpenCV copy
+   using the instructions in **Details**, then choose **Find Homebrew installation**
+   on macOS or **Choose installation folder**. Homebrew detection checks only
+   `/opt/homebrew` and `/usr/local`; folder selection checks only the approved
+   roots and catalog-defined candidate directories. Required modules and their
+   non-system dependency closure are resolved from bounded binary metadata,
+   without loading libraries, running inspection tools or scanning the disk/PATH.
+   Add a missing dependency's folder explicitly when needed (**8 folders** maximum).
+   **Copy command** only copies text: no shell, package manager or installer runs.
+   A moving Homebrew formula is not an ABI guarantee.
+4. **Recheck resources** reuses complete downloads and repeats the installation
+   choice. Verified missing paths fill the draft automatically; explicit model
+   and runtime paths are preserved. A Download action deliberately selects that
+   resource's managed path. Results cannot overwrite newer OCR edits or enter a
+   closed/replacement dialog. **Advanced · manual configuration** remains
+   available for existing paths and a reviewed list of **1–64 libraries**, one
+   per line. File/dependency checks are not API/ABI or initialization evidence;
+   use the saved-environment Check below.
 5. **Save changes** validates and atomically saves the dialog's editable settings.
    It does not load libraries, models, or a backend. **Clear draft** followed by
    **Save changes** removes the optional environment. Existing settings with no
@@ -1933,12 +1941,14 @@ On the next explicit setup action, an OS file lock protects recovery of recogniz
 incomplete staging. Unknown files are retained, not recursively removed.
 
 The embedded [OCR catalog](../apps/desktop/src-tauri/resources/ocr-catalog.json)
-owns fixed sources, model identities, platform-specific dependency guidance and
-license links. Model installs include
-[LICENSE](../apps/desktop/src-tauri/resources/ocr-model-LICENSE.txt),
-[NOTICE](../apps/desktop/src-tauri/resources/ocr-model-NOTICE.txt) and a receipt;
-the receipt never replaces byte verification. Maintainers can edit transport
-sources and guidance in the catalog, then run the offline resource tests:
+owns fixed sources, content identities, platform archives, selected members,
+bounded search locations, display-only guidance and license links. Model installs
+include [LICENSE](../apps/desktop/src-tauri/resources/ocr-model-LICENSE.txt),
+[NOTICE](../apps/desktop/src-tauri/resources/ocr-model-NOTICE.txt) and a receipt.
+Runtime installs retain the official `LICENSE` and `ThirdPartyNotices.txt`; their
+reviewed provenance is recorded in the [runtime notice](../apps/desktop/src-tauri/resources/ocr-runtime-NOTICE.txt).
+Receipts never replace byte verification. Maintainers can edit transport sources
+and guidance in the catalog, then run the offline resource tests:
 
 ```sh
 cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib ocr_setup
@@ -1946,10 +1956,12 @@ cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --
 
 Review licenses, notices, host terms and exact downloaded bytes before enabling a
 new source. Catalog edits do not extend the engine's accepted model/profile set.
-Automatic acquisition covers the verified model set on supported macOS arm64
-and Windows x64 targets; runtime/native libraries use manual guidance. No archive
-installer, automatic update, custom-model selector or new native authority is
-provided. See the [engine prerequisites](runtime-native.md#install-the-engine-prerequisites).
+Automatic acquisition covers the verified model set and reviewed ONNX Runtime
+archives on macOS arm64 and Windows x64. Archive extraction copies only pinned
+regular files into app-owned storage; archive links are never created or followed.
+OpenCV installation remains external. No automatic update, custom-model selector,
+global loader change or new native authority is provided. See the
+[engine prerequisites](runtime-native.md#install-the-engine-prerequisites).
 
 The descriptor is a session location hint, not persisted native authority.
 It is bounded to **256 KiB**. Inspection, Check, and both Start lanes use the

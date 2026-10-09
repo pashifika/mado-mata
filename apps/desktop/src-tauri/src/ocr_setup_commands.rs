@@ -1,6 +1,6 @@
 use crate::{Backend, background};
 use mado_mata_desktop::application::SetupOperation;
-use mado_mata_desktop::ocr_setup::{self, SetupView};
+use mado_mata_desktop::ocr_setup::{self, NativeSelection, SetupView};
 use mado_runtime_comparison::environment::OcrEnvironment;
 use mado_runtime_comparison::model::Fault;
 
@@ -13,10 +13,12 @@ pub fn ocr_setup_catalog() -> Result<SetupView, Fault> {
 pub async fn ocr_setup_start(
     resource_id: String,
     environment: Option<OcrEnvironment>,
+    native_selection: Option<NativeSelection>,
     state: tauri::State<'_, Backend>,
 ) -> Result<String, Fault> {
     let application = state.bootstrap.application()?;
-    background(move || application.ocr_setup_start(resource_id, environment)).await
+    background(move || application.ocr_setup_start(resource_id, environment, native_selection))
+        .await
 }
 
 #[tauri::command]
@@ -33,6 +35,26 @@ pub fn ocr_setup_cancel(
         .bootstrap
         .running_application()?
         .ocr_setup_cancel(&operation_id)
+}
+
+#[tauri::command]
+pub async fn ocr_setup_pick_folder(window: tauri::WebviewWindow) -> Result<Option<String>, Fault> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::picker::choose_directory(window).await
+    }
+    #[cfg(windows)]
+    {
+        crate::windows_shell::choose_directory(window).await
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = window;
+        Err(Fault::new(
+            "OcrSetupPlatform",
+            "Folder selection requires macOS or Windows",
+        ))
+    }
 }
 
 #[tauri::command]

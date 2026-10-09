@@ -76,6 +76,7 @@ impl Application {
         &self,
         resource_id: String,
         environment: Option<OcrEnvironment>,
+        native_selection: Option<ocr_setup::NativeSelection>,
     ) -> Result<String, Fault> {
         let (_command, mut state) = self.command_state()?;
         self.collect(&mut state);
@@ -92,7 +93,7 @@ impl Application {
                 "Select a downloadable catalog resource",
             ));
         }
-        if resource_id != "inspect" && environment.is_some() {
+        if resource_id != "inspect" && (environment.is_some() || native_selection.is_some()) {
             return Err(Fault::new(
                 "OcrSetupResource",
                 "Downloads do not accept environment overrides",
@@ -126,17 +127,21 @@ impl Application {
             .name("ocr-resource-setup".into())
             .spawn(move || {
                 let outcome = if resource_id == "inspect" {
-                    ocr_setup::inspect(&root, environment.as_ref(), &worker_cancel).map(Some)
+                    ocr_setup::inspect(
+                        &root,
+                        environment.as_ref(),
+                        native_selection.as_ref(),
+                        &worker_cancel,
+                    )
                 } else {
                     ocr_setup::download(&root, &resource_id, &worker_cancel, |progress| {
                         lock(&worker_view).progress = progress;
                     })
-                    .map(|()| None)
                 };
                 let mut view = lock(&worker_view);
                 match outcome {
                     Ok(result) => {
-                        view.result = result;
+                        view.result = Some(result);
                         view.progress.stage = "complete".into();
                     }
                     Err(error) => {
@@ -365,7 +370,7 @@ mod tests {
             "OcrSetupCleanup"
         );
         assert_eq!(
-            app.ocr_setup_start("inspect".into(), None)
+            app.ocr_setup_start("inspect".into(), None, None)
                 .unwrap_err()
                 .category,
             "OcrSetupCleanup"

@@ -34,19 +34,15 @@ access, or rate-limit bypass. Hosting terms are separate from Apache-2.0 rights.
 The complete upstream license and attribution are in LICENSE.txt beside the
 installed files. Source URLs and content identities are retained in receipt.json.
 
-Manual dependencies (not redistributed or installed by MadoMata)
+Managed runtime (downloaded directly from Microsoft, not bundled)
   ONNX Runtime 1.29.0 CPU / API 17: MIT, official Microsoft release.
     https://github.com/microsoft/onnxruntime/releases/tag/v1.29.0
     https://github.com/microsoft/onnxruntime/blob/v1.29.0/LICENSE
-  Official archives independently read during review:
-    macOS arm64 archive SHA-256:
-      d0706fc34f315d8c88639d0a8c81f2e09e815f282cabed3493c06a054352cf92
-    Windows x64 archive SHA-256:
-      c9b4b7086b529ad814f428c1bad028e20a25d7dc0699836775faace4ab5b78b2
-  Inner runtime identities in the catalog are derived from these archives.
-  Retain each archive's LICENSE and ThirdPartyNotices on external installation.
-  Other runtime builds remain usable through existing manual settings/Check;
-  setup does not identify an unknown build as the reviewed official runtime.
+  Exact archive, selected library and license-notice identities are pinned in
+  ocr-catalog.json. See ocr-runtime-NOTICE.txt for the archive review and safe
+  extraction policy. Each runtime installation retains the archive's unchanged
+  LICENSE and ThirdPartyNotices.txt beside the selected library and receipt.
+  File verification is not runtime initialization; saved Check remains required.
 
   OpenCV 4: Apache-2.0; linked dependencies have independent license obligations.
     https://github.com/opencv/opencv/blob/4.14.0/LICENSE
@@ -54,9 +50,10 @@ Manual dependencies (not redistributed or installed by MadoMata)
   Homebrew API review: opencv@4 4.14.0 revision 11, deprecated 2026-10-09,
   disabled date 2027-07-09. Its moving formula is not a compatible-build pin.
   The displayed command is guidance only and is never executed by MadoMata.
-  Use the runner's matching OpenCV build and complete reviewed native list.
-  Recheck checks names, target headers and regular files, not ABI/dependency
-  closure. Saved Check remains required; no native load or OCR is done by setup.
+  Choose Homebrew or approved installation folders to discover the required
+  modules and their bounded non-system dependency closure without loading them.
+  Discovery does not certify ABI compatibility. Saved Check remains required;
+  no native library load or OCR is done by setup.
 
 HTTP dependency review
   ureq 3.4.2, crates.io, MIT OR Apache-2.0, MSRV 1.85.

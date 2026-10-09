@@ -467,36 +467,52 @@ function deferredSetup() {
   return {promise,resolve,reject};
 }
 
-function setupOperation({id='owned',active=false,stage='complete',result=null,error=null,cleanup_error=null}={}) {
-  return {id,active,progress:{stage,resource_id:'models',bytes:100,total:100},result,error,cleanup_error};
+function setupView({environment=null,resolved={},items=null,native_methods=['homebrew','folders']}={}) {
+  return {
+    items:items ?? ['rapidocr-models','onnxruntime','native-libraries'].map(id=>({
+      id,name:{en:id,ja:id},state:'missing',detail:{en:'fixture',ja:'fixture'},downloadable:id!=='native-libraries',links:[],commands:[],
+    })),
+    environment,
+    resolved:{model_root:environment?.model_root ?? null,runtime_path:environment?.runtime_path ?? null,native_library_paths:environment?.native_library_paths ?? null,...resolved},
+    native_methods,
+  };
 }
 
-function setupHarness(draft=validSettingsDraft, overrides={}) {
-  const calls=[], published=[];
+function setupOperation({id='owned',active=false,stage='complete',resource_id='rapidocr-models',result=null,error=null,cleanup_error=null}={}) {
+  return {id,active,progress:{stage,resource_id,bytes:100,total:100},result,error,cleanup_error};
+}
+
+function setupHarness(initial=validSettingsDraft, overrides={}) {
+  const calls=[], published=[], adopted=[];
+  let draft=initial;
   const client={
-    catalog:async()=>{calls.push({kind:'catalog'}); return overrides.catalog ? overrides.catalog() : {items:[],environment:null};},
-    start:async(resourceId,environment)=>{calls.push({kind:'start',resourceId,environment}); return overrides.start ? overrides.start() : 'owned';},
+    catalog:async()=>{calls.push({kind:'catalog'}); return overrides.catalog ? overrides.catalog() : setupView();},
+    start:async(resourceId,environment,nativeSelection)=>{calls.push({kind:'start',resourceId,environment,nativeSelection}); return overrides.start ? overrides.start() : 'owned';},
     poll:async()=>{calls.push({kind:'poll'}); return overrides.poll ? overrides.poll() : setupOperation();},
     cancel:async(operationId)=>{calls.push({kind:'cancel',operationId}); if (overrides.cancel) await overrides.cancel();},
+    pickFolder:async()=>{calls.push({kind:'pickFolder'}); return overrides.pickFolder ? overrides.pickFolder() : '/installation';},
     openLink:async(resourceId,index)=>{calls.push({kind:'link',resourceId,index}); if (overrides.openLink) await overrides.openLink();},
     copyCommand:async(resourceId,index)=>{calls.push({kind:'copy',resourceId,index}); if (overrides.copyCommand) await overrides.copyCommand();},
   };
-  const session=new OcrSetupSession(client,draft,state=>published.push(state));
-  return {session,calls,published};
+  const session=new OcrSetupSession(client,draft,state=>published.push(state),next=>{draft=next; adopted.push(next);});
+  return {session,calls,published,adopted,get draft(){return draft;},edit(next){draft=next; session.observeDraft(next);}};
 }
 
-test('resource catalog and manual guidance never start a setup job or apply settings',async()=>{
-  const {session,calls}=setupHarness();
-  await session.load();
-  await session.guidance('link','runtime',0);
-  await session.guidance('copy','libraries',1);
-  assert.deepEqual(calls,[{kind:'catalog'},{kind:'poll'},{kind:'link',resourceId:'runtime',index:0},{kind:'copy',resourceId:'libraries',index:1}]);
-  assert.equal(session.snapshot.copied,'copy:libraries:1');
-  assert.equal(session.snapshot.view.environment,null);
-  assert.equal(session.apply(validSettingsDraft),null);
+const blankSetupDraft={...validSettingsDraft,environment:environmentDraft(null)};
+
+test('resource catalog and installation guidance stay read-only',async()=>{
+  const harness=setupHarness(blankSetupDraft);
+  await harness.session.load();
+  await harness.session.guidance('link','onnxruntime',0);
+  await harness.session.guidance('copy','native-libraries',1);
+  assert.deepEqual(harness.calls,[{kind:'catalog'},{kind:'poll'},{kind:'link',resourceId:'onnxruntime',index:0},{kind:'copy',resourceId:'native-libraries',index:1}]);
+  assert.equal(harness.session.snapshot.copied,'copy:native-libraries:1');
+  assert.equal(harness.session.snapshot.view.environment,null);
+  assert.deepEqual(harness.adopted,[]);
+  assert.equal(harness.draft,blankSetupDraft);
 });
 
-test('Recheck preserves partial dependency hints and unsupported nonblank profiles without relaxing Save',()=>{
+test('Recheck preserves partial hints and unsupported nonblank profiles without relaxing Save',()=>{
   assert.equal(setupEnvironment(environmentDraft(null)),null);
   const partial={profile:'',model_root:'',runtime_path:' /runtime ',library_paths:' /library-a \n\n /library-b '};
   const hints=setupEnvironment(partial);
@@ -508,252 +524,539 @@ test('Recheck preserves partial dependency hints and unsupported nonblank profil
   assert.equal(setupEnvironment({...partial,profile:SUPPORTED_PROFILES[1].profile}).model,SUPPORTED_PROFILES[1].model);
 });
 
+for (const {scenario,resourceId,resolved,expected} of [
+  {scenario:'models',resourceId:'rapidocr-models',resolved:{model_root:'/managed-models'},expected:{profile:SUPPORTED_PROFILES[0].profile,model_root:'/managed-models',runtime_path:'',library_paths:''}},
+  {scenario:'runtime',resourceId:'onnxruntime',resolved:{runtime_path:'/managed-runtime'},expected:{profile:SUPPORTED_PROFILES[0].profile,model_root:'',runtime_path:'/managed-runtime',library_paths:''}},
+]) {
+  test(`a ${scenario} download automatically selects its verified path with all manual fields blank`,async()=>{
+    const original=structuredClone(blankSetupDraft);
+    const result=setupView({resolved});
+    const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
+    await harness.session.start(resourceId,harness.draft);
+    assert.deepEqual(harness.calls[0],{kind:'start',resourceId,environment:null,nativeSelection:null});
+    await harness.session.poll();
+    assert.deepEqual(harness.draft.environment,expected);
+    assert.equal(harness.adopted.length,1);
+    assert.equal(harness.session.snapshot.adopted,true);
+    assert.equal(harness.session.snapshot.checkedRevision,harness.session.draftRevision);
+    assert.equal(readSettingsDraft(harness.draft).settings,null);
+    assert.deepEqual(blankSetupDraft,original);
+    await harness.session.poll();
+    assert.equal(harness.adopted.length,1);
+    assert.equal(harness.calls.filter(call=>call.kind==='poll').length,1);
+  });
+}
+
+test('independent downloads and native discovery complete one draft without saving or resetting earlier item statuses',async()=>{
+  const saved={version:1,package_path:null,...readSettingsDraft(blankSetupDraft).settings};
+  const original=structuredClone(saved);
+  let result=setupView({resolved:{model_root:'/managed-models'}});
+  result.items[0].state='verified';
+  const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
+  await harness.session.load();
+  await harness.session.start('rapidocr-models',harness.draft);
+  await harness.session.poll();
+  result=setupView({resolved:{model_root:'/managed-models',native_library_paths:['/opencv/core','/opencv/imgproc','/opencv/imgcodecs']}});
+  result.items[0].state='verified';
+  result.items[2].state='verified';
+  await harness.session.useHomebrew(harness.draft);
+  await harness.session.poll();
+  result=setupView({resolved:{runtime_path:'/managed-runtime'}});
+  result.items[1].state='verified';
+  await harness.session.start('onnxruntime',harness.draft);
+  await harness.session.poll();
+  assert.deepEqual(harness.draft.environment,{
+    profile:SUPPORTED_PROFILES[0].profile,model_root:'/managed-models',runtime_path:'/managed-runtime',
+    library_paths:'/opencv/core\n/opencv/imgproc\n/opencv/imgcodecs',
+  });
+  assert.deepEqual(harness.session.snapshot.view.items.map(item=>item.state),['verified','verified','verified']);
+  assert.deepEqual(harness.session.snapshot.view.resolved,{
+    model_root:'/managed-models',runtime_path:'/managed-runtime',native_library_paths:['/opencv/core','/opencv/imgproc','/opencv/imgcodecs'],
+  });
+  assert.equal(readSettingsDraft(harness.draft).settings.ocr_environment.runtime_path,'/managed-runtime');
+  assert.deepEqual(saved,original);
+  assert.equal(harness.adopted.length,3);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start').map(call=>call.nativeSelection),[null,{method:'homebrew'},null]);
+});
+
+for (const {scenario,profile} of [
+  {scenario:'a supported nondefault profile',profile:SUPPORTED_PROFILES[1].profile},
+  {scenario:'an explicit unsupported profile',profile:'unsupported-profile'},
+  {scenario:'an explicit whitespace profile',profile:' '},
+]) {
+  test(`automatic model selection preserves ${scenario}`,async()=>{
+    const initial={...blankSetupDraft,environment:{...blankSetupDraft.environment,profile}};
+    const harness=setupHarness(initial,{poll:async()=>setupOperation({result:setupView({resolved:{model_root:'/models'}})})});
+    await harness.session.start('rapidocr-models',initial);
+    await harness.session.poll();
+    assert.equal(harness.draft.environment.profile,profile);
+    assert.equal(harness.draft.environment.model_root,'/models');
+    assert.equal(readSettingsDraft(harness.draft).settings,null);
+  });
+}
+
+test('a download adopts only its own resource and preserves current explicit dependency paths',async()=>{
+  const result=setupView({resolved:{model_root:'/new-models',runtime_path:'/old-runtime',native_library_paths:['/old-native']}});
+  const harness=setupHarness(validSettingsDraft,{poll:async()=>setupOperation({result})});
+  await harness.session.start('rapidocr-models',harness.draft);
+  await harness.session.poll();
+  assert.equal(harness.draft.environment.model_root,'/new-models');
+  assert.equal(harness.draft.environment.runtime_path,validSettingsDraft.environment.runtime_path);
+  assert.equal(harness.draft.environment.library_paths,validSettingsDraft.environment.library_paths);
+  assert.equal(harness.adopted.length,1);
+});
+
+test('inspection fills verified partial paths but never replaces nonblank explicit paths',async()=>{
+  const initial={...blankSetupDraft,environment:{...blankSetupDraft.environment,runtime_path:'/explicit-runtime'}};
+  const result=setupView({resolved:{model_root:'/models',runtime_path:'/different-runtime',native_library_paths:['/native']}});
+  const harness=setupHarness(initial,{poll:async()=>setupOperation({result})});
+  await harness.session.start('inspect',initial);
+  await harness.session.poll();
+  assert.deepEqual(harness.draft.environment,{profile:SUPPORTED_PROFILES[0].profile,model_root:'/models',runtime_path:'/explicit-runtime',library_paths:'/native'});
+  assert.equal(harness.session.snapshot.view.environment,null);
+  assert.equal(harness.session.snapshot.checkedRevision,harness.session.draftRevision);
+});
+
+test('a successful download selects the default profile even when its verified path is already present',async()=>{
+  const initial={...blankSetupDraft,environment:{...blankSetupDraft.environment,model_root:'/models'}};
+  const harness=setupHarness(initial,{poll:async()=>setupOperation({result:setupView({resolved:{model_root:'/models'}})})});
+  await harness.session.start('rapidocr-models',initial);
+  await harness.session.poll();
+  assert.equal(harness.draft.environment.profile,SUPPORTED_PROFILES[0].profile);
+  assert.equal(harness.draft.environment.model_root,'/models');
+  assert.equal(harness.adopted.length,1);
+  await harness.session.poll();
+  assert.equal(harness.adopted.length,1);
+});
+
+test('advanced manual Recheck explicitly leaves native discovery and keeps the supplied library list',async()=>{
+  const harness=setupHarness(blankSetupDraft);
+  await harness.session.load();
+  await harness.session.useHomebrew(harness.draft);
+  await harness.session.poll();
+  harness.edit(validSettingsDraft);
+  await harness.session.useManual(harness.draft);
+  assert.equal(harness.session.snapshot.nativeSelection,null);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start').at(-1),{
+    kind:'start',resourceId:'inspect',environment:checkedEnvironment,nativeSelection:null,
+  });
+  await harness.session.poll();
+  assert.deepEqual(harness.draft.environment,validSettingsDraft.environment);
+  assert.deepEqual(harness.adopted,[]);
+});
+
+test('automatic adoption merges unrelated edits made during the operation into the current draft',async()=>{
+  const pending=deferredSetup();
+  const harness=setupHarness(blankSetupDraft,{poll:()=>pending.promise});
+  await harness.session.start('rapidocr-models',harness.draft);
+  const polling=harness.session.poll();
+  const edited={...harness.draft,backupDirectory:'/draft-backups',logLimit:'500',notifications:{...harness.draft.notifications,show_success:false}};
+  harness.edit(edited);
+  pending.resolve(setupOperation({result:setupView({resolved:{model_root:'/models'}})}));
+  await polling;
+  assert.equal(harness.draft.backupDirectory,edited.backupDirectory);
+  assert.equal(harness.draft.logLimit,edited.logLimit);
+  assert.equal(harness.draft.notifications,edited.notifications);
+  assert.equal(harness.draft.environment.model_root,'/models');
+  assert.equal(harness.adopted.length,1);
+});
+
 for (const {scenario,resourceId} of [
-  {scenario:'a download',resourceId:'models'},
+  {scenario:'a model download',resourceId:'rapidocr-models'},
+  {scenario:'a runtime download',resourceId:'onnxruntime'},
+  {scenario:'an inspection',resourceId:'inspect'},
+]) {
+  test(`an OCR edit and revert fences ${scenario} and a fresh inspection can recover`,async()=>{
+    const pending=deferredSetup();
+    let result=pending.promise;
+    const harness=setupHarness(blankSetupDraft,{poll:()=>result});
+    await harness.session.start(resourceId,harness.draft);
+    const polling=harness.session.poll();
+    harness.edit({...blankSetupDraft,environment:{...blankSetupDraft.environment,runtime_path:'/new-runtime'}});
+    harness.edit(blankSetupDraft);
+    pending.resolve(setupOperation({result:setupView({resolved:{model_root:'/models',runtime_path:'/runtime'}})}));
+    await polling;
+    assert.deepEqual(harness.adopted,[]);
+    assert.equal(harness.draft,blankSetupDraft);
+    assert.notEqual(harness.session.snapshot.checkedRevision,harness.session.draftRevision);
+    result=Promise.resolve(setupOperation({result:setupView({resolved:{model_root:'/models',runtime_path:'/runtime'}})}));
+    await harness.session.start('inspect',harness.draft);
+    await harness.session.poll();
+    assert.equal(harness.draft.environment.model_root,'/models');
+    assert.equal(harness.draft.environment.runtime_path,'/runtime');
+    assert.equal(harness.adopted.length,1);
+  });
+}
+
+for (const {scenario,resourceId} of [
+  {scenario:'a download',resourceId:'rapidocr-models'},
   {scenario:'a Recheck',resourceId:'inspect'},
 ]) {
   test(`closing before ${scenario} returns cancels only its late operation, never the successor`,async()=>{
     const start=deferredSetup();
-    const old=setupHarness(validSettingsDraft,{start:()=>start.promise});
-    const pending=old.session.start(resourceId,validSettingsDraft);
+    const old=setupHarness(blankSetupDraft,{start:()=>start.promise});
+    const pending=old.session.start(resourceId,old.draft);
     assert.equal(old.session.busy,true);
     old.session.close();
     const publications=old.published.length;
-    const successor=setupHarness(validSettingsDraft,{start:async()=> 'successor'});
-    await successor.session.start('inspect',validSettingsDraft);
+    const successor=setupHarness(blankSetupDraft,{start:async()=> 'successor'});
+    await successor.session.start('inspect',successor.draft);
     start.resolve('predecessor');
     await pending;
     assert.deepEqual(old.calls.filter(call=>call.kind==='cancel'),[{kind:'cancel',operationId:'predecessor'}]);
     assert.equal(old.published.length,publications);
-    assert.equal(old.session.apply(validSettingsDraft),null);
+    assert.deepEqual(old.adopted,[]);
     assert.equal(successor.session.snapshot.id,'successor');
     assert.deepEqual(successor.calls.filter(call=>call.kind==='cancel'),[]);
   });
 }
 
-test('Cancel before Start returns remains latched and publication still reports retained verified files',async()=>{
+test('Cancel before Start remains latched, and complete retained models can be reused by explicit Recheck',async()=>{
   const start=deferredSetup();
-  const original=structuredClone(validSettingsDraft);
-  const {session,calls}=setupHarness(validSettingsDraft,{start:()=>start.promise});
-  const pending=session.start('models',validSettingsDraft);
-  await session.cancel();
-  assert.deepEqual(calls.filter(call=>call.kind==='cancel'),[]);
+  const result=setupView({resolved:{model_root:'/retained-models'}});
+  const harness=setupHarness(blankSetupDraft,{start:()=>start.promise,poll:async()=>setupOperation({result})});
+  const pending=harness.session.start('rapidocr-models',harness.draft);
+  await harness.session.cancel();
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='cancel'),[]);
   start.resolve('owned');
   await pending;
-  assert.deepEqual(calls.filter(call=>call.kind==='cancel'),[{kind:'cancel',operationId:'owned'}]);
-  assert.equal(session.busy,true);
-  await session.poll();
-  assert.equal(session.snapshot.operation.progress.stage,'complete');
-  assert.equal(session.busy,false);
-  assert.equal(session.currentEnvironment(validSettingsDraft),null);
-  assert.deepEqual(validSettingsDraft,original);
-  session.close();
-  assert.equal(calls.filter(call=>call.kind==='cancel').length,1);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='cancel'),[{kind:'cancel',operationId:'owned'}]);
+  assert.equal(harness.session.busy,true);
+  await harness.session.poll();
+  assert.equal(harness.session.snapshot.operation.progress.stage,'complete');
+  assert.equal(harness.session.busy,false);
+  assert.deepEqual(harness.adopted,[]);
+  assert.equal(harness.draft,blankSetupDraft);
+  assert.equal(harness.session.snapshot.view.resolved.model_root,'/retained-models');
+  await harness.session.start('inspect',harness.draft);
+  await harness.session.poll();
+  assert.equal(harness.draft.environment.model_root,'/retained-models');
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start').map(call=>call.resourceId),['rapidocr-models','inspect']);
+  harness.session.close();
+  assert.equal(harness.calls.filter(call=>call.kind==='cancel').length,1);
 });
 
-test('a foreign poll result is never adopted and Cancel still targets only the dialog-owned ID',async()=>{
-  const {session,calls}=setupHarness(validSettingsDraft,{poll:async()=>setupOperation({id:'foreign',result:{items:[],environment:checkedEnvironment}})});
-  await session.start('inspect',validSettingsDraft);
-  await session.poll();
-  assert.equal(session.snapshot.unavailable,true);
-  assert.equal(session.snapshot.operation,null);
-  assert.equal(session.currentEnvironment(validSettingsDraft),null);
-  await session.cancel();
-  assert.deepEqual(calls.filter(call=>call.kind==='cancel'),[{kind:'cancel',operationId:'owned'}]);
+test('a foreign poll result is never adopted and Cancel targets only the dialog-owned ID',async()=>{
+  const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({id:'foreign',result:setupView({environment:checkedEnvironment})})});
+  await harness.session.start('inspect',harness.draft);
+  await harness.session.poll();
+  assert.equal(harness.session.snapshot.unavailable,true);
+  assert.equal(harness.session.snapshot.operation,null);
+  assert.deepEqual(harness.adopted,[]);
+  await harness.session.cancel();
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='cancel'),[{kind:'cancel',operationId:'owned'}]);
 });
 
-test('an inspection finishing after close cannot publish into a replacement dialog',async()=>{
-  const result=deferredSetup();
-  const old=setupHarness(validSettingsDraft,{poll:()=>result.promise});
-  await old.session.start('inspect',validSettingsDraft);
-  const pending=old.session.poll();
+test('an inspection finishing after close cannot publish or fill a replacement dialog',async()=>{
+  const pending=deferredSetup();
+  const old=setupHarness(blankSetupDraft,{poll:()=>pending.promise});
+  await old.session.start('inspect',old.draft);
+  const polling=old.session.poll();
   old.session.close();
   const publications=old.published.length;
-  const successor=setupHarness(validSettingsDraft,{start:async()=> 'successor',poll:async()=>setupOperation({id:'successor',result:{items:[],environment:checkedEnvironment}})});
-  await successor.session.start('inspect',validSettingsDraft);
+  const successor=setupHarness(blankSetupDraft,{start:async()=> 'successor',poll:async()=>setupOperation({id:'successor',result:setupView({environment:checkedEnvironment})})});
+  await successor.session.start('inspect',successor.draft);
   await successor.session.poll();
-  result.resolve(setupOperation({result:{items:[],environment:{...checkedEnvironment,runtime_path:'/old-runtime'}}}));
-  await pending;
+  pending.resolve(setupOperation({result:setupView({environment:{...checkedEnvironment,runtime_path:'/old-runtime'}})}));
+  await polling;
   assert.equal(old.published.length,publications);
-  assert.equal(old.session.currentEnvironment(validSettingsDraft),null);
-  assert.deepEqual(successor.session.currentEnvironment(validSettingsDraft),checkedEnvironment);
+  assert.deepEqual(old.adopted,[]);
+  assert.deepEqual(successor.draft.environment,environmentDraft(checkedEnvironment));
   assert.deepEqual(old.calls.filter(call=>call.kind==='cancel'),[{kind:'cancel',operationId:'owned'}]);
 });
 
-for (const {scenario,edit} of [
-  {scenario:'an OCR path edit',edit:draft=>({...draft,environment:{...draft.environment,runtime_path:'/edited-runtime'}})},
-  {scenario:'an unrelated settings edit',edit:draft=>({...draft,backupDirectory:'/edited-backups'})},
-]) {
-  test(`${scenario} invalidates an in-flight Recheck even when the draft is later reverted`,async()=>{
-    const result=deferredSetup();
-    const {session}=setupHarness(validSettingsDraft,{poll:()=>result.promise});
-    await session.start('inspect',validSettingsDraft);
-    const pending=session.poll();
-    const edited=edit(validSettingsDraft);
-    session.observeDraft(edited);
-    result.resolve(setupOperation({result:{items:[],environment:checkedEnvironment}}));
-    await pending;
-    assert.equal(session.currentEnvironment(edited),null);
-    assert.equal(session.apply(edited),null);
-    assert.equal(session.currentEnvironment(validSettingsDraft),null);
-    assert.equal(session.apply(validSettingsDraft),null);
-  });
-}
-
-test('Use applies only a current complete OCR proposal, keeps other edits and leaves saved settings unchanged',async()=>{
-  const saved={version:1,package_path:null,...readSettingsDraft(validSettingsDraft).settings};
-  const original=structuredClone(saved);
-  const draft={...validSettingsDraft,backupDirectory:'/draft-backups',logLimit:'500'};
-  const environment={...checkedEnvironment,model_root:'/managed-models',runtime_path:'/reviewed-runtime'};
-  const {session,calls}=setupHarness(draft,{poll:async()=>setupOperation({result:{items:[],environment}})});
-  await session.start('inspect',draft);
-  assert.deepEqual(calls[0],{kind:'start',resourceId:'inspect',environment:checkedEnvironment});
-  await session.poll();
-  const applied=session.apply(draft);
-  assert.deepEqual(applied.environment,environmentDraft(environment));
-  assert.equal(applied.backupDirectory,draft.backupDirectory);
-  assert.equal(applied.logLimit,draft.logLimit);
-  assert.equal(applied.notifications,draft.notifications);
-  assert.deepEqual(readSettingsDraft(applied).settings.ocr_environment,environment);
-  assert.deepEqual(saved,original);
-  assert.equal(session.snapshot.applied,true);
-  assert.equal(session.currentEnvironment(applied),null);
-  session.close();
-  assert.deepEqual(calls.filter(call=>call.kind==='cancel'),[]);
-});
-
-test('an edit immediately before Use refuses the proposal and a fresh Recheck can recover',async()=>{
-  const {session}=setupHarness(validSettingsDraft,{poll:async()=>setupOperation({result:{items:[],environment:checkedEnvironment}})});
-  await session.start('inspect',validSettingsDraft);
-  await session.poll();
-  const edited={...validSettingsDraft,environment:{...validSettingsDraft.environment,runtime_path:'/new-runtime'}};
-  assert.equal(session.apply(edited),null);
-  await session.start('inspect',edited);
-  await session.poll();
-  assert.deepEqual(session.currentEnvironment(edited),checkedEnvironment);
-});
-
 for (const {scenario,stage,error,cleanup_error,expectedBusy} of [
-  {scenario:'a cancelled Recheck',stage:'cancelled',error:{category:'Cancelled',message:'cancelled',context:null},cleanup_error:null,expectedBusy:false},
-  {scenario:'a failed Recheck',stage:'failed',error:{category:'Storage',message:'unreadable',context:null},cleanup_error:null,expectedBusy:false},
-  {scenario:'incomplete Recheck cleanup',stage:'complete',error:null,cleanup_error:{category:'Storage',message:'cleanup failed',context:null},expectedBusy:true},
+  {scenario:'a cancelled inspection',stage:'cancelled',error:{category:'Cancelled',message:'cancelled',context:null},cleanup_error:null,expectedBusy:false},
+  {scenario:'a failed inspection',stage:'failed',error:{category:'Storage',message:'unreadable',context:null},cleanup_error:null,expectedBusy:false},
+  {scenario:'incomplete inspection cleanup',stage:'complete',error:null,cleanup_error:{category:'Storage',message:'cleanup failed',context:null},expectedBusy:true},
 ]) {
-  test(`${scenario} remains visible and cannot supply a settings proposal`,async()=>{
-    const {session}=setupHarness(validSettingsDraft,{poll:async()=>setupOperation({stage,error,cleanup_error,result:{items:[],environment:checkedEnvironment}})});
-    await session.start('inspect',validSettingsDraft);
-    await session.poll();
-    assert.equal(session.snapshot.operation.error,error);
-    assert.equal(session.snapshot.operation.cleanup_error,cleanup_error);
-    assert.equal(session.busy,expectedBusy);
-    assert.equal(session.currentEnvironment(validSettingsDraft),null);
-    assert.equal(session.apply(validSettingsDraft),null);
+  test(`${scenario} remains visible without automatically filling paths`,async()=>{
+    const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({stage,error,cleanup_error,result:setupView({environment:checkedEnvironment})})});
+    await harness.session.start('inspect',harness.draft);
+    await harness.session.poll();
+    assert.equal(harness.session.snapshot.operation.error,error);
+    assert.equal(harness.session.snapshot.operation.cleanup_error,cleanup_error);
+    assert.equal(harness.session.busy,expectedBusy);
+    assert.deepEqual(harness.adopted,[]);
+    assert.equal(harness.draft,blankSetupDraft);
   });
 }
 
-test('polling is single-flight and transport failures do not release setup ownership',async()=>{
-  const result=deferredSetup();
-  const {session,calls}=setupHarness(validSettingsDraft,{poll:()=>result.promise});
-  await session.start('models',validSettingsDraft);
-  const pending=session.poll();
-  await session.poll();
-  assert.equal(calls.filter(call=>call.kind==='poll').length,1);
-  const failure={category:'Transport',message:'temporarily unavailable',context:null};
-  result.reject(failure);
-  await pending;
-  assert.equal(session.snapshot.pollError,failure);
-  assert.equal(session.busy,true);
-  result.promise=Promise.resolve(setupOperation());
-  await session.poll();
-  assert.equal(session.snapshot.pollError,null);
-  assert.equal(session.busy,false);
+test('Homebrew discovery automatically fills native paths and repeats the selected method',async()=>{
+  const result=setupView({resolved:{native_library_paths:['/homebrew/core','/homebrew/imgproc','/homebrew/imgcodecs']}});
+  const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
+  await harness.session.load();
+  await harness.session.useHomebrew(harness.draft);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start'),[{kind:'start',resourceId:'inspect',environment:null,nativeSelection:{method:'homebrew'}}]);
+  await harness.session.poll();
+  assert.equal(harness.draft.environment.library_paths,'/homebrew/core\n/homebrew/imgproc\n/homebrew/imgcodecs');
+  assert.equal(harness.draft.environment.profile,SUPPORTED_PROFILES[0].profile);
+  assert.equal(harness.draft.environment.model_root,'');
+  assert.equal(harness.draft.environment.runtime_path,'');
+  await harness.session.start('inspect',harness.draft);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start').map(call=>call.nativeSelection),[{method:'homebrew'},{method:'homebrew'}]);
 });
 
-test('a failed cancellation is actionable and a terminal poll does not admit new work before Cancel returns',async()=>{
+test('choosing an installation folder fills the native list without editing individual paths',async()=>{
+  const result=setupView({resolved:{native_library_paths:['/installation/core','/installation/codec']}});
+  const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
+  await harness.session.load();
+  await harness.session.pickFolder(harness.draft);
+  assert.deepEqual(harness.session.snapshot.nativeSelection,{method:'folders',paths:['/installation']});
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start'),[{kind:'start',resourceId:'inspect',environment:null,nativeSelection:{method:'folders',paths:['/installation']}}]);
+  await harness.session.poll();
+  assert.equal(harness.draft.environment.library_paths,'/installation/core\n/installation/codec');
+  await harness.session.start('inspect',harness.draft);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start').at(-1).nativeSelection,{method:'folders',paths:['/installation']});
+});
+
+test('an explicitly added dependency folder is retained through failure and used on each subsequent inspection',async()=>{
+  const paths=['/opencv','/extra-dependencies'];
+  let operation=setupOperation({stage:'failed',error:{category:'Storage',message:'missing dependency',context:null}});
+  const harness=setupHarness(blankSetupDraft,{pickFolder:async()=>paths.shift(),poll:async()=>operation});
+  await harness.session.load();
+  await harness.session.pickFolder(harness.draft);
+  await harness.session.poll();
+  assert.deepEqual(harness.adopted,[]);
+  assert.deepEqual(harness.session.snapshot.nativeSelection,{method:'folders',paths:['/opencv']});
+  await harness.session.pickFolder(harness.draft,true);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start').at(-1).nativeSelection,{method:'folders',paths:['/opencv','/extra-dependencies']});
+  operation=setupOperation({result:setupView({resolved:{native_library_paths:['/opencv/core','/extra-dependencies/codec']}})});
+  await harness.session.poll();
+  assert.equal(harness.draft.environment.library_paths,'/opencv/core\n/extra-dependencies/codec');
+  await harness.session.start('inspect',harness.draft);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start').at(-1).nativeSelection,{method:'folders',paths:['/opencv','/extra-dependencies']});
+});
+
+test('cancelling the folder picker keeps the existing source choice and never starts inspection',async()=>{
+  const harness=setupHarness(blankSetupDraft,{pickFolder:async()=>null});
+  await harness.session.load();
+  await harness.session.useHomebrew(harness.draft);
+  await harness.session.poll();
+  const starts=harness.calls.filter(call=>call.kind==='start').length;
+  await harness.session.pickFolder(harness.draft);
+  assert.equal(harness.session.snapshot.pickerPending,false);
+  assert.deepEqual(harness.session.snapshot.nativeSelection,{method:'homebrew'});
+  assert.equal(harness.calls.filter(call=>call.kind==='start').length,starts);
+  assert.deepEqual(harness.adopted,[]);
+});
+
+test('a folder picker result after an OCR edit and revert is ignored',async()=>{
+  const picker=deferredSetup();
+  const harness=setupHarness(blankSetupDraft,{pickFolder:()=>picker.promise});
+  await harness.session.load();
+  const choosing=harness.session.pickFolder(harness.draft);
+  assert.equal(harness.session.busy,true);
+  await harness.session.start('rapidocr-models',harness.draft);
+  harness.edit({...blankSetupDraft,environment:{...blankSetupDraft.environment,model_root:'/new-models'}});
+  harness.edit(blankSetupDraft);
+  picker.resolve('/old-folder');
+  await choosing;
+  assert.equal(harness.session.snapshot.pickerStale,true);
+  assert.equal(harness.session.snapshot.nativeSelection,null);
+  assert.equal(harness.session.busy,false);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start'),[]);
+  assert.deepEqual(harness.adopted,[]);
+});
+
+test('unrelated draft edits while choosing a folder are preserved by its automatic inspection',async()=>{
+  const picker=deferredSetup();
+  const result=setupView({resolved:{native_library_paths:['/opencv/core']}});
+  const harness=setupHarness(blankSetupDraft,{pickFolder:()=>picker.promise,poll:async()=>setupOperation({result})});
+  await harness.session.load();
+  const choosing=harness.session.pickFolder(harness.draft);
+  harness.edit({...harness.draft,backupDirectory:'/new-backups'});
+  picker.resolve('/opencv');
+  await choosing;
+  await harness.session.poll();
+  assert.equal(harness.draft.backupDirectory,'/new-backups');
+  assert.equal(harness.draft.environment.library_paths,'/opencv/core');
+  assert.equal(harness.session.snapshot.pickerStale,false);
+});
+
+for (const {scenario,stop} of [
+  {scenario:'close',stop:session=>session.close()},
+  {scenario:'Cancel setup',stop:session=>session.cancel()},
+]) {
+  test(`a late folder answer after ${scenario} cannot enter a successor dialog or picker`,async()=>{
+    const picker=deferredSetup();
+    const old=setupHarness(blankSetupDraft,{pickFolder:()=>picker.promise});
+    await old.session.load();
+    const choosing=old.session.pickFolder(old.draft);
+    await stop(old.session);
+    const successor=setupHarness(blankSetupDraft,{pickFolder:async()=>'/successor-folder'});
+    await successor.session.load();
+    await successor.session.pickFolder(successor.draft);
+    picker.resolve('/old-folder');
+    await choosing;
+    assert.deepEqual(old.calls.filter(call=>call.kind==='start'),[]);
+    assert.equal(old.session.snapshot.nativeSelection,null);
+    assert.deepEqual(successor.session.snapshot.nativeSelection,{method:'folders',paths:['/successor-folder']});
+  });
+}
+
+test('cancelling one picker fences its answer even after a new picker starts in the same session',async()=>{
+  const first=deferredSetup(), second=deferredSetup();
+  let count=0;
+  const harness=setupHarness(blankSetupDraft,{pickFolder:()=>++count===1 ? first.promise : second.promise});
+  await harness.session.load();
+  const old=harness.session.pickFolder(harness.draft);
+  await harness.session.cancel();
+  const current=harness.session.pickFolder(harness.draft);
+  first.resolve('/old-folder');
+  await old;
+  assert.equal(harness.session.snapshot.pickerPending,true);
+  assert.equal(harness.session.snapshot.nativeSelection,null);
+  second.resolve('/current-folder');
+  await current;
+  assert.deepEqual(harness.session.snapshot.nativeSelection,{method:'folders',paths:['/current-folder']});
+  assert.equal(harness.calls.filter(call=>call.kind==='start').length,1);
+});
+
+test('duplicate folders do not expand approval and eight approved folders refuse a ninth picker',async()=>{
+  const answers=['/folder-1','/folder-1',...Array.from({length:7},(_,index)=>`/folder-${index+2}`)];
+  const harness=setupHarness(blankSetupDraft,{pickFolder:async()=>answers.shift()});
+  await harness.session.load();
+  await harness.session.pickFolder(harness.draft);
+  await harness.session.poll();
+  await harness.session.pickFolder(harness.draft,true);
+  await harness.session.poll();
+  assert.deepEqual(harness.session.snapshot.nativeSelection,{method:'folders',paths:['/folder-1']});
+  for (let index=0;index<7;index++) {
+    await harness.session.pickFolder(harness.draft,true);
+    await harness.session.poll();
+  }
+  assert.deepEqual(harness.session.snapshot.nativeSelection.paths,Array.from({length:8},(_,index)=>`/folder-${index+1}`));
+  const picks=harness.calls.filter(call=>call.kind==='pickFolder').length;
+  await harness.session.pickFolder(harness.draft,true);
+  assert.equal(harness.calls.filter(call=>call.kind==='pickFolder').length,picks);
+});
+
+test('folder picker failures remain actionable without dropping the source selection',async()=>{
+  const failure={category:'Transport',message:'picker unavailable',context:null};
+  const harness=setupHarness(blankSetupDraft,{pickFolder:async()=>{throw failure;}});
+  await harness.session.load();
+  await harness.session.pickFolder(harness.draft);
+  assert.equal(harness.session.snapshot.error,failure);
+  assert.equal(harness.session.snapshot.pickerPending,false);
+  assert.equal(harness.session.busy,false);
+  assert.equal(harness.session.snapshot.nativeSelection,null);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start'),[]);
+});
+
+test('platform method admission never opens an unsupported native picker or Homebrew search',async()=>{
+  const harness=setupHarness(blankSetupDraft,{catalog:async()=>setupView({native_methods:[]})});
+  await harness.session.load();
+  await harness.session.useHomebrew(harness.draft);
+  await harness.session.pickFolder(harness.draft);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start'||call.kind==='pickFolder'),[]);
+});
+
+test('polling stays single-flight and transport failures do not release ownership',async()=>{
+  const pending=deferredSetup();
+  let result=pending.promise;
+  const harness=setupHarness(blankSetupDraft,{poll:()=>result});
+  await harness.session.start('rapidocr-models',harness.draft);
+  const polling=harness.session.poll();
+  await harness.session.poll();
+  assert.equal(harness.calls.filter(call=>call.kind==='poll').length,1);
+  const failure={category:'Transport',message:'temporarily unavailable',context:null};
+  pending.reject(failure);
+  await polling;
+  assert.equal(harness.session.snapshot.pollError,failure);
+  assert.equal(harness.session.busy,true);
+  result=Promise.resolve(setupOperation());
+  await harness.session.poll();
+  assert.equal(harness.session.snapshot.pollError,null);
+  assert.equal(harness.session.busy,false);
+});
+
+test('failed cancellation can be retried and terminal polling admits no work before Cancel returns',async()=>{
   const failure={category:'Transport',message:'cancel unavailable',context:null};
   const cancellation=deferredSetup();
   let failed=true;
-  const {session,calls}=setupHarness(validSettingsDraft,{cancel:async()=>{if (failed) throw failure; await cancellation.promise;}});
-  await session.start('models',validSettingsDraft);
-  await session.cancel();
-  assert.equal(session.snapshot.error,failure);
-  assert.equal(session.snapshot.cancelPending,false);
-  assert.equal(session.busy,true);
+  const harness=setupHarness(blankSetupDraft,{cancel:async()=>{if (failed) throw failure; await cancellation.promise;},poll:async()=>setupOperation({result:setupView({environment:checkedEnvironment})})});
+  await harness.session.start('rapidocr-models',harness.draft);
+  await harness.session.cancel();
+  assert.equal(harness.session.snapshot.error,failure);
+  assert.equal(harness.session.snapshot.cancelPending,false);
+  assert.equal(harness.session.busy,true);
   failed=false;
-  const pending=session.cancel();
-  await session.poll();
-  assert.equal(session.snapshot.operation.active,false);
-  assert.equal(session.busy,true);
-  await session.start('inspect',validSettingsDraft);
-  assert.equal(calls.filter(call=>call.kind==='start').length,1);
+  const cancelling=harness.session.cancel();
+  await harness.session.poll();
+  assert.equal(harness.session.snapshot.operation.active,false);
+  assert.equal(harness.session.busy,true);
+  assert.deepEqual(harness.adopted,[]);
+  await harness.session.start('inspect',harness.draft);
+  assert.equal(harness.calls.filter(call=>call.kind==='start').length,1);
   cancellation.resolve();
-  await pending;
-  assert.equal(session.snapshot.error,null);
-  assert.equal(session.busy,false);
+  await cancelling;
+  assert.equal(harness.session.snapshot.error,null);
+  assert.equal(harness.session.busy,false);
 });
 
-test('reopening observes a settling predecessor without cancelling it or using its old proposal',async()=>{
-  let operation=setupOperation({id:'predecessor',active:true,stage:'verifying',result:{items:[],environment:checkedEnvironment}});
-  const {session,calls}=setupHarness(validSettingsDraft,{poll:async()=>operation});
-  await session.load();
-  assert.equal(session.snapshot.id,'predecessor');
-  assert.equal(session.snapshot.owned,false);
-  assert.equal(session.busy,true);
-  assert.equal(session.currentEnvironment(validSettingsDraft),null);
-  await session.cancel();
-  await session.start('inspect',validSettingsDraft);
-  assert.deepEqual(calls.filter(call=>call.kind==='cancel'||call.kind==='start'),[]);
-  operation=setupOperation({id:'predecessor',result:{items:[],environment:checkedEnvironment}});
-  await session.poll();
-  assert.equal(session.busy,false);
-  assert.equal(session.currentEnvironment(validSettingsDraft),null);
-  assert.equal(session.apply(validSettingsDraft),null);
-  await session.start('inspect',validSettingsDraft);
-  operation=setupOperation({result:{items:[],environment:checkedEnvironment}});
-  await session.poll();
-  assert.equal(session.snapshot.owned,true);
-  assert.deepEqual(session.currentEnvironment(validSettingsDraft),checkedEnvironment);
+test('reopening observes a settling predecessor without adopting it, then explicit Recheck can reuse its files',async()=>{
+  let operation=setupOperation({id:'predecessor',active:true,stage:'verifying',result:setupView({environment:checkedEnvironment})});
+  const harness=setupHarness(blankSetupDraft,{poll:async()=>operation});
+  await harness.session.load();
+  assert.equal(harness.session.snapshot.id,'predecessor');
+  assert.equal(harness.session.snapshot.owned,false);
+  assert.equal(harness.session.busy,true);
+  assert.deepEqual(harness.adopted,[]);
+  await harness.session.cancel();
+  await harness.session.start('inspect',harness.draft);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='cancel'||call.kind==='start'),[]);
+  operation=setupOperation({id:'predecessor',result:setupView({environment:checkedEnvironment})});
+  await harness.session.poll();
+  assert.equal(harness.session.busy,false);
+  assert.deepEqual(harness.adopted,[]);
+  await harness.session.start('inspect',harness.draft);
+  operation=setupOperation({result:setupView({environment:checkedEnvironment})});
+  await harness.session.poll();
+  assert.equal(harness.session.snapshot.owned,true);
+  assert.deepEqual(harness.draft.environment,environmentDraft(checkedEnvironment));
 });
 
 test('closing a progress-only observer never cancels a predecessor or its successor',async()=>{
   let operation=setupOperation({id:'predecessor',active:true,stage:'downloading'});
-  const {session,calls}=setupHarness(validSettingsDraft,{poll:async()=>operation});
-  await session.load();
+  const harness=setupHarness(blankSetupDraft,{poll:async()=>operation});
+  await harness.session.load();
   operation=setupOperation({id:'successor',active:true,stage:'verifying'});
-  await session.poll();
-  assert.equal(session.snapshot.id,'successor');
-  assert.equal(session.snapshot.owned,false);
-  session.close();
-  assert.deepEqual(calls.filter(call=>call.kind==='cancel'),[]);
+  await harness.session.poll();
+  assert.equal(harness.session.snapshot.id,'successor');
+  assert.equal(harness.session.snapshot.owned,false);
+  harness.session.close();
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='cancel'),[]);
 });
 
 test('reopened incomplete cleanup stays visible and blocks new setup until restart',async()=>{
   const cleanup_error={category:'Storage',message:'could not remove staging',context:null};
-  const {session,calls}=setupHarness(validSettingsDraft,{poll:async()=>setupOperation({id:'predecessor',cleanup_error})});
-  await session.load();
-  assert.equal(session.busy,true);
-  assert.equal(session.snapshot.operation.cleanup_error,cleanup_error);
-  await session.start('inspect',validSettingsDraft);
-  await session.cancel();
-  session.close();
-  assert.deepEqual(calls.filter(call=>call.kind==='cancel'||call.kind==='start'),[]);
-  assert.equal(session.currentEnvironment(validSettingsDraft),null);
+  const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({id:'predecessor',cleanup_error})});
+  await harness.session.load();
+  assert.equal(harness.session.busy,true);
+  assert.equal(harness.session.snapshot.operation.cleanup_error,cleanup_error);
+  await harness.session.start('inspect',harness.draft);
+  await harness.session.cancel();
+  harness.session.close();
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='cancel'||call.kind==='start'),[]);
+  assert.deepEqual(harness.adopted,[]);
 });
 
-test('retrying initial status failure remains read-only and discovers the still-settling predecessor',async()=>{
+test('retrying initial status failure remains read-only and finds the still-settling predecessor',async()=>{
   const failure={category:'Transport',message:'status unavailable',context:null};
   let failed=true;
-  const {session,calls}=setupHarness(validSettingsDraft,{poll:async()=>{
+  const harness=setupHarness(blankSetupDraft,{poll:async()=>{
     if (failed) throw failure;
     return setupOperation({id:'predecessor',active:true,stage:'downloading'});
   }});
-  await session.load();
-  assert.equal(session.snapshot.pollError,failure);
-  assert.deepEqual(session.snapshot.view,{items:[],environment:null});
+  await harness.session.load();
+  assert.equal(harness.session.snapshot.pollError,failure);
+  assert.deepEqual(harness.session.snapshot.view,setupView());
   failed=false;
-  await session.load();
-  assert.equal(session.snapshot.pollError,null);
-  assert.equal(session.busy,true);
-  assert.equal(session.snapshot.owned,false);
-  assert.equal(session.snapshot.id,'predecessor');
-  assert.deepEqual(calls.filter(call=>call.kind==='start'||call.kind==='cancel'),[]);
+  await harness.session.load();
+  assert.equal(harness.session.snapshot.pollError,null);
+  assert.equal(harness.session.busy,true);
+  assert.equal(harness.session.snapshot.owned,false);
+  assert.equal(harness.session.snapshot.id,'predecessor');
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start'||call.kind==='cancel'),[]);
 });

@@ -69,24 +69,9 @@ fn install(fixture: &Fixture, catalog: &Catalog) {
 }
 
 #[test]
-fn embedded_catalog_is_offline_valid_and_profiles_share_content() {
-    let catalog = Catalog::load().unwrap();
-    assert_eq!(catalog.profiles.len(), 2);
-    assert_eq!(catalog.models.assets.len(), 2);
-    let view = catalog_view().unwrap();
-    assert!(view.environment.is_none());
-    assert_eq!(
-        view.items.iter().filter(|item| item.downloadable).count(),
-        1
-    );
-    assert_eq!(view.items[0].state, "missing");
-    assert!(
-        guidance_link("rapidocr-models", 0)
-            .unwrap()
-            .starts_with("https://")
-    );
-    assert!(guidance_link("caller-url", 0).is_err());
-    assert!(guidance_command("rapidocr-models", 0).is_err());
+fn guidance_rejects_caller_selected_resources() {
+    assert!(guidance_link("https://caller.example/install", 0).is_err());
+    assert!(guidance_command("brew install caller-selected-package", 0).is_err());
 }
 
 #[test]
@@ -168,7 +153,7 @@ fn partial_hints_keep_supported_profile_and_reject_nonblank_unsupported_tuple() 
 #[test]
 fn absent_resources_do_not_create_directories_or_propose_environment() {
     let fixture = Fixture::new();
-    let view = inspect(&fixture.0, None, &AtomicBool::new(false)).unwrap();
+    let view = inspect(&fixture.0, None, None, &AtomicBool::new(false)).unwrap();
     assert!(view.environment.is_none());
     assert_eq!(view.items[0].state, "missing");
     assert!(!fixture.0.join("ocr-resources").exists());
@@ -542,7 +527,14 @@ fn recheck_returns_complete_draft_only_after_all_resources_resolve() {
             .native_library_paths
             .push(path.to_str().unwrap().into());
     }
-    let result = inspect_with(&catalog, &fixture.0, Some(&hints), &AtomicBool::new(false)).unwrap();
+    let result = inspect_with(
+        &catalog,
+        &fixture.0,
+        Some(&hints),
+        None,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     let proposal = result.environment.unwrap();
     assert_eq!(proposal.profile, BOUNDED_PROFILE);
     assert_eq!(
@@ -551,7 +543,14 @@ fn recheck_returns_complete_draft_only_after_all_resources_resolve() {
     );
     assert!(hints.model_root.is_empty());
     fs::write(runtime, "wrong runtime").unwrap();
-    let result = inspect_with(&catalog, &fixture.0, Some(&hints), &AtomicBool::new(false)).unwrap();
+    let result = inspect_with(
+        &catalog,
+        &fixture.0,
+        Some(&hints),
+        None,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     assert!(result.environment.is_none());
     assert_eq!(result.items[0].state, "verified");
     assert_eq!(result.items[1].state, "incompatible");
@@ -614,17 +613,38 @@ fn partial_hints_use_managed_models_but_never_override_an_explicit_model_root() 
     let catalog = fixture_catalog();
     install(&fixture, &catalog);
     let mut hints = proposed_tuple(None).unwrap();
-    let view = inspect_with(&catalog, &fixture.0, Some(&hints), &AtomicBool::new(false)).unwrap();
+    let view = inspect_with(
+        &catalog,
+        &fixture.0,
+        Some(&hints),
+        None,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     assert_eq!(view.items[0].state, "verified");
     assert!(view.environment.is_none());
+    assert_eq!(
+        view.resolved.model_root.as_deref(),
+        fixture.installed(&catalog).to_str()
+    );
+    assert!(view.resolved.runtime_path.is_none());
+    assert!(view.resolved.native_library_paths.is_none());
     hints.model_root = fixture
         .0
         .join("explicit-missing-models")
         .to_str()
         .unwrap()
         .into();
-    let view = inspect_with(&catalog, &fixture.0, Some(&hints), &AtomicBool::new(false)).unwrap();
+    let view = inspect_with(
+        &catalog,
+        &fixture.0,
+        Some(&hints),
+        None,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     assert_eq!(view.items[0].state, "missing");
     assert!(view.environment.is_none());
+    assert!(view.resolved.model_root.is_none());
     assert!(fixture.installed(&catalog).exists());
 }

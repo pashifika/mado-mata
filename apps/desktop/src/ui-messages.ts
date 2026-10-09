@@ -75,8 +75,8 @@ function catalog(data: typeof enData) {
     },
     ocrSetup: {
       ...data.ocrSetup,
-      state: (value: string) => known(data.ocrSetup.states, value),
-      stage: (value: string) => known(data.ocrSetup.stages, value),
+      state: (value: string) => Object.hasOwn(data.ocrSetup.states, value) ? data.ocrSetup.states[value as keyof typeof data.ocrSetup.states] : data.ocrSetup.unknownState,
+      stage: (value: string) => Object.hasOwn(data.ocrSetup.stages, value) ? data.ocrSetup.stages[value as keyof typeof data.ocrSetup.stages] : data.ocrSetup.unknownStage,
     },
     run: {
       ...data.run,

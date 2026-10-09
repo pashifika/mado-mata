@@ -3,6 +3,10 @@
 mod catalog;
 mod download;
 mod files;
+mod native;
+mod runtime;
+
+pub use native::NativeSelection;
 #[cfg(test)]
 mod tests;
 
@@ -50,10 +54,19 @@ pub struct SetupItem {
     pub commands: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ResolvedResources {
+    pub model_root: Option<String>,
+    pub runtime_path: Option<String>,
+    pub native_library_paths: Option<Vec<String>>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct SetupView {
     pub items: Vec<SetupItem>,
     pub environment: Option<OcrEnvironment>,
+    pub resolved: ResolvedResources,
+    pub native_methods: &'static [&'static str],
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -66,26 +79,39 @@ pub struct SetupProgress {
 
 /// Pure embedded catalog presentation; never touches local files or the network.
 pub fn catalog_view() -> Result<SetupView, Fault> {
+    let catalog = Catalog::load()?;
     Ok(SetupView {
-        items: Catalog::load()?.items(),
+        items: catalog.items(),
         environment: None,
+        resolved: ResolvedResources::default(),
+        native_methods: native_methods(&catalog),
     })
+}
+
+fn native_methods(catalog: &Catalog) -> &'static [&'static str] {
+    match catalog.platform().map(|platform| platform.os.as_str()) {
+        Some("macos") => &["homebrew", "folders"],
+        Some("windows") => &["folders"],
+        _ => &[],
+    }
 }
 
 /// The caller holds exclusive setup admission until this call and cleanup settle.
 pub fn inspect(
     root: &Path,
     environment: Option<&OcrEnvironment>,
+    native_selection: Option<&NativeSelection>,
     cancel: &AtomicBool,
 ) -> Result<SetupView, Fault> {
     let catalog = Catalog::load()?;
-    inspect_with(&catalog, root, environment, cancel)
+    inspect_with(&catalog, root, environment, native_selection, cancel)
 }
 
 fn inspect_with(
     catalog: &Catalog,
     root: &Path,
     environment: Option<&OcrEnvironment>,
+    native_selection: Option<&NativeSelection>,
     cancel: &AtomicBool,
 ) -> Result<SetupView, Fault> {
     check_cancel(cancel)?;
@@ -115,13 +141,15 @@ fn inspect_with(
         return Ok(SetupView {
             items,
             environment: None,
+            resolved: ResolvedResources {
+                model_root,
+                ..ResolvedResources::default()
+            },
+            native_methods: native_methods(catalog),
         });
     };
     let runtime = if proposal.runtime_path.is_empty() {
-        Err(fault(
-            "missing",
-            "select the externally installed official runtime file",
-        ))
+        runtime::installed(root, catalog, cancel)
     } else {
         files::runtime(Path::new(&proposal.runtime_path), &platform.runtime, cancel)
     };
@@ -132,31 +160,43 @@ fn inspect_with(
         "レビュー済み公式ランタイムのバイト列を検証しました。APIと初期化はCheckで確認してください。",
         cancel,
     )?;
-    let native = files::native(&proposal.native_library_paths, platform, cancel);
+    let native = match native_selection {
+        Some(selection) => native::discover(platform, selection, cancel),
+        None => files::native(&proposal.native_library_paths, platform, cancel),
+    };
     let native = observation(
         &mut items[2],
         native,
-        "Required module names and target file headers checked. The supplied list remains your reviewed dependency closure; ABI/loadability are not certified. Save and Check.",
-        "必須モジュール名と対象CPUのファイルヘッダーを確認しました。指定一覧の依存関係は利用者によるレビューが必要です。ABIとロード可否は保証しません。保存してCheckしてください。",
+        "Image-processing library files checked. Save settings; engine initialization is checked separately.",
+        "画像処理ライブラリのファイルを確認しました。設定を保存してください。エンジン初期化の確認は別の操作です。",
         cancel,
     )?;
-    if let (Some(model_root), Some(runtime_path), Some(native_library_paths)) =
-        (model_root, runtime, native)
-    {
-        proposal.model_root = model_root;
-        proposal.runtime_path = runtime_path;
-        proposal.native_library_paths = native_library_paths;
+    let resolved = ResolvedResources {
+        model_root,
+        runtime_path: runtime,
+        native_library_paths: native,
+    };
+    let environment = if let (Some(model_root), Some(runtime_path), Some(native_library_paths)) = (
+        &resolved.model_root,
+        &resolved.runtime_path,
+        &resolved.native_library_paths,
+    ) {
+        proposal.model_root.clone_from(model_root);
+        proposal.runtime_path.clone_from(runtime_path);
+        proposal
+            .native_library_paths
+            .clone_from(native_library_paths);
         proposal.validate()?;
-        check_cancel(cancel)?;
-        return Ok(SetupView {
-            items,
-            environment: Some(proposal),
-        });
-    }
+        Some(proposal)
+    } else {
+        None
+    };
     check_cancel(cancel)?;
     Ok(SetupView {
         items,
-        environment: None,
+        environment,
+        resolved,
+        native_methods: native_methods(catalog),
     })
 }
 
@@ -165,15 +205,29 @@ pub fn download(
     resource_id: &str,
     cancel: &AtomicBool,
     progress: impl FnMut(SetupProgress),
-) -> Result<(), Fault> {
+) -> Result<SetupView, Fault> {
     let catalog = Catalog::load()?;
-    if resource_id != catalog.models.id {
-        return Err(fault(
-            "resource",
-            "only the catalog model set is downloadable; native prerequisites use manual guidance",
-        ));
+    let mut view = SetupView {
+        items: catalog.items(),
+        environment: None,
+        resolved: ResolvedResources::default(),
+        native_methods: native_methods(&catalog),
+    };
+    match resource_id {
+        "rapidocr-models" => {
+            download::acquire(root, &catalog, cancel, progress)?;
+            view.resolved.model_root = Some(absolute_string(
+                &root.join("ocr-resources").join(catalog.installation_name()),
+            )?);
+            view.items[0].state = "verified".into();
+        }
+        "onnxruntime" => {
+            view.resolved.runtime_path = Some(runtime::acquire(root, &catalog, cancel, progress)?);
+            view.items[1].state = "verified".into();
+        }
+        _ => return Err(fault("resource", "select a downloadable catalog resource")),
     }
-    download::acquire(root, &catalog, cancel, progress)
+    Ok(view)
 }
 
 pub fn guidance_link(resource_id: &str, index: usize) -> Result<String, Fault> {

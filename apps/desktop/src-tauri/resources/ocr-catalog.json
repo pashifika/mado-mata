@@ -7,10 +7,10 @@
   ],
   "models": {
     "id": "rapidocr-models",
-    "name": {"en": "Verified OCR models", "ja": "検証済みOCRモデル"},
+    "name": {"en": "OCR models", "ja": "OCRモデル"},
     "detail": {
-      "en": "Download 25,979,900 bytes from Hugging Face (SWHL and independent DjB314 mirror). Both supported profiles share these exact Apache-2.0 files. Downloads remain installed when settings are cancelled. File verification is not engine initialization.",
-      "ja": "Hugging Face（SWHLおよび独立ミラーDjB314）から25,979,900バイトを取得します。対応する2プロファイルで同じApache-2.0モデルを共有します。設定をキャンセルしても取得済みファイルは残ります。ファイル検証はエンジン初期化ではありません。"
+      "en": "Download the files used to read text (26 MB). They are selected automatically in this settings draft. Cancelling settings keeps downloaded files.",
+      "ja": "文字認識に使うファイル（26 MB）を取得し、編集中の設定に自動で選択します。設定をキャンセルしても取得済みファイルは残ります。"
     },
     "version": "rapidocr-v3.9.2-g004",
     "license": "Apache-2.0",
@@ -41,10 +41,10 @@
       "arch": "aarch64",
       "runtime": {
         "id": "onnxruntime",
-        "name": {"en": "ONNX Runtime 1.29.0 (CPU)", "ja": "ONNX Runtime 1.29.0（CPU）"},
+        "name": {"en": "OCR runtime", "ja": "OCRランタイム"},
         "detail": {
-          "en": "Download the official arm64 archive and unpack it externally, retaining LICENSE and ThirdPartyNotices. Select lib/libonnxruntime.1.29.0.dylib in the manual settings, then Recheck. Only the reviewed official file is identified here; API 17 and initialization still require Check.",
-          "ja": "公式arm64アーカイブを外部で展開し、LICENSEとThirdPartyNoticesを保持してください。手動設定でlib/libonnxruntime.1.29.0.dylibを指定して再確認します。ここではレビュー済み公式ファイルを識別します。API 17と初期化は既存のCheckで確認します。"
+          "en": "Download ONNX Runtime 1.29.0 from Microsoft (42 MB). The app verifies and installs it with its licenses, then selects it in this settings draft. No separate installation is needed.",
+          "ja": "MicrosoftからONNX Runtime 1.29.0（42 MB）を取得します。ライセンスとともに検証・保存し、編集中の設定に自動で選択します。別途インストールする必要はありません。"
         },
         "version": "1.29.0-api17-cpu",
         "license": "MIT",
@@ -56,14 +56,28 @@
         "commands": [],
         "filename": "libonnxruntime.1.29.0.dylib",
         "bytes": 43184400,
-        "sha256": "68f6e54e695583adc371aef610ec4abb1ffaa3df656582922de7690f7e2000eb"
+        "sha256": "68f6e54e695583adc371aef610ec4abb1ffaa3df656582922de7690f7e2000eb",
+        "archive": {
+          "format": "tgz",
+          "asset": {
+            "path": "onnxruntime-osx-arm64-1.29.0.tgz",
+            "bytes": 41578864,
+            "sha256": "d0706fc34f315d8c88639d0a8c81f2e09e815f282cabed3493c06a054352cf92",
+            "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/onnxruntime-osx-arm64-1.29.0.tgz"
+          },
+          "members": [
+            {"archive_path": "onnxruntime-osx-arm64-1.29.0/lib/libonnxruntime.1.29.0.dylib", "path": "libonnxruntime.1.29.0.dylib", "bytes": 43184400, "sha256": "68f6e54e695583adc371aef610ec4abb1ffaa3df656582922de7690f7e2000eb"},
+            {"archive_path": "onnxruntime-osx-arm64-1.29.0/LICENSE", "path": "LICENSE", "bytes": 1073, "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"},
+            {"archive_path": "onnxruntime-osx-arm64-1.29.0/ThirdPartyNotices.txt", "path": "ThirdPartyNotices.txt", "bytes": 336906, "sha256": "53d3fa5821ac016ac24dd35775c996efec86e2ae0841e9a3a5e146c0ae916845"}
+          ]
+        }
       },
       "native": {
         "id": "native-libraries",
-        "name": {"en": "OpenCV 4 and linked native libraries", "ja": "OpenCV 4とリンク先ネイティブライブラリ"},
+        "name": {"en": "OpenCV libraries", "ja": "OpenCVライブラリ"},
         "detail": {
-          "en": "Use the same OpenCV build as the engine runner: core, imgproc, imgcodecs and every linked non-system dependency. Select the complete reviewed library list in manual settings. Homebrew opencv@4 supplies 4.14.0 at review (2026-10-09) but is deprecated and may change; the command is not proof of build compatibility. Recheck checks regular files, required module names and arm64 headers only, not ABI, dependency closure or initialization. Use saved Check to test the engine.",
-          "ja": "エンジンrunnerと同じOpenCVビルドのcore、imgproc、imgcodecsおよび全ての非システム依存ライブラリを使用し、レビュー済みの完全な一覧を手動設定で指定してください。Homebrew opencv@4はレビュー時点（2026-10-09）で4.14.0ですが、非推奨で変更され得ます。コマンドはビルド互換性の証明ではありません。再確認では通常ファイル、必須モジュール名、arm64ヘッダーのみを検査し、ABI、依存関係の完全性、初期化は保証しません。保存後のCheckでエンジンを確認してください。"
+          "en": "Find an existing Homebrew installation, or choose your OpenCV 4 installation folder. The app checks required libraries and their non-system dependencies without running them. Use the same OpenCV build as the engine; Homebrew versions can change. Save and Check to test compatibility.",
+          "ja": "既存のHomebrew環境を検索するか、OpenCV 4のインストールフォルダを選択します。必須ライブラリと非システム依存を実行せずに調べます。エンジンと同じOpenCVビルドを使用してください。Homebrewのバージョンは変更され得ます。保存後のCheckで互換性を確認します。"
         },
         "version": "engine-linked-opencv-4",
         "license": "Apache-2.0; dependencies retain their own licenses",
@@ -73,7 +87,9 @@
           {"label": {"en": "Homebrew opencv@4 (version can change)", "ja": "Homebrew opencv@4（バージョンは変更され得ます）"}, "url": "https://formulae.brew.sh/formula/opencv@4"}
         ],
         "commands": ["brew install opencv@4"],
-        "required_modules": ["libopencv_core.4", "libopencv_imgproc.4", "libopencv_imgcodecs.4"]
+        "required_modules": ["libopencv_core.4", "libopencv_imgproc.4", "libopencv_imgcodecs.4"],
+        "search_roots": ["/opt/homebrew", "/usr/local"],
+        "search_subdirectories": ["lib", "opt/opencv@4/lib", "opt/opencv/lib"]
       }
     },
     {
@@ -81,10 +97,10 @@
       "arch": "x86_64",
       "runtime": {
         "id": "onnxruntime",
-        "name": {"en": "ONNX Runtime 1.29.0 (CPU)", "ja": "ONNX Runtime 1.29.0（CPU）"},
+        "name": {"en": "OCR runtime", "ja": "OCRランタイム"},
         "detail": {
-          "en": "Download the official win-x64 archive and unpack it externally, retaining LICENSE and ThirdPartyNotices. Select lib/onnxruntime.dll in manual settings, then Recheck. Only the reviewed official file is identified here; API 17 and initialization still require Check.",
-          "ja": "公式win-x64アーカイブを外部で展開し、LICENSEとThirdPartyNoticesを保持してください。手動設定でlib/onnxruntime.dllを指定して再確認します。ここではレビュー済み公式ファイルを識別します。API 17と初期化は既存のCheckで確認します。"
+          "en": "Download ONNX Runtime 1.29.0 from Microsoft (80 MB). The app verifies and installs it with its licenses, then selects it in this settings draft. No separate installation is needed.",
+          "ja": "MicrosoftからONNX Runtime 1.29.0（80 MB）を取得します。ライセンスとともに検証・保存し、編集中の設定に自動で選択します。別途インストールする必要はありません。"
         },
         "version": "1.29.0-api17-cpu",
         "license": "MIT",
@@ -96,14 +112,28 @@
         "commands": [],
         "filename": "onnxruntime.dll",
         "bytes": 16149344,
-        "sha256": "69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b847059738323404519ec471"
+        "sha256": "69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b847059738323404519ec471",
+        "archive": {
+          "format": "zip",
+          "asset": {
+            "path": "onnxruntime-win-x64-1.29.0.zip",
+            "bytes": 79645520,
+            "sha256": "c9b4b7086b529ad814f428c1bad028e20a25d7dc0699836775faace4ab5b78b2",
+            "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/onnxruntime-win-x64-1.29.0.zip"
+          },
+          "members": [
+            {"archive_path": "onnxruntime-win-x64-1.29.0/lib/onnxruntime.dll", "path": "onnxruntime.dll", "bytes": 16149344, "sha256": "69d8e6d3879a3b4001cdc74c8ed9ccc7e7f799a5b847059738323404519ec471"},
+            {"archive_path": "onnxruntime-win-x64-1.29.0/LICENSE", "path": "LICENSE", "bytes": 1094, "sha256": "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674"},
+            {"archive_path": "onnxruntime-win-x64-1.29.0/ThirdPartyNotices.txt", "path": "ThirdPartyNotices.txt", "bytes": 343249, "sha256": "4c5b864d8974c94b37461f38163facef79a1bb5dea461667ee9e5be6a8e73f83"}
+          ]
+        }
       },
       "native": {
         "id": "native-libraries",
-        "name": {"en": "OpenCV 4.14.0 and linked native libraries", "ja": "OpenCV 4.14.0とリンク先ネイティブライブラリ"},
+        "name": {"en": "OpenCV libraries", "ja": "OpenCVライブラリ"},
         "detail": {
-          "en": "Obtain the official OpenCV 4.14.0 Windows release externally. Use build/x64/vc16/bin/opencv_world4140.dll and all non-system dependencies matching the engine runner, including its x64 MSVC runtime. Select the complete reviewed list in manual settings. Recheck checks regular files, the required module name and x64 PE headers only, not ABI, dependency closure or initialization. Preserve supplied licenses and use saved Check to test the engine.",
-          "ja": "公式OpenCV 4.14.0 Windowsリリースを外部で取得してください。build/x64/vc16/bin/opencv_world4140.dllと、x64 MSVCランタイムを含むエンジンrunnerに一致した全ての非システム依存ライブラリを使用します。完全なレビュー済み一覧を手動設定で指定してください。再確認では通常ファイル、必須モジュール名、x64 PEヘッダーのみを検査し、ABI、依存関係の完全性、初期化は保証しません。付属ライセンスを保持し、保存後のCheckでエンジンを確認してください。"
+          "en": "Choose the folder containing your OpenCV 4.14.0 Windows installation. Add another approved folder if its x64 MSVC runtime or other non-system dependencies are elsewhere. The app checks files without running them. Preserve supplied licenses; Save and Check tests engine compatibility.",
+          "ja": "Windows版OpenCV 4.14.0のインストールフォルダを選択してください。x64 MSVCランタイムなどの非システム依存が別の場所にある場合は、そのフォルダも追加します。ファイルを実行せずに調べます。付属ライセンスを保持し、保存後のCheckでエンジン互換性を確認してください。"
         },
         "version": "engine-linked-opencv-4.14.0",
         "license": "Apache-2.0; dependencies retain their own licenses",
@@ -113,7 +143,9 @@
           {"label": {"en": "Pinned native prerequisites", "ja": "固定リビジョンのネイティブ前提条件"}, "url": "https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/CONTRIBUTING.md#native-development-prerequisites"}
         ],
         "commands": [],
-        "required_modules": ["opencv_world4140.dll"]
+        "required_modules": ["opencv_world4140.dll"],
+        "search_roots": [],
+        "search_subdirectories": ["bin", "build/x64/vc16/bin", "x64/vc16/bin"]
       }
     }
   ]

@@ -30,7 +30,18 @@ pub(super) fn acquire(
     cancel: &AtomicBool,
     progress: impl FnMut(SetupProgress),
 ) -> Result<(), Fault> {
-    let agent = ureq::Agent::config_builder()
+    let agent = https_agent();
+    acquire_with(
+        root,
+        catalog,
+        cancel,
+        progress,
+        |asset, output, cancel, report| fetch(&agent, asset, output, cancel, report),
+    )
+}
+
+pub(super) fn https_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .https_only(true)
         .proxy(None)
         .max_redirects(5)
@@ -41,42 +52,47 @@ pub(super) fn acquire(
         .timeout_recv_response(Some(Duration::from_secs(20)))
         .user_agent("MadoMata-OCR-Setup/1")
         .build()
-        .new_agent();
-    acquire_with(
-        root,
-        catalog,
+        .new_agent()
+}
+
+pub(super) fn fetch(
+    agent: &ureq::Agent,
+    asset: &Asset,
+    output: &mut File,
+    cancel: &AtomicBool,
+    report: &mut dyn FnMut(u64),
+) -> Result<(), Fault> {
+    check_cancel(cancel)?;
+    let response = agent
+        .get(&asset.url)
+        .header("Accept-Encoding", "identity")
+        .call();
+    check_cancel(cancel)?;
+    let mut response = response.map_err(|error| {
+        fault(
+            "download",
+            &format!("HTTPS resource transfer failed: {error}"),
+        )
+    })?;
+    if response.status() != ureq::http::StatusCode::OK {
+        return Err(fault("download", "resource server did not return HTTP 200"));
+    }
+    if response
+        .body()
+        .content_length()
+        .is_some_and(|length| length != asset.bytes)
+    {
+        return Err(fault(
+            "integrity",
+            "HTTP content length differs from the accepted resource",
+        ));
+    }
+    transfer(
+        &mut response.body_mut().as_reader(),
+        output,
+        asset,
         cancel,
-        progress,
-        |asset, output, cancel, report| {
-            check_cancel(cancel)?;
-            let mut response = agent
-                .get(&asset.url)
-                .header("Accept-Encoding", "identity")
-                .call()
-                .map_err(|error| {
-                    fault("download", &format!("HTTPS model transfer failed: {error}"))
-                })?;
-            if response.status() != ureq::http::StatusCode::OK {
-                return Err(fault("download", "model server did not return HTTP 200"));
-            }
-            if response
-                .body()
-                .content_length()
-                .is_some_and(|length| length != asset.bytes)
-            {
-                return Err(fault(
-                    "integrity",
-                    "HTTP content length differs from the accepted model",
-                ));
-            }
-            transfer(
-                &mut response.body_mut().as_reader(),
-                output,
-                asset,
-                cancel,
-                report,
-            )
-        },
+        report,
     )
 }
 
@@ -174,20 +190,30 @@ pub(super) fn transfer(
     cancel: &AtomicBool,
     report: &mut dyn FnMut(u64),
 ) -> Result<(), Fault> {
+    transfer_verified(input, output, asset.bytes, &asset.sha256, cancel, report)
+}
+
+pub(super) fn transfer_verified(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    expected_bytes: u64,
+    expected_sha256: &str,
+    cancel: &AtomicBool,
+    report: &mut dyn FnMut(u64),
+) -> Result<(), Fault> {
     let mut count = 0_u64;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 65_536];
     loop {
         check_cancel(cancel)?;
-        let length = input
-            .read(&mut buffer)
-            .map_err(|error| io_fault("download", error))?;
+        let read = input.read(&mut buffer);
         check_cancel(cancel)?;
+        let length = read.map_err(|error| io_fault("download", error))?;
         if length == 0 {
             break;
         }
         count += length as u64;
-        if count > asset.bytes {
+        if count > expected_bytes {
             return Err(fault(
                 "integrity",
                 "download exceeds the exact accepted size",
@@ -199,10 +225,10 @@ pub(super) fn transfer(
         hasher.update(&buffer[..length]);
         report(count);
     }
-    if count != asset.bytes || format!("{:x}", hasher.finalize()) != asset.sha256 {
+    if count != expected_bytes || format!("{:x}", hasher.finalize()) != expected_sha256 {
         return Err(fault(
             "integrity",
-            "download length or SHA-256 does not match the accepted model",
+            "download length or SHA-256 does not match the accepted resource",
         ));
     }
     check_cancel(cancel)
@@ -217,7 +243,7 @@ pub(super) fn recover(root: &Path, catalog: &Catalog) -> Result<Option<File>, Fa
     Ok(None)
 }
 
-fn lease(owned: &Path) -> Result<File, Fault> {
+pub(super) fn lease(owned: &Path) -> Result<File, Fault> {
     let path = owned.join(".setup.lock");
     match fs::symlink_metadata(&path) {
         Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
@@ -247,7 +273,7 @@ fn lease(owned: &Path) -> Result<File, Fault> {
     Ok(file)
 }
 
-fn owned(root: &Path, create: bool) -> Result<Option<PathBuf>, Fault> {
+pub(super) fn owned(root: &Path, create: bool) -> Result<Option<PathBuf>, Fault> {
     let path = root.join("ocr-resources");
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
@@ -305,7 +331,7 @@ pub(super) fn verify_receipt(root: &Path, catalog: &Catalog) -> Result<(), Fault
     Ok(())
 }
 
-fn new_file(path: &Path) -> Result<File, Fault> {
+pub(super) fn new_file(path: &Path) -> Result<File, Fault> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -313,14 +339,14 @@ fn new_file(path: &Path) -> Result<File, Fault> {
         .map_err(|error| io_fault("staging", error))
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Fault> {
+pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Fault> {
     let mut file = new_file(path)?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
         .map_err(|error| io_fault("staging", error))
 }
 
-fn read_small(path: &Path, limit: u64) -> Result<Vec<u8>, Fault> {
+pub(super) fn read_small(path: &Path, limit: u64) -> Result<Vec<u8>, Fault> {
     let metadata = fs::symlink_metadata(path).map_err(|error| io_fault("storage", error))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
         return Err(fault(
@@ -338,11 +364,24 @@ fn read_small(path: &Path, limit: u64) -> Result<Vec<u8>, Fault> {
     Ok(bytes)
 }
 
+pub(super) fn cleanup(owned: &Path, catalog: &Catalog) -> Result<(), Fault> {
+    let staging = owned.join(STAGING);
+    let mut allowed_files: BTreeSet<PathBuf> = catalog
+        .models
+        .assets
+        .iter()
+        .map(|asset| staging.join(&asset.path))
+        .collect();
+    allowed_files
+        .extend(["LICENSE.txt", "NOTICE.txt", "receipt.json"].map(|name| staging.join(name)));
+    cleanup_tree(&staging, &allowed_files)?;
+    super::runtime::cleanup(owned, catalog)
+}
+
 // Validate the entire small known tree before deleting any member. Never recurse
 // through links or remove unknown files, even inside the app-owned directory.
-fn cleanup(owned: &Path, catalog: &Catalog) -> Result<(), Fault> {
-    let staging = owned.join(STAGING);
-    match fs::symlink_metadata(&staging) {
+pub(super) fn cleanup_tree(staging: &Path, allowed_files: &BTreeSet<PathBuf>) -> Result<(), Fault> {
+    match fs::symlink_metadata(staging) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(cleanup_fault(io_fault("cleanup", error))),
         Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
@@ -353,16 +392,8 @@ fn cleanup(owned: &Path, catalog: &Catalog) -> Result<(), Fault> {
         }
         Ok(_) => {}
     }
-    let mut allowed_files: BTreeSet<PathBuf> = catalog
-        .models
-        .assets
-        .iter()
-        .map(|asset| staging.join(&asset.path))
-        .collect();
-    allowed_files
-        .extend(["LICENSE.txt", "NOTICE.txt", "receipt.json"].map(|name| staging.join(name)));
     let mut allowed_dirs = BTreeSet::new();
-    for file in &allowed_files {
+    for file in allowed_files {
         let mut parent = file.parent();
         while let Some(directory) = parent {
             if directory == staging {
@@ -373,7 +404,7 @@ fn cleanup(owned: &Path, catalog: &Catalog) -> Result<(), Fault> {
         }
     }
     let result = (|| {
-        let mut directories = vec![staging.clone()];
+        let mut directories = vec![staging.to_path_buf()];
         let mut files = Vec::new();
         let mut cursor = 0;
         while cursor < directories.len() {
