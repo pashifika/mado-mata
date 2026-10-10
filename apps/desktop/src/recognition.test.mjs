@@ -6,6 +6,7 @@ import {
   hitHandle, hitRegion, mapRegion, openRecognition, previewSnapshot, recognitionDirty, regionFromEdges, renameDefinition, saveBlock, saveTicket,
   selectDefinition, setContent, setDisplay, setExpected, setKind, setRegion, setRights, spanEdges, syncTicket, toggleCrop, toggleTrial, trialBlock,
   trialFreshness, trialTicket, undoRecognition, captureDocuments, aggregateDefinitions, canUndoRecognition, discardPixelCrops, canReleaseImage, rebaseFrame, nativePrimaryAction,
+  generationBlock, generationTicket, snippetProvenance,
 } from './recognition.ts';
 import {PixelInspection, clientToPixel, pixelCenter, rgbHex} from './recognitionInspection.ts';
 import {PreviewImageLoad, previewActionAvailable} from './recognitionPreviewLoad.ts';
@@ -748,6 +749,78 @@ test('Copy refuses invalid whole requests and unknown or exceeded engine limits,
   assert.equal(saveBlock(changed),'unconfirmed','Save cannot persist unconfirmed geometry for later implicit reuse');
   const saved=applyView(state,savedView(state,state.document,{frame:null}));
   assert.equal(saveBlock(renameDefinition(saved,'r1','metadata edit')),null,'saved geometry remains editable without a frame');
+});
+
+test('explicit generation admits the same capture, purpose and order regardless of checked rows or the selected row',()=>{
+  let state=loaded();
+  for (let index=0; index<3; index++) state=create(state,edges(index*100,0,index*100+50,50));
+  state=sync(state);
+  const request={capture_id:state.view.capture_id,kind:'ocr_recognize',definition_ids:['r3','r1']};
+  const ticket=generationTicket(state,request);
+  assert.deepEqual(ticket.definition_ids,['r3','r1'],'request order, not document or checked order');
+  for (const ui of [toggleTrial(state,'r2'),toggleTrial(toggleTrial(state,'r1'),'r3'),selectDefinition(state,'r2'),selectDefinition(state,null)]) {
+    assert.deepEqual(generationTicket(ui,request),ticket);
+  }
+  // UI Copy is the same admission over its checked set, plus the stamp its freshness display follows.
+  const checked=toggleTrial(toggleTrial(state,'r1'),'r3');
+  const copied={...copyTicket(checked,['r1','r3'],'ocr_recognize')};
+  delete copied.stamp;
+  assert.deepEqual(copied,generationTicket(checked,{...request,definition_ids:['r1','r3']}));
+  assert.equal(copyTicket(state,['r1','r3'],'ocr_recognize'),null,'UI Copy still names only the checked set');
+
+  let template=sync(setRights(setKind(state,'r1','template'),{license:'CC0',created_by:'author',created_for:null,reviewed:true}));
+  const png={asset:'recognition/r1.png',sha256:'b'.repeat(64),width:40,height:40};
+  template=applyView(template,savedView(template,{...template.document,definitions:template.document.definitions.map(item=>item.id==='r1'?{...item,saved:png}:item)},
+    {revision:'rev-2',document_revision:template.view.document_revision+1}));
+  template=selectDefinition(template,'r2');
+  assert.equal(copyTicket(template,['r1'],'template_recognize'),null,'template Copy names the selected row');
+  assert.deepEqual(generationTicket(template,{capture_id:template.view.capture_id,kind:'template_recognize',definition_ids:['r1']}).definition_ids,['r1']);
+});
+
+test('explicit generation refuses another capture, an unsynchronized draft and whole over-limit requests',()=>{
+  const state=sync(create(create(loaded(),edges(0,0,50,50)),edges(100,0,150,50)));
+  const request=(kind,definition_ids,capture_id=state.view.capture_id)=>({capture_id,kind,definition_ids});
+  assert.equal(state.view.capture_id,CAPTURE_A);
+  assert.equal(generationBlock(state,request('game_content',[],CAPTURE_B)),'inactiveCapture','another capture is never selected or loaded');
+  assert.equal(generationTicket(state,request('game_content',[],CAPTURE_B)),null);
+  const edited=renameDefinition(state,'r1','renamed');
+  assert.equal(generationBlock(edited,request('ocr_recognize',['r1'])),'unsynchronized');
+  assert.equal(generationBlock(edited,request('game_content',[])),'unsynchronized','the host must hold the draft it generates from');
+  assert.equal(generationBlock(sync(edited),request('ocr_recognize',['r1'])),null);
+  const limit=max_ocr_zones=>({...state,view:{...state.view,capabilities:{...state.view.capabilities,max_ocr_zones}}});
+  assert.equal(generationBlock(limit(1),request('ocr_recognize',['r1','r2'])),'overLimit');
+  assert.equal(generationTicket(limit(1),request('ocr_recognize',['r1','r2'])),null,'no partial or batched admission');
+  assert.equal(generationBlock(limit(null),request('ocr_recognize',['r1'])),'noCapability');
+  assert.equal(generationBlock(limit(null),request('game_content',[])),null,'setup needs no engine report');
+  assert.equal(generationBlock(sync(setContent(state,{x:0,y:60,width:1920,height:960})),request('game_content',[])),'unconfirmed');
+});
+
+test('snippet provenance separates setup, retained trial evidence and newer-frame applicability',()=>{
+  let state=toggleTrial(sync(create(loaded(),edges(10,10,50,50))),'r1');
+  const capture_id=state.view.capture_id;
+  const result=(ticket,verified)=>({capture_id:ticket.capture_id,source:'source',basis:state.document.basis,verified,
+    document_revision:ticket.document_revision,definition_ids:ticket.definition_ids});
+  const setup=generationTicket(state,{capture_id,kind:'game_content',definition_ids:[]});
+  assert.deepEqual(snippetProvenance(setup,result(setup,false)),
+    {revision:'rev-1',capture:CAPTURE_A,kind:'game_content',ids:[],basis:state.document.basis,verification:'not_applicable'},
+    'setup is usable geometry without a trial and never recognition evidence');
+  assert.equal(snippetProvenance(setup,result(setup,true)).verification,'not_applicable');
+
+  const ocr=generationTicket(state,{capture_id,kind:'ocr_recognize',definition_ids:['r1']});
+  const trial=trialTicket(state,'frame',['r1']);
+  state=applyTrial(state,trial,trialResult(trial,[zone('r1','HP 10')]));
+  assert.equal(trialFreshness(state,'r1'),'fresh');
+  // A newer compatible frame keeps the same confirmed geometry: the source stays admissible while the trial is stale.
+  const newer=applyView(state,{...state.view,frame:{...FRAME,id:'f2',revision:2,confirmed:true}});
+  assert.equal(trialFreshness(newer,'r1'),'stale');
+  const regenerated=generationTicket(newer,{capture_id,kind:'ocr_recognize',definition_ids:['r1']});
+  assert.deepEqual(regenerated,ocr,'source admission does not follow the frame');
+  assert.equal(snippetProvenance(regenerated,result(regenerated,false)).verification,'unverified');
+
+  // A host result for another request is never attributed to this ticket.
+  for (const other of [{capture_id:CAPTURE_B},{document_revision:ocr.document_revision+1},{definition_ids:['r1','r1']},{definition_ids:[]}]) {
+    assert.equal(snippetProvenance(ocr,{...result(ocr,false),...other}),null);
+  }
 });
 
 for (const savedSetup of [false,true]) test(`confirmed ${savedSetup?'changed saved':'first'} setup remains saveable after a failed image load`,()=>{

@@ -37,7 +37,19 @@ results, not source-text assertions. [Repository CI](ci.md) invokes these checks
 from a tracked-only snapshot on Linux, Apple Silicon macOS, and Windows x64.
 The same full/runtime-only entrypoints also check desktop frontend state/build
 and the Rust application core on all three hosts, then compile the shell on
-macOS only. Those checks do not launch the GUI or qualify another desktop OS.
+macOS and Windows. Those checks do not launch the GUI or qualify another desktop OS.
+
+The [shared SDK catalog](../tools/runtime-comparison/compiler/sdk.mjs) owns
+compiler declarations, editor completion and
+[OMP SDK discovery](desktop.md#discover-the-sdk-and-retrieve-snippets).
+Discovery returns installed contract/catalog identities, English/Japanese
+purpose terms, types, constraints and examples; it neither evaluates package
+code nor establishes operation availability in a lane or phase.
+The Rust `sdk_examples` tests discover and compile those examples under empty
+and representative option schemas, then exercise applicable behavior on the
+controlled host, including native-only refusal. Use the
+[focused CI commands](ci.md#local-check-scope) for these checks; they need no
+OMP installation and do not qualify native execution.
 
 A bounded, non-native example plan is provided:
 
@@ -146,6 +158,10 @@ authoring trial verdict or generated OCR filter. Copy provides reusable Game
 content setup and one grouped OCR request for all checked regions. It changes
 the native clipboard, never package source; preserve existing entry exports
 when deliberately pasting and editing.
+The desktop's [OMP snippet operation](desktop.md#discover-the-sdk-and-retrieve-snippets)
+uses the same generation checks for an explicitly named loaded capture and
+ordered definition IDs, without reading or writing the clipboard. Its receipt
+dependencies can fence a later draft edit; retrieval itself never changes Script.
 
 ### Optional portable target declaration
 

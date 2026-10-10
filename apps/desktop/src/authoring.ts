@@ -16,7 +16,9 @@ export const AUTHORING_SOURCE_BYTES = 1_048_576;
 export const AUTHORING_NON_IMAGE_BYTES = 1_048_576;
 
 export interface TextRange {start:number; end:number}
-export interface Snapshot extends TextRange {text:string}
+// Structured metadata snapshots also carry the draft's form provenance (see `typed`), so Undo and Redo restore
+// incomplete numeric input together with its text. Source snapshots have none.
+export interface Snapshot extends TextRange {text:string; typed?:TypedText[]}
 // Text the operator typed into a numeric field of a structured form that is not a number yet (e.g. `1.`), at a value
 // path of that form. The document holds it as a string; this marks it as editable text rather than stored data.
 export interface TypedText {path:string; text:string}
@@ -124,13 +126,19 @@ function withDraft(session:AuthoringSession, draft:FileDraft):AuthoringSession {
   return {...session, drafts};
 }
 
-function pushHistory(stack:Snapshot[], snapshot:Snapshot):Snapshot[] {
-  const next = [...stack, snapshot];
+function pushHistory(stack:Snapshot[], entry:Snapshot):Snapshot[] {
+  const next = [...stack, entry];
   let characters = next.reduce((total, item) => total + item.text.length, 0);
   while (next.length > 1 && (next.length > HISTORY_ENTRIES || characters > HISTORY_CHARACTERS)) {
     characters -= next.shift()!.text.length;
   }
   return next;
+}
+
+// `text` is the draft's current text at `range`, with form provenance for structured metadata.
+function snapshot(draft:FileDraft, text:string, range:TextRange = draft.range):Snapshot {
+  const at = clamp(range, text.length);
+  return draft.kind === 'source' ? {text, ...at} : {text, ...at, typed: draft.typed};
 }
 
 // Ordinary typing and repeated deletion coalesce while the caret stays where the last edit left it; whitespace,
@@ -151,14 +159,14 @@ export function editFile(session:AuthoringSession, path:string, next:Snapshot, b
   const group = editGroup(input);
   const contiguous = before.start === draft.range.start && before.end === draft.range.end;
   const coalesce = group !== null && group === draft.group && contiguous;
-  const undo = coalesce ? draft.undo : pushHistory(draft.undo, {text: draft.text, ...clamp(before, draft.text.length)});
+  const undo = coalesce ? draft.undo : pushHistory(draft.undo, snapshot(draft, draft.text, before));
   return withDraft(session, {...draft, text: next.text, range, revision: draft.revision + 1, undo, redo: [], group});
 }
 
 export function beginComposition(session:AuthoringSession, path:string, range:TextRange):AuthoringSession {
   const draft = session.drafts.get(path);
   if (!draft || draft.text === null || draft.composing !== null) return session;
-  return withDraft(session, {...draft, composing: {text: draft.text, ...clamp(range, draft.text.length)}});
+  return withDraft(session, {...draft, composing: snapshot(draft, draft.text, range)});
 }
 
 // A trailing composition input after compositionend (WebKit ordering) merges into this step via the group key.
@@ -166,7 +174,9 @@ export function endComposition(session:AuthoringSession, path:string):AuthoringS
   const draft = session.drafts.get(path);
   if (!draft || draft.text === null || draft.composing === null) return session;
   const composing = draft.composing;
-  if (composing.text === draft.text) return withDraft(session, {...draft, composing: null});
+  const sameTyped = composing.typed === undefined || (composing.typed.length === draft.typed.length
+    && composing.typed.every((entry, index) => entry.path === draft.typed[index].path && entry.text === draft.typed[index].text));
+  if (composing.text === draft.text && sameTyped) return withDraft(session, {...draft, composing: null});
   return withDraft(session, {...draft, composing: null, undo: pushHistory(draft.undo, composing), redo: [], group: 'composition'});
 }
 
@@ -176,11 +186,10 @@ function travel(session:AuthoringSession, path:string, direction:'undo'|'redo'):
   const from = direction === 'undo' ? draft.undo : draft.redo;
   const target = from.at(-1);
   if (!target) return session;
-  const current:Snapshot = {text: draft.text, ...draft.range};
   const remaining = from.slice(0, -1);
-  const other = pushHistory(direction === 'undo' ? draft.redo : draft.undo, current);
+  const other = pushHistory(direction === 'undo' ? draft.redo : draft.undo, snapshot(draft, draft.text));
   const moved:FileDraft = {...draft, text: target.text, range: clamp(target, target.text.length), revision: draft.revision + 1, group: null,
-    undo: direction === 'undo' ? remaining : other, redo: direction === 'undo' ? other : remaining};
+    typed: target.typed ?? draft.typed, undo: direction === 'undo' ? remaining : other, redo: direction === 'undo' ? other : remaining};
   return {...withDraft(session, moved), reveal: session.reveal + 1};
 }
 
@@ -192,18 +201,38 @@ export function redoFile(session:AuthoringSession, path:string):AuthoringSession
   return travel(session, path, 'redo');
 }
 
-// Structured metadata forms replace the whole document. They keep no text history: the form controls themselves are
-// the way back, and Discard restores the saved text. Dirtiness stays `text !== base`, so restoring every value is clean.
-// A form that tracks numeric text passes its provenance; other structured edits keep the recorded one, which a form
-// applies only where the document still holds exactly that text.
+// One accepted external (agent) transaction. Each changed text draft gets exactly one undo step that never coalesces
+// with adjacent typing; the caller supplies the caret mapped through its change. Selection, destination and reveal stay
+// unchanged, so the editor synchronizes the text without moving focus, the caret or the selected file.
+export interface ExternalEdit {path:string; text:string; range:TextRange}
+
+export function applyExternalEdits(session:AuthoringSession, edits:readonly ExternalEdit[]):AuthoringSession {
+  let drafts:Map<string,FileDraft>|null = null;
+  for (const edit of edits) {
+    const draft = (drafts ?? session.drafts).get(edit.path);
+    if (!draft || draft.text === null || draft.composing !== null || draft.text === edit.text) continue;
+    drafts ??= new Map(session.drafts);
+    drafts.set(edit.path, {...draft, text: edit.text, range: clamp(edit.range, edit.text.length), revision: draft.revision + 1,
+      undo: pushHistory(draft.undo, snapshot(draft, draft.text)), redo: [], group: null});
+  }
+  return drafts === null ? session : {...session, drafts};
+}
+
+// Structured metadata forms replace the whole document. Each replacement is one undo step with the draft's form
+// provenance; during a form's IME composition the text follows the input and the composition-start snapshot becomes
+// the single step when it ends. Dirtiness stays `text !== base`, so restoring every value is clean. A form that tracks
+// numeric text passes its provenance; other structured edits keep the recorded one, which a form applies only where
+// the document still holds exactly that text. Provenance-only changes are visible form edits and have their own step.
 export function replaceFile(session:AuthoringSession, path:string, text:string, typed?:readonly TypedText[]):AuthoringSession {
   const draft = session.drafts.get(path);
-  if (!draft || draft.text === null || draft.composing !== null) return session;
+  if (!draft || draft.text === null) return session;
   const provenance = typed === undefined ? draft.typed : [...typed];
   const sameProvenance = provenance.length === draft.typed.length
     && provenance.every((entry, index) => entry.path === draft.typed[index].path && entry.text === draft.typed[index].text);
-  if (draft.text === text) return sameProvenance ? session : withDraft(session, {...draft, typed: provenance});
-  return withDraft(session, {...draft, text, range: {start: 0, end: 0}, revision: draft.revision + 1, group: null, typed: provenance});
+  if (draft.text === text && sameProvenance) return session;
+  if (draft.composing !== null) return withDraft(session, {...draft, text, revision: draft.revision + 1, typed: provenance});
+  return withDraft(session, {...draft, text, range: {start: 0, end: 0}, revision: draft.revision + 1, group: null, typed: provenance,
+    undo: pushHistory(draft.undo, snapshot(draft, draft.text)), redo: []});
 }
 
 // Discarding one file is itself undoable; a draft of an undeclared file is dropped.
@@ -218,7 +247,7 @@ export function discardFile(session:AuthoringSession, path:string):AuthoringSess
   }
   const base = draft.base ?? '';
   const discarded:FileDraft = {...draft, text: base, range: clamp(draft.range, base.length), revision: draft.revision + 1, group: null,
-    undo: pushHistory(draft.undo, {text: draft.text!, ...draft.range}), redo: [], diskChanged: false, typed: []};
+    undo: pushHistory(draft.undo, snapshot(draft, draft.text!)), redo: [], diskChanged: false, typed: []};
   return {...withDraft(session, discarded), reveal: session.reveal + 1, notice: {key: 'authoringDiscarded', args: [path]}};
 }
 
@@ -332,7 +361,7 @@ export function catalogTicket(session:AuthoringSession, edit:CatalogEdit):Catalo
   return catalogBlock(session, edit) === null ? {token: session.owner.token, expected: session.revision, edit} : null;
 }
 
-export function applyCatalogMutation(session:AuthoringSession|null, ticket:CatalogTicket, mutation:AuthoringMutation):AuthoringSession|null {
+export function applyCatalogMutation(session:AuthoringSession|null, ticket:CatalogTicket, mutation:AuthoringMutation, foreground:boolean):AuthoringSession|null {
   if (!session || session.owner.token !== ticket.token || mutation.owner.token !== ticket.token) return session;
   const edit = ticket.edit;
   let next:AuthoringSession = {...session, revision: mutation.committed_revision, pending: null, error: null, conflict: false};
@@ -350,9 +379,9 @@ export function applyCatalogMutation(session:AuthoringSession|null, ticket:Catal
     return {...next, refreshRequired: true, refreshError: mutation.refresh_error, notice: {key: 'authoringCatalogRefreshFailed', args: [revision]}};
   }
   const merged = mergeView(next, mutation.view).session;
-  const added = edit.kind === 'add' && merged.drafts.has(edit.path);
+  const added = foreground && edit.kind === 'add' && merged.drafts.has(edit.path);
   const selected = added ? edit.path : merged.selected;
-  return {...merged, selected, destination: added ? 'file' : merged.destination, reveal: session.reveal + 1,
+  return {...merged, selected, destination: added ? 'file' : merged.destination, reveal: session.reveal + (foreground ? 1 : 0),
     refreshRequired: false, refreshError: null, notice: {key: 'authoringCatalogSaved', args: [revision]}};
 }
 
@@ -367,10 +396,10 @@ export function applyRecognitionMutation(session:AuthoringSession|null, mutation
   return {...mergeView(next, mutation.view).session, refreshRequired: false, refreshError: null, notice: {key: 'recognitionSaved'}};
 }
 
-export function applyRefresh(session:AuthoringSession|null, view:AuthoringView):AuthoringSession|null {
+export function applyRefresh(session:AuthoringSession|null, view:AuthoringView, foreground:boolean):AuthoringSession|null {
   if (!session || session.owner.token !== view.owner.token) return session;
   const {session: merged, changed} = mergeView(session, view);
-  return {...merged, reveal: session.reveal + 1, pending: null, refreshRequired: false, conflict: false, refreshError: null, error: null,
+  return {...merged, reveal: session.reveal + (foreground ? 1 : 0), pending: null, refreshRequired: false, conflict: false, refreshError: null, error: null,
     notice: changed > 0 ? {key: 'authoringDiskChanged', args: [changed]} : {key: 'authoringRefreshed', args: [shortRevision(view.revision)]}};
 }
 
@@ -522,7 +551,7 @@ function lowSurrogate(unit:number):boolean {
 }
 
 // Match TextEncoder without allocating an encoded copy, including unpaired UTF-16 surrogates.
-function utf8Bytes(text:string, start = 0, end = text.length):number {
+export function utf8Bytes(text:string, start = 0, end = text.length):number {
   let bytes = 0;
   for (let index = start; index < end; index++) {
     const unit = text.charCodeAt(index);

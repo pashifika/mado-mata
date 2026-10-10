@@ -6,6 +6,7 @@ use mado_mata_desktop::application::{
 use mado_mata_desktop::authoring::CatalogEdit;
 use mado_mata_desktop::backup::SnapshotReceipt;
 use mado_mata_desktop::bootstrap::{Bootstrap, BootstrapStatus, selected_roots};
+use mado_mata_desktop::collaboration::Collaboration;
 use mado_mata_desktop::storage::{EditableSettings, LegacyImport, Profile, Settings};
 use mado_mata_desktop::target::{TargetConfiguration, TargetExpectation, TargetResolution};
 use mado_runtime_comparison::desktop::{NativeCapability, StartRequest};
@@ -16,9 +17,11 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 use tauri::{Emitter, Manager};
 
 mod cache_commands;
+mod collaboration_commands;
 mod ocr_setup_commands;
 #[cfg(target_os = "macos")]
 mod picker;
@@ -33,7 +36,11 @@ struct Backend {
     exiting: AtomicBool,
     shutdown_finished: AtomicBool,
     preview_owner: std::sync::Mutex<Option<Arc<recognition_commands::PreviewSession>>>,
+    collaboration: Arc<Collaboration>,
 }
+
+/// Bounded wait for claimed collaboration replies before child cleanup starts.
+const COLLABORATION_DRAIN: Duration = Duration::from_secs(1);
 
 async fn background<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, Fault> + Send + 'static,
@@ -572,8 +579,11 @@ fn close(app: &tauri::AppHandle) {
         return;
     }
     let bootstrap = backend.bootstrap.clone();
+    let collaboration = backend.collaboration.clone();
     let app = app.clone();
     std::thread::spawn(move || {
+        // Close admission and settle dispatched requests before existing cleanup.
+        collaboration.shutdown(COLLABORATION_DRAIN);
         let outcome = bootstrap.shutdown();
         if let Err(error) = &outcome {
             eprintln!("Shutdown: {}", error.category);
@@ -621,17 +631,37 @@ fn main() {
                     .map_err(|error| Fault::new("HomeDirectory", error.to_string()))
             };
             let (root, legacy) = selected_roots(home, data_root.clone());
+            let bootstrap = Arc::new(Bootstrap::new(
+                root.clone(),
+                legacy,
+                executable.clone(),
+                engine_executable.clone(),
+            ));
+            let handle = app.handle().clone();
+            let leases = bootstrap.clone();
+            let collaboration = Collaboration::new(
+                root.ok(),
+                Arc::new(move |ticket: &str| {
+                    handle
+                        .emit_to(
+                            collaboration_commands::MAIN_WINDOW,
+                            collaboration_commands::REQUEST_EVENT,
+                            serde_json::json!({ "ticket": ticket }),
+                        )
+                        .is_ok()
+                }),
+                Arc::new(move || {
+                    let application = leases.application().ok()?;
+                    application.authoring_owner().map(|lease| lease.token)
+                }),
+            );
             app.manage(Backend {
-                bootstrap: Arc::new(Bootstrap::new(
-                    root,
-                    legacy,
-                    executable.clone(),
-                    engine_executable.clone(),
-                )),
+                bootstrap,
                 closing: AtomicBool::new(false),
                 exiting: AtomicBool::new(false),
                 shutdown_finished: AtomicBool::new(false),
                 preview_owner: std::sync::Mutex::new(None),
+                collaboration: Arc::new(collaboration),
             });
             Ok(())
         })
@@ -712,9 +742,14 @@ fn main() {
             recognition_commands::recognition_trial,
             recognition_commands::recognition_save,
             recognition_commands::recognition_copy,
+            recognition_commands::recognition_generate,
             recognition_commands::recognition_open_preview,
             recognition_commands::recognition_close_preview,
             app_close,
+            collaboration_commands::collaboration_ready,
+            collaboration_commands::collaboration_unavailable,
+            collaboration_commands::collaboration_claim,
+            collaboration_commands::collaboration_reply,
             poll
         ])
         .on_window_event(|window, event| {
@@ -745,6 +780,7 @@ fn main() {
                 let backend = app.state::<Backend>();
                 backend.exiting.store(true, Ordering::SeqCst);
                 backend.closing.store(true, Ordering::SeqCst);
+                backend.collaboration.shutdown(Duration::ZERO);
                 if let Err(error) = backend.bootstrap.shutdown() {
                     eprintln!("Shutdown: {}", error.category);
                 }

@@ -168,9 +168,9 @@ test('replies issued to a previous owner never touch the current session',()=>{
   const duplicate=type(openSession(packageView('rev-9',files,'lease-2')),'main.ts','X');
   assert.equal(applySave(duplicate,save,mutation('rev-2',null)),duplicate);
   assert.equal(applyValidation(duplicate,validation,{owner,revision:'rev-1',valid:true,diagnostics:[]}),duplicate);
-  assert.equal(applyCatalogMutation(duplicate,catalog,mutation('rev-2',null)),duplicate);
+  assert.equal(applyCatalogMutation(duplicate,catalog,mutation('rev-2',null),true),duplicate);
   assert.equal(failCommand(duplicate,save.token,{category:AUTHORING_CONFLICT,message:'stale',context:null}),duplicate);
-  assert.equal(applyRefresh(duplicate,packageView('rev-3',files)),duplicate);
+  assert.equal(applyRefresh(duplicate,packageView('rev-3',files),true),duplicate);
   assert.equal(applySave(null,save,mutation('rev-2',null)),null);
 });
 
@@ -184,17 +184,17 @@ test('a committed Save whose refresh failed stays committed; a committed catalog
   assert.equal(state.notice.key,'authoringSavedRefreshFailed');
   assert.equal(saveBlock(state,'helper.ts'),'refresh');
   assert.equal(saveTicket(state,'helper.ts'),null);
-  state=applyRefresh(state,packageView('rev-2',withText('main.ts','A'+MAIN)));
+  state=applyRefresh(state,packageView('rev-2',withText('main.ts','A'+MAIN)),true);
   assert.equal(saveBlock(state,'helper.ts'),null);
 
   const edit={kind:'add',path:'extra.ts',file_kind:'source',text:''};
-  state=applyCatalogMutation(state,catalogTicket(state,edit),mutation('rev-3',null,refreshError));
+  state=applyCatalogMutation(state,catalogTicket(state,edit),mutation('rev-3',null,refreshError),true);
   assert.equal(state.revision,'rev-3');
   assert.equal(state.refreshRequired,true);
   assert.equal(state.notice.key,'authoringCatalogRefreshFailed');
   assert.equal(saveBlock(state,'helper.ts'),'refresh');
   assert.equal(catalogBlock(state,edit),'refresh');
-  state=applyRefresh(state,packageView('rev-3',[...withText('main.ts','A'+MAIN),file('extra.ts','source','')]));
+  state=applyRefresh(state,packageView('rev-3',[...withText('main.ts','A'+MAIN),file('extra.ts','source','')]),true);
   assert.equal(state.refreshRequired,false);
   assert.equal(state.refreshError,null);
   assert.equal(text(state,'helper.ts'),'H'+HELPER);
@@ -212,7 +212,7 @@ test('a stale-source refusal keeps drafts until a deliberate refresh reconciles 
   assert.equal(saveBlock(state,'main.ts'),'refresh');
   // The disk now has another main.ts and manifest, and helper.ts is no longer declared.
   const disk=[file('package.json','manifest','{"changed":true}\n'),file('main.ts','source','external\n'),file('schema.json','schema','{}\n'),file('images/logo.png','asset',null)];
-  state=applyRefresh(state,packageView('rev-5',disk));
+  state=applyRefresh(state,packageView('rev-5',disk),true);
   const main=state.drafts.get('main.ts');
   assert.equal(state.conflict,false);
   assert.equal(state.revision,'rev-5');
@@ -258,17 +258,33 @@ test('catalog edits wait for dirty manifest or target drafts and a rename keeps 
   state=applySave(state,saveTicket(state,'main.ts'),mutation('rev-2',packageView('rev-2',withText('main.ts','A'+MAIN))));
   const edit={kind:'rename',path:'main.ts',destination:'src/main.ts'};
   const renamed=[file('package.json','manifest','{}\n'),file('src/main.ts','source','A'+MAIN),file('helper.ts','source',HELPER),file('schema.json','schema','{}\n'),file('images/logo.png','asset',null)];
-  state=applyCatalogMutation(state,catalogTicket(state,edit),mutation('rev-3',packageView('rev-3',renamed)));
+  state=applyCatalogMutation(state,catalogTicket(state,edit),mutation('rev-3',packageView('rev-3',renamed)),true);
   assert.equal(state.drafts.has('main.ts'),false);
   assert.equal(state.selected,'src/main.ts');
-  assert.equal(state.drafts.get('src/main.ts').undo.length,1);
+  assert.equal(text(undoFile(state,'src/main.ts'),'src/main.ts'),MAIN);
   assert.deepEqual(state.order,renamed.map(item=>item.path));
-  assert.equal(state.notice.key,'authoringCatalogSaved');
   state=selectRecognition(state,null);
   const add={kind:'add',path:'new.ts',file_kind:'source',text:''};
-  state=applyCatalogMutation(state,catalogTicket(state,add),mutation('rev-4',packageView('rev-4',[...renamed,file('new.ts','source','')])));
+  state=applyCatalogMutation(state,catalogTicket(state,add),mutation('rev-4',packageView('rev-4',[...renamed,file('new.ts','source','')])),true);
   assert.equal(state.destination,'file');
   assert.equal(state.selected,'new.ts');
+});
+
+test('background catalog and Refresh preserve the current destination and editing position',()=>{
+  let state=type(openSession(packageView('rev-1',files)),'main.ts','human ');
+  state=selectRecognition(state,{start:2,end:4});
+  const before=state;
+  const add={kind:'add',path:'new.ts',file_kind:'source',text:'export const added = true;\n'};
+  const published=[...files,file(add.path,'source',add.text)];
+  state=applyCatalogMutation(state,catalogTicket(state,add),mutation('rev-2',packageView('rev-2',published)),false);
+  assert.equal(state.drafts.get(add.path).text,add.text);
+  state=applyRefresh(state,packageView('rev-2',published),false);
+  assert.equal(state.selected,before.selected);
+  assert.equal(state.destination,'recognition');
+  assert.deepEqual(state.drafts.get('main.ts').range,before.drafts.get('main.ts').range);
+  assert.equal(state.reveal,before.reveal);
+  assert.equal(text(state,'main.ts'),'human '+MAIN);
+  assert.equal(text(undoFile(state,'main.ts'),'main.ts'),MAIN);
 });
 
 test('search is literal, case-insensitive and wraps; diagnostics map to file offsets',()=>{
@@ -421,7 +437,7 @@ for(const {scenario,change} of ineligibleReplacements) test(scenario,()=>{
 
 test('replacement refuses a removed source while preserving its recoverable unsaved draft',()=>{
   let state=type(openSession(packageView('rev-1',withText('main.ts','foo'))),'main.ts','draft ');
-  state=applyRefresh(state,packageView('rev-2',files.filter(item=>item.path!=='main.ts')));
+  state=applyRefresh(state,packageView('rev-2',files.filter(item=>item.path!=='main.ts')),true);
   assert.equal(state.drafts.get('main.ts').missing,true);
   assert.deepEqual(replacementEdit(state,replacementTicket(state),'foo','bar',true,{start:6,end:9}),{kind:'refused',reason:'ineligible'});
   assert.equal(text(state,'main.ts'),'draft foo');
@@ -478,7 +494,7 @@ test('aggregate non-image preflight includes current metadata and binary JSON as
   const editedManifest=manifest.replace('"json"','"png"');
   state=replaceFile(state,'package.json',editedManifest);
   assert.equal(otherNonImageBytes(state,'main.ts'),new TextEncoder().encode(editedManifest).length+6+3+7+4+11);
-  state=applyRefresh(state,packageView('rev-2',inventory.filter(item=>item.path!=='helper.ts')));
+  state=applyRefresh(state,packageView('rev-2',inventory.filter(item=>item.path!=='helper.ts')),true);
   assert.equal(state.drafts.get('helper.ts').missing,true);
   assert.equal(otherNonImageBytes(state,'main.ts'),new TextEncoder().encode(editedManifest).length+3+7+4+11);
 });

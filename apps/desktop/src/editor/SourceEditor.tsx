@@ -14,7 +14,7 @@ import {AUTHORING_NON_IMAGE_BYTES, AUTHORING_SOURCE_BYTES} from '../authoring.ts
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import type {CompletionCandidate, CompletionContext, CompletionKey, CompletionResult} from './completion-types.ts';
-import {SourcePositions} from './source-positions.ts';
+import {SourcePositions, sourceDifference} from './source-positions.ts';
 import {CompletionSession} from './completion-session.ts';
 import type {SourceChange} from './source-positions.ts';
 
@@ -418,11 +418,13 @@ export default function SourceEditor(props: Props) {
   }, [props.readOnly, props.draft.revision, locale]);
 
   useLayoutEffect(() => {
-    const view = editor.current;
-    if (!view || positions.current?.source === props.draft.text) return;
-    positions.current = new SourcePositions(props.draft.text);
-    view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: positions.current.document},
-      selection: {anchor: positions.current.toEditor(props.draft.range.start), head: positions.current.toEditor(props.draft.range.end, 1)},
+    const view = editor.current, previous = positions.current;
+    if (!view || !previous || previous.source === props.draft.text) return;
+    const next = new SourcePositions(props.draft.text), change = sourceDifference(previous.document, next.document);
+    positions.current = next;
+    // Keep unchanged text so CodeMirror can retain its viewport anchor.
+    view.dispatch({changes: {from: change.from, to: change.to, insert: next.document.slice(change.from, change.from + change.length)},
+      selection: {anchor: next.toEditor(props.draft.range.start), head: next.toEditor(props.draft.range.end, 1)},
       annotations: synchronize.of(true)});
   }, [props.draft.text]);
 
