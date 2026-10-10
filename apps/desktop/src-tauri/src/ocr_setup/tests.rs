@@ -24,6 +24,14 @@ impl Fixture {
         fs::create_dir(&path).unwrap();
         Self(path.canonicalize().unwrap())
     }
+    fn relative() -> Self {
+        let path = PathBuf::from(format!(
+            "mado-ocr-relative-{}",
+            crate::storage::new_id().unwrap()
+        ));
+        fs::create_dir(&path).unwrap();
+        Self(path)
+    }
     fn installed(&self, catalog: &Catalog) -> PathBuf {
         self.0
             .join("ocr-resources")
@@ -152,20 +160,21 @@ fn partial_hints_keep_supported_profile_and_reject_nonblank_unsupported_tuple() 
 
 #[test]
 fn absent_resources_do_not_create_directories_or_propose_environment() {
-    let fixture = Fixture::new();
-    let view = inspect(&fixture.0, None, None, &AtomicBool::new(false)).unwrap();
-    assert!(view.environment.is_none());
-    assert_eq!(view.items[0].state, "missing");
-    assert!(!fixture.0.join("ocr-resources").exists());
-    let error = download(
-        &fixture.0,
-        "https://caller.example/model",
-        &AtomicBool::new(false),
-        |_| {},
-    )
-    .unwrap_err();
-    assert_eq!(error.context["stage"], "resource");
-    assert!(!fixture.0.join("ocr-resources").exists());
+    for fixture in [Fixture::new(), Fixture::relative()] {
+        let view = inspect(&fixture.0, None, None, &AtomicBool::new(false)).unwrap();
+        assert!(view.environment.is_none());
+        assert_eq!(view.items[0].state, "missing");
+        assert!(!fixture.0.join("ocr-resources").exists());
+        let error = download(
+            &fixture.0,
+            "https://caller.example/model",
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(error.context["stage"], "resource");
+        assert!(!fixture.0.join("ocr-resources").exists());
+    }
 }
 
 #[test]
@@ -270,33 +279,34 @@ fn cancellation_before_publication_removes_staging_but_after_commit_preserves_in
 
 #[test]
 fn verified_installation_is_reused_without_fetch_and_corrupt_one_is_not_overwritten() {
-    let fixture = Fixture::new();
-    let catalog = fixture_catalog();
-    install(&fixture, &catalog);
-    download::verify_receipt(&fixture.installed(&catalog), &catalog).unwrap();
-    download::acquire_with(
-        &fixture.0,
-        &catalog,
-        &AtomicBool::new(false),
-        |_| {},
-        |_, _, _, _| panic!("must reuse verified files"),
-    )
-    .unwrap();
-    let model = fixture
-        .installed(&catalog)
-        .join(&catalog.models.assets[0].path);
-    fs::write(&model, "user replacement").unwrap();
-    assert!(
+    for fixture in [Fixture::new(), Fixture::relative()] {
+        let catalog = fixture_catalog();
+        install(&fixture, &catalog);
+        download::verify_receipt(&fixture.installed(&catalog), &catalog).unwrap();
         download::acquire_with(
             &fixture.0,
             &catalog,
             &AtomicBool::new(false),
             |_| {},
-            |_, _, _, _| panic!("must not overwrite publication")
+            |_, _, _, _| panic!("must reuse verified files"),
         )
-        .is_err()
-    );
-    assert_eq!(fs::read_to_string(model).unwrap(), "user replacement");
+        .unwrap();
+        let model = fixture
+            .installed(&catalog)
+            .join(&catalog.models.assets[0].path);
+        fs::write(&model, "user replacement").unwrap();
+        assert!(
+            download::acquire_with(
+                &fixture.0,
+                &catalog,
+                &AtomicBool::new(false),
+                |_| {},
+                |_, _, _, _| panic!("must not overwrite publication")
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(model).unwrap(), "user replacement");
+    }
 }
 
 #[test]
@@ -647,4 +657,28 @@ fn partial_hints_use_managed_models_but_never_override_an_explicit_model_root() 
     assert!(view.environment.is_none());
     assert!(view.resolved.model_root.is_none());
     assert!(fixture.installed(&catalog).exists());
+}
+
+#[test]
+fn relative_configuration_root_rechecks_managed_models_but_refuses_relative_manual_paths() {
+    let fixture = Fixture::relative();
+    let catalog = fixture_catalog();
+    install(&fixture, &catalog);
+    let cancel = AtomicBool::new(false);
+    let view = inspect_with(&catalog, &fixture.0, None, None, &cancel).unwrap();
+    assert_eq!(view.items[0].state, "verified");
+    assert_eq!(
+        view.resolved.model_root.as_deref(),
+        fixture.installed(&catalog).canonicalize().unwrap().to_str()
+    );
+    assert!(view.environment.is_none());
+    assert!(view.resolved.runtime_path.is_none());
+    assert!(view.resolved.native_library_paths.is_none());
+
+    let mut hints = proposed_tuple(None).unwrap();
+    hints.model_root = fixture.installed(&catalog).to_str().unwrap().into();
+    let view = inspect_with(&catalog, &fixture.0, Some(&hints), None, &cancel).unwrap();
+    assert_eq!(view.items[0].state, "incompatible");
+    assert!(view.resolved.model_root.is_none());
+    assert!(view.environment.is_none());
 }

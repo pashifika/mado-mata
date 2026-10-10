@@ -1954,6 +1954,9 @@ Recovery then offers **Retry** after repair, not transaction controls.
    available for existing paths and a reviewed list of **1–64 libraries**, one
    per line. File/dependency checks are not API/ABI or initialization evidence;
    use the saved-environment Check below.
+   Managed model recheck and Download reuse also support a relative `--data-dir`
+   for an already initialized root. Explicit manual model paths must remain
+   absolute; this does not relax Initialize or package-path validation.
 5. **Save changes** validates and atomically saves the dialog's editable settings.
    It does not load libraries, models, or a backend. **Clear draft** followed by
    **Save changes** removes the optional environment. Existing settings with no

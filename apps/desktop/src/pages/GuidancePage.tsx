@@ -19,7 +19,7 @@ interface Props {
   // True while another command or the closing application refuses new inspection; the path stays editable.
   locked: boolean; lockReason: string | null;
   onPath: (value: string) => void; onInspect: () => void;
-  // Stop for a foreign owner lives in the strip; the page only names the owner's scope.
+  // Names the owner's scope without moving or retargeting its Stop.
   activeOwner: ActiveOwner;
   recovery: RecoveryHandlers;
   authoring: PageAuthoring;

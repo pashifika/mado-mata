@@ -1222,10 +1222,10 @@
     "unavailableEyebrow": "Saved source unavailable",
     "unavailableHeading": "Saved package could not be inspected",
     "unavailableHelp": "The saved directory reference is kept and package-dependent commands are refused. Nothing was replaced with defaults. Repair the package or inspect another directory.",
-    "stopHelp": "An operation owned by another workspace keeps its Stop in the strip above; nothing on this page starts, stops or retargets it.",
-    "stopHint": "The active operation keeps its Stop above; this page cannot retarget it.",
+    "stopHelp": "An operation owned by another workspace retains its own Stop control; nothing on this page starts, stops or retargets it.",
+    "stopHint": "Use the active operation's own Stop control; this page cannot retarget it.",
     "inspectHint": "Load package schema and profiles without executing package code.",
-    "applicationStopHelp": "An application-scoped environment check, owned by no workspace, keeps its Stop in the strip above; nothing on this page starts, stops or retargets it."
+    "applicationStopHelp": "An application-scoped environment check, owned by no workspace, retains its own Stop control; nothing on this page starts, stops or retargets it."
   },
   "authoring": {
     "recognition": "Recognition",
