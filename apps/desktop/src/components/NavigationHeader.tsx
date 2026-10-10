@@ -1,7 +1,7 @@
 import {useLayoutEffect, useRef} from 'react';
 import type {ReactNode} from 'react';
 
-// Only navigation is pinned. Its owning shell shares this clearance with page reveals and the Edit rail.
+// Pinned navigation and operation controls share their measured clearance with page reveals and the Edit rail.
 export default function NavigationHeader({children}: {children: ReactNode}) {
   const header = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {

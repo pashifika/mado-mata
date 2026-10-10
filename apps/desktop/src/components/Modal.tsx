@@ -34,7 +34,14 @@ export default function Modal({id, open, onCancel, labelledBy, className, locked
     }
   }, [open, initialFocus]);
   return <dialog id={id} ref={dialog} className={className ? `modal ${className}` : 'modal'} aria-labelledby={labelledBy}
-    onCancel={event => {event.preventDefault(); if (!locked) onCancel();}}>
+    onCancel={event => {
+      event.preventDefault();
+      const details = dialog.current?.querySelector<HTMLDetailsElement>('.footer-authoring-details[open]');
+      if (details) {
+        details.open = false;
+        details.querySelector('summary')?.focus();
+      } else if (!locked) onCancel();
+    }}>
     {open && children}
   </dialog>;
 }

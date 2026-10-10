@@ -68,7 +68,7 @@
 .preview-feedback > * { margin: 0; }
 .preview-feedback > * + * { margin-top: 10px; }
 .preview-feedback > .inline-warning { border: 1px solid var(--warn); }
-.preview-feedback > #preview-help { padding: 12px 14px; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--info-soft); }
+.preview-feedback > #preview-help { --help-panel-background: var(--info-soft); max-height: none; border-color: var(--accent); overflow: visible; }
 .preview-feedback .field-help { margin: 0; }
 .preview-feedback .diagnostic { white-space: pre-wrap; overflow-wrap: anywhere; }
 .preview-feedback .inline-warning button { display: block; max-width: 100%; margin-top: 8px; white-space: normal; }

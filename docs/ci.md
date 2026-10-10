@@ -64,7 +64,8 @@ The version and integrity sources are:
 | Script editor | CodeMirror state 6.7.6, view 6.43.13, language 6.12.4, JavaScript 6.2.5, autocomplete 6.20.3, commands 6.11.1; existing TypeScript 5.9.3 language service | Exact [frontend manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json); trusted ES2020 declarations are bundled by the [build helper](../apps/desktop/build/trusted-libraries.mjs), with no runtime downloads |
 | Desktop Rust | Tauri 2.11.6, tauri-build 2.6.3, tracing 0.1.41, tracing-subscriber 0.3.20 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Saved-image payloads | png 0.18.1; flate2 1.1.9 (default features disabled; `rust_backend`) | [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock) |
-| Desktop configuration | zip 8.6.0 (default features disabled), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Desktop configuration | zip 8.6.0 (default features disabled; `deflate-flate2` for reviewed runtime archives), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Desktop OCR acquisition | ureq 3.4.2 with only `rustls`; rustls 0.23.45 in the lockfile; tar 0.4.46 without default features; flate2 1.1.9 with only `rust_backend` | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock); fixed HTTPS sources, bounded transfers/selected-member extraction, exact hashes, retained notices, no shell or installer |
 | Desktop persisted identifiers | Public `pashifika/xid-rs` Git dependency at the immutable `rev` in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml), repeated in its [lockfile](../apps/desktop/src-tauri/Cargo.lock); default features disabled | The public checkout fetches the Fork directly; no maintenance checkout or local path override is required |
 | macOS application metadata, picker, and clipboard | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Application launch library | libc 0.2.189 on Unix; objc2 0.6.4, block2 0.6.2 and objc2-foundation/objc2-app-kit 0.3.2 on macOS | [Library manifest](../crates/application-launch/Cargo.toml) and [lockfile](../crates/application-launch/Cargo.lock); no Desktop or runtime dependency |
@@ -97,6 +98,13 @@ and grant no native execution authority.
 The desktop crate denies `unsafe_code` and `unsafe_op_in_unsafe_fn` by default.
 Audited native FFI uses narrowly scoped `#[expect(unsafe_code)]` with a reason
 and documented safety conditions; no crate-wide warning suppression is used.
+The runtime's Windows file-identity FFI follows the same reason-bearing annotation
+convention at the function boundary; its crate-wide unsafe-code warning remains
+enabled.
+Platform-only test imports use `#[cfg]`; intentional cross-platform mutability
+and native discovery outcomes use reason-bearing `#[cfg_attr(..., expect(...))]`
+only for builds where their Unix/macOS consumers are absent. Global unused-code
+warnings remain enabled.
 
 ## Local check scope
 
@@ -171,6 +179,16 @@ The full check has these responsibilities:
   Historical-root staging keeps the managed-path byte budget even when an inert
   source is named `settings.json`. Recovery UI checks distinguish unsupported
   protocols from current-transaction validation failures and preserve repair/Retry.
+  OCR resource tests validate the embedded catalog offline, exact-byte model/runtime
+  publication, TAR/ZIP extraction bounds, cancellation, filesystem failures,
+  staging ownership/file locks, snapshot exclusion, and setup admission without
+  turning a temporary busy state into configuration Recovery. Native discovery
+  tests exercise bounded Mach-O/PE dependency closure, explicit-root containment,
+  loader precedence, ambiguity, missing dependencies and incompatible headers.
+  Frontend tests cover independent automatic draft selection, later OCR edits,
+  unrelated edits, closed dialogs, picker/cancellation fences and explicit Save.
+  Live source hosts, OS folder selection, native link/clipboard behavior and real
+  engine OCR remain separate local smoke/acceptance work.
   Completion-preference regressions cover old-file defaults without rewriting,
   strict object/range refusal, atomic write failure, Edit/busy/restore admission,
   and configuration restore/restart. Restore/Import regressions exercise

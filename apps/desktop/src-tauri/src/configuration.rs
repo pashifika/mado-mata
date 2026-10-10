@@ -520,6 +520,10 @@ pub(crate) fn create_private_file(path: &Path) -> Result<File, Fault> {
 }
 
 pub(crate) fn create_private_directory(path: &Path) -> Result<(), Fault> {
+    #[cfg_attr(
+        not(unix),
+        expect(unused_mut, reason = "only Unix sets the private directory mode")
+    )]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     builder.mode(0o700);
@@ -675,6 +679,33 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn hidden_managed_records_and_macos_archive_directories_remain_in_raw_capture() {
+        let root = Root::new();
+        let paths = [
+            "profiles/.hidden.json",
+            "tabs/__MACOSX/pkg/profile.config",
+            "tabs/One/__MACOSX/profile.config",
+        ];
+        let bytes = b"malformed managed bytes\0";
+        for path in paths {
+            root.put(path, bytes);
+        }
+        let captured = capture(&root.0).unwrap();
+        assert_eq!(
+            captured.files,
+            paths
+                .into_iter()
+                .map(|path| (path.to_owned(), bytes.to_vec()))
+                .collect::<BTreeMap<_, _>>()
+        );
+        for path in paths {
+            assert_eq!(fs::read(root.0.join(path)).unwrap(), bytes);
+        }
+        fs::write(root.0.join(paths[0]), b"changed malformed managed bytes").unwrap();
+        assert_ne!(capture(&root.0).unwrap().generation, captured.generation);
+    }
+
     #[cfg(unix)]
     #[test]
     fn metadata_named_links_cannot_bypass_configuration_file_safety() {
@@ -816,6 +847,7 @@ pub(crate) mod tests {
     fn pending_files_refuse_capture_without_omitting_valid_pending_named_packages() {
         for path in [
             "settings.pending",
+            "identity-migrations.pending",
             "profiles/old.pending",
             "tabs/One/tab.pending",
             "tabs/One/pkg/profile.pending",

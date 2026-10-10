@@ -250,18 +250,23 @@ export default function SourceEditor(props: Props) {
         javascript({typescript: /\.[cm]?tsx?$/i.test(first.draft.path), jsx: /\.[jt]sx$/i.test(first.draft.path)}),
         syntaxHighlighting(defaultHighlightStyle),
         EditorView.scrollHandler.of((view, range, options) => {
-          // Let CodeMirror reveal inside its scroller first; correct only actual document/header overlap.
+          // Let CodeMirror reveal inside its scroller first; then clear the fixed shell.
           view.requestMeasure({
             key: navigationScroll,
             read: () => {
-              const clearance = navigationClearance(view);
-              if (clearance <= 0) return 0;
+              const shell = view.dom.closest('.app');
+              const style = shell ? getComputedStyle(shell) : null;
+              const top = parseFloat(style?.getPropertyValue('--navigation-clearance') ?? '') || 0;
+              const bottom = view.dom.ownerDocument.documentElement.clientHeight
+                - (parseFloat(style?.getPropertyValue('--status-height') ?? '') || 0)
+                - (parseFloat(style?.getPropertyValue('--drawer-height') ?? '') || 0);
               const bounds = view.scrollDOM.getBoundingClientRect();
               const caret = view.coordsAtPos(range.head, range.assoc || (range.head > range.anchor ? -1 : 1));
-              return caret && caret.bottom > bounds.top && caret.top < bounds.bottom && caret.top < clearance
-                ? caret.top - clearance - Math.max(0, options.yMargin) : 0;
+              if (!caret || caret.bottom <= bounds.top || caret.top >= bounds.bottom) return 0;
+              const margin = Math.max(0, options.yMargin);
+              return caret.top < top ? caret.top - top - margin : caret.bottom > bottom ? caret.bottom - bottom + margin : 0;
             },
-            write: delta => {if (delta < 0) view.dom.ownerDocument.defaultView?.scrollBy(0, delta);},
+            write: delta => {if (delta !== 0) view.dom.ownerDocument.defaultView?.scrollBy(0, delta);},
           });
           return false;
         }),
@@ -440,6 +445,7 @@ export default function SourceEditor(props: Props) {
   return <div className="code-editor">
     <div ref={mount} className="source-editor"/>
     <div className="editor-status"><span id="authoring-caret">{a.position(caret.line, caret.column)}</span><span>{a.lines(caret.lines)}</span>
-      <span id="authoring-editor-help">{a.editorHelp}</span></div>
+      <span id="authoring-editor-help">{a.editorHelp}</span>
+      <span id="authoring-completion-scope" className="visually-hidden">{a.completionScope}</span></div>
   </div>;
 }

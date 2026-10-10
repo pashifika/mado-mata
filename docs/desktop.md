@@ -221,12 +221,13 @@ TSX files under `apps/desktop/src/` are grouped by responsibility:
 | Path | Responsibility |
 | --- | --- |
 | `main.tsx`, `App.tsx` | Bootstrap and application composition |
-| `components/` | Shared selection, schema forms, results, notifications, and named-workspace dialogs/navigation |
-| `pages/` | Setup/Recovery, unbound-package guidance, Edit, Run, and Logs views |
+| `components/` | Shared selection, schema forms, results, status/Help, notifications, and named-workspace dialogs/navigation |
+| `pages/` | Setup/Recovery, unbound-package guidance, Edit, Run, Run details, and Logs views |
 | `settings/` | App settings dialog and OCR environment view |
 | `locales/` | Bundled English/Japanese JSON text resources |
 | `i18n.ts`, `ui-messages.ts`, `locale.tsx` | Typed formatting and saved-locale presentation |
 | `authoring.ts` | Per-file drafts/history, revision-bound save responses, search, and diagnostic navigation |
+| `status.ts` | Scoped notice priority and saved-package validation presentation |
 
 Imports point directly to the owning file. Non-visual TypeScript modules and
 their tests remain at the source root.
@@ -248,10 +249,88 @@ metadata validation keep their existing separate modules. Tests follow their
 behavior owner; cross-owner tests stay at the root. Module extraction does not
 change persisted formats, filesystem protections, or runtime authority.
 
+## Workspace navigation, status and Help
+
+**Run** prepares the next operation. Its summary groups Status,
+Profile · next run, Execution mode, and separate **Validate** / **Start** actions.
+Validate checks the profile draft; it is not a Start token or saved-package
+validation. Start revalidates each submitted request and does not navigate away.
+Configuration and **Target** appear side by side when space permits, then stack
+in that order. Execution mode is distinct from Target's native Input route.
+The line below the summary identifies the next-run profile or draft; Replay also
+names the saved OCR environment and descriptor before Start.
+
+**Run details**, beside Run and Logs, shows the selected workspace's
+captured operation, progress, retained outcome and independent cleanup evidence.
+It remains available after Edit invalidates the selection and when logs are
+evicted. Older selection revisions are identified; missing captured inputs are
+not reconstructed from current settings. The bounded raw record requires
+**Show record**; **Hide record** conceals it again. Private observations and
+script decisions share that disclosure gate. The conditional privacy explanation
+appears before the action. Outside Edit, the shared pinned operation strip
+identifies the actual Run/Check owner and provides **Stop** across pages;
+dialogs keep their own controls. Run details has no second Stop button.
+
+Every main page uses the same one-row status presentation: page/activity label,
+known state, a truncatable message, and an explicit **Status details** button.
+The full Workspace or Application scope remains in titles and details.
+Use **Status details** for complete messages and corrective navigation.
+Unresolved failures and blockers take priority over progress and ordinary notices.
+Closing details does not clear them.
+Profile-draft validation, saved-package validation and unsaved drafts remain
+distinct; another workspace's late response cannot become the selected
+workspace's notice.
+Application-scoped work reports its own progress. Target failures retain their
+earlier-draft attribution; an unresolved saved-record conflict still requires reload.
+
+During Edit, the bottom bar groups **Edit · state**, a concise current-scope
+message and direct **Stop** / retained capture **Release** / **Return to Edit**
+controls. Validation indicators live on the associated tabs. The full Edit owner
+is available through the information hint, status details and action descriptions,
+including when another workspace is selected. The hint identifies only the owner.
+General Edit restrictions live in page Help; the header Help introduces package
+editing. Another scope's message keeps its scope label.
+**Status details** combines attributed activity and notices. **Attention** and
+**Cleanup incomplete** remain visible until their underlying outcomes change.
+Settings, New workspace, Saved workspaces and unsaved-change confirmation use
+the same compact Edit control in their own footer, without an adjacent information
+icon or upper owner strip. Stop acknowledgement is not worker settlement.
+
+**Run** carries a profile-draft validation icon; **Edit** carries a
+saved-package validation icon. Shape and color distinguish unchecked (dash),
+valid (check), invalid (cross), stale (clock), and running (hourglass) as applicable.
+Hover for the localized scope/state description. Activating a tab still navigates;
+**Status details** contains saved-revision and diagnostic details.
+The footer does not repeat these indicators and stays on one row at supported
+widths, including 760 CSS px. Narrow widths truncate the message with an ellipsis;
+full text remains in its tooltip and Status details.
+
+**Help** opens the current page's explanation. Small information circles sit close
+to their labels, aligned to the upper-right within the text height. Their wider
+clickable area does not add a visible gap. Hover or keyboard focus shows a short
+hint; activating a circle keeps its topic's long explanation open.
+Action buttons have no information icon: hover or focus shows only a short
+explanation. Disabled actions retain hover descriptions without becoming enabled.
+
+Close or an unconsumed Escape returns focus to the opener, respecting modal/editor
+Escape ownership. Help and Status details, including saved validation, share one
+bounded drawer; changing page or workspace closes it without clearing the underlying state.
+Corrective and diagnostic actions preserve a usable focus target; source diagnostics
+continue into the editor.
+Detached Preview uses the same interaction in its existing overlay without
+resizing the image or changing Fit scale.
+
+Recognition retains its inline image, region, trial, Save and Copy guidance and
+established button layout. Its activity and Stop use the shared bottom status
+surface, not duplicate progress rows in the form. Missing prerequisites,
+confirmation, invalid fields, stale/unsaved state, results and failures remain
+at their decision points. Opening Help starts no recognition or acquisition.
+
+
 ## Edit directory packages
 
 Create or open a package from an unbound workspace, or choose **Edit package**
-on Run control. Supported sources are ordinary **TypeScript or JavaScript
+on Run. Supported sources are ordinary **TypeScript or JavaScript
 directories**, with at most **128 declared files** under the
 [shared image and non-image limits](adr/0006-saved-image-recognition-observations.md#image-policy).
 Create writes a runnable TypeScript starter. Duplicate copies the saved source
@@ -284,6 +363,19 @@ Neither action inspects, binds, or runs the package.
   its line endings and UTF-16 positions, including non-BMP characters. File-tree assets
   are inventory facts, not decoded or text-edited; image authoring belongs to
   **Recognition**.
+  Script actions share one compact row, with **Find** at the right.
+  **Find** or **Cmd/Ctrl+F** opens a panel immediately above that row.
+  Normal Script buttons remain visible and available, without moving the toolbar
+  or the code. The panel can cover part of the file heading at narrow widths.
+  Toggle **Replace** to reveal replacement controls below Find; the panel expands
+  upward rather than covering code or adding source padding. Its highlighted
+  icon indicates that the row is open. Hiding Replace or closing Find keeps
+  both text fields for reopening. Close or Escape returns focus to the Script
+  without discarding edits.
+  First-line and one-line matches stay outside the panel. Opening/closing Find
+  preserves internal source scrolling; revealing an offscreen search control can
+  scroll the outer page.
+  **Discard changes** affects only the selected file; other file drafts are kept.
 - **Metadata** opens structured manifest, option-schema and packaged preset
   controls; generated source maps are read-only facts. Metadata never
   opens in the source editor. Manifest controls preserve package identity and
@@ -309,8 +401,12 @@ Neither action inspects, binds, or runs the package.
   `ehthumbs_vista.db`, and `desktop.ini`). These files are left untouched and do
   not affect package revisions or application-owned storage; links, special
   files, directories with those names, and explicit package declarations of
-  reserved metadata names are still refused. This is not a general hidden-file
-  exception.
+  reserved metadata names are still refused. **Duplicate** preserves supported
+  declared files under `__MACOSX`, except for its existing identity/recognition-copy
+  transformations. Package path components beginning with `.` remain forbidden
+  by the portable-path rules; metadata exclusion does not grant them admission.
+  Duplicate never deletes source metadata or silently drops a reserved
+  declaration from a successful copy. This is not a package-backup/export format.
   Both the main and Recognition preview windows disable the ordinary Web
   Inspector, including debug builds; normal text-editing clipboard menus remain
   available outside these owned menus.
@@ -320,18 +416,31 @@ Neither action inspects, binds, or runs the package.
   earlier Save response arrives afterward. Composition, paste, completion and
   replacement use the same file-local history as typing; package-supplied
   WebView code is never loaded.
+  The total unsaved-draft count appears once, in a small lower-left bubble above
+  the status bar, and disappears when all drafts are saved or discarded.
+  Per-file dirty markers and the exit confirmation's affected-file list remain.
+  The bubble belongs to the Edit owner's Workspace; it is not another Workspace's
+  or Application's status.
+  Settings and confirmation dialogs reserve room below them for that single
+  count; their content remains scrollable at constrained window heights.
 - **Validate** checks one saved revision through the existing inventory and
   trusted compiler without evaluating package code. Unsaved text is excluded.
-  Diagnostics identify their revision and link to declared source locations.
-  The finite validation child occupies the existing operation slot; **Stop**
-  requests cancellation and retains ownership until the worker settles.
+  The **Edit** tab's saved-package icon shows not checked, running, valid, invalid
+  or earlier-revision state. **Status details** retains the revision, diagnostic
+  count and source locations; selecting an available location returns to the
+  owning Edit session without losing drafts. Later saves make the old result
+  stale; unsaved changes remain independently identified. Details are available
+  from the owner's other pages until Edit exits. The finite validation child
+  occupies the existing operation slot; the shared **Stop** requests cancellation
+  even with details closed and retains ownership until the worker settles.
 - One Edit session owns the application. Ordinary **Start**, independent OCR
   **Check**, a second editor, and configuration reconstruction are refused.
-  One shared application strip explains this exclusion, including when another
-  workspace is selected. Its expandable authority details explain Save/Inspect
-  as static content outside the live status announcement, not another warning.
-  Idle Edit has no timed runner. Navigation remains available; the owner strip
-  and **Return to Edit** preserve the session across workspaces and dialogs.
+  The bottom Edit summary retains its actual owner across navigation.
+  Its main-window information circle explains exclusion and Save/Inspect on
+  hover, focus or click. Owner-bound Recognition OCR/template trials remain
+  allowed. Unavailable Start/Check actions retain their current reasons.
+  Idle Edit has no timed runner. **Return to Edit** preserves the session across
+  workspaces and dialogs.
 - Guidance **Open/Create**, like Run-page Edit, asks before leaving unsaved
   profile/recovery drafts, including an incomplete Reset's default-based draft.
   **Keep draft** cancels entry. Closing the choice restores focus to its entry
@@ -706,6 +815,12 @@ The toolbar's rightmost **Done** button uses the primary accent color and closes
 only the preview, including when no image is loaded. It does not save, discard,
 exit Edit, or stop a running trial.
 Reopen with **Open preview** to continue the same draft.
+While Preview loads its display image, target selection, saved-target startup,
+**Capture**, and **New capture** are unavailable and are not queued. They become
+available after all outstanding image requests settle, subject to the existing
+owner and operation restrictions. A failed load keeps its error visible without
+blocking target selection permanently; an empty Preview still allows initial
+selection. Loading alone does not disable **Stop**, cancellation, or **Done**.
 At the default Preview width, **Capture** and **Done** stay on the same toolbar
 row as the editing controls. Narrow windows use fixed additional rows; tool,
 capture, and feedback state do not change the image viewport's height.
@@ -1033,8 +1148,8 @@ Popups scroll within the viewport and open above the trigger when needed. Inside
 App settings they remain within the native modal, outside its content scroller.
 Escape dismisses an open selector without cancelling the settings draft.
 
-**Run control** (bound) or **Guidance** (unbound) and **Logs** beside the dropdown
-belong to the selected workspace.
+**Run** (bound) or **Guidance** (unbound), **Run details**, and **Logs** beside the
+dropdown belong to the selected workspace.
 Switching workspaces does not transfer an operation. There is **one application-wide
 operation slot** for Start and OCR Check; the owner and Stop remain available
 across navigation and inside App settings. The host retains the latest terminal
@@ -1078,6 +1193,22 @@ Active operations keep the settings they already captured.
 **Application → Application logs** opens application-wide
 diagnostics; **Close window** follows the bounded shutdown path.
 
+During Edit, the small **i** beside the editing state shows its owner and **Save and Inspect
+guidance** on hover, focus, or click. A focused information or action hint
+consumes Escape while visible and keeps focus on its trigger. Once hidden,
+Escape reaches the existing Help or dialog handler. This applies to shared hints
+in the main window and detached Preview.
+
+App settings places a colored **Edit · state** control beside its save-state
+text in the footer; click it to return to the owning editor. New workspace,
+Saved workspaces and unsaved-change confirmation use the same control.
+Pending work keeps direct **Stop** or capture **Release** alongside it, without
+an adjacent information icon. The return control retains its full owner description.
+Retained-warning details scroll within the space above the owning footer.
+Escape closes them first, even after focus moves to another dialog control.
+At narrow widths, category tabs use their content height rather than stretching
+with the selected panel. Scroll the dialog when needed to reach Save/Close.
+
 ### Editor completion preferences
 
 **Editor → Show completions automatically** defaults to on; **Automatic opening
@@ -1106,6 +1237,8 @@ compatible configuration backup before rolling back to an older strict binary.
 
 Choose **Display → Language → English / 日本語**, then **Save changes**.
 The saved language applies immediately without restarting workspaces or runs.
+The main window and detached Recognition Preview also declare that language
+for assistive technology.
 Cancel, Escape, and failed Save keep the previous language; edits made during a
 pending Save remain unsaved. Language does not change OCR recognition settings,
 profile values, or input authority.
@@ -1136,19 +1269,22 @@ as described in [the manifest contract](runtime-comparison.md#optional-portable-
 A targetless package still runs existing controlled/replay workflows; a missing,
 invalid, or incompatible local target is not an execution prerequisite.
 
-1. For the **actual game**, choose **Application bundle (.app)** and
-   **Choose application…** to select the outer application, including a supported
-   iOS-on-Mac wrapper. Do not navigate to its internal executable. Cancel keeps
-   the draft. Manual absolute paths and direct executable configuration remain
-   available. A separate bundle launcher uses the same picker; it does not
-   identify or replace the game.
-2. Add arguments as ordered individual fields. Empty fields remain empty
-   arguments; spaces and shell syntax are literal, never split or expanded.
+1. For the **actual game**, choose **Application bundle (.app)** and use
+   **Open…** at the right edge of its path field to select the outer application,
+   including a supported iOS-on-Mac wrapper. Game and launcher paths each occupy
+   their own full-width row. Do not navigate to the internal executable. Cancel
+   keeps the draft. Manual absolute paths and direct executable configuration
+   remain available. A separate bundle launcher uses the same picker; it does
+   not identify or replace the game.
+2. Add or remove arguments as individual rows, like schema **Allowed values**.
+   Drag the left handle to reorder; with the handle focused, Up/Down arrow keys
+   move that argument one position. Empty fields remain empty arguments; spaces
+   and shell syntax are literal, never split or expanded.
    A direct-executable launcher uses an explicit absolute working directory or
    its executable's parent directory. Bundle launch uses the OS-defined working
    directory; an explicit directory for a bundle recipient is refused before
-   launch, not ignored. Supply an exact window title when the package leaves it
-   local; a package-required title is read-only.
+   launch, not ignored. The exact window title has its own full-width row.
+   Supply it when the package leaves it local; a package-required title is read-only.
 3. Leave all input fields blank for capture-only use. To configure future input,
    explicitly select a complete policy. Process-directed input requires a pointer
    mode: Core Graphics permits either focus policy; AppKit background requires
@@ -1587,11 +1723,27 @@ edited-destination conflicts without overwrite. An explicit import into another
 Tab retains the same source XID in an independent store, not shared mutable data.
 Files are processed in sorted order until the first fault; earlier durable
 imports and unchanged entries remain reported, including when committed cleanup
-fails. Later entries are not claimed imported. Settle eligible pending recovery
-before retry; identical completed entries must not be duplicated.
+fails. Later entries are not claimed imported. A subsequent catalog read can
+separately report `RestorePending`; it does not erase the Import IDs or undo
+durable publication. Preserve the original fault and transaction evidence.
+Use Recovery's **Complete operation** for committed cleanup, with its explicit
+confirmations, after repairing the reported filesystem obstacle. Do not delete
+the journal or completion marker to bypass admission. Recovery reconstructs the
+session and drops transient results; reselect the owner before explicitly
+retrying Import. Identical completed entries must be unchanged, not duplicated.
 Journal admission captures the bounded managed set: an unresolved pending write
 or unsafe entry in another owner can refuse Import until repaired. This does not
 broaden the existing owner-scoped admission for ordinary profile edits.
+
+For local acceptance, use private disposable roots and a real inspected package.
+Exercise sorted sources A (already identical), B (newly durable when cleanup
+fails), and C (unreached). Compare the displayed imported B / unchanged A,
+original cleanup fault and separate catalog failure with saved bytes, absent C,
+unchanged sources/unrelated owners, and retained transaction evidence. After
+supported recovery, retry must import only C and report A/B unchanged; verify
+ordinary close/reopen as well. Store regressions or mocked UI replies alone do
+not establish this Desktop boundary. Any temporary fault instrumentation belongs
+only in an isolated debug acceptance build, never the delivered application.
 
 ## Configuration snapshots and restore
 
@@ -1630,6 +1782,17 @@ owned `.pending` write or restore transaction blocks capture rather than being
 silently omitted. Unsafe, unreadable, linked, aliased, oversized, or changing
 managed data is refused. Capture serializes with configuration writers; archive
 I/O does not hold the operation-control lock, so owner-bound Stop stays available.
+
+Ordinary regular files with reserved metadata basenames are omitted without
+reading their contents: exact case-sensitive `.DS_Store`; `._` followed by a
+nonempty suffix other than `.` or `..`; and ASCII-case-insensitive `Thumbs.db`,
+`ehthumbs.db`, `ehthumbs_vista.db`, and `desktop.ini`. This is a name reservation,
+not proof of OS provenance: intentional user bytes under these names are not
+backed up. They remain on the source and restore destination unchanged and do
+not affect the managed generation or receipt counts. Raw enumeration bounds and
+unsafe-entry checks still apply. Non-reserved managed dotfiles retain their exact
+bytes, including malformed preservation-only data. `__MACOSX` is not recursively
+ignored; ordinary managed-path ownership determines inclusion.
 
 Limits are **4,096 payload files**, **16 MiB payload bytes**, **4 MiB manifest**,
 and **32 MiB archive**. The host creates a missing private destination and refuses
@@ -1671,6 +1834,12 @@ are not permission to publish its contents.
    supported document schemas, and owning identities are validated before live
    mutation. Traversal, links, duplicate/aliased paths, encryption, unsupported
    ZIP features, unknown owners/versions, and unlisted payloads are refused.
+   Reserved metadata payload basenames also refuse before session disposal,
+   even when an older snapshot declares them with consistent hashes and
+   generation (for example `profiles/._legacy.json`). Undeclared metadata and
+   foreign `__MACOSX/._settings.json` decorations are refused, not stripped.
+   The input archive is never rewritten. Clean supported version-1/version-2
+   snapshots need no conversion.
    Target records are validated structurally without requiring their referenced
    installation to exist on this machine; restored bindings remain unchecked.
    A raw preservation snapshot with malformed data, orphaned package files, or
@@ -1748,27 +1917,58 @@ Recovery then offers **Retry** after repair, not transaction controls.
 
 ## Save and check an OCR environment
 
-1. Open **Application → App settings → OCR environment**, choose an offered
-   supported profile, and enter the absolute model root, pinned ONNX Runtime
-   library, and reviewed non-system
-   library locations, **1–64 libraries**, one per line. Blank lines are ignored
-   and surrounding whitespace is trimmed. Use the pinned
-   [engine prerequisites](runtime-native.md#install-the-engine-prerequisites).
-   Model bytes must match the selected profile; a filename alone is insufficient.
-   Rust resolves selected aliases to canonical paths and derives byte lengths,
-   hashes, and SDK identity; operators do not edit identity fields.
-2. **Save changes** validates and atomically saves the dialog's editable settings.
+1. Open **Application → App settings → OCR environment**. Under **Set up text
+   recognition**, choose **Download** for **Text recognition files**. The shared
+   model set is about 26 MB. Exact sizes and SHA-256 values are checked before
+   publication, then its path and an unset default profile are selected in the
+   draft automatically. Missing runtime or native libraries do not block this.
+   **Details** includes source, license and hosting-term links before download.
+2. Choose **Download** for **Recognition engine**. MadoMata acquires the fixed
+   official ONNX Runtime **1.29.0** archive for the supported platform, verifies
+   the archive and selected members, and retains the library, license and
+   third-party notices together. Its path is selected automatically; no installer
+   runs and no system directory is changed.
+3. For **Image-processing libraries**, install a build-compatible OpenCV copy
+   using the instructions in **Details**, then choose **Find Homebrew installation**
+   on macOS or **Choose installation folder**. Homebrew detection checks only
+   `/opt/homebrew` and `/usr/local`; folder selection checks the approved
+   roots and catalog-defined candidate directories. On Windows, selecting the
+   OpenCV installation root also resolves known x64 MSVC runtime DLLs already
+   installed in the system directory returned by the Windows API. Known runtime
+   basenames are matched without ASCII case sensitivity, including the final
+   canonical filename. Explicitly selected copies take precedence; the system
+   directory is not enumerated or used to find OpenCV or arbitrary third-party
+   DLLs. These runtime files remain part of the validated dependency list, not
+   assumed-present system imports.
+   Required modules and their non-system dependency closure are resolved from
+   bounded binary metadata without loading libraries, running inspection tools
+   or scanning the disk/PATH. If a dependency is genuinely absent, install it
+   externally or add its folder explicitly (**8 selected folders** maximum).
+   **Copy command** only copies text: no shell, package manager or installer runs.
+   A moving Homebrew formula is not an ABI guarantee.
+4. **Recheck resources** reuses complete downloads and repeats the installation
+   choice. Verified missing paths fill the draft automatically; explicit model
+   and runtime paths are preserved. A Download action deliberately selects that
+   resource's managed path. Results cannot overwrite newer OCR edits or enter a
+   closed/replacement dialog. **Advanced · manual configuration** remains
+   available for existing paths and a reviewed list of **1–64 libraries**, one
+   per line. File/dependency checks are not API/ABI or initialization evidence;
+   use the saved-environment Check below.
+   Managed model recheck and Download reuse also support a relative `--data-dir`
+   for an already initialized root. Explicit manual model paths must remain
+   absolute; this does not relax Initialize or package-path validation.
+5. **Save changes** validates and atomically saves the dialog's editable settings.
    It does not load libraries, models, or a backend. **Clear draft** followed by
    **Save changes** removes the optional environment. Existing settings with no
    environment remain unconfigured without a read-time rewrite. Failed saves and
    incompatible stored data preserve the previous bytes.
-3. On the selected workspace's **Run control** page, enter a **Recorded corpus
+6. On the selected workspace's **Run** page, enter a **Recorded corpus
    descriptor** for its inspected recorded package.
    The descriptor is the `replay` object from the [existing replay format](runtime-native.md#prepare-a-private-replay-package-and-plan),
    not a Plan or complete `native_config`. Its assets must already belong to the
    inspected package inventory. No arbitrary asset paths, executable override,
    native authority, or unknown fields are accepted.
-4. Return to **App settings → OCR environment** and choose **Check saved
+7. Return to **App settings → OCR environment** and choose **Check saved
    environment**. Unsaved environment edits must be saved first. Check uses that
    workspace and selection revision; its target is shown in the dialog. With no
    selected workspace, it can validate environment files but cannot initialize a
@@ -1777,12 +1977,46 @@ Recovery then offers **Retry** after repair, not transaction controls.
    I/O; it is cancellable
    through **Stop**. Without a corpus it reports file-validation progress and the
    missing prerequisite, never readiness.
-5. With a valid corpus, Check starts the real owned engine child and initializes
+8. With a valid corpus, Check starts the real owned engine child and initializes
    the replay backend. It does not resolve a workload profile, compile or
    evaluate package modules, or call readiness/workflow. `NotExecuted`, absent
    VM/workflow metrics, initialization milestones, and independent cleanup are
    intentional. A prerequisite refusal, loader failure, and interrupted
    initialization are different outcomes.
+
+Downloads are retained under `<data-dir>/ocr-resources/`, outside configuration
+snapshots, packages and profiles. **Cancel setup** requests cancellation; the
+operation remains busy until its worker and staging cleanup settle. Closing
+settings also cancels its pending work, but neither action uninstalls complete
+verified downloads or changes saved settings. A late cancellation after atomic
+publication reports the installed result. Setup excludes Start, Check, Edit and
+configuration maintenance until settlement. Incomplete cleanup remains visible
+and blocks further setup; restart before retrying after resolving the cause.
+On the next explicit setup action, an OS file lock protects recovery of recognized
+incomplete staging. Unknown files are retained, not recursively removed.
+
+The embedded [OCR catalog](../apps/desktop/src-tauri/resources/ocr-catalog.json)
+owns fixed sources, content identities, platform archives, selected members,
+bounded search locations, display-only guidance and license links. Model installs
+include [LICENSE](../apps/desktop/src-tauri/resources/ocr-model-LICENSE.txt),
+[NOTICE](../apps/desktop/src-tauri/resources/ocr-model-NOTICE.txt) and a receipt.
+Runtime installs retain the official `LICENSE` and `ThirdPartyNotices.txt`; their
+reviewed provenance is recorded in the [runtime notice](../apps/desktop/src-tauri/resources/ocr-runtime-NOTICE.txt).
+Receipts never replace byte verification. Maintainers can edit transport sources
+and guidance in the catalog, then run the offline resource tests:
+
+```sh
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib ocr_setup
+```
+
+Review licenses, notices, host terms and exact downloaded bytes before enabling a
+new source. Catalog edits do not extend the engine's accepted model/profile set.
+Automatic acquisition covers the verified model set and reviewed ONNX Runtime
+archives on macOS arm64 and Windows x64. Archive extraction copies only pinned
+regular files into app-owned storage; archive links are never created or followed.
+OpenCV installation remains external. No automatic update, custom-model selector,
+global loader change or new native authority is provided. See the
+[engine prerequisites](runtime-native.md#install-the-engine-prerequisites).
 
 The descriptor is a session location hint, not persisted native authority.
 It is bounded to **256 KiB**. Inspection, Check, and both Start lanes use the
@@ -2111,10 +2345,14 @@ private diagnostic fields are not searched. Severity and text filters do not
 increase retention. A notification's **View logs** action opens its original
 scope; closed origins and evicted events are labeled explicitly.
 
-- **GUI retained-item limit:** integer **1–10,000**, initially **1,000**, saved
+- **Maximum retained events:** integer **1–10,000**, initially **1,000**, saved
   through **Application → App settings → Logs → Save changes**, not a profile
   value. Lowering it immediately keeps only the newest items across all scopes.
   Invalid input preserves the previous valid limit.
+- **Count badges:** Workspace Logs and Application logs show at most **99**,
+  without a plus sign. Hover or the accessible description gives the exact
+  retained count. These are not unread counts; display capping does not change
+  retention, filtering, or the log list.
 - **Delivery queues:** at most **256 records each** for the application GUI and
   file queues. A larger display limit does not enlarge these queues.
 - **Files:** sanitized JSONL under the data root's `logs/`, rotating across at
@@ -2134,15 +2372,18 @@ scope; closed origins and evicted events are labeled explicitly.
 ### Notification cards
 
 Cards summarize command and terminal outcomes without replacing persistent
-errors, cleanup evidence, or logs. **App settings → Notifications** supports
-**one or two cards**, **5, 8, or 12 seconds**, and success visibility; defaults are
-**two**, **8 seconds**, and **enabled**. Older settings lacking this field use
-those defaults without a read-time rewrite. Invalid present values are refused.
+errors, cleanup evidence, or logs. **App settings → Notifications → Notification
+display** provides **Maximum visible notifications** (one or two cards),
+**Auto-dismiss delay** (5, 8, or 12 seconds), and **Show success notifications**.
+Defaults are **two**, **8 seconds**, and **enabled**. Older settings lacking this
+field use those defaults without a read-time rewrite. Invalid present values
+are refused.
 
 New outcomes displace the oldest visible card; there is no hidden unbounded
 backlog. Lowering the saved count trims immediately. Each card keeps its original
 timeout, paused while hovered or keyboard-focused. Dismissal or expiry does not
-erase its diagnostic record. When a keyboard-focused card is dismissed or
+erase a retained diagnostic record; log history still has its own retention and
+delivery limits. When a keyboard-focused card is dismissed or
 displaced, focus moves to the card now in its place, or back to where focus
 entered the stack; cards that expire or are dismissed without focus leave focus
 untouched. Disabling success cards never suppresses warning or error cards. Cards
@@ -2286,6 +2527,16 @@ separately.
    order; the preview must not remain above the main window. Record whether
    pointer actions were WebView events or physical OS input; one does not
    qualify the other.
+   While the display image request is pending, attempt target selection and
+   confirm no competing command or new `WorkspaceBusy` is emitted. After success
+   or failure, verify a new deliberate action is available, the current failure
+   remains visible, and no blocked action is replayed. Check first use without
+   an image, replacement with held late success/failure, and close/reopen:
+   obsolete replies must not replace the current image/error or unlock another
+   outstanding request. Keep Stop/cancel/Done independently available.
+   Native picker or window observation requires fresh target/environment/operation
+   approval; this check authorizes no capture, input, OCR, or game launch.
+   Distinguish temporary held-response observations from real backend requests.
    For **Inspect**, use a deterministic supported PNG and an independent source
    byte oracle, including more than 4,194,304 pixels so the display is reduced.
    Include a source pixel omitted by reduction, first/last and outside-Game-content
@@ -2576,8 +2827,9 @@ Keep package presets valid when changing the schema; do not edit tracked fixture
    refusal, immediate trimming, and restart persistence. Verify card overflow,
    deduplication, hover/focus pause, failure visibility, and origin-linked Logs
    after workspace switches, closure, and log eviction.
-8. Verify Run, Logs, the Application menu, and App settings at 1440, 1024, and
-   900 CSS-pixel widths, including keyboard navigation and modal Stop.
+8. Verify Run, Run details, Logs, the status/validation/Help drawers, the Application
+   menu, and App settings at 1440, 1024, 900 and the supported minimum 760
+   CSS-pixel widths, including keyboard navigation and modal Stop.
    Verify the compact aggregate counters, conditional Errors count, shared
    selectors, and combined level/text log-search field. Check Native review/refusal
    on macOS (disabled elsewhere), Replay's scenario lock, preset/profile round trips, empty enum

@@ -2,9 +2,12 @@ import {useEffect, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
 import EnvironmentPanel from './EnvironmentPanel.tsx';
 import type {CheckTarget, LastCheck} from './EnvironmentPanel.tsx';
+import {useOcrSetup} from './useOcrSetup.ts';
 import {FaultMessage} from '../components/ResultPanel.tsx';
 import CaptureCacheControls from '../components/CaptureCacheControls.tsx';
 import Select from '../components/Select.tsx';
+import {AuthoringFooterStatus} from '../components/StatusSurface.tsx';
+import type {AuthoringStatusProps} from '../components/StatusSurface.tsx';
 import type {SnapshotOutcome} from '../bootstrap.ts';
 import {TIMEOUT_SECONDS, VISIBLE_COUNTS} from '../state.ts';
 import type {EnvironmentDraft, SettingsDraft} from '../state.ts';
@@ -40,16 +43,19 @@ interface Props {
   retained: number; evicted: number;
   // Back up now is separate from Save: it uses the saved destination and its outcome outlives the dialog.
   onSnapshot: () => void; snapshotPending: boolean; snapshotOutcome: SnapshotOutcome | null;
-  strip: ReactNode;
+  strip: ReactNode; authoring: AuthoringStatusProps | null;
 }
 
 export default function SettingsDialog(props: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
-  const {open, onCancel, settings, draft, onDraft, parsed, dirty, saving, saveError, saveNotice, onSave, busyReason, envDirty, active, pickerBusy, target, onCheck, checkError, authoringReason, lastCheck, stale, originLabel, retained, evicted, onSnapshot, snapshotPending, snapshotOutcome, strip} = props;
+  const {open, onCancel, settings, draft, onDraft, parsed, dirty, saving, saveError, saveNotice, onSave, busyReason, envDirty, active, pickerBusy, target, onCheck, checkError, authoringReason, lastCheck, stale, originLabel, retained, evicted, onSnapshot, snapshotPending, snapshotOutcome, strip, authoring} = props;
   const dialog = useRef<HTMLDialogElement>(null);
   const opener = useRef<Element | null>(null);
   const [category, setCategory] = useState<Category>('notifications');
+  const setup = useOcrSetup(open, draft, onDraft);
+  const saveBlockReason = busyReason ?? (setup.busy ? t.ocrSetup.busy : null);
+  function cancel() {setup.close(); onCancel();}
   // Native modal semantics: the rest of the document is inert, Escape raises cancel, and focus returns to the opener.
   useEffect(() => {
     const element = dialog.current;
@@ -75,14 +81,21 @@ export default function SettingsDialog(props: Props) {
   // Errors in an unselected category and a pending host command both block Save; the footer names which.
   const status = saving ? t.settings.saving
     : invalid > 0 ? t.settings.invalid(invalid, invalidLabels)
-    : dirty && busyReason ? t.settings.wait(busyReason)
+    : dirty && saveBlockReason ? t.settings.wait(saveBlockReason)
     : saveError ? t.settings.saveFailed
     : dirty ? t.settings.unsaved : saveNotice || t.settings.unchanged;
   return <dialog id="app-settings" ref={dialog} className="settings-dialog" aria-labelledby="settings-heading"
-    onCancel={event => {event.preventDefault(); if (!saving) onCancel();}}>
+    onCancel={event => {
+      event.preventDefault();
+      const details = dialog.current?.querySelector<HTMLDetailsElement>('.footer-authoring-details[open]');
+      if (details) {
+        details.open = false;
+        details.querySelector('summary')?.focus();
+      } else if (!saving) cancel();
+    }}>
     {open && <>
       <div className="dialog-header"><div><h2 id="settings-heading">{t.settings.heading}</h2><p>{t.settings.introduction}</p></div>
-        <button type="button" className="icon" aria-label={t.settings.close} disabled={saving} onClick={onCancel}>×</button></div>
+        <button type="button" className="icon" aria-label={t.settings.close} disabled={saving} onClick={cancel}>×</button></div>
       {strip}
       <div className="dialog-layout">
         <nav className="settings-nav" role="tablist" aria-label={t.settings.categories}>
@@ -168,7 +181,7 @@ export default function SettingsDialog(props: Props) {
                 onChange={event => onDraft({...draft, backupDirectory: event.target.value})}/>
               <p className="field-help">{t.settings.backupDirectoryHelp}</p></div>
             <div className="button-row">
-              <button id="backup-now" type="button" disabled={settings === null || snapshotPending || saving} onClick={onSnapshot}>{t.settings.backupNow}</button>
+              <button id="backup-now" type="button" disabled={settings === null || snapshotPending || saving || setup.busy} onClick={onSnapshot}>{t.settings.backupNow}</button>
               <span className="muted">{t.settings.backupNowHelp}</span>
             </div>
             {backupDirty && <p className="inline-warning">{t.settings.backupUnsaved}</p>}
@@ -183,15 +196,16 @@ export default function SettingsDialog(props: Props) {
             {checkError && <FaultMessage title={t.settings.checkFailed} value={checkError}/>}
             <EnvironmentPanel draft={draft.environment} errors={errors} onDraft={(next: EnvironmentDraft) => onDraft({...draft, environment: next})}
               saved={settings?.ocr_environment ?? null} loaded={settings !== null} dirty={envDirty} locked={saving} active={active} pickerBusy={pickerBusy} busyReason={busyReason} authoringReason={authoringReason}
-              target={target} onCheck={onCheck} lastCheck={lastCheck} stale={stale} originLabel={originLabel}/>
+              target={target} onCheck={onCheck} lastCheck={lastCheck} stale={stale} originLabel={originLabel} setup={setup}/>
           </>}
           {saveError && <FaultMessage title={t.settings.saveError} value={saveError}/>}
         </div>
       </div>
       <div className="dialog-footer">
         <span role="status">{status}</span>
-        <button type="button" id="cancel-settings" onClick={onCancel} disabled={saving}>{dirty ? t.common.cancel : t.common.close}</button>
-        <button type="button" id="save-settings" className="primary" disabled={settings === null || saving || !dirty || parsed.settings === null || busyReason !== null} onClick={onSave}>{t.common.save}</button>
+        {authoring && <AuthoringFooterStatus key={authoring.activity.owner.token} {...authoring} idPrefix="settings-authoring"/>}
+        <button type="button" id="cancel-settings" onClick={cancel} disabled={saving}>{dirty ? t.common.cancel : t.common.close}</button>
+        <button type="button" id="save-settings" className="primary" disabled={settings === null || saving || !dirty || parsed.settings === null || saveBlockReason !== null} onClick={onSave}>{t.common.save}</button>
       </div>
     </>}
   </dialog>;

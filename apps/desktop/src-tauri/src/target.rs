@@ -151,6 +151,13 @@ pub(crate) struct AuthoringProcess {
 
 /// Fresh process correspondence; absence never follows from a missing window.
 #[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(
+    all(not(target_os = "macos"), not(test)),
+    expect(
+        dead_code,
+        reason = "native discovery constructs these outcomes only on macOS or in contract tests"
+    )
+)]
 pub(crate) enum NativeDiscovery {
     Absent,
     Unique(AuthoringApplication),

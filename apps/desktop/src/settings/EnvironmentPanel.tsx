@@ -5,6 +5,8 @@ import type {CheckAssociation, EnvironmentDraft} from '../state.ts';
 import type {ControllerView, OcrEnvironment, WorkspaceRef} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
+import ResourceSetupPanel from './ResourceSetupPanel.tsx';
+import type {OcrSetupControls} from './useOcrSetup.ts';
 
 export interface LastCheck {association: CheckAssociation; view: ControllerView}
 
@@ -21,6 +23,7 @@ interface Props {
   target: CheckTarget; onCheck: () => void;
   lastCheck: LastCheck | null; stale: string[];
   originLabel: (workspaceId: string | null) => string;
+  setup: OcrSetupControls;
 }
 
 function CheckCard({check, stale, originLabel}: {check: LastCheck; stale: string[]; originLabel: Props['originLabel']}) {
@@ -63,14 +66,16 @@ function CheckCard({check, stale, originLabel}: {check: LastCheck; stale: string
 export default function EnvironmentPanel(props: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
-  const {draft, errors, onDraft, saved, loaded, dirty, locked, active, pickerBusy, busyReason, authoringReason, target, onCheck, lastCheck, stale, originLabel} = props;
+  const {draft, errors, onDraft, saved, loaded, dirty, locked, active, pickerBusy, busyReason, authoringReason, target, onCheck, lastCheck, stale, originLabel, setup} = props;
   const supported = SUPPORTED_PROFILES.find(item => item.profile === draft.profile);
   const savedModel = saved ? SUPPORTED_PROFILES.find(item => item.profile === saved.profile)?.model : undefined;
   const fixedMismatch = saved !== null && (saved.language !== ENVIRONMENT_LANGUAGE || saved.provider !== ENVIRONMENT_PROVIDER || saved.runtime_profile !== ENVIRONMENT_RUNTIME_PROFILE || saved.model !== savedModel);
   const checkBlock = !loaded ? t.environment.notLoaded : !saved ? t.environment.saveFirst
-    : dirty ? t.environment.dirty : active ? t.environment.active
+    : dirty ? t.environment.dirty : active ? t.environment.active : setup.busy ? t.ocrSetup.busy
     : authoringReason ?? (pickerBusy ? t.environment.wait(t.target.choosing)
       : busyReason ? t.environment.wait(busyReason) : null);
+  const setupBlock = !loaded ? t.environment.notLoaded : locked ? t.ocrSetup.saving : active ? t.environment.active
+    : authoringReason ?? (pickerBusy ? t.settings.wait(t.target.choosing) : busyReason ? t.settings.wait(busyReason) : null);
   const blank = !draft.profile && !draft.model_root.trim() && !draft.runtime_path.trim() && !draft.library_paths.trim();
   function field(key: keyof EnvironmentDraft, value: string) {
     onDraft({...draft, [key]: value});
@@ -79,19 +84,25 @@ export default function EnvironmentPanel(props: Props) {
     <div className="section-heading"><div><h3 id="environment-heading">{t.common.environment}</h3>
       <p className="muted">{t.environment.introduction}</p></div>
       <span className={`tag ${dirty ? 'unsaved' : ''}`}>{!loaded ? t.environment.settingsNotLoaded : dirty ? t.common.unsavedChanges : saved ? t.common.saved : t.common.unconfigured}</span></div>
+    <ResourceSetupPanel setup={setup} block={setupBlock}/>
     <div className="field"><label htmlFor="ocr-profile">{t.environment.supportedProfile}</label>
       <Select id="ocr-profile" value={draft.profile} disabled={locked} aria-invalid={Boolean(errors.profile)} onChange={value => field('profile', value)}
         options={[{value: '', label: t.environment.notConfigured},
           ...SUPPORTED_PROFILES.map(item => ({value: item.profile, label: t.environment.profileLabel(item.profile)})),
           ...(draft.profile && !supported ? [{value: draft.profile, label: t.environment.unsupported(draft.profile), disabled: true}] : [])]}/>
       {errors.profile && <p className="field-error">{errors.profile}</p>}</div>
+    <details className="ocr-setup-details"><summary>{t.environment.technicalHeading}</summary>
     <dl className="fixed-facts">
       <dt>{t.common.model}</dt><dd>{supported?.model ?? '—'}</dd>
       <dt>{t.common.language}</dt><dd>{ENVIRONMENT_LANGUAGE}</dd>
       <dt>{t.common.provider}</dt><dd>{ENVIRONMENT_PROVIDER}</dd>
       <dt>{t.common.runtimeProfile}</dt><dd>{ENVIRONMENT_RUNTIME_PROFILE}</dd>
     </dl>
+    </details>
     {saved && fixedMismatch && <p className="inline-warning">{t.environment.mismatch(saved.model, saved.language, saved.provider, saved.runtime_profile)}</p>}
+    <details className="ocr-manual" open={fixedMismatch || Boolean((draft.model_root.trim() && errors.model_root) || (draft.runtime_path.trim() && errors.runtime_path) || (draft.library_paths.trim() && errors.library_paths))}>
+      <summary>{t.environment.manualHeading}</summary>
+      <p className="field-help">{t.environment.manualHelp}</p>
     <div className="field"><label htmlFor="model-root">{t.environment.modelRoot}</label>
       <input id="model-root" type="text" value={draft.model_root} disabled={locked} spellCheck={false} aria-invalid={Boolean(errors.model_root)}
         placeholder={t.environment.modelPlaceholder} onChange={event => field('model_root', event.target.value)}/>
@@ -106,9 +117,11 @@ export default function EnvironmentPanel(props: Props) {
       {errors.library_paths && <p className="field-error">{errors.library_paths}</p>}
       <p className="field-help">{t.environment.librariesHelp}</p></div>
     <div className="button-row">
+      <button type="button" disabled={setupBlock !== null || setup.busy || setup.state.catalogPending} onClick={setup.manual}>{t.environment.checkManual}</button>
       <button id="clear-environment" disabled={locked || blank} onClick={() => onDraft({profile: '', model_root: '', runtime_path: '', library_paths: ''})}>{t.environment.clear}</button>
       <span className="muted">{blank ? t.environment.blank : t.environment.saveHelp}</span>
     </div>
+    </details>
     <div className="check-section">
       <h3>{t.environment.check}</h3>
       <dl className="run-identity check-target">
@@ -117,9 +130,9 @@ export default function EnvironmentPanel(props: Props) {
         <dt>{t.common.package}</dt><dd><code>{target.packageInventoryIdentity ?? t.common.noneInspected}</code></dd>
       </dl>
       <div className="run-buttons"><button id="check-environment" className="primary" disabled={checkBlock !== null || locked}
-        aria-describedby={authoringReason !== null && checkBlock === authoringReason ? 'dialog-authoring-strip' : 'check-block'}
+        aria-describedby="check-block"
         onClick={onCheck}>{t.environment.check}</button></div>
-      <p className={authoringReason !== null && checkBlock === authoringReason ? 'visually-hidden' : checkBlock !== null ? 'inline-info' : 'muted'}
+      <p className={checkBlock !== null ? 'inline-info' : 'muted'}
         id="check-block">{checkBlock ?? (target.descriptorPath ? t.environment.checkHelp : t.environment.noCorpus)}</p>
       {lastCheck ? <CheckCard key={lastCheck.association.operation} check={lastCheck} stale={stale} originLabel={originLabel}/> : <p className="muted">{t.environment.noChecks}</p>}
     </div>

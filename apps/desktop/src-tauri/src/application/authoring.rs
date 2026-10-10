@@ -535,6 +535,7 @@ impl Application {
             );
         }
         self.closing.store(true, Ordering::Release);
+        self.cancel_setup();
         Ok(())
     }
 }

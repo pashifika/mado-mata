@@ -1,0 +1,15 @@
+.contextual-help-trigger { position: relative; vertical-align: middle; }
+button.contextual-help-trigger.contextual-help-icon-button { display: inline-flex; align-items: flex-start; justify-content: center; flex: none; width: 20px; height: 1em; min-height: 0; margin: 0 2px; padding: .5px 0 0; border: 0; border-radius: 50%; background: transparent; color: var(--accent); font-size: inherit; line-height: 1; vertical-align: text-top; }
+button.contextual-help-trigger.contextual-help-icon-button:hover { background: transparent; }
+.contextual-help-icon { display: inline-flex; align-items: center; justify-content: center; width: 10px; height: 10px; box-sizing: border-box; border: 1px solid var(--accent); border-radius: 50%; background: var(--info-soft); font-size: 8px; font-weight: 700; font-style: normal; }
+.contextual-help-trigger:hover > .contextual-help-icon { background: var(--surface); }
+.field-heading:has(> .contextual-help-icon-button) { column-gap: 4px; }
+.field-heading > button.contextual-help-trigger.contextual-help-icon-button { justify-content: flex-start; margin-inline: 0; }
+.button-hint { position: relative; display: inline-flex; align-items: center; max-width: 100%; }
+.contextual-help-hint { position: fixed; z-index: 70; width: max-content; max-width: min(20rem, calc(100vw - 24px)); padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font-size: 11px; font-weight: 400; line-height: 1.5; text-align: start; white-space: normal; overflow-wrap: anywhere; pointer-events: none; box-shadow: 0 3px 12px #12223b18; }
+.contextual-help-panel { --help-panel-background: var(--surface); min-width: 0; max-height: min(45vh, 24rem); overflow: auto; overscroll-behavior: contain; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--help-panel-background); }
+.contextual-help-heading { position: sticky; top: 0; z-index: 1; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px 14px 8px; background: var(--help-panel-background); }
+.contextual-help-heading h3 { margin: 0; min-width: 0; }
+.contextual-help-heading > button { flex: none; padding: 3px 10px; font-size: 12px; }
+.contextual-help-content { padding: 0 14px 12px; }
+.contextual-help-content > :last-child { margin-bottom: 0; }

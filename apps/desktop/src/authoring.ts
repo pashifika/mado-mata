@@ -251,7 +251,7 @@ export function selectRecognition(session:AuthoringSession, previous:TextRange|n
 }
 
 export function beginPending(session:AuthoringSession, pending:AuthoringPending):AuthoringSession {
-  return {...session, pending, error: null};
+  return {...session, pending, error: null, notice: session.notice?.key === 'authoringStopRequested' ? null : session.notice};
 }
 
 export function saveBlock(session:AuthoringSession, path:string):PublishBlock|null {
@@ -426,6 +426,20 @@ export function diagnosticLocation(fault:Fault):SourceLocation|null {
   const lineNumber = typeof line === 'number' && Number.isSafeInteger(line) && line > 0 ? line : 1;
   const columnNumber = typeof column === 'number' && Number.isSafeInteger(column) && column > 0 ? column : 1;
   return {path, line: lineNumber, column: columnNumber};
+}
+
+// Retired drawer callbacks cannot navigate a replacement lease or a newer diagnostic result.
+export function revealDiagnostic(session:AuthoringSession, token:string, fault:Fault):AuthoringSession {
+  if (session.owner.token !== token || !session.validation?.diagnostics.includes(fault)) return session;
+  const location = diagnosticLocation(fault);
+  const target = location ? session.drafts.get(location.path) : undefined;
+  if (!location || !target || target.missing) return session;
+  if (target.kind !== 'source' || target.text === null) {
+    const selected = selectFile(session, location.path, null);
+    return selected === session ? {...session, reveal: session.reveal + 1} : selected;
+  }
+  const offset = offsetAt(target.text, location.line, location.column);
+  return revealRange(session, location.path, {start: offset, end: offset});
 }
 
 export function offsetAt(text:string, line:number, column:number):number {

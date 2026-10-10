@@ -13,6 +13,7 @@ function bounds(min: number | undefined, max: number | undefined) {
 
 function catalog(data: typeof enData) {
   return {
+    status: data.status,
     captureCache: data.captureCache,
     nativeCapture: data.nativeCapture,
     recognition: {
@@ -72,6 +73,11 @@ function catalog(data: typeof enData) {
       profileLabel: (profile: keyof typeof data.environment.profileLabels) => data.environment.profileLabels[profile],
       mismatch: (model: string, language: string, provider: string, runtime: string) => interpolate(data.environment.mismatch, {model, language, provider, runtime}),
     },
+    ocrSetup: {
+      ...data.ocrSetup,
+      state: (value: string) => Object.hasOwn(data.ocrSetup.states, value) ? data.ocrSetup.states[value as keyof typeof data.ocrSetup.states] : data.ocrSetup.unknownState,
+      stage: (value: string) => Object.hasOwn(data.ocrSetup.stages, value) ? data.ocrSetup.stages[value as keyof typeof data.ocrSetup.stages] : data.ocrSetup.unknownStage,
+    },
     run: {
       ...data.run,
       heading: (label: string) => interpolate(data.run.heading, {label}),
@@ -81,7 +87,6 @@ function catalog(data: typeof enData) {
       descriptorHelp: (limit: number) => interpolate(data.run.descriptorHelp, {limit}),
       startUses: (profile: string | null, replay: boolean, environment: string | null, descriptor: string | null) => interpolate(data.run.startUses[replay ? profile === null ? 'replayDraft' : 'replayProfile' : profile === null ? 'draft' : 'profile'], {profile: profile ?? '', environment: environment ?? data.run.noSavedEnvironment, descriptor: descriptor ?? data.common.none}),
       olderRevision: (old: number, current: number) => interpolate(data.run.olderRevision, {old, current}),
-      stopTarget: (operation: string | null) => interpolate(data.run.stopTarget, {operation: operation ?? data.common.none}),
       runKind: (lane: string) => interpolate(data.run.runKind, {lane}),
       nativeEnvelope: (duration: number) => interpolate(data.run.nativeEnvelope, {duration}),
       nativeWorkflowHelp: (defaultSeconds: number, maxSeconds: number) => interpolate(data.run.nativeWorkflowHelp, {defaultSeconds, maxSeconds}),
@@ -178,6 +183,8 @@ function catalog(data: typeof enData) {
       matches: (count: number, current: number | null, capped: boolean) => interpolate(data.authoring.matches[count === 0 ? 'none' : capped ? 'capped' : current === null ? 'count' : 'position'], {count, current: current ?? ''}),
       valid: (revision: string) => interpolate(data.authoring.valid, {revision}),
       invalid: (revision: string, count: number) => interpolate(data.authoring.invalid[count === 1 ? 'one' : 'other'], {revision, count}),
+      validationDiagnosticCount: (count: number) => interpolate(data.authoring.validationDiagnosticCount[count === 1 ? 'one' : 'other'], {count}),
+      diagnosticUnavailable: (location: string) => interpolate(data.authoring.diagnosticUnavailable, {location}),
       staleValidation: (revision: string) => interpolate(data.authoring.staleValidation, {revision}),
       location: (path: string, line: number, column: number) => interpolate(data.authoring.location, {path, line, column}),
       goTo: (location: string) => interpolate(data.authoring.goTo, {location}),
@@ -187,7 +194,6 @@ function catalog(data: typeof enData) {
       block: (kind: keyof typeof data.authoring.block) => data.authoring.block[kind],
       blockedOther: (owner: string) => interpolate(data.authoring.blockedOther, {owner}),
       startBlocked: (owner: string) => interpolate(data.authoring.startBlocked, {owner}),
-      stripKind: (packageId: string) => interpolate(data.authoring.stripKind, {package: packageId}),
       dirtyHeading: (intent: keyof typeof data.authoring.dirtyHeading) => data.authoring.dirtyHeading[intent],
       presetLabel: (id: string) => interpolate(data.authoring.presetLabel, {id}),
       sourceMapLabel: (module: string) => interpolate(data.authoring.sourceMapLabel, {module}),

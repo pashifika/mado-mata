@@ -5,6 +5,7 @@ import CatalogDialog from '../components/CatalogDialog.tsx';
 import type {CatalogIntent} from '../components/CatalogDialog.tsx';
 import ContextMenu, {elementAnchor, menuEvents} from '../components/ContextMenu.tsx';
 import type {MenuAction, MenuAnchor} from '../components/ContextMenu.tsx';
+import {ButtonHint, HelpTrigger} from '../components/ContextualHelp.tsx';
 import FileTree from '../components/FileTree.tsx';
 import ManifestEditor from '../components/ManifestEditor.tsx';
 import Modal from '../components/Modal.tsx';
@@ -16,12 +17,12 @@ import SourceEditor from '../editor/SourceEditor.tsx';
 import type {SourceEditorHandle} from '../editor/SourceEditor.tsx';
 import {CompletionClient} from '../editor/completion-client.ts';
 import type {CompletionContext, CompletionKey, CompletionStatus} from '../editor/completion-types.ts';
-import {AUTHORING_RECOVERY, catalogBlock, diagnosticLocation, dirtyDrafts, draftList, fileDirty, findMatch, matchSummary, offsetAt, otherNonImageBytes, replacementEdit, saveBlock, shortRevision, validationCurrent} from '../authoring.ts';
+import {AUTHORING_RECOVERY, catalogBlock, dirtyDrafts, draftList, fileDirty, findMatch, matchSummary, otherNonImageBytes, replacementEdit, saveBlock, shortRevision, validationCurrent} from '../authoring.ts';
 import type {AuthoringSession, EditInput, FileDraft, Snapshot, TextRange, TypedText} from '../authoring.ts';
 import {parseJson, readManifest, schemaIssues, treeKind} from '../metadata.ts';
 import {packageDestination} from '../state.ts';
-import type {AuthoringFileKind, CatalogEdit, EditorCompletionPreferences, Fault} from '../types.ts';
-import {messages, renderMessage} from '../i18n.ts';
+import type {AuthoringFileKind, CatalogEdit, EditorCompletionPreferences} from '../types.ts';
+import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
 // Metadata row order in the tree's Metadata group; the Files group holds sources and assets.
@@ -56,7 +57,7 @@ export interface EditHandlers {
   replace: (path: string, text: string, typed?: TypedText[]) => void;
   discard: (path: string) => void;
   save: (path: string) => void; saveAll: () => void;
-  validate: () => void; stopValidation: () => void;
+  validate: () => void;
   refresh: () => void; recover: () => void;
   // Resolves true once the host committed the edit, so the Add, Rename or Remove dialog can close.
   catalog: (edit: CatalogEdit) => Promise<boolean>;
@@ -101,7 +102,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const a = t.authoring;
   const drafts = draftList(session);
   const dirty = dirtyDrafts(session);
-  const unsaved = dirty.length + Number(recognitionDirty);
   const recognitionSelected = session.destination === 'recognition';
   const selected = recognitionSelected || session.selected === null ? undefined : session.drafts.get(session.selected);
   // Only sources get the text editor; declared metadata opens as structured views and assets as inventory facts.
@@ -109,6 +109,8 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const editable = text?.kind === 'source' ? text : undefined;
   const selection = useRef<TextRange>(selected?.range ?? {start: 0, end: 0});
   const searchInput = useRef<HTMLInputElement>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [duplicateId, setDuplicateId] = useState('');
   const [replacement, setReplacement] = useState('');
@@ -134,16 +136,16 @@ export default function EditPage({session, label, handlers, recognition, recogni
   // Rename) opens the group in the same render, so the row is visible when the page reveals it.
   const selectedGroup = selected ? groupOf(selected) : null;
   const [groups, setGroups] = useState<Record<Group, boolean>>({files: true, metadata: true});
-  const [revealRequest, setRevealRequest] = useState(0);
-  const revealKey = `${revealRequest}:${session.selected ?? ''}`;
+  const revealRequest = session.reveal;
+  const revealKey = `${session.owner.token}:${revealRequest}:${session.selected ?? ''}`;
   const [revealedKey, setRevealedKey] = useState(revealKey);
   if (revealedKey !== revealKey) {
     setRevealedKey(revealKey);
     if (selectedGroup !== null && !groups[selectedGroup]) setGroups({...groups, [selectedGroup]: true});
   }
-  // A diagnostic brings the file into sight on both sides; the editor itself focuses without scrolling the page.
+  // Host-driven reveals bring the file into sight on both sides; the editor focuses without scrolling the page.
   useEffect(() => {
-    if (revealRequest === 0) return;
+    if (revealRequest === 0 || recognitionSelected) return;
     const main = document.getElementById('authoring-main');
     const top = main?.getBoundingClientRect().top ?? 0;
     const shell = main?.closest('.app');
@@ -155,7 +157,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
     if (!body || !row) return;
     const offset = row.getBoundingClientRect().top - body.getBoundingClientRect().top;
     if (offset < 0 || offset + row.offsetHeight > body.clientHeight) body.scrollTop += offset - body.clientHeight / 3;
-  }, [revealRequest]);
+  }, [session.owner.token, revealRequest, recognitionSelected]);
 
   const [railOpen, setRailOpen] = useState(true);
   const railToggle = useRef<HTMLButtonElement>(null);
@@ -215,6 +217,16 @@ export default function EditPage({session, label, handlers, recognition, recogni
     };
   }, [session.owner.token]);
 
+  function openSearch() {
+    flushSync(() => setSearchOpen(true));
+    searchInput.current?.focus({preventScroll: true});
+    searchInput.current?.select();
+  }
+  function closeSearch() {
+    setSearchOpen(false);
+    sourceEditor.current?.focus();
+  }
+
   function invalidateCompletion(next?: Snapshot) {
     const context = currentContext.current;
     const updated = context && next ? {...context, source: next.text, revision: context.revision + 1, generation: ++generation.current} : null;
@@ -258,18 +270,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
   }
   // The outgoing selection matters only for the text editor, whose caret is restored when returning to the file.
   const previous = () => editable ? selection.current : null;
-  function goTo(item: Fault) {
-    const location = diagnosticLocation(item);
-    const target = location ? session.drafts.get(location.path) : undefined;
-    if (!location || !target) return;
-    setRevealRequest(count => count + 1);
-    if (target.kind !== 'source' || target.text === null) {
-      handlers.select(location.path, previous());
-      return;
-    }
-    const offset = offsetAt(target.text, location.line, location.column);
-    handlers.reveal(location.path, {start: offset, end: offset});
-  }
   const presetIds = new Map(manifest?.profiles.map(([id, path]): [string, string] => [path, id]) ?? []);
   const mapModules = new Map(manifest?.sourceMaps.map(([module, path]): [string, string] => [path, module]) ?? []);
   const metadata = drafts.filter(draft => !draft.missing && !treeKind(draft.kind)).sort((left, right) => METADATA_ORDER[left.kind] - METADATA_ORDER[right.kind]);
@@ -359,7 +359,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
   }
   const validation = session.validation;
   const current = validationCurrent(session);
-  const statusText = renderMessage(locale, session.notice) || (lockReason ?? '');
   // A publication or a validation that reached disk capture can report an interrupted save that needs recovery.
   const recoveryFault = session.error?.category === AUTHORING_RECOVERY || (current && validation?.diagnostics.some(item => item.category === AUTHORING_RECOVERY) === true);
 
@@ -371,43 +370,67 @@ export default function EditPage({session, label, handlers, recognition, recogni
     {selected.diskChanged && <p className="inline-warning">{a.diskChangedHelp}</p>}
     {selected.missing && <p className="inline-warning">{a.missingHelp}</p>}
     {text && (text.kind === 'manifest' || text.kind === 'schema' || text.kind === 'profile') && <div className="editor-toolbar">
-      <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(text) || readOnly} onClick={() => handlers.discard(text.path)}>{a.discardFile}</button>
-      <span className="muted">{a.structuredHelp}</span>
+      <ButtonHint hint={a.discardHint}>
+        <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(text) || readOnly} onClick={() => handlers.discard(text.path)}>{a.discardFile}</button>
+      </ButtonHint>
     </div>}
     {editable && <>
-      <div className="editor-toolbar">
+      {/* Find floats above the toolbar without moving controls or padding the code viewport. */}
+      <div className="source-tools">
+      <div className="editor-toolbar source-toolbar">
         <button id="authoring-undo" type="button" disabled={sourceReadOnly || editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
         <button id="authoring-redo" type="button" disabled={sourceReadOnly || editable.redo.length === 0 || editable.composing !== null} onClick={() => handlers.redo(editable.path)}>{a.redo}</button>
         <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(editable) || readOnly || editable.composing !== null} onClick={() => handlers.discard(editable.path)}>{a.discardFile}</button>
-        <button id="authoring-complete" type="button" disabled={!completionContext} aria-keyshortcuts="Control+Space"
-          onClick={() => sourceEditor.current?.complete()}>{a.complete}</button>
-        <span className="editor-search" role="search">
+        <ButtonHint hint={a.completionHint}>
+          <button id="authoring-complete" type="button" disabled={!completionContext} aria-keyshortcuts="Control+Space"
+            onClick={() => sourceEditor.current?.complete()}>{a.complete}</button>
+        </ButtonHint>
+        <button id="authoring-find" type="button" aria-expanded={searchOpen} aria-controls="authoring-find-panel"
+          onClick={() => searchOpen ? closeSearch() : openSearch()}>{a.find}</button>
+      </div>
+      {searchOpen && <div id="authoring-find-panel" className="editor-find-panel" role="search" aria-label={a.search}
+        onKeyDown={event => {
+          if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
+          event.preventDefault();
+          event.stopPropagation();
+          closeSearch();
+        }}>
+        <span className="editor-search">
           <label className="visually-hidden" htmlFor="authoring-search">{a.search}</label>
           <input id="authoring-search" ref={searchInput} type="search" value={query} spellCheck={false} placeholder={a.searchPlaceholder}
             onChange={event => setQuery(event.target.value)}
             onKeyDown={event => {
               if (event.nativeEvent.isComposing || event.keyCode === 229) return;
               if (event.key === 'Enter') {event.preventDefault(); find(event.shiftKey);}
-              if (event.key === 'Escape') {event.preventDefault(); sourceEditor.current?.focus();}
             }}/>
           <button id="authoring-search-previous" type="button" disabled={!query} onClick={() => find(true)}>{a.previous}</button>
           <button id="authoring-search-next" type="button" disabled={!query} onClick={() => find(false)}>{a.next}</button>
           <span id="authoring-search-count" className="muted" role="status">{summary ? a.matches(summary.count, summary.current, summary.capped) : ''}</span>
+          <button id="authoring-replace-toggle" className="editor-replace-toggle" type="button" aria-label={a.toggleReplacement} title={a.toggleReplacement}
+            aria-controls="authoring-replacement-row" aria-expanded={replaceOpen} onClick={() => setReplaceOpen(current => !current)}>
+            <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+              <text x="2" y="9" fill="currentColor" fontFamily="monospace" fontSize="11">a</text>
+              <text x="10" y="19" fill="currentColor" fontFamily="monospace" fontSize="11">b</text>
+              <path d="M11 4h5v7m-3-3 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
+          <button id="authoring-find-close" type="button" aria-label={t.common.close} title={t.common.close} onClick={closeSearch}>×</button>
         </span>
+        {replaceOpen && <span id="authoring-replacement-row" className="editor-replacement" role="group" aria-label={a.replacement}>
+          <label className="visually-hidden" htmlFor="authoring-replacement">{a.replacement}</label>
+          <input id="authoring-replacement" type="text" value={replacement} spellCheck={false} placeholder={a.replacementPlaceholder}
+            onChange={event => setReplacement(event.target.value)}
+            onKeyDown={event => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+              if (event.key === 'Enter') {event.preventDefault(); replaceMatch(false);}
+            }}/>
+          <button id="authoring-replace" type="button" disabled={!query || sourceReadOnly || editable.composing !== null} onClick={() => replaceMatch(false)}>{a.replace}</button>
+          <button id="authoring-replace-all" type="button" disabled={!query || sourceReadOnly || editable.composing !== null} onClick={() => replaceMatch(true)}>{a.replaceAll}</button>
+        </span>}
+        <div className="editor-replacement-notice" role="status">{replacementNotice === null ? '' : a.replacementRefusals[replacementNotice]}</div>
+      </div>}
       </div>
-      <div className="editor-toolbar editor-replacement">
-        <label htmlFor="authoring-replacement">{a.replacement}</label>
-        <input id="authoring-replacement" type="text" value={replacement} spellCheck={false} placeholder={a.replacementPlaceholder}
-          onChange={event => setReplacement(event.target.value)}
-          onKeyDown={event => {
-            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-            if (event.key === 'Enter') {event.preventDefault(); replaceMatch(false);}
-            if (event.key === 'Escape') {event.preventDefault(); sourceEditor.current?.focus();}
-          }}/>
-        <button id="authoring-replace" type="button" disabled={!query || sourceReadOnly || editable.composing !== null} onClick={() => replaceMatch(false)}>{a.replace}</button>
-        <button id="authoring-replace-all" type="button" disabled={!query || sourceReadOnly || editable.composing !== null} onClick={() => replaceMatch(true)}>{a.replaceAll}</button>
-        <span role="status">{replacementNotice === null ? '' : a.replacementRefusals[replacementNotice]}</span>
-      </div>
+      <div className="source-editing-area">
       <SourceEditor key={`${session.owner.token}:${editable.path}`} draft={editable} reveal={session.reveal} readOnly={sourceReadOnly}
         selection={selection} control={sourceEditor} context={completionContext} request={requestCompletion} accepts={acceptsCompletion}
         completionPreferences={completionPreferences}
@@ -421,12 +444,13 @@ export default function EditPage({session, label, handlers, recognition, recogni
         onCompositionStart={range => {invalidateCompletion(); handlers.compositionStart(editable.path, range);}}
         onCompositionEnd={() => handlers.compositionEnd(editable.path)}
         onUndo={() => handlers.undo(editable.path)} onRedo={() => handlers.redo(editable.path)} onSave={() => handlers.save(editable.path)}
-        onFind={() => {searchInput.current?.focus(); searchInput.current?.select();}} onFindNext={find}/>
-      <div className="completion-status" role="status">
-        <span id="authoring-completion-status">{a.completionStatuses[completionStatus]}</span>
-        {!optionsAvailable && <span id="authoring-options-unavailable">{a.optionsCompletionUnavailable}</span>}
+        onFind={openSearch} onFindNext={find}/>
       </div>
-      <p id="authoring-completion-scope" className="field-help">{a.completionScope}</p>
+      <div className="completion-status">
+        <span>{a.completionList}<HelpTrigger title={a.completionList} hint={a.completionHint}><p>{a.completionScope}</p></HelpTrigger></span>
+        <span role="status"><span id="authoring-completion-status">{a.completionStatuses[completionStatus]}</span>
+          {!optionsAvailable && <> <span id="authoring-options-unavailable">{a.optionsCompletionUnavailable}</span></>}</span>
+      </div>
     </>}
     {text?.kind === 'manifest' && <ManifestEditor key={text.path} draft={text} disabled={formDisabled}
       onReplace={next => handlers.replace(text.path, next)} onOpen={path => handlers.select(path, null)}/>}
@@ -439,19 +463,22 @@ export default function EditPage({session, label, handlers, recognition, recogni
   </>;
 
   return <>
-    <div className="page-heading"><div><span className="eyebrow">{a.scope(label)}</span><h1 id="authoring-heading">{session.packageId}</h1>
-      <p>{a.intro}</p></div>
+    <div className="page-heading"><div><span className="eyebrow">{a.scope(label)}</span><h1 aria-labelledby="authoring-heading"><span id="authoring-heading">{session.packageId}</span>
+      <HelpTrigger title={a.scope(label)} hint={a.introHint}><p>{a.intro}</p></HelpTrigger></h1></div>
       <div className="actions">
         <button id="authoring-save" type="button" className="primary" disabled={publishLocked || !selected || saveReason !== null}
           title={saveReason ? a.block(saveReason) : undefined} onClick={() => selected && handlers.save(selected.path)}>{pending?.kind === 'save' ? a.working : a.save}</button>
         <button id="authoring-save-all" type="button" disabled={publishLocked || (savable.length === 0 && (!recognitionDirty || recognitionSaveBlock !== null)) || saveAllReason !== null}
           title={saveAllReason ?? recognitionSaveBlock ?? undefined} onClick={handlers.saveAll}>{a.saveAll}</button>
-        <button id="authoring-validate" type="button" disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button>
-        <button id="authoring-exit" type="button" disabled={locked || (pending !== null && pending.kind !== 'recognition_trial' && pending.kind !== 'validate')}
-          title={a.exitHelp} onClick={handlers.exit}>{pending?.kind === 'exit' ? a.working : a.exit}</button>
+        <ButtonHint hint={a.validationHelp}>
+          <button id="authoring-validate" type="button" disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button>
+        </ButtonHint>
+        <ButtonHint hint={a.exitHint}>
+          <button id="authoring-exit" type="button" disabled={locked || (pending !== null && pending.kind !== 'recognition_trial' && pending.kind !== 'validate')}
+            onClick={handlers.exit}>{pending?.kind === 'exit' ? a.working : a.exit}</button>
+        </ButtonHint>
       </div>
     </div>
-    <div id="authoring-status" className="operation-status" role="status">{statusText}</div>
     {leaseLost && <p id="authoring-lease-lost" className="inline-warning" role="alert">{a.leaseLost}</p>}
     {session.error && <div id="authoring-error"><FaultMessage title={a.actionFailed} value={session.error}/></div>}
     {recoveryFault && <div className="button-row"><button id="authoring-recover" type="button" disabled={locked} onClick={handlers.recover}>{a.recover}</button>
@@ -466,11 +493,11 @@ export default function EditPage({session, label, handlers, recognition, recogni
         <div><dt>{a.path}</dt><dd id="authoring-package-path" className="mono">{session.packagePath}</dd></div>
         <div><dt>{a.revision}</dt><dd id="authoring-revision" className="mono" title={session.revision}>{shortRevision(session.revision)}</dd></div>
       </dl>
-      {unsaved > 0 && <span id="authoring-unsaved-count" className="tag unsaved">{a.unsavedFiles(unsaved)}</span>}
     </div>
     <div className={railOpen ? 'repo' : 'repo rail-closed'}>
       <aside id="authoring-rail" className="panel repo-rail" aria-labelledby="authoring-rail-heading" hidden={!railOpen} onContextMenu={event => event.preventDefault()}>
-        <div className="rail-heading"><h2 id="authoring-rail-heading">{a.railHeading}</h2>
+        <div className="rail-heading"><h2 aria-labelledby="authoring-rail-heading"><span id="authoring-rail-heading">{a.railHeading}</span>
+          <HelpTrigger title={a.railHeading} hint={a.filesHint}><p>{a.filesHelp}</p></HelpTrigger></h2>
           <button id="authoring-tree-add" type="button" className="icon-button" aria-label={a.addFile} title={addReason ?? a.addFile}
             disabled={addReason !== null} onClick={() => setIntent({kind: 'add'})}><span aria-hidden="true">+</span></button>
           {railOpen && railButton}</div>
@@ -524,7 +551,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
                 <span className="copy-icon" aria-hidden="true"/><span className="tree-name">{a.duplicateOpen}</span></button>
             </div></li>
           </ul>
-          <p className="field-help rail-help">{a.filesHelp}</p>
         </div>
       </aside>
       <section id="authoring-main" className="panel repo-main" aria-labelledby="authoring-file-heading">
@@ -564,27 +590,5 @@ export default function EditPage({session, label, handlers, recognition, recogni
         </div>
       </form>
     </Modal>
-    <section id="authoring-validation" className="panel validation-panel" aria-labelledby="authoring-validation-heading">
-      <div className="panel-heading"><h2 id="authoring-validation-heading">{a.validationHeading}</h2>
-        {validation && <span id="authoring-validation-state" className={`tag ${!current ? 'stale' : validation.valid ? 'current' : 'unsaved'}`}>
-          {validation.valid ? a.valid(shortRevision(validation.revision)) : a.invalid(shortRevision(validation.revision), validation.diagnostics.length)}</span>}</div>
-      <div className="panel-body">
-        {validating && <div className="button-row"><span className="muted" role="status">{a.validating}</span>
-          <button id="authoring-validate-stop" type="button" className="stop-button" onClick={handlers.stopValidation}>{a.stopValidation}</button></div>}
-        {!validation && !validating && <p className="muted">{a.validationNone}</p>}
-        {validation && !current && <p className="inline-warning">{a.staleValidation(shortRevision(validation.revision))}</p>}
-        {unsaved > 0 && <p className="field-help">{a.unsavedNotValidated}</p>}
-        {validation && validation.diagnostics.length > 0 && <ol id="authoring-diagnostics" className="diagnostic-list">
-          {validation.diagnostics.map((item, index) => {
-            const location = diagnosticLocation(item);
-            const where = location ? a.location(location.path, location.line, location.column) : null;
-            return <li key={index}>
-              {where && session.drafts.has(location!.path)
-                ? <button type="button" className="link diagnostic-location" data-path={location!.path} aria-label={a.goTo(where)} onClick={() => goTo(item)}>{where}</button>
-                : <span className="muted">{where ?? a.unlocated}</span>}
-              <strong> {item.category}</strong> <span>{item.message}</span></li>;
-          })}</ol>}
-      </div>
-    </section>
   </>;
 }

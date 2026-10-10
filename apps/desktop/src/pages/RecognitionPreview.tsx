@@ -7,6 +7,7 @@ import ContentTrial from '../components/ContentTrial.tsx';
 import NativeCaptureControls from '../components/NativeCaptureControls.tsx';
 import Select from '../components/Select.tsx';
 import {FaultMessage, fault} from '../components/ResultPanel.tsx';
+import {HelpPanel, HelpProvider, HelpTrigger, useHelp} from '../components/ContextualHelp.tsx';
 import {messages} from '../i18n.ts';
 import {LocaleContext} from '../locale.tsx';
 import {PREVIEW_ACTION, PREVIEW_EDIT, PREVIEW_LABEL, PREVIEW_READY, PREVIEW_STATE, ZOOM_LEVELS, displayScale, sameJson, stepZoom} from '../recognition.ts';
@@ -14,6 +15,7 @@ import type {PixelRect, PreviewAction, PreviewActionMessage, PreviewCloseFailure
 import type {Fault} from '../types.ts';
 import {PixelInspection, rgbHex} from '../recognitionInspection.ts';
 import type {InspectionState, PixelSample} from '../recognitionInspection.ts';
+import {PreviewImageLoad, previewActionAvailable} from '../recognitionPreviewLoad.ts';
 
 // The main window's label in tauri.conf.json; it owns the Edit session and applies every relayed edit.
 const MAIN_LABEL = 'main';
@@ -35,6 +37,8 @@ export default function RecognitionPreview() {
   const [received, setReceived] = useState(false);
   const [raster, setRaster] = useState<Raster | null>(null);
   const [rasterError, setRasterError] = useState<Fault | null>(null);
+  const [imageLoad] = useState(() => new PreviewImageLoad());
+  const [, refreshImageLoad] = useState(0);
   const [sendError, setSendError] = useState<Fault | null>(null);
   const [stopError, setStopError] = useState<Fault | null>(null);
   const [closeError, setCloseError] = useState<Fault | null>(null);
@@ -44,10 +48,9 @@ export default function RecognitionPreview() {
     request => invoke<PixelSample>('recognition_pixel', {...request}), setInspectionState, fault));
   const inspected = inspection.value;
   const [closing, setClosing] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
+  const closingRef = useRef(false);
   const [trialEpoch, setTrialEpoch] = useState(0);
   const trialEpochRef = useRef(0);
-  const helpButton = useRef<HTMLButtonElement>(null);
   const [display, setDisplay] = useState<PreviewDisplay>({zoom: 'fit', tool: 'zones'});
   const [viewport, setViewport] = useState({width: 0, height: 0});
   const stage = useRef<HTMLDivElement>(null);
@@ -91,6 +94,7 @@ export default function RecognitionPreview() {
       if (!alive) return;
       inspection.close();
       invalidateContent();
+      closingRef.current = true;
       setClosing(true);
     }, {target:{kind:'Window', label:PREVIEW_LABEL}}));
     register(listen<PreviewCloseFailure>('recognition-preview-close-failed', event => {
@@ -100,6 +104,7 @@ export default function RecognitionPreview() {
         || event.payload.generation !== (current.nativeSelection?.selection_generation ?? 0)) return;
       setCloseError(event.payload.error);
       inspection.open();
+      closingRef.current = false;
       setClosing(false);
     }));
     return () => {alive = false; for (const stop of stops) stop();};
@@ -108,13 +113,17 @@ export default function RecognitionPreview() {
 
   useEffect(() => {
     document.title = r.previewTitle;
-  }, [r.previewTitle]);
+    document.documentElement.lang = locale;
+  }, [locale, r.previewTitle]);
 
   // The raster is read once per frame through the owner-scoped host command; no image data crosses windows.
   const token = snapshot?.owner.token ?? null;
+  const help = useHelp(token ?? 'preview-unowned');
   const frameId = snapshot?.frame?.id ?? null;
   const frameRevision = snapshot?.frame?.revision ?? null;
   const captureId = snapshot?.capture_id ?? null;
+  const loadEpoch = frameId !== null && captureId !== null ? inspectionEpoch : null;
+  const imageLoading = imageLoad.pending(loadEpoch);
   const image = raster?.epoch === inspectionEpoch && raster?.token === token && raster?.captureId === captureId && raster?.frameId === frameId
     && raster?.frameRevision === frameRevision ? raster.url : null;
   const trialKey = JSON.stringify([trialEpoch, contentIdentity(snapshot), closing, display.tool, image]);
@@ -135,6 +144,7 @@ export default function RecognitionPreview() {
     }
     let alive = true;
     let url: string | null = null;
+    const request = imageLoad.begin(inspectionEpoch);
     setRasterError(null);
     invoke<ArrayBuffer>('recognition_preview', {owner: snapshot.owner, frameId, captureId}).then(bytes => {
       if (!alive || inspection.sourceEpoch !== inspectionEpoch) return;
@@ -147,9 +157,13 @@ export default function RecognitionPreview() {
         setRaster(null);
         setRasterError(fault(cause));
       }
+    }).finally(() => {
+      request.settle();
+      refreshImageLoad(value => value + 1);
     });
     return () => {
       alive = false;
+      request.invalidate();
       if (url !== null) URL.revokeObjectURL(url);
     };
   }, [token, captureId, frameId, frameRevision, inspectionEpoch, closing]);
@@ -179,7 +193,8 @@ export default function RecognitionPreview() {
     send({kind: 'display', display: next});
   }
   function action(next:PreviewAction) {
-    if (snapshot === null) return;
+    if (snapshot === null || snapshot !== snapshotRef.current || inspectionEpoch !== inspection.sourceEpoch
+      || !previewActionAvailable(snapshot, closingRef.current, imageLoad.pending(loadEpoch), next)) return;
     invalidateContent();
     inspection.clear();
     const message:PreviewActionMessage = {token:snapshot.owner.token, revision:snapshot.revision,
@@ -194,6 +209,7 @@ export default function RecognitionPreview() {
     if (!snapshot || closing) return;
     invalidateContent();
     inspection.close();
+    closingRef.current = true;
     setClosing(true);
     setCloseError(null);
     try {
@@ -203,6 +219,7 @@ export default function RecognitionPreview() {
     } catch (cause) {
       setCloseError(fault(cause));
       inspection.open();
+      closingRef.current = false;
       setClosing(false);
     }
   }
@@ -220,13 +237,6 @@ export default function RecognitionPreview() {
     if (event.defaultPrevented) return;
     const target = event.target as HTMLElement;
     if (target.closest('input, textarea, select, a, [contenteditable="true"], [role="combobox"], [role="listbox"], button:not(#preview-help-toggle)')) return;
-    if (event.key === 'Escape' && helpOpen) {
-      event.preventDefault();
-      event.stopPropagation();
-      setHelpOpen(false);
-      helpButton.current?.focus();
-      return;
-    }
     if (target.closest('.preview-feedback, .content-trial, button') || !snapshot || !geometryEditable) return;
     if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
       event.preventDefault();
@@ -267,7 +277,10 @@ export default function RecognitionPreview() {
       : snapshot?.running ? messages[locale].ui.phase('running')
         : frame ? snapshot?.confirmed ? r.confirmed : r.unconfirmed : '';
 
+  const helpTitle = display.tool === 'inspect' ? r.toolInspect : display.tool === 'content' ? r.toolContent : r.toolZones;
+  const helpContent = <p className="field-help">{display.tool === 'inspect' ? r.inspectHelp : display.tool === 'content' ? r.contentHelp : r.zonesHelp}</p>;
   return <LocaleContext value={locale}>
+    <HelpProvider controller={help} panelId="preview-help">
     <div className="preview-app" onKeyDown={keyDown}>
       <ContentTrial identity={trialKey} active={display.tool === 'content'} disabled={trialDisabled}
         width={frame?.width ?? 0} height={frame?.height ?? 0} content={basis?.content ?? null} image={image}
@@ -312,7 +325,7 @@ export default function RecognitionPreview() {
               // The independent authoring Stop: no geometry fence, no relay through the main window.
               invoke<boolean>('authoring_stop', {owner: snapshot.owner}).catch(cause => setStopError(fault(cause)));
             }}>{r.stop}</button>
-          <NativeCaptureControls disabled={!snapshot || closing || snapshot.commandBusy || snapshot.running || !snapshot.editable} cancelDisabled={closing}
+          <NativeCaptureControls disabled={!previewActionAvailable(snapshot, closing, imageLoading, 'select')} cancelDisabled={closing}
             selection={snapshot?.nativeSelection ?? null} onSelect={() => action('select')} onStart={() => action('start')}
             onCapture={newCapture => action(newCapture ? 'newCapture' : 'capture')} onCancel={() => action('cancel')}/>
           <button id="preview-done" type="button" disabled={!snapshot || closing}
@@ -324,10 +337,8 @@ export default function RecognitionPreview() {
           className={`recognition-stage${display.zoom === 'fit' ? ' fit' : ''}`}>
           {body(candidate, clearCandidate)}
         </div>
-        {(helpOpen || hasFeedback) && <aside id="preview-feedback" className="preview-feedback" aria-label={r.previewFeedback} tabIndex={0}>
-          {helpOpen && <section id="preview-help" aria-labelledby="preview-help-toggle" tabIndex={0}>
-            <p className="field-help">{display.tool === 'inspect' ? r.inspectHelp : display.tool === 'content' ? r.contentHelp : r.zonesHelp}</p>
-          </section>}
+        {(help.topic !== null || hasFeedback) && <aside id="preview-feedback" className="preview-feedback" aria-label={r.previewFeedback} tabIndex={0}>
+          <HelpPanel controller={help} id="preview-help" title={helpTitle}>{helpContent}</HelpPanel>
           {nativeError && !nativeErrorHidden && !duplicateNativeError
             && <FaultMessage title={native.status.failed} value={nativeError} onDismiss={() => setDismissedNativeError(nativeErrorKey)}/>}
           {snapshot?.nativeCache?.error && <FaultMessage title={native.cacheFailed} value={snapshot.nativeCache.error}/>}
@@ -373,11 +384,11 @@ export default function RecognitionPreview() {
             {frame && r.scale(frame.width, frame.height, percent)}
           </span>
         </>}
-        <button ref={helpButton} id="preview-help-toggle" type="button" aria-expanded={helpOpen} aria-controls="preview-help"
-          onClick={() => setHelpOpen(value => !value)}>{r.previewHelpButton}</button>
+        <HelpTrigger id="preview-help-toggle" title={helpTitle} hint={r.previewHelpHint} label={r.previewHelpButton}>{helpContent}</HelpTrigger>
       </footer>
       </>}
       </ContentTrial>
     </div>
+    </HelpProvider>
   </LocaleContext>;
 }

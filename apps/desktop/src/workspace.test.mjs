@@ -1,10 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {applyCatalog,applyCommand,applyIfCurrent,applyInspection,applyInvalidatedViews,applyRecoveryMutation,applyWorkspaceView,approveNative,bindSelection,busy,chooseLane,clearNativeApproval,closeWorkspace,commandValues,deriveBound,displayNameError,editDraft,editNativeReview,hasWorkspaceEdits,importProfileCommand,ingestResults,inScope,internalNameError,isBound,matchesFilter,needsAttention,newDraft,originLabel,retainClosed,selectProfile,updateBound,viewLogs,workspaceFromView,workspaceLabel,CLOSED_LIMIT,UNSUPPORTED_SOURCE} from './workspace.ts';
-import {LocalFault} from './i18n.ts';
+import {LocalFault,messages} from './i18n.ts';
 import {currentRecoveryDraft,editRecovery,issuePath,readRecoveryDraft,recoveryIssue,recoveryState,recoveryTicket,selectRecovery} from './recovery.ts';
 import {optionPath,readDraft} from './state.ts';
-import {beginApplicationPicker,beginRunningApplication,beginTarget,cancelRunningApplication,checkedTarget,completeApplicationPicker,completeRunningApplication,currentTargetDraft,discardTarget,editTarget,eligibleRunningApplication,failRunningApplication,invalidateApplicationPicker,invalidateRunningApplication,readTarget,readTargetDraft,removedTarget,savedTarget,targetDirty,targetExpectation,targetFailed,targetReadFailed,targetState,targetTicket} from './target.ts';
+import {beginApplicationPicker,beginRunningApplication,beginTarget,cancelRunningApplication,checkedTarget,completeApplicationPicker,completeRunningApplication,currentTargetDraft,discardTarget,editTarget,eligibleRunningApplication,failRunningApplication,invalidateApplicationPicker,invalidateRunningApplication,moveTargetArgument,readTarget,readTargetDraft,removedTarget,savedTarget,targetDirty,targetExpectation,targetFailed,targetReadFailed,targetState,targetTicket} from './target.ts';
+import {applicationStatus,workspaceStatus,scopedAuthoring} from './status.ts';
 
 const schema={type:'object',properties:{count:{type:'integer',default:1},mode:{type:'string'}}};
 function profile(id,name,values,packageId='pkg-a',schemaIdentity='schema-1'){
@@ -206,13 +207,13 @@ for (const {scenario,localName,expectedName} of [
   test(`a selected profile changed on disk keeps the local draft as a draft and ${scenario}`,()=>{
     let tab=sameSourceTabs()[0];
     tab=updateBound(tab,bound=>({...selectProfile(bound,'P'),name:localName}));
-    tab=updateBound(tab,bound=>({...editDraft(bound,{count:'8'}),validation:{count:8}}));
+    tab=updateBound(tab,bound=>({...editDraft(bound,{count:'8'}),validation:{draftRevision:bound.draftRevision+1,values:{count:8}}}));
     const before=tab.bound;
     const after=applyCatalog(tab,{profiles:[profile('P','Reviewed again',{count:7},'shared')],profiles_error:null});
     assert.equal(after.bound.selectedId,'P');
     assert.deepEqual(after.bound.draft,{count:'8'});
     assert.equal(after.bound.draftRevision,before.draftRevision);
-    assert.deepEqual(after.bound.validation,{count:8});
+    assert.deepEqual(after.bound.validation,{draftRevision:before.draftRevision,values:{count:8}});
     assert.equal(after.bound.name,expectedName);
     assert.deepEqual(after.bound.profiles[0].values,{count:7});
     assert.equal(after.notice.key,'updatedElsewhere');
@@ -264,7 +265,7 @@ test('an unchanged catalog or an unbound Tab is left as it is',()=>{
 });
 
 for (const {scenario,update} of [
-  {scenario:'validation',update:item=>updateBound(item,bound=>({...bound,validation:{count:5}}))},
+  {scenario:'validation',update:item=>updateBound(item,bound=>({...bound,validation:{draftRevision:bound.draftRevision,values:{count:5}}}))},
   {scenario:'a failed profile mutation',update:item=>({...item,error:unreadable})},
 ]) {
   test(`${scenario} in one Tab cannot roll back another Tab after a successful write whose refresh failed`,()=>{
@@ -303,7 +304,7 @@ test('two Tabs keep independent drafts and switching never touches the other',()
 
 test('a completion for a closed, rebound, stale or reopened workspace is discarded without touching another Tab',()=>{
   const open=[bindSelection(workspaceFromView(view('a')),selection('a',1)),bindSelection(workspaceFromView(view('b')),selection('b',1))];
-  const update=item=>updateBound(item,bound=>({...bound,validation:{count:1}}));
+  const update=item=>updateBound(item,bound=>({...bound,validation:{draftRevision:bound.draftRevision,values:{count:1}}}));
   const afterClose=applyIfCurrent(closeWorkspace(open,'a'),{id:'a',revision:1},update);
   assert.equal(afterClose.length,1);
   assert.equal(afterClose[0].bound.validation,null);
@@ -315,7 +316,7 @@ test('a completion for a closed, rebound, stale or reopened workspace is discard
   const reopened=[open[1],workspaceFromView(view('a2',{internal:'a',display:'Tab a'}))];
   assert.equal(applyIfCurrent(reopened,{id:'a',revision:1},update),reopened);
   const applied=applyIfCurrent(open,{id:'a',revision:1,draftRevision:open[0].bound.draftRevision},update);
-  assert.deepEqual(applied[0].bound.validation,{count:1});
+  assert.deepEqual(applied[0].bound.validation,{draftRevision:open[0].bound.draftRevision,values:{count:1}});
   assert.equal(applied[1],open[1]);
 });
 
@@ -479,6 +480,19 @@ test('target form preserves literal argument boundaries, empty arguments and ind
   assert.equal(saved.draft.launcherPath,'/metadata/Launcher.app');
   assert.equal(saved.observation,null);
   assert.equal(targetDirty(saved),false);
+});
+
+for (const {scenario,from,to,expected} of [
+  {scenario:'first argument moves to the end',from:0,to:4,expected:['two words','"quoted"','$(literal)','','']},
+  {scenario:'last argument moves to the start',from:4,to:0,expected:['','','two words','"quoted"','$(literal)']},
+  {scenario:'literal argument moves across duplicate empty values',from:3,to:1,expected:['','$(literal)','two words','"quoted"','']},
+]) test(`target argument reordering: ${scenario}`,()=>{
+  const draft={...loadedTarget().draft,arguments:['','two words','"quoted"','$(literal)','']};
+  const moved=moveTargetArgument(draft,from,to);
+  const {configuration,errors}=readTargetDraft(moved);
+  assert.deepEqual(errors,{});
+  assert.deepEqual(configuration.arguments,expected);
+  assert.deepEqual(draft.arguments,['','two words','"quoted"','$(literal)','']);
 });
 
 test('native application choice edits only the issuing game or launcher and cancellation leaves the draft untouched',()=>{
@@ -1795,3 +1809,111 @@ for (const {scenario, launcher, workingDirectory, recipient, location, directory
     assert.equal(launch.intent.launch_approved,true);
   });
 }
+
+test('status preserves unresolved execution cleanup and inspection ahead of unrelated successes',()=>{
+  const workspace={...workspaceFromView(view('a')),notice:{key:'settingsSaved',args:['profile']}};
+  const failed=terminal('old',{result:{status:'FAIL',primary:{category:'Script',message:'private recognized text'},cleanup:{clean:false},forced:true}});
+  const items=workspaceStatus(workspace,undefined,failed,null,'en');
+  assert.equal(items[0].id,'execution');
+  assert.equal(items[0].action,'execution');
+  assert.equal(items[1].id,'inspection');
+  assert.equal(items.at(-1).id,'notice');
+  assert.equal(items[0].text.includes('private recognized text'),false);
+  const inspected=bindSelection(workspace,selection('a',2));
+  assert.equal(workspaceStatus(inspected,deriveBound(inspected.bound,null),failed,null,'en').some(item=>item.id==='inspection'),false);
+  assert.equal(workspaceStatus(inspected,deriveBound(inspected.bound,null),failed,null,'en')[0].id,'execution');
+});
+
+test('status attributes a late Target failure to the earlier draft without certifying current edits',()=>{
+  const initial=loadedTarget();
+  const missing=editTarget(initial,{...initial.draft,gamePath:'/metadata/missing'});
+  const ticket=targetTicket(missing);
+  const pending=beginTarget(missing,'check');
+  const repaired=editTarget(pending,{...pending.draft,gamePath:initial.draft.gamePath});
+  const metadata={category:'TargetMetadata',message:'Selected target metadata is unavailable',context:{field:'game',stage:'canonicalize'}};
+  const failed=targetFailed(repaired,ticket,metadata);
+  const tab=withTarget(bindSelection(workspaceFromView(view('a')),targetSelection()),failed);
+  const issue=workspaceStatus(tab,deriveBound(tab.bound,null),null,null,'en').find(item=>item.id==='target-action');
+  assert.equal(issue.earlierDraft,true);
+  assert.equal(issue.severity,'error');
+  assert.equal(issue.action,'run');
+  assert.equal(failed.issue.fault,metadata);
+  assert.equal(failed.draft.gamePath,initial.draft.gamePath);
+  assert.equal(failed.observation,null);
+  assert.equal(failed.reconcile,false);
+  const current=withTarget(tab,targetFailed(missing,ticket,metadata));
+  assert.equal(workspaceStatus(current,deriveBound(current.bound,null),null,null,'en')
+    .find(item=>item.id==='target-action').earlierDraft,false);
+});
+
+test('status retains a late Target conflict and its reload requirement after further draft edits',()=>{
+  const initial=loadedTarget();
+  const ticket=targetTicket(initial);
+  const edited=editTarget(beginTarget(initial,'check'),{...initial.draft,gamePath:'/metadata/edited'});
+  const failed=targetFailed(edited,ticket,{category:'TargetConflict',message:'Saved target record changed',context:null});
+  let tab=withTarget(bindSelection(workspaceFromView(view('a')),targetSelection()),failed);
+  const items=workspaceStatus(tab,deriveBound(tab.bound,null),null,null,'en');
+  assert.equal(items.find(item=>item.id==='target-action').earlierDraft,true);
+  assert.equal(items.find(item=>item.id==='target-conflict').severity,'warning');
+  tab=withTarget(tab,editTarget(failed,{...failed.draft,arguments:['later']}));
+  assert.equal(tab.bound.target.issue,null);
+  assert.equal(targetTicket(tab.bound.target),null);
+  assert.equal(workspaceStatus(tab,deriveBound(tab.bound,null),null,null,'en')
+    .find(item=>item.id==='target-conflict').action,'run');
+  tab=withTarget(tab,readTarget(tab.bound.target,tab.bound.target.view));
+  assert.equal(workspaceStatus(tab,deriveBound(tab.bound,null),null,null,'en')
+    .some(item=>item.id==='target-conflict'),false);
+});
+
+test('Application status projects package-less Check admission and settlement without borrowing workspace work',()=>{
+  const previous=terminal('workspace-run');
+  const admitting=applicationStatus(previous,'en',null,true);
+  assert.equal(admitting[0].id,'operation');
+  assert.equal(admitting[0].severity,'progress');
+  assert.equal(admitting[0].action,null);
+  const check=terminal('application-check',{state:'preparing',operation:'environment_check',workspace_id:null,workspace_revision:null});
+  assert.equal(applicationStatus(check,'en')[0].id,'operation');
+  assert.equal(applicationStatus({...check,state:'running'},'en')[0].severity,'progress');
+  assert.equal(applicationStatus({...check,state:'stopping'},'en')[0].severity,'progress');
+  assert.deepEqual(applicationStatus({...check,state:'terminal'},'en'),[]);
+  assert.deepEqual(applicationStatus({...previous,state:'running'},'en'),[]);
+  const saving=applicationStatus(previous,'en',messages.en.app.savingSettings);
+  assert.equal(saving[0].id,'command');
+  assert.equal(saving[0].severity,'progress');
+  assert.equal(saving.length,1);
+});
+
+test('selected workspace status does not borrow a foreign late notice, validation or operation',()=>{
+  const a=workspaceFromView(view('a'));
+  const b=bindSelection(workspaceFromView(view('b')),selection('b',1));
+  const authoring={owner:{workspace:{workspace_id:'a'},token:'owner-a'},notice:{key:'authoringOpened'}};
+  assert.equal(scopedAuthoring(b,authoring),null);
+  assert.equal(scopedAuthoring(undefined,authoring),null);
+  const late=applyIfCurrent([a,b],{id:'a',revision:0},item=>({...item,notice:{key:'validated'}}));
+  const shown=workspaceStatus(late[1],deriveBound(b.bound,null),terminal('a-run',{error:unreadable}),authoring,'en');
+  assert.deepEqual(shown,[]);
+  assert.equal(workspaceStatus(late[0],undefined,null,null,'en').at(-1).id,'notice');
+});
+
+test('execution disclosure remains possible when package selection retires and resets on rebinding',()=>{
+  let workspace={...bindSelection(workspaceFromView(view('a')),selection('a',1)),page:'execution',disclosedRun:'old'};
+  workspace=applyWorkspaceView(workspace,view('a',{revision:2}),null);
+  assert.equal(workspace.page,'execution');
+  assert.equal(workspace.disclosedRun,null);
+  workspace={...workspace,disclosedRun:'old'};
+  assert.equal(workspace.bound,null);
+  assert.equal(bindSelection(workspace,selection('a',3)).disclosedRun,null);
+});
+
+test('profile validation retains its checked revision across value edits and unrelated notices',()=>{
+  let tab=bindSelection(workspaceFromView(view('a')),selection('a',1));
+  const checked=tab.bound.draftRevision;
+  tab=updateBound(tab,bound=>({...bound,validation:{draftRevision:checked,values:{count:1}}}));
+  tab=updateBound({...tab,notice:null},bound=>({...editDraft(bound,{count:2}),name:'Another name'}));
+  assert.equal(tab.bound.validation.draftRevision,checked);
+  assert.notEqual(tab.bound.validation.draftRevision,tab.bound.draftRevision);
+  assert.deepEqual(tab.bound.validation.values,{count:1});
+  assert.equal(newDraft(tab.bound).validation,null);
+  assert.equal(selectProfile(tab.bound,'prof-a').validation,null);
+  assert.equal(bindSelection(tab,selection('a',2)).bound.validation,null);
+});

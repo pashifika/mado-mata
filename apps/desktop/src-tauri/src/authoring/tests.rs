@@ -128,6 +128,166 @@ fn create_and_duplicate_preserve_portable_ownership_without_local_configuration(
 }
 
 #[test]
+fn duplicate_omits_os_metadata_without_losing_declared_wrapper_files_or_source_bytes() {
+    let fixture = Fixture::new();
+    let original = fixture.package();
+    let original = fixture.catalog(
+        &original,
+        CatalogEdit::Add {
+            path: "__MACOSX/data.json".into(),
+            file_kind: CatalogFileKind::Asset,
+            text: None,
+            bytes: Some(b"{ \"retained\": [1, 2, 3] }\n".to_vec()),
+            id: Some("data".into()),
+            module: None,
+            format: Some("json".into()),
+            width: Some(0),
+            height: Some(0),
+        },
+    );
+    let original_inventory = original.validate().unwrap();
+    let source_files = original.draft.files().clone();
+    let metadata_paths = [
+        ".DS_Store",
+        "Thumbs.db",
+        "ehthumbs.db",
+        "ehthumbs_vista.db",
+        "desktop.ini",
+        "profiles/._default.json",
+        "profiles/.DS_Store",
+        "__MACOSX/._data.json",
+    ];
+    let metadata_bytes = b"retained OS metadata\0\xff";
+    for path in metadata_paths {
+        fs::write(original.root().join(path), metadata_bytes).unwrap();
+    }
+    let reopened = fixture.publisher.open(original.root()).unwrap();
+    assert_eq!(reopened.revision(), original.revision());
+    assert_eq!(
+        Inventory::capture(original.root(), &limits().unwrap())
+            .unwrap()
+            .identity,
+        original_inventory.identity
+    );
+    let duplicate = fixture
+        .publisher
+        .duplicate(
+            &reopened,
+            reopened.revision(),
+            &fixture.root.join("copy"),
+            "other",
+        )
+        .unwrap();
+    let copied_inventory = duplicate.validate().unwrap();
+    assert_eq!(copied_inventory.sources, original_inventory.sources);
+    assert_eq!(copied_inventory.assets, original_inventory.assets);
+    assert!(
+        duplicate
+            .draft
+            .files()
+            .keys()
+            .eq(source_files.keys())
+    );
+    for (path, bytes) in &source_files {
+        let copied = fs::read(duplicate.root().join(path)).unwrap();
+        match original.draft.kinds()[path] {
+            DraftFileKind::Manifest | DraftFileKind::Profile => {
+                let mut expected: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                expected["package_id"] = json!("other");
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&copied).unwrap(),
+                    expected,
+                    "{path}"
+                );
+            }
+            _ => assert_eq!(copied.as_slice(), bytes.as_ref(), "{path}"),
+        }
+        assert_eq!(
+            fs::read(original.root().join(path)).unwrap().as_slice(),
+            bytes.as_ref(),
+            "{path}"
+        );
+    }
+    for path in metadata_paths {
+        assert!(!duplicate.root().join(path).exists(), "{path}");
+        assert_eq!(
+            fs::read(original.root().join(path)).unwrap(),
+            metadata_bytes,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        fixture.publisher.open(original.root()).unwrap().revision(),
+        original.revision()
+    );
+}
+
+#[test]
+fn declared_os_metadata_refuses_duplicate_before_destination_publication() {
+    let fixture = Fixture::new();
+    let original = fixture.package();
+    let mut manifest = original.draft.manifest().unwrap();
+    manifest["assets"]["reserved"] =
+        json!({"path":"desktop.ini","format":"json","width":0,"height":0});
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    fs::write(original.root().join("package.json"), &manifest_bytes).unwrap();
+    fs::write(original.root().join("desktop.ini"), b"{}").unwrap();
+    let mut source_files = original.draft.files().clone();
+    source_files.insert(
+        "package.json".into(),
+        mado_runtime_comparison::images::PayloadBytes::new(manifest_bytes).unwrap(),
+    );
+    assert_eq!(
+        Inventory::capture(original.root(), &limits().unwrap())
+            .unwrap_err()
+            .category,
+        "Inventory"
+    );
+    assert_eq!(
+        fixture.publisher.open(original.root()).unwrap_err().category,
+        "Inventory"
+    );
+    let destination = fixture.root.join("missing/copy");
+    let fault = fixture
+        .publisher
+        .duplicate(&original, original.revision(), &destination, "other")
+        .unwrap_err();
+    assert_eq!(fault.category, "AuthoringConflict");
+    assert_eq!(fault.context["cause"]["category"], "Inventory");
+    assert!(!destination.exists());
+    assert!(!fixture.root.join("missing").exists());
+    for (path, bytes) in &source_files {
+        assert_eq!(
+            fs::read(original.root().join(path)).unwrap().as_slice(),
+            bytes.as_ref(),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        fs::read(original.root().join("desktop.ini")).unwrap(),
+        b"{}"
+    );
+}
+
+#[test]
+fn hidden_package_declarations_keep_existing_portable_path_refusal() {
+    let fixture = Fixture::new();
+    let original = fixture.package();
+    for path in [".helper.ts", ".helpers/entry.ts"] {
+        let fault = fixture
+            .publisher
+            .publish(&original, original.revision(), add_source(path))
+            .unwrap_err();
+        assert_eq!(fault.category, "Inventory");
+        assert!(!original.root().join(path).exists());
+        assert_eq!(
+            fixture.publisher.open(original.root()).unwrap().draft.files(),
+            original.draft.files()
+        );
+    }
+}
+
+#[test]
 fn nested_destinations_do_not_damage_an_existing_package() {
     let fixture = Fixture::new();
     let original = fixture.package();
