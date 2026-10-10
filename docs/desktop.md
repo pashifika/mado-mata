@@ -222,7 +222,7 @@ TSX files under `apps/desktop/src/` are grouped by responsibility:
 | --- | --- |
 | `main.tsx`, `App.tsx` | Bootstrap and application composition |
 | `components/` | Shared selection, schema forms, results, status/Help, notifications, and named-workspace dialogs/navigation |
-| `pages/` | Setup/Recovery, unbound-package guidance, Edit, Run, Execution, and Logs views |
+| `pages/` | Setup/Recovery, unbound-package guidance, Edit, Run, Run details, and Logs views |
 | `settings/` | App settings dialog and OCR environment view |
 | `locales/` | Bundled English/Japanese JSON text resources |
 | `i18n.ts`, `ui-messages.ts`, `locale.tsx` | Typed formatting and saved-locale presentation |
@@ -251,7 +251,7 @@ change persisted formats, filesystem protections, or runtime authority.
 
 ## Workspace navigation, status and Help
 
-**Run control** prepares the next operation. Its summary groups Status,
+**Run** prepares the next operation. Its summary groups Status,
 Profile · next run, Execution mode, and separate **Validate** / **Start** actions.
 Validate checks the profile draft; it is not a Start token or saved-package
 validation. Start revalidates each submitted request and does not navigate away.
@@ -260,14 +260,16 @@ in that order. Execution mode is distinct from Target's native Input route.
 The line below the summary identifies the next-run profile or draft; Replay also
 names the saved OCR environment and descriptor before Start.
 
-**Execution**, beside Run control and Logs, shows the selected workspace's
+**Run details**, beside Run and Logs, shows the selected workspace's
 captured operation, progress, retained outcome and independent cleanup evidence.
 It remains available after Edit invalidates the selection and when logs are
 evicted. Older selection revisions are identified; missing captured inputs are
-not reconstructed from current settings. Private records still require explicit
-disclosure. Outside Edit, the shared pinned operation strip identifies the actual
-Run/Check owner and provides **Stop** across pages; dialogs keep their own controls.
-Execution has no second Stop button.
+not reconstructed from current settings. The bounded raw record requires
+**Show record**; **Hide record** conceals it again. Private observations and
+script decisions share that disclosure gate. The conditional privacy explanation
+appears before the action. Outside Edit, the shared pinned operation strip
+identifies the actual Run/Check owner and provides **Stop** across pages;
+dialogs keep their own controls. Run details has no second Stop button.
 
 Every main page uses the same one-row status presentation: page/activity label,
 known state, a truncatable message, and an explicit **Status details** button.
@@ -284,15 +286,17 @@ earlier-draft attribution; an unresolved saved-record conflict still requires re
 During Edit, the bottom bar groups **Edit · state**, a concise current-scope
 message and direct **Stop** / retained capture **Release** / **Return to Edit**
 controls. Validation indicators live on the associated tabs. The full Edit owner
-is available through the information hint, status details and action descriptions rather than
-occupying the resting bar. Another scope's message keeps its scope label.
+is available through the information hint, status details and action descriptions,
+including when another workspace is selected. The hint identifies only the owner.
+General Edit restrictions live in page Help; the header Help introduces package
+editing. Another scope's message keeps its scope label.
 **Status details** combines attributed activity and notices. **Attention** and
 **Cleanup incomplete** remain visible until their underlying outcomes change.
 Settings, New workspace, Saved workspaces and unsaved-change confirmation use
 the same compact Edit control in their own footer, without an adjacent information
 icon or upper owner strip. Stop acknowledgement is not worker settlement.
 
-**Run control** carries a profile-draft validation icon; **Edit** carries a
+**Run** carries a profile-draft validation icon; **Edit** carries a
 saved-package validation icon. Shape and color distinguish unchecked (dash),
 valid (check), invalid (cross), stale (clock), and running (hourglass) as applicable.
 Hover for the localized scope/state description. Activating a tab still navigates;
@@ -326,7 +330,7 @@ at their decision points. Opening Help starts no recognition or acquisition.
 ## Edit directory packages
 
 Create or open a package from an unbound workspace, or choose **Edit package**
-on Run control. Supported sources are ordinary **TypeScript or JavaScript
+on Run. Supported sources are ordinary **TypeScript or JavaScript
 directories**, with at most **128 declared files** under the
 [shared image and non-image limits](adr/0006-saved-image-recognition-observations.md#image-policy).
 Create writes a runnable TypeScript starter. Duplicate copies the saved source
@@ -1144,8 +1148,8 @@ Popups scroll within the viewport and open above the trigger when needed. Inside
 App settings they remain within the native modal, outside its content scroller.
 Escape dismisses an open selector without cancelling the settings draft.
 
-**Run control** (bound) or **Guidance** (unbound) and **Logs** beside the dropdown
-belong to the selected workspace.
+**Run** (bound) or **Guidance** (unbound), **Run details**, and **Logs** beside the
+dropdown belong to the selected workspace.
 Switching workspaces does not transfer an operation. There is **one application-wide
 operation slot** for Start and OCR Check; the owner and Stop remain available
 across navigation and inside App settings. The host retains the latest terminal
@@ -1233,6 +1237,8 @@ compatible configuration backup before rolling back to an older strict binary.
 
 Choose **Display → Language → English / 日本語**, then **Save changes**.
 The saved language applies immediately without restarting workspaces or runs.
+The main window and detached Recognition Preview also declare that language
+for assistive technology.
 Cancel, Escape, and failed Save keep the previous language; edits made during a
 pending Save remain unsaved. Language does not change OCR recognition settings,
 profile values, or input authority.
@@ -1953,7 +1959,7 @@ Recovery then offers **Retry** after repair, not transaction controls.
    **Save changes** removes the optional environment. Existing settings with no
    environment remain unconfigured without a read-time rewrite. Failed saves and
    incompatible stored data preserve the previous bytes.
-6. On the selected workspace's **Run control** page, enter a **Recorded corpus
+6. On the selected workspace's **Run** page, enter a **Recorded corpus
    descriptor** for its inspected recorded package.
    The descriptor is the `replay` object from the [existing replay format](runtime-native.md#prepare-a-private-replay-package-and-plan),
    not a Plan or complete `native_config`. Its assets must already belong to the
@@ -2336,7 +2342,7 @@ private diagnostic fields are not searched. Severity and text filters do not
 increase retention. A notification's **View logs** action opens its original
 scope; closed origins and evicted events are labeled explicitly.
 
-- **GUI retained-item limit:** integer **1–10,000**, initially **1,000**, saved
+- **Maximum retained events:** integer **1–10,000**, initially **1,000**, saved
   through **Application → App settings → Logs → Save changes**, not a profile
   value. Lowering it immediately keeps only the newest items across all scopes.
   Invalid input preserves the previous valid limit.
@@ -2363,15 +2369,18 @@ scope; closed origins and evicted events are labeled explicitly.
 ### Notification cards
 
 Cards summarize command and terminal outcomes without replacing persistent
-errors, cleanup evidence, or logs. **App settings → Notifications** supports
-**one or two cards**, **5, 8, or 12 seconds**, and success visibility; defaults are
-**two**, **8 seconds**, and **enabled**. Older settings lacking this field use
-those defaults without a read-time rewrite. Invalid present values are refused.
+errors, cleanup evidence, or logs. **App settings → Notifications → Notification
+display** provides **Maximum visible notifications** (one or two cards),
+**Auto-dismiss delay** (5, 8, or 12 seconds), and **Show success notifications**.
+Defaults are **two**, **8 seconds**, and **enabled**. Older settings lacking this
+field use those defaults without a read-time rewrite. Invalid present values
+are refused.
 
 New outcomes displace the oldest visible card; there is no hidden unbounded
 backlog. Lowering the saved count trims immediately. Each card keeps its original
 timeout, paused while hovered or keyboard-focused. Dismissal or expiry does not
-erase its diagnostic record. When a keyboard-focused card is dismissed or
+erase a retained diagnostic record; log history still has its own retention and
+delivery limits. When a keyboard-focused card is dismissed or
 displaced, focus moves to the card now in its place, or back to where focus
 entered the stack; cards that expire or are dismissed without focus leave focus
 untouched. Disabling success cards never suppresses warning or error cards. Cards
@@ -2815,7 +2824,7 @@ Keep package presets valid when changing the schema; do not edit tracked fixture
    refusal, immediate trimming, and restart persistence. Verify card overflow,
    deduplication, hover/focus pause, failure visibility, and origin-linked Logs
    after workspace switches, closure, and log eviction.
-8. Verify Run, Execution, Logs, the status/validation/Help drawers, the Application
+8. Verify Run, Run details, Logs, the status/validation/Help drawers, the Application
    menu, and App settings at 1440, 1024, 900 and the supported minimum 760
    CSS-pixel widths, including keyboard navigation and modal Stop.
    Verify the compact aggregate counters, conditional Errors count, shared

@@ -29,9 +29,9 @@ export default function ExecutionPage({label, revision, run, snapshot, starting,
   const privatePrimary = !check && lane !== 'controlled';
   const outcome = nativeOutcome(view);
   return <>
-    <div className="page-heading"><div><span className="eyebrow">{t.common.revision(label, revision)}</span><h1>{t.common.execution}</h1></div></div>
+    <div className="page-heading"><div><span className="eyebrow">{t.common.revision(label, revision)}</span><h1 id="run-heading">{t.common.execution}</h1></div></div>
     <section className="panel" aria-labelledby="run-heading">
-      <div className="panel-heading"><div><span className="eyebrow">{t.run.immutable}</span><h2 id="run-heading">{check ? t.run.environmentCheck : t.common.execution}</h2></div>
+      <div className="panel-heading"><span className="eyebrow">{t.run.immutable}</span>
         <span className={`phase phase-${phase}`}>{t.phase(phase)}</span></div>
       <div className="panel-body">
         {run.olderRevision !== null && <p className="inline-warning">{t.run.olderRevision(run.olderRevision, revision)}</p>}

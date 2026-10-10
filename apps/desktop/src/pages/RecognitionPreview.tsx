@@ -113,7 +113,8 @@ export default function RecognitionPreview() {
 
   useEffect(() => {
     document.title = r.previewTitle;
-  }, [r.previewTitle]);
+    document.documentElement.lang = locale;
+  }, [locale, r.previewTitle]);
 
   // The raster is read once per frame through the owner-scoped host command; no image data crosses windows.
   const token = snapshot?.owner.token ?? null;

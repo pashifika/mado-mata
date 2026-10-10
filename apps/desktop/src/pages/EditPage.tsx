@@ -464,7 +464,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
 
   return <>
     <div className="page-heading"><div><span className="eyebrow">{a.scope(label)}</span><h1 aria-labelledby="authoring-heading"><span id="authoring-heading">{session.packageId}</span>
-      <HelpTrigger title={a.scope(label)} hint={a.introHint}><p>{a.intro}</p><p>{a.authority}</p></HelpTrigger></h1></div>
+      <HelpTrigger title={a.scope(label)} hint={a.introHint}><p>{a.intro}</p></HelpTrigger></h1></div>
       <div className="actions">
         <button id="authoring-save" type="button" className="primary" disabled={publishLocked || !selected || saveReason !== null}
           title={saveReason ? a.block(saveReason) : undefined} onClick={() => selected && handlers.save(selected.path)}>{pending?.kind === 'save' ? a.working : a.save}</button>

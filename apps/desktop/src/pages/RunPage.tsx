@@ -52,7 +52,7 @@ export default function RunPage({workspace, label, derived, run, locked, active,
   const reinspectButton = useRef<HTMLButtonElement>(null);
   const confirmRow = useRef<HTMLDivElement>(null);
   // Set only when the confirmation row closes while it owns focus. Focus returns to Reinspect; once the submitted
-  // command locks that button (and a fresh revision remounts this page), the stable Run control page tab takes it.
+  // command locks that button (and a fresh revision remounts this page), the stable Run page tab takes it.
   const refocus = useRef(false);
   useEffect(() => {
     if (confirmReinspect || !refocus.current) return;
