@@ -148,10 +148,9 @@ The full check has these responsibilities:
   the real controlled host. They cover no-match/backend-fault distinctions,
   finite waits, retained-handle release and stage/lane refusals. Native-only
   examples must refuse in the controlled lane, not acquire native authority.
-  A focused `engine`-feature regression runs SDK examples against the real
-  Engine with public testkit capture/OCR backends. It checks separate retained
-  result/observation release and rejects ordinary non-ready text; it loads no
-  OCR model and performs no system capture or native input.
+  Separate [Engine publication regressions](runtime-native.md#consumer-publication-regressions)
+  cover Engine-specific resource ownership after installing its native build
+  dependencies; they are not part of the ordinary CI command.
 - Test the independent [application-launch library](../crates/application-launch/Cargo.toml)
   and its literal argument/cwd, refusal and external-child ownership contracts.
   These checks do not launch a game or authorize bundle/native acceptance.
@@ -261,7 +260,6 @@ the product root:
 npm test --prefix integrations/omp
 node --test tools/runtime-comparison/compiler/sdk.test.mjs
 cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml --test sdk_examples
-cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml --features engine --lib sdk_examples_release_engine_results_and_check_visible_readiness
 ```
 
 The full and runtime-only entrypoints include these scopes alongside desktop
@@ -523,9 +521,9 @@ Hosted jobs exercise the real comparison executable with deterministic controlle
 observations and a non-native input sink, plus the desktop checks above.
 Cross-platform success is controlled evidence, not replay, native qualification,
 GUI acceptance, desktop distribution, or runtime adoption. Real engine
-integration and its external prerequisites remain separate from the testkit
-regression above; no CI lane discovers windows, requests permission, captures
-the desktop, changes focus, sends OS input, or operates a game.
+integration and its external prerequisites remain separate from hosted checks;
+no CI lane discovers windows, requests permission, captures the desktop, changes
+focus, sends OS input, or operates a game.
 
 M0 acceptance still requires explicitly authorized native Windows and Apple
 Silicon macOS evidence for capture, template recognition, OCR, input, lifecycle,

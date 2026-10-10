@@ -173,8 +173,6 @@ def check_runtime(root, results_directory):
     run([*cargo, "build", *manifest], root)
     run([*cargo, "test", *manifest], root)
     run_runtime_check([*cargo, "run", *manifest, "--", "check"], root, results_directory)
-    run([*cargo, "test", *manifest, "--features", "engine", "--lib",
-         "sdk_examples_release_engine_results_and_check_visible_readiness"], root)
     run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix", DESKTOP_ROOT], root)
     run([npm, "test", "--prefix", DESKTOP_ROOT], root)
     run([npm, "run", "build", "--prefix", DESKTOP_ROOT], root)
