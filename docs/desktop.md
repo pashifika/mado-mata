@@ -265,18 +265,41 @@ captured operation, progress, retained outcome and independent cleanup evidence.
 It remains available after Edit invalidates the selection and when logs are
 evicted. Older selection revisions are identified; missing captured inputs are
 not reconstructed from current settings. Private records still require explicit
-disclosure. The shared pinned operation strip identifies the actual owner and
-provides **Stop** across pages; dialogs keep their own owner-bound strip.
+disclosure. Outside Edit, the shared pinned operation strip identifies the actual
+Run/Check owner and provides **Stop** across pages; dialogs keep their own controls.
 Execution has no second Stop button.
 
-The bottom status bar identifies its Workspace or Application scope. Click its
-message for full current details and corrective navigation. Unresolved failures
-and blockers take priority over progress and ordinary notices. Closing details
-does not clear them. Profile-draft validation, saved-package validation and
-unsaved drafts retain distinct labels; another workspace's late response cannot
-become the selected workspace's notice.
+Every main page uses the same one-row status presentation: page/activity label,
+known state, a truncatable message, and an explicit **Status details** button.
+The full Workspace or Application scope remains in titles and details.
+Use **Status details** for complete messages and corrective navigation.
+Unresolved failures and blockers take priority over progress and ordinary notices.
+Closing details does not clear them.
+Profile-draft validation, saved-package validation and unsaved drafts remain
+distinct; another workspace's late response cannot become the selected
+workspace's notice.
 Application-scoped work reports its own progress. Target failures retain their
 earlier-draft attribution; an unresolved saved-record conflict still requires reload.
+
+During Edit, the bottom bar groups **Edit · state**, a concise current-scope
+message and direct **Stop** / retained capture **Release** / **Return to Edit**
+controls. Validation indicators live on the associated tabs. The full Edit owner
+is available through the information hint, status details and action descriptions rather than
+occupying the resting bar. Another scope's message keeps its scope label.
+**Status details** combines attributed activity and notices. **Attention** and
+**Cleanup incomplete** remain visible until their underlying outcomes change.
+Settings, New workspace, Saved workspaces and unsaved-change confirmation use
+the same compact Edit control in their own footer, without an adjacent information
+icon or upper owner strip. Stop acknowledgement is not worker settlement.
+
+**Run control** carries a profile-draft validation icon; **Edit** carries a
+saved-package validation icon. Shape and color distinguish unchecked (dash),
+valid (check), invalid (cross), stale (clock), and running (hourglass) as applicable.
+Hover for the localized scope/state description. Activating a tab still navigates;
+**Status details** contains saved-revision and diagnostic details.
+The footer does not repeat these indicators and stays on one row at supported
+widths, including 760 CSS px. Narrow widths truncate the message with an ellipsis;
+full text remains in its tooltip and Status details.
 
 **Help** opens the current page's explanation. Small information circles sit close
 to their labels, aligned to the upper-right within the text height. Their wider
@@ -286,12 +309,18 @@ Action buttons have no information icon: hover or focus shows only a short
 explanation. Disabled actions retain hover descriptions without becoming enabled.
 
 Close or an unconsumed Escape returns focus to the opener, respecting modal/editor
-Escape ownership. Help and status/validation details share one bounded drawer;
-changing page or workspace closes it without clearing the underlying state.
+Escape ownership. Help and Status details, including saved validation, share one
+bounded drawer; changing page or workspace closes it without clearing the underlying state.
 Corrective and diagnostic actions preserve a usable focus target; source diagnostics
 continue into the editor.
 Detached Preview uses the same interaction in its existing overlay without
 resizing the image or changing Fit scale.
+
+Recognition retains its inline image, region, trial, Save and Copy guidance and
+established button layout. Its activity and Stop use the shared bottom status
+surface, not duplicate progress rows in the form. Missing prerequisites,
+confirmation, invalid fields, stale/unsaved state, results and failures remain
+at their decision points. Opening Help starts no recognition or acquisition.
 
 
 ## Edit directory packages
@@ -331,16 +360,17 @@ Neither action inspects, binds, or runs the package.
   are inventory facts, not decoded or text-edited; image authoring belongs to
   **Recognition**.
   Script actions share one compact row, with **Find** at the right.
-  **Find** or **Cmd/Ctrl+F** opens a floating search area over the editor's upper
-  right, without moving or resizing the editor. Toggle the **Replace** icon to
-  reveal replacement controls below Find inside that area; its highlighted
-  state indicates that the row is open. Hiding Replace or closing Find keeps
-  both text fields for reopening. Close or Escape in the search area returns
-  focus to the Script without discarding edits.
-  The floating area reserves scrollable space above the source and keeps revealed
-  matches below it, including the first line; the editor frame does not resize.
-  Opening or closing these controls preserves a scrolled source view rather than
-  jumping to an offscreen caret.
+  **Find** or **Cmd/Ctrl+F** opens a panel immediately above that row.
+  Normal Script buttons remain visible and available, without moving the toolbar
+  or the code. The panel can cover part of the file heading at narrow widths.
+  Toggle **Replace** to reveal replacement controls below Find; the panel expands
+  upward rather than covering code or adding source padding. Its highlighted
+  icon indicates that the row is open. Hiding Replace or closing Find keeps
+  both text fields for reopening. Close or Escape returns focus to the Script
+  without discarding edits.
+  First-line and one-line matches stay outside the panel. Opening/closing Find
+  preserves internal source scrolling; revealing an offscreen search control can
+  scroll the outer page.
   **Discard changes** affects only the selected file; other file drafts are kept.
 - **Metadata** opens structured manifest, option-schema and packaged preset
   controls; generated source maps are read-only facts. Metadata never
@@ -391,9 +421,9 @@ Neither action inspects, binds, or runs the package.
   count; their content remains scrollable at constrained window heights.
 - **Validate** checks one saved revision through the existing inventory and
   trusted compiler without evaluating package code. Unsaved text is excluded.
-  **Saved-package validation** in the bottom bar shows not checked, running,
-  valid, invalid or earlier-revision state and the retained diagnostic count.
-  Open it for source locations; selecting an available location returns to the
+  The **Edit** tab's saved-package icon shows not checked, running, valid, invalid
+  or earlier-revision state. **Status details** retains the revision, diagnostic
+  count and source locations; selecting an available location returns to the
   owning Edit session without losing drafts. Later saves make the old result
   stale; unsaved changes remain independently identified. Details are available
   from the owner's other pages until Edit exits. The finite validation child
@@ -401,11 +431,12 @@ Neither action inspects, binds, or runs the package.
   even with details closed and retains ownership until the worker settles.
 - One Edit session owns the application. Ordinary **Start**, independent OCR
   **Check**, a second editor, and configuration reconstruction are refused.
-  One shared application strip explains this exclusion, including when another
-  workspace is selected. Its expandable authority details explain Save/Inspect
-  as static content outside the live status announcement, not another warning.
-  Idle Edit has no timed runner. Navigation remains available; the owner strip
-  and **Return to Edit** preserve the session across workspaces and dialogs.
+  The bottom Edit summary retains its actual owner across navigation.
+  Its main-window information circle explains exclusion and Save/Inspect on
+  hover, focus or click. Owner-bound Recognition OCR/template trials remain
+  allowed. Unavailable Start/Check actions retain their current reasons.
+  Idle Edit has no timed runner. **Return to Edit** preserves the session across
+  workspaces and dialogs.
 - Guidance **Open/Create**, like Run-page Edit, asks before leaving unsaved
   profile/recovery drafts, including an incomplete Reset's default-based draft.
   **Keep draft** cancels entry. Closing the choice restores focus to its entry
@@ -1158,12 +1189,19 @@ Active operations keep the settings they already captured.
 **Application → Application logs** opens application-wide
 diagnostics; **Close window** follows the bounded shutdown path.
 
-During Edit, the owner strip's small **i** beside the workspace name shows
-**Save and Inspect guidance** on hover, focus, or click, including inside dialogs.
-A focused information or action hint consumes Escape while visible and keeps
-focus on its trigger. Once hidden, Escape reaches the existing Help or dialog
-handler. This applies to shared hints in the main window and detached Preview.
-The settings strip keeps **Return to Edit** at the upper right.
+During Edit, the small **i** beside the editing state shows its owner and **Save and Inspect
+guidance** on hover, focus, or click. A focused information or action hint
+consumes Escape while visible and keeps focus on its trigger. Once hidden,
+Escape reaches the existing Help or dialog handler. This applies to shared hints
+in the main window and detached Preview.
+
+App settings places a colored **Edit · state** control beside its save-state
+text in the footer; click it to return to the owning editor. New workspace,
+Saved workspaces and unsaved-change confirmation use the same control.
+Pending work keeps direct **Stop** or capture **Release** alongside it, without
+an adjacent information icon. The return control retains its full owner description.
+Retained-warning details scroll within the space above the owning footer.
+Escape closes them first, even after focus moves to another dialog control.
 At narrow widths, category tabs use their content height rather than stretching
 with the selected panel. Scroll the dialog when needed to reach Save/Close.
 
@@ -2302,6 +2340,10 @@ scope; closed origins and evicted events are labeled explicitly.
   through **Application → App settings → Logs → Save changes**, not a profile
   value. Lowering it immediately keeps only the newest items across all scopes.
   Invalid input preserves the previous valid limit.
+- **Count badges:** Workspace Logs and Application logs show at most **99**,
+  without a plus sign. Hover or the accessible description gives the exact
+  retained count. These are not unread counts; display capping does not change
+  retention, filtering, or the log list.
 - **Delivery queues:** at most **256 records each** for the application GUI and
   file queues. A larger display limit does not enlarge these queues.
 - **Files:** sanitized JSONL under the data root's `logs/`, rotating across at

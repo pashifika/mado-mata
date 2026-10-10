@@ -78,6 +78,7 @@ export default function RunPage({workspace, label, derived, run, locked, active,
   const view = run.view;
   const phase = starting ? 'preparing' : view.state;
   const canStart = !locked && !active && !pickerBusy && authoring.role === null && !numericErrors && profileBound && startBlock === null && descriptorError === null;
+  const startReason = authoring.role !== null ? a.startBlocked(authoring.ownerLabel ?? label) : startBlock;
   const executionCaption = starting ? t.run.submitted : run.live && busy(view.state) ? t.run.owned(view.run) : view.state === 'terminal' ? t.run.settled(view.run) : t.run.noOperations;
   const heading = selectedProfile && !valuesDirty ? selectedProfile.name : bound.name || t.run.untitled;
   const legacy = workspace.legacyImport;
@@ -121,12 +122,13 @@ export default function RunPage({workspace, label, derived, run, locked, active,
       </HelpTrigger></span><div className="summary-value">{t.lane(bound.lane)}</div></div>
       <div className="actions run-summary-actions">
         <ButtonHint hint={t.run.validateHint}><button id="validate" disabled={locked || numericErrors || !profileBound} onClick={handlers.validate}>{t.run.validate}</button></ButtonHint>
-        <ButtonHint hint={t.run.startHint}><button id="start" className="primary" disabled={!canStart}
-          aria-describedby={['run-start-uses', authoring.role !== null ? 'app-authoring-strip' : null, startBlock ? 'start-block' : null].filter(Boolean).join(' ')}
+        <ButtonHint hint={startReason ?? t.run.startHint}><button id="start" className="primary" disabled={!canStart}
+          aria-describedby={['run-start-uses', authoring.role !== null ? 'start-edit-block' : startBlock ? 'start-block' : null].filter(Boolean).join(' ')}
           onClick={handlers.start}>{t.run.start}</button></ButtonHint>
       </div>
     </section>
     <p id="run-start-uses" className="muted">{t.run.startUses(selectedProfile && !valuesDirty ? selectedProfile.name : null, bound.lane === 'replay', environment?.profile ?? null, bound.descriptorPath.trim() || null)}</p>
+    {authoring.role !== null && <p id="start-edit-block" className="muted">{startReason}</p>}
     <div className="run-grid">
       <section className="panel" aria-labelledby="config-heading">
         <div className="panel-heading"><h2 id="config-heading">{t.run.configuration}</h2><span className="tag">{dirty ? t.common.unsavedChanges : t.run.savedValues}</span></div>

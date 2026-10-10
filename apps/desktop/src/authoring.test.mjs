@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {AUTHORING_CONFLICT,AUTHORING_NON_IMAGE_BYTES,AUTHORING_SOURCE_BYTES,MATCH_LIMIT,applyCatalogMutation,applyRecognitionMutation,applyRefresh,applySave,applyValidation,beginComposition,beginPending,catalogBlock,catalogTicket,diagnosticLocation,discardFile,editFile,endComposition,failCommand,fileDirty,findMatch,lineColumn,lineCount,matchSummary,offsetAt,openSession,otherNonImageBytes,recoveryPath,redoFile,replaceFile,replacementEdit,revealRange,saveBlock,saveTicket,selectFile,selectRecognition,undoFile,validationCurrent,validationTicket} from './authoring.ts';
 import {applyAuthoringExit,applyInvalidatedViews,editDraft,updateBound,workspaceFromView} from './workspace.ts';
 import {revealDiagnostic} from './authoring.ts';
-import {packageValidation} from './status.ts';
+import {authoringActivity,packageValidation,scopedAuthoring} from './status.ts';
 
 const owner={workspace:{workspace_id:'a',revision:1},token:'lease-1'};
 const MAIN='export const a = 1;\n';
@@ -605,4 +605,75 @@ test('a diagnostic for an already-selected metadata file still requests an Edit 
   assert.equal(next.selected,path);
   assert.equal(next.reveal,state.reveal+1);
   assert.equal(next.drafts,state.drafts);
+});
+
+const idleController={run:null,state:'idle',operation:'run',result:null,error:null,progress:[],dropped_logs:0,workspace_id:null,workspace_revision:null,attempts:[]};
+
+test('global Edit activity retains its owner while the selected workspace has no Edit session',()=>{
+  const session=beginPending(openSession(packageView('rev-1',files)),{kind:'validate'});
+  const other=workspaceFromView(workspaceView('b',1,null));
+  assert.equal(scopedAuthoring(other,session),null);
+  const activity=authoringActivity(session,owner,idleController,null,'en');
+  assert.deepEqual(activity.owner,owner);
+  assert.equal(activity.worker.cancellable,true);
+  assert.equal(activity.worker.phase,'preparing');
+  assert.equal(activity.worker.run,null);
+  assert.equal(activity.capture,null);
+  assert.equal(authoringActivity(null,null,idleController,null,'en'),null);
+  assert.deepEqual(authoringActivity(null,owner,idleController,null,'en').owner,owner);
+});
+
+test('pending validation cancellation remains outstanding until the owner result settles',()=>{
+  const original=openSession(packageView('rev-1',files));
+  const ticket=validationTicket(original);
+  const pending={...beginPending(original,{kind:'validate'}),notice:{key:'authoringStopRequested'}};
+  const awaiting=authoringActivity(pending,owner,idleController,null,'en');
+  assert.equal(awaiting.stopRequested,true);
+  assert.equal(awaiting.worker.cancellable,true);
+  const operation={...idleController,run:'validation-1',state:'stopping',operation:'authoring_validate',workspace_id:'a',workspace_revision:1};
+  assert.equal(authoringActivity(pending,owner,operation,null,'en').worker.phase,'stopping');
+  const terminal={...operation,state:'terminal',result:{primary:null,cleanup:{clean:true},forced:false,exit_code:0}};
+  assert.equal(authoringActivity(pending,owner,terminal,null,'en').worker.cancellable,true);
+  const settled=applyValidation(pending,ticket,{owner,revision:'rev-1',valid:true,diagnostics:[]});
+  const activity=authoringActivity(settled,owner,terminal,null,'en');
+  assert.equal(activity.worker,null);
+  assert.equal(activity.stopRequested,false);
+  assert.equal(packageValidation(settled,false).state,'valid');
+});
+
+test('retained capture release is separate from workers and failed release survives ordinary notices',()=>{
+  const session=openSession(packageView('rev-1',files));
+  const capture={owner,revision:'rev-1',selection_generation:3,selected_id:'selected-window',candidates:[],status:'selected',
+    platform:'macos',occupied:true,busy:false,has_saved_target:true,error:null};
+  const retained=authoringActivity(session,owner,idleController,capture,'en');
+  assert.equal(retained.worker,null);
+  assert.equal(retained.capture.occupied,true);
+  assert.equal(retained.capture.busy,false);
+  const pending=beginPending(session,{kind:'validate'});
+  const simultaneous=authoringActivity(pending,owner,idleController,capture,'en');
+  assert.equal(simultaneous.worker.cancellable,true);
+  assert.equal(simultaneous.capture.occupied,true);
+  const failed={...capture,status:'failed',error:{category:'CaptureCleanup',message:'private target title',context:null}};
+  const projection=authoringActivity({...session,notice:{key:'recognitionCopied'}},owner,idleController,failed,'ja');
+  assert.equal(projection.capture,failed);
+  assert.equal(projection.items[0].id,'capture-error');
+  assert.equal(projection.items[0].text.includes('private target title'),false);
+  const released=authoringActivity(session,owner,idleController,{...failed,occupied:false},'en');
+  assert.equal(released.items[0].id,'capture-error');
+  const successor=openSession(packageView('rev-2',files,'lease-2'));
+  assert.equal(authoringActivity(successor,successor.owner,idleController,failed,'en').capture,null);
+});
+
+test('a delayed old validation error cannot replace the successor status or revive its capture details',()=>{
+  const original=beginPending(openSession(packageView('rev-1',files)),{kind:'validate'});
+  const successor=failCommand(openSession(packageView('rev-2',files,'lease-2')),'lease-2',
+    {category:'CurrentFailure',message:'current private detail',context:null});
+  const late=failCommand(successor,original.owner.token,{category:'OldFailure',message:'old private detail',context:null});
+  const oldOperation={...idleController,state:'terminal',operation:'authoring_validate',workspace_id:'a',workspace_revision:1,
+    error:{category:'OldFailure',message:'old private detail',context:null}};
+  const activity=authoringActivity(late,successor.owner,oldOperation,null,'en');
+  assert.equal(late,successor);
+  assert.equal(activity.owner.token,'lease-2');
+  assert.equal(activity.worker,null);
+  assert.deepEqual(activity.items.map(item=>item.text),['CurrentFailure']);
 });

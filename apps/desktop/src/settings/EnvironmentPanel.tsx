@@ -130,9 +130,9 @@ export default function EnvironmentPanel(props: Props) {
         <dt>{t.common.package}</dt><dd><code>{target.packageInventoryIdentity ?? t.common.noneInspected}</code></dd>
       </dl>
       <div className="run-buttons"><button id="check-environment" className="primary" disabled={checkBlock !== null || locked}
-        aria-describedby={authoringReason !== null && checkBlock === authoringReason ? 'dialog-authoring-strip' : 'check-block'}
+        aria-describedby="check-block"
         onClick={onCheck}>{t.environment.check}</button></div>
-      <p className={authoringReason !== null && checkBlock === authoringReason ? 'visually-hidden' : checkBlock !== null ? 'inline-info' : 'muted'}
+      <p className={checkBlock !== null ? 'inline-info' : 'muted'}
         id="check-block">{checkBlock ?? (target.descriptorPath ? t.environment.checkHelp : t.environment.noCorpus)}</p>
       {lastCheck ? <CheckCard key={lastCheck.association.operation} check={lastCheck} stale={stale} originLabel={originLabel}/> : <p className="muted">{t.environment.noChecks}</p>}
     </div>

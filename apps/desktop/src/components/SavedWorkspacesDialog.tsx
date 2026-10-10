@@ -1,6 +1,8 @@
 import type {ReactNode} from 'react';
 import Modal from './Modal.tsx';
 import {FaultMessage} from './ResultPanel.tsx';
+import {AuthoringFooterStatus} from './StatusSurface.tsx';
+import type {AuthoringStatusProps} from './StatusSurface.tsx';
 import {SAVED_LIMIT, WORKSPACE_LIMIT} from '../workspace.ts';
 import type {Fault, TabRecord} from '../types.ts';
 import {messages} from '../i18n.ts';
@@ -14,11 +16,11 @@ interface Props {
   onRefresh: () => void; onReopen: (internalName: string) => void;
   reopening: string | null; reopenError: Fault | null;
   busyReason: string | null;
-  strip: ReactNode;
+  strip: ReactNode; authoring: AuthoringStatusProps | null;
 }
 
 // Closed Tabs are saved storage, not deleted sessions. Reopen asks the host for a fresh session; drafts never return.
-export default function SavedWorkspacesDialog({open, onCancel, closed, faults, listError, openCount, savedCount, onRefresh, onReopen, reopening, reopenError, busyReason, strip}: Props) {
+export default function SavedWorkspacesDialog({open, onCancel, closed, faults, listError, openCount, savedCount, onRefresh, onReopen, reopening, reopenError, busyReason, strip, authoring}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const atLimit = openCount >= WORKSPACE_LIMIT;
@@ -49,10 +51,11 @@ export default function SavedWorkspacesDialog({open, onCancel, closed, faults, l
       </ul>}
       {faults.length > 0 && <section className="catalog-faults"><h3>{t.bootstrap.catalogFaults}</h3><p className="muted">{t.bootstrap.catalogFaultsHelp}</p>
         {faults.map((fault, index) => <FaultMessage key={index} title={t.bootstrap.catalogFaults} value={fault}/>)}</section>}
-      <div className="dialog-footer">
-        <span role="status">{atLimit ? t.reopen.limit(WORKSPACE_LIMIT) : busyReason ?? ''}</span>
-        <button type="button" id="close-saved" onClick={onCancel} disabled={reopening !== null}>{t.common.close}</button>
-      </div>
+    </div>
+    <div className="dialog-footer">
+      <span role="status">{atLimit ? t.reopen.limit(WORKSPACE_LIMIT) : busyReason ?? ''}</span>
+      {authoring && <AuthoringFooterStatus key={authoring.activity.owner.token} {...authoring} idPrefix="saved-authoring"/>}
+      <button type="button" id="close-saved" onClick={onCancel} disabled={reopening !== null}>{t.common.close}</button>
     </div>
   </Modal>;
 }

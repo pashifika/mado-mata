@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  MAX_DEFINITIONS, UNDO_BYTES, UNDO_ENTRIES, applyConfirm, applyCopy, applyDiscard, applyPreviewEdit, applySave, applySync, applyTrial, applyView,
+  MAX_DEFINITIONS, UNDO_BYTES, UNDO_ENTRIES, applyConfirm, applyCopy, applyDiscard, applyPreviewEdit, applySave, applySync, applyTrial, applyView, beginTrial, clearRecognitionMessages, failRecognition,
   clientToFrame, confirmTicket, copyBlock, copyFreshness, copyTicket, createDefinition, deleteDefinition, displayScale, dragEdges, geometryConfirmed,
   hitHandle, hitRegion, mapRegion, openRecognition, previewSnapshot, recognitionDirty, regionFromEdges, renameDefinition, saveBlock, saveTicket,
   selectDefinition, setContent, setDisplay, setExpected, setKind, setRegion, setRights, spanEdges, syncTicket, toggleCrop, toggleTrial, trialBlock,
@@ -9,6 +9,8 @@ import {
 } from './recognition.ts';
 import {PixelInspection, clientToPixel, pixelCenter, rgbHex} from './recognitionInspection.ts';
 import {PreviewImageLoad, previewActionAvailable} from './recognitionPreviewLoad.ts';
+import {beginPending, openSession} from './authoring.ts';
+import {authoringActivity} from './status.ts';
 
 const MIB=1_048_576;
 const owner={workspace:{workspace_id:'a',revision:1},token:'lease-1'};
@@ -1642,4 +1644,56 @@ for (const {scenario,first} of [
   old.settle();
   assert.equal(load.pending(2),false,'old cleanup cannot erase successor settlement');
   assert.equal(load.pending(3),true,'a new source is blocked before its effect starts');
+});
+
+test('global OCR feedback keeps pending Stop and retained cleanup apart from selection and notices',()=>{
+  let state=sync(create(loaded(),edges(10,10,50,50)));
+  const ticket=trialTicket(state,'frame',['r1']);
+  state=beginTrial(state,ticket);
+  const session=openSession({owner,package_path:'/pkg/a',package_id:'example.a',revision:'rev-1',files:[]});
+  const idle={run:null,state:'idle',operation:'run',result:null,error:null,progress:[],dropped_logs:0,workspace_id:null,workspace_revision:null,attempts:[]};
+  const pending=authoringActivity({...session,recognition:state,notice:{key:'authoringStopRequested'}},owner,idle,null,'en');
+  assert.equal(pending.worker.cancellable,true,'the recognition ticket retains Stop even before a controller poll');
+  assert.equal(pending.stopRequested,true);
+  const result=trialResult(ticket,[zone('r1','private recognized text')]);
+  result.controller.state='terminal';
+  result.controller.result.cleanup={clean:false};
+  result.controller.result.primary={category:'OcrFailure',message:'private engine message',context:null};
+  state=clearRecognitionMessages(applyTrial(state,ticket,result));
+  state=renameDefinition(state,'r1','Changed after the trial');
+  const settledSession={...session,recognition:state,notice:{key:'authoringStopRequested'}};
+  const settled=authoringActivity(settledSession,owner,idle,null,'en');
+  assert.equal(settled.worker,null);
+  assert.equal(settled.stopRequested,false);
+  assert.equal(settled.cleanupIncomplete,true);
+  assert.equal(settled.trial,result);
+  assert.equal(settled.items[0].id,'trial-outcome');
+  assert.equal(settled.items[0].recognition,true);
+  assert.equal(settled.items[0].text.includes('private recognized text'),false);
+  assert.equal(settled.items[0].text.includes('private engine message'),false);
+  const restarted=beginPending(settledSession,{kind:'recognition_trial'});
+  const next=authoringActivity(restarted,owner,idle,null,'en');
+  assert.equal(next.worker.cancellable,true);
+  assert.equal(next.stopRequested,false,'a new admission must not inherit the previous trial Stop');
+  assert.equal(next.cleanupIncomplete,true,'new admission does not dismiss an unresolved previous cleanup');
+});
+
+test('replaced Edit owners cannot recover stale trial details or overwrite the successor failure',()=>{
+  const original=sync(create(loaded(),edges(10,10,50,50)));
+  const ticket=trialTicket(original,'frame',['r1']);
+  const result=trialResult(ticket,[]);
+  result.controller.state='terminal';
+  result.controller.result.cleanup={clean:false};
+  const successorOwner={...owner,token:'lease-next'};
+  let state=openRecognition({...original.view,owner:successorOwner,trial:result});
+  state=failRecognition(state,successorOwner.token,{category:'SuccessorFailure',message:'private current failure',context:null});
+  const late=applyTrial(state,ticket,result);
+  assert.equal(late,state);
+  const session=openSession({owner:successorOwner,package_path:'/pkg/a',package_id:'example.a',revision:'rev-1',files:[]});
+  const activity=authoringActivity({...session,recognition:late},successorOwner,result.controller,null,'en');
+  assert.equal(activity.owner.token,successorOwner.token);
+  assert.equal(activity.worker,null);
+  assert.equal(activity.trial,null);
+  assert.equal(activity.cleanupIncomplete,false);
+  assert.deepEqual(activity.items.map(item=>item.text),['SuccessorFailure']);
 });

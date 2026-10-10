@@ -40,7 +40,7 @@ export interface RecognitionPageProps {
   handlers: RecognitionHandlers;
   // Command admission only: another host command is in flight or the application is closing. Local metadata
   // edits, selection and Undo stay available.
-  locked: boolean; lockReason: string | null;
+  locked: boolean;
   // The host no longer reports this lease: nothing can be sent or edited; the draft is kept for Exit.
   leaseLost: boolean;
   // The recognition child holds the work reservation, as the host controller reports; Stop stays reachable.
@@ -52,7 +52,7 @@ const MIB = 1_048_576;
 
 // Main-window recognition panel: frame and geometry status, definitions, trials, crop-only Save and one-way Copy.
 // On-image editing happens in the detached preview window, which shares this state through the Edit session.
-export default function RecognitionPage({state, nativeSelection, onState, handlers, locked, lockReason, leaseLost, trialActive}: RecognitionPageProps) {
+export default function RecognitionPage({state, nativeSelection, onState, handlers, locked, leaseLost, trialActive}: RecognitionPageProps) {
   const locale = useLocale();
   const r = messages[locale].ui.recognition;
   const {document, view} = state;
@@ -180,7 +180,6 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
         <button type="button" onClick={() => setPixelChoice(null)}>{r.cancelCapture}</button>
       </div>
     </div>}
-    {lockReason && <p className="muted" role="status">{lockReason}</p>}
     {state.notice && <p id="recognition-notice" className="inline-warning" role="status">{r.notice(state.notice)}</p>}
     {state.error && <FaultMessage title={r.actionFailed} value={state.error}/>}
 
@@ -287,10 +286,8 @@ export default function RecognitionPage({state, nativeSelection, onState, handle
             title={templateBlock ? r.block(templateBlock) : undefined} onClick={() => handlers.trial('frame', [selected.id])}>{r.tryTemplate}</button>}
           {selected?.kind === 'ocr' && selected.saved && <button id="recognition-recheck-sample" type="button" disabled={commands || running || sampleBlock !== null}
             title={sampleBlock ? r.block(sampleBlock) : r.sampleHelp} onClick={() => handlers.trial('sample', [selected.id])}>{r.recheckSample}</button>}
-          {running && <button id="recognition-stop" type="button" className="stop-button" onClick={handlers.stop}>{r.stop}</button>}
         </div>
         {ocrBlock && ocrBlock !== 'empty' && <p className="muted">{r.block(ocrBlock)}</p>}
-        {running && <p className="muted" role="status">{r.trialRunning}</p>}
         {!record && !running && <p className="muted">{r.noTrial}</p>}
         {record?.fault && <FaultMessage title={r.trialRefused} value={record.fault}/>}
         {record?.trial && <div id="recognition-results" className="recognition-results">

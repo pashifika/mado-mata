@@ -109,8 +109,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const editable = text?.kind === 'source' ? text : undefined;
   const selection = useRef<TextRange>(selected?.range ?? {start: 0, end: 0});
   const searchInput = useRef<HTMLInputElement>(null);
-  const searchPanel = useRef<HTMLDivElement>(null);
-  const [searchInset, setSearchInset] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -219,19 +217,9 @@ export default function EditPage({session, label, handlers, recognition, recogni
     };
   }, [session.owner.token]);
 
-  useLayoutEffect(() => {
-    const panel = searchPanel.current;
-    if (!panel) {setSearchInset(0); return;}
-    const measure = () => setSearchInset(panel.offsetTop + panel.offsetHeight);
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(panel);
-    return () => observer.disconnect();
-  }, [searchOpen, editable?.path]);
-
   function openSearch() {
     flushSync(() => setSearchOpen(true));
-    searchInput.current?.focus();
+    searchInput.current?.focus({preventScroll: true});
     searchInput.current?.select();
   }
   function closeSearch() {
@@ -387,6 +375,8 @@ export default function EditPage({session, label, handlers, recognition, recogni
       </ButtonHint>
     </div>}
     {editable && <>
+      {/* Find floats above the toolbar without moving controls or padding the code viewport. */}
+      <div className="source-tools">
       <div className="editor-toolbar source-toolbar">
         <button id="authoring-undo" type="button" disabled={sourceReadOnly || editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
         <button id="authoring-redo" type="button" disabled={sourceReadOnly || editable.redo.length === 0 || editable.composing !== null} onClick={() => handlers.redo(editable.path)}>{a.redo}</button>
@@ -398,8 +388,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
         <button id="authoring-find" type="button" aria-expanded={searchOpen} aria-controls="authoring-find-panel"
           onClick={() => searchOpen ? closeSearch() : openSearch()}>{a.find}</button>
       </div>
-      <div className="source-editing-area">
-      {searchOpen && <div ref={searchPanel} id="authoring-find-panel" className="editor-find-panel" role="search" aria-label={a.search}
+      {searchOpen && <div id="authoring-find-panel" className="editor-find-panel" role="search" aria-label={a.search}
         onKeyDown={event => {
           if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
           event.preventDefault();
@@ -440,9 +429,11 @@ export default function EditPage({session, label, handlers, recognition, recogni
         </span>}
         <div className="editor-replacement-notice" role="status">{replacementNotice === null ? '' : a.replacementRefusals[replacementNotice]}</div>
       </div>}
+      </div>
+      <div className="source-editing-area">
       <SourceEditor key={`${session.owner.token}:${editable.path}`} draft={editable} reveal={session.reveal} readOnly={sourceReadOnly}
         selection={selection} control={sourceEditor} context={completionContext} request={requestCompletion} accepts={acceptsCompletion}
-        completionPreferences={completionPreferences} topInset={searchOpen ? searchInset : 0}
+        completionPreferences={completionPreferences}
         completionUnavailable={completionStatus === 'unavailable' || completionStatus === 'oversized'}
         onCompletionRefused={() => setCompletionStatus('oversized')}
         onEdit={(next, before, input) => {
@@ -488,7 +479,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
         </ButtonHint>
       </div>
     </div>
-    {locked && lockReason && <p id="authoring-lock-reason" className="operation-status" role="status">{lockReason}</p>}
     {leaseLost && <p id="authoring-lease-lost" className="inline-warning" role="alert">{a.leaseLost}</p>}
     {session.error && <div id="authoring-error"><FaultMessage title={a.actionFailed} value={session.error}/></div>}
     {recoveryFault && <div className="button-row"><button id="authoring-recover" type="button" disabled={locked} onClick={handlers.recover}>{a.recover}</button>

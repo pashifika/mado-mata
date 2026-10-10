@@ -251,7 +251,7 @@ export function selectRecognition(session:AuthoringSession, previous:TextRange|n
 }
 
 export function beginPending(session:AuthoringSession, pending:AuthoringPending):AuthoringSession {
-  return {...session, pending, error: null};
+  return {...session, pending, error: null, notice: session.notice?.key === 'authoringStopRequested' ? null : session.notice};
 }
 
 export function saveBlock(session:AuthoringSession, path:string):PublishBlock|null {
