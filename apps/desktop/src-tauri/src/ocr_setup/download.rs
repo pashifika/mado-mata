@@ -118,7 +118,11 @@ pub(super) fn acquire_with(
         .ok_or_else(|| fault("storage", "managed resource directory is unavailable"))?;
     let _lease = lease(&owned)?;
     cleanup(&owned, catalog)?;
-    let destination = owned.join(catalog.installation_name());
+    let mut destination = owned.join(catalog.installation_name());
+    if !destination.is_absolute() {
+        destination =
+            std::path::absolute(destination).map_err(|error| io_fault("storage", error))?;
+    }
     if fs::symlink_metadata(&destination).is_ok() {
         report(&mut progress, "verifying", 0);
         verify_receipt(&destination, catalog)?;

@@ -119,11 +119,14 @@ fn inspect_with(
     let _lease = download::recover(root, catalog)?;
     let mut items = catalog.items();
     let managed = proposal.model_root.is_empty();
-    let model_root = if managed {
+    let mut model_root = if managed {
         root.join("ocr-resources").join(catalog.installation_name())
     } else {
         PathBuf::from(&proposal.model_root)
     };
+    if managed && !model_root.is_absolute() {
+        model_root = std::path::absolute(model_root).map_err(|error| io_fault("path", error))?;
+    }
     let models = files::models(&model_root, catalog, cancel).and_then(|()| {
         if managed {
             download::verify_receipt(&model_root, catalog)?;
