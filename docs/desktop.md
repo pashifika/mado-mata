@@ -1233,6 +1233,8 @@ compatible configuration backup before rolling back to an older strict binary.
 
 Choose **Display → Language → English / 日本語**, then **Save changes**.
 The saved language applies immediately without restarting workspaces or runs.
+The main window and detached Recognition Preview also declare that language
+for assistive technology.
 Cancel, Escape, and failed Save keep the previous language; edits made during a
 pending Save remain unsaved. Language does not change OCR recognition settings,
 profile values, or input authority.
@@ -2336,7 +2338,7 @@ private diagnostic fields are not searched. Severity and text filters do not
 increase retention. A notification's **View logs** action opens its original
 scope; closed origins and evicted events are labeled explicitly.
 
-- **GUI retained-item limit:** integer **1–10,000**, initially **1,000**, saved
+- **Maximum retained events:** integer **1–10,000**, initially **1,000**, saved
   through **Application → App settings → Logs → Save changes**, not a profile
   value. Lowering it immediately keeps only the newest items across all scopes.
   Invalid input preserves the previous valid limit.
@@ -2363,15 +2365,18 @@ scope; closed origins and evicted events are labeled explicitly.
 ### Notification cards
 
 Cards summarize command and terminal outcomes without replacing persistent
-errors, cleanup evidence, or logs. **App settings → Notifications** supports
-**one or two cards**, **5, 8, or 12 seconds**, and success visibility; defaults are
-**two**, **8 seconds**, and **enabled**. Older settings lacking this field use
-those defaults without a read-time rewrite. Invalid present values are refused.
+errors, cleanup evidence, or logs. **App settings → Notifications → Notification
+display** provides **Maximum visible notifications** (one or two cards),
+**Auto-dismiss delay** (5, 8, or 12 seconds), and **Show success notifications**.
+Defaults are **two**, **8 seconds**, and **enabled**. Older settings lacking this
+field use those defaults without a read-time rewrite. Invalid present values
+are refused.
 
 New outcomes displace the oldest visible card; there is no hidden unbounded
 backlog. Lowering the saved count trims immediately. Each card keeps its original
 timeout, paused while hovered or keyboard-focused. Dismissal or expiry does not
-erase its diagnostic record. When a keyboard-focused card is dismissed or
+erase a retained diagnostic record; log history still has its own retention and
+delivery limits. When a keyboard-focused card is dismissed or
 displaced, focus moves to the card now in its place, or back to where focus
 entered the stack; cards that expire or are dismissed without focus leave focus
 untouched. Disabling success cards never suppresses warning or error cards. Cards
