@@ -110,7 +110,7 @@ export function applicationStatus(operation: ControllerView, locale: Locale, pen
   return items;
 }
 
-// The ordered list is a projection, not a last-message store. Private operation text stays in Execution.
+// The ordered list is a projection, not a last-message store. Private operation text stays in Run details.
 export function workspaceStatus(workspace: Workspace, facts: Derived | undefined, operation: ControllerView | null,
   authoring: AuthoringSession | null, locale: Locale, starting = false, leaseLost = false): StatusItem[] {
   const t = messages[locale].app;

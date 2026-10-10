@@ -195,8 +195,8 @@ export default function StatusSurface({scopeKey, scopeLabel, scopePhase, pageTit
             {authoring ? ui.authoring.ownerEyebrow : pageTitle}{stateLabel !== null && ' ·'}
           </strong>
           {stateLabel !== null && <span className={`phase phase-${phase}`} role="status">{stateLabel}</span>}
-          {authoring && <InfoHint id="app-authoring-help" label={`${ui.authoring.details} · ${authoring.ownerLabel}`}
-            hint={`${ui.authoring.ownerEyebrow} · ${authoring.ownerLabel}\n${ui.authoring.authority}`}/>}
+          {authoring && <InfoHint id="app-authoring-help" label={`${ui.authoring.ownerEyebrow} · ${authoring.ownerLabel}`}
+            hint={`${ui.authoring.ownerEyebrow} · ${authoring.ownerLabel}`}/>}
         </span>
         <span className="status-message-group" role="status" aria-live="polite">
           {worker && <span className="activity-kind" title={worker.kind}>{worker.kind}</span>}

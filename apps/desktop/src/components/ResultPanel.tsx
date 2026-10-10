@@ -87,9 +87,7 @@ export default function ResultPanel({view, disclosed, onDisclose}: {view: Contro
       <details><summary>{t.result.cleanupEvidence}</summary><pre>{JSON.stringify(result.cleanup ?? null, null, 2)}</pre></details>
     </div>}
     {result && !check && <div className="outcome-details">
-      {privateDetail && !disclosed
-        ? <p className="muted">{t.result.privateHelp}</p>
-        : <>
+      {(!privateDetail || disclosed) && <>
           <h3>{t.result.decisions}</h3>
           {Array.isArray(observations.logs) && observations.logs.length > 0
             ? <ul className="decision-list">{observations.logs.map((item, index) => <li key={index}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>)}</ul>
@@ -102,8 +100,8 @@ export default function ResultPanel({view, disclosed, onDisclose}: {view: Contro
       <details><summary>{t.result.cleanupEvidence}</summary><pre>{JSON.stringify(result.cleanup ?? null, null, 2)}</pre></details>
     </div>}
     <div id="result" className="private-disclosure">
-      <button id="disclose-result" disabled={!result && !view.error && attempts.length === 0} onClick={() => onDisclose(!disclosed)}>{disclosed ? t.result.hide : t.result.disclose}</button>
-      <span className="muted">{t.result.disclosureHelp(privateDetail, DISCLOSURE_LIMIT / 1024)}</span>
+      <p id="result-disclosure-help" className="muted">{t.result.disclosureHelp(privateDetail, DISCLOSURE_LIMIT / 1024)}</p>
+      <button id="disclose-result" aria-describedby="result-disclosure-help" disabled={!result && !view.error && attempts.length === 0} onClick={() => onDisclose(!disclosed)}>{disclosed ? t.result.hide : t.result.disclose}</button>
       {disclosed && <BoundedRecord value={result ?? (view.error ? {category: view.error.category, message: view.error.message, context: view.error.context} : {attempts:view.attempts})}/>}
     </div>
   </>;

@@ -2113,7 +2113,7 @@ export default function App() {
     : currentPage === 'edit' ? t.edit : selected ? isBound(selected) ? t.runControl : t.guidance
     : nav.kind === 'closed' ? t.closedDiagnostics : t.application;
   const pageHelp = currentPage === 'execution' ? ui.status.executionHelp : currentPage === 'logs' ? t.workspaceLogHelp
-    : currentPage === 'edit' ? `${ui.authoring.authority} ${ui.authoring.exitHelp}`
+    : currentPage === 'edit' ? ui.authoring.authority
     : selected ? isBound(selected) ? ui.run.introduction : ui.status.inspectionRequired
     : nav.kind === 'closed' ? `${t.closedHelp} ${t.closedLogHelp}` : t.appLogHelp;
   const statusPhase = selected
