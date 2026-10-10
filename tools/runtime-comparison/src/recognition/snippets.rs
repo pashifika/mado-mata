@@ -102,7 +102,7 @@ fn grouped_ocr(
         ));
     }
     Ok(format!(
-        "{{\n  // Checked OCR regions in one scan_ocr_zones request (mado-host-v1), relative to recognitionBasis\n  // from the Game content setup. Reference text is Script-author context only: never sent, matched or awaited.\n  const observation = host.call(\"observe\", {{}});\n  try {{\n    const scan = host.call(\"scan_ocr_zones\", {{\n      observation,\n      basis: recognitionBasis,\n      zones: [\n{zones}      ],\n    }});\n    // Use scan here: scan.zones follow this order, each \"recognized\" or \"no_match\" with every engine region.\n    // The scan is a plain snapshot without a handle to release. No input or automatic text logging.\n  }} finally {{\n    host.call(\"release\", {{ id: observation.id }});\n  }}\n}}\n"
+        "{{\n  // OCR regions in one scan_ocr_zones request (mado-host-v1), relative to recognitionBasis\n  // from the Game content setup. Reference text is Script-author context only: never sent, matched or awaited.\n  const observation = host.call(\"observe\", {{}});\n  try {{\n    const scan = host.call(\"scan_ocr_zones\", {{\n      observation,\n      basis: recognitionBasis,\n      zones: [\n{zones}      ],\n    }});\n    // Use scan here: scan.zones follow this order, each \"recognized\" or \"no_match\" with every engine region.\n    // The scan is a plain snapshot without a handle to release. No input or automatic text logging.\n  }} finally {{\n    host.call(\"release\", {{ id: observation.id }});\n  }}\n}}\n"
     ))
 }
 

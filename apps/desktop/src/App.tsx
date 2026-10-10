@@ -1,5 +1,6 @@
 import {useEffect, useMemo, useReducer, useRef, useState} from 'react';
 import type {KeyboardEvent, ReactNode} from 'react';
+import {flushSync} from 'react-dom';
 import {invoke} from '@tauri-apps/api/core';
 import {emitTo, listen} from '@tauri-apps/api/event';
 import {getCurrentWindow} from '@tauri-apps/api/window';
@@ -44,9 +45,18 @@ import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readEnvironment, 
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
 import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
-import {applyCatalogMutation, applyRecognitionMutation, applyRefresh, applySave, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, saveBlock, saveTicket, selectFile, selectRecognition, undoFile, validationTicket} from './authoring.ts';
+import {applyCatalogMutation, applyRecognitionMutation, applyRefresh, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, selectFile, selectRecognition, undoFile, validationTicket} from './authoring.ts';
 import type {AuthoringSession} from './authoring.ts';
 import {revealDiagnostic} from './authoring.ts';
+import {AuthoringController} from './authoring-controller.ts';
+import type {CollaborationError, CollaborationResponse} from './authoring-controller.ts';
+import {hostFailure, parseHostOperation, requestError} from './authoring-requests.ts';
+import type {HostOperation, LifecycleResult, PublicationResult} from './authoring-requests.ts';
+import {only, record} from './structured-patch.ts';
+import {sdk, sdkDetail, searchSdk} from '../../../tools/runtime-comparison/compiler/sdk.mjs';
+import {CollaborationBridge} from './collaboration-bridge.ts';
+import {saveFileDraft, saveFiles} from './authoring-publication.ts';
+import type {PublicationPorts, SaveOutcome, SaveSequence, SaveTarget} from './authoring-publication.ts';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, approveNative, busy, clearNativeApproval, closeWorkspace, commandValues, deriveBound, editNativeReview, hasWorkspaceEdits, importProfileCommand, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
 import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
@@ -145,10 +155,12 @@ export default function App() {
   const [closedFilter, setClosedFilter] = useState<LogFilter>(EMPTY_FILTER);
   const [reveal, setReveal] = useState<{scope: string; sequence: number} | null>(null);
   const [closedDisclosed, setClosedDisclosed] = useState(false);
-  // The one Edit session's drafts live here, not in the page, so navigation and unmounting never lose them. The ref is
-  // the synchronous truth for sequential host calls (Save all) and is published to state by `updateAuthoring` only.
-  const authoringStore = useRef<AuthoringSession | null>(null);
+  // The one Edit session's drafts live in this controller, not in the page, so navigation and unmounting never lose
+  // them. Its current session is the synchronous truth shared by UI actions, sequential host calls (Save all) and
+  // collaboration requests; `authoringController.update` is the only writer and publishes `authoring` for rendering.
   const [authoring, setAuthoring] = useState<AuthoringSession | null>(null);
+  const [authoringController] = useState(() => new AuthoringController(setAuthoring));
+  const [collaboration] = useState(() => new CollaborationBridge({invoke, listen}));
   // The host's lease as last polled; undefined until the first poll of this session answers.
   const hostAuthoringRef = useRef<AuthoringRef | null | undefined>(undefined);
   const [hostAuthoring, setHostAuthoring] = useState<AuthoringRef | null | undefined>(undefined);
@@ -160,6 +172,9 @@ export default function App() {
   const [choice, setChoice] = useState<Choice | null>(null);
   const [choiceBusy, setChoiceBusy] = useState(false);
   const choiceRunning = useRef(false);
+  // Read by collaboration admission outside render: shutdown or a shown Save/Discard choice decides this session's fate.
+  const resolvingAuthoring = useRef(false);
+  resolvingAuthoring.current = closing || choice !== null;
   const authoringWorker = useRef<Promise<unknown> | null>(null);
   const capabilityOwner = useRef<string | null>(null);
   const previewConnected = useRef(false);
@@ -261,13 +276,6 @@ export default function App() {
     return {view: idle, live: false, olderRevision: null};
   }
 
-  function updateAuthoring(update: (session: AuthoringSession | null) => AuthoringSession | null) {
-    const next = update(authoringStore.current);
-    if (next === authoringStore.current) return;
-    authoringStore.current = next;
-    setAuthoring(next);
-  }
-
   function publishHostAuthoring(next: AuthoringRef | null | undefined) {
     const current = hostAuthoringRef.current;
     if (next === current || (next && current && sameAuthoringRef(next, current))) return;
@@ -277,7 +285,7 @@ export default function App() {
 
   // Read from refs so an action that awaited the host sees the lease as it is now, not as it was when it was rendered.
   function leaseOwnerNow(): string | null {
-    return authoringStore.current?.owner.workspace.workspace_id ?? hostAuthoringRef.current?.workspace.workspace_id ?? null;
+    return authoringController.current()?.owner.workspace.workspace_id ?? hostAuthoringRef.current?.workspace.workspace_id ?? null;
   }
 
   useEffect(() => {document.documentElement.lang = locale;}, [locale]);
@@ -285,7 +293,7 @@ export default function App() {
   function adoptSettings(saved: Settings) {
     if (!sameEnvironment(knownOcrEnvironment.current, saved.ocr_environment)) {
       recognitionConfigurationDirty.current = true;
-      updateAuthoring(session => session?.recognition
+      authoringController.update(session => session?.recognition
         ? {...session, recognition: recognition.invalidateConfiguration(session.recognition)} : session);
       // A Native approval covered the environment it was given for, even if an identical one returns later.
       setWorkspaces(list => list.map(item => updateBound(item, clearNativeApproval)));
@@ -350,7 +358,7 @@ export default function App() {
     epoch.current += 1;
     // A rebuilt Application issues fresh leases; the old session's Edit view and its lease are gone with it.
     authoringEpoch.current += 1;
-    updateAuthoring(() => null);
+    authoringController.update(() => null);
     publishHostAuthoring(undefined);
     setChoice(null);
     setWorkspaces(catalog.open.map(item => workspaceFromView(item)));
@@ -893,8 +901,8 @@ export default function App() {
     }
   }
 
-  function ownAuthoringWorker(action: () => Promise<void>): Promise<void> {
-    if (authoringWorker.current !== null) return Promise.resolve();
+  function ownAuthoringWorker<T>(action: () => Promise<T>): Promise<T | null> {
+    if (authoringWorker.current !== null) return Promise.resolve(null);
     const settled = action().finally(() => {
       if (authoringWorker.current === settled) authoringWorker.current = null;
     });
@@ -919,14 +927,15 @@ export default function App() {
   // Why this Tab cannot enter Edit now. One lease exists per application and entering requires settled work.
   function editBlock(workspace: Workspace): string | null {
     if (closing) return t.applicationClosing;
-    if (leaseOwnerId !== null) return ui.authoring.blockedOther(labelOf(leaseOwnerId));
+    const ownerId = leaseOwnerNow();
+    if (ownerId !== null) return ui.authoring.blockedOther(labelOf(ownerId));
     if (active) return ui.authoring.blockedActive;
     return workspace.busy !== null ? renderMessage(locale, workspace.busy) : commandReason;
   }
 
   // Open and Create never run package code or bind the Tab; the lease then excludes ordinary Start and Check.
-  async function enterEdit(workspace: Workspace, path: string, packageId: string | null) {
-    if (!(packageId === null ? path : packageId) || editBlock(workspace) !== null || leaseOwnerNow() !== null) return;
+  async function enterEdit(workspace: Workspace, path: string, packageId: string | null): Promise<boolean> {
+    if (!(packageId === null ? path : packageId) || editBlock(workspace) !== null || leaseOwnerNow() !== null) return false;
     invalidateOwnerTarget(workspace.id);
     const origin: Origin = {id: workspace.id, revision: workspace.revision};
     const ref = workspaceRef(workspace);
@@ -935,15 +944,17 @@ export default function App() {
       const view = await authoringCall(packageId === null ? 'openingPackage' : 'creatingPackage', () => packageId === null
         ? invoke<AuthoringView>('authoring_open', {workspace: ref, packagePath: path})
         : invoke<AuthoringView>('authoring_create', {workspace: ref, packageId}));
-      updateAuthoring(() => openSession(view, {key: packageId === null ? 'authoringOpened' : 'authoringCreated'}));
+      authoringController.update(() => openSession(view, {key: packageId === null ? 'authoringOpened' : 'authoringCreated'}));
       publishHostAuthoring(view.owner);
       const owner = view.owner.workspace.workspace_id;
       change(owner, item => ({...item, page: 'edit'}));
       go({kind: 'workspace', id: owner});
       await readRecognition();
+      return true;
     } catch (cause) {
       const error = fault(cause);
       setWorkspaces(list => applyIfCurrent(list, origin, item => ({...item, error})));
+      return false;
     }
   }
 
@@ -952,7 +963,7 @@ export default function App() {
     const id = owner.workspace.workspace_id;
     try {
       const view = await authoringCall('refreshingPackage', () => invoke<AuthoringView>('authoring_refresh', {owner}));
-      if (authoringStore.current === null) updateAuthoring(() => openSession(view, {key: 'authoringResumed'}));
+      if (authoringController.current() === null) authoringController.update(() => openSession(view, {key: 'authoringResumed'}));
       publishHostAuthoring(view.owner);
       change(id, item => ({...item, page: 'edit'}));
       await readRecognition();
@@ -964,7 +975,7 @@ export default function App() {
   }
 
   function returnToEdit() {
-    const session = authoringStore.current;
+    const session = authoringController.current();
     const owner = session?.owner ?? hostAuthoringRef.current ?? null;
     if (!owner) return;
     if (!session) {
@@ -976,67 +987,85 @@ export default function App() {
     go({kind: 'workspace', id});
   }
 
-  // Resolves true when the file is saved or has nothing left to save; a refusal keeps the draft and reports why.
-  async function saveFile(path: string): Promise<boolean> {
-    const session = authoringStore.current;
-    if (!session || leaseLost) return false;
-    if (saveBlock(session, path) === 'clean') return true;
-    const ticket = saveTicket(session, path);
-    if (!ticket) return false;
-    updateAuthoring(current => current && current.owner.token === ticket.token ? beginPending(current, {kind: 'save', path}) : current);
-    try {
-      const mutation = await authoringCall('savingFile', () => invoke<AuthoringMutation>('authoring_save', {owner: session.owner, revision: ticket.expected, path, text: ticket.text}));
-      updateAuthoring(current => applySave(current, ticket, mutation));
-      if (session.recognition && mutation.view !== null && !await readRecognition()) return false;
-      return true;
-    } catch (cause) {
-      updateAuthoring(current => failCommand(current, ticket.token, fault(cause)));
-      return false;
+  const publicationPorts: PublicationPorts = {
+    save: (owner, ticket) => authoringCall('savingFile', () => invoke<AuthoringMutation>('authoring_save',
+      {owner, revision: ticket.expected, path: ticket.path, text: ticket.text})),
+    refreshRecognition: readRecognition,
+    fault,
+    available: owner => hostAuthoringRef.current === undefined
+      || (hostAuthoringRef.current !== null && sameAuthoringRef(owner, hostAuthoringRef.current)),
+  };
+
+  // The same sequence serves UI Save all, dirty resolution and explicit external publication.
+  async function saveAll(targets?: readonly SaveTarget[], includeRecognition = true): Promise<SaveSequence> {
+    const initial = authoringController.current();
+    if (!initial) return {committed: [], remaining: [], failure: null};
+    const description = authoringController.describe();
+    const files = targets ?? description.resources.filter(resource => resource.dirty && !resource.missing && initial.drafts.has(resource.path))
+      .map(resource => ({resource: resource.id, version: resource.version}));
+    const result = await saveFiles(authoringController, files, publicationPorts);
+    let current = authoringController.current();
+    if (!result.failure && includeRecognition && current?.owner.token === initial.owner.token && current.recognition && recognition.recognitionDirty(current.recognition)) {
+      if (current.recognition.localRevision !== initial.recognition?.localRevision || current.recognition.view.capture_id !== initial.recognition?.view.capture_id) {
+        result.failure = {path: 'recognition', committedRevision: null, refreshRequired: false,
+          error: {category: 'RecognitionDraftChanged', message: 'Recognition changed during Save all', context: null}};
+      } else {
+        let committed: AuthoringMutation | null = null;
+        const saved = await saveRecognition(mutation => {
+          committed = mutation;
+          result.committed.push({path: 'recognition', revision: mutation.committed_revision});
+        });
+        current = authoringController.current();
+        if (!saved || current?.refreshRequired) result.failure = {
+          path: 'recognition', committedRevision: (committed as AuthoringMutation | null)?.committed_revision ?? null,
+          refreshRequired: current?.refreshRequired ?? false, error: current?.refreshError ?? current?.error
+            ?? {category: 'RecognitionSaveBlocked', message: 'Recognition Save did not complete', context: null},
+        };
+      }
     }
+    if (authoringController.current()?.owner.token === initial.owner.token) {
+      const requested = targets === undefined ? null : new Set(targets.map(target => target.resource));
+      result.remaining = authoringController.describe().resources.filter(resource => resource.dirty
+        && (resource.role === undefined || resource.role === 'context')
+        && (requested === null || requested.has(resource.id) || (includeRecognition && resource.role === 'context')))
+        .map(resource => ({resource: resource.id, version: resource.version}));
+      const error = result.failure?.error;
+      if (error) authoringController.update(session => failCommand(session, initial.owner.token, error));
+    }
+    return result;
   }
 
-  // Saves every savable dirty file in order and stops at the first failure; each ticket reads the latest revision.
-  async function saveAll(): Promise<boolean> {
-    const paths = authoringStore.current ? dirtyDrafts(authoringStore.current).filter(draft => !draft.missing).map(draft => draft.path) : [];
-    for (const path of paths) {
-      if (!await saveFile(path)) return false;
-    }
-    const session = authoringStore.current;
-    if (session?.recognition && recognition.recognitionDirty(session.recognition) && !await saveRecognition()) return false;
-    const latest = authoringStore.current;
-    return latest === null || (dirtyDrafts(latest).length === 0 && (!latest.recognition || !recognition.recognitionDirty(latest.recognition)));
-  }
-
-  async function changeCatalog(edit: CatalogEdit): Promise<boolean> {
-    const session = authoringStore.current;
+  async function changeCatalog(edit: CatalogEdit, foreground: boolean, onCommit?: (mutation: AuthoringMutation) => void): Promise<boolean> {
+    const session = authoringController.current();
     const ticket = session && !leaseLost ? catalogTicket(session, edit) : null;
     if (!session || !ticket) return false;
-    updateAuthoring(current => current && current.owner.token === ticket.token ? beginPending(current, {kind: 'catalog'}) : current);
+    authoringController.update(current => current && current.owner.token === ticket.token ? beginPending(current, {kind: 'catalog'}) : current);
     try {
       const mutation = await authoringCall('changingCatalog', () => invoke<AuthoringMutation>('authoring_catalog', {owner: session.owner, revision: ticket.expected, edit}));
-      updateAuthoring(current => applyCatalogMutation(current, ticket, mutation));
+      onCommit?.(mutation);
+      authoringController.update(current => applyCatalogMutation(current, ticket, mutation, foreground));
       if (session.recognition && mutation.view !== null) await readRecognition();
       return true;
     } catch (cause) {
-      updateAuthoring(current => failCommand(current, ticket.token, fault(cause)));
+      authoringController.update(current => failCommand(current, ticket.token, fault(cause)));
       return false;
     }
   }
 
   function updateRecognition(token: string, update: (state: recognition.RecognitionState) => recognition.RecognitionState) {
-    updateAuthoring(session => session?.owner.token === token && session.recognition
+    authoringController.update(session => session?.owner.token === token && session.recognition
       ? {...session, recognition: update(session.recognition)} : session);
   }
 
   function acceptRecognitionView(owner: AuthoringRef, next: recognition.RecognitionView) {
-    updateAuthoring(session => session && sameAuthoringRef(session.owner, owner) && sameAuthoringRef(next.owner, owner) && session.revision === next.revision
+    authoringController.update(session => session && sameAuthoringRef(session.owner, owner) && sameAuthoringRef(next.owner, owner) && session.revision === next.revision
       ? {...session, recognition: session.recognition ? recognition.applyView(session.recognition, next) : recognition.openRecognition(next)}
       : session);
   }
 
   function recognitionFailed(token: string, cause: unknown) {
     const error = fault(cause);
-    updateAuthoring(session => {
+    authoringController.update(session => {
       const next = failCommand(session, token, error);
       return next?.owner.token === token && next.recognition
         ? {...next, recognition: recognition.failRecognition(next.recognition, token, error)} : next;
@@ -1045,10 +1074,10 @@ export default function App() {
 
   // Local edits remain possible while a command awaits IPC; only the captured host draft is authorized.
   async function recognitionCommand(label: Command, action: (session: AuthoringSession) => Promise<void>): Promise<boolean> {
-    const session = authoringStore.current;
+    const session = authoringController.current();
     if (!session || session.pending !== null || leaseLost || closing) return false;
     const token = session.owner.token;
-    updateAuthoring(current => current?.owner.token === token
+    authoringController.update(current => current?.owner.token === token
       ? {...beginPending(current, {kind: 'recognition'}), recognition: current.recognition && recognition.clearRecognitionMessages(current.recognition)} : current);
     try {
       await authoringCall(label, () => action(session));
@@ -1057,7 +1086,7 @@ export default function App() {
       recognitionFailed(token, cause);
       return false;
     } finally {
-      updateAuthoring(current => current?.owner.token === token && current.pending?.kind === 'recognition' ? {...current, pending: null} : current);
+      authoringController.update(current => current?.owner.token === token && current.pending?.kind === 'recognition' ? {...current, pending: null} : current);
     }
   }
 
@@ -1069,11 +1098,11 @@ export default function App() {
   }
 
   async function checkRecognitionCapabilities() {
-    const session = authoringStore.current;
+    const session = authoringController.current();
     if (!session || session.pending !== null || leaseLost || closing || hostCommand.current !== null) return;
     const token = session.owner.token;
     capabilityOwner.current = token;
-    updateAuthoring(current => current?.owner.token === token
+    authoringController.update(current => current?.owner.token === token
       ? {...beginPending(current, {kind: 'recognition_trial'}), recognition: current.recognition && recognition.clearRecognitionMessages(current.recognition)} : current);
     expectedRun.current = null;
     epoch.current += 1;
@@ -1084,13 +1113,13 @@ export default function App() {
     } catch (cause) {
       recognitionFailed(token, cause);
     } finally {
-      updateAuthoring(current => current?.owner.token === token && current.pending?.kind === 'recognition_trial' ? {...current, pending: null} : current);
+      authoringController.update(current => current?.owner.token === token && current.pending?.kind === 'recognition_trial' ? {...current, pending: null} : current);
     }
   }
 
   async function openRecognition() {
-    if (!authoringStore.current?.recognition && !await readRecognition()) return;
-    const session = authoringStore.current;
+    if (!authoringController.current()?.recognition && !await readRecognition()) return;
+    const session = authoringController.current();
     if (session && capabilityOwner.current !== session.owner.token) {
       await ownAuthoringWorker(checkRecognitionCapabilities);
     }
@@ -1101,13 +1130,13 @@ export default function App() {
   }, [authoring?.destination, authoring?.owner.token, authoring?.recognition !== null, authoring?.pending]);
 
   async function synchronizeRecognition(owner: AuthoringRef): Promise<{session: AuthoringSession; state: recognition.RecognitionState}> {
-    let session = authoringStore.current;
+    let session = authoringController.current();
     if (!session || !sameAuthoringRef(session.owner, owner) || !session.recognition) throw new LocalFault({key: 'recognitionUnavailable'});
     if (recognitionConfigurationDirty.current || session.recognition.view.revision !== session.revision) {
       const next = await invoke<recognition.RecognitionView>('recognition_view', {owner, revision: session.revision});
       acceptRecognitionView(owner, next);
       recognitionConfigurationDirty.current = false;
-      session = authoringStore.current;
+      session = authoringController.current();
       if (!session || !sameAuthoringRef(session.owner, owner) || !session.recognition) throw new LocalFault({key: 'recognitionUnavailable'});
     }
     const ticket = recognition.syncTicket(session.recognition);
@@ -1117,7 +1146,7 @@ export default function App() {
       });
       updateRecognition(owner.token, state => recognition.applySync(state, ticket, next));
     }
-    session = authoringStore.current;
+    session = authoringController.current();
     if (!session || !sameAuthoringRef(session.owner, owner) || !session.recognition) throw new LocalFault({key: 'recognitionUnavailable'});
     if (!recognition.hostCurrent(session.recognition)) throw new LocalFault({key: 'recognitionDraftChanged'});
     return {session, state: session.recognition};
@@ -1158,7 +1187,7 @@ export default function App() {
   }
 
   function acceptNativeSelection(owner:AuthoringRef, next:NativeSelectionView|null) {
-    const session = authoringStore.current;
+    const session = authoringController.current();
     if (next && session && sameAuthoringRef(session.owner, owner) && sameAuthoringRef(next.owner, owner) && next.revision === session.revision) {
       setNativeSelection(next);
     }
@@ -1203,7 +1232,7 @@ export default function App() {
   }
 
   async function releaseNativeCapture() {
-    const session = authoringStore.current;
+    const session = authoringController.current();
     const selected = nativeSelection;
     if (!session || !selected || !sameAuthoringRef(session.owner, selected.owner) || session.revision !== selected.revision) return;
     try {
@@ -1261,18 +1290,18 @@ export default function App() {
   }
 
   async function trialRecognition(kind: 'frame' | 'sample', ids: string[]) {
-    const initial = authoringStore.current;
+    const initial = authoringController.current();
     if (!initial || initial.pending !== null || leaseLost || closing || hostCommand.current !== null) return;
     const token = initial.owner.token;
     let ticket: recognition.TrialTicket | null = null;
-    updateAuthoring(current => current?.owner.token === token
+    authoringController.update(current => current?.owner.token === token
       ? {...beginPending(current, {kind: 'recognition'}), recognition: current.recognition && recognition.clearRecognitionMessages(current.recognition)} : current);
     try {
       const {session, state} = await authoringCall('updatingRecognition', () => synchronizeRecognition(initial.owner));
       ticket = recognition.trialTicket(state, kind, ids);
       if (!ticket) throw new LocalFault({key: 'recognitionDraftChanged'});
       const captured = ticket;
-      updateAuthoring(current => current?.owner.token === token && current.recognition
+      authoringController.update(current => current?.owner.token === token && current.recognition
         ? {...current, pending: {kind: 'recognition_trial'}, recognition: recognition.beginTrial(current.recognition, captured)} : current);
       expectedRun.current = null;
       epoch.current += 1;
@@ -1290,12 +1319,12 @@ export default function App() {
       }
       recognitionFailed(token, cause);
     } finally {
-      updateAuthoring(current => current?.owner.token === token ? {...current, pending: null} : current);
+      authoringController.update(current => current?.owner.token === token ? {...current, pending: null} : current);
     }
   }
 
-  async function saveRecognition(): Promise<boolean> {
-    const initial = authoringStore.current;
+  async function saveRecognition(onCommit?: (mutation: AuthoringMutation) => void): Promise<boolean> {
+    const initial = authoringController.current();
     if (!initial?.recognition || !recognition.recognitionDirty(initial.recognition)) return true;
     if (initial.refreshRequired || initial.conflict) return false;
     if (dirtyDrafts(initial).some(draft => draft.kind === 'manifest')) {
@@ -1320,7 +1349,8 @@ export default function App() {
         owner: session.owner, revision: session.revision, captureId: ticket.capture_id, documentRevision: ticket.document_revision, cropIds: ticket.crop_ids,
         cropSources: ticket.crop_sources,
       });
-      updateAuthoring(latest => {
+      onCommit?.(result.mutation);
+      authoringController.update(latest => {
         const next = applyRecognitionMutation(latest, result.mutation);
         return next?.owner.token === ticket.token && next.recognition
           ? {...next, recognition: recognition.applySave(next.recognition, ticket, result.recognition)} : next;
@@ -1350,7 +1380,7 @@ export default function App() {
           owner: session.owner, revision: session.revision, captureId: ticket.capture_id, documentRevision: ticket.document_revision, definitionIds: ticket.definition_ids, mode,
         });
         updateRecognition(captured.token, current => recognition.applyCopy(current, captured, result, null));
-        updateAuthoring(current => current?.owner.token === captured.token ? {...current, notice: {key: 'recognitionCopied'}} : current);
+        authoringController.update(current => current?.owner.token === captured.token ? {...current, notice: {key: 'recognitionCopied'}} : current);
       } catch (cause) {
         updateRecognition(captured.token, current => recognition.applyCopy(current, captured, result, fault(cause)));
         throw cause;
@@ -1359,14 +1389,14 @@ export default function App() {
   }
 
   async function openRecognitionPreview() {
-    const session = authoringStore.current;
+    const session = authoringController.current();
     if (!session || leaseLost || closing || choice !== null || choiceRunning.current) return;
     try {
       await invoke<void>('recognition_open_preview', {owner: session.owner, revision: session.revision});
       await publishRecognitionPreview();
     } catch (cause) {
       const error = fault(cause);
-      updateAuthoring(current => current?.owner.token === session.owner.token
+      authoringController.update(current => current?.owner.token === session.owner.token
         ? {...current, error, recognition: current.recognition ? recognition.failRecognition(current.recognition, session.owner.token, error) : null}
         : current);
     }
@@ -1374,7 +1404,7 @@ export default function App() {
 
   async function publishRecognitionPreview() {
     if (!previewConnected.current) return;
-    const session = authoringStore.current;
+    const session = authoringController.current();
     const editable = !captureTransition.current && !closing && choice === null && !choiceRunning.current && !leaseLost && session?.pending?.kind !== 'exit' && session?.pending?.kind !== 'duplicate';
     const running = session?.pending?.kind === 'recognition_trial' || session?.pending?.kind === 'validate'
       || (busy(view.state) && (view.operation === 'authoring_validate' || view.operation?.startsWith('recognition_') === true));
@@ -1388,7 +1418,7 @@ export default function App() {
     catch {
       if (publication !== previewPublication.current) return;
       previewConnected.current = false;
-      if (session) updateAuthoring(current => current?.owner.token === session.owner.token
+      if (session) authoringController.update(current => current?.owner.token === session.owner.token
         ? {...current, error: new LocalFault({key: 'recognitionPreviewFailed'})} : current);
     }
   }
@@ -1396,13 +1426,13 @@ export default function App() {
   previewBridge.current = {
     ready: () => {previewConnected.current = true; void publishRecognitionPreview();},
     edit: message => {
-      const session = authoringStore.current;
+      const session = authoringController.current();
       if (!session || captureTransition.current || leaseLost || closing || choice !== null || choiceRunning.current || session.pending?.kind === 'exit' || session.pending?.kind === 'duplicate') return;
       updateRecognition(session.owner.token, state => recognition.applyPreviewEdit(state, message, ui.recognition.defaultName));
       void publishRecognitionPreview();
     },
     action: message => {
-      const session = authoringStore.current;
+      const session = authoringController.current();
       const state = session?.recognition;
       const observed = nativeSelectionRef.current;
       if (!session || !state || message.token !== session.owner.token || message.revision !== session.revision) return;
@@ -1431,7 +1461,7 @@ export default function App() {
     const stops: (() => void)[] = [];
     const register = (promise: Promise<() => void>) => {
       void promise.then(stop => {if (alive) stops.push(stop); else stop();}).catch(cause => {
-        const token = authoringStore.current?.owner.token;
+        const token = authoringController.current()?.owner.token;
         if (alive && token) recognitionFailed(token, cause);
       });
     };
@@ -1439,7 +1469,7 @@ export default function App() {
     register(listen<recognition.PreviewEditMessage>(recognition.PREVIEW_EDIT, event => previewBridge.current.edit(event.payload)));
     register(listen<recognition.PreviewActionMessage>(recognition.PREVIEW_ACTION, event => previewBridge.current.action(event.payload)));
     register(listen<recognition.PreviewCloseMessage>('recognition-preview-closed', event => {
-      const session = authoringStore.current;
+      const session = authoringController.current();
       const selection = nativeSelectionRef.current;
       const close = event.payload;
       if (session && sameAuthoringRef(session.owner, close.owner) && session.revision === close.revision
@@ -1448,7 +1478,7 @@ export default function App() {
       }
     }));
     register(listen<recognition.PreviewCloseFailure>('recognition-preview-close-failed', event => {
-      const session = authoringStore.current;
+      const session = authoringController.current();
       const selection = nativeSelectionRef.current;
       if (session && sameAuthoringRef(session.owner, event.payload.owner) && session.revision === event.payload.revision
         && (!selection || !sameAuthoringRef(selection.owner, session.owner) || selection.selection_generation === event.payload.generation)) {
@@ -1466,74 +1496,79 @@ export default function App() {
       const selection = nativeSelectionRef.current;
       const generation = selection && sameAuthoringRef(selection.owner, owner) ? selection.selection_generation : 0;
       void invoke<void>('recognition_close_preview', {owner, revision, generation}).catch(cause => {
-        const session = authoringStore.current;
+        const session = authoringController.current();
         if (session && sameAuthoringRef(session.owner, owner)) recognitionFailed(owner.token, cause);
       });
     };
   }, [authoring?.owner.token]);
 
-  async function refreshAuthoring() {
-    const session = authoringStore.current;
-    if (!session || session.pending !== null) return;
+  async function refreshAuthoring(foreground = true): Promise<boolean> {
+    const session = authoringController.current();
+    if (!session || session.pending !== null) return false;
     const token = session.owner.token;
-    updateAuthoring(current => current && current.owner.token === token ? beginPending(current, {kind: 'refresh'}) : current);
+    authoringController.update(current => current && current.owner.token === token ? beginPending(current, {kind: 'refresh'}) : current);
     try {
       const view = await authoringCall('refreshingPackage', () => invoke<AuthoringView>('authoring_refresh', {owner: session.owner}));
-      updateAuthoring(current => applyRefresh(current, view));
-      await readRecognition();
+      authoringController.update(current => applyRefresh(current, view, foreground));
+      return await readRecognition();
     } catch (cause) {
-      updateAuthoring(current => failCommand(current, token, fault(cause)));
+      authoringController.update(current => failCommand(current, token, fault(cause)));
+      return false;
     }
   }
 
   // Validation reserves the shared work slot under the lease; the status surface keeps its owner-bound Stop.
-  async function validateAuthoring() {
-    const session = authoringStore.current;
-    if (!session || leaseLost || hostCommand.current !== null || active || closing) return;
+  async function validateAuthoring(): Promise<AuthoringValidation | null> {
+    const session = authoringController.current();
+    if (!session || leaseLost || hostCommand.current !== null || active || closing) return null;
     const ticket = validationTicket(session);
-    if (!ticket) return;
-    updateAuthoring(current => current && current.owner.token === ticket.token ? beginPending(current, {kind: 'validate'}) : current);
+    if (!ticket) return null;
+    authoringController.update(current => current && current.owner.token === ticket.token ? beginPending(current, {kind: 'validate'}) : current);
     // The child replaces any earlier run in the shared controller view; accept its host-issued ID when polled.
     expectedRun.current = null;
     epoch.current += 1;
     setStripMessage(null);
     try {
       const result = await invoke<AuthoringValidation>('authoring_validate', {owner: session.owner, revision: ticket.revision});
-      updateAuthoring(current => applyValidation(current, ticket, result));
+      authoringController.update(current => applyValidation(current, ticket, result));
+      return result;
     } catch (cause) {
-      updateAuthoring(current => failCommand(current, ticket.token, fault(cause)));
+      authoringController.update(current => failCommand(current, ticket.token, fault(cause)));
+      return null;
     }
   }
 
   // Cancellation stays independent of command admission, like Stop; the reply only acknowledges the request.
-  async function stopValidation() {
-    const owner = authoringStore.current?.owner ?? hostAuthoringRef.current;
-    if (!owner) return;
+  async function stopValidation(): Promise<boolean | null> {
+    const owner = authoringController.current()?.owner ?? hostAuthoringRef.current;
+    if (!owner) return null;
     const token = owner.token;
     setStopping(true);
     try {
-      await invoke<boolean>('authoring_stop', {owner});
-      updateAuthoring(current => current && current.owner.token === token ? {...current, notice: {key: 'authoringStopRequested'}} : current);
+      const requested = await invoke<boolean>('authoring_stop', {owner});
+      authoringController.update(current => current && current.owner.token === token ? {...current, notice: {key: 'authoringStopRequested'}} : current);
       setStripMessage({text: {key: 'authoringStopRequested'}, error: false});
+      return requested;
     } catch (cause) {
       const error = fault(cause);
-      updateAuthoring(current => current && current.owner.token === token ? {...current, error} : current);
+      authoringController.update(current => current && current.owner.token === token ? {...current, error} : current);
       setStripMessage({text: {key: 'stopFailed', args: [faultSummary(error, true)]}, error: true});
+      return null;
     } finally {
       setStopping(false);
     }
   }
 
   async function recoverAuthoringPackage() {
-    const session = authoringStore.current;
+    const session = authoringController.current();
     if (!session || session.pending !== null) return;
     const token = session.owner.token;
     try {
       await authoringCall('recoveringPackage', () => invoke<void>('authoring_recover', {packagePath: session.packagePath}));
-      updateAuthoring(current => current && current.owner.token === token ? {...current, error: null} : current);
+      authoringController.update(current => current && current.owner.token === token ? {...current, error: null} : current);
       await refreshAuthoring();
     } catch (cause) {
-      updateAuthoring(current => failCommand(current, token, fault(cause)));
+      authoringController.update(current => failCommand(current, token, fault(cause)));
     }
   }
 
@@ -1550,18 +1585,18 @@ export default function App() {
 
   // Duplicate reads the saved revision, so the choice dialog has already saved or deliberately left the drafts.
   async function duplicateAuthoring(packageId: string): Promise<boolean> {
-    const session = authoringStore.current;
+    const session = authoringController.current();
     if (!session || session.pending !== null || leaseLost) return false;
     const token = session.owner.token;
-    updateAuthoring(current => current && current.owner.token === token ? beginPending(current, {kind: 'duplicate'}) : current);
+    authoringController.update(current => current && current.owner.token === token ? beginPending(current, {kind: 'duplicate'}) : current);
     try {
       const view = await authoringCall('duplicatingPackage', () => invoke<AuthoringView>('authoring_duplicate', {owner: session.owner, revision: session.revision, packageId}));
-      updateAuthoring(current => current && current.owner.token === token ? openSession(view, {key: 'authoringDuplicated', args: [view.package_path, view.package_id]}) : current);
+      authoringController.update(current => current && current.owner.token === token ? openSession(view, {key: 'authoringDuplicated', args: [view.package_path, view.package_id]}) : current);
       publishHostAuthoring(view.owner);
       await readRecognition();
       return true;
     } catch (cause) {
-      updateAuthoring(current => failCommand(current, token, fault(cause)));
+      authoringController.update(current => failCommand(current, token, fault(cause)));
       return false;
     }
   }
@@ -1569,21 +1604,21 @@ export default function App() {
   // Ends the lease and applies the owner's invalidated view; the Tab then needs an explicit Inspect/Reinspect. Returns
   // 'released' when the host no longer held this view's lease, and null when the host refused (the view stays).
   async function exitAuthoring(): Promise<WorkspaceView | 'released' | null> {
-    const session = authoringStore.current;
+    const session = authoringController.current();
     const owner = session?.owner ?? hostAuthoringRef.current ?? null;
     if (!owner) return null;
     const ownerId = owner.workspace.workspace_id;
     if (session && hostAuthoringRef.current === null && session.pending === null && authoringBusy === null) {
-      updateAuthoring(() => null);
+      authoringController.update(() => null);
       change(ownerId, item => ({...item, page: 'run'}));
       return 'released';
     }
     const token = owner.token;
-    updateAuthoring(current => current && current.owner.token === token ? beginPending(current, {kind: 'exit'}) : current);
+    authoringController.update(current => current && current.owner.token === token ? beginPending(current, {kind: 'exit'}) : current);
     try {
       return await authoringCall('exitingEdit', async () => {
         const view = await invoke<WorkspaceView>('authoring_exit', {owner});
-        updateAuthoring(current => current && current.owner.token === token ? null : current);
+        authoringController.update(current => current && current.owner.token === token ? null : current);
         publishHostAuthoring(null);
         const packagePath = session?.packagePath ?? null;
         setWorkspaces(list => updateWorkspace(list, view.workspace_id, item => applyAuthoringExit(item, view, packagePath)));
@@ -1592,7 +1627,7 @@ export default function App() {
       });
     } catch (cause) {
       const error = fault(cause);
-      if (session) updateAuthoring(current => failCommand(current, token, error));
+      if (session) authoringController.update(current => failCommand(current, token, error));
       else change(ownerId, item => ({...item, error}));
       return null;
     }
@@ -1600,17 +1635,18 @@ export default function App() {
 
   function requestChoice(next: Choice) {
     if (choiceRunning.current) return;
-    const session = authoringStore.current;
+    const session = authoringController.current();
     if (session && (dirtyDrafts(session).length > 0 || (session.recognition && recognition.recognitionDirty(session.recognition)))) setChoice(next);
     else void resolveChoice(next, false);
   }
 
-  // Save stops at the first failed file; any refusal keeps the lease, drafts and selection and shows the editor.
-  async function resolveChoice(intent: Choice, save: boolean) {
-    if (choiceRunning.current) return;
+  // A stopped Save keeps the lease and drafts; only a foreground refusal navigates back to Edit.
+  async function resolveChoice(intent: Choice, save: boolean, foreground = true, onPublication?: (result: SaveSequence) => void): Promise<boolean> {
+    if (choiceRunning.current) return false;
     choiceRunning.current = true;
     setChoiceBusy(true);
     let done = false;
+    const token = authoringController.current()?.owner.token;
     try {
       const worker = authoringWorker.current;
       if (worker) {
@@ -1618,7 +1654,7 @@ export default function App() {
         // The operation handler retains its primary/cleanup outcome before this promise settles.
         await worker.catch(() => {});
       }
-      const session = authoringStore.current;
+      const session = authoringController.current();
       if (session) {
         const selected = nativeSelectionRef.current;
         const released = await authoringCall('readingRecognition', () => invoke<NativeSelectionView>('native_release_selection', {
@@ -1626,52 +1662,60 @@ export default function App() {
         }));
         acceptNativeSelection(session.owner, released);
       }
-      if (save && !await saveAll()) return;
+      if (save) {
+        const publication = await saveAll();
+        onPublication?.(publication);
+        if (publication.failure !== null || publication.remaining.length > 0) return false;
+      }
       if (intent.kind === 'duplicate') {
         done = await duplicateAuthoring(intent.packageId);
-        return;
+        return done;
       }
       if (intent.kind === 'close') {
-        done = await closeApplication(authoringStore.current?.owner ?? hostAuthoringRef.current ?? null);
-        return;
+        done = await closeApplication(authoringController.current()?.owner ?? hostAuthoringRef.current ?? null);
+        return done;
       }
-      const packagePath = authoringStore.current?.packagePath ?? null;
+      const packagePath = authoringController.current()?.packagePath ?? null;
       const exited = await exitAuthoring();
-      if (exited === null) return;
+      if (exited === null) return false;
       done = true;
       if (intent.kind === 'closeTab') {
         const current = openWorkspaces.current.find(item => item.id === intent.workspaceId);
         if (current) void closeTab(exited === 'released' ? current : applyAuthoringExit(current, exited, packagePath), false);
       }
+    } catch (cause) {
+      if (token) authoringController.update(current => failCommand(current, token, fault(cause)));
+      return false;
     } finally {
       choiceRunning.current = false;
       setChoiceBusy(false);
       setChoice(null);
-      if (!done && authoringStore.current) returnToEdit();
+      if (foreground && !done && authoringController.current()) returnToEdit();
     }
+    return done;
   }
 
   const editHandlers: EditHandlers = {
-    select: (path, previous) => updateAuthoring(session => session && selectFile(session, path, previous)),
+    select: (path, previous) => authoringController.update(session => session && selectFile(session, path, previous)),
     recognition: previous => {
-      updateAuthoring(session => session && selectRecognition(session, previous));
+      authoringController.update(session => session && selectRecognition(session, previous));
       void openRecognition();
     },
-    edit: (path, next, before, input) => updateAuthoring(session => session && editFile(session, path, next, before, input)),
-    replace: (path, text, typed) => updateAuthoring(session => session && replaceFile(session, path, text, typed)),
-    compositionStart: (path, range) => updateAuthoring(session => session && beginComposition(session, path, range)),
-    compositionEnd: path => updateAuthoring(session => session && endComposition(session, path)),
-    range: (path, range) => updateAuthoring(session => session && recordRange(session, path, range)),
-    undo: path => updateAuthoring(session => session && undoFile(session, path)),
-    redo: path => updateAuthoring(session => session && redoFile(session, path)),
-    reveal: (path, range) => updateAuthoring(session => session && revealRange(session, path, range)),
-    discard: path => updateAuthoring(session => session && discardFile(session, path)),
-    save: path => void saveFile(path),
-    saveAll: () => void saveAll(),
+    edit: (path, next, before, input) => authoringController.update(session => session && editFile(session, path, next, before, input)),
+    replace: (path, text, typed) => authoringController.update(session => session && replaceFile(session, path, text, typed)),
+    compositionStart: (path, range) => authoringController.update(session => session && beginComposition(session, path, range)),
+    compositionEnd: path => authoringController.update(session => session && endComposition(session, path)),
+    range: (path, range) => authoringController.update(session => session && recordRange(session, path, range)),
+    undo: path => authoringController.update(session => session && undoFile(session, path)),
+    redo: path => authoringController.update(session => session && redoFile(session, path)),
+    reveal: (path, range) => authoringController.update(session => session && revealRange(session, path, range)),
+    discard: path => authoringController.update(session => session && discardFile(session, path)),
+    save: path => void ownAuthoringWorker(() => saveFileDraft(authoringController, path, publicationPorts)),
+    saveAll: () => void ownAuthoringWorker(() => saveAll()),
     validate: () => void ownAuthoringWorker(validateAuthoring),
-    refresh: () => void refreshAuthoring(),
+    refresh: () => void ownAuthoringWorker(refreshAuthoring),
     recover: () => void recoverAuthoringPackage(),
-    catalog: edit => changeCatalog(edit),
+    catalog: async edit => (await ownAuthoringWorker(() => changeCatalog(edit, true))) ?? false,
     duplicate: packageId => requestChoice({kind: 'duplicate', packageId}),
     exit: () => requestChoice({kind: 'exit'}),
   };
@@ -1870,6 +1914,207 @@ export default function App() {
     }).then(unlisten => {if (alive) stop = unlisten; else unlisten();}).catch(() => {});
     return () => {alive = false; stop?.();};
   }, []);
+  function collaborationEditBlock(session: AuthoringSession, editsRecognition: boolean): string | null {
+    const host = hostAuthoringRef.current;
+    if (host !== undefined && session.pending === null && host?.token !== session.owner.token) return 'The host no longer reports this Edit lease';
+    if (editsRecognition && captureTransition.current) return 'The capture is changing';
+    return choiceRunning.current || resolvingAuthoring.current ? 'The application is closing or resolving unsaved work' : null;
+  }
+
+  function publicationResult(sequence: SaveSequence): PublicationResult {
+    const current = authoringController.describe();
+    return {complete: sequence.failure === null && sequence.remaining.length === 0,
+      committed: sequence.committed, remaining: sequence.remaining, savedRevision: current.savedRevision,
+      refreshRequired: current.refreshRequired || (sequence.failure?.refreshRequired ?? false),
+      failure: sequence.failure === null ? null : hostFailure(sequence.failure.error,
+        'Publication stopped; committed revisions remain saved. Inspect the desktop status before continuing.', sequence.failure.outcome)};
+  }
+
+  async function collaborationLifecycle(operation: Extract<HostOperation, {kind: 'create'|'open'|'duplicate'|'exit'}>): Promise<LifecycleResult|CollaborationError> {
+    if (operation.resolution === 'cancel') return requestError('cancelled', 'The owner transition was cancelled');
+    const initial = authoringController.describe();
+    const session = authoringController.current();
+    if (initial.resources.some(resource => resource.dirty) && operation.resolution === undefined) {
+      return requestError('dirty_choice_required', 'Choose save, discard or cancel for the current unsaved drafts');
+    }
+    const workspace = 'workspace' in operation ? openWorkspaces.current.find(item => item.id === operation.workspace) : null;
+    if ('workspace' in operation && !workspace) return requestError('unknown_workspace', 'The selected workspace is no longer open');
+    if (workspace && hasWorkspaceEdits(workspace, undefined) && operation.resolution !== 'discard') {
+      return requestError('workspace_dirty', 'The destination has unsaved Run inputs; explicitly discard them or resolve them in the desktop');
+    }
+    let publication: PublicationResult | null = null;
+    let publicationStopped = false;
+    let complete = false;
+    let previousReleased = false;
+    try {
+      if (session) {
+        const intent: Choice = operation.kind === 'duplicate' ? {kind: 'duplicate', packageId: operation.packageId} : {kind: 'exit'};
+        complete = await resolveChoice(intent, operation.resolution === 'save', false, result => {
+          publication = publicationResult(result);
+          publicationStopped = !publication.complete;
+        });
+        previousReleased = authoringController.describe().owner !== initial.owner;
+        if (!complete || operation.kind === 'exit' || operation.kind === 'duplicate') {
+          const current = authoringController.describe();
+          return {complete, connection: {owner: current.owner, package: current.package}, previousReleased, publication,
+            failure: complete ? null : publicationStopped
+              ? requestError('publication_incomplete', 'The owner transition did not start; committed saves and remaining drafts are retained')
+              : hostFailure(authoringController.current()?.error ?? null,
+                'The owner transition stopped; the current desktop state and any committed prefix are retained.', 'unknown')};
+        }
+      }
+      if (operation.kind === 'create' || operation.kind === 'open') {
+        complete = await ownAuthoringWorker(async () => {
+          const catalog = await authoringCall('openingPackage', () => invoke<WorkspaceCatalog>('workspace_catalog'));
+          const view = catalog.open.find(item => item.workspace_id === operation.workspace);
+          if (!view) return false;
+          setWorkspaces(list => applyInvalidatedViews(list, catalog.open));
+          return enterEdit(workspaceFromView(view), operation.kind === 'open' ? operation.path : '',
+            operation.kind === 'create' ? operation.packageId : null);
+        }) ?? false;
+      }
+    } catch (cause) {
+      const error = fault(cause);
+      const current = authoringController.describe();
+      return {complete: false, connection: {owner: current.owner, package: current.package}, previousReleased, publication,
+        failure: hostFailure(error, 'The requested owner transition did not finish; rediscover before deciding.', 'unknown')};
+    }
+    const current = authoringController.describe();
+    return {complete, connection: {owner: current.owner, package: current.package}, previousReleased, publication,
+      failure: complete ? null : hostFailure(authoringController.current()?.error ?? null,
+        'The requested owner transition did not finish; rediscover before deciding.', 'unknown')};
+  }
+
+  async function handleCollaboration(value: unknown): Promise<CollaborationResponse> {
+    const request = record(value);
+    if (!request || !only(request, ['id', 'owner', 'package', 'operation'])
+      || (request.owner !== null && typeof request.owner !== 'string') || (request.package !== null && typeof request.package !== 'string')) {
+      return authoringController.handle(value, collaborationEditBlock);
+    }
+    const owner = request.owner;
+    const operation = parseHostOperation(request.operation);
+    if (operation === null) {
+      const response = flushSync(() => authoringController.handle(value, collaborationEditBlock));
+      if (response.ok && record(request.operation)?.kind === 'describe' && 'resources' in response.result && 'owner' in response.result) {
+        const result = {...response.result, catalog: sdk,
+          workerPending: active || captureTransition.current || authoringWorker.current !== null
+            || hostCommand.current !== null || choiceRunning.current || resolvingAuthoring.current,
+          workspaces: openWorkspaces.current.map(workspace => ({id: workspace.id, label: workspaceLabel(workspace, openWorkspaces.current),
+            editable: !closing && !active && workspace.busy === null && commandReason === null}))};
+        return {owner, ok: true, result};
+      }
+      return {...response, owner};
+    }
+    if ('code' in operation) return {owner, ok: false, error: operation};
+    if (operation.kind === 'sdk_search') return {owner, ...searchSdk(operation.query, {cursor: operation.cursor, limit: operation.limit})};
+    if (operation.kind === 'sdk_detail') return {owner, ...sdkDetail(operation.name)};
+    const scope = authoringController.checkScope(owner, request.package);
+    if (scope !== null) return {owner, ok: false, error: scope};
+    if (closing || choiceRunning.current || resolvingAuthoring.current) {
+      return {owner, ok: false, error: requestError('busy', 'The desktop is closing or resolving an owner transition')};
+    }
+    if (operation.kind === 'cancel') {
+      if (!authoringController.current()) return {owner, ok: false, error: requestError('no_edit_owner', 'Cancellation has no current Edit owner')};
+      const requested = await stopValidation();
+      return requested === null ? {owner, ok: false, error: {code: 'cancel_unavailable', message: 'Cancellation could not be acknowledged; observe the desktop state', outcome: 'unknown'}}
+        : {owner, ok: true, result: {requested, settled: false}};
+    }
+    const session = authoringController.current();
+    if (operation.kind === 'create' || operation.kind === 'open' || operation.kind === 'duplicate' || operation.kind === 'exit') {
+      if ((!session && authoringWorker.current !== null) || (authoringWorker.current === null && (hostCommand.current !== null || session?.pending))) {
+        return {owner, ok: false, error: requestError('busy', 'A desktop command must settle before the owner transition')};
+      }
+      const result = await collaborationLifecycle(operation);
+      return 'code' in result ? {owner, ok: false, error: result} : {owner, ok: true, result};
+    }
+    if (!session) return {owner, ok: false, error: requestError('no_edit_owner', 'No package is open for editing')};
+    if (authoringWorker.current !== null || hostCommand.current !== null || session.pending !== null || active || leaseLost || captureTransition.current) {
+      return {owner, ok: false, error: requestError('busy', 'The current desktop operation must settle first')};
+    }
+    return await ownAuthoringWorker(async (): Promise<CollaborationResponse> => {
+      try {
+        if (operation.kind === 'save' || operation.kind === 'save_all') {
+          const targets = operation.kind === 'save' ? [operation.target] : operation.targets;
+          let includeRecognition = targets === undefined;
+          const files: SaveTarget[] = [];
+          for (const target of targets ?? []) {
+            const resource = authoringController.resource(target.resource);
+            if (!resource || resource.version !== target.version) {
+              return {owner, ok: false, error: requestError('stale_version', 'A requested Save target changed; read it again', target.resource)};
+            }
+            if (resource.role === 'context') includeRecognition = true;
+            else if (session.drafts.has(resource.path) && session.drafts.get(resource.path)?.text !== null) files.push(target);
+            else return {owner, ok: false, error: requestError('unsupported_resource', 'Save a declared text file or the recognition context', target.resource)};
+          }
+          return {owner, ok: true, result: publicationResult(await saveAll(targets === undefined ? undefined : files, includeRecognition))};
+        }
+        if (operation.kind === 'catalog_add' || operation.kind === 'catalog_rename' || operation.kind === 'catalog_remove') {
+          if (operation.revision !== session.revision) return {owner, ok: false, error: requestError('stale_revision', 'The saved revision changed; describe again')};
+          if (!catalogTicket(session, operation.edit)) return {owner, ok: false, error: requestError('catalog_blocked', 'Resolve dirty or unavailable catalog files in the desktop first')};
+          const committed: PublicationResult['committed'] = [];
+          const changed = await changeCatalog(operation.edit, false, mutation => committed.push({path: operation.edit.path, revision: mutation.committed_revision}));
+          const current = authoringController.describe();
+          return {owner, ok: true, result: {complete: changed && !current.refreshRequired, committed, remaining: [],
+            savedRevision: current.savedRevision, refreshRequired: current.refreshRequired,
+            failure: changed && !current.refreshRequired ? null : hostFailure(authoringController.current()?.refreshError ?? authoringController.current()?.error ?? null,
+              'The catalog operation stopped; inspect the committed prefix and desktop status.', committed.length === 0 ? 'unknown' : undefined)}};
+        }
+        if (operation.kind === 'refresh') {
+          const complete = await refreshAuthoring(false);
+          const current = authoringController.describe();
+          return {owner, ok: true, result: {complete, savedRevision: current.savedRevision, refreshRequired: current.refreshRequired}};
+        }
+        if (operation.kind === 'validate') {
+          if (operation.revision !== session.revision) return {owner, ok: false, error: requestError('stale_revision', 'Validation requires the current saved revision')};
+          const checked = await validateAuthoring();
+          if (!checked) return {owner, ok: false, error: {code: 'validation_unavailable', message: 'Validation did not finish; inspect the desktop status', outcome: 'unknown'}};
+          const current = authoringController.describe();
+          const diagnostics = current.resources.find(resource => resource.kind === 'validation');
+          return {owner, ok: true, result: {complete: true, revision: checked.revision, valid: checked.valid,
+            current: current.validation?.current ?? false, excluded: current.validation?.excluded ?? [],
+            diagnostics: {count: current.validation?.diagnostics ?? checked.diagnostics.length,
+              resource: diagnostics?.id ?? null, version: diagnostics?.version ?? null}}};
+        }
+        const state = session.recognition;
+        if (!state) return {owner, ok: false, error: requestError('snippet_unavailable', 'Recognition is not loaded in this Edit session')};
+        const generation = {capture_id: operation.capture, kind: operation.mode, definition_ids: operation.ids};
+        const block = recognition.generationBlock(state, generation);
+        if (block !== null && block !== 'unsynchronized') return {owner, ok: false, error: requestError('snippet_unavailable', `Generation is unavailable: ${block}`)};
+        return await authoringCall('readingRecognition', async (): Promise<CollaborationResponse> => {
+          const synchronized = await synchronizeRecognition(session.owner);
+          const ticket = recognition.generationTicket(synchronized.state, generation);
+          if (!ticket) return {owner, ok: false, error: requestError('snippet_unavailable', 'The requested generation prerequisites changed')};
+          const dependencies = authoringController.recognitionDependencies(operation.capture, operation.ids, operation.mode);
+          if (!Array.isArray(dependencies)) return {owner, ok: false, error: dependencies};
+          const result = await invoke<recognition.CopyResult>('recognition_generate', {owner: synchronized.session.owner,
+            revision: synchronized.session.revision, captureId: ticket.capture_id, documentRevision: ticket.document_revision,
+            definitionIds: ticket.definition_ids, mode: operation.mode});
+          const provenance = recognition.snippetProvenance(ticket, result);
+          const current = authoringController.describe();
+          if (!provenance || current.owner !== owner || current.package !== request.package
+            || dependencies.some(dependency => authoringController.resource(dependency.resource)?.version !== dependency.version)) {
+            return {owner, ok: false, error: requestError('stale_dependency', 'The contributing recognition data changed during generation')};
+          }
+          return {owner, ok: true, result: {source: result.source, sdk, receipt: {owner: current.owner!, package: current.package!,
+            capture: provenance.capture, ids: provenance.ids, basis: provenance.basis, revision: provenance.revision,
+            dependencies, verification: provenance.verification}}};
+        });
+      } catch {
+        return {owner, ok: false, error: {code: 'operation_failed',
+          message: 'The desktop operation did not finish; inspect its status and refresh before deciding',
+          outcome: operation.kind === 'snippet' ? 'not_applied' : 'unknown'}};
+      }
+    }) ?? {owner, ok: false, error: requestError('busy', 'Another authoring operation is active')};
+  }
+
+  // A stable listener reads the latest coordinator; no render-time draft is retained by the bridge.
+  const collaborationHandler = useRef(handleCollaboration);
+  collaborationHandler.current = handleCollaboration;
+  const collaborationReady = status?.state === 'ready' && pollEnabled;
+  useEffect(() => {
+    if (!collaborationReady) return;
+    return collaboration.start(request => collaborationHandler.current(request));
+  }, [collaborationReady, collaboration, authoringController]);
 
   async function refreshSaved() {
     try {
@@ -2011,10 +2256,10 @@ export default function App() {
   const compactAuthoring = (onReturn: () => void, showReturn: boolean, returnDisabled = false): AuthoringStatusProps | null => activity && ({
     activity, ownerLabel: labelOf(activity.owner.workspace.workspace_id), showReturn, returnDisabled, stopDisabled: stopping || closing,
     onReturn: () => {
-      if (sameAuthoringRef(authoringStore.current?.owner ?? hostAuthoringRef.current, activity.owner)) onReturn();
+      if (sameAuthoringRef(authoringController.current()?.owner ?? hostAuthoringRef.current, activity.owner)) onReturn();
     },
     onStop: () => {
-      if (sameAuthoringRef(authoringStore.current?.owner ?? hostAuthoringRef.current, activity.owner)) void stopValidation();
+      if (sameAuthoringRef(authoringController.current()?.owner ?? hostAuthoringRef.current, activity.owner)) void stopValidation();
     },
     onRelease: () => {
       const current = nativeSelectionRef.current;
@@ -2035,8 +2280,8 @@ export default function App() {
       {activity.stopRequested && <p role="status">{renderMessage(locale, authoring?.notice ?? null)}</p>}
       <ul className="status-details">{activity.items.map(item => <li key={item.id} className={`status-${item.severity}`}>
         <span>{item.text}</span><button type="button" disabled={returnDisabled} onClick={() => {
-          if (!sameAuthoringRef(authoringStore.current?.owner ?? hostAuthoringRef.current, activity.owner)) return;
-          if (item.recognition) updateAuthoring(current => current && sameAuthoringRef(current.owner, activity.owner) ? selectRecognition(current, null) : current);
+          if (!sameAuthoringRef(authoringController.current()?.owner ?? hostAuthoringRef.current, activity.owner)) return;
+          if (item.recognition) authoringController.update(current => current && sameAuthoringRef(current.owner, activity.owner) ? selectRecognition(current, null) : current);
           onReturn();
         }}>{item.recognition ? ui.recognition.heading : ui.authoring.returnToEdit}</button>
       </li>)}</ul>
@@ -2131,11 +2376,11 @@ export default function App() {
       validation={savedValidation}
       onNavigate={page => {if (selected) {if (page === 'edit') returnToEdit(); else change(selected.id, item => ({...item, page}));}}}
       onDiagnostic={diagnostic => {
-        const current = authoringStore.current;
+        const current = authoringController.current();
         if (!selectedAuthoring || !current || selected?.id !== current.owner.workspace.workspace_id) return;
         const next = revealDiagnostic(current, selectedAuthoring.owner.token, diagnostic);
         if (next === current) return;
-        updateAuthoring(() => next);
+        authoringController.update(() => next);
         change(current.owner.workspace.workspace_id, item => ({...item, page: 'edit'}));
       }}>
     <NavigationHeader>

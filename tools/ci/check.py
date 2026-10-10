@@ -162,15 +162,19 @@ def check_runtime(root, results_directory):
     version = subprocess.run([node, "--version"], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
     if version != f"v{NODE_VERSION}":
         raise ValueError(f"Node.js {NODE_VERSION} is required; found {version!r}")
+    run([npm, "test", "--prefix", "integrations/omp"], root)
     compiler = root / RUNTIME_ROOT / "compiler"
     run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], compiler)
     run([node, "compile.mjs", "--self-check"], compiler)
+    run([node, "--test", "sdk.test.mjs"], compiler)
     cargo = ["cargo", f"+{RUST_VERSION}"]
     run([*cargo, "test", "--locked", "--manifest-path", LAUNCH_ROOT / "Cargo.toml"], root)
     manifest = ["--locked", "--manifest-path", RUNTIME_ROOT / "Cargo.toml"]
     run([*cargo, "build", *manifest], root)
     run([*cargo, "test", *manifest], root)
     run_runtime_check([*cargo, "run", *manifest, "--", "check"], root, results_directory)
+    run([*cargo, "test", *manifest, "--features", "engine", "--lib",
+         "sdk_examples_release_engine_results_and_check_visible_readiness"], root)
     run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix", DESKTOP_ROOT], root)
     run([npm, "test", "--prefix", DESKTOP_ROOT], root)
     run([npm, "run", "build", "--prefix", DESKTOP_ROOT], root)

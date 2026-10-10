@@ -363,6 +363,55 @@ pub async fn recognition_save(
     .await
 }
 
+/// The one source generation path for an explicit capture, purpose and ordered
+/// definitions. It never reads UI selection or touches the clipboard.
+async fn generate(
+    application: Arc<mado_mata_desktop::application::Application>,
+    owner: AuthoringRef,
+    revision: String,
+    document_revision: u64,
+    definition_ids: Vec<String>,
+    mode: SnippetKind,
+    capture_id: String,
+) -> Result<RecognitionCopy, Fault> {
+    background(move || {
+        application.recognition_copy(
+            &owner,
+            &revision,
+            document_revision,
+            &definition_ids,
+            mode,
+            &capture_id,
+        )
+    })
+    .await
+}
+
+/// Agent retrieval: the same generation as Copy without clipboard publication.
+#[tauri::command]
+pub async fn recognition_generate(
+    owner: AuthoringRef,
+    revision: String,
+    document_revision: u64,
+    definition_ids: Vec<String>,
+    mode: SnippetKind,
+    capture_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<RecognitionCopy, Fault> {
+    let application = state.bootstrap.application()?;
+    generate(
+        application,
+        owner,
+        revision,
+        document_revision,
+        definition_ids,
+        mode,
+        capture_id,
+    )
+    .await
+}
+
+/// UI Copy: generates, then alone publishes the complete source to the clipboard.
 #[tauri::command]
 pub async fn recognition_copy(
     owner: AuthoringRef,
@@ -375,19 +424,15 @@ pub async fn recognition_copy(
     state: tauri::State<'_, Backend>,
 ) -> Result<RecognitionCopy, Fault> {
     let application = state.bootstrap.application()?;
-    let worker = application.clone();
-    let expected_owner = owner.clone();
-    let expected_revision = revision.clone();
-    let copied = background(move || {
-        worker.recognition_copy(
-            &expected_owner,
-            &expected_revision,
-            document_revision,
-            &definition_ids,
-            mode,
-            &capture_id,
-        )
-    })
+    let copied = generate(
+        application.clone(),
+        owner.clone(),
+        revision.clone(),
+        document_revision,
+        definition_ids,
+        mode,
+        capture_id,
+    )
     .await?;
     publish_clipboard(app, application, owner, revision, copied).await
 }
@@ -837,8 +882,18 @@ mod tests {
         // Both coordinate arguments use u32. Tauri's CommandItem forwards JSON
         // values to this same deserializer; no native WebView is needed here.
         for raw in [
-            "-1", "-0", "0.5", "1.0", "4294967296", "1e100", "null", "\"1\"", "true",
-            "false", "[]", "{}",
+            "-1",
+            "-0",
+            "0.5",
+            "1.0",
+            "4294967296",
+            "1e100",
+            "null",
+            "\"1\"",
+            "true",
+            "false",
+            "[]",
+            "{}",
         ] {
             let value: serde_json::Value = serde_json::from_str(raw).unwrap();
             assert!(
@@ -855,8 +910,18 @@ mod tests {
     #[test]
     fn pixel_command_frame_revision_rejects_invalid_transport_numbers() {
         for raw in [
-            "-1", "-0", "0.5", "1.0", "18446744073709551616", "1e100", "null", "\"1\"",
-            "true", "false", "[]", "{}",
+            "-1",
+            "-0",
+            "0.5",
+            "1.0",
+            "18446744073709551616",
+            "1e100",
+            "null",
+            "\"1\"",
+            "true",
+            "false",
+            "[]",
+            "{}",
         ] {
             let value: serde_json::Value = serde_json::from_str(raw).unwrap();
             assert!(

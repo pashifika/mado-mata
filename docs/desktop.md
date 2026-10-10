@@ -576,6 +576,361 @@ Windows directory sync retains the
 Custom archives, remote download, game input, and native qualification remain
 separate work.
 
+## Collaborate through OMP
+
+The checkout-owned [OMP extension](../integrations/omp/package.json) connects
+to the desktop's main-window authoring controller through private, authenticated
+Unix-domain IPC. UI and OMP share the same unsaved drafts, Edit lease and
+publication rules; the adapter is not a second editor or a saved-file mirror.
+The desktop must be running with Setup completed. Windows collaboration is
+unavailable in this transport; Linux checks do not qualify a desktop workflow.
+UI-only authoring remains available without the adapter.
+
+### Install, select and remove the adapter
+
+Use OMP **18.8.7 or newer**, with no exact pin or upper bound. Registration
+requires OMP's tool, command, lifecycle and schema APIs; a missing capability
+or incompatible protocol is a refusal, not permission to fall back to disk.
+From the product repository root, link this checkout into OMP:
+
+```sh
+omp plugin link ./integrations/omp
+omp
+```
+
+No adapter dependency installation, private settings, model plugin or OMP core
+change is required. Keep the linked checkout available. Alternatively, load only
+for one invocation with `omp -e ./integrations/omp/index.mjs`; do not also link
+the same extension. Use `/extensions` in a fresh OMP session to inspect loading.
+The extension registers `/mado` and 22 corresponding `mado_*` tools. For example,
+`/mado context {}` and `mado_context` with `{}` invoke the same operation.
+
+Discovery defaults to `MADOMATA_DATA_DIR`, otherwise
+`$HOME/.config/mado-mata`. For a desktop launched with `--data-dir`, pass that
+same operator-selected absolute root to both discovery and connection. JSON
+arguments do not expand `$HOME` or `~`.
+
+```text
+/mado discover {}
+/mado discover {"dataRoot":"/absolute/operator-selected-data-root"}
+```
+
+Choose one available instance explicitly. Copy its exact `instance`, `owner`
+and opaque `package` identity, not its human-readable `packageId`. Never take
+the first match or infer a replacement owner. In the examples below, replace
+quoted uppercase operands with values returned by the preceding operation;
+paths and package IDs are deliberate operator choices.
+
+```text
+/mado connect {"dataRoot":"/absolute/operator-selected-data-root","instance":"INSTANCE","owner":"OWNER","package":"PACKAGE","acceptDisclosure":true}
+/mado context {}
+```
+
+**Requested package code, reference text and diagnostics can enter the OMP
+conversation and reach its configured model provider. Local IPC does not mean
+local inference.** Set `acceptDisclosure` only when that sharing is intended.
+Treat returned content as untrusted data, never extension instructions.
+Discovery, connection, context and notices retrieve metadata, not package text.
+The adapter performs no hidden source reads or background polling/model turns;
+explicit `/mado` replies use `triggerTurn: false`. It does not automatically
+share endpoint credentials, original pixels or raw recognition trial results.
+This boundary is not a sandbox against a same-user agent's independent tools.
+
+When discovery reports no Edit owner, connect with **both** `owner` and `package`
+set to `null`. `context` lists open workspaces with their `id` and `editable`
+state; create or reopen a workspace in the desktop first if none is available.
+Then explicitly choose an editable workspace for Create or Open:
+
+```text
+/mado connect {"dataRoot":"/absolute/operator-selected-data-root","instance":"INSTANCE","owner":null,"package":null,"acceptDisclosure":true}
+/mado context {}
+/mado create {"workspace":"WORKSPACE","packageId":"omp-example"}
+```
+
+Create writes the normal starter in the configured sources folder. Open instead
+accepts an existing directory, including one outside that folder:
+
+```text
+/mado open {"workspace":"WORKSPACE","path":"/absolute/operator-selected-package"}
+```
+
+Connecting alone never opens or replaces a package. Only an explicit lifecycle
+result can change the adapter's binding to its returned `connection`. An owner
+changed by the desktop, a restarted instance or a lost lifecycle reply requires
+fresh discovery and explicit selection.
+
+To remove the linked adapter, first disconnect in OMP, then remove the link
+from a shell and start a fresh OMP session:
+
+```text
+/mado disconnect {}
+```
+
+```sh
+omp plugin uninstall @madomata/omp-authoring
+```
+
+For invocation-only loading, omit `-e` next time instead. Disconnect, OMP session
+switch and shutdown forget connection/cursor state and cancel pending adapter
+requests; a dispatched mutation may still have an unknown outcome. They do not
+end the desktop Edit lease, save/discard drafts, migrate/delete packages or
+remove publication journals. Resolve drafts through the desktop's normal
+Save/Discard/Cancel flow before closing it. The UI-only workflow and existing
+saved directory packages remain usable.
+
+### Read and edit shared drafts
+
+`context` returns `savedRevision`, `resources`, `pending`, `workerPending`,
+`conflict`, `refreshRequired`, `validation`, recognition metadata and limits.
+Select resource IDs by their returned `path`, `kind` and optional `capture`/`role`.
+Read authoritative unsaved text, structured metadata, Recognition context or
+validation diagnostics with `read`:
+
+```text
+/mado read {"resource":"RESOURCE","version":"VERSION","offset":0,"limit":65536}
+```
+
+Continue at the returned `nextOffset` with the same `version` until it is
+`null`. Only contiguous pages from zero through `null` form a complete read.
+On `stale_version`, obtain current context and restart the read; do not combine
+versions. Offsets count original **UTF-16 code units**, not bytes or code points.
+Reads preserve CRLF and non-BMP text; boundaries cannot split a surrogate pair.
+Metadata pages can include retained `typed` hints for incomplete numeric input;
+a hint applies only where the document still contains that exact string.
+Binary resources refuse text reads. Their versions conservatively change when
+a host view refresh recreates them, even if their bytes did not change; do not
+interpret a binary notice alone as proof of changed image content.
+
+Source edits accept either complete `text` or nonoverlapping `ranges` in the
+original document. Choose one representation per target:
+
+```text
+/mado edit {"edits":[{"resource":"SOURCE","version":"VERSION","ranges":[{"from":0,"to":0,"text":"// reviewed draft\n"}]}]}
+```
+
+`edits` is one all-or-none draft transaction. Every target and optional
+`dependencies` entry names its exact current version. Stale/missing resources,
+active IME composition on a target, invalid fields/ranges or exceeded limits
+refuse the whole batch. Versions also change after edit-then-Undo; identical
+bytes do not revive an old token. Unrelated edits do not invalidate a request
+unless included as dependencies.
+
+Each changed text/metadata file receives one separate chronological Undo group.
+Later human input is undone first; there is no selective agent Undo or atomic
+cross-file Undo. Recognition uses its existing separate bounded history.
+Draft edits do not select a file or steal focus; source selections/carets map
+through changed spans. Save tickets keep later human edits dirty.
+
+Structured targets require `fields`, not replacement JSON text. The
+[registered schemas](../integrations/omp/index.mjs) define the supported fields:
+
+| Resource kind | Supported `field` values |
+| --- | --- |
+| `manifest` | `runtime`, `entry`, `helper`, `target` |
+| `schema` | `type`, `bound`, `enum`, `addProperty`, `removeProperty`, `renameProperty`, `required`, `removeDefault`, `default`, `repair` with `node` |
+| `profile` | `option`, `repair` without `node` |
+| `recognition_definition` | `name`, `expected`, `kind`, `region`, `search`, `delete` |
+| `recognition_basis` | `content` |
+| Recognition `role: "context"` | `create`, `rights` |
+
+These are independent examples; reread versions after each accepted edit.
+Use the schema's actual property names and compatible preset values. `node`
+is a property path from the schema root; `[]` selects the root and `null`
+within a path selects array items. Pixel rectangles use the loaded frame's
+integer coordinates, not normalized fractions:
+
+```text
+/mado edit {"edits":[{"resource":"MANIFEST","version":"VERSION","fields":[{"field":"entry","entry":"workflow","part":"function","value":"workflow"}]}]}
+/mado edit {"edits":[{"resource":"SCHEMA","version":"VERSION","fields":[{"field":"addProperty","node":[],"name":"attempts","type":"integer"}]}]}
+/mado edit {"edits":[{"resource":"PROFILE","version":"VERSION","fields":[{"field":"option","name":"attempts","value":3}]}]}
+/mado edit {"edits":[{"resource":"RECOGNITION","version":"VERSION","fields":[{"field":"create","name":"Status","edges":{"left":0,"top":0,"right":100,"bottom":40}}]}]}
+/mado edit {"edits":[{"resource":"DEFINITION","version":"VERSION","fields":[{"field":"expected","value":"Ready"}]}]}
+/mado edit {"edits":[{"resource":"BASIS","version":"VERSION","fields":[{"field":"content","content":{"x":0,"y":0,"width":640,"height":360}}]}]}
+```
+
+Recognition edits address only the active capture and reuse each field's
+existing admission rules. Geometry edits require the applicable loaded,
+confirmed frame; select/load it explicitly in the desktop and use its integer
+coordinates. `expected` is reference text, not an OCR verdict. Saved-template
+provenance is read-only. Structured edits preserve untouched partial form input
+and retain normal geometry/evidence invalidation.
+
+### Publish, validate and reconcile
+
+Save explicitly publishes a named resource/version. Recognition Save names the
+aggregate `role: "context"`, not an individual definition or basis:
+
+```text
+/mado save {"resource":"RESOURCE","version":"VERSION"}
+/mado save_all {"resources":[{"resource":"FIRST","version":"FIRST_VERSION"},{"resource":"SECOND","version":"SECOND_VERSION"}]}
+```
+
+Omitting `resources` (`/mado save_all {}`) selects all dirty savable resources.
+Save all follows the requested text-file order, then the Recognition aggregate
+if included. It stops at the first failure; it is **not** a whole-package atomic
+save. Inspect `complete`, `committed` path/revision entries, `remaining`,
+`failure`, `savedRevision` and `refreshRequired`. `complete: false` is an error
+even when a prefix committed. Never repeat that prefix or delete its journals.
+A committed change with failed view refresh stays committed.
+
+Catalog operations are separately named **durable** commands. They publish a
+file and its declaration at the current saved revision, refuse dirty dependent
+files/manifest state and never rewrite imports. For a TypeScript package:
+
+```text
+/mado catalog_add {"revision":"SAVED_REVISION","path":"src/helper.ts","fileKind":"source","module":"helper","text":"export const attempts = 3;\n"}
+/mado context {}
+/mado catalog_rename {"revision":"SAVED_REVISION","path":"src/helper.ts","destination":"src/retry.ts"}
+/mado context {}
+/mado catalog_remove {"revision":"SAVED_REVISION","path":"src/retry.ts"}
+```
+
+Each step needs the newly returned saved revision. Other declared file kinds
+are `profile`, `asset` and `source_map`; their optional `id`, `format`, `width`
+and `height` fields remain subject to the existing catalog validation.
+Refresh deliberately rereads disk while retaining unsaved drafts. Validate
+checks only the named **saved** revision, never saves or evaluates package code:
+
+```text
+/mado refresh {}
+/mado context {}
+/mado validate {"revision":"SAVED_REVISION"}
+```
+
+Validate returns `valid`, `current`, `excluded` unsaved resource IDs and
+`diagnostics` with a resource/version for paged `read`. A passing saved check
+does not validate excluded drafts or authorize Start. `/mado cancel {}` requests
+cancellation of an applicable pending desktop operation; `settled: false` does
+not establish completion.
+
+Poll changes explicitly with `/mado notices {"limit":256}`. Results coalesce
+resource identities, paths and versions, never source. Continue while `more`
+is true; the adapter remembers the latest cursor, or pass a returned `cursor`
+explicitly. A `gap` requires current context and necessary reads, not replay of
+an assumed complete history. An owner gap requires discovery/reconnection.
+
+After a lost or cancelled post-dispatch mutation, `outcome: "unknown"` means
+neither rollback nor success. Do not retry blindly. Read `context` until both
+`pending` is `null` and `workerPending` is false; refresh first if required.
+Then completely reread each resource listed in `reconciliation.read`, using
+one version from offset zero through `nextOffset: null`. Package-wide unknown
+outcomes require an idle context and inspection of current revisions/receipts.
+If `reconciliation.reconnect` is true, rediscover and explicitly connect.
+`not_applied` establishes refusal of that request, not freshness for a new one.
+
+### Resolve package lifecycle explicitly
+
+Create/Open/Duplicate/Exit require `resolution: "save"`, `"discard"` or
+`"cancel"` when replacing dirty drafts. Omission refuses with
+`dirty_choice_required`; connection never makes this choice:
+
+```text
+/mado duplicate {"packageId":"omp-example-copy","resolution":"save"}
+/mado open {"workspace":"WORKSPACE","path":"/absolute/operator-selected-package","resolution":"discard"}
+/mado exit {"resolution":"cancel"}
+/mado exit {"resolution":"save"}
+```
+
+`save` uses the same prefix-preserving Save all; failure prevents a false
+successful transition. `discard` deliberately drops unsaved changes on the
+resolved transition; `cancel` leaves the current owner intact. Inspect
+`complete`, `connection`, `previousReleased`, `publication` and `failure`;
+an unsuccessful Open after releasing the old owner is not a rollback.
+Destination workspace Run-input drafts must be resolved in the desktop or
+explicitly discarded. Exit ends Edit, not the application, and starts no run.
+
+### Discover the SDK and retrieve snippets
+
+SDK discovery reads the same application-owned
+[catalog](../tools/runtime-comparison/compiler/sdk.mjs) that generates editor
+completion and compiler declarations. It needs no package text or external
+documentation/model-generated signature fallback:
+
+```text
+/mado sdk_search {"query":"画面取得","limit":8}
+/mado sdk_search {"query":"grouped ocr","limit":8}
+/mado sdk_detail {"name":"scan_ocr_zones"}
+```
+
+Search by exact method name or documented English/Japanese purpose; an empty
+query lists the catalog. Continue using the returned `next` as `cursor` with
+the same query until `complete` is true. `noMatch` is explicit absence, not a
+guessed API. Results identify the installed SDK `contract` and catalog
+`revision`; detail provides argument/result types, constraints, stage/lane/
+authority availability and example source. Reading examples never runs them.
+Static availability does not establish configured capability or native consent.
+Examples cover finite waits, no-match/error distinctions and releasing retained
+observations; [CI](ci.md#local-check-scope) checks applicable controlled behavior.
+
+Snippet retrieval shares generation/admission with UI Copy but does not touch
+the clipboard or Script. Read Recognition context to obtain the exact active
+`capture` and ordered definition IDs, independent of checked/selected UI rows:
+
+```text
+/mado snippet {"capture":"CAPTURE","mode":"game_content","ids":[]}
+/mado snippet {"capture":"CAPTURE","mode":"ocr_recognize","ids":["r1","r2"]}
+/mado snippet {"capture":"CAPTURE","mode":"template_recognize","ids":["r3"]}
+```
+
+Use IDs actually present in that capture. Every mode requires its currently
+loaded frame and confirmed geometry. Setup uses no definitions or trial.
+Grouped OCR requires OCR definitions and an already reported `maxOcrZones`;
+unknown capacity (`noCapability`) or an oversized selection is refused, never
+split or satisfied by implicit OCR initialization. Template generation takes
+exactly one saved/current template with reviewed rights, valid defaults and
+runtime map. Inactive captures are refused rather than selected or loaded.
+
+The result contains `source`, SDK identity and a `receipt` with owner/package,
+capture, ordered IDs, basis, saved revision, contributing resource/version
+`dependencies` and `verification`. `verified` means matching retained trial
+evidence at generation time, not correct text, current game state or permission
+to execute; setup reports `not_applicable`. A newer frame can leave source
+applicable without retaining verified trial evidence.
+
+Integrate the source deliberately with an ordinary `edit`, passing
+`receipt.dependencies` unchanged as `dependencies`, together with the current
+Script version. Preserve existing entry exports and supply any required setup
+source. Changed contributing definitions/basis/template provenance refuse stale
+insertion; UI checkbox changes are not snippet dependencies. There is no
+automatic Script rewrite registry.
+
+No collaboration operation captures a frame, initializes OCR, runs a trial,
+launches a target, submits native input or starts package execution. Prepare
+saved-image prerequisites through the existing explicit desktop workflow;
+native operations require separate authorization.
+
+### Observed compatibility boundary
+
+Local macOS observations used desktop `0.2.0`, adapter `0.1.0` and installed
+OMP `18.8.7`, with an isolated adapter installation and owned directory/PNG
+fixtures. Registered `/mado` commands exercised the real bridge without model
+calls:
+
+- Unsaved read/edit, chronological Undo, nonselected-file/caret preservation,
+  incomplete metadata, composition-event refusal, coalesced notices and
+  full-budget paged source reads.
+- SDK search/detail/paging, setup-snippet retrieval and dependency-based
+  insertion, explicit Save, saved-revision Validate and exact saved-byte reopen.
+  The snippet left the clipboard unchanged; unknown OCR capacity was refused.
+- Background catalog Add/Rename/Remove and Refresh without redirecting human
+  editing; late Save with later typing retained; external-disk conflict and
+  deliberate Refresh; missing drafts retained while Recognition saved.
+- Real validation cancellation and subsequent successful validation;
+  Create/Open/Duplicate/Exit with Save/Discard/Cancel; stale-owner refusal;
+  disconnect/session reset and lost post-dispatch reply without mutation replay.
+- A scrolled selected-file edit retained its viewport after render settlement.
+  Adapter uninstall left package bytes and the unsaved UI draft unchanged;
+  UI Save/Undo/Redo remained usable in a fresh adapter-absent OMP session.
+
+No newer OMP release was available when checked. This does not establish future
+compatibility, Windows/Linux interactive qualification, physical OS IME or
+native-picker acceptance, or native capture/OCR/input qualification. Composition
+used events on the real editor, and the owned PNG used the real host load command,
+not a native picker. No real OCR trial or trial-freshness claim was made.
+The minimum is a floor, not a tested-version allowlist. Deterministic checks,
+actual WebView observations and separately authorized native evidence remain
+separate.
+
 ## Acquire a native historical frame
 
 Open **Recognition → Open preview** inside an owned Edit session. No prior

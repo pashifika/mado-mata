@@ -1,0 +1,11 @@
+{
+  "name": "@madomata/omp-authoring",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared live MadoMata authoring for OMP",
+  "omp": {"extensions": ["index.mjs"]},
+  "peerDependencies": {"@oh-my-pi/pi-coding-agent": ">=18.8.7"},
+  "peerDependenciesMeta": {"@oh-my-pi/pi-coding-agent": {"optional": true}},
+  "scripts": {"test": "node --test *.test.mjs"}
+}

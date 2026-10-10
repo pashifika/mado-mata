@@ -3,6 +3,7 @@ pub mod authoring;
 pub mod backup;
 pub mod bootstrap;
 pub mod capture_cache;
+pub mod collaboration;
 pub mod configuration;
 pub mod logging;
 pub mod ocr_setup;
