@@ -27,9 +27,9 @@ import RunPage from './pages/RunPage.tsx';
 import type {RunHandlers} from './pages/RunPage.tsx';
 import ExecutionPage from './pages/ExecutionPage.tsx';
 import type {RunSnapshot, RunView} from './pages/ExecutionPage.tsx';
-import StatusSurface from './components/StatusSurface.tsx';
+import StatusSurface, {ValidationStatusIcon} from './components/StatusSurface.tsx';
 import type {AuthoringStatusProps} from './components/StatusSurface.tsx';
-import {applicationStatus, authoringActivity, scopedAuthoring, workspaceStatus} from './status.ts';
+import {applicationStatus, authoringActivity, packageValidation, scopedAuthoring, workspaceStatus} from './status.ts';
 import type {StatusItem} from './status.ts';
 import SavedWorkspacesDialog from './components/SavedWorkspacesDialog.tsx';
 import Select from './components/Select.tsx';
@@ -247,6 +247,8 @@ export default function App() {
     }
     return counts;
   }, [logs.items]);
+  const workspaceLogCount = selected ? logCounts[selected.id] ?? 0 : 0;
+  const applicationLogCount = logCounts[''] ?? 0;
 
   // The live controller belongs to whichever workspace the host attributed it to; others show retained outcomes.
   // Authoring workers are reported by Edit and the global status surface, never as the Tab's run result.
@@ -2098,6 +2100,7 @@ export default function App() {
   // Guidance names the owner's scope truthfully: an Application-scoped check has no owning workspace.
   const activeOwner = (workspace: Workspace): ActiveOwner => !active || owner === workspace.id ? null : owner === null ? 'application' : 'other';
   const selectedAuthoring = scopedAuthoring(selected, authoring);
+  const savedValidation = selectedAuthoring ? packageValidation(selectedAuthoring, validationActive) : null;
   const selectedRun = selected ? runView(selected) : null;
   const applicationPending = closing ? t.closing : appBusy ? t[appBusy] : bootstrap.pending ? t[bootstrap.pending]
     : bootstrap.snapshotPending ? ui.bootstrap.snapshotting : null;
@@ -2125,7 +2128,7 @@ export default function App() {
       pageTitle={pageTitle} pageHelp={<p>{pageHelp}</p>} runLabel={selected && isBound(selected) ? t.runControl : t.guidance} items={statusItems} session={selectedAuthoring}
       recognitionDirty={selectedAuthoring !== null && recognitionDirty} validating={selectedAuthoring !== null && validationActive}
       authoring={compactAuthoring(returnToEdit, !editVisible)}
-      profile={currentPage !== 'edit' && selected?.bound ? selected.bound.validation === null ? 'none' : selected.bound.validation.draftRevision === selected.bound.draftRevision ? 'valid' : 'stale' : null}
+      validation={savedValidation}
       onNavigate={page => {if (selected) {if (page === 'edit') returnToEdit(); else change(selected.id, item => ({...item, page}));}}}
       onDiagnostic={diagnostic => {
         const current = authoringStore.current;
@@ -2147,7 +2150,10 @@ export default function App() {
           {menuOpen && <div id="application-menu-items" ref={menu} className="dropdown" role="menu" aria-labelledby="application-menu" onKeyDown={menuKeys}>
             <button type="button" role="menuitem" id="menu-settings" disabled={settings === null || !normalReady} onClick={openSettings}>{t.appSettings}</button>
             <button type="button" role="menuitem" id="menu-restore" onClick={() => {menuButton.current?.focus(); setMenuOpen(false); setConfigurationOpen(true);}}>{ui.bootstrap.restoreHeading}</button>
-            <button type="button" role="menuitem" id="menu-application-logs" aria-current={nav.kind === 'application' ? 'page' : undefined} onClick={() => {setMenuOpen(false); go({kind: 'application'});}}>{t.applicationLogs}<span className="count">{logCounts[''] ?? 0}</span></button>
+            <button type="button" role="menuitem" id="menu-application-logs" aria-current={nav.kind === 'application' ? 'page' : undefined}
+              aria-label={`${t.applicationLogs} · ${applicationLogCount}`} onClick={() => {setMenuOpen(false); go({kind: 'application'});}}>
+              {t.applicationLogs}<span className="count" title={String(applicationLogCount)}>{Math.min(applicationLogCount, 99)}</span>
+            </button>
             <button type="button" role="menuitem" id="close" disabled={closing} onClick={() => void exitApplication()}>{closing ? t.closing : t.closeWindow}</button>
             <p className="menu-description">{t.menuDescription}</p>
           </div>}
@@ -2166,12 +2172,21 @@ export default function App() {
       </div>
       <nav className="workspace-pages" aria-label={selected ? t.selectedPages : t.currentScope}>
         {selected && <>
-          <button id="page-run" type="button" className="nav-item" aria-current={selected.page === 'run' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'run'}));}}>{isBound(selected) ? t.runControl : t.guidance}</button>
+          <button id="page-run" type="button" className="nav-item" aria-current={selected.page === 'run' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'run'}));}}>
+            {isBound(selected) ? t.runControl : t.guidance}
+            {selected.bound && <ValidationStatusIcon id="profile-validation-status" label={ui.status.profile}
+              state={selected.bound.validation === null ? 'none' : selected.bound.validation.draftRevision === selected.bound.draftRevision ? 'valid' : 'stale'}/>}
+          </button>
           <button id="page-execution" type="button" className="nav-item" aria-current={selected.page === 'execution' ? 'page' : undefined}
             onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'execution'}));}}>{ui.status.execution}{needsAttention(runView(selected).view) && <span className="execution-attention" aria-label={t.attention(t.unresolved)}>!</span>}</button>
-          <button id="page-logs" type="button" className="nav-item" aria-current={selected.page === 'logs' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'logs'}));}}>{t.logs}<span className="count">{logCounts[selected.id] ?? 0}</span></button>
+          <button id="page-logs" type="button" className="nav-item" aria-current={selected.page === 'logs' ? 'page' : undefined}
+            aria-label={`${t.logs} · ${workspaceLogCount}`} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'logs'}));}}>
+            {t.logs}<span className="count" title={String(workspaceLogCount)}>{Math.min(workspaceLogCount, 99)}</span>
+          </button>
           {selected.id === leaseOwnerId && <button id="page-edit" type="button" className="nav-item" aria-current={selected.page === 'edit' && authoring !== null ? 'page' : undefined}
-            onClick={() => {setReveal(null); returnToEdit();}}>{t.edit}</button>}
+            onClick={() => {setReveal(null); returnToEdit();}}>{t.edit}
+            {savedValidation && <ValidationStatusIcon id="package-validation-status" label={ui.status.savedPackage} state={savedValidation.state}/>}
+          </button>}
         </>}
         {nav.kind === 'application' && <span className="scope-label">{t.applicationLogs}</span>}
         {nav.kind === 'closed' && <span className="scope-label">{t.closedDiagnostics}</span>}

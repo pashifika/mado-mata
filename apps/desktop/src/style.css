@@ -152,6 +152,12 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .dropdown [role="menuitem"][aria-current="page"] { font-weight: 600; }
 .menu-description { margin: 4px 0 0; padding: 9px 10px 4px; border-top: 1px solid #e6ebf1; font-size: 11px; color: var(--text-muted); }
 .count { margin-left: auto; font-size: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.validation-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 18px; height: 18px; padding: 1px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text-muted); }
+.validation-icon svg { width: 14px; height: 14px; }
+.validation-valid { color: var(--ok); }
+.validation-invalid { color: var(--danger); }
+.validation-stale { color: var(--warn); }
+.validation-running { color: var(--accent); }
 
 /* Workspace state and local pages share one compact navigation row. */
 .workspace-bar { display: flex; align-items: center; gap: 16px; padding: 7px var(--space-5); background: #e4e9ef; border-bottom: 1px solid #cfd8e2; }
@@ -698,21 +704,17 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
   .workspace-status.status-busy { animation: none; }
 }
 
-.status-bar { position: fixed; z-index: 45; inset: auto 0 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px 14px; padding: 6px 18px; background: var(--surface); border-top: 1px solid var(--border-strong); }
+.status-bar { position: fixed; z-index: 45; inset: auto 0 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 14px; padding: 6px 18px; background: var(--surface); border-top: 1px solid var(--border-strong); }
 .status-context { display: flex; align-items: center; gap: 8px; min-width: 0; height: 36px; font-size: 12px; }
 .status-identity { display: flex; align-items: center; flex: 0 0 auto; gap: 5px; min-width: 0; }
 .status-message-group { display: flex; align-items: center; gap: 6px; flex: 1 1 160px; min-width: 0; }
 .status-message-group .activity-kind { max-width: 40%; }
 .status-message { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
-.status-facts { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; border-left: 1px solid var(--border); padding-left: 14px; }
-.status-facts:empty { display: none; }
-.validation-summary { font-size: 11px; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status-bar > .contextual-help-trigger { grid-column: 3; }
 .tag.status-attention { color: var(--danger); background: var(--danger-soft); }
-.status-context > button, .authoring-capture > button { flex-shrink: 0; white-space: nowrap; padding: 6px 9px; font-size: 12px; }
+.status-context > button { flex-shrink: 0; white-space: nowrap; padding: 6px 9px; font-size: 12px; }
 .activity-kind { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .status-identity .contextual-help-trigger, .status-identity .phase { flex-shrink: 0; }
-.authoring-capture { display: flex; align-items: center; gap: 6px; flex: 1 1 180px; min-width: 0; }
+.authoring-capture { flex: 0 1 180px; }
 .footer-authoring { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
 .footer-authoring > button { flex-shrink: 0; padding: 5px 8px; font-size: 11px; }
 .footer-authoring .edit-status { flex: 0 1 auto; min-width: 0; max-width: 200px; background: var(--info-soft); color: #285e9e; font-size: 11px; }
@@ -726,8 +728,8 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .footer-authoring-panel .run-identity { margin: 0; }
 @media (max-width: 940px) {
   .status-bar { padding-inline: 12px; }
-  .status-context, .status-message-group, .authoring-capture { gap: 6px; font-size: 11px; }
-  .status-context > button, .authoring-capture > button { padding-inline: 7px; font-size: 11px; }
+  .status-context, .status-message-group { gap: 6px; font-size: 11px; }
+  .status-context > button { padding-inline: 7px; font-size: 11px; }
 }
 .status-error, .execution-attention { color: var(--danger); }
 .status-warning { color: var(--warn); }

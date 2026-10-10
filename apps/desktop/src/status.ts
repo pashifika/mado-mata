@@ -21,11 +21,18 @@ export function scopedAuthoring(workspace: Workspace | undefined, session: Autho
   return workspace && session?.owner.workspace.workspace_id === workspace.id ? session : null;
 }
 
-export function packageValidation(session: AuthoringSession, validating: boolean) {
+export interface PackageValidation {
+  state: 'none' | 'running' | 'valid' | 'invalid' | 'stale';
+  revision: string | null;
+  count: number;
+  unsaved: number;
+}
+
+export function packageValidation(session: AuthoringSession, validating: boolean): PackageValidation {
   return {
-    state: validating || session.pending?.kind === 'validate' ? 'running' as const
-      : session.validation === null ? 'none' as const : !validationCurrent(session) ? 'stale' as const
-      : session.validation.valid ? 'valid' as const : 'invalid' as const,
+    state: validating || session.pending?.kind === 'validate' ? 'running'
+      : session.validation === null ? 'none' : !validationCurrent(session) ? 'stale'
+      : session.validation.valid ? 'valid' : 'invalid',
     revision: session.validation?.revision ?? null,
     count: session.validation?.diagnostics.length ?? 0,
     unsaved: dirtyDrafts(session).length,

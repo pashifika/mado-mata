@@ -1,14 +1,26 @@
 import {useLayoutEffect, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
-import {shortRevision} from '../authoring.ts';
 import type {AuthoringSession} from '../authoring.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
-import {packageValidation} from '../status.ts';
-import type {AuthoringActivity, StatusItem} from '../status.ts';
+import type {AuthoringActivity, PackageValidation, StatusItem} from '../status.ts';
 import type {Fault} from '../types.ts';
 import AuthoringValidation from './AuthoringValidation.tsx';
 import {HelpPanel, HelpProvider, HelpTrigger, InfoHint, useHelp} from './ContextualHelp.tsx';
+
+export function ValidationStatusIcon({id, state, label}: {
+  id: string; state: PackageValidation['state']; label: string;
+}) {
+  const ui = messages[useLocale()].ui;
+  const description = `${label} · ${state === 'running' ? ui.authoring.validating : ui.status[state]}`;
+  return <span id={id} className={`validation-icon validation-${state}`} role="img" aria-label={description} title={description}>
+    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      {state !== 'running' && <circle cx="8" cy="8" r="6"/>}
+      <path d={state === 'valid' ? 'm4.8 8 2.1 2.1 4.3-4.3' : state === 'invalid' ? 'm5.8 5.8 4.4 4.4m0-4.4-4.4 4.4'
+        : state === 'stale' ? 'M8 4.5V8h3' : state === 'running' ? 'M5 3h6v2L5 11v2h6v-2L5 5Z' : 'M5.5 8h5'}/>
+    </svg>
+  </span>;
+}
 
 export interface AuthoringStatusProps {
   activity: AuthoringActivity; ownerLabel: string; showReturn: boolean; returnDisabled: boolean; stopDisabled: boolean;
@@ -24,8 +36,8 @@ function AuthoringActions({idPrefix, activity, ownerLabel, showReturn, returnDis
   return <>
     {worker?.cancellable && <button id={`${idPrefix}-stop`} type="button" className="stop-button" aria-label={`${messages[locale].app.stop} · ${ownerLabel}`}
       title={`${messages[locale].app.stop} · ${ownerLabel}`} disabled={stopDisabled || worker.phase === 'stopping'} onClick={onStop}>{messages[locale].app.stop}</button>}
-    {capture && <span className="authoring-capture">
-      <span className="activity-kind" title={`${ui.nativeCapture.heading} · ${ui.nativeCapture.status[capture.status]}`} role="status">
+    {capture && <>
+      <span className="activity-kind authoring-capture" title={`${ui.nativeCapture.heading} · ${ui.nativeCapture.status[capture.status]}`} role="status">
         {ui.nativeCapture.heading} · {activity.stopRequested && capture.busy ? a.stopPending : ui.nativeCapture.status[capture.status]}
       </span>
       <button id={`${idPrefix}-native-stop`} type="button" className={capture.busy ? 'stop-button' : undefined}
@@ -33,7 +45,7 @@ function AuthoringActions({idPrefix, activity, ownerLabel, showReturn, returnDis
         title={`${capture.busy ? messages[locale].app.stop : a.releaseCapture} · ${ownerLabel}`} disabled={stopDisabled || capture.status === 'cancelling'} onClick={capture.busy ? onStop : onRelease}>
         {capture.busy ? messages[locale].app.stop : a.releaseCapture}
       </button>
-    </span>}
+    </>}
     {showReturn && <button id={`${idPrefix}-return-to-edit`} type="button" disabled={returnDisabled}
       aria-label={`${a.returnToEdit} · ${ownerLabel}`} title={`${a.returnToEdit} · ${ownerLabel}`} onClick={onReturn}>{a.returnToEdit}</button>}
   </>;
@@ -98,21 +110,20 @@ export function AuthoringFooterStatus({idPrefix, activity, ownerLabel, returnDis
 interface Props {
   scopeKey: string; scopeLabel: string; scopePhase: string | null; pageTitle: string; pageHelp: ReactNode; runLabel: string;
   items: StatusItem[]; session: AuthoringSession | null; recognitionDirty: boolean; validating: boolean;
-  profile: 'valid' | 'none' | 'stale' | null;
+  validation: PackageValidation | null;
   authoring: AuthoringStatusProps | null;
   onNavigate: (action: NonNullable<StatusItem['action']>) => void;
   onDiagnostic: (fault: Fault) => void;
   children: ReactNode;
 }
 
-export default function StatusSurface({scopeKey, scopeLabel, scopePhase, pageTitle, pageHelp, runLabel, items, session, recognitionDirty, validating, profile, authoring, onNavigate, onDiagnostic, children}: Props) {
+export default function StatusSurface({scopeKey, scopeLabel, scopePhase, pageTitle, pageHelp, runLabel, items, session, recognitionDirty, validating, validation, authoring, onNavigate, onDiagnostic, children}: Props) {
   const locale = useLocale();
   const ui = messages[locale].ui;
-  const [panel, setPanel] = useState<'help' | 'status' | 'validation'>('help');
+  const [panel, setPanel] = useState<'help' | 'status'>('help');
   const help = useHelp(`${scopeKey}:${authoring?.activity.owner.token ?? ''}`, () => setPanel('help'));
   const bar = useRef<HTMLElement>(null);
   const drawer = useRef<HTMLDivElement>(null);
-  const validation = session ? packageValidation(session, validating) : null;
   const unsaved = (validation?.unsaved ?? 0) + Number(recognitionDirty);
   const activity = authoring?.activity;
   const worker = activity?.worker;
@@ -152,10 +163,6 @@ export default function StatusSurface({scopeKey, scopeLabel, scopePhase, pageTit
       page.style.scrollPaddingBottom = previousPadding;
     };
   }, [help.topic]);
-  const openDetails = (kind: 'status' | 'validation', opener: HTMLElement) => {
-    help.open({title: kind === 'status' ? ui.status.details : ui.authoring.savedValidationHeading, content: null}, opener);
-    setPanel(kind);
-  };
   const details = panel === 'status' ? <>
     {authoring && <section aria-label={ui.authoring.activityDetails}>{authoring.details}</section>}
     <section aria-label={scopeLabel}>
@@ -167,13 +174,17 @@ export default function StatusSurface({scopeKey, scopeLabel, scopePhase, pageTit
       </li>)}</ul>
       {items.length === 0 && <p className="muted">{ui.status.ready}</p>}
     </section>
-  </> : panel === 'validation' && session ? <AuthoringValidation session={session} recognitionDirty={recognitionDirty} validating={validating}
-    onNavigate={fault => {help.close(); onDiagnostic(fault);}}/> : undefined;
+    {session && <section aria-label={ui.authoring.savedValidationHeading}>
+      <h3>{ui.authoring.savedValidationHeading}</h3>
+      <AuthoringValidation session={session} recognitionDirty={recognitionDirty} validating={validating}
+        onNavigate={fault => {help.close(); onDiagnostic(fault);}}/>
+    </section>}
+  </> : undefined;
   return <HelpProvider controller={help}>
     {children}
     <div ref={drawer} className="workspace-feedback">
       {help.topic && <div className="workspace-drawer">
-        <HelpPanel controller={help} title={panel === 'status' ? ui.status.details : panel === 'validation' ? ui.authoring.savedValidationHeading : undefined}>{details}</HelpPanel>
+        <HelpPanel controller={help} title={panel === 'status' ? ui.status.details : undefined}>{details}</HelpPanel>
       </div>}
       <div className="unsaved-status" role="status">{unsaved > 0 && <span id="status-unsaved" className="unsaved-bubble" title={ui.authoring.unsavedNotValidated}>{ui.authoring.unsavedFiles(unsaved)}</span>}</div>
     </div>
@@ -196,18 +207,9 @@ export default function StatusSurface({scopeKey, scopeLabel, scopePhase, pageTit
         {authoring && <AuthoringActions {...authoring} idPrefix="app"/>}
         <button id="status-details" type="button" className={attention ? 'status-error' : undefined}
           title={detailTitle} aria-expanded={help.topic !== null && panel === 'status'} aria-controls="workspace-help-panel"
-          onClick={event => openDetails('status', event.currentTarget)}>
+          onClick={event => {help.open({title: ui.status.details, content: null}, event.currentTarget); setPanel('status');}}>
           <span role="status">{detailLabel}</span>
         </button>
-      </div>
-      <div className="status-facts">
-        {profile !== null && <span id="profile-validation-status" className={`tag ${profile === 'valid' ? 'current' : profile === 'stale' ? 'stale' : ''}`}>{ui.status.profile} · {ui.status[profile]}</span>}
-        {validation && <button id="package-validation-status" type="button" className={`validation-summary tag ${validation.state === 'valid' ? 'current' : validation.state === 'invalid' ? 'status-attention' : validation.state === 'stale' ? 'stale' : ''}`}
-          title={`${ui.authoring.savedValidationHeading} · ${validation.revision === null ? ui.status.none : `${shortRevision(validation.revision)} · ${ui.authoring.validationDiagnosticCount(validation.count)}`}`}
-          aria-expanded={help.topic !== null && panel === 'validation'} aria-controls="workspace-help-panel"
-          onClick={event => openDetails('validation', event.currentTarget)}>
-          {ui.status.savedPackage} · {validation.state === 'running' ? ui.authoring.validating : ui.status[validation.state]}
-        </button>}
       </div>
       <HelpTrigger id="workspace-help" label={ui.status.help} title={pageTitle} hint={ui.status.helpHint}>{pageHelp}</HelpTrigger>
     </footer>

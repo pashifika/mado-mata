@@ -275,16 +275,16 @@ The full Workspace or Application scope remains in titles and details.
 Use **Status details** for complete messages and corrective navigation.
 Unresolved failures and blockers take priority over progress and ordinary notices.
 Closing details does not clear them.
-Profile-draft validation, saved-package validation and
-unsaved drafts retain distinct labels; another workspace's late response cannot
-become the selected workspace's notice.
+Profile-draft validation, saved-package validation and unsaved drafts remain
+distinct; another workspace's late response cannot become the selected
+workspace's notice.
 Application-scoped work reports its own progress. Target failures retain their
 earlier-draft attribution; an unresolved saved-record conflict still requires reload.
 
 During Edit, the bottom bar groups **Edit · state**, a concise current-scope
 message and direct **Stop** / retained capture **Release** / **Return to Edit**
-controls separately from validation facts. The full Edit owner is available
-through the information hint, status details and action descriptions rather than
+controls. Validation indicators live on the associated tabs. The full Edit owner
+is available through the information hint, status details and action descriptions rather than
 occupying the resting bar. Another scope's message keeps its scope label.
 **Status details** combines attributed activity and notices. **Attention** and
 **Cleanup incomplete** remain visible until their underlying outcomes change.
@@ -292,11 +292,14 @@ Settings, New workspace, Saved workspaces and unsaved-change confirmation use
 the same compact Edit control in their own footer, without an adjacent information
 icon or upper owner strip. Stop acknowledgement is not worker settlement.
 
-The colored **Saved package** summary opens revision and diagnostic details.
-Edit omits Run control's profile-draft validation; its state remains available
-outside Edit. Validation states are labels, not count badges. The footer stays
-on one row at every supported width, including 760 CSS px. Narrow widths truncate
-the message with an ellipsis; full text remains in its tooltip and Status details.
+**Run control** carries a profile-draft validation icon; **Edit** carries a
+saved-package validation icon. Shape and color distinguish unchecked (dash),
+valid (check), invalid (cross), stale (clock), and running (hourglass) as applicable.
+Hover for the localized scope/state description. Activating a tab still navigates;
+**Status details** contains saved-revision and diagnostic details.
+The footer does not repeat these indicators and stays on one row at supported
+widths, including 760 CSS px. Narrow widths truncate the message with an ellipsis;
+full text remains in its tooltip and Status details.
 
 **Help** opens the current page's explanation. Small information circles sit close
 to their labels, aligned to the upper-right within the text height. Their wider
@@ -306,8 +309,8 @@ Action buttons have no information icon: hover or focus shows only a short
 explanation. Disabled actions retain hover descriptions without becoming enabled.
 
 Close or an unconsumed Escape returns focus to the opener, respecting modal/editor
-Escape ownership. Help and status/validation details share one bounded drawer;
-changing page or workspace closes it without clearing the underlying state.
+Escape ownership. Help and Status details, including saved validation, share one
+bounded drawer; changing page or workspace closes it without clearing the underlying state.
 Corrective and diagnostic actions preserve a usable focus target; source diagnostics
 continue into the editor.
 Detached Preview uses the same interaction in its existing overlay without
@@ -418,9 +421,9 @@ Neither action inspects, binds, or runs the package.
   count; their content remains scrollable at constrained window heights.
 - **Validate** checks one saved revision through the existing inventory and
   trusted compiler without evaluating package code. Unsaved text is excluded.
-  **Saved-package validation** in the bottom bar shows not checked, running,
-  valid, invalid or earlier-revision state and the retained diagnostic count.
-  Open it for source locations; selecting an available location returns to the
+  The **Edit** tab's saved-package icon shows not checked, running, valid, invalid
+  or earlier-revision state. **Status details** retains the revision, diagnostic
+  count and source locations; selecting an available location returns to the
   owning Edit session without losing drafts. Later saves make the old result
   stale; unsaved changes remain independently identified. Details are available
   from the owner's other pages until Edit exits. The finite validation child
@@ -429,9 +432,9 @@ Neither action inspects, binds, or runs the package.
 - One Edit session owns the application. Ordinary **Start**, independent OCR
   **Check**, a second editor, and configuration reconstruction are refused.
   The bottom Edit summary retains its actual owner across navigation.
-  Its information circle explains exclusion and Save/Inspect on hover, focus or
-  click, including inside dialogs. Owner-bound Recognition OCR/template trials
-  remain allowed. Unavailable Start/Check actions retain their current reasons.
+  Its main-window information circle explains exclusion and Save/Inspect on
+  hover, focus or click. Owner-bound Recognition OCR/template trials remain
+  allowed. Unavailable Start/Check actions retain their current reasons.
   Idle Edit has no timed runner. **Return to Edit** preserves the session across
   workspaces and dialogs.
 - Guidance **Open/Create**, like Run-page Edit, asks before leaving unsaved
@@ -2337,6 +2340,10 @@ scope; closed origins and evicted events are labeled explicitly.
   through **Application → App settings → Logs → Save changes**, not a profile
   value. Lowering it immediately keeps only the newest items across all scopes.
   Invalid input preserves the previous valid limit.
+- **Count badges:** Workspace Logs and Application logs show at most **99**,
+  without a plus sign. Hover or the accessible description gives the exact
+  retained count. These are not unread counts; display capping does not change
+  retention, filtering, or the log list.
 - **Delivery queues:** at most **256 records each** for the application GUI and
   file queues. A larger display limit does not enlarge these queues.
 - **Files:** sanitized JSONL under the data root's `logs/`, rotating across at
