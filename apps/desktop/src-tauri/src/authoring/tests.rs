@@ -181,13 +181,7 @@ fn duplicate_omits_os_metadata_without_losing_declared_wrapper_files_or_source_b
     let copied_inventory = duplicate.validate().unwrap();
     assert_eq!(copied_inventory.sources, original_inventory.sources);
     assert_eq!(copied_inventory.assets, original_inventory.assets);
-    assert!(
-        duplicate
-            .draft
-            .files()
-            .keys()
-            .eq(source_files.keys())
-    );
+    assert!(duplicate.draft.files().keys().eq(source_files.keys()));
     for (path, bytes) in &source_files {
         let copied = fs::read(duplicate.root().join(path)).unwrap();
         match original.draft.kinds()[path] {
@@ -244,7 +238,11 @@ fn declared_os_metadata_refuses_duplicate_before_destination_publication() {
         "Inventory"
     );
     assert_eq!(
-        fixture.publisher.open(original.root()).unwrap_err().category,
+        fixture
+            .publisher
+            .open(original.root())
+            .unwrap_err()
+            .category,
         "Inventory"
     );
     let destination = fixture.root.join("missing/copy");
@@ -281,7 +279,12 @@ fn hidden_package_declarations_keep_existing_portable_path_refusal() {
         assert_eq!(fault.category, "Inventory");
         assert!(!original.root().join(path).exists());
         assert_eq!(
-            fixture.publisher.open(original.root()).unwrap().draft.files(),
+            fixture
+                .publisher
+                .open(original.root())
+                .unwrap()
+                .draft
+                .files(),
             original.draft.files()
         );
     }
