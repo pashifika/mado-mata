@@ -163,6 +163,79 @@ uses the same generation checks for an explicitly named loaded capture and
 ordered definition IDs, without reading or writing the clipboard. Its receipt
 dependencies can fence a later draft edit; retrieval itself never changes Script.
 
+### Optional distribution metadata
+
+A version-1 source manifest may contain this strict optional object. It is
+required for signed export, not for ordinary directory inspection or execution:
+
+```json
+{
+  "distribution": {
+    "version": 1,
+    "release_version": "1.2.0-rc.1+build.5",
+    "name": "Example automation",
+    "description": "Original source is included.",
+    "author_name": "Example author",
+    "license": "MIT",
+    "game": {
+      "id": "example-game",
+      "names": {"en": "Example Game", "pt-BR": "Jogo de exemplo"},
+      "aliases": ["EG", "ExampleGame.exe"]
+    }
+  }
+}
+```
+
+Unknown/duplicate fields and invalid types are refused. Bounds use UTF-8 bytes:
+
+| Field | Bound |
+| --- | --- |
+| `release_version` | Strict SemVer 2.0.0, at most 128 bytes; core integers have no artificial `u64` ceiling |
+| `name`, `author_name`, `license` | Nonempty, at most 256 bytes each |
+| `description` | At most 8 KiB; rendered as text |
+| `game.id` | Portable component, at most 128 bytes; search-only |
+| `game.names` | 1–64 entries; language keys at most 64 ASCII bytes, names nonempty and at most 256 bytes |
+| `game.aliases` | Up to 64 nonempty search strings of at most 256 bytes; no machine paths |
+| Optional `tags` | Up to 64 strings of at most 128 bytes; preserved internally, no tag controls |
+| Complete object | At most 64 KiB serialized JSON, within the package non-image budget |
+
+Language keys use Unicode language identifiers, such as `en`, `ja`, `zh-Hant`,
+`pt-BR` and `fr-CA`: language, optional script/region and variants, without
+extensions or private-use subtags. Casing, separators and variant order normalize
+for comparison; canonical duplicates refuse. The editor's i18n suggestions are
+not an allowlist or limited to the app's `en | ja` translations. Opening a file
+does not rewrite its raw keys. Description, author, license, game names, aliases
+and tags grant no runtime authority. Distribution edits change content identity
+but never the normalized target-binding identity.
+
+### Signed `.mmpkg` format
+
+The [desktop transfer flow](desktop.md#transfer-signed-packages) reads and writes
+a standard ZIP, not legacy CustomZip. Version 1 has exactly `index.json`,
+`signature.json` and the indexed ordinary payload files below `package/`.
+The writer uses stored members with fixed metadata; readers accept stored or
+deflated members. No explicit directories, links/special files, encrypted
+members, traversal, duplicate/case-alias names or unlisted extras are admitted.
+Existing reserved-OS-metadata and portable-path rules still apply.
+
+`index.json` contains exactly `format: 1` and `files`, sorted by payload-relative
+UTF-8 path bytes. Each file has exactly `path`, `bytes` and its lowercase
+64-character SHA-256 `sha256`. `signature.json` contains exactly `format: 1`,
+`algorithm: "Ed25519"`, padded standard Base64 `public_key` (32 bytes) and
+`signature` (64 bytes), and `key_id` (lowercase SHA-256 of the public key).
+The signed message is the ASCII bytes `madomata-pkg-v1`, one LF byte, then the
+**original index bytes**, not a JSON reserialization.
+
+Bounds are 67 MiB for the archive, 1 MiB for the index, 16 KiB for the signature
+envelope and 128 payload files plus the two envelope members. Existing 64 MiB
+image, 1 MiB non-image, 65 MiB total and decoded-image limits still apply,
+including explicitly lower package limits. Reads/decompression enforce bounds
+while consuming data. Approved host dependencies are validated but not bundled.
+Original source and source maps remain readable; signing is not encryption.
+The archive-byte SHA-256 identifies the installed artifact, separately from the
+runtime inventory and execution-target identities. The CLI still consumes
+captured package directories; archive import/verification belongs to the desktop.
+
 ### Optional portable target declaration
 
 Version-1 manifests may include a strict `target` object:

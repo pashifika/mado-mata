@@ -1,8 +1,9 @@
-import {lineColumn} from './authoring.ts';
+import {lineColumn, utf8Bytes} from './authoring.ts';
 import type {FileDraft, TypedText} from './authoring.ts';
 import {retainStoredText, storedText} from './recovery.ts';
 import type {RecoveryEdit, StoredText} from './recovery.ts';
-import {exactIntegerText, optionPath, readDraft} from './state.ts';
+import {exactIntegerText, optionPath, portableComponent, readDraft} from './state.ts';
+import {canonicalLanguageKey} from './i18n-language.ts';
 import type {AuthoringFileKind, Json, Schema} from './types.ts';
 
 // Pure models behind Edit's structured views. Declared metadata (manifest, options schema, presets, source maps) is
@@ -340,6 +341,179 @@ export function windowTitleValid(value: string): boolean {
 
 export function bundleIdValid(value: string): boolean {
   return /^[A-Za-z0-9.-]{1,255}$/.test(value);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Distribution metadata
+
+// The optional `distribution` member: release identity, attribution and search-only game facts. It is part of the
+// signed package content but never of the target declaration, target identity or local target settings. Internal
+// `tags` are carried over as saved and have no form controls.
+export const DISTRIBUTION_TEXT = ['release_version', 'name', 'description', 'author_name', 'license'] as const;
+export type DistributionText = typeof DISTRIBUTION_TEXT[number];
+// The text members the form and agent field edits set; `game_id` is `distribution.game.id`.
+export type DistributionPart = DistributionText | 'game_id';
+export const DISTRIBUTION_PARTS: readonly DistributionPart[] = [...DISTRIBUTION_TEXT, 'game_id'];
+const DISTRIBUTION_MEMBERS: readonly string[] = ['version', ...DISTRIBUTION_TEXT, 'game', 'tags'];
+const GAME_MEMBERS: readonly string[] = ['id', 'names', 'aliases'];
+// Localized names and aliases each.
+export const DISTRIBUTION_ENTRIES = 64;
+export const DISTRIBUTION_TEXT_BYTES: Record<DistributionText, number> = {release_version: 128, name: 256, description: 8192, author_name: 256, license: 256};
+export const GAME_TEXT_BYTES = 256;
+
+// One localized-name row: the language key exactly as written and its game name.
+export interface NameRow {key: string; name: string}
+export type DistributionIssue = {code: 'version'} | {code: 'member'; key: string} | {code: 'gameMember'; key: string}
+  | {code: 'type'; key: DistributionText | 'game' | 'id' | 'names' | 'aliases'};
+export interface DistributionView {
+  text: Record<DistributionPart, string>;
+  // null while `game` is not an object; `names`/`aliases` are null while not in an editable shape. Each such part is
+  // reported with a deliberate repair and is never replaced by an edit of another field.
+  game: {names: NameRow[] | null; aliases: string[] | null} | null;
+  // The rows are held as [key, name] pairs: two of them have the same key, which a JSON object cannot keep.
+  pairs: boolean;
+  issues: DistributionIssue[];
+}
+
+function nameRows(value: Json | undefined): {rows: NameRow[]; pairs: boolean} | null {
+  if (value === undefined) return {rows: [], pairs: false};
+  if (isObject(value)) {
+    const rows: NameRow[] = [];
+    for (const [key, name] of Object.entries(value)) {
+      if (typeof name !== 'string') return null;
+      rows.push({key, name});
+    }
+    return {rows, pairs: false};
+  }
+  if (!Array.isArray(value)) return null;
+  const rows: NameRow[] = [];
+  for (const item of value) {
+    if (!Array.isArray(item) || item.length !== 2 || typeof item[0] !== 'string' || typeof item[1] !== 'string') return null;
+    rows.push({key: item[0], name: item[1]});
+  }
+  return {rows, pairs: true};
+}
+
+// The form's reading of a `distribution` object. Reading never rewrites anything: a key is normalized only when the
+// author commits it, and a stored problem stays until its repair or a deliberate edit of that field.
+export function readDistribution(distribution: JsonObject): DistributionView {
+  const issues: DistributionIssue[] = [];
+  if (distribution.version !== 1) issues.push({code: 'version'});
+  for (const key of Object.keys(distribution)) if (!DISTRIBUTION_MEMBERS.includes(key)) issues.push({code: 'member', key});
+  for (const key of DISTRIBUTION_TEXT) {
+    if (distribution[key] !== undefined && typeof distribution[key] !== 'string') issues.push({code: 'type', key});
+  }
+  const game = distribution.game;
+  let gameView: DistributionView['game'] = {names: [], aliases: []};
+  let pairs = false;
+  if (isObject(game)) {
+    for (const key of Object.keys(game)) if (!GAME_MEMBERS.includes(key)) issues.push({code: 'gameMember', key});
+    if (game.id !== undefined && typeof game.id !== 'string') issues.push({code: 'type', key: 'id'});
+    const names = nameRows(game.names);
+    if (names === null) issues.push({code: 'type', key: 'names'});
+    pairs = names?.pairs ?? false;
+    const aliases = game.aliases === undefined ? [] : Array.isArray(game.aliases) && game.aliases.every(item => typeof item === 'string') ? game.aliases as string[] : null;
+    if (aliases === null) issues.push({code: 'type', key: 'aliases'});
+    gameView = {names: names?.rows ?? null, aliases};
+  } else if (game !== undefined) {
+    issues.push({code: 'type', key: 'game'});
+    gameView = null;
+  }
+  const text = Object.fromEntries(DISTRIBUTION_TEXT.map(key => [key, typeof distribution[key] === 'string' ? distribution[key] : ''])) as Record<DistributionText, string>;
+  return {text: {...text, game_id: isObject(game) && typeof game.id === 'string' ? game.id : ''}, game: gameView, pairs, issues};
+}
+
+// Declared with every member empty for the author to fill; nothing is invented on their behalf.
+export function starterDistribution(): JsonObject {
+  return {version: 1, release_version: '', name: '', description: '', author_name: '', license: '', game: {id: '', names: {}, aliases: []}};
+}
+
+// Declaring keeps an existing object; removing deletes the whole member, internal tags included.
+export function withDistribution(manifest: JsonObject, declared: boolean): JsonObject {
+  if (!declared) return without(manifest, 'distribution');
+  return manifest.distribution === undefined ? {...manifest, distribution: starterDistribution()} : manifest;
+}
+
+function withGame(manifest: JsonObject, member: 'id' | 'names' | 'aliases', value: Json): JsonObject {
+  const distribution: JsonObject = isObject(manifest.distribution) ? manifest.distribution : {};
+  const game: JsonObject = isObject(distribution.game) ? distribution.game : {};
+  return {...manifest, distribution: {...distribution, game: {...game, [member]: value}}};
+}
+
+export function withDistributionText(manifest: JsonObject, part: DistributionPart, text: string): JsonObject {
+  if (part === 'game_id') return withGame(manifest, 'id', text);
+  return {...manifest, distribution: {...(isObject(manifest.distribution) ? manifest.distribution : {}), [part]: text}};
+}
+
+// Rows become a JSON object whenever one can hold them in order: distinct keys, none of them an array index (which
+// JavaScript objects move first). Otherwise every row is kept as a [key, name] pair, so no typed key or name is lost
+// or overwritten; the host refuses that shape until each language appears once.
+export function withNameRows(manifest: JsonObject, rows: readonly NameRow[]): JsonObject {
+  const keys = new Set(rows.map(row => row.key));
+  if (keys.size < rows.length || rows.some(row => /^(?:0|[1-9][0-9]*)$/.test(row.key) && Number(row.key) < 2 ** 32 - 1)) {
+    return withGame(manifest, 'names', rows.map(row => [row.key, row.name]));
+  }
+  const names: JsonObject = {};
+  for (const row of rows) define(names, row.key, row.name);
+  return withGame(manifest, 'names', names);
+}
+
+export function withAliases(manifest: JsonObject, aliases: readonly string[]): JsonObject {
+  return withGame(manifest, 'aliases', [...aliases]);
+}
+
+// One deliberate repair: it changes only the member the issue names.
+export function repairDistribution(manifest: JsonObject, issue: DistributionIssue): JsonObject {
+  const distribution: JsonObject = isObject(manifest.distribution) ? manifest.distribution : {};
+  switch (issue.code) {
+    case 'version':
+      return {...manifest, distribution: {...distribution, version: 1}};
+    case 'member':
+      return {...manifest, distribution: without(distribution, issue.key)};
+    case 'gameMember':
+      return {...manifest, distribution: {...distribution, game: without(isObject(distribution.game) ? distribution.game : {}, issue.key)}};
+    case 'type':
+      if (issue.key === 'game') return {...manifest, distribution: {...distribution, game: {id: '', names: {}, aliases: []}}};
+      if (issue.key === 'names') return withGame(manifest, 'names', {});
+      if (issue.key === 'aliases') return withGame(manifest, 'aliases', []);
+      return withDistributionText(manifest, issue.key === 'id' ? 'game_id' : issue.key, '');
+  }
+}
+
+// Strict SemVer 2.0.0, including prerelease and build metadata.
+const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+export type TextIssue = 'required' | 'length' | 'format';
+
+// The host's check for one text member, so the form shows what Save would refuse. Only the description may be empty.
+export function distributionTextIssue(part: DistributionPart, text: string): TextIssue | null {
+  if (part === 'game_id') return text === '' ? 'required' : portableComponent(text) ? null : 'format';
+  if (utf8Bytes(text) > DISTRIBUTION_TEXT_BYTES[part]) return 'length';
+  if (text === '') return part === 'description' ? null : 'required';
+  return part === 'release_version' && !SEMVER.test(text) ? 'format' : null;
+}
+
+export type NameKeyIssue = {code: 'empty'} | {code: 'invalid'} | {code: 'duplicate'; row: number} | {code: 'canonical'; canonical: string};
+export interface NameRowIssues {key: NameKeyIssue | null; name: 'empty' | 'length' | null}
+
+// Per row: a key that is missing, not a language key, the same language as another row after canonicalization, or
+// not yet in canonical form; a missing or oversized name. A duplicate names the first other row (1-based).
+export function nameRowIssues(rows: readonly NameRow[]): NameRowIssues[] {
+  const languages = rows.map(row => canonicalLanguageKey(row.key) ?? row.key);
+  return rows.map((row, index) => {
+    const canonical = canonicalLanguageKey(row.key);
+    const other = row.key === '' ? -1 : languages.findIndex((language, at) => at !== index && language === languages[index]);
+    const key: NameKeyIssue | null = row.key === '' ? {code: 'empty'} : other >= 0 ? {code: 'duplicate', row: other + 1}
+      : canonical === null ? {code: 'invalid'} : canonical !== row.key ? {code: 'canonical', canonical} : null;
+    return {key, name: row.name === '' ? 'empty' : utf8Bytes(row.name) > GAME_TEXT_BYTES ? 'length' : null};
+  });
+}
+
+// Aliases are search strings, never machine paths: absolute, home-relative, drive and UNC forms are refused.
+export function aliasIssue(alias: string): 'empty' | 'length' | 'path' | null {
+  if (alias === '') return 'empty';
+  if (utf8Bytes(alias) > GAME_TEXT_BYTES) return 'length';
+  return /^(?:[/\\]|~[/\\]|[A-Za-z]:[/\\])/.test(alias) ? 'path' : null;
 }
 
 // ---------------------------------------------------------------------------------------------------------------

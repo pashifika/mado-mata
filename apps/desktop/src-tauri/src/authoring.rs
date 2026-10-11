@@ -1,5 +1,6 @@
 //! Owner-admitted directory authoring. The Application authenticates its lease and
 //! serializes calls; this module owns source revisions and durable publication.
+//! Managed installed releases open read-only: only Duplicate may copy them to source.
 mod catalog;
 mod publication;
 mod recognition;
@@ -7,6 +8,7 @@ mod recognition;
 #[cfg(test)]
 mod tests;
 
+use crate::distribution::{InstalledIdentity, managed_identity};
 use mado_runtime_comparison::inventory::{DraftFileKind, Inventory, PackageDraft};
 use mado_runtime_comparison::model::{Fault, Limits, Plan};
 use serde::Serialize;
@@ -25,6 +27,8 @@ pub struct Candidate {
     root: PathBuf,
     draft: PackageDraft,
     root_identity: String,
+    // Derived from the managed container on every open, never from a lease flag.
+    managed: Option<InstalledIdentity>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,6 +67,14 @@ impl Candidate {
     pub fn revision(&self) -> &str {
         self.draft.revision()
     }
+    /// The exact captured saved files of this revision.
+    pub fn draft(&self) -> &PackageDraft {
+        &self.draft
+    }
+    /// The installed release this read-only view belongs to, if any.
+    pub fn managed(&self) -> Option<&InstalledIdentity> {
+        self.managed.as_ref()
+    }
     pub fn files(&self) -> Vec<AuthoringFile> {
         self.draft
             .files()
@@ -97,6 +109,11 @@ impl Publisher {
         Self { data_root }
     }
 
+    /// The application data root that owns `pkgs/` installed releases.
+    pub(crate) fn data_root(&self) -> &Path {
+        &self.data_root
+    }
+
     /// Resolves a collection location without creating it or changing an active lease.
     pub(crate) fn packages_root(&self, root: &Path) -> Result<PathBuf, Fault> {
         let root = publication::resolve_packages_root(root)?;
@@ -123,6 +140,7 @@ impl Publisher {
         self.check_admission(root)?;
         let root = PackageDraft::canonical_root(root)?;
         self.separate_root(&root)?;
+        let managed = managed_identity(&self.data_root, &root)?;
         let root_identity = publication::root_identity(&root)?;
         let draft = PackageDraft::capture(&root, &limits()?)?;
         if root_identity != publication::root_identity(&root)? {
@@ -141,6 +159,7 @@ impl Publisher {
             root,
             draft,
             root_identity,
+            managed,
         })
     }
 
@@ -187,6 +206,9 @@ impl Publisher {
         before_refresh: impl FnOnce() -> Result<(), Fault>,
     ) -> Result<Commit, Fault> {
         let current = self.check_current(candidate, expected_revision)?;
+        if let Some(identity) = &current.managed {
+            return Err(managed_fault(&current.root, identity));
+        }
         let next = catalog::apply(&current.draft, edit)?;
         next.check_directory_budget(&current.draft)?;
         let committed_revision = next.revision().to_owned();
@@ -220,7 +242,7 @@ impl Publisher {
         })
     }
 
-    fn check_current(
+    pub(crate) fn check_current(
         &self,
         candidate: &Candidate,
         expected_revision: &str,
@@ -238,6 +260,15 @@ impl Publisher {
             return Err(stale());
         }
         Ok(current)
+    }
+
+    /// Refuse writing anywhere inside a managed release container, including paths
+    /// that do not exist yet.
+    fn check_unmanaged(&self, path: &Path) -> Result<(), Fault> {
+        match managed_identity(&self.data_root, path)? {
+            Some(identity) => Err(managed_fault(path, &identity)),
+            None => Ok(()),
+        }
     }
 
     fn separate_root(&self, root: &Path) -> Result<(), Fault> {
@@ -289,7 +320,8 @@ impl Publisher {
     }
 }
 
-fn limits() -> Result<Limits, Fault> {
+/// The desktop package capture limits shared by authoring, inspection and distribution.
+pub(crate) fn limits() -> Result<Limits, Fault> {
     let mut plan: Plan = serde_json::from_str(include_str!(
         "../../../../tools/runtime-comparison/fixtures/manual-plan.json"
     ))
@@ -303,6 +335,16 @@ fn stale() -> Fault {
         "AuthoringConflict",
         "source revision changed; retain drafts and deliberately refresh before saving",
     )
+}
+
+fn managed_fault(path: &Path, identity: &InstalledIdentity) -> Fault {
+    Fault::new(
+        "ManagedPackage",
+        "installed releases are read-only; Duplicate to a new source package before editing",
+    )
+    .with_context(json!({
+        "package_path":path,"package_id":identity.package_id,"artifact_id":identity.artifact_id,
+    }))
 }
 
 fn io_fault(action: &str, error: std::io::Error) -> Fault {

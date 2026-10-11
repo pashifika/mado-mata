@@ -30,12 +30,15 @@ pub struct AuthoringRef {
     pub token: String,
 }
 
+/// `managed` marks a read-only installed release: every write is refused and only
+/// Duplicate can produce an editable source copy.
 #[derive(Debug, Serialize)]
 pub struct AuthoringView {
     pub owner: AuthoringRef,
     pub package_path: String,
     pub package_id: String,
     pub revision: String,
+    pub managed: bool,
     pub files: Vec<AuthoringFile>,
 }
 
@@ -89,7 +92,7 @@ impl Lease {
 }
 
 impl Workspaces {
-    fn authoring(&self, owner: &AuthoringRef) -> Result<&Lease, Fault> {
+    pub(super) fn authoring(&self, owner: &AuthoringRef) -> Result<&Lease, Fault> {
         self.authoring
             .as_ref()
             .filter(|lease| lease.owner == *owner)
@@ -101,7 +104,7 @@ impl Workspaces {
             })
     }
 
-    fn authoring_revision(
+    pub(super) fn authoring_revision(
         &self,
         owner: &AuthoringRef,
         revision: &str,
@@ -137,6 +140,7 @@ fn view(owner: &AuthoringRef, candidate: &Candidate) -> AuthoringView {
         package_path: candidate.root().to_string_lossy().into_owned(),
         package_id: candidate.package_id().to_owned(),
         revision: candidate.revision().to_owned(),
+        managed: candidate.managed().is_some(),
         files: candidate.files(),
     }
 }
@@ -176,7 +180,13 @@ impl Application {
         let candidate = capture()?;
         self.invalidate_target_observation(Some(workspace));
         let result = view(&owner, &candidate);
-        let roots = BTreeSet::from([candidate.root().to_path_buf()]);
+        // A read-only installed release cannot change, so other Tabs keep their inspection.
+        let roots = candidate
+            .managed()
+            .is_none()
+            .then(|| candidate.root().to_path_buf())
+            .into_iter()
+            .collect();
         let mut state = lock(&self.workspaces);
         state.next_authoring += 1;
         state.authoring = Some(Lease {

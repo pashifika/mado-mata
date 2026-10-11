@@ -16,7 +16,8 @@ export const DISPLAY_NAME_LIMIT = 80;
 export const DESCRIPTOR_LIMIT = 4096;
 // The host's bound for each reviewed Native text: trimmed non-empty, at most 4096 UTF-8 bytes, no control characters.
 const NATIVE_TEXT_LIMIT = 4096;
-// The host's category for a saved custom-archive reference; every other source fault is an unavailable directory.
+// The host's category for a saved custom-archive reference. Saved installed releases report `Installed*` integrity or
+// availability categories; every other source fault is an unavailable directory.
 export const UNSUPPORTED_SOURCE = 'UnsupportedPackageSource';
 const BUSY_PHASES: Record<string, true> = {preparing: true, running: true, recovering: true, stopping: true};
 const INTERNAL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
@@ -126,7 +127,7 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
 
 // A host view becomes a session: unbound, unusable saved source, or bound to real inventory. No draft is restored.
 // A failed saved directory stays visible and prefilled so repairing it needs no retyping of an unseen path; a saved
-// custom archive is shown but never offered as a directory request.
+// installed release or custom archive is shown but never offered as a directory request.
 export function workspaceFromView(view:WorkspaceView, notice:Message|null = null):Workspace {
   const saved = view.saved_package;
   const path = view.selection?.package_path ?? (saved !== null && saved.source.kind === 'directory' ? saved.source.path : '');
@@ -140,11 +141,12 @@ export function workspaceFromView(view:WorkspaceView, notice:Message|null = null
 }
 
 // Binding publishes the host's new revision; execution configuration and navigation survive, package-bound draft
-// state does not. A previous source error is resolved by the successful inspection, which is now the saved reference.
+// state does not. A previous source error is resolved by the successful inspection, which is now the saved reference
+// in the host's own source form: an installed release never becomes a directory reference here.
 export function bindSelection(workspace:Workspace, selection:Selection, notice:Message|null = null):Workspace {
   return {
     ...workspace, revision: selection.revision, bound: fromSelection(selection, workspace.bound ?? undefined), sourceError: null,
-    savedPackage: {package_id: selection.package.package_id, source: {kind: 'directory', path: selection.package_path}},
+    savedPackage: {package_id: selection.package.package_id, source: selection.source},
     error: null, notice, inspectPath: selection.package_path, legacyImport: null, disclosedRun: null,
   };
 }

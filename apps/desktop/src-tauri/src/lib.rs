@@ -1,10 +1,12 @@
 pub mod application;
 pub mod authoring;
+pub mod author_signing;
 pub mod backup;
 pub mod bootstrap;
 pub mod capture_cache;
 pub mod collaboration;
 pub mod configuration;
+pub mod distribution;
 pub mod logging;
 pub mod ocr_setup;
 pub mod plugin_management;

@@ -39,7 +39,8 @@ export default function SavedWorkspacesDialog({open, onCancel, closed, faults, l
         {closed.map(tab => {
           const selected = tab.packages.find(item => item.package_id === tab.selected_package_id) ?? null;
           const source = selected === null ? t.reopen.noPackage
-            : selected.source.kind === 'directory' ? t.reopen.directory(selected.package_id) : t.reopen.archive(selected.package_id);
+            : selected.source.kind === 'directory' ? t.reopen.directory(selected.package_id)
+            : selected.source.kind === 'installed' ? t.distribution.installedSource(selected.package_id) : t.reopen.archive(selected.package_id);
           return <li key={tab.internal_name} className="saved-row">
             <div className="saved-text"><strong>{tab.display_name}</strong><span className="mono">{tab.internal_name}</span>
               <span className="muted">{source}{tab.packages.length > 1 ? ` · ${t.reopen.references(tab.packages.length)}` : ''}</span></div>

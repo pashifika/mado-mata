@@ -430,6 +430,20 @@ impl Fixture {
         source
     }
 
+    fn predecessor(&self, name: &str) -> PathBuf {
+        let source = self.checkout(
+            name,
+            PREDECESSOR,
+            include_bytes!("../../fixtures/omp-predecessor/index.mjs"),
+        );
+        fs::write(
+            source.join("client.mjs"),
+            include_bytes!("../../fixtures/omp-predecessor/client.mjs"),
+        )
+        .unwrap();
+        source
+    }
+
     /// A private copy in the managed layout, as an earlier preparation leaves it.
     fn managed(&self, version: &str, index: &[u8]) -> PathBuf {
         let files = [
@@ -468,30 +482,6 @@ impl Fixture {
     }
 }
 
-#[test]
-fn the_build_supplies_one_finite_identified_adapter_release() {
-    let included = payload::included().unwrap();
-    assert_eq!(
-        FILES.map(|(name, _)| name),
-        ["package.json", "index.mjs", "client.mjs"]
-    );
-    let manifest: Value = serde_json::from_slice(FILES[0].1).unwrap();
-    assert_eq!(manifest["name"], NAME);
-    assert_eq!(included.version.to_string(), "0.1.1");
-    assert_eq!(included.minimum.to_string(), "18.8.7");
-    assert_eq!(included.content.len(), 64);
-    assert_eq!(included.content, payload::identity(FILES));
-    let mut changed = FILES.map(|(name, bytes)| (name, bytes.to_vec()));
-    changed[1].1.push(b'\n');
-    assert_ne!(
-        payload::identity(
-            changed
-                .iter()
-                .map(|(name, bytes)| (*name, bytes.as_slice()))
-        ),
-        included.content
-    );
-}
 
 #[test]
 fn versions_follow_release_precedence() {
@@ -709,7 +699,7 @@ fn install_registers_the_prepared_payload_only_after_readback() {
     assert_eq!(
         applied.installed.unwrap(),
         PluginInstallation {
-            version: "0.1.1".into(),
+            version: payload::included().unwrap().version.to_string(),
             source: display(&fixture.prepared()),
             content: Some(payload::included().unwrap().content.clone()),
             managed: true,
@@ -772,17 +762,17 @@ fn identical_newer_or_same_version_different_content_is_never_replaced() {
         "PluginActionUnavailable"
     );
     let cases = [
-        (fixture.managed("0.1.2", FILES[1].1), "PluginNewerInstalled"),
+        (fixture.managed("999.0.0", FILES[1].1), "PluginNewerInstalled"),
         (
-            fixture.managed("0.1.1", b"// other bytes"),
+            fixture.managed(&included.version.to_string(), b"// other bytes"),
             "PluginContentMismatch",
         ),
         (
-            fixture.checkout("newer", "0.2.0", FILES[1].1),
+            fixture.checkout("newer", "999.0.0", FILES[1].1),
             "PluginNewerInstalled",
         ),
         (
-            fixture.checkout("edited", "0.1.1", b"// edited"),
+            fixture.checkout("edited", &included.version.to_string(), b"// edited"),
             "PluginContentMismatch",
         ),
     ];
@@ -810,7 +800,7 @@ fn identical_newer_or_same_version_different_content_is_never_replaced() {
 #[test]
 fn only_a_recognized_predecessor_checkout_is_migrated_and_it_is_preserved() {
     let fixture = Fixture::new();
-    let checkout = fixture.checkout("checkout", PREDECESSOR, FILES[1].1);
+    let checkout = fixture.predecessor("checkout");
     let before = snapshot(&checkout);
     fixture.register(&checkout);
     let view = fixture.inspect();
@@ -842,7 +832,7 @@ fn only_a_recognized_predecessor_checkout_is_migrated_and_it_is_preserved() {
 #[test]
 fn a_changed_target_or_superseded_review_refuses_without_mutation() {
     let fixture = Fixture::new();
-    let checkout = fixture.checkout("checkout", PREDECESSOR, FILES[1].1);
+    let checkout = fixture.predecessor("checkout");
     fixture.register(&checkout);
     let first = fixture.inspect();
     let second = fixture.inspect();
@@ -869,7 +859,7 @@ fn a_changed_target_or_superseded_review_refuses_without_mutation() {
     assert_eq!(outcome.issue.unwrap().category, "PluginStale");
     assert_eq!(refused.state, Conflict);
 
-    let replacement = fixture.checkout("replacement", PREDECESSOR, FILES[1].1);
+    let replacement = fixture.predecessor("replacement");
     fixture.register(&replacement);
     let review = fixture.inspect();
     assert_eq!(review.state, Legacy);

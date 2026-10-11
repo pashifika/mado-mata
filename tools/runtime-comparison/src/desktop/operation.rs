@@ -260,6 +260,7 @@ impl DesktopController {
                 Ok(StartPreparation {
                     environment,
                     native: (),
+                    inventory: None,
                 })
             },
             |_, _| {
@@ -354,7 +355,7 @@ impl DesktopController {
                     control.check()?;
                     Ok((plan, preparation))
                 })();
-                let (plan, preparation) = prepared.map_err(|error| evidence.fault(error, true))?;
+                let (plan, mut preparation) = prepared.map_err(|error| evidence.fault(error, true))?;
                 evidence.complete();
                 let executable = if matches!(request.lane.as_str(), "replay" | "native") {
                     engine
@@ -365,6 +366,7 @@ impl DesktopController {
                 let prepared = prepare_run(
                     executable,
                     &request,
+                    preparation.inventory.take(),
                     preparation.environment.as_ref(),
                     &mut plan,
                     control,
@@ -1022,6 +1024,7 @@ fn verify_resources(
 fn prepare_run(
     executable: &Path,
     request: &StartRequest,
+    captured: Option<Inventory>,
     environment: Option<&OcrEnvironment>,
     plan: &mut Plan,
     control: &Arc<Control>,
@@ -1030,11 +1033,14 @@ fn prepare_run(
 ) -> Result<PreparedRun, Fault> {
     evidence.stage("package_validation", observer);
     control.check()?;
-    let mut inventory = Inventory::capture_with_stop(
-        Path::new(&request.package_path),
-        &manual_plan()?.limits,
-        Some(control),
-    )?;
+    let mut inventory = match captured {
+        Some(inventory) => inventory,
+        None => Inventory::capture_with_stop(
+            Path::new(&request.package_path),
+            &manual_plan()?.limits,
+            Some(control),
+        )?,
+    };
     control.check()?;
     evidence.complete();
     evidence.stage("profile_validation", observer);

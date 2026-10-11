@@ -916,3 +916,54 @@ fn predecessor_logs_survive_delivery_races_and_successor_startup_failure() {
         assert!(controller.poll().logs.is_empty());
     }
 }
+
+#[test]
+fn host_captured_inventory_is_executed_without_rereading_the_package_path() {
+    let captured = fixture();
+    let mut request = request(&captured);
+    // The location is evidence only once the host supplies its verified capture.
+    request.package_path = "/missing/package/never-read".into();
+    let observer = || {
+        let (progress, _) = mpsc::sync_channel(PROGRESS_CAPACITY);
+        let (logs, _) = mpsc::sync_channel(LOG_CAPACITY);
+        Observer {
+            native_preparation: Default::default(),
+            attempts: Default::default(),
+            progress,
+            logs,
+            dropped_logs: Arc::new(AtomicU64::new(0)),
+        }
+    };
+    let prepare = |inventory: Option<Inventory>| {
+        let control = Arc::new(Control::new(&manual_plan().unwrap().limits));
+        let mut plan = requested_plan(&request).unwrap();
+        let mut evidence = Evidence::new("run", "host-captured", None, None).unwrap();
+        prepare_run(
+            Path::new("runner-must-not-be-launched"),
+            &request,
+            inventory,
+            None,
+            &mut plan,
+            &control,
+            &observer(),
+            &mut evidence,
+        )
+    };
+    let prepared = prepare(Some(captured.clone())).unwrap();
+    assert_eq!(prepared.inventory.package_id, captured.package_id);
+    assert!(prepared.inventory.profiles.contains_key("saved-choice"));
+    // Without a host capture the runner reads the location and refuses the missing source.
+    assert!(prepare(None).is_err());
+    // A different verified capture never satisfies the inspected identity.
+    let mut changed = captured;
+    changed
+        .sources
+        .get_mut(&changed.entries.workflow.module)
+        .unwrap()
+        .push_str("\n// changed\n");
+    changed.refresh_identity().unwrap();
+    assert_eq!(
+        prepare(Some(changed)).err().unwrap().category,
+        "StaleIdentity"
+    );
+}

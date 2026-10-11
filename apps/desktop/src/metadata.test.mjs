@@ -1,8 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {applyRefresh,applySave,beginComposition,discardFile,endComposition,fileDirty,openSession,redoFile,replaceFile,saveTicket,selectFile,undoFile} from './authoring.ts';
-import {constraintValue,currentValues,editValues,emptySchema,fileTree,folderAncestors,formatJson,loadValues,nodeIssues,parseJson,presetIssues,readManifest,renameProperty,typedText,
-  repairNode,repairPreset,schemaIssues,sourceMapFacts,topDefaults,withEntry,withHelper,withProperty,withRequired,withTarget,withTopDefaults,withType,withoutProperty} from './metadata.ts';
+import {applyRefresh,applySave,beginComposition,beginPending,discardFile,editFile,endComposition,failCommand,fileDirty,openSession,redoFile,replaceFile,saveTicket,selectFile,
+  undoFile} from './authoring.ts';
+import {aliasIssue,constraintValue,currentValues,distributionTextIssue,editValues,emptySchema,fileTree,folderAncestors,formatJson,loadValues,nameRowIssues,nodeIssues,
+  parseJson,presetIssues,readDistribution,readManifest,renameProperty,repairDistribution,typedText,repairNode,repairPreset,schemaIssues,sourceMapFacts,starterDistribution,
+  topDefaults,withAliases,withDistribution,withDistributionText,withEntry,withHelper,withNameRows,withProperty,withRequired,withTarget,withTopDefaults,withType,
+  withoutProperty} from './metadata.ts';
 
 const owner={workspace:{workspace_id:'a',revision:1},token:'lease-1'};
 // The host writes catalog-edited manifests compactly and without a final newline.
@@ -307,4 +310,137 @@ test('same-byte numeric provenance is undoable, including a composition, without
   assert.deepEqual([shown(state).stored,shown(state).draft.ratio],[[],'1.']);
   // The discarded redo branch (the earlier 1.5 edit) must not return after the new composition.
   assert.equal(redoFile(state,PRESET_PATH),state);
+});
+
+// A saved manifest (two-space style) with release/search metadata, internal tags and a declared target. Its keys are
+// valid but not canonical, as an author may have written them by hand.
+const DISTRIBUTION={version:1,release_version:'1.2.0-rc.1+build.7',name:'Example',description:'<b>Plain</b> text',author_name:'A',license:'MIT',
+  game:{id:'example-game',names:{EN:'Example','zh-hant':'範例'},aliases:['EX','Example.exe']},tags:['internal','kept']};
+const DISTRIBUTED=JSON.stringify({...value(MANIFEST),target:{id:'game',window_title:'Game'},distribution:DISTRIBUTION},null,2)+'\n';
+function distributedSession(text=DISTRIBUTED){
+  return openSession(view([file('package.json','manifest',text),file('main.ts','source','export {};\n')]));
+}
+// What the manifest form does: rewrite the whole draft from the edited value, with the saved text's style.
+function formEdit(state,change){
+  const current=state.drafts.get('package.json');
+  return replaceFile(state,'package.json',formatJson(current.base,change(value(current.text))));
+}
+const manifestOf=state=>value(state.drafts.get('package.json').text);
+const rowsOf=manifest=>readDistribution(manifest.distribution).game.names;
+
+test('opening distribution metadata never normalizes it, and a form edit keeps tags, target and every other member',()=>{
+  let state=distributedSession();
+  const opened=state.drafts.get('package.json');
+  const distribution=readDistribution(manifestOf(state).distribution);
+  assert.deepEqual(distribution.game.names,[{key:'EN',name:'Example'},{key:'zh-hant',name:'範例'}]);
+  assert.deepEqual(nameRowIssues(distribution.game.names).map(issue=>issue.key),[{code:'canonical',canonical:'en'},{code:'canonical',canonical:'zh-Hant'}]);
+  assert.deepEqual([distribution.issues,distribution.pairs],[[],false]);
+  assert.deepEqual([opened.text,fileDirty(opened),opened.undo.length],[DISTRIBUTED,false,0],'reading the form changes nothing');
+  state=formEdit(state,manifest=>withDistributionText(manifest,'name','Example 2'));
+  const edited=manifestOf(state);
+  assert.deepEqual([edited.distribution.tags,edited.target,edited.entries,edited.distribution.game.names,edited.distribution.description],
+    [['internal','kept'],{id:'game',window_title:'Game'},value(MANIFEST).entries,{EN:'Example','zh-hant':'範例'},'<b>Plain</b> text']);
+  assert.match(state.drafts.get('package.json').text,/^\{\n {2}"version": 1,\n/);
+  // The deliberate commit of one key normalizes only that key.
+  state=formEdit(state,manifest=>withNameRows(manifest,rowsOf(manifest).map(row=>row.key==='EN' ? {...row,key:'en'} : row)));
+  assert.deepEqual(Object.entries(manifestOf(state).distribution.game.names),[['en','Example'],['zh-hant','範例']]);
+  // Restoring every value is the saved text again.
+  state=formEdit(formEdit(state,manifest=>withNameRows(manifest,[{key:'EN',name:'Example'},{key:'zh-hant',name:'範例'}])),
+    manifest=>withDistributionText(manifest,'name','Example'));
+  assert.equal(fileDirty(state.drafts.get('package.json')),false);
+});
+
+test('empty, conflicting and array-index name rows stay in the manifest draft in order without overwrite',()=>{
+  let manifest={...value(MANIFEST),distribution:starterDistribution()};
+  manifest=withNameRows(manifest,[{key:'',name:''}]);
+  assert.deepEqual(manifest.distribution.game.names,{'':''});
+  manifest=withNameRows(manifest,[{key:'',name:''},{key:'',name:''}]);
+  assert.deepEqual(manifest.distribution.game.names,[['',''],['','']],'a second new row cannot share the first one\'s member');
+  const typed=[{key:'en',name:'Example'},{key:'1',name:'One'},{key:'en',name:'Sample'}];
+  manifest=withNameRows(manifest,typed);
+  assert.deepEqual(manifest.distribution.game.names,[['en','Example'],['1','One'],['en','Sample']]);
+  assert.deepEqual([rowsOf(manifest),readDistribution(manifest.distribution).pairs],[typed,true]);
+  assert.deepEqual(nameRowIssues(typed).map(issue=>issue.key),[{code:'duplicate',row:3},{code:'invalid'},{code:'duplicate',row:1}]);
+  // Distinct keys are an object again, in row order; canonically equal keys still conflict visibly.
+  const resolved=[{key:'en',name:'Example'},{key:'ja',name:'例'},{key:'EN',name:'Sample'}];
+  manifest=withNameRows(manifest,resolved);
+  assert.deepEqual(Object.entries(manifest.distribution.game.names),[['en','Example'],['ja','例'],['EN','Sample']]);
+  assert.equal(readDistribution(manifest.distribution).pairs,false);
+  assert.deepEqual(nameRowIssues(resolved).map(issue=>issue.key),[{code:'duplicate',row:3},null,{code:'duplicate',row:1}]);
+  // A pure array index would be moved first by an object, so it stays a pair; `__proto__` is an ordinary member.
+  assert.deepEqual(withNameRows(manifest,[{key:'ja',name:'例'},{key:'7',name:'x'}]).distribution.game.names,[['ja','例'],['7','x']]);
+  const proto=withNameRows(manifest,[{key:'__proto__',name:'x'}]).distribution.game.names;
+  assert.deepEqual([Object.hasOwn(proto,'__proto__'),Object.getPrototypeOf(proto)],[true,Object.prototype]);
+  // Valid keys outside the suggestions are accepted; names are required and bounded.
+  assert.deepEqual(nameRowIssues([{key:'fr-CA',name:'Exemple'},{key:'sl-biske-rozaj',name:'x'}]),[{key:null,name:null},{key:null,name:null}]);
+  assert.deepEqual(nameRowIssues([{key:'ja',name:''},{key:'ko',name:'x'.repeat(257)},{key:'',name:'y'}]).map(issue=>[issue.key,issue.name]),
+    [[null,'empty'],[null,'length'],[{code:'empty'},null]]);
+});
+
+test('selected-resource history, Save refusal and a delayed Save keep conflicting rows and tags without touching another file',()=>{
+  let state=distributedSession();
+  state=editFile(state,'main.ts',{text:'export {};\n// x\n',start:16,end:16},{start:11,end:11},{type:'insertText',data:'// x\n',composing:false});
+  const main=state.drafts.get('main.ts');
+  state=formEdit(state,manifest=>withNameRows(manifest,[...rowsOf(manifest),{key:'',name:''}]));
+  const added=state.drafts.get('package.json').text;
+  state=formEdit(state,manifest=>withNameRows(manifest,rowsOf(manifest).map((row,index)=>index===2 ? {key:'EN',name:'Sample'} : row)));
+  const conflicting=state.drafts.get('package.json').text;
+  assert.deepEqual(manifestOf(state).distribution.game.names,[['EN','Example'],['zh-hant','範例'],['EN','Sample']]);
+  // Another field's edit keeps the conflicting rows and the tags.
+  state=formEdit(state,manifest=>withHelper(manifest,true));
+  assert.deepEqual([manifestOf(state).distribution.game.names[2],manifestOf(state).distribution.tags],[['EN','Sample'],['internal','kept']]);
+  // The host refuses a Save of the ambiguous map; the draft and its history stay.
+  const refused=saveTicket(state,'package.json');
+  state=failCommand(beginPending(state,{kind:'save',path:'package.json'}),refused.token,{category:'Inventory',message:'invalid package.json',context:null});
+  assert.deepEqual([state.drafts.get('package.json').text,state.pending],[refused.text,null]);
+  state=undoFile(state,'package.json');
+  assert.equal(state.drafts.get('package.json').text,conflicting);
+  state=undoFile(state,'package.json');
+  assert.equal(state.drafts.get('package.json').text,added);
+  state=undoFile(state,'package.json');
+  assert.equal(state.drafts.get('package.json').text,DISTRIBUTED);
+  state=redoFile(redoFile(state,'package.json'),'package.json');
+  assert.equal(state.drafts.get('package.json').text,conflicting);
+  assert.equal(state.drafts.get('main.ts'),main,'the manifest history never touches another resource');
+  // A Save of revision A answered after draft B leaves B dirty on base A.
+  state=formEdit(state,manifest=>withNameRows(manifest,[{key:'en',name:'Example'},{key:'zh-Hant',name:'範例'}]));
+  const ticket=saveTicket(state,'package.json');
+  state=beginPending(state,{kind:'save',path:'package.json'});
+  state=formEdit(state,manifest=>withNameRows(manifest,[...rowsOf(manifest),{key:'en',name:'Later'}]));
+  const later=state.drafts.get('package.json').text;
+  state=applySave(state,ticket,{owner,committed_revision:'rev-2',view:null,refresh_error:null});
+  const saved=state.drafts.get('package.json');
+  assert.deepEqual([saved.base,saved.text,fileDirty(saved),state.revision],[ticket.text,later,true,'rev-2']);
+  assert.deepEqual(manifestOf(state).distribution.game.names,[['en','Example'],['zh-Hant','範例'],['en','Later']]);
+  // Discard restores the committed A; Undo brings B back.
+  state=undoFile(discardFile(state,'package.json'),'package.json');
+  assert.equal(state.drafts.get('package.json').text,later);
+});
+
+test('distribution text, aliases and repairs follow the host bounds and change only what they name',()=>{
+  for (const [part,text,issue] of [
+    ['release_version','1.2.3',null],['release_version','1.0.0-alpha.1+build.001',null],['release_version','18446744073709551616.0.0',null],
+    ['release_version','',`required`],['release_version','1.2',`format`],['release_version','01.2.3','format'],['release_version','1.2.3-01','format'],
+    ['release_version','v1.2.3','format'],['release_version',`1.0.0+${'a'.repeat(123)}`,'length'],
+    ['name','','required'],['name','名'.repeat(85),null],['name','名'.repeat(86),'length'],['author_name','','required'],['license','','required'],
+    ['description','',null],['description','x'.repeat(8193),'length'],['game_id','','required'],['game_id','example-game',null],['game_id','.hidden','format'],
+  ]) assert.equal(distributionTextIssue(part,text),issue,`${part}: ${text.slice(0,24)}`);
+  assert.deepEqual(['EX','Example.exe','','x'.repeat(257),'/Applications/Game.app','~/game','C:\\Games\\game.exe','\\\\server\\share','game/launcher']
+    .map(aliasIssue),[null,null,'empty','length','path','path','path','path',null]);
+  const manifest={version:1,package_id:'example.a',distribution:{version:2,name:7,extra:true,game:{id:'g',names:'en',aliases:['A',1],other:1},tags:['kept']}};
+  const found=readDistribution(manifest.distribution);
+  assert.deepEqual(found.issues,[{code:'version'},{code:'member',key:'extra'},{code:'type',key:'name'},{code:'gameMember',key:'other'},
+    {code:'type',key:'names'},{code:'type',key:'aliases'}]);
+  assert.deepEqual([found.game,found.text.name,found.text.game_id],[{names:null,aliases:null},'','g']);
+  const repaired=found.issues.reduce(repairDistribution,manifest);
+  assert.deepEqual(repaired.distribution,{version:1,name:'',game:{id:'g',names:{},aliases:[]},tags:['kept']});
+  assert.deepEqual(readDistribution({...manifest.distribution,game:'x'}).game,null);
+  assert.deepEqual(repairDistribution({distribution:{game:'x'}},{code:'type',key:'game'}).distribution.game,{id:'',names:{},aliases:[]});
+  const numbered={distribution:{version:1,game:{id:5,names:{},aliases:[]}}};
+  assert.deepEqual([readDistribution(numbered.distribution).issues,readDistribution(numbered.distribution).text.game_id],[[{code:'type',key:'id'}],'']);
+  assert.deepEqual(repairDistribution(numbered,{code:'type',key:'id'}).distribution.game,{id:'',names:{},aliases:[]});
+  // Aliases are replaced as a list; removing the whole object is explicit.
+  assert.deepEqual(withAliases(manifest,['B']).distribution.game,{id:'g',names:'en',aliases:['B'],other:1});
+  assert.equal(Object.hasOwn(withDistribution(manifest,false),'distribution'),false);
+  assert.equal(withDistribution(manifest,true),manifest);
 });

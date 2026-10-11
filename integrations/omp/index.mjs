@@ -21,6 +21,10 @@ export default function (pi) {
     field('entry', {entry: z.enum(['readiness', 'workflow']), part: z.enum(['module', 'function']), value: z.string()}),
     field('helper', {enabled: z.boolean()}),
     field('target', {target: exact({id: z.string(), windowTitle: z.string().nullable(), bundleId: z.string().nullable()}).nullable()}),
+    field('distribution', {declared: z.boolean()}),
+    field('distribution', {part: z.enum(['release_version', 'name', 'description', 'author_name', 'license', 'game_id']), value: z.string()}),
+    field('gameName', {key: z.string(), name: z.string().nullable()}),
+    field('gameAliases', {aliases: z.array(z.string()).max(64)}),
     field('type', {node, type: schemaType}),
     field('bound', {node, key: z.string(), value: z.number().nullable()}),
     field('enum', {node, values: z.array(z.string())}),
@@ -42,7 +46,7 @@ export default function (pi) {
     field('content', {content: exact({x: pixel, y: pixel, width: pixel, height: pixel})}),
     field('create', {name: z.string(), edges}),
     field('rights', {rights: exact({license: z.string(), created_by: z.string(), created_for: z.string().nullable(), reviewed: z.boolean()}).nullable()}),
-  ])).min(1).max(256).describe('Typed operations by resource kind. manifest: runtime, entry, helper, target. schema: type, bound, enum, addProperty, removeProperty, renameProperty, required, removeDefault, default, repair with node. profile: option, repair without node. recognition_definition: name, expected, kind, region, search, delete. recognition_basis: content. recognition context: create, rights. node is the property path from the schema root; null selects array items. Edges are integer frame pixels.');
+  ])).min(1).max(256).describe('Typed operations by resource kind. manifest: runtime, entry, helper, target, distribution with declared (add the empty release/search metadata or remove it), distribution with part and value, gameName (set a localized game name by i18n language tag such as en, ja, zh-Hant or pt-BR; null name removes it), gameAliases (replace the search aliases list). Internal distribution tags are preserved and have no operation. schema: type, bound, enum, addProperty, removeProperty, renameProperty, required, removeDefault, default, repair with node. profile: option, repair without node. recognition_definition: name, expected, kind, region, search, delete. recognition_basis: content. recognition context: create, rights. node is the property path from the schema root; null selects array items. Edges are integer frame pixels.');
   const range = exact({from: z.number().int().min(0), to: z.number().int().min(0), text: z.string()});
   const edits = z.array(z.union([
     exact({resource: id, version: id, text: z.string()}),

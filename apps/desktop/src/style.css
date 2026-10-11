@@ -662,6 +662,21 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .enum-item input { flex: 1; }
 .schema-default { margin: 6px 0 0; overflow-wrap: anywhere; }
 .metadata-number small { display: block; margin-top: 4px; }
+/* Release and search metadata. Each localized-name row joins the language-key combobox and the name with the Logs
+   input-select-group border; the combobox takes the place of that group's left-hand select. */
+.distribution-form textarea { resize: vertical; }
+.distribution-list { display: grid; gap: 8px; }
+.distribution-list > button { justify-self: start; }
+.distribution-rows { display: grid; gap: 8px; }
+.distribution-row-controls { display: flex; align-items: stretch; gap: 6px; min-width: 0; }
+.distribution-row-controls > .input-select-group { flex: 1 1 auto; }
+.input-select-group > .language-key-input { flex: 0 0 120px; width: 120px; border-right: 1px solid var(--border); border-radius: var(--radius-sm) 0 0 var(--radius-sm); background: var(--surface-alt); font-family: var(--mono); }
+.input-select-group > .language-key-input:focus { background: var(--surface); }
+.language-key-popup .select-option { min-height: 30px; padding: 6px 8px; }
+.distribution-alias .field-error { margin-top: 4px; }
+/* Package distribution review text: package-supplied description is plain text, never HTML. */
+.distribution-description { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.distribution-names { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
 
 @media (max-width: 1100px) {
   .content { padding: 22px 20px 36px; }
@@ -694,6 +709,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
   .workspace-pages { border-left: 0; padding-left: 0; }
   .log-toolbar { flex-wrap: wrap; }
   .log-toolbar .input-select-group { flex-basis: 100%; }
+  .input-select-group > .language-key-input { flex-basis: 88px; width: 88px; }
   .content { padding: 16px 12px 28px; }
   .panel-heading, .panel-body { padding-left: 14px; padding-right: 14px; }
   .summary-panel { grid-template-columns: 1fr; }

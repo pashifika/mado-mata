@@ -3,7 +3,7 @@ use super::validation::{
     ImageBudget, catalog, declare, portable_component, portable_path, sha256, validate_asset,
     validate_manifest, validate_source,
 };
-use super::{Inventory, Manifest, invalid};
+use super::{Distribution, Inventory, Manifest, invalid};
 use crate::images::PayloadBytes;
 use crate::model::{Fault, Limits};
 use serde::Serialize;
@@ -232,6 +232,10 @@ impl PackageDraft {
     }
     pub fn manifest(&self) -> Result<Value, Fault> {
         serde_json::to_value(&self.manifest).map_err(|error| invalid(error.to_string()))
+    }
+    /// Validated with the draft; absent for ordinary directory packages.
+    pub fn distribution(&self) -> Option<&Distribution> {
+        self.manifest.distribution.as_ref()
     }
     pub fn validate(&self) -> Result<Inventory, Fault> {
         inventory_from_files(self.files.clone(), &self.limits)

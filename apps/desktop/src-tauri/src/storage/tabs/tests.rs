@@ -123,6 +123,55 @@ fn package_bounds_aliases_and_unsupported_source_forms_are_preserved() {
 }
 
 #[test]
+fn installed_references_persist_explicitly_and_refuse_malformed_identities() {
+    let directory = Directory::new();
+    let store = directory.store();
+    store.create_tab("Owner", "Owner").unwrap();
+    store.bind_package("Owner", "example", &directory.0).unwrap();
+    let artifact = "0123456789abcdef".repeat(4);
+    let bound = store
+        .bind_installed("Owner", "example", &artifact)
+        .unwrap();
+    let installed = PackageSource::Installed {
+        package_id: "example".into(),
+        artifact_id: artifact.clone(),
+    };
+    // Rebinding replaces the source form in place; no directory path is synthesized.
+    assert_eq!(bound.packages.len(), 1);
+    assert_eq!(bound.packages[0].source, installed);
+    assert_eq!(bound.selected_package_id.as_deref(), Some("example"));
+    let path = tab_path(&directory, "Owner");
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["packages"][0]["source"],
+        json!({"kind":"installed","package_id":"example","artifact_id":artifact})
+    );
+    assert_eq!(directory.store().tab("Owner").unwrap(), bound);
+    let before = fs::read(&path).unwrap();
+    for (package, artifact) in [
+        ("example", "0123456789ABCDEF".repeat(4)),
+        ("example", "0123456789abcdef".repeat(3)),
+        ("example", format!("{}g", "0".repeat(63))),
+        ("example", format!("sha256:{}", "0".repeat(57))),
+        ("../outside", "0".repeat(64)),
+    ] {
+        assert!(store.bind_installed("Owner", package, &artifact).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    // A reference whose source names another package is refused rather than reinterpreted.
+    let mut foreign = saved.clone();
+    foreign["packages"][0]["source"]["package_id"] = json!("other");
+    let bytes = serde_json::to_vec(&foreign).unwrap();
+    put(&path, &bytes);
+    assert_eq!(store.tab("Owner").unwrap_err().category, "PackageSource");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let mut extra = saved;
+    extra["packages"][0]["source"]["path"] = json!("/payload");
+    put(&path, &serde_json::to_vec(&extra).unwrap());
+    assert!(store.tab("Owner").is_err());
+}
+
+#[test]
 fn filesystem_aliases_cannot_select_retained_package_data() {
     let directory = Directory::new();
     let store = directory.store();

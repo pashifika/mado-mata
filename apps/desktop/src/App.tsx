@@ -20,6 +20,10 @@ import type {Losses} from './pages/LogsPage.tsx';
 import CreateWorkspaceDialog from './components/CreateWorkspaceDialog.tsx';
 import type {CreateDraft} from './components/CreateWorkspaceDialog.tsx';
 import DirtyChoiceDialog from './components/DirtyChoiceDialog.tsx';
+import ExportDialog from './components/ExportDialog.tsx';
+import ImportDialog from './components/ImportDialog.tsx';
+import InstalledPackages from './components/InstalledPackages.tsx';
+import SigningDialog from './components/SigningDialog.tsx';
 import Notifications from './components/Notifications.tsx';
 import NavigationHeader from './components/NavigationHeader.tsx';
 import type {RecoveryHandlers} from './components/ProfileRecovery.tsx';
@@ -47,7 +51,7 @@ import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readEnvironment, 
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
 import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
-import {applyCatalogMutation, applyRecognitionMutation, applyRefresh, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, selectFile, selectRecognition, undoFile, validationTicket} from './authoring.ts';
+import {applyCatalogMutation, applyRecognitionMutation, applyRefresh, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, draftList, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, selectFile, selectRecognition, undoFile, validationTicket} from './authoring.ts';
 import type {AuthoringSession} from './authoring.ts';
 import {revealDiagnostic} from './authoring.ts';
 import {AuthoringController} from './authoring-controller.ts';
@@ -59,6 +63,8 @@ import {sdk, sdkDetail, searchSdk} from '../../../tools/runtime-comparison/compi
 import {CollaborationBridge} from './collaboration-bridge.ts';
 import {saveFileDraft, saveFiles} from './authoring-publication.ts';
 import type {PublicationPorts, SaveOutcome, SaveSequence, SaveTarget} from './authoring-publication.ts';
+import {acceptExportReview, acceptImportReview, declaredRelease, exportConfirmable, exportReadiness, failExportPreparation, failImportPreparation, sameWorkspace, suggestedName} from './distribution.ts';
+import type {DistributionReview, ExportFlow, ImportFlow, InstalledRelease, Publication, SignerState, SigningInfo} from './distribution.ts';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, approveNative, busy, clearNativeApproval, closeWorkspace, commandValues, deriveBound, editNativeReview, hasWorkspaceEdits, importProfileCommand, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
 import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
@@ -181,6 +187,20 @@ export default function App() {
   const resolvingAuthoring = useRef(false);
   resolvingAuthoring.current = closing || choice !== null;
   const authoringWorker = useRef<Promise<unknown> | null>(null);
+  // One owner-bound Export and one Tab-bound Import flow. Refs give confirmation and delayed replies the current flow
+  // synchronously; every reply is applied only to the attempt and owner that issued it.
+  const [exportFlow, setExportFlow] = useState<ExportFlow | null>(null);
+  const exportFlowRef = useRef<ExportFlow | null>(null);
+  const [importFlow, setImportFlow] = useState<ImportFlow | null>(null);
+  const importFlowRef = useRef<ImportFlow | null>(null);
+  const distributionAttempt = useRef(0);
+  // A fresh, reverified listing per read; a failed read shows no earlier facts as current.
+  const [installed, setInstalled] = useState<{releases: InstalledRelease[] | null; error: Fault | null; loading: boolean}>({releases: null, error: null, loading: false});
+  const installedRead = useRef(0);
+  const [signer, setSigner] = useState<SignerState>({info: undefined, statusError: null, enrollError: null, cancelError: null, enrolling: false, cancelling: false});
+  const enrolling = useRef(false);
+  // The Edit owner's Workspace that owns the shown signing details and any enrollment they start.
+  const [signingWorkspace, setSigningWorkspace] = useState<WorkspaceRef | null>(null);
   const capabilityOwner = useRef<string | null>(null);
   const previewConnected = useRef(false);
   const previewPublication = useRef(0);
@@ -253,6 +273,8 @@ export default function App() {
   // the dirty-choice dialog explain it instead of attempting and blaming a concurrent edit.
   const recognitionSaveRefusal = authoring?.recognition && recognitionDirty ? recognition.saveBlock(authoring.recognition) : null;
   const recognitionSaveReason = recognitionSaveRefusal === null ? null : t.recognitionSaveBlocked(recognitionSaveRefusal);
+  // The release version of the saved manifest, for Export's display and suggested file name; the host validates.
+  const exportRelease = declaredRelease(authoring ? draftList(authoring).find(draft => draft.kind === 'manifest' && !draft.missing)?.base ?? null : null);
   const unsavedCount = (authoring ? dirtyDrafts(authoring).length : 0) + Number(recognitionDirty);
   const validationActive = busy(view.state) && view.operation === 'authoring_validate';
   const recognitionActive = authoring?.pending?.kind === 'recognition_trial' || (busy(view.state) && view.operation.startsWith('recognition_'));
@@ -575,6 +597,28 @@ export default function App() {
     });
   }
 
+  // Why this Tab cannot be inspected now: the same admission as directory inspection, named for the Select control.
+  function inspectBlock(workspace: Workspace): string | null {
+    if (leaseOwnerNow() === workspace.id) return ui.authoring.inspectBlocked;
+    const current = runView(workspace);
+    if (current.live && busy(current.view.state)) return ui.run.reinspectBlocked;
+    return commandReason ?? (closing ? t.applicationClosing : null);
+  }
+
+  // Explicit selection of one installed release for this Tab only: the host reverifies the signed container and runs
+  // the ordinary inspection, profile reconciliation and durable binding. Import never reaches here by itself.
+  function selectInstalled(workspace: Workspace, packageId: string, artifactId: string) {
+    if (inspectBlock(workspace) !== null) return;
+    invalidateOwnerTarget(workspace.id);
+    const origin: Origin = {id: workspace.id, revision: workspace.revision};
+    const ref = workspaceRef(workspace);
+    const rebinding = workspace.bound !== null;
+    void runCommand(origin, rebinding ? 'reinspectingPackage' : 'inspectingPackage', async () => {
+      const outcome = await invoke<InspectionOutcome>('inspect_installed', {workspace: ref, packageId, artifactId});
+      return {update: item => applyInspection(item, outcome, inspectionNotice(outcome, rebinding, false), false)};
+    });
+  }
+
   // Recovery commands carry only the host context reference, profile ID and values; replies are guarded by
   // Workspace/revision (runCommand) and by the ticket's token, profile and draft revision. Only Save reads the draft:
   // Reset discards it, so a draft that cannot parse never blocks the Reset meant to replace it.
@@ -835,7 +879,13 @@ export default function App() {
           () => readProfiles(ref),
         )).then(() => bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false));
       },
-      reinspect: () => inspectFor(workspace),
+      // A saved installed release reinspects by its identity unless the operator typed another directory.
+      reinspect: () => {
+        const source = workspace.savedPackage?.source;
+        const path = workspace.inspectPath.trim();
+        if (source?.kind === 'installed' && (path === '' || path === workspace.bound?.packagePath)) selectInstalled(workspace, source.package_id, source.artifact_id);
+        else inspectFor(workspace);
+      },
       native: {
         edit: (field, value) => edit(current => editNativeReview(current, field, value)),
         approve: (field, value) => edit(current => approveNative(current, field, value, savedEnvironment, nativeCapability.policy)),
@@ -1700,6 +1750,267 @@ export default function App() {
     return done;
   }
 
+  function updateExportFlow(update: (flow: ExportFlow | null) => ExportFlow | null) {
+    exportFlowRef.current = update(exportFlowRef.current);
+    setExportFlow(exportFlowRef.current);
+  }
+
+  function updateImportFlow(update: (flow: ImportFlow | null) => ImportFlow | null) {
+    importFlowRef.current = update(importFlowRef.current);
+    setImportFlow(importFlowRef.current);
+  }
+
+  // A Tab-scoped host command outside the Run flow (package import): serialized with every other host command and shown
+  // as that Tab's busy state. Callers apply replies through their own owner and attempt checks.
+  async function workspaceCall<T>(id: string, label: Command, call: () => Promise<T>): Promise<T> {
+    const pending = hostCommand.current;
+    if (pending !== null) throw new LocalFault({key: 'authoringWait', args: [pending]});
+    hostCommand.current = label;
+    change(id, item => ({...item, busy: {key: label}}));
+    try {
+      return await call();
+    } finally {
+      hostCommand.current = null;
+      change(id, item => ({...item, busy: null}));
+    }
+  }
+
+  // A dismissed review releases its host-held capture; nothing was published from it.
+  function releaseReview(workspace: WorkspaceRef) {
+    void invoke<boolean>('package_distribution_cancel', {workspace}).catch(() => {});
+  }
+
+  async function readSigner() {
+    if (hostCommand.current !== null) return;
+    try {
+      const info = await authoringCall('readingSigner', () => invoke<SigningInfo | null>('author_signing_status'));
+      setSigner(current => ({...current, info, statusError: null}));
+    } catch (cause) {
+      setSigner(current => ({...current, info: undefined, statusError: fault(cause)}));
+    }
+  }
+
+  // The one real enrollment, owned by the Edit owner's Workspace. Cancellation is only a request: whatever the host
+  // settles is reported, including a key it durably published while cancellation raced, and Edit stays open throughout.
+  async function enrollSigner() {
+    const workspace = signingWorkspace;
+    if (!workspace || enrolling.current || closing) return;
+    enrolling.current = true;
+    setSigner(current => ({...current, enrolling: true, cancelling: false, enrollError: null, cancelError: null}));
+    try {
+      const info = await invoke<SigningInfo>('author_signing_enroll', {workspace});
+      setSigner(current => ({...current, info, statusError: null}));
+    } catch (cause) {
+      setSigner(current => ({...current, enrollError: fault(cause)}));
+      await readSigner();
+    } finally {
+      enrolling.current = false;
+      setSigner(current => ({...current, enrolling: false, cancelling: false}));
+    }
+  }
+
+  function cancelEnrollment() {
+    const workspace = signingWorkspace;
+    if (!workspace || !enrolling.current) return;
+    setSigner(current => ({...current, cancelling: true, cancelError: null}));
+    void invoke<boolean>('package_distribution_cancel', {workspace}).catch(cause => setSigner(current => ({...current, cancelling: false, cancelError: fault(cause)})));
+  }
+
+  function openSigning() {
+    const flow = exportFlowRef.current;
+    if (!flow) return;
+    setSigningWorkspace(flow.owner.workspace);
+    setSigner(current => ({...current, enrollError: null, cancelError: null}));
+    void readSigner();
+  }
+
+  // Export resolves unsaved drafts only through explicit Save and continue (the shared Save all, recognition included)
+  // or Cancel; it never presents stale disk bytes as the visible drafts.
+  function openExport() {
+    const session = authoringController.current();
+    if (!session || session.managed || exportFlowRef.current !== null || choiceRunning.current) return;
+    updateExportFlow(() => ({owner: session.owner, step: exportReadiness(authoringController, session.owner, null)}));
+    void readSigner();
+  }
+
+  async function saveForExport() {
+    const flow = exportFlowRef.current;
+    if (flow?.step.kind !== 'drafts') return;
+    const owner = flow.owner;
+    updateExportFlow(current => current === flow ? {owner, step: {kind: 'saving'}} : current);
+    let sequence: SaveSequence | null;
+    try {
+      sequence = await ownAuthoringWorker(() => saveAll());
+    } catch (cause) {
+      sequence = {committed: [], remaining: [], failure: {path: '', committedRevision: null, refreshRequired: false, error: fault(cause), outcome: 'unknown'}};
+    }
+    updateExportFlow(current => current?.step.kind === 'saving' && sameAuthoringRef(current.owner, owner)
+      ? {owner, step: sequence === null ? {kind: 'drafts'} : exportReadiness(authoringController, owner, sequence)} : current);
+  }
+
+  // The destination is chosen first and the capture taken afterwards, so a draft created while the panel was open is
+  // resolved before preparation. Preparation holds the shared command admission and stays cancellable.
+  async function prepareExport() {
+    const flow = exportFlowRef.current;
+    const session = authoringController.current();
+    if (flow?.step.kind !== 'ready' || !session || !sameAuthoringRef(session.owner, flow.owner) || !signer.info || signer.statusError !== null) return;
+    const owner = flow.owner;
+    updateExportFlow(current => current === flow ? {owner, step: {kind: 'choosing'}} : current);
+    let picked: string | null;
+    try {
+      picked = await invoke<string | null>('package_pick', {workspace: owner.workspace, exporting: true, suggestedName: suggestedName(session.packageId, exportRelease)});
+    } catch (cause) {
+      updateExportFlow(current => current?.step.kind === 'choosing' ? {owner, step: {kind: 'ready', note: {kind: 'failed', stage: 'prepare', error: fault(cause)}}} : current);
+      return;
+    }
+    const destination = picked;
+    const ticket = authoringController.exportTicket();
+    const attempt = ++distributionAttempt.current;
+    updateExportFlow(current => {
+      if (current?.step.kind !== 'choosing') return current;
+      if (destination === null) return {owner, step: {kind: 'ready', note: {kind: 'unchosen'}}};
+      return ticket !== null && sameAuthoringRef(ticket.owner, owner)
+        ? {owner, step: {kind: 'preparing', attempt, ticket, destination, cancelling: false, cancelError: null}}
+        : {owner, step: exportReadiness(authoringController, owner, null)};
+    });
+    const step = exportFlowRef.current?.step;
+    if (step?.kind !== 'preparing' || step.attempt !== attempt) return;
+    try {
+      const review = await authoringCall('preparingExport', () => invoke<DistributionReview>('package_export_prepare',
+        {owner: step.ticket.owner, revision: step.ticket.revision, destination: step.destination}));
+      updateExportFlow(current => acceptExportReview(current, attempt, review));
+      if (exportFlowRef.current?.step.kind !== 'review' || exportFlowRef.current.step.review !== review) releaseReview(owner.workspace);
+    } catch (cause) {
+      updateExportFlow(current => failExportPreparation(current, attempt, fault(cause)));
+    }
+  }
+
+  function cancelExportPreparation() {
+    const flow = exportFlowRef.current;
+    if (flow?.step.kind !== 'preparing' || flow.step.cancelling) return;
+    const {attempt} = flow.step;
+    const mark = (cancelling: boolean, cancelError: Fault | null) => updateExportFlow(current => current?.step.kind === 'preparing' && current.step.attempt === attempt
+      ? {...current, step: {...current.step, cancelling, cancelError}} : current);
+    mark(true, null);
+    void invoke<boolean>('package_distribution_cancel', {workspace: flow.owner.workspace}).catch(cause => mark(false, fault(cause)));
+  }
+
+  // Confirmation is guarded synchronously against the reviewed capture, then publishes only that review's token.
+  async function confirmExport() {
+    const flow = exportFlowRef.current;
+    if (hostCommand.current !== null || closing || !exportConfirmable(flow, authoringController)) return;
+    const {ticket, review} = flow.step;
+    updateExportFlow(current => current === flow ? {owner: flow.owner, step: {kind: 'publishing', ticket, review}} : current);
+    try {
+      const publication = await authoringCall('publishingExport', () => invoke<Publication>('package_export_publish',
+        {owner: ticket.owner, revision: ticket.revision, token: review.token}));
+      updateExportFlow(current => current?.step.kind === 'publishing' && current.step.review === review
+        ? {...current, step: {kind: 'published', review, publication}} : current);
+    } catch (cause) {
+      updateExportFlow(current => current?.step.kind === 'publishing' && current.step.review === review
+        ? {...current, step: {kind: 'ready', note: {kind: 'failed', stage: 'publish', error: fault(cause)}}} : current);
+    }
+  }
+
+  function prepareExportAgain() {
+    const flow = exportFlowRef.current;
+    if (flow?.step.kind !== 'review') return;
+    releaseReview(flow.owner.workspace);
+    updateExportFlow(current => current === flow ? {owner: flow.owner, step: exportReadiness(authoringController, flow.owner, null)} : current);
+  }
+
+  function closeExport() {
+    const flow = exportFlowRef.current;
+    const kind = flow?.step.kind;
+    if (!flow || kind === 'saving' || kind === 'choosing' || kind === 'preparing' || kind === 'publishing') return;
+    if (kind === 'review') releaseReview(flow.owner.workspace);
+    updateExportFlow(() => null);
+  }
+
+  // Import verifies one picked archive for this Tab and installs it only after explicit confirmation of that review. It
+  // never selects the release, changes another Tab or replaces an active run snapshot.
+  async function importPackage(workspace: Workspace) {
+    if (importFlowRef.current !== null || commandReason !== null || closing || leaseOwnerNow() !== null) return;
+    const ref = workspaceRef(workspace);
+    updateImportFlow(() => ({workspace: ref, step: {kind: 'choosing'}}));
+    let picked: string | null;
+    try {
+      picked = await invoke<string | null>('package_pick', {workspace: ref, exporting: false, suggestedName: null});
+    } catch (cause) {
+      updateImportFlow(current => current?.step.kind === 'choosing' ? {workspace: ref, step: {kind: 'failed', error: fault(cause)}} : current);
+      return;
+    }
+    const path = picked;
+    if (path === null) {
+      updateImportFlow(current => current?.step.kind === 'choosing' ? null : current);
+      return;
+    }
+    const attempt = ++distributionAttempt.current;
+    updateImportFlow(current => current?.step.kind === 'choosing' ? {workspace: ref, step: {kind: 'preparing', attempt, path, cancelling: false, cancelError: null}} : current);
+    try {
+      const review = await workspaceCall(workspace.id, 'preparingImport', () => invoke<DistributionReview>('package_import_prepare', {workspace: ref, path}));
+      updateImportFlow(current => {
+        const next = acceptImportReview(current, attempt, review);
+        if (next?.step.kind !== 'review' || next.step.review !== review) releaseReview(ref);
+        return next;
+      });
+    } catch (cause) {
+      updateImportFlow(current => failImportPreparation(current, attempt, fault(cause)));
+    }
+  }
+
+  function cancelImportPreparation() {
+    const flow = importFlowRef.current;
+    if (flow?.step.kind !== 'preparing' || flow.step.cancelling) return;
+    const {attempt} = flow.step;
+    const mark = (cancelling: boolean, cancelError: Fault | null) => updateImportFlow(current => current?.step.kind === 'preparing' && current.step.attempt === attempt
+      ? {...current, step: {...current.step, cancelling, cancelError}} : current);
+    mark(true, null);
+    void invoke<boolean>('package_distribution_cancel', {workspace: flow.workspace}).catch(cause => mark(false, fault(cause)));
+  }
+
+  async function confirmImport() {
+    const flow = importFlowRef.current;
+    if (flow?.step.kind !== 'review' || hostCommand.current !== null || closing) return;
+    // The Tab session that verified the archive confirms it; a closed or reinspected Tab cannot.
+    if (!openWorkspaces.current.some(item => sameWorkspace(workspaceRef(item), flow.workspace))) return;
+    const review = flow.step.review;
+    updateImportFlow(current => current === flow ? {workspace: flow.workspace, step: {kind: 'publishing', review}} : current);
+    try {
+      const publication = await workspaceCall(flow.workspace.workspace_id, 'publishingImport',
+        () => invoke<Publication>('package_import_publish', {workspace: flow.workspace, token: review.token}));
+      updateImportFlow(current => current?.step.kind === 'publishing' && current.step.review === review
+        ? {...current, step: {kind: 'published', review, publication}} : current);
+    } catch (cause) {
+      updateImportFlow(current => current?.step.kind === 'publishing' && current.step.review === review
+        ? {...current, step: {kind: 'failed', error: fault(cause)}} : current);
+    }
+    void refreshInstalled();
+  }
+
+  function closeImport() {
+    const flow = importFlowRef.current;
+    const kind = flow?.step.kind;
+    if (!flow || kind === 'choosing' || kind === 'preparing' || kind === 'publishing') return;
+    if (kind === 'review') releaseReview(flow.workspace);
+    updateImportFlow(() => null);
+  }
+
+  async function refreshInstalled() {
+    if (hostCommand.current !== null) return;
+    const read = ++installedRead.current;
+    setInstalled(current => ({...current, loading: true}));
+    try {
+      const releases = await authoringCall('readingInstalled', () => invoke<InstalledRelease[]>('package_installed_list'));
+      if (read === installedRead.current) setInstalled({releases, error: null, loading: false});
+    } catch (cause) {
+      if (read === installedRead.current) setInstalled({releases: null, error: fault(cause), loading: false});
+    }
+  }
+  useEffect(() => {
+    if (normalReady) void refreshInstalled();
+  }, [normalReady]);
+
   const editHandlers: EditHandlers = {
     select: (path, previous) => authoringController.update(session => session && selectFile(session, path, previous)),
     recognition: previous => {
@@ -1723,6 +2034,7 @@ export default function App() {
     catalog: async edit => (await ownAuthoringWorker(() => changeCatalog(edit, true))) ?? false,
     duplicate: packageId => requestChoice({kind: 'duplicate', packageId}),
     exit: () => requestChoice({kind: 'exit'}),
+    exportPackage: openExport,
   };
 
   function pageAuthoring(workspace: Workspace): PageAuthoring {
@@ -2474,14 +2786,14 @@ export default function App() {
         {selected && selected.page === 'edit' && editVisible && authoring && editorCompletion.current !== null && <EditPage key={authoring.owner.token} session={authoring} label={workspaceLabel(selected, workspaces)}
           handlers={editHandlers} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
           packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive} recognitionDirty={recognitionDirty}
-          recognitionSaveBlock={recognitionSaveReason}
+          recognitionSaveBlock={recognitionSaveReason} exportBlock={active ? ui.authoring.blockedActive : null}
           completionPreferences={editorCompletion.current}
           recognition={authoring.recognition
-            ? <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null}
+            ? <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null || authoring.managed}
               leaseLost={leaseLost} trialActive={recognitionActive}
               nativeSelection={nativeSelection && sameAuthoringRef(nativeSelection.owner, authoring.owner) && nativeSelection.revision === authoring.revision ? nativeSelection : null}
               onState={update => {
-                if (!captureTransition.current && !closing && choice === null && !choiceRunning.current && !leaseLost) updateRecognition(authoring.owner.token, update);
+                if (!captureTransition.current && !closing && choice === null && !choiceRunning.current && !leaseLost && !authoring.managed) updateRecognition(authoring.owner.token, update);
               }}
               handlers={{
                 load: newCapture => void changeRecognitionCapture({newCapture}), selectCapture: captureId => void changeRecognitionCapture({captureId}),
@@ -2504,6 +2816,11 @@ export default function App() {
           : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
             recovery={recoveryHandlers(selected)} authoring={pageAuthoring(selected)} packagesRoot={packagesRoot}/>)}
+        {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && <InstalledPackages key={`installed:${selected.id}:${selected.revision}`}
+          saved={selected.savedPackage?.source ?? null} dirty={dirtyDraft(selected)} releases={installed.releases} error={installed.error} loading={installed.loading}
+          importBlock={leaseOwnerId !== null ? ui.authoring.blockedOther(labelOf(leaseOwnerId)) : importFlow !== null ? ui.authoring.block('pending') : commandReason ?? (closing ? t.applicationClosing : null)} selectBlock={inspectBlock(selected)}
+          onImport={() => void importPackage(selected)} onRefresh={() => void refreshInstalled()}
+          onSelect={release => selectInstalled(selected, release.package_id, release.artifact_id)}/>}
         {selected && selected.page === 'execution' && selectedRun && <ExecutionPage label={workspaceLabel(selected, workspaces)} revision={selected.revision}
           run={selectedRun} snapshot={operation?.snapshot ?? null} starting={starting?.workspaceId === selected.id}
           disclosed={selectedRun.view.run !== null && selected.disclosedRun === selectedRun.view.run}
@@ -2567,6 +2884,19 @@ export default function App() {
       strip={ordinaryStrip('dirty')} authoring={compactAuthoring(() => {if (!choiceBusy) {setChoice(null); returnToEdit();}}, true, choiceBusy)}
       onSave={() => {if (choice) void resolveChoice(choice, true);}} onDiscard={() => {if (choice) void resolveChoice(choice, false);}}
       onCancel={() => {if (!choiceBusy) setChoice(null);}}/>
+    <ExportDialog flow={exportFlow} stale={exportFlow?.step.kind === 'review' && !authoringController.exportCurrent(exportFlow.step.ticket)}
+      packageId={authoring?.packageId ?? ''} release={exportRelease} drafts={authoring ? dirtyDrafts(authoring) : []} recognitionDirty={recognitionDirty}
+      saveBlock={leaseLost ? ui.authoring.leaseLost : recognitionSaveReason} signer={signer}
+      blocked={exportFlow === null ? null : leaseLost || !sameAuthoringRef(authoring?.owner, exportFlow.owner) ? ui.authoring.leaseLostShort
+        : commandReason ?? (active ? ui.authoring.blockedActive : closing ? t.applicationClosing : null)}
+      onSave={() => void saveForExport()} onChoose={() => void prepareExport()} onCancelPreparation={cancelExportPreparation}
+      onConfirm={() => void confirmExport()} onPrepareAgain={prepareExportAgain} onSigning={openSigning} onClose={closeExport}/>
+    <SigningDialog open={signingWorkspace !== null} signer={signer} enrollBlock={closing ? t.applicationClosing : null}
+      onEnroll={() => void enrollSigner()} onCancelEnroll={cancelEnrollment} onClose={() => {if (!enrolling.current) setSigningWorkspace(null);}}/>
+    <ImportDialog flow={importFlow} label={importFlow ? labelOf(importFlow.workspace.workspace_id) : ''}
+      stale={importFlow?.step.kind === 'review' && !workspaces.some(item => sameWorkspace(workspaceRef(item), importFlow.workspace))}
+      blocked={commandReason ?? (closing ? t.applicationClosing : null)}
+      onConfirm={() => void confirmImport()} onCancelPreparation={cancelImportPreparation} onClose={closeImport}/>
     </StatusSurface>
   </div></LocaleContext>;
 }

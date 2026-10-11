@@ -66,6 +66,8 @@ The version and integrity sources are:
 | Saved-image payloads | png 0.18.1; flate2 1.1.9 (default features disabled; `rust_backend`) | [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock) |
 | Desktop configuration | zip 8.6.0 (default features disabled; `deflate-flate2` for reviewed runtime archives), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Desktop OCR acquisition | ureq 3.4.2 with only `rustls`; rustls 0.23.45 in the lockfile; tar 0.4.46 without default features; flate2 1.1.9 with only `rust_backend` | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock); fixed HTTPS sources, bounded transfers/selected-member extraction, exact hashes, retained notices, no shell or installer |
+| Package metadata | semver 1.0.28, icu_locale_core 2.3.0 (`alloc`, no default features) | Exact [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock); shared bounded SemVer/language identifiers |
+| Local author signing | openidconnect 4.0.1 (no default features), ed25519-dalek 2.2.0 (`std`, `zeroize`), base64 0.22.1, getrandom 0.4.3; existing bounded ureq/rustls transport | Exact [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Desktop persisted identifiers | Public `pashifika/xid-rs` Git dependency at the immutable `rev` in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml), repeated in its [lockfile](../apps/desktop/src-tauri/Cargo.lock); default features disabled | The public checkout fetches the Fork directly; no maintenance checkout or local path override is required |
 | macOS application metadata, picker, and clipboard | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Application launch library | libc 0.2.189 on Unix; objc2 0.6.4, block2 0.6.2 and objc2-foundation/objc2-app-kit 0.3.2 on macOS | [Library manifest](../crates/application-launch/Cargo.toml) and [lockfile](../crates/application-launch/Cargo.lock); no Desktop or runtime dependency |
@@ -121,6 +123,23 @@ the desktop shell. Repository inputs come from tracked product files, not
 recursive discovery of ignored planning, sibling checkouts, installed authoring
 packages, or extracted reference applications. New files must enter the intended
 tracked change before that inventory covers them; never force-add private directories.
+
+Signed-package checks cover strict metadata, real cryptographic/archive
+consumption, exact captured-byte export/import/Start, local key publication,
+installed-source persistence and draft/review cancellation. OIDC protocol tests
+use locally signed fixture tokens and loopback requests, not a real account.
+Actual Google consent, native file dialogs, offline two-root desktop transfer and
+Windows/macOS interaction remain separate local acceptance.
+
+Ordinary CI must not receive `OIDC_CLIENT_KEY_GOOGLE` or attach the protected
+`release` environment to pull-request checks. Public builds work without it and
+refuse only new enrollment with an actionable configuration error. A separately
+approved trusted build may map the `release` environment's secret of that name
+to Cargo's environment as the `client_secret` string, never JSON or a logged
+command-line argument. This native registration value is extractable from the
+resulting binary, not confidential authentication; see
+[ADR 0009](adr/0009-google-native-client-registration.md). Release packaging
+remains unresolved; this does not introduce a release workflow.
 
 The full check has these responsibilities:
 

@@ -102,6 +102,9 @@ impl Publisher {
         draft: PackageDraft,
     ) -> Result<Candidate, Fault> {
         self.check_admission(root)?;
+        // A new or duplicated source never lands inside an installed release container;
+        // refuse before resolving or creating any missing parent there.
+        self.check_unmanaged(root)?;
         let destination = missing_destination(root, Some(self))?;
         self.separate_root(&destination)?;
         let parent = destination.parent().ok_or_else(stale)?;

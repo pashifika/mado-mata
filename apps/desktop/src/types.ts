@@ -37,10 +37,12 @@ export interface EditableSettings {gui_log_limit:number; ocr_environment:OcrEnvi
 // Host-issued session identity; revisions increment on reinspect and ids are never reused.
 export interface WorkspaceRef {workspace_id:string; revision:number}
 export interface ProfileCatalog {profiles:Profile[]; profiles_error:Fault|null}
-// A real inspected package bound to one named Tab session.
-export interface Selection extends WorkspaceRef, ProfileCatalog {internal_name:string; display_name:string; package:PackageInfo; package_path:string}
-// Persisted package source forms. Only `directory` is inspectable by this desktop; `custom_archive` is retained unsupported.
-export type PackageSource = {kind:'directory'; path:string} | {kind:'custom_archive'; path:string};
+// A real inspected package bound to one named Tab session. `source` is the durable reference form this inspection
+// binds; for an installed release `package_path` is its verified managed payload, not a directory reference.
+export interface Selection extends WorkspaceRef, ProfileCatalog {internal_name:string; display_name:string; package:PackageInfo; package_path:string; source:PackageSource}
+// Persisted package source forms. `directory` and `installed` are inspectable: an installed release is named by package
+// and archive (artifact) identity and reverified by the host on every use. `custom_archive` is retained unsupported.
+export type PackageSource = {kind:'directory'; path:string} | {kind:'installed'; package_id:string; artifact_id:string} | {kind:'custom_archive'; path:string};
 export interface PackageReference {package_id:string; source:PackageSource}
 // The durable Tab record; names and references persist, sessions do not.
 export interface TabRecord {version:number; internal_name:string; display_name:string; open:boolean; packages:PackageReference[]; selected_package_id:string|null}
@@ -142,8 +144,9 @@ export interface CaptureCacheReceipt {cached:boolean; error:Fault|null}
 export type AuthoringFileKind = 'manifest'|'source'|'schema'|'profile'|'asset'|'source_map';
 // A declared package file. Binary assets carry `text: null`: listed, never edited as text.
 export interface AuthoringFile {path:string; kind:AuthoringFileKind; text:string|null; bytes:number}
-// One read of the package at an opaque source revision; the next Save or catalog edit must name it.
-export interface AuthoringView {owner:AuthoringRef; package_path:string; package_id:string; revision:string; files:AuthoringFile[]}
+// One read of the package at an opaque source revision; the next Save or catalog edit must name it. `managed` marks a
+// read-only installed release: the host refuses every write and only Duplicate creates an editable source copy.
+export interface AuthoringView {owner:AuthoringRef; package_path:string; package_id:string; revision:string; managed:boolean; files:AuthoringFile[]}
 // `committed_revision` is true even when the follow-up read failed and `view` is null.
 export interface AuthoringMutation {owner:AuthoringRef; committed_revision:string; view:AuthoringView|null; refresh_error:Fault|null}
 // Non-evaluating validation of exactly one saved revision; diagnostics may carry path/line/column context.

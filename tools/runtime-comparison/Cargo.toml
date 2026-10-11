@@ -13,6 +13,8 @@ engine = ["dep:mado-pilot", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundat
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.145", features = ["float_roundtrip"] }
 sha2 = "=0.10.9"
+semver = "=1.0.28"
+icu_locale_core = { version = "=2.3.0", default-features = false, features = ["alloc"] }
 xid = { git = "https://github.com/pashifika/xid-rs", rev = "bb7de7a0370d051f7fc07f31b87db62549118bfe", default-features = false }
 png = "=0.18.1"
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }

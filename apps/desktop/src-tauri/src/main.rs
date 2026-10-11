@@ -24,6 +24,7 @@ use tauri::{Emitter, Manager};
 mod cache_commands;
 mod collaboration_commands;
 mod ocr_setup_commands;
+mod distribution_commands;
 #[cfg(target_os = "macos")]
 mod picker;
 mod plugin_commands;
@@ -553,6 +554,7 @@ async fn app_close(
     let bootstrap = state.bootstrap.clone();
     background(move || {
         if let Ok(application) = bootstrap.running_application() {
+            application.prepare_distribution_close(owner.as_ref())?;
             application.prepare_close(owner.as_ref())?;
         }
         close(&app);
@@ -565,7 +567,8 @@ fn request_close(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         if let Ok(application) = app.state::<Backend>().bootstrap.running_application() {
-            if let Err(fault) = application.prepare_close(None) {
+            if let Err(fault) = application.prepare_distribution_close(None)
+                .and_then(|_| application.prepare_close(None)) {
                 if fault.category == "AuthoringActive" {
                     let _ = app.emit("authoring-close-requested", ());
                 } else {
@@ -693,6 +696,16 @@ fn main() {
             reopen_workspace,
             workspace_catalog,
             inspect,
+            distribution_commands::package_pick,
+            distribution_commands::package_export_prepare,
+            distribution_commands::package_export_publish,
+            distribution_commands::package_import_prepare,
+            distribution_commands::package_import_publish,
+            distribution_commands::package_distribution_cancel,
+            distribution_commands::package_installed_list,
+            distribution_commands::inspect_installed,
+            distribution_commands::author_signing_status,
+            distribution_commands::author_signing_enroll,
             repair_profile,
             reset_profile,
             retry_binding,

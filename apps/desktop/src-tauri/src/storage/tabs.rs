@@ -30,11 +30,21 @@ pub struct PackageReference {
     pub source: PackageSource,
 }
 
+/// `Installed` names one managed signed release by package and archive identity; its
+/// payload location is derived, never stored, and every consumer reverifies it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PackageSource {
-    Directory { path: String },
-    CustomArchive { path: String },
+    Directory {
+        path: String,
+    },
+    Installed {
+        package_id: String,
+        artifact_id: String,
+    },
+    CustomArchive {
+        path: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -189,7 +199,42 @@ impl Store {
         package_id: &str,
         path: &Path,
     ) -> Result<TabRecord, Fault> {
+        let path = path
+            .to_str()
+            .ok_or_else(|| Fault::new("PackageSource", "package source must be UTF-8"))?;
+        self.bind_source(
+            name,
+            package_id,
+            PackageSource::Directory {
+                path: path.to_owned(),
+            },
+        )
+    }
+
+    pub fn bind_installed(
+        &self,
+        name: &str,
+        package_id: &str,
+        artifact_id: &str,
+    ) -> Result<TabRecord, Fault> {
+        self.bind_source(
+            name,
+            package_id,
+            PackageSource::Installed {
+                package_id: package_id.to_owned(),
+                artifact_id: artifact_id.to_owned(),
+            },
+        )
+    }
+
+    fn bind_source(
+        &self,
+        name: &str,
+        package_id: &str,
+        source: PackageSource,
+    ) -> Result<TabRecord, Fault> {
         validate_package_id(package_id)?;
+        validate_source(package_id, &source)?;
         let mut tab = self.tab(name)?;
         if !tab.open {
             return Err(tab_fault(
@@ -197,18 +242,11 @@ impl Store {
                 name,
             ));
         }
-        let path = path
-            .to_str()
-            .ok_or_else(|| Fault::new("PackageSource", "package source must be UTF-8"))?;
-        validate_source_path(path)?;
         let directory = self.tab_directory(name)?;
         check_alias(&directory, package_id)?;
         if exists(&directory.join(package_id))? {
             check_directory(&directory.join(package_id))?;
         }
-        let source = PackageSource::Directory {
-            path: path.to_owned(),
-        };
         if let Some(reference) = tab
             .packages
             .iter_mut()
@@ -293,6 +331,32 @@ fn validate_source_path(path: &str) -> Result<(), Fault> {
     Ok(())
 }
 
+fn validate_source(package_id: &str, source: &PackageSource) -> Result<(), Fault> {
+    match source {
+        PackageSource::Directory { path } | PackageSource::CustomArchive { path } => {
+            validate_source_path(path)
+        }
+        PackageSource::Installed {
+            package_id: installed,
+            artifact_id,
+        } => {
+            // The archive SHA-256 identifies one release container; it is not a path.
+            if installed != package_id
+                || artifact_id.len() != 64
+                || !artifact_id
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            {
+                return Err(Fault::new(
+                    "PackageSource",
+                    "installed source must name its owning package and a lowercase SHA-256 artifact ID",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 pub(crate) fn validate_tab(tab: &TabRecord) -> Result<(), Fault> {
     if tab.version != VERSION {
         return Err(Fault::new(
@@ -322,11 +386,7 @@ pub(crate) fn validate_tab(tab: &TabRecord) -> Result<(), Fault> {
                 "Tab package references contain duplicate or aliased identities",
             ));
         }
-        match &reference.source {
-            PackageSource::Directory { path } | PackageSource::CustomArchive { path } => {
-                validate_source_path(path)?
-            }
-        }
+        validate_source(&reference.package_id, &reference.source)?;
     }
     if tab.selected_package_id.as_ref().is_some_and(|id| {
         !tab.packages

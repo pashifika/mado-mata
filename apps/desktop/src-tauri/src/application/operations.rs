@@ -179,6 +179,7 @@ impl Application {
                 }
             })?;
             self.setup_idle()?;
+            self.distribution_idle()?;
             self.collect(&mut state);
             state.idle()?;
             state.native_ready()?;
@@ -226,6 +227,8 @@ impl Application {
             desktop_options(&selected.inventory, request.values.clone())?;
             let internal_name = selected.internal_name.clone();
             let native_package = native.then(|| selected.package.clone());
+            let installed = selected.installed.clone();
+            let data_root = self.root.clone();
             let store = self.store.clone();
             let (acquired, ready) = mpsc::sync_channel(1);
             let run = self.runner.start_with_preparation(
@@ -266,9 +269,24 @@ impl Application {
                         (environment, binding)
                     };
                     control.check()?;
+                    // An installed release runs exactly the bytes verified here, never a
+                    // cached result or a later reread of its payload directory.
+                    let inventory = installed
+                        .map(|identity| {
+                            crate::distribution::verify_installed(
+                                &data_root,
+                                &identity.package_id,
+                                &identity.artifact_id,
+                            )?
+                            .draft()
+                            .validate()
+                        })
+                        .transpose()?;
+                    control.check()?;
                     Ok(StartPreparation {
                         environment,
                         native: binding,
+                        inventory,
                     })
                 },
                 |captured, attempt| {
@@ -406,6 +424,7 @@ impl Application {
                 self.invalidate_target_observation(None);
                 self.cancel_native();
                 self.cancel_setup();
+                self.cancel_distribution();
                 let mut outcome = self.runner.shutdown();
                 // Publication holds command admission, not the Stop/runner lock.
                 // A forced shutdown retains its lease/journal if storage cannot settle.
@@ -465,6 +484,9 @@ impl Application {
                     }
                 }
                 if let Err(error) = self.settle_setup(deadline) {
+                    outcome = Err(error);
+                }
+                if let Err(error) = self.settle_distribution(deadline) {
                     outcome = Err(error);
                 }
                 if let Some(bridge) = lock(&self.bridge).take() {

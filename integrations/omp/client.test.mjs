@@ -464,3 +464,48 @@ test('/mado shares the tool connection and never starts a model turn', unix, asy
   assert.deepEqual(extension.messages.map(entry => entry.options), [{triggerTurn: false}, {triggerTurn: false}]);
   assert.deepEqual(fixture.requests.map(value => value.owner), [null, 'owner-a', 'owner-a']);
 });
+
+// The subset of OMP's zod builder the extension declares with, validating as zod does: objects strip unknown members
+// unless strict, optional members may be absent, and unions accept the first matching branch.
+function zodSubset() {
+  const schema = check => ({
+    check,
+    parse(value) { if (!check(value)) throw new Error('invalid'); return value; },
+    min: limit => schema(value => check(value) && (typeof value === 'number' ? value >= limit : value.length >= limit)),
+    max: limit => schema(value => check(value) && (typeof value === 'number' ? value <= limit : value.length <= limit)),
+    int: () => schema(value => check(value) && Number.isInteger(value)),
+    nullable: () => schema(value => value === null || check(value)),
+    optional: () => schema(value => value === undefined || check(value)),
+    describe() { return this; },
+  });
+  const object = (shape, strict) => ({
+    ...schema(value => value !== null && typeof value === 'object' && !Array.isArray(value)
+      && Object.entries(shape).every(([key, item]) => item.check(value[key])) && (!strict || Object.keys(value).every(key => Object.hasOwn(shape, key)))),
+    strict: () => object(shape, true),
+  });
+  return {
+    object: shape => object(shape, false),
+    string: () => schema(value => typeof value === 'string'),
+    number: () => schema(value => typeof value === 'number' && Number.isFinite(value)),
+    boolean: () => schema(value => typeof value === 'boolean'),
+    unknown: () => schema(() => true),
+    literal: expected => schema(value => value === expected),
+    enum: values => schema(value => values.includes(value)),
+    array: item => schema(value => Array.isArray(value) && value.every(entry => item.check(entry))),
+    union: options => schema(value => options.some(option => option.check(value))),
+  };
+}
+
+test('the edit tool schema admits the distribution manifest fields in their exact shapes and offers no tag operation', () => {
+  const tools = new Map();
+  register({pi: {VERSION: '18.8.7'}, zod: zodSubset(), registerTool: tool => tools.set(tool.name, tool), registerCommand() {}, on() {}});
+  const edit = fields => tools.get('mado_edit').parameters.check({edits: [{resource: 'manifest-a', version: 'v1', fields}]});
+  assert.equal(edit([{field: 'distribution', declared: true}, {field: 'distribution', part: 'game_id', value: 'example-game'},
+    {field: 'distribution', part: 'release_version', value: '1.2.0-beta.1'}, {field: 'gameName', key: 'zh-Hant', name: '範例'},
+    {field: 'gameName', key: 'ja', name: null}, {field: 'gameAliases', aliases: ['EX', 'Example.exe']}]), true);
+  for (const field of [
+    {field: 'distribution'}, {field: 'distribution', declared: true, part: 'name', value: 'x'}, {field: 'distribution', part: 'tags', value: 'x'},
+    {field: 'distribution', part: 'version', value: '1'}, {field: 'gameName', key: 'ja'}, {field: 'gameName', key: 'ja', name: 1},
+    {field: 'gameAliases', aliases: Array(65).fill('x')}, {field: 'gameAliases', aliases: [1]}, {field: 'tags', tags: ['internal']},
+  ]) assert.equal(edit([field]), false, JSON.stringify(field));
+});

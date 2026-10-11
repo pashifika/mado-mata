@@ -474,6 +474,7 @@ fn native_stop_during_host_preparation_retains_the_slot_and_prevents_child_launc
                 Ok(StartPreparation {
                     environment: None,
                     native: (),
+                    inventory: None,
                 })
             },
             |_, _| {

@@ -29,13 +29,25 @@ export function NormalizationNotice({document}: {document: JsonDocument}) {
   </div>;
 }
 
-// Replaces a whole document the form cannot repair member by member; only an explicit confirmation does it.
-export function RebuildControl({id, label, question, disabled, onConfirm}: {id: string; label: string; question: string; disabled: boolean; onConfirm: () => void}) {
+// A one-line form text field with optional help and its current error, both linked to the input.
+export function TextField({id, label, value, help, error, onChange}: {id: string; label: string; value: string; help?: string; error: string | null; onChange: (value: string) => void}) {
+  const described = [help ? `${id}-help` : '', error ? `${id}-error` : ''].filter(Boolean).join(' ');
+  return <div className="field"><label htmlFor={id}>{label}</label>
+    <input id={id} type="text" value={value} spellCheck={false} autoCapitalize="off" autoCorrect="off" aria-invalid={error !== null}
+      aria-describedby={described || undefined} onChange={event => onChange(event.target.value)}/>
+    {help && <p id={`${id}-help`} className="field-help">{help}</p>}
+    {error && <p id={`${id}-error`} className="field-error">{error}</p>}</div>;
+}
+
+// Replaces a whole document (or a whole member) the form cannot repair part by part; only an explicit confirmation does it.
+export function RebuildControl({id, label, question, confirm, disabled, onConfirm}: {
+  id: string; label: string; question: string; confirm?: string; disabled: boolean; onConfirm: () => void;
+}) {
   const a = messages[useLocale()].ui.authoring;
   const [confirming, setConfirming] = useState(false);
   return confirming
     ? <span className="confirm-row" role="alertdialog" aria-labelledby={`${id}-text`}><span id={`${id}-text`}>{question}</span>
-      <button id={`${id}-confirm`} type="button" className="danger-text" disabled={disabled} onClick={() => {setConfirming(false); onConfirm();}}>{a.rebuildConfirmed}</button>
+      <button id={`${id}-confirm`} type="button" className="danger-text" disabled={disabled} onClick={() => {setConfirming(false); onConfirm();}}>{confirm ?? a.rebuildConfirmed}</button>
       <button id={`${id}-cancel`} type="button" autoFocus onClick={() => setConfirming(false)}>{a.cancel}</button></span>
     : <button id={id} type="button" disabled={disabled} onClick={() => setConfirming(true)}>{label}</button>;
 }

@@ -6,7 +6,7 @@ import {captureDocuments, geometryConfirmed, mapRegion, recognitionDirty, sameJs
 import type {CaptureDocument, RecognitionDefinition, RecognitionDocument, RecognitionState} from './recognition.ts';
 import {fieldDomain, only, parseField, patchMetadata, patchRecognition, record, wellFormed} from './structured-patch.ts';
 import type {FieldDomain, FieldOperation, RecognitionTarget} from './structured-patch.ts';
-import type {Json} from './types.ts';
+import type {AuthoringRef, Json} from './types.ts';
 import type {HostResult} from './authoring-requests.ts';
 import {sourceDifference} from './editor/source-positions.ts';
 
@@ -73,6 +73,9 @@ export type CollaborationResponse =
 // Why the main window currently refuses agent draft edits (for example a lost lease), or null when it admits them.
 // `recognition` is true when the batch changes recognition metadata.
 export type CollaborationEditBlock = (session:AuthoringSession, recognition:boolean) => string|null;
+// One saved export capture as the UI resolved it: the Edit owner, package lineage, saved revision and the version of
+// every contributing file and recognition draft. Opaque outside this controller; compared only by `exportCurrent`.
+export interface ExportTicket {owner:AuthoringRef; package:string; revision:string; versions:string}
 
 interface RangeEdit {from:number; to:number; text:string}
 type TargetEdit = {resource:string; version:string; text:string} | {resource:string; version:string; ranges:RangeEdit[]}
@@ -415,6 +418,37 @@ export class AuthoringController {
     return entry?.present ? entryInfo(entry) : null;
   };
 
+  // The capture an export may prepare now, or null while a contributing draft is unsaved, a command is pending, or a
+  // committed publication awaits refresh or conflict resolution. Export never represents stale disk bytes as drafts.
+  readonly exportTicket = ():ExportTicket|null => {
+    const session = this.#session, lineage = this.#lineage;
+    if (!session || !lineage || session.pending !== null || !this.#exportable(session)) return null;
+    return {owner: session.owner, package: lineage.package, revision: session.revision, versions: this.#contributing(lineage)};
+  };
+
+  // Whether a review of `ticket` may still publish. Any later contributing edit (even one undone again), saved revision,
+  // package or owner change makes it stale for good; pending commands that change nothing (validation) do not.
+  readonly exportCurrent = (ticket:ExportTicket):boolean => {
+    const session = this.#session, lineage = this.#lineage;
+    return session !== null && lineage !== null && this.#exportable(session) && sameAuthoringRef(session.owner, ticket.owner)
+      && lineage.package === ticket.package && session.revision === ticket.revision && this.#contributing(lineage) === ticket.versions;
+  };
+
+  #exportable(session:AuthoringSession):boolean {
+    return !session.managed && !session.refreshRequired && !session.conflict && !draftList(session).some(fileDirty)
+      && !(session.recognition !== null && recognitionDirty(session.recognition));
+  }
+
+  // Files and the recognition aggregate (which versions every capture's basis and definitions) contribute to the
+  // saved package; validation results and read-only provenance do not.
+  #contributing(lineage:Lineage):string {
+    const versions:string[] = [];
+    for (const entry of lineage.entries.values()) {
+      if (entry.present && (entry.target.type === 'file' || entry.target.type === 'context')) versions.push(`${entry.id}=${entry.version}`);
+    }
+    return versions.sort().join('\n');
+  }
+
   // The current versions of exactly the resources a snippet of `flavor` reads: the capture basis for setup, each
   // definition for grouped OCR, and the definition, basis and saved template provenance for a template. UI checkbox
   // and row selection, frames and trials are not snippet inputs.
@@ -713,6 +747,8 @@ export class AuthoringController {
   // recognition Undo and freshness rules for recognition fields.
   #edit(session:AuthoringSession, lineage:Lineage, operation:Extract<Operation, {kind:'edit'}>,
     editBlock:CollaborationEditBlock|undefined):CollaborationEditResult|CollaborationError {
+    // A verified installed release is copy-before-edit for agents exactly as for the person: Duplicate first.
+    if (session.managed) return refusal('managed_package', 'This installed release is read-only; duplicate it to a source package to edit');
     // Catalog publication, Refresh, Exit and Duplicate replace or rebase drafts; Save keeps later edits dirty instead.
     const pending = session.pending?.kind;
     if (pending === 'catalog' || pending === 'refresh' || pending === 'exit' || pending === 'duplicate') {

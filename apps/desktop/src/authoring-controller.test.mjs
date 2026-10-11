@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {AuthoringController, EDIT_RANGES, NOTICE_HISTORY, PAGE_UNITS} from './authoring-controller.ts';
 import {AUTHORING_NON_IMAGE_BYTES, AUTHORING_SOURCE_BYTES, applyExternalEdits, applySave, applyValidation, beginComposition, beginPending, editFile, endComposition, openSession,
   recordRange, replaceFile, saveTicket, selectFile, undoFile} from './authoring.ts';
-import {editValues, formatJson, loadValues, typedText} from './metadata.ts';
+import {editValues, formatJson, loadValues, readDistribution, typedText, withDistributionText, withNameRows} from './metadata.ts';
 import {applyView, mapRegion, openRecognition, regionFromEdges, renameDefinition, selectDefinition, setContent, setRegion, toggleCrop, toggleTrial,
   undoRecognition} from './recognition.ts';
 
@@ -562,6 +562,73 @@ test('a late metadata Save advances the saved base while a newer agent field edi
   assert.deepEqual([after.version,after.dirty,description.savedRevision,draft(controller,PRESET_PATH).base],[version,true,'rev-2',ticket.text]);
   assert.deepEqual(options(controller),{ratio:2,label:'late'});
   assert.equal(controller.handle(request(description,{kind:'edit',edits:[{resource:after.id,version,fields:[{field:'option',name:'label',value:'later'}]}]})).ok,true);
+});
+
+const DISTRIBUTED_MANIFEST=JSON.stringify({version:1,package_id:'example.a',sources:['main.ts'],target:{id:'game',window_title:'Game'},
+  distribution:{version:1,release_version:'1.0.0',name:'Example',description:'',author_name:'A',license:'MIT',
+    game:{id:'example-game',names:{en:'Example'},aliases:[]},tags:['internal']}})+'\n';
+// What the manifest form does with an edit of the release/search metadata.
+function manifestForm(controller,change){
+  controller.update(session=>{
+    const current=session.drafts.get('package.json');
+    return replaceFile(session,'package.json',formatJson(current.base,change(JSON.parse(current.text))));
+  });
+}
+const manifestValue=controller=>JSON.parse(draft(controller,'package.json').text);
+
+test('conflicting localized names typed by the person and agent manifest fields share one draft without loss',()=>{
+  const {controller}=setup(metadataView(DISTRIBUTED_MANIFEST));
+  // The person adds a row and gives it the first row's language: both rows stay in the manifest draft.
+  manifestForm(controller,manifest=>withNameRows(manifest,[...readDistribution(manifest.distribution).game.names,{key:'en',name:'Sample'}]));
+  const description=describe(controller);
+  const manifest=resource(description,'package.json');
+  const page=controller.handle(request(description,{kind:'read',resource:manifest.id})).result;
+  assert.deepEqual(JSON.parse(page.text).distribution.game.names,[['en','Example'],['en','Sample']]);
+  const response=controller.handle(request(description,{kind:'edit',edits:[{resource:manifest.id,version:manifest.version,fields:[
+    {field:'helper',enabled:true},{field:'gameName',key:'JA',name:'例'},{field:'gameAliases',aliases:['EX']}]}]}));
+  assert.equal(response.ok,true);
+  const after=manifestValue(controller);
+  assert.deepEqual([after.distribution.game.names,after.distribution.game.aliases,after.distribution.tags,after.target,after.dependencies],
+    [[['en','Example'],['en','Sample'],['ja','例']],['EX'],['internal'],{id:'game',window_title:'Game'},{'@mado/helper':'1.0.0'}]);
+  assert.equal(draft(controller,'package.json').undo.length,2,'one person step and one agent step');
+  // Choosing between the person's conflicting rows, or a stale version, refuses the whole batch.
+  const current=describe(controller);
+  const preset=resource(current,PRESET_PATH), edited=resource(current,'package.json');
+  const session=controller.current();
+  refused(controller.handle(request(current,{kind:'edit',edits:[
+    {resource:preset.id,version:preset.version,fields:[{field:'option',name:'label',value:'x'}]},
+    {resource:edited.id,version:edited.version,fields:[{field:'gameName',key:'en',name:'Other'}]}]})),'invalid_field',edited.id);
+  refused(controller.handle(request(current,{kind:'edit',edits:[{resource:edited.id,version:manifest.version,fields:[{field:'helper',enabled:false}]}]})),
+    'stale_version',edited.id);
+  assert.equal(controller.current(),session);
+  // Undo restores the person's rows before the agent step and leaves other resources alone.
+  controller.update(state=>undoFile(state,'package.json'));
+  assert.deepEqual(manifestValue(controller).distribution.game.names,[['en','Example'],['en','Sample']]);
+  assert.equal(draft(controller,PRESET_PATH).text,PRESET);
+  // A composing manifest form refuses agent fields.
+  controller.update(state=>beginComposition(state,'package.json',{start:0,end:0}));
+  const composing=describe(controller);
+  const target=resource(composing,'package.json');
+  refused(controller.handle(request(composing,{kind:'edit',edits:[{resource:target.id,version:target.version,fields:[{field:'gameName',key:'ko',name:'예'}]}]})),
+    'composing',target.id);
+});
+
+test('a late distribution Save names its own revision while a newer agent name edit stays dirty and current',()=>{
+  const {controller}=setup(metadataView(DISTRIBUTED_MANIFEST));
+  manifestForm(controller,manifest=>withDistributionText(manifest,'release_version','1.1.0'));
+  const ticket=saveTicket(controller.current(),'package.json');
+  controller.update(session=>beginPending(session,{kind:'save',path:'package.json'}));
+  const manifest=resource(describe(controller),'package.json');
+  const response=controller.handle(request(describe(controller),{kind:'edit',edits:[{resource:manifest.id,version:manifest.version,
+    fields:[{field:'gameName',key:'ko',name:'예'}]}]}));
+  assert.equal(response.ok,true);
+  const version=response.result.resources[0].version;
+  controller.update(session=>applySave(session,ticket,{owner,committed_revision:'rev-2',view:null,refresh_error:null}));
+  const description=describe(controller);
+  const after=resource(description,'package.json');
+  assert.deepEqual([after.version,after.dirty,description.savedRevision,draft(controller,'package.json').base],[version,true,'rev-2',ticket.text]);
+  assert.deepEqual([JSON.parse(ticket.text).distribution.game.names,manifestValue(controller).distribution.game.names],[{en:'Example'},{en:'Example',ko:'예'}]);
+  assert.deepEqual([manifestValue(controller).distribution.release_version,manifestValue(controller).distribution.tags],['1.1.0',['internal']]);
 });
 
 // Owned recognition metadata only: no pixels. The retained trial carries an observation that must never be disclosed.
