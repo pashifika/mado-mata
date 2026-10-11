@@ -912,13 +912,19 @@ mod tests {
             let home = Home::new();
             let (bootstrap, incoming, preimage) = restore_fixture(&home);
             let root = home.0.join("selected");
-            put(&root.join("profiles/._retained.json"), b"destination metadata");
+            put(
+                &root.join("profiles/._retained.json"),
+                b"destination metadata",
+            );
             let before = configuration::capture(&root).unwrap();
             let application = bootstrap.application().unwrap();
             let preimage_bytes = fs::read(&preimage.path).unwrap();
             let mut files = backup::read(Path::new(&incoming.path)).unwrap().files;
             if extra.is_none() {
-                files.insert("profiles/._legacy.json".into(), b"historical bytes".to_vec());
+                files.insert(
+                    "profiles/._legacy.json".into(),
+                    b"historical bytes".to_vec(),
+                );
             }
             let capture = configuration::Capture::from_files(files, true).unwrap();
             restore::validate(&capture).unwrap();
@@ -934,12 +940,18 @@ mod tests {
             assert!(matches!(bootstrap.status().state, Phase::Ready));
             assert_eq!(configuration::capture(&root).unwrap(), before);
             assert!(!root.join("profiles/._legacy.json").exists());
-            assert_eq!(fs::read(root.join("profiles/._retained.json")).unwrap(), b"destination metadata");
+            assert_eq!(
+                fs::read(root.join("profiles/._retained.json")).unwrap(),
+                b"destination metadata"
+            );
             assert!(!restore::pending(&root).unwrap());
             assert!(!root.join(".restore-journal").exists());
             assert_eq!(fs::read(&archive).unwrap(), archive_bytes);
             assert_eq!(fs::read(&preimage.path).unwrap(), preimage_bytes);
-            assert_eq!(lock(&bootstrap.state).receipt.as_ref().unwrap().generation, preimage.generation);
+            assert_eq!(
+                lock(&bootstrap.state).receipt.as_ref().unwrap().generation,
+                preimage.generation
+            );
             bootstrap.shutdown().unwrap();
         }
     }
@@ -951,7 +963,10 @@ mod tests {
             let (bootstrap, incoming, preimage) = restore_fixture(&home);
             let root = home.0.join("selected");
             let mut files = backup::read(Path::new(&incoming.path)).unwrap().files;
-            files.insert("profiles/.retained.json".into(), b"opaque historical bytes\0".to_vec());
+            files.insert(
+                "profiles/.retained.json".into(),
+                b"opaque historical bytes\0".to_vec(),
+            );
             let capture = configuration::Capture::from_files(files, true).unwrap();
             let archive = home.0.join("clean.config");
             let archive_bytes = stored_snapshot(&archive, &capture, version, None);

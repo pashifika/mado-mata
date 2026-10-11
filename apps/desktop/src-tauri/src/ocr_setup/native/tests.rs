@@ -416,8 +416,7 @@ fn windows_system_scope_accepts_canonical_runtime_filename_case_only() {
     let runtime = system.put("MSVCP140.dll", &pe(&[], &[], &[]));
     let vendor = system.put("VENDOR.dll", &pe(&[], &[], &[]));
     let nested = system.put("nested/MSVCP140.dll", &pe(&[], &[], &[]));
-    let mut scope =
-        Scope::new(&[text(&fixture.0)], &[], false, &AtomicBool::new(false)).unwrap();
+    let mut scope = Scope::new(&[text(&fixture.0)], &[], false, &AtomicBool::new(false)).unwrap();
     scope.system_directory = Some(system.0.clone());
     assert_eq!(
         scope.resolve(&runtime).unwrap(),
