@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep the retirement-close regression valid when bounded log shutdown times out;
+  still verify retirement, close, and refused new commands without changing
+  production shutdown behavior.
 - Add a separate [Plugins dialog](docs/desktop.md#install-select-and-remove-the-adapter)
   for the application-supplied OMP adapter: reviewed user-scope Install, Update,
   Uninstall and checkout migration with verified readback and fresh-session guidance.
