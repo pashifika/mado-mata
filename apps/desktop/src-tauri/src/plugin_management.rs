@@ -3,12 +3,18 @@
 //! The build supplies one finite adapter payload. Install, Update and Migrate
 //! prepare an app-owned copy under its version/content identity, then register it
 //! in the normal per-user OMP installation through fixed client commands; Uninstall
-//! removes only that registration. An action is admitted only against the
-//! observation the operator reviewed, and is rechecked against current facts
-//! before dispatch. Success requires readback of the expected registration,
-//! version and source. A dispatched mutation without such readback is `unknown`,
-//! never a claimed rollback or a replay. No workspace or Edit admission is held,
-//! and no OMP session is touched.
+//! removes only that registration. Every client command, observations included,
+//! runs only while this application owns the user installation exclusively,
+//! across application instances and data roots; another owner refuses it at
+//! once. An action is admitted only against the observation the operator
+//! reviewed, and is rechecked against current facts before dispatch under the
+//! ownership it keeps until its readback. Success requires readback of the
+//! expected registration, version and source. A dispatched mutation without such
+//! readback is `unknown`, never a claimed rollback or a replay. A dispatched
+//! command is fenced in the user installation until its process group is known
+//! to be gone; a fence or unsettled-command marker that remains refuses
+//! management from every instance until the operator reconciles it. No workspace
+//! or Edit admission is held, and no OMP session is touched.
 
 mod payload;
 mod process;
@@ -23,7 +29,7 @@ use process::{Cli, Client, Invocation, Operation, Output, RunError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::cmp::Ordering as Order;
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -178,6 +184,11 @@ struct State {
     reviewed: Option<Reviewed>,
     last: Option<PluginOutcome>,
     journal_checked: bool,
+    /// Set when an owned command tree could not be settled and that could not
+    /// be recorded durably; refuses all later work of this instance.
+    unsettled: Option<Fault>,
+    /// Installation ownership kept for that case until the process ends.
+    retained: Option<File>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -197,7 +208,7 @@ pub struct PluginManager {
     cancel: AtomicBool,
 }
 
-/// Clears the mutation slot if an admitted operation unwinds.
+/// Clears the work slot if an admitted inspection or mutation unwinds.
 struct Busy<'a> {
     manager: &'a PluginManager,
     armed: bool,
@@ -208,6 +219,37 @@ impl Drop for Busy<'_> {
         if self.armed {
             lock(&self.manager.state).busy = false;
             self.manager.settled.notify_all();
+        }
+    }
+}
+
+/// Ownership of the user installation for one observation or admitted action;
+/// every client command runs under it. It is released when that work returns,
+/// unless owned work could not be settled and that could not be recorded; the
+/// manager then keeps it until the process ends.
+struct Owned<'a> {
+    manager: &'a PluginManager,
+    lease: Option<File>,
+}
+
+impl<'a> Owned<'a> {
+    fn new(manager: &'a PluginManager, lease: File) -> Self {
+        Self {
+            manager,
+            lease: Some(lease),
+        }
+    }
+}
+
+impl Drop for Owned<'_> {
+    fn drop(&mut self) {
+        let mut state = lock(&self.manager.state);
+        if state.unsettled.is_some() && state.retained.is_none() {
+            state.retained = self.lease.take();
+        }
+        // A concurrent fork can briefly inherit this fd before exec closes it.
+        if let Some(lease) = &self.lease {
+            let _ = lease.unlock();
         }
     }
 }
@@ -223,6 +265,9 @@ fn closing() -> Fault {
 fn admit(state: &State) -> Result<(), Fault> {
     if state.closing {
         return Err(closing());
+    }
+    if let Some(fault) = &state.unsettled {
+        return Err(fault.clone());
     }
     if state.busy {
         return Err(Fault::new(
@@ -295,8 +340,11 @@ impl PluginManager {
     ///
     /// # Errors
     ///
-    /// `Closing`, `PluginBusy` while a mutation is pending, or `PluginPayload`
-    /// when the build's adapter payload is invalid. Target problems are reported
+    /// `Closing`, `PluginBusy` while a mutation or another inspection is
+    /// pending, `PluginUnsettled` after an owned command could not be confirmed
+    /// to have ended and that could not be recorded, or `PluginPayload` when the
+    /// build's adapter payload is invalid. Target problems, including another
+    /// owner of the installation or a recorded unsettled command, are reported
     /// in the view, not as errors.
     pub fn inspect(&self, executable: Option<&str>) -> Result<PluginView, Fault> {
         let included = payload::included()?;
@@ -309,10 +357,19 @@ impl PluginManager {
                     state.last = Some(outcome);
                 }
             }
+            // Its client commands are settled by shutdown like a mutation's.
+            state.busy = true;
         }
+        let mut busy = Busy {
+            manager: self,
+            armed: true,
+        };
         let selection = executable.map_or(Selection::Discover, Selection::Explicit);
         let observed = self.observe(selection, included);
         let mut state = lock(&self.state);
+        state.busy = false;
+        busy.armed = false;
+        self.settled.notify_all();
         admit(&state)?;
         let token = publish(&mut state, &observed.facts);
         let last = state.last.clone();
@@ -325,12 +382,14 @@ impl PluginManager {
     ///
     /// # Errors
     ///
-    /// `Closing`, `PluginBusy`, `PluginStale` for an unknown or superseded
-    /// observation, `PluginActionUnavailable`, or `PluginPayload`. Nothing is
+    /// `Closing`, `PluginBusy`, `PluginUnsettled`, `PluginStale` for an unknown
+    /// or superseded observation, `PluginActionUnavailable`,
+    /// `PluginInstallationBusy` while another instance uses the installation,
+    /// `PluginInstallationLock`, or `PluginPayload`. Nothing is prepared or
     /// dispatched for these refusals.
     pub fn apply(&self, observation: &str, action: PluginAction) -> Result<PluginView, Fault> {
         let included = payload::included()?;
-        let admitted = {
+        let (admitted, lease) = {
             let mut state = lock(&self.state);
             admit(&state)?;
             let reviewed = state
@@ -350,20 +409,26 @@ impl PluginManager {
                 )
                 .with_context(json!({"action": action, "state": reviewed.facts.state})));
             }
+            // Ownership precedes every effect and is kept through readback.
+            let lease = self
+                .established()
+                .and_then(|(_, home)| target::lease(home))?;
             state.busy = true;
-            reviewed.facts
+            (reviewed.facts, lease)
         };
         let mut busy = Busy {
             manager: self,
             armed: true,
         };
+        let owned = Owned::new(self, lease);
         let (observed, outcome) = self.execute(included, &admitted, action);
+        drop(owned);
         let mut state = lock(&self.state);
         state.busy = false;
         busy.armed = false;
         self.settled.notify_all();
         state.last = Some(outcome.clone());
-        let token = if state.closing {
+        let token = if state.closing || state.unsettled.is_some() {
             state.reviewed = None;
             None
         } else {
@@ -373,10 +438,11 @@ impl PluginManager {
         Ok(view(included, &observed, token, Some(outcome)))
     }
 
-    /// Refuses new work, lets an admitted mutation settle for up to `drain`, then
-    /// interrupts this application's own client child. An interrupted mutation
-    /// keeps its journal, so the next inspection reports an attributable unknown
-    /// outcome. Never signals an OMP session. Idempotent.
+    /// Refuses new work, lets an admitted inspection or mutation settle for up
+    /// to `drain`, then interrupts this application's own client child; no
+    /// client command starts after that. An interrupted mutation keeps its
+    /// journal, so the next inspection reports an attributable unknown outcome.
+    /// Never signals an OMP session. Idempotent.
     pub fn shutdown(&self, drain: Duration) {
         let mut state = lock(&self.state);
         state.closing = true;
@@ -436,6 +502,8 @@ impl PluginManager {
                 outcome(OutcomeStatus::Failed, fault),
             );
         };
+        // The caller owns the installation from admission through readback, so
+        // every observation below runs under that ownership.
         let selection = Selection::Captured(&executable.path);
         // Bytes are prepared and verified before any registration changes.
         let prepared = match action {
@@ -444,13 +512,13 @@ impl PluginManager {
                 Ok(path) => Some(path),
                 Err(fault) => {
                     return (
-                        self.observe(selection, included),
+                        self.observe_owned(selection, included),
                         outcome(OutcomeStatus::Failed, fault),
                     );
                 }
             },
         };
-        let current = self.observe(selection, included);
+        let current = self.observe_owned(selection, included);
         if current.facts != *admitted {
             return (
                 current,
@@ -469,8 +537,14 @@ impl PluginManager {
                 outcome(OutcomeStatus::Failed, closing()),
             );
         }
+        // The installation-scoped fence keeps refusing other work durably if
+        // the command cannot be settled; the journal is this root's receipt.
+        if let Err(fault) = target::fence(home, &json!({"action": action, "target": &target})) {
+            return (current, outcome(OutcomeStatus::Failed, fault));
+        }
         let journal = Journal { action, target };
         if let Err(fault) = write_journal(root, &journal) {
+            target::lift(home);
             return (current, outcome(OutcomeStatus::Failed, fault));
         }
         let environment = self.environment.child(home, &executable.path);
@@ -483,9 +557,16 @@ impl PluginManager {
         let operation = prepared
             .as_deref()
             .map_or(Operation::Uninstall, Operation::Link);
-        let dispatched = self.client.run(&invocation, operation);
+        let dispatched = self.run(&invocation, operation);
+        // A command tree that may still run has no settled result: its fence and
+        // journal stay. Otherwise the group is known gone, so the fence is lifted
+        // before readback while ownership is still held.
+        let unsettled = matches!(dispatched, Err(RunError::Unsettled(_)));
+        if !unsettled {
+            target::lift(home);
+        }
         let readback = (!self.cancel.load(Ordering::Acquire))
-            .then(|| self.observe(selection, included))
+            .then(|| self.observe_owned(selection, included))
             .filter(|_| !self.cancel.load(Ordering::Acquire));
         let Some(readback) = readback else {
             let refused = Observation::refused(PluginState::Unsupported, closing());
@@ -494,7 +575,7 @@ impl PluginManager {
                     let _ = fs::remove_file(journal_path(root));
                     return (refused, outcome(OutcomeStatus::Failed, fault));
                 }
-                Err(RunError::Started(fault)) => fault,
+                Err(RunError::Started(fault) | RunError::Unsettled(fault)) => fault,
                 Ok(_) => Fault::new(
                     "PluginInterrupted",
                     "Application shutdown began before the OMP result could be read back",
@@ -503,7 +584,9 @@ impl PluginManager {
             // The journal stays: the result is left for the next inspection.
             return (refused, outcome(OutcomeStatus::Unknown, issue));
         };
-        let _ = fs::remove_file(journal_path(root));
+        if !unsettled {
+            let _ = fs::remove_file(journal_path(root));
+        }
         let (status, issue) = settle(admitted, &readback, prepared.as_deref(), dispatched);
         (
             readback,
@@ -529,50 +612,97 @@ impl PluginManager {
         Some(PluginOutcome {
             action: journal.action,
             status: OutcomeStatus::Unknown,
-            issue: Some(
-                Fault::new(
-                    "PluginInterrupted",
-                    "An earlier plugin operation stopped before its result was observed; the installation below is the current readback",
-                )
-                .with_context(json!({"executable": journal.target.executable, "user_root": journal.target.user_root})),
-            ),
+            issue: Some(Fault::new(
+                "PluginInterrupted",
+                "An earlier plugin operation stopped before its result was observed",
+            )),
             target: Some(journal.target),
         })
     }
 
-    fn observe(&self, selection: Selection<'_>, included: &Included) -> Observation {
-        if !self.platform {
-            return Observation::refused(
-                PluginState::Unsupported,
-                Fault::new(
-                    "PluginPlatform",
-                    "Managed OMP installation is available only in the macOS desktop",
-                ),
-            );
+    /// Runs one client operation, always under installation ownership. A
+    /// command tree that could not be settled may still change the
+    /// installation, so it stays recorded there (a mutation's fence, or a new
+    /// marker for a probe or inventory read), refusing management from every
+    /// instance until the operator reconciles it. Without that record, this
+    /// instance refuses all further work, and the ownership in use is kept
+    /// until the process ends.
+    fn run(
+        &self,
+        invocation: &Invocation<'_>,
+        operation: Operation<'_>,
+    ) -> Result<Output, RunError> {
+        // After shutdown interrupts this application's work, nothing starts.
+        if self.cancel.load(Ordering::Acquire) {
+            return Err(RunError::NotStarted(process::interrupted()));
         }
-        let root = match &self.root {
-            Ok(root) => root,
-            Err(fault) => return Observation::refused(PluginState::Unsupported, fault.clone()),
-        };
-        let home = match &self.environment.home {
-            Ok(home) => home,
-            Err(fault) => {
-                return Observation::refused(
-                    PluginState::Unsupported,
-                    Fault::new("PluginHome", "The user home directory is unavailable")
-                        .with_context(json!({"cause": fault})),
-                );
+        let result = self.client.run(invocation, operation);
+        if let Err(RunError::Unsettled(cause)) = &result {
+            let record = json!({
+                "executable": display(invocation.executable),
+                "operation": format!("{operation:?}"),
+                "issue": cause,
+            });
+            if let Err(fault) = target::mark_unsettled(invocation.home, &record) {
+                lock(&self.state).unsettled.get_or_insert(fault);
             }
+        }
+        result
+    }
+
+    /// The platform, data root and HOME every observation requires; without
+    /// them the target is unsupported.
+    fn established(&self) -> Result<(&Path, &Path), Fault> {
+        if !self.platform {
+            return Err(Fault::new(
+                "PluginPlatform",
+                "Managed OMP installation is available only in the macOS desktop",
+            ));
+        }
+        let root = self.root.as_deref().map_err(Fault::clone)?;
+        let home = self.environment.home.as_deref().map_err(|fault| {
+            Fault::new("PluginHome", "The user home directory is unavailable")
+                .with_context(json!({"cause": fault}))
+        })?;
+        Ok((root, home))
+    }
+
+    /// Observes under installation ownership taken for this observation alone;
+    /// while another owner holds it, nothing runs.
+    fn observe(&self, selection: Selection<'_>, included: &Included) -> Observation {
+        let lease = self.established().and_then(|(_, home)| target::lease(home));
+        let _owned = match lease {
+            Ok(lease) => Owned::new(self, lease),
+            Err(fault) => return Observation::refused(PluginState::Unsupported, fault),
         };
+        self.observe_owned(selection, included)
+    }
+
+    /// Observes while this manager owns the installation; no other instance
+    /// runs client work on it meanwhile.
+    fn observe_owned(&self, selection: Selection<'_>, included: &Included) -> Observation {
+        let (root, home) = match self.established() {
+            Ok(established) => established,
+            Err(fault) => return Observation::refused(PluginState::Unsupported, fault),
+        };
+        // An unsettled command refuses every target observation.
+        if let Some(fault) = target::unsettled(home) {
+            return Observation::refused(PluginState::Unsupported, fault);
+        }
         let overrides = self.environment.overrides(home);
-        if !overrides.is_empty() {
+        // The client also selects its directories from these files.
+        let dotenv = match target::dotenv(home) {
+            Ok(found) => found,
+            Err(fault) => return Observation::refused(PluginState::Unsupported, fault),
+        };
+        if !overrides.is_empty() || !dotenv.is_empty() {
             return Observation::refused(
                 PluginState::Unsupported,
                 Fault::new(
                     "PluginTargetOverride",
                     "OMP profile or agent-state overrides are set; only the normal user installation is managed",
                 )
-                .with_context(json!({"variables": overrides})),
+                .with_context(json!({"variables": overrides, "dotenv": dotenv})),
             );
         }
         let resolved = match selection {
@@ -635,7 +765,7 @@ impl PluginManager {
                 )),
             );
         }
-        let listed = match self.client.run(&invocation, Operation::List) {
+        let listed = match self.run(&invocation, Operation::List) {
             Ok(output) if output.success => target::inventory(&output.stdout),
             Ok(output) => Err(Fault::new(
                 "PluginInventoryUnavailable",
@@ -664,11 +794,11 @@ impl PluginManager {
         {
             return Some((probe.version.clone(), probe.capable));
         }
-        let version = match self.client.run(invocation, Operation::Version) {
+        let version = match self.run(invocation, Operation::Version) {
             Ok(output) if output.success => target::omp_version(&output.stdout)?,
             _ => return None,
         };
-        let help = match self.client.run(invocation, Operation::Help) {
+        let help = match self.run(invocation, Operation::Help) {
             Ok(output) => Some(
                 output.success
                     && (target::capable(&output.stdout) || target::capable(&output.stderr)),
@@ -737,7 +867,7 @@ fn settle(
     let unchanged = facts == admitted;
     match dispatched {
         Err(RunError::NotStarted(fault)) => (OutcomeStatus::Failed, Some(fault)),
-        Err(RunError::Started(mut fault)) => {
+        Err(RunError::Started(mut fault) | RunError::Unsettled(mut fault)) => {
             fault.context["readback"] = json!(facts.state);
             fault.context["intended"] = json!(intended);
             (OutcomeStatus::Unknown, Some(fault))

@@ -1,4 +1,5 @@
-//! Fixed OMP client operations with finite duration and output.
+//! Fixed OMP client operations with finite duration and output. Each run owns a
+//! new process group and ends it before returning.
 
 use super::payload::NAME;
 use mado_runtime_comparison::model::Fault;
@@ -7,12 +8,16 @@ use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::io::{self, Read};
 #[cfg(unix)]
+use std::mem::MaybeUninit;
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 #[cfg(unix)]
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::AtomicBool;
 #[cfg(unix)]
 use std::sync::atomic::Ordering;
@@ -24,9 +29,12 @@ use std::time::Instant;
 
 #[cfg(unix)]
 const POLL: Duration = Duration::from_millis(10);
-/// After the child exits, its pipes must close within this bound.
+/// After the leader exits, its pipes must close within this bound.
 #[cfg(unix)]
 const PIPE_GRACE: Duration = Duration::from_secs(1);
+/// After the owned process group is killed, it must be empty within this bound.
+#[cfg(unix)]
+const TERMINATE: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
@@ -80,14 +88,18 @@ pub(super) struct Output {
 pub(super) enum RunError {
     /// Nothing ran.
     NotStarted(Fault),
-    /// The child started and was settled early; any effect is unknown.
+    /// The command started and was ended early; its whole process group is gone
+    /// and any effect is unknown.
     Started(Fault),
+    /// The command started, but its process group could not be confirmed empty.
+    /// Its effects may continue, so the installation stays owned.
+    Unsettled(Fault),
 }
 
 impl RunError {
     pub(super) fn fault(self) -> Fault {
         match self {
-            Self::NotStarted(fault) | Self::Started(fault) => fault,
+            Self::NotStarted(fault) | Self::Started(fault) | Self::Unsettled(fault) => fault,
         }
     }
 }
@@ -203,7 +215,112 @@ fn drain(
     Ok(false)
 }
 
-/// Owns both nonblocking output readers; no reader outlives the finite command.
+/// The command's own process group: the spawned leader and every descendant
+/// that stays in it, such as the Bun process OMP starts. Only this group is
+/// signaled, never an OMP session or the application's own group. The leader
+/// stays unreaped until the group has been killed, so the ID naming the group
+/// cannot be reused by an unrelated process before the signal.
+#[cfg(unix)]
+struct Group {
+    leader: Child,
+    id: libc::pid_t,
+}
+
+#[cfg(unix)]
+impl Group {
+    fn spawn(command: &mut Command) -> io::Result<Self> {
+        let leader = command.process_group(0).spawn()?;
+        // std derives the child ID from its pid_t, so the conversion is exact.
+        let id = leader.id().cast_signed();
+        Ok(Self { leader, id })
+    }
+
+    /// Whether the leader has exited; it stays unreaped either way.
+    #[expect(
+        unsafe_code,
+        reason = "audited non-reaping exit query for the owned leader"
+    )]
+    fn exited(&self) -> io::Result<bool> {
+        let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
+        loop {
+            // SAFETY: `info` is writable storage for one siginfo_t that waitid fills
+            // synchronously and does not retain. WNOWAIT leaves the leader waitable,
+            // so `Child` still owns reaping it.
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.leader.id(),
+                    info.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == 0 {
+                break;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+        // SAFETY: an all-zero siginfo_t is a valid value, and waitid only stores a
+        // complete one. Under WNOHANG si_pid stays zero while the leader runs.
+        Ok(unsafe { info.assume_init_ref().si_pid() } != 0)
+    }
+
+    #[expect(
+        unsafe_code,
+        reason = "audited signal limited to the owned process group"
+    )]
+    fn signal(&self, signal: libc::c_int) -> io::Result<()> {
+        // SAFETY: killpg takes plain integers and touches no Rust memory; `id` is
+        // the spawned leader's PID, which names the group it leads.
+        if unsafe { libc::killpg(self.id, signal) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    /// No member remains; EPERM still reports a member this process cannot signal.
+    fn empty(&self) -> bool {
+        matches!(self.signal(0), Err(error) if error.raw_os_error() == Some(libc::ESRCH))
+    }
+
+    /// Ends every owned process and returns the leader's status. The group is
+    /// killed only while the leader is confirmed unreaped; once it is reaped, only
+    /// the null signal observes the group until no member remains.
+    fn settle(mut self) -> Result<ExitStatus, Fault> {
+        let unsettled = || {
+            Fault::new(
+                "PluginUnsettled",
+                "Processes started by the OMP command could not be confirmed to have ended",
+            )
+        };
+        if self.exited().is_err() {
+            return Err(unsettled());
+        }
+        // A group left with only its exited leader may report ESRCH.
+        let _ = self.signal(libc::SIGKILL);
+        let deadline = Instant::now() + TERMINATE;
+        let status = loop {
+            match self.leader.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => thread::sleep(POLL),
+                Ok(None) | Err(_) => return Err(unsettled()),
+            }
+        };
+        while !self.empty() {
+            if Instant::now() >= deadline {
+                return Err(unsettled());
+            }
+            thread::sleep(POLL);
+        }
+        Ok(status)
+    }
+}
+
+/// Owns both nonblocking output readers and the command's process group; none
+/// outlives the finite command.
 #[cfg(unix)]
 pub(super) fn run(
     program: &Path,
@@ -234,7 +351,7 @@ pub(super) fn run(
         .stdin(Stdio::null())
         .stdout(stdout_child)
         .stderr(stderr_child);
-    let mut child = command.spawn().map_err(|error| {
+    let group = Group::spawn(&mut command).map_err(|error| {
         RunError::NotStarted(io_fault(
             "PluginSpawn",
             "The selected OMP executable could not be started",
@@ -246,8 +363,8 @@ pub(super) fn run(
     let mut pipes_deadline = deadline;
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let mut status = None;
-    let result = loop {
+    let mut exited = false;
+    let finished = loop {
         if cancel.load(Ordering::Acquire) {
             break Err(interrupted());
         }
@@ -258,13 +375,13 @@ pub(super) fn run(
             Ok(closed) => closed,
             Err(fault) => break Err(fault),
         };
-        if status.is_none() {
-            match child.try_wait() {
-                Ok(Some(exit)) => {
-                    status = Some(exit);
+        if !exited {
+            match group.exited() {
+                Ok(true) => {
+                    exited = true;
                     pipes_deadline = deadline.min(Instant::now() + PIPE_GRACE);
                 }
-                Ok(None) => {}
+                Ok(false) => {}
                 Err(error) => {
                     break Err(io_fault(
                         "PluginProcess",
@@ -274,16 +391,11 @@ pub(super) fn run(
                 }
             }
         }
-        if let (Some(exit), true, true) = (status, out_closed, err_closed) {
-            break Ok(Output {
-                success: exit.success(),
-                code: exit.code(),
-                stdout,
-                stderr,
-            });
+        if exited && out_closed && err_closed {
+            break Ok(());
         }
         let now = Instant::now();
-        if status.is_some() && now >= pipes_deadline {
+        if exited && now >= pipes_deadline {
             break Err(Fault::new(
                 "PluginProcess",
                 "OMP output did not close after the command exited",
@@ -297,11 +409,20 @@ pub(super) fn run(
         }
         thread::sleep(POLL);
     };
-    if status.is_none() {
-        let _ = child.kill();
-        let _ = child.wait();
+    // Every result, success included, ends what the command left in its group.
+    let status = group.settle().map_err(|mut fault| {
+        fault.context["cause"] = json!(finished.as_ref().err().map(|cause| &cause.category));
+        RunError::Unsettled(fault)
+    })?;
+    match finished {
+        Ok(()) => Ok(Output {
+            success: status.success(),
+            code: status.code(),
+            stdout,
+            stderr,
+        }),
+        Err(fault) => Err(RunError::Started(fault)),
     }
-    result.map_err(RunError::Started)
 }
 
 #[cfg(not(unix))]

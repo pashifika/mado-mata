@@ -636,8 +636,10 @@ ambiguous executable discovery are refused; project-local installation is not
 offered. OMP's npm/link commands do not use generic scope flags to select a
 different registry. Enter an absolute executable path and choose **Check** to
 resolve discovery ambiguity. This is a session target selector, not a saved app
-preference. Missing, old or incapable clients are reported; MadoMata never installs
-or updates OMP itself or edits its private configuration.
+preference. Target checks also read the client's home/config/agent dotenv files;
+directory overrides or unverifiable files refuse management, while ordinary
+non-routing entries remain usable. Missing, old or incapable clients are reported;
+MadoMata never installs or updates OMP itself or edits OMP-owned configuration.
 OMP 18.8.7 and 18.8.9 require `bun` on PATH for npm-plugin Uninstall.
 Management includes the executable's directory and usual user/Homebrew tool
 directories when launching OMP, including from a minimal-PATH GUI. Install Bun
@@ -650,12 +652,28 @@ dispatch. Tab and page navigation preserve the target selector and do not dispat
 management commands. An admitted action continues across Back or Close: return to
 the entry to see progress or the **Last operation** receipt. Details retains that
 receipt's target attribution even after another executable is selected.
-Draft editing and owner-attributed Stop/Return remain independent. Commands have
-finite duration/output bounds. A failed or unreadable readback is not success or
-proof of rollback; **Refresh** inspects current state without replaying the
-mutation. Interrupted publication is reported as unknown on subsequent inspection.
-Prepared payloads are outside configuration snapshots and are not automatically
-removed.
+Draft editing and owner-attributed Stop/Return remain independent. All management
+reads and mutations take exclusive ownership of the actual user installation,
+including across application data roots and HOME aliases. A competing request
+is refused without waiting; **Refresh** after the owner settles.
+Commands have finite duration/output bounds and settle their owned process group,
+including OMP's Bun companion. Application shutdown drains and, if needed,
+interrupts both inspections and mutations, then waits for owned settlement.
+It does not signal existing OMP sessions. A failed or unreadable readback is not
+success or proof of rollback; **Refresh** inspects current state without replaying
+the mutation. Interrupted publication is reported
+as unknown on subsequent inspection. Prepared payloads are outside configuration
+snapshots and are not automatically removed.
+
+Each mutation reserves an application-owned
+`$HOME/.omp/mado-mata-plugin-unsettled.json` safety marker before dispatch and
+removes it only after its command group is confirmed ended. An unsettled command
+or an interruption can leave it behind, refusing management across restarts and
+data roots. Follow the reported reconciliation guidance: establish that this
+MadoMata management command and its descendants have ended, inspect the actual
+registration, then remove only that marker. Do not remove it during another
+instance's pending work. Restart alone is not settlement evidence, and unrelated
+OMP sessions must not be terminated as a substitute.
 
 Before Update, migration or Uninstall, disconnect connected OMP sessions with
 `/mado disconnect {}`. Then start a fresh OMP session and use `/extensions` to

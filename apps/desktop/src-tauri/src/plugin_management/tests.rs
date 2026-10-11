@@ -38,6 +38,8 @@ FLAGS
 ";
 
 /// Scripted results for the next mutation; unscripted mutations apply normally.
+/// A version probe scripted in `reads` is only held (`Hold`, `AwaitCancel`)
+/// and then answers normally.
 enum Behavior {
     /// Exits successfully without changing the registry.
     Ignore,
@@ -47,6 +49,8 @@ enum Behavior {
     FailAfter,
     /// Changes the registry, then the bounded run expires.
     Timeout,
+    /// Changes the registry, then its command tree cannot be confirmed ended.
+    Unsettled,
     Hold(mpsc::Sender<()>, mpsc::Receiver<()>),
     AwaitCancel(mpsc::Sender<()>),
 }
@@ -56,7 +60,12 @@ struct Fake {
     help: Mutex<String>,
     marketplace: Mutex<Vec<Value>>,
     behaviors: Mutex<VecDeque<Behavior>>,
+    reads: Mutex<VecDeque<Behavior>>,
     mutations: AtomicUsize,
+    /// Every client run, including probes and inventory reads.
+    runs: AtomicUsize,
+    /// Whether each inventory read's command tree is left unsettled.
+    unsettled_list: AtomicBool,
 }
 
 struct Shared(Arc<Fake>);
@@ -99,12 +108,19 @@ impl Fake {
             help: Mutex::new(HELP.into()),
             marketplace: Mutex::new(Vec::new()),
             behaviors: Mutex::new(VecDeque::new()),
+            reads: Mutex::new(VecDeque::new()),
             mutations: AtomicUsize::new(0),
+            runs: AtomicUsize::new(0),
+            unsettled_list: AtomicBool::new(false),
         })
     }
 
     fn mutations(&self) -> usize {
         self.mutations.load(Ordering::SeqCst)
+    }
+
+    fn runs(&self) -> usize {
+        self.runs.load(Ordering::SeqCst)
     }
 
     fn script(&self, behavior: Behavior) {
@@ -116,11 +132,39 @@ impl Fake {
         invocation: &Invocation<'_>,
         operation: Operation<'_>,
     ) -> Result<Output, RunError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            matches!(target::lease(invocation.home), Err(fault) if fault.category == "PluginInstallationBusy"),
+            "client work runs only while the user installation is owned"
+        );
         let registry = invocation.home.join(".omp/plugins/node_modules");
         match operation {
-            Operation::Version => Ok(exited(true, lock(&self.version).clone().into_bytes())),
+            Operation::Version => {
+                let read = lock(&self.reads).pop_front();
+                match read {
+                    None => {}
+                    Some(Behavior::Hold(entered, release)) => {
+                        entered.send(()).unwrap();
+                        release.recv().unwrap();
+                    }
+                    Some(Behavior::AwaitCancel(entered)) => {
+                        entered.send(()).unwrap();
+                        await_cancel(invocation);
+                    }
+                    Some(_) => unreachable!("a read is only held"),
+                }
+                Ok(exited(true, lock(&self.version).clone().into_bytes()))
+            }
             Operation::Help => Ok(exited(true, lock(&self.help).clone().into_bytes())),
-            Operation::List => Ok(exited(true, list(&registry, &lock(&self.marketplace)))),
+            Operation::List => {
+                if self.unsettled_list.load(Ordering::SeqCst) {
+                    return Err(RunError::Unsettled(Fault::new(
+                        "PluginUnsettled",
+                        "fixture tree",
+                    )));
+                }
+                Ok(exited(true, list(&registry, &lock(&self.marketplace))))
+            }
             Operation::Link(_) | Operation::Uninstall => {
                 self.mutations.fetch_add(1, Ordering::SeqCst);
                 let behavior = lock(&self.behaviors).pop_front();
@@ -139,6 +183,13 @@ impl Fake {
                             "fixture deadline",
                         )))
                     }
+                    Some(Behavior::Unsettled) => {
+                        mutate(&registry, operation);
+                        Err(RunError::Unsettled(Fault::new(
+                            "PluginUnsettled",
+                            "fixture tree",
+                        )))
+                    }
                     Some(Behavior::Hold(entered, release)) => {
                         entered.send(()).unwrap();
                         release.recv().unwrap();
@@ -146,19 +197,23 @@ impl Fake {
                     }
                     Some(Behavior::AwaitCancel(entered)) => {
                         entered.send(()).unwrap();
-                        let deadline = Instant::now() + Duration::from_secs(10);
-                        while !invocation.cancel.load(Ordering::Acquire) {
-                            assert!(
-                                Instant::now() < deadline,
-                                "shutdown must interrupt the child"
-                            );
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
+                        await_cancel(invocation);
                         Err(RunError::Started(process::interrupted()))
                     }
                 }
             }
         }
+    }
+}
+
+fn await_cancel(invocation: &Invocation<'_>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !invocation.cancel.load(Ordering::Acquire) {
+        assert!(
+            Instant::now() < deadline,
+            "shutdown must interrupt the child"
+        );
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -246,6 +301,32 @@ fn environment(home: &Path, bin: &Path) -> Environment {
     }
 }
 
+/// Keeps a directory unwritable for its unprivileged owner until dropped.
+struct ReadOnly(PathBuf, fs::Permissions);
+
+impl ReadOnly {
+    fn new(directory: &Path) -> Self {
+        let restore = Self(
+            directory.to_path_buf(),
+            fs::metadata(directory).unwrap().permissions(),
+        );
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o500)).unwrap();
+        let probe = fs::write(directory.join("permission-probe"), b"");
+        assert_eq!(
+            probe.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "this regression requires an unprivileged filesystem owner"
+        );
+        restore
+    }
+}
+
+impl Drop for ReadOnly {
+    fn drop(&mut self) {
+        fs::set_permissions(&self.0, self.1.clone()).unwrap();
+    }
+}
+
 struct Fixture {
     _root: Root,
     base: PathBuf,
@@ -296,6 +377,20 @@ impl Fixture {
 
     fn environment(&self) -> Environment {
         environment(&self.home, &self.bin)
+    }
+
+    /// Another application instance: its own data root and client, this HOME.
+    fn peer(&self, name: &str) -> (PathBuf, Arc<Fake>, PluginManager) {
+        let data = self.base.join(name);
+        crate::storage::private_directory(&data).unwrap();
+        let fake = Fake::new();
+        let manager = PluginManager::with_client(
+            Ok(data.clone()),
+            self.environment(),
+            true,
+            Box::new(Shared(fake.clone())),
+        );
+        (data, fake, manager)
     }
 
     fn registry(&self) -> PathBuf {
@@ -913,70 +1008,167 @@ fn shutdown_interrupts_its_own_child_and_the_next_run_reports_unknown() {
     let view = next.inspect(None).unwrap();
     let outcome = view.outcome.unwrap();
     assert_eq!((outcome.action, outcome.status), (Install, Unknown));
-    let issue = outcome.issue.unwrap();
-    assert_eq!(issue.category, "PluginInterrupted");
+    assert_eq!(outcome.issue.unwrap().category, "PluginInterrupted");
+    // The outcome keeps the journaled target; the view is the current readback.
     assert_eq!(
-        issue.context["user_root"],
+        outcome.target.unwrap().user_root,
         display(&fixture.home.join(".omp"))
     );
     assert!(!fixture.journal().exists());
     assert_eq!(view.state, Absent);
 }
 
-const PROCESS_FIXTURE: &str = "MADO_PLUGIN_PROCESS_FIXTURE";
-const PROCESS_MARKER: &str = "MADO_PLUGIN_PROCESS_MARKER";
+#[test]
+fn shutdown_waits_for_an_independent_inspection_to_settle() {
+    struct PendingInspection {
+        entered: mpsc::Sender<()>,
+        cancelled: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+    impl Client for PendingInspection {
+        fn run(
+            &self,
+            invocation: &Invocation<'_>,
+            _operation: Operation<'_>,
+        ) -> Result<Output, RunError> {
+            self.entered.send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !invocation.cancel.load(Ordering::Acquire) {
+                assert!(Instant::now() < deadline, "inspection was not cancelled");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            self.cancelled.send(()).unwrap();
+            lock(&self.release)
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+            Err(RunError::Started(process::interrupted()))
+        }
+    }
 
-/// Child-side behavior for the runner test; does nothing in a normal run.
+    let fixture = Fixture::new();
+    let (entered, reached) = mpsc::channel();
+    let (cancelled, cancellation) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let manager = Arc::new(PluginManager::with_client(
+        Ok(fixture.data.clone()),
+        fixture.environment(),
+        true,
+        Box::new(PendingInspection {
+            entered,
+            cancelled,
+            release: Mutex::new(released),
+        }),
+    ));
+    let inspecting = manager.clone();
+    let inspection = std::thread::spawn(move || inspecting.inspect(None));
+    reached.recv_timeout(Duration::from_secs(10)).unwrap();
+    let (settled, settlement) = mpsc::channel();
+    let closing = manager.clone();
+    let shutdown = std::thread::spawn(move || {
+        closing.shutdown(Duration::ZERO);
+        settled.send(()).unwrap();
+    });
+    cancellation.recv_timeout(Duration::from_secs(10)).unwrap();
+    let returned_early = settlement.recv_timeout(Duration::from_millis(100)).is_ok();
+    release.send(()).unwrap();
+    shutdown.join().unwrap();
+    assert_eq!(inspection.join().unwrap().unwrap_err().category, "Closing");
+    assert!(
+        !returned_early,
+        "shutdown returned while inspection still owned work"
+    );
+    drop(target::lease(&fixture.home).unwrap());
+}
+
+const PROCESS_FIXTURE: &str = "MADO_PLUGIN_PROCESS_FIXTURE";
+const PROCESS_MARKERS: &str = "MADO_PLUGIN_PROCESS_MARKERS";
+const FIXTURE_ARGUMENTS: [&str; 3] = [
+    "--exact",
+    "plugin_management::tests::process_fixture",
+    "--nocapture",
+];
+
+/// Child-side behavior for the runner tests; does nothing in a normal run.
+///
+/// A leader first starts a silent companion, as OMP starts Bun, and waits until
+/// it runs. It then exits, sleeps, floods stdout, or exits while the companion
+/// holds its inherited output. A companion or unrelated process writes its late
+/// marker only after the test releases it, so the write proves it outlived a run.
 #[test]
 fn process_fixture() {
-    match std::env::var(PROCESS_FIXTURE).as_deref() {
-        Ok("sleep") => std::thread::sleep(Duration::from_secs(30)),
-        Ok("flood") => {
+    let (Ok(mode), Some(markers)) = (
+        std::env::var(PROCESS_FIXTURE),
+        std::env::var_os(PROCESS_MARKERS),
+    ) else {
+        return;
+    };
+    let markers = PathBuf::from(markers);
+    if matches!(mode.as_str(), "companion" | "unrelated") {
+        fs::write(markers.join(format!("{mode}.started")), b"").unwrap();
+        if appears(&markers.join("released"), Duration::from_secs(30)) {
+            fs::write(markers.join(format!("{mode}.late")), b"").unwrap();
+        }
+        return;
+    }
+    let mut companion = fixture_command("companion", &markers);
+    if mode != "hold" {
+        companion
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    }
+    companion.spawn().unwrap();
+    assert!(appears(
+        &markers.join("companion.started"),
+        Duration::from_secs(10)
+    ));
+    match mode.as_str() {
+        "sleep" => std::thread::sleep(Duration::from_secs(30)),
+        "flood" => {
             let chunk = [b'x'; 65_536];
             let mut stdout = std::io::stdout().lock();
             while stdout.write_all(&chunk).is_ok() {}
         }
-        Ok("inherit") => {
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "plugin_management::tests::process_fixture",
-                    "--nocapture",
-                ])
-                .env(PROCESS_FIXTURE, "descendant")
-                .spawn()
-                .unwrap();
-        }
-        Ok("descendant") => {
-            let deadline = Instant::now() + Duration::from_secs(4);
-            let mut stderr = std::io::stderr().lock();
-            let outcome = loop {
-                if stderr.write_all(b"still running\n").is_err() {
-                    break "closed";
-                }
-                if Instant::now() >= deadline {
-                    break "deadline";
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            };
-            fs::write(std::env::var_os(PROCESS_MARKER).unwrap(), outcome).unwrap();
-        }
-        _ => {}
+        "exit" | "hold" => {}
+        other => panic!("unknown process fixture {other}"),
     }
 }
 
-fn fixture_run(mode: &str, limits: Limits, cancel: &AtomicBool) -> Result<Output, RunError> {
-    let program = std::env::current_exe().unwrap();
-    let arguments: [&OsStr; 3] = [
-        "--exact".as_ref(),
-        "plugin_management::tests::process_fixture".as_ref(),
-        "--nocapture".as_ref(),
-    ];
+fn fixture_command(mode: &str, markers: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(FIXTURE_ARGUMENTS)
+        .env(PROCESS_FIXTURE, mode)
+        .env(PROCESS_MARKERS, markers)
+        .stdin(std::process::Stdio::null());
+    command
+}
+
+/// Waits a bounded time for a fixture marker.
+fn appears(path: &Path, bound: Duration) -> bool {
+    let deadline = Instant::now() + bound;
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+fn fixture_run(
+    mode: &str,
+    markers: &Path,
+    limits: Limits,
+    cancel: &AtomicBool,
+) -> Result<Output, RunError> {
     process::run(
-        &program,
-        &arguments,
-        &std::env::temp_dir(),
-        &[(PROCESS_FIXTURE, mode.into())],
+        &std::env::current_exe().unwrap(),
+        &FIXTURE_ARGUMENTS.map(OsStr::new),
+        markers,
+        &[
+            (PROCESS_FIXTURE, mode.into()),
+            (PROCESS_MARKERS, markers.into()),
+        ],
         limits,
         cancel,
     )
@@ -986,50 +1178,140 @@ fn started(result: Result<Output, RunError>) -> String {
     match result {
         Err(RunError::Started(fault)) => fault.category,
         Err(RunError::NotStarted(fault)) => panic!("unexpected start failure {fault:?}"),
+        Err(RunError::Unsettled(fault)) => panic!("the owned process group remained {fault:?}"),
         Ok(_) => panic!("the bounded run must settle its child early"),
     }
 }
 
+/// A process the runner does not own, left in the test's own process group like
+/// an OMP session the operator started.
+struct Unrelated {
+    child: std::process::Child,
+    markers: Root,
+}
+
+impl Unrelated {
+    fn start() -> Self {
+        let markers = Root::new();
+        let child = fixture_command("unrelated", &markers.0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(appears(
+            &markers.0.join("unrelated.started"),
+            Duration::from_secs(10)
+        ));
+        Self { child, markers }
+    }
+
+    /// Releases every fixture process. The unrelated one still writes its late
+    /// marker; no owned companion can, because each run ended it before returning.
+    fn release(mut self, owned: &[&PathBuf]) {
+        for markers in owned.iter().copied().chain([&self.markers.0]) {
+            fs::write(markers.join("released"), b"").unwrap();
+        }
+        assert!(appears(
+            &self.markers.0.join("unrelated.late"),
+            Duration::from_secs(10)
+        ));
+        assert!(self.child.wait().unwrap().success());
+        // Companions poll like the unrelated process; a survivor has written by now.
+        std::thread::sleep(Duration::from_millis(500));
+        for markers in owned {
+            assert!(markers.join("companion.started").exists());
+            assert!(
+                !markers.join("companion.late").exists(),
+                "an owned companion outlived its run: {}",
+                markers.display()
+            );
+        }
+    }
+}
+
 #[test]
-fn the_client_runner_settles_its_own_child_at_every_bound() {
+fn deadline_and_cancellation_end_only_the_owned_process_group() {
+    let unrelated = Unrelated::start();
     let limits = Limits {
         duration: Duration::from_secs(60),
         stdout: 1024 * 1024,
         stderr: 64 * 1024,
     };
-    let Ok(done) = fixture_run("none", limits, &AtomicBool::new(false)) else {
-        panic!("the fixture child must complete");
-    };
-    assert!(done.success);
-    let begun = Instant::now();
+    let expired = Root::new();
     let short = Limits {
-        duration: Duration::from_millis(300),
+        duration: Duration::from_secs(3),
         ..limits
     };
+    let begun = Instant::now();
     assert_eq!(
-        started(fixture_run("sleep", short, &AtomicBool::new(false))),
+        started(fixture_run(
+            "sleep",
+            &expired.0,
+            short,
+            &AtomicBool::new(false)
+        )),
         "PluginTimeout"
     );
     assert!(begun.elapsed() < Duration::from_secs(10));
+    let cancelled = Root::new();
+    let cancel = AtomicBool::new(false);
+    let settling = std::thread::scope(|scope| {
+        let canceller = scope.spawn(|| {
+            appears(
+                &cancelled.0.join("companion.started"),
+                Duration::from_secs(10),
+            );
+            cancel.store(true, Ordering::Release);
+            Instant::now()
+        });
+        assert_eq!(
+            started(fixture_run("sleep", &cancelled.0, limits, &cancel)),
+            "PluginInterrupted"
+        );
+        canceller.join().unwrap().elapsed()
+    });
+    assert!(settling < Duration::from_secs(5));
+    unrelated.release(&[&expired.0, &cancelled.0]);
+}
+
+#[test]
+fn exit_output_and_grace_results_leave_no_owned_process_running() {
+    let unrelated = Unrelated::start();
+    let limits = Limits {
+        duration: Duration::from_secs(60),
+        stdout: 1024 * 1024,
+        stderr: 64 * 1024,
+    };
+    let normal = Root::new();
+    match fixture_run("exit", &normal.0, limits, &AtomicBool::new(false)) {
+        Ok(done) => assert!(done.success),
+        Err(error) => panic!("the fixture leader must complete {:?}", error.fault()),
+    }
+    let flooded = Root::new();
     let small = Limits {
         stdout: 1024,
         ..limits
     };
     assert_eq!(
-        started(fixture_run("flood", small, &AtomicBool::new(false))),
+        started(fixture_run(
+            "flood",
+            &flooded.0,
+            small,
+            &AtomicBool::new(false)
+        )),
         "PluginOutputLimit"
     );
-    let cancel = AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            std::thread::sleep(Duration::from_millis(200));
-            cancel.store(true, Ordering::Release);
-        });
-        assert_eq!(
-            started(fixture_run("sleep", limits, &cancel)),
-            "PluginInterrupted"
-        );
-    });
+    let held = Root::new();
+    assert_eq!(
+        started(fixture_run(
+            "hold",
+            &held.0,
+            limits,
+            &AtomicBool::new(false)
+        )),
+        "PluginProcess"
+    );
+    unrelated.release(&[&normal.0, &flooded.0, &held.0]);
     match process::run(
         Path::new("/nonexistent/omp"),
         &[],
@@ -1041,38 +1323,6 @@ fn the_client_runner_settles_its_own_child_at_every_bound() {
         Err(RunError::NotStarted(fault)) => assert_eq!(fault.category, "PluginSpawn"),
         _ => panic!("a missing executable must not start"),
     }
-}
-
-#[test]
-fn inherited_output_is_closed_when_the_owned_command_settles() {
-    let root = Root::new();
-    let marker = root.0.join("pipe-closed");
-    let limits = Limits {
-        duration: Duration::from_secs(10),
-        stdout: 1024 * 1024,
-        stderr: 64 * 1024,
-    };
-    let result = process::run(
-        &std::env::current_exe().unwrap(),
-        &[
-            "--exact".as_ref(),
-            "plugin_management::tests::process_fixture".as_ref(),
-            "--nocapture".as_ref(),
-        ],
-        &root.0,
-        &[
-            (PROCESS_FIXTURE, "inherit".into()),
-            (PROCESS_MARKER, marker.clone().into()),
-        ],
-        limits,
-        &AtomicBool::new(false),
-    );
-    assert_eq!(started(result), "PluginProcess");
-    let deadline = Instant::now() + Duration::from_secs(6);
-    while !marker.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(fs::read_to_string(marker).unwrap(), "closed");
 }
 
 #[test]
@@ -1090,4 +1340,456 @@ fn an_outcome_retains_its_target_after_another_executable_is_inspected() {
         .unwrap();
     assert_eq!(next.target.unwrap().executable, display(&other));
     assert_eq!(next.outcome.unwrap().target, target);
+}
+
+#[test]
+fn supported_dotenv_directory_selection_refuses_before_any_client_run() {
+    let cases = [
+        // The reproduced case: the agent file selects an existing XDG data root.
+        (
+            ".omp/agent/.env",
+            "OPENAI_API_KEY=sk-owned\nXDG_DATA_HOME={xdg}\n",
+        ),
+        (".omp/.env", "export XDG_DATA_HOME=\"{xdg}\" # data\n"),
+        (".env", "OMP_PROFILE=work\n"),
+        (".env.local", "PI_CODING_AGENT_DIR=/elsewhere/agent\n"),
+        (".env.development", "OMP_CONFIG_DIR = .other\n"),
+        (".env.development.local", "XDG_DATA_HOME: {xdg}\r\n"),
+        // An expanded value cannot be shown to keep the normal target.
+        (".env", "XDG_DATA_HOME=${HOME}/share\n"),
+    ];
+    for (file, contents) in cases {
+        let fixture = Fixture::new();
+        let xdg = fixture.base.join("xdg");
+        let custom = xdg.join("omp/plugins/node_modules");
+        fs::create_dir_all(&custom).unwrap();
+        let path = fixture.home.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, contents.replace("{xdg}", &display(&xdg))).unwrap();
+        let view = fixture.inspect();
+        assert_eq!(view.state, Unsupported, "{file}: {contents}");
+        let issue = view.issue.unwrap();
+        assert_eq!(issue.category, "PluginTargetOverride", "{file}: {contents}");
+        assert_eq!(issue.context["dotenv"][0]["file"], display(&path));
+        assert!(view.actions.is_empty() && view.observation.is_none());
+        assert_eq!(fixture.fake.runs(), 0, "{file}: {contents}");
+        assert!(fs::read_dir(&custom).unwrap().next().is_none());
+    }
+    // A linked dotfile is read as the client reads it.
+    let linked = Fixture::new();
+    let xdg = linked.base.join("xdg");
+    fs::create_dir_all(xdg.join("omp")).unwrap();
+    let dotfile = linked.base.join("dotfiles-env");
+    fs::write(&dotfile, format!("XDG_DATA_HOME={}\n", display(&xdg))).unwrap();
+    symlink(&dotfile, linked.home.join(".env")).unwrap();
+    assert_eq!(
+        linked.inspect().issue.unwrap().category,
+        "PluginTargetOverride"
+    );
+    // A file beyond the bound is not partially trusted.
+    let oversized = Fixture::new();
+    fs::write(oversized.home.join(".env"), vec![b'#'; 256 * 1024 + 1]).unwrap();
+    let view = oversized.inspect();
+    assert_eq!(view.state, Unsupported);
+    assert_eq!(view.issue.unwrap().category, "PluginTargetUnverified");
+    for fixture in [&linked, &oversized] {
+        assert_eq!(fixture.fake.runs(), 0);
+    }
+}
+
+#[test]
+fn ordinary_dotenv_keeps_the_normal_target_and_a_later_redirect_is_refused() {
+    let fixture = Fixture::new();
+    let xdg = fixture.base.join("xdg");
+    let custom = xdg.join("omp/plugins/node_modules");
+    fs::create_dir_all(&custom).unwrap();
+    let agent = fixture.home.join(".omp/agent");
+    fs::create_dir_all(&agent).unwrap();
+    fs::write(
+        fixture.home.join(".env"),
+        format!(
+            "# XDG_DATA_HOME={xdg}\nOPENAI_API_KEY=\"sk-owned#1\"\nNOTE='XDG_DATA_HOME={xdg}'\n\
+             export OMP_PROFILE=default\nPI_CODING_AGENT_DIR={agent}\nPI_CONFIG_DIR=.omp\n\
+             XDG_DATA_HOME={empty}\n",
+            xdg = display(&xdg),
+            agent = display(&agent),
+            empty = display(&fixture.base.join("empty")),
+        ),
+    )
+    .unwrap();
+    // A directory is not a dotenv file.
+    fs::create_dir(fixture.home.join(".env.local")).unwrap();
+    let view = fixture.inspect();
+    assert_eq!(view.state, Absent);
+    let installed = fixture.apply(&view, Install).unwrap();
+    assert_eq!(installed.outcome.as_ref().unwrap().status, Verified);
+    assert_eq!(
+        fs::read_link(fixture.registration()).unwrap(),
+        fixture.prepared()
+    );
+
+    // Routing changed after review: the reviewed action is refused undispatched.
+    fs::write(
+        agent.join(".env"),
+        format!("XDG_DATA_HOME={}\n", display(&xdg)),
+    )
+    .unwrap();
+    let refused = fixture.apply(&installed, Uninstall).unwrap();
+    let outcome = refused.outcome.unwrap();
+    assert_eq!(outcome.status, Failed);
+    assert_eq!(outcome.issue.unwrap().category, "PluginStale");
+    assert_eq!(refused.state, Unsupported);
+    assert_eq!(refused.issue.unwrap().category, "PluginTargetOverride");
+    assert!(refused.observation.is_none());
+    assert_eq!(fixture.fake.mutations(), 1);
+    assert_eq!(
+        fs::read_link(fixture.registration()).unwrap(),
+        fixture.prepared()
+    );
+    assert!(fs::read_dir(&custom).unwrap().next().is_none());
+    assert!(!fixture.journal().exists());
+}
+
+#[test]
+fn installation_ownership_spans_data_roots_until_the_owner_settles() {
+    let fixture = Fixture::new();
+    let (peer_data, peer_fake, peer) = fixture.peer("peer-data");
+    let elsewhere = Fixture::new();
+    let installed = fixture.apply(&fixture.inspect(), Install).unwrap();
+    assert_eq!(installed.state, Current);
+    // The peer recognizes the first instance's release as a source to migrate.
+    let reviewed = peer.inspect(None).unwrap();
+    assert_eq!(reviewed.state, Legacy);
+    let (entered, reached) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    fixture.fake.script(Behavior::Hold(entered, released));
+    let manager = fixture.manager.clone();
+    let token = installed.observation.clone().unwrap();
+    let pending = std::thread::spawn(move || manager.apply(&token, Uninstall));
+    reached.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    assert_eq!(
+        target::lease(&fixture.home).unwrap_err().category,
+        "PluginInstallationBusy"
+    );
+    let runs = peer_fake.runs();
+    assert_eq!(
+        peer.apply(reviewed.observation.as_deref().unwrap(), Migrate)
+            .unwrap_err()
+            .category,
+        "PluginInstallationBusy"
+    );
+    // Refused at admission: no command, payload, journal or outcome.
+    assert_eq!((peer_fake.runs(), peer_fake.mutations()), (runs, 0));
+    assert!(!payload::base(&peer_data).exists());
+    assert!(!journal_path(&peer_data).exists());
+    assert_eq!(
+        fs::read_link(fixture.registration()).unwrap(),
+        fixture.prepared()
+    );
+    // Another HOME is another installation.
+    let other = elsewhere.apply(&elsewhere.inspect(), Install).unwrap();
+    assert_eq!(other.outcome.unwrap().status, Verified);
+
+    release.send(()).unwrap();
+    let removed = pending.join().unwrap().unwrap();
+    assert_eq!(removed.outcome.unwrap().status, Verified);
+    drop(target::lease(&fixture.home).unwrap());
+    // The refused call consumed its review; only a fresh review resumes.
+    assert_eq!(
+        peer.apply(reviewed.observation.as_deref().unwrap(), Migrate)
+            .unwrap_err()
+            .category,
+        "PluginStale"
+    );
+    let resumed = peer.inspect(None).unwrap();
+    assert_eq!(resumed.state, Absent);
+    assert!(resumed.outcome.is_none());
+    let applied = peer
+        .apply(resumed.observation.as_deref().unwrap(), Install)
+        .unwrap();
+    assert_eq!(applied.outcome.unwrap().status, Verified);
+    let included = payload::included().unwrap();
+    assert_eq!(
+        fs::read_link(fixture.registration()).unwrap(),
+        payload::base(&peer_data).join(format!("{}-{}", included.version, included.content))
+    );
+    assert_eq!(peer_fake.mutations(), 1);
+}
+
+#[test]
+fn an_unsettled_command_tree_refuses_the_installation_until_it_is_reconciled() {
+    let fixture = Fixture::new();
+    let (_, peer_fake, peer) = fixture.peer("peer-data");
+    let elsewhere = Fixture::new();
+    let marker = fixture.home.join(".omp/mado-mata-plugin-unsettled.json");
+    let view = fixture.inspect();
+    // Reviewed before the tree was left unsettled.
+    let reviewed = peer.inspect(None).unwrap();
+    assert_eq!(reviewed.state, Absent);
+    fixture.fake.script(Behavior::Unsettled);
+    let applied = fixture.apply(&view, Install).unwrap();
+    let outcome = applied.outcome.unwrap();
+    assert_eq!(outcome.status, Unknown);
+    assert_eq!(outcome.issue.unwrap().category, "PluginUnsettled");
+    assert_eq!(applied.issue.unwrap().category, "PluginUnsettled");
+    assert!(applied.observation.is_none() && applied.actions.is_empty());
+    assert!(marker.is_file());
+    // No settled result exists, so the next run of this data root reports it too.
+    assert!(fixture.journal().exists());
+    // The record, not a held lease, refuses the installation.
+    drop(target::lease(&fixture.home).unwrap());
+
+    // Every instance and data root refuses before any client run, after restart too.
+    let runs = (fixture.fake.runs(), peer_fake.runs());
+    let refused = peer
+        .apply(reviewed.observation.as_deref().unwrap(), Install)
+        .unwrap();
+    let outcome = refused.outcome.unwrap();
+    assert_eq!(outcome.status, Failed);
+    assert_eq!(outcome.issue.unwrap().category, "PluginStale");
+    assert_eq!(refused.issue.unwrap().category, "PluginUnsettled");
+    let restarted_fake = Fake::new();
+    let restarted = PluginManager::with_client(
+        Ok(fixture.data.clone()),
+        fixture.environment(),
+        true,
+        Box::new(Shared(restarted_fake.clone())),
+    );
+    let reopened = restarted.inspect(None).unwrap();
+    assert_eq!(reopened.outcome.as_ref().unwrap().status, Unknown);
+    for view in [fixture.inspect(), peer.inspect(None).unwrap(), reopened] {
+        assert_eq!(view.state, Unsupported);
+        assert_eq!(view.issue.unwrap().category, "PluginUnsettled");
+        assert!(view.actions.is_empty() && view.observation.is_none());
+    }
+    assert_eq!((fixture.fake.runs(), peer_fake.runs()), runs);
+    assert_eq!((restarted_fake.runs(), peer_fake.mutations()), (0, 0));
+    assert_eq!(
+        fs::read_link(fixture.registration()).unwrap(),
+        fixture.prepared()
+    );
+    assert!(marker.is_file());
+    let other = elsewhere.apply(&elsewhere.inspect(), Install).unwrap();
+    assert_eq!(other.outcome.unwrap().status, Verified);
+
+    // Only the operator's reconciliation resumes management, from a fresh review.
+    fs::remove_file(&marker).unwrap();
+    let resumed = peer.inspect(None).unwrap();
+    assert_eq!(resumed.state, Legacy);
+    let removed = peer
+        .apply(resumed.observation.as_deref().unwrap(), Uninstall)
+        .unwrap();
+    assert_eq!(removed.outcome.unwrap().status, Verified);
+    assert!(fs::symlink_metadata(fixture.registration()).is_err());
+    assert!(fixture.prepared().is_dir());
+}
+
+#[test]
+fn a_mutation_whose_fence_cannot_be_recorded_is_not_dispatched() {
+    let fixture = Fixture::new();
+    let view = fixture.inspect();
+    let read_only = ReadOnly::new(&fixture.home.join(".omp"));
+    let refused = fixture.apply(&view, Install).unwrap();
+    let outcome = refused.outcome.unwrap();
+    assert_eq!(outcome.status, Failed);
+    assert_eq!(outcome.issue.unwrap().category, "PluginInstallationLock");
+    assert_eq!(fixture.fake.mutations(), 0);
+    assert!(!fixture.journal().exists());
+    assert!(fs::symlink_metadata(fixture.registration()).is_err());
+    drop(read_only);
+    // Nothing is left behind: a fresh review installs normally.
+    let installed = fixture.apply(&fixture.inspect(), Install).unwrap();
+    assert_eq!(installed.outcome.unwrap().status, Verified);
+    assert_eq!(fixture.fake.mutations(), 1);
+}
+
+#[test]
+fn homes_whose_user_root_is_one_directory_share_its_ownership() {
+    let fixture = Fixture::new();
+    // Another HOME whose user root links to the same registry.
+    let alias = Fixture::new();
+    let user_root = alias.home.join(".omp");
+    fs::remove_dir_all(&user_root).unwrap();
+    symlink(fixture.home.join(".omp"), &user_root).unwrap();
+    let elsewhere = Fixture::new();
+    let reviewed = alias.inspect();
+    assert_eq!(reviewed.state, Absent);
+    let view = fixture.inspect();
+    let (entered, reached) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    fixture.fake.script(Behavior::Hold(entered, released));
+    let manager = fixture.manager.clone();
+    let token = view.observation.clone().unwrap();
+    let pending = std::thread::spawn(move || manager.apply(&token, Install));
+    reached.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    assert_eq!(
+        alias.apply(&reviewed, Install).unwrap_err().category,
+        "PluginInstallationBusy"
+    );
+    // No read runs while another HOME of this installation owns it.
+    let runs = alias.fake.runs();
+    let pending_view = alias.inspect();
+    assert_eq!(pending_view.state, Unsupported);
+    assert_eq!(
+        pending_view.issue.unwrap().category,
+        "PluginInstallationBusy"
+    );
+    assert_eq!((alias.fake.runs(), alias.fake.mutations()), (runs, 0));
+    // A distinct registry stays independent.
+    let other = elsewhere.apply(&elsewhere.inspect(), Install).unwrap();
+    assert_eq!(other.outcome.unwrap().status, Verified);
+
+    release.send(()).unwrap();
+    let applied = pending.join().unwrap().unwrap();
+    assert_eq!(applied.outcome.unwrap().status, Verified);
+    assert_eq!(
+        fs::read_link(alias.registration()).unwrap(),
+        fixture.prepared()
+    );
+    assert!(
+        !fixture
+            .home
+            .join(".omp/mado-mata-plugin-unsettled.json")
+            .exists()
+    );
+}
+
+#[test]
+fn a_concurrent_read_neither_runs_nor_loses_an_unsettled_refusal() {
+    let fixture = Fixture::new();
+    let (_, peer_fake, peer) = fixture.peer("peer-data");
+    let marker = fixture.home.join(".omp/mado-mata-plugin-unsettled.json");
+    let view = fixture.inspect();
+    let reviewed = peer.inspect(None).unwrap();
+    let (entered, reached) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    fixture.fake.script(Behavior::Hold(entered, released));
+    let manager = fixture.manager.clone();
+    let token = view.observation.clone().unwrap();
+    let pending = std::thread::spawn(move || manager.apply(&token, Install));
+    reached.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    // The peer's inventory tree would be left unsettled, but it cannot start.
+    peer_fake.unsettled_list.store(true, Ordering::SeqCst);
+    let runs = peer_fake.runs();
+    assert_eq!(
+        peer.apply(reviewed.observation.as_deref().unwrap(), Install)
+            .unwrap_err()
+            .category,
+        "PluginInstallationBusy"
+    );
+    let blocked = peer.inspect(None).unwrap();
+    assert_eq!(blocked.state, Unsupported);
+    assert_eq!(blocked.issue.unwrap().category, "PluginInstallationBusy");
+    assert!(blocked.observation.is_none());
+    assert_eq!((peer_fake.runs(), peer_fake.mutations()), (runs, 0));
+
+    release.send(()).unwrap();
+    let applied = pending.join().unwrap().unwrap();
+    assert_eq!(applied.outcome.unwrap().status, Verified);
+    assert!(!marker.exists());
+    // Once the owner settled, the peer's read runs under ownership, and its
+    // unsettled tree stays recorded for every instance.
+    let left = peer.inspect(None).unwrap();
+    assert_eq!(left.state, Unsupported);
+    assert_eq!(left.issue.unwrap().category, "PluginUnsettled");
+    peer_fake.unsettled_list.store(false, Ordering::SeqCst);
+    for view in [fixture.inspect(), peer.inspect(None).unwrap()] {
+        assert_eq!(view.state, Unsupported);
+        assert_eq!(view.issue.unwrap().category, "PluginUnsettled");
+        assert!(view.observation.is_none());
+    }
+    assert!(marker.is_file());
+}
+
+#[test]
+fn an_unrecorded_unsettled_inventory_keeps_ownership_in_its_instance() {
+    let fixture = Fixture::new();
+    let read_only = ReadOnly::new(&fixture.home.join(".omp"));
+    fixture.fake.unsettled_list.store(true, Ordering::SeqCst);
+    assert_eq!(
+        fixture.manager.inspect(None).unwrap_err().category,
+        "PluginUnsettled"
+    );
+    fixture.fake.unsettled_list.store(false, Ordering::SeqCst);
+    let runs = fixture.fake.runs();
+    assert_eq!(
+        fixture.manager.inspect(None).unwrap_err().category,
+        "PluginUnsettled"
+    );
+    assert_eq!(fixture.fake.runs(), runs);
+    assert_eq!(
+        target::lease(&fixture.home).unwrap_err().category,
+        "PluginInstallationBusy"
+    );
+    drop(read_only);
+}
+
+#[test]
+fn an_apply_refused_by_a_reading_owner_changes_nothing() {
+    let fixture = Fixture::new();
+    let (peer_data, peer_fake, peer) = fixture.peer("peer-data");
+    let reviewed = peer.inspect(None).unwrap();
+    assert_eq!(reviewed.state, Absent);
+    // Another instance's inspection owns the installation while it reads.
+    let (entered, reached) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    lock(&fixture.fake.reads).push_back(Behavior::Hold(entered, released));
+    let manager = fixture.manager.clone();
+    let reading = std::thread::spawn(move || manager.inspect(None));
+    reached.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    let runs = peer_fake.runs();
+    assert_eq!(
+        peer.apply(reviewed.observation.as_deref().unwrap(), Install)
+            .unwrap_err()
+            .category,
+        "PluginInstallationBusy"
+    );
+    assert_eq!((peer_fake.runs(), peer_fake.mutations()), (runs, 0));
+    assert!(!payload::base(&peer_data).exists());
+    assert!(!journal_path(&peer_data).exists());
+    // The reading instance refuses its own concurrent work as pending.
+    assert_eq!(
+        fixture.manager.inspect(None).unwrap_err().category,
+        "PluginBusy"
+    );
+
+    release.send(()).unwrap();
+    let read = reading.join().unwrap().unwrap();
+    assert_eq!(read.state, Absent);
+    assert!(read.observation.is_some());
+    assert!(fs::symlink_metadata(fixture.registration()).is_err());
+    // The refused call consumed its review; only a fresh review resumes.
+    assert_eq!(
+        peer.apply(reviewed.observation.as_deref().unwrap(), Install)
+            .unwrap_err()
+            .category,
+        "PluginStale"
+    );
+    let fresh = peer.inspect(None).unwrap();
+    assert!(fresh.outcome.is_none());
+    let applied = peer
+        .apply(fresh.observation.as_deref().unwrap(), Install)
+        .unwrap();
+    assert_eq!(applied.outcome.unwrap().status, Verified);
+    assert_eq!(peer_fake.mutations(), 1);
+}
+
+#[test]
+fn an_inspection_interrupted_by_shutdown_starts_no_later_command() {
+    let fixture = Fixture::new();
+    let (entered, reached) = mpsc::channel();
+    lock(&fixture.fake.reads).push_back(Behavior::AwaitCancel(entered));
+    let manager = fixture.manager.clone();
+    let inspection = std::thread::spawn(move || manager.inspect(None));
+    reached.recv_timeout(Duration::from_secs(10)).unwrap();
+    fixture.manager.shutdown(Duration::ZERO);
+    assert_eq!(inspection.join().unwrap().unwrap_err().category, "Closing");
+    // Only the probe in flight ran; nothing started after cancellation.
+    assert_eq!((fixture.fake.runs(), fixture.fake.mutations()), (1, 0));
+    assert!(!fixture.journal().exists());
+    drop(target::lease(&fixture.home).unwrap());
 }

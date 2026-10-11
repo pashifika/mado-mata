@@ -7,6 +7,9 @@
   Uninstall and checkout migration with verified readback and fresh-session guidance.
   Separate System/External tabs and compact entries from per-plugin Details pages;
   navigation retains in-flight actions, target selection and historical receipts.
+  Refuse dotenv-directed targets, serialize shared-installation commands across
+  desktop instances, and settle owned command groups before releasing ownership.
+  Keep uncertain work fenced across restarts.
 - Join Undo/Redo as two independent buttons; move editable Metadata history and
   Discard into its heading while keeping File actions in the source toolbar.
 - Add [OMP collaboration](docs/desktop.md#collaborate-through-omp) for shared
