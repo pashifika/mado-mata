@@ -1147,6 +1147,142 @@
     "close": "Close",
     "reopenLabel": "Reopen {name}"
   },
+  "plugins": {
+    "heading": "Plugins",
+    "intro": "Manage plugins for your user account on this machine. Plugins are separate from app settings and workspaces; opening this dialog does not change drafts, Edit ownership or packages.",
+    "close": "Close plugins",
+    "unavailable": "Plugin management is available once the application is ready. Nothing was read or changed.",
+    "systemHeading": "System plugins",
+    "systemHelp": "Supplied and maintained by MadoMata. System describes where a plugin comes from; it is not installed OS-wide, is not mandatory and can be uninstalled.",
+    "externalHeading": "External plugins",
+    "externalHelp": "External plugins are not supported. MadoMata does not install, import or load plugins from other sources and has no plugin marketplace.",
+    "agentHeading": "Agent integration",
+    "agentHelp": "Lets a supported coding agent work on Edit drafts through the explicit connect-and-disclose workflow. Installing it shares nothing by itself.",
+    "origin": "Origin",
+    "originSystem": "System · supplied by MadoMata",
+    "activation": "Activation",
+    "activationInstallation": "Installation only · no On/Off switch",
+    "included": "Included with this build",
+    "targets": "Agent targets",
+    "scope": "Scope",
+    "userScope": "User installation",
+    "executableLabel": "OMP executable",
+    "executablePlaceholder": "Automatic discovery",
+    "executableHelp": "Leave blank to discover OMP for your user account, or enter the absolute path of another executable and choose Check. MadoMata never installs or updates OMP itself.",
+    "check": "Check",
+    "refresh": "Refresh",
+    "executableChanged": "Check the edited executable before changing the installation.",
+    "inspecting": "Reading the OMP installation…",
+    "inspectFailed": "The OMP installation could not be read",
+    "inspectFailedHelp": "Nothing was changed. Correct the executable or Refresh.",
+    "notRead": "Not read yet. Refresh to read the OMP installation.",
+    "executable": "Executable",
+    "notFound": "Not found",
+    "ompVersion": "OMP version",
+    "minimum": "requires {version} or newer",
+    "userRoot": "User installation root",
+    "notEstablished": "Not established",
+    "installed": "Installed adapter",
+    "notInstalled": "Not installed",
+    "managed": "installed by MadoMata",
+    "unmanaged": "not installed by MadoMata",
+    "source": "Installed source",
+    "compatibility": "Compatibility",
+    "compatibilityStates": {
+      "missing": "Not checked · OMP not found",
+      "unsupported": "Unsupported",
+      "incompatible": "Incompatible",
+      "compatible": "Compatible"
+    },
+    "identity": "Payload identity",
+    "includedContent": "Included payload",
+    "installedContent": "Installed payload",
+    "unknownContent": "Not identified",
+    "issue": "Target issue",
+    "states": {
+      "missing": "OMP not found",
+      "unsupported": "Unsupported",
+      "incompatible": "Incompatible OMP",
+      "absent": "Not installed",
+      "current": "Up to date",
+      "update_available": "Update available",
+      "legacy": "Migration required",
+      "conflict": "Needs reconciliation"
+    },
+    "stateHelp": {
+      "missing": "No OMP executable was found for your user account. Install OMP yourself, or enter its absolute path and choose Check. Nothing will be installed.",
+      "unsupported": "Managed installation is not supported for this platform or installation scope. Nothing will be changed.",
+      "incompatible": "This OMP is older than the supported minimum or lacks a required plugin-management capability. Update OMP yourself, then Refresh.",
+      "absent": "The adapter is not registered in this OMP user installation.",
+      "current": "The installed adapter matches the version and payload included with this build. No update is needed.",
+      "update_available": "An older adapter installed by MadoMata can be updated to the version included with this build.",
+      "legacy": "The same adapter is registered from another source, such as a checkout link. Review the migration to replace only that registration; the source itself is kept.",
+      "conflict": "The installed adapter is newer than the included one, or differs from it under the same version. It is not replaced or downgraded automatically."
+    },
+    "unknownStateHelp": "This build does not recognize the reported installation state. Nothing will be changed.",
+    "actions": {
+      "install": "Install",
+      "update": "Update",
+      "uninstall": "Uninstall",
+      "migrate": "Review migration"
+    },
+    "noActions": "No installation change is available for this observation.",
+    "names": {
+      "install": "Install",
+      "update": "Update",
+      "uninstall": "Uninstall",
+      "migrate": "Migration"
+    },
+    "confirmHeading": {
+      "install": "Install the agent integration?",
+      "update": "Update the agent integration?",
+      "uninstall": "Uninstall the agent integration?",
+      "migrate": "Migrate the existing registration?"
+    },
+    "confirmBody": {
+      "install": "Registers adapter {included}, supplied with this build, in this OMP user installation. No other plugin or OMP setting changes.",
+      "update": "Prepares adapter {included} first, then replaces the registered {installed} and reads the result back. Other plugins stay unchanged.",
+      "uninstall": "Removes only the registration of adapter {installed} and checks that it is absent. Packages, drafts, recovery journals and stored payloads are kept.",
+      "migrate": "Replaces only the registration from {source} with adapter {included} supplied by this build. The original source directory is not changed or deleted."
+    },
+    "confirm": {
+      "install": "Confirm install",
+      "update": "Confirm update",
+      "uninstall": "Confirm uninstall",
+      "migrate": "Confirm migration"
+    },
+    "confirmScope": "Applies only to the observation shown here. Refresh, Check or an executable edit withdraws this confirmation.",
+    "withdrawn": "Confirmation withdrawn: the observation or executable changed. Review the current facts before confirming again.",
+    "running": {
+      "install": "Installing…",
+      "update": "Updating…",
+      "uninstall": "Uninstalling…",
+      "migrate": "Migrating…"
+    },
+    "pending": "Target {executable}. Closing Plugins does not cancel this; reopen Plugins to see the read-back result.",
+    "stale": "The last request returned no current observation. Refresh before another change; nothing is retried automatically.",
+    "result": {
+      "verified": "{action} verified by read-back",
+      "unknown": "{action} outcome unknown",
+      "failed": "{action} failed",
+      "rejected": "{action} not completed"
+    },
+    "resultHelp": {
+      "unknown": "The registration may have changed but could not be verified. Refresh to inspect the current installation; nothing is retried or rolled back automatically.",
+      "failed": "The current read-back is shown above. Nothing was rolled back automatically.",
+      "rejected": "The host refused the request or reported no result. Refresh to read the current installation; nothing is retried automatically."
+    },
+    "freshSession": {
+      "install": "Start a fresh OMP session to load the adapter. Connecting still uses the explicit /mado workflow.",
+      "update": "Start a fresh OMP session to load the new version. Sessions already running keep the version they loaded.",
+      "uninstall": "Start a fresh OMP session to confirm the adapter is absent. Sessions already running may still hold the removed code.",
+      "migrate": "Start a fresh OMP session to load the supplied adapter. Sessions already running keep the code they loaded."
+    },
+    "sessionHeading": "Running OMP sessions",
+    "sessionHelp": "Installation is not loading or connection. A registration change reaches only fresh OMP sessions; MadoMata never restarts, stops or reconfigures OMP.",
+    "sessionDisconnect": "Before Update, Uninstall or migration, disconnect each connected session:",
+    "sessionFresh": "Afterwards, start a fresh OMP session and inspect loading with:"
+  },
   "recovery": {
     "eyebrow": "Profile recovery",
     "heading": "Rejected saved profiles",

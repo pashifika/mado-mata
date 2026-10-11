@@ -161,6 +161,15 @@ function catalog(data: typeof enData) {
       limit: (limit: number) => interpolate(data.reopen.limit, {limit}),
       reopenLabel: (name: string) => interpolate(data.reopen.reopenLabel, {name}),
     },
+    plugins: {
+      ...data.plugins,
+      minimum: (version: string) => interpolate(data.plugins.minimum, {version}),
+      state: (value: string) => known(data.plugins.states, value),
+      stateHelp: (value: string) => Object.hasOwn(data.plugins.stateHelp, value) ? data.plugins.stateHelp[value as keyof typeof data.plugins.stateHelp] : data.plugins.unknownStateHelp,
+      confirmBody: (action: keyof typeof data.plugins.confirmBody, values: {included: string; installed: string; source: string}) => interpolate(data.plugins.confirmBody[action], values),
+      pending: (executable: string) => interpolate(data.plugins.pending, {executable}),
+      result: (kind: keyof typeof data.plugins.result, action: keyof typeof data.plugins.names) => interpolate(data.plugins.result[kind], {action: data.plugins.names[action]}),
+    },
     recovery: {
       ...data.recovery,
       outcomeStatus: (value: string) => known(data.recovery.outcomeStatus, value),
