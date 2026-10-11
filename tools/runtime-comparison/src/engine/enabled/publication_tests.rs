@@ -240,6 +240,94 @@ fn retained_query_cannot_republish_a_released_source_observation() {
 }
 
 #[test]
+fn sdk_examples_release_engine_results_and_check_visible_readiness() {
+    let output = std::process::Command::new("node")
+        .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/compiler"))
+        .args(["--input-type=module", "--eval", r#"
+            import ts from "typescript";
+            import {sdkDetail} from "./sdk.mjs";
+            const examples = [
+                sdkDetail("query_wait").result.method.examples.find(item => item.id === "visual-query"),
+                sdkDetail("wait").result.method.examples.find(item => item.id === "bounded-poll"),
+            ];
+            process.stdout.write(JSON.stringify(Object.fromEntries(examples.map(item => [
+                item.id, ts.transpileModule(item.source, {compilerOptions: {
+                    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS,
+                }}).outputText,
+            ]))));
+        "#])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let scripts: Value = serde_json::from_slice(&output.stdout).unwrap();
+    for (example, visible, entry, expected) in [
+        ("visual-query", "READY", "workflow", "returned"),
+        ("bounded-poll", "READY", "readiness", "returned"),
+        ("bounded-poll", "LOADING", "readiness", "Error"),
+    ] {
+        let recognized = vec![ScriptedOcrCandidate::new(
+            Arc::<[u8]>::from(visible.as_bytes()),
+            [(1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0)],
+            0.9,
+            0,
+        )];
+        let (engine, capture) = controlled(Arc::new(
+            ControlledOcr::new(mp::PixelFormat::Rgba8).with_candidates(recognized),
+        ));
+        let engine = Arc::new(engine);
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            let calls = Arc::clone(&engine);
+            let invoke = rquickjs::Function::new(ctx.clone(), move |method: String, args: String| {
+                let args: Value = serde_json::from_str(&args).unwrap();
+                if method == "observe" {
+                    capture.publish(0, mp::Continuity::Continuous).unwrap();
+                }
+                // Host-only logging and finite waiting; resource operations use the real Engine.
+                let result = match method.as_str() {
+                    "log" => Ok(json!({"recorded":true})),
+                    "wait" => {
+                        std::thread::sleep(Duration::from_millis(args["duration_ms"].as_u64().unwrap()));
+                        Ok(json!({"completed":true}))
+                    }
+                    _ => calls.call(&method, args),
+                };
+                match result {
+                    Ok(value) => json!({"value":value}),
+                    Err(error) => json!({"error":error.category}),
+                }.to_string()
+            }).unwrap();
+            ctx.globals().set("invoke", invoke).unwrap();
+            ctx.eval::<(), _>(r#"
+                const exports = {};
+                const host = {call(method, args) {
+                    const reply = JSON.parse(invoke(method, JSON.stringify(args)));
+                    if (reply.error) throw Object.assign(new Error(reply.error), {name:"EngineFault"});
+                    return reply.value;
+                }};
+            "#).unwrap();
+            ctx.eval::<(), _>(scripts[example].as_str().unwrap()).unwrap();
+            let outcome = ctx.eval::<String, _>(format!(
+                "try {{ exports.{entry}(); 'returned'; }} catch (error) {{ error.name === 'EngineFault' ? error.name + ':' + error.message : error.name; }}"
+            )).unwrap();
+            assert_eq!(outcome, expected, "{example}/{visible}");
+        });
+        assert_eq!(
+            engine.snapshot()["script_handles"],
+            0,
+            "{example}/{visible}"
+        );
+        assert!(engine.handle_budget.reserve(engine.limits.handles).is_ok());
+        assert_eq!(engine.finish()["clean"], true);
+    }
+}
+
+#[test]
 fn template_no_match_is_historical_but_new_recognition_preserves_capture_terminal_cause() {
     let (mut engine, capture) = controlled(Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8)));
     let source = mp::TemplateSource::new(mp::TemplateSourceRequest {

@@ -10,6 +10,20 @@ function lowerBound(values: readonly number[], position: number): number {
   return low;
 }
 
+// Preserve unchanged UTF-16 boundaries when synchronizing text or mapping a caret.
+export function sourceDifference(before: string, after: string): {from: number; to: number; length: number} {
+  const shortest = Math.min(before.length, after.length);
+  let prefix = 0;
+  while (prefix < shortest && before.charCodeAt(prefix) === after.charCodeAt(prefix)) prefix++;
+  const prefixUnit = before.charCodeAt(prefix - 1);
+  if (prefixUnit >= 0xd800 && prefixUnit <= 0xdbff) prefix--;
+  let suffix = 0;
+  while (suffix < shortest - prefix && before.charCodeAt(before.length - 1 - suffix) === after.charCodeAt(after.length - 1 - suffix)) suffix++;
+  const suffixUnit = before.charCodeAt(before.length - suffix);
+  if (suffixUnit >= 0xdc00 && suffixUnit <= 0xdfff) suffix--;
+  return {from: prefix, to: before.length - suffix, length: after.length - prefix - suffix};
+}
+
 // CodeMirror counts every line break as one UTF-16 unit. The source keeps its original separators.
 export class SourcePositions {
   readonly source: string;

@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {applyRefresh,applySave,discardFile,fileDirty,openSession,replaceFile,saveTicket,selectFile} from './authoring.ts';
+import {applyRefresh,applySave,beginComposition,discardFile,endComposition,fileDirty,openSession,redoFile,replaceFile,saveTicket,selectFile,undoFile} from './authoring.ts';
 import {constraintValue,currentValues,editValues,emptySchema,fileTree,folderAncestors,formatJson,loadValues,nodeIssues,parseJson,presetIssues,readManifest,renameProperty,typedText,
   repairNode,repairPreset,schemaIssues,sourceMapFacts,topDefaults,withEntry,withHelper,withProperty,withRequired,withTarget,withTopDefaults,withType,withoutProperty} from './metadata.ts';
 
@@ -57,7 +57,6 @@ test('structured manifest edits mark only the manifest dirty, restoring every fi
   state=replaceFile(state,'package.json',formatJson(MANIFEST,withEntry(original,'workflow','function','run')));
   let manifest=state.drafts.get('package.json');
   assert.equal(fileDirty(manifest),true);
-  assert.equal(manifest.undo.length,0);
   assert.equal(readManifest(value(manifest.text)).entries.workflow.function,'run');
   state=replaceFile(state,'package.json',formatJson(MANIFEST,withEntry(value(manifest.text),'workflow','function','workflow')));
   assert.equal(state.drafts.get('package.json').text,MANIFEST);
@@ -257,9 +256,55 @@ test('Discard, a changed disk read and a new session do not resurrect typed prov
   state=applySave(state,ticket,{owner,committed_revision:'rev-2',view:view(presetFiles(ticket.text),'rev-2'),refresh_error:null});
   assert.deepEqual(shown(state).stored,[]);
   // Other bytes on disk replace the clean draft together with its provenance.
-  state=applyRefresh(state,view(presetFiles('{"package_id":"example.a","schema_version":1,"options":{"ratio":"2."}}'),'rev-3'));
+  state=applyRefresh(state,view(presetFiles('{"package_id":"example.a","schema_version":1,"options":{"ratio":"2."}}'),'rev-3'),true);
   assert.deepEqual(state.drafts.get(PRESET_PATH).typed,[]);
   assert.deepEqual(shown(state).stored.map(entry=>entry.path),['$.ratio']);
   // Duplicate, Return to Edit without a local view, or another owner opens a new session from the saved bytes.
   assert.deepEqual(shown(openSession(view(presetFiles(ticket.text)))).stored.map(entry=>entry.path),['$.ratio']);
+});
+
+test('form Undo and Redo restore incomplete numeric text with its provenance in chronological steps',()=>{
+  let state=typeOption(typeOption(openSession(view(presetFiles())),'1.'),'1.5');
+  assert.deepEqual(state.drafts.get(PRESET_PATH).typed,[]);
+  state=undoFile(state,PRESET_PATH);
+  // Editable operator text again, not a stored type mismatch.
+  assert.deepEqual([shown(state).stored,shown(state).draft.ratio],[[],'1.']);
+  state=redoFile(state,PRESET_PATH);
+  assert.deepEqual([value(state.drafts.get(PRESET_PATH).text).options.ratio,state.drafts.get(PRESET_PATH).typed],[1.5,[]]);
+  state=discardFile(typeOption(state,'2.'),PRESET_PATH);
+  state=undoFile(state,PRESET_PATH);
+  assert.deepEqual([shown(state).stored,shown(state).draft.ratio],[[],'2.']);
+  // A form IME composition follows the input and becomes one step when it ends.
+  state=beginComposition(state,PRESET_PATH,{start:0,end:0});
+  state=typeOption(typeOption(state,'2.5'),'2.75');
+  assert.equal(value(state.drafts.get(PRESET_PATH).text).options.ratio,2.75);
+  state=endComposition(state,PRESET_PATH);
+  state=undoFile(state,PRESET_PATH);
+  assert.deepEqual([shown(state).stored,shown(state).draft.ratio],[[],'2.']);
+});
+
+test('same-byte numeric provenance is undoable, including a composition, without undoing an earlier form edit',()=>{
+  const saved='{"package_id":"example.a","schema_version":1,"options":{"ratio":"1."}}';
+  const initial=openSession(view(presetFiles(saved)));
+  assert.deepEqual(shown(initial).stored.map(entry=>entry.path),['$.ratio']);
+  let state=typeOption(initial,'1.');
+  assert.equal(state.drafts.get(PRESET_PATH).text,saved);
+  assert.deepEqual([shown(state).stored,shown(state).draft.ratio],[[],'1.']);
+  state=typeOption(state,'1.5');
+  state=undoFile(state,PRESET_PATH);
+  assert.deepEqual([shown(state).stored,shown(state).draft.ratio],[[],'1.']);
+  state=undoFile(state,PRESET_PATH);
+  assert.deepEqual(shown(state).stored.map(entry=>entry.path),['$.ratio']);
+  state=redoFile(state,PRESET_PATH);
+  assert.deepEqual([shown(state).stored,shown(state).draft.ratio],[[],'1.']);
+  state=undoFile(state,PRESET_PATH);
+  state=beginComposition(state,PRESET_PATH,{start:0,end:0});
+  state=typeOption(state,'1.');
+  state=endComposition(state,PRESET_PATH);
+  state=undoFile(state,PRESET_PATH);
+  assert.deepEqual(shown(state).stored.map(entry=>entry.path),['$.ratio']);
+  state=redoFile(state,PRESET_PATH);
+  assert.deepEqual([shown(state).stored,shown(state).draft.ratio],[[],'1.']);
+  // The discarded redo branch (the earlier 1.5 edit) must not return after the new composition.
+  assert.equal(redoFile(state,PRESET_PATH),state);
 });

@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {EditorState} from '@codemirror/state';
 import {editFile, fileDirty, findMatch, offsetAt, openSession, undoFile} from '../authoring.ts';
-import {SourcePositions} from './source-positions.ts';
+import {SourcePositions, sourceDifference} from './source-positions.ts';
 
 function transaction(source, spec) {
   const mapping = new SourcePositions(source);
@@ -88,4 +88,20 @@ test('invalid or overlapping editor edits are refused rather than clipping sourc
   assert.throws(() => mapping.apply([{from: 0, to: 4, insert: ''}]), RangeError);
   assert.throws(() => mapping.apply([{from: 0, to: 2, insert: ''}, {from: 1, to: 3, insert: ''}]), RangeError);
   assert.equal(mapping.source, 'a\r\nb');
+});
+
+test('external replacements retain CodeMirror anchors around complete Unicode changes', () => {
+  const before = new SourcePositions('before\r\n\u{2000b}\r\nanchor\r\nend');
+  const after = new SourcePositions('before\r\n\u{2000c}abc\r\nanchor\r\nend');
+  const change = sourceDifference(before.document, after.document);
+  const edit = EditorState.create({doc: before.document}).update({changes: {
+    from: change.from, to: change.to, insert: after.document.slice(change.from, change.from + change.length),
+  }});
+  assert.equal(edit.newDoc.toString(), after.document);
+  assert.equal(edit.changes.mapPos(3, -1), 3);
+  assert.equal(edit.changes.mapPos(before.document.indexOf('anchor'), -1), after.document.indexOf('anchor'));
+  edit.changes.iterChanges((from, to, _fromNew, _toNew, inserted) => {
+    assert.equal(before.document.slice(from, to).isWellFormed(), true);
+    assert.equal(inserted.toString().isWellFormed(), true);
+  });
 });

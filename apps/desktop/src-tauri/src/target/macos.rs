@@ -388,7 +388,10 @@ fn process_architecture(pid: i32, guard: &Guard<'_>) -> Result<i32, Fault> {
         return Err(unavailable("process_architecture"));
     }
     // SAFETY: libproc reported the complete initialized architecture structure.
-    #[expect(unsafe_code, reason = "libproc returned the full initialized structure")]
+    #[expect(
+        unsafe_code,
+        reason = "libproc returned the full initialized structure"
+    )]
     let info = unsafe { info.assume_init() };
     if info.cpu_type <= 0 {
         return Err(unavailable("process_architecture"));

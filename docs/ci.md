@@ -136,6 +136,21 @@ The full check has these responsibilities:
 - Exercise accepted/refused branch routes, malformed metadata, repository-policy
   failures, and gate outcomes through behavioral tests.
 - Install and check the trusted TypeScript compiler with package scripts disabled.
+- Run the checkout-owned OMP adapter tests without installing OMP or private
+  plugins. These exercise registration/schema compatibility, explicit instance/
+  owner selection, cancellation, session teardown, notice continuation and
+  unknown-outcome reconciliation. The compatibility floor is OMP `18.8.7`, not
+  an exact pin or upper bound; simulated API/version cases are not evidence
+  that an installed future release works.
+- Run the shared SDK catalog unit tests. Runtime `sdk_examples` tests discover
+  the public catalog, compile examples with the pinned trusted compiler under
+  empty and representative option schemas, and execute applicable behavior on
+  the real controlled host. They cover no-match/backend-fault distinctions,
+  finite waits, retained-handle release and stage/lane refusals. Native-only
+  examples must refuse in the controlled lane, not acquire native authority.
+  Separate [Engine publication regressions](runtime-native.md#consumer-publication-regressions)
+  cover Engine-specific resource ownership after installing its native build
+  dependencies; they are not part of the ordinary CI command.
 - Test the independent [application-launch library](../crates/application-launch/Cargo.toml)
   and its literal argument/cwd, refusal and external-child ownership contracts.
   These checks do not launch a game or authorize bundle/native acceptance.
@@ -161,6 +176,12 @@ The full check has these responsibilities:
   geometry/Undo, grouped selection, stale trial/Copy state, and per-Start Native
   consent invalidation), and
   type-check/build its trusted UI and bundled language worker.
+  Shared-authoring tests also cover versioned unsaved reads, original-UTF-16
+  batch edits, ABA/IME refusal, structured-field provenance, chronological
+  Undo, snippet dependencies, publication prefixes and lifecycle resolution.
+  These deterministic checks do not prove physical OS IME or editor interaction.
+  Plugin-dialog state checks cover pending work across closure, withdrawn
+  confirmations and fresh-observation admission after failure.
 - Test the Rust application core with `--no-default-features --lib`: explicit
   setup/recovery, named Tab ownership, scoped profiles, source-preserving
   historical-layout imports, bounded snapshots, and journaled restore/rollback
@@ -168,6 +189,12 @@ The full check has these responsibilities:
   initialization-error and successful receipt-restore assertions join the real
   writer independently of the production shutdown deadline; a separate stalled-worker
   test checks the bounded shutdown and incomplete-cleanup outcome.
+  Plugin-management checks use owned Unix filesystem/process fixtures for
+  payload integrity, target/source/version refusals, lifecycle readback,
+  interrupted publication and finite output cleanup. The shell embeds the
+  finite adapter payload from tracked product files. Public checks require
+  neither installed OMP nor personal agent state; actual macOS dialog and
+  real OMP lifecycle acceptance remain separate local procedures.
   Command-retirement checks accept settled logging or an explicit `LoggingShutdown`
   refusal with retirement and closed admission; they do not assume disk-sync latency.
   Identifier cutover checks must cover canonical-XID lifecycle and unchanged
@@ -216,6 +243,11 @@ The full check has these responsibilities:
   left-tree navigation and contextual file actions, physical OS IME input,
   worker startup/warm-response/memory observations, and storage power-loss
   durability are not hosted CI claims.
+  Unix builds additionally exercise private collaboration endpoints with real
+  owned sockets, bounded framing/queues, cancellation, owner fencing and
+  shutdown. Non-Unix builds do not provide the collaboration transport.
+  Recognition generation tests use owned fixtures; no clipboard scraping,
+  native acquisition, OCR initialization or model request is authorized.
 - On macOS and Windows, build the real Tauri shell with `--features custom-protocol`
   after building frontend assets. Windows also runs non-GUI shell validation and
   real owned-process/Job lifetime regressions; the test-only `webdriver` feature
@@ -228,6 +260,21 @@ The full check has these responsibilities:
   permission is added to default CI. These checks do not prove native picker or
   clipboard interaction, recognition quality, physical pointer behavior,
   capture-session cleanup under a real backend, or total RSS.
+
+For focused adapter and SDK checks after the pinned compiler setup, run from
+the product root:
+
+```sh
+npm test --prefix integrations/omp
+node --test tools/runtime-comparison/compiler/sdk.test.mjs
+cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml --test sdk_examples
+```
+
+The full and runtime-only entrypoints include these scopes alongside desktop
+tests. Actual installed-OMP loading and communication with a macOS WebView
+remain separate [local observations](desktop.md#observed-compatibility-boundary),
+not hosted-CI claims. Adapter installation and removal belong to the
+[desktop guide](desktop.md#install-select-and-remove-the-adapter).
 
 For governance policy and its behavioral tests only, after Python dependency
 setup:
@@ -396,10 +443,23 @@ protection; branch rulesets and the required `CI Gate` context remain unchanged.
 The lightweight `dev-push-policy` job runs only on pushes. It suppresses duplicate
 `dev/<topic>` push checks only when an open promotion PR to `main` has both its
 head and base in this repository, with the exact pushed branch and commit SHA.
-The [selector](../tools/ci/select_checks.py) uses paginated GitHub CLI lookup with
-a 30-second timeout; invalid metadata, malformed responses, lookup failures, and
-an unconfirmed match keep all checks enabled. Main pushes, PRs (including forks),
-and manual dispatch never suppress checks or perform this lookup.
+Draft promotion PRs also qualify. The [selector](../tools/ci/select_checks.py)
+uses paginated GitHub CLI lookup with a 30-second timeout; invalid metadata,
+malformed responses, lookup failures, and an unconfirmed match keep all checks
+enabled. Main pushes, PRs (including forks), and manual dispatch never suppress
+checks or perform this lookup.
+
+Open the Draft promotion
+[before the final leaf merge](../CONTRIBUTING.md#ordinary-change-and-promotion)
+so the selector can find it. Selection happens once, at the beginning of the
+push run; a PR created after that lookup does not cancel work already admitted.
+An API response that has not yet caught up with the pushed head still keeps
+checks enabled. This suppresses duplicate work, not the push workflow or its
+skipped check entries, and does not remove GitHub's event labels.
+
+Draft PRs still run the normal PR checks on opening and head updates. Marking
+one ready for review triggers another PR run; its current-head `CI Gate` must
+pass before promotion.
 
 Only this selector job receives `pull-requests: read` alongside `contents: read`,
 using the read-only `github.token` as `GH_TOKEN`. API responses and credentials
@@ -481,9 +541,9 @@ A source-level policy check is not proof that GitHub is enforcing the payload.
 Hosted jobs exercise the real comparison executable with deterministic controlled
 observations and a non-native input sink, plus the desktop checks above.
 Cross-platform success is controlled evidence, not replay, native qualification,
-GUI acceptance, desktop distribution, or runtime adoption. The optional `engine`
-integration and its external prerequisites are separate from these commands; no
-CI lane discovers windows, requests permission, captures the desktop, changes
+GUI acceptance, desktop distribution, or runtime adoption. Real engine
+integration and its external prerequisites remain separate from hosted checks;
+no CI lane discovers windows, requests permission, captures the desktop, changes
 focus, sends OS input, or operates a game.
 
 M0 acceptance still requires explicitly authorized native Windows and Apple

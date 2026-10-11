@@ -1340,17 +1340,17 @@ impl Application {
         let recognition = &state.authoring(owner)?.recognition;
         recognition.check_capture(Some(capture_id))?;
         let frame = recognition.frame.as_ref().ok_or_else(|| {
-            invalid("No original frame is retained").with_context(json!({"reason": "missing_frame"}))
+            invalid("No original frame is retained")
+                .with_context(json!({"reason": "missing_frame"}))
         })?;
         if frame.id != frame_id || frame.revision != frame_revision {
             return Err(stale());
         }
         let image = &frame.image;
         let bounds = || {
-            invalid("Pixel coordinates are outside the retained original frame").with_context(
-                json!({"reason": "pixel_bounds", "x": x, "y": y,
-                    "width": image.width, "height": image.height}),
-            )
+            invalid("Pixel coordinates are outside the retained original frame")
+                .with_context(json!({"reason": "pixel_bounds", "x": x, "y": y,
+                    "width": image.width, "height": image.height}))
         };
         if x >= image.width || y >= image.height {
             return Err(bounds());
@@ -1800,6 +1800,9 @@ impl Application {
         })
     }
 
+    /// Generates complete source for an explicit capture, purpose and ordered definitions,
+    /// the shared path of UI Copy and agent retrieval. It never publishes the source;
+    /// `verified` reports only matching retained trial evidence, never for setup.
     pub fn recognition_copy(
         &self,
         owner: &AuthoringRef,

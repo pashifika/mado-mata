@@ -38,8 +38,8 @@ export interface RecognitionDocument {
   version:number; rounding:number; basis:GeometryBasis; definitions:RecognitionDefinition[]; template_rights:TemplateRights|null;
 }
 export interface CaptureDocument {capture_id:string; document:RecognitionDocument}
-// `game_content` is the reusable `recognitionBasis` setup, `ocr_recognize` one grouped request for every checked OCR
-// Trial row, `template_recognize` the selected saved template.
+// `game_content` is the reusable `recognitionBasis` setup, `ocr_recognize` one grouped request for the named OCR
+// definitions in request order, `template_recognize` one saved template.
 export type SnippetKind = 'game_content' | 'ocr_recognize' | 'template_recognize';
 
 // Owner-scoped frame descriptor; pixels stay in the host. Compatible frames reuse confirmed content setup.
@@ -102,13 +102,32 @@ export interface TrialTicket {
 // `fault` is a refusal before any trial settled. A ticketless record is a trial the host retained from before
 // this state existed; it is never shown as current.
 export interface TrialRecord {ticket:TrialTicket|null; trial:RecognitionTrial|null; fault:Fault|null}
+// One explicitly addressed snippet: capture, purpose and ordered definitions. It never reads checked rows or the
+// selected row, so UI Copy and agent retrieval admit and generate the same request identically.
+export interface GenerationRequest {capture_id:string; kind:SnippetKind; definition_ids:readonly string[]}
+// The fence the host re-checks before generating source for exactly this request.
+export interface GenerationTicket {capture_id:string; token:string; revision:string; document_revision:number; definition_ids:string[]; kind:SnippetKind}
+// Beyond the Copy checks, a request may name a capture other than the loaded active one (which is never selected or
+// loaded for it), or arrive before the host holds the local draft.
+export type GenerationBlock = RecognitionBlock | 'inactiveCapture' | 'unsynchronized';
 // A Copy captures every input and its selection generation; changing a checked set and restoring it does not
 // revive copied source. Recognition-input (or, for grouped OCR, source-input) marks likewise prevent geometry Undo
 // from reviving a Copy. Setup source is the basis value itself, so it is compared by value.
 export interface CopyStamp {basis:number; definitions:Record<string, {revision:number; mark:number}>; source:string|null; selection:number}
-export interface CopyTicket {capture_id:string; token:string; revision:string; document_revision:number; definition_ids:string[]; kind:SnippetKind; stamp:CopyStamp}
+export interface CopyTicket extends GenerationTicket {stamp:CopyStamp}
 // `error` is the host refusal or the clipboard failure; either way no package file changed.
 export interface CopyRecord {capture_id:string; definition_ids:string[]; stamp:CopyStamp; basis:GeometryBasis|null; verified:boolean; error:Fault|null}
+// Retained trial evidence the host matched at generation time; it is never refreshed later. Setup is geometry, never
+// recognition evidence. `verified` means only that a clean retained trial at the same owner, package and draft
+// revisions, frame and OCR configuration observed every requested definition: not text correctness, current game
+// state or permission to run.
+export type SnippetVerification = 'not_applicable' | 'verified' | 'unverified';
+// Sanitized provenance of generated source, without pixels, trial observations, native handles or paths. Whether the
+// source still applies follows the receipt's input versions: a newer frame on the same confirmed geometry leaves it
+// applicable while `verification` keeps describing generation time.
+export interface SnippetProvenance {
+  revision:string; capture:string; kind:SnippetKind; ids:string[]; basis:GeometryBasis; verification:SnippetVerification;
+}
 export interface SyncTicket {capture_id:string; token:string; revision:string; document_revision:number; local_revision:number; frame_id:string|null; document:RecognitionDocument}
 export interface ConfirmTicket {capture_id:string; token:string; revision:string; frame_id:string; document_revision:number}
 export interface SaveTicket {
@@ -967,8 +986,8 @@ export function templateSavedCurrent(state:RecognitionState, id:string):boolean 
     && sameContent(state.document, saved) && rightsValid(saved.template_rights);
 }
 
-// The definitions each Copy purpose names: none for the Game content setup, every checked OCR Trial row for grouped
-// OCR (independent of Selected definition), and the Selected definition for a template.
+// The definitions each UI Copy purpose names: none for the Game content setup, every checked OCR Trial row for grouped
+// OCR (independent of Selected definition), and the Selected definition for a template. Generation never reads them.
 function copySelection(state:RecognitionState, kind:SnippetKind):string[] {
   if (kind === 'game_content') return [];
   if (kind === 'ocr_recognize') return state.trialIds;
@@ -996,20 +1015,48 @@ export function copyBlock(state:RecognitionState, ids:readonly string[], kind:Sn
   return null;
 }
 
+// The one admission for UI Copy and agent retrieval: Copy's checks on the loaded active capture, which the host holds
+// exactly as drafted. A request for another capture is refused rather than selecting or loading it.
+export function generationBlock(state:RecognitionState, request:GenerationRequest):GenerationBlock|null {
+  if (state.view.capture_id === null || request.capture_id !== state.view.capture_id) return 'inactiveCapture';
+  return copyBlock(state, request.definition_ids, request.kind) ?? (hostCurrent(state) ? null : 'unsynchronized');
+}
+
+export function generationTicket(state:RecognitionState, request:GenerationRequest):GenerationTicket|null {
+  if (generationBlock(state, request) !== null) return null;
+  return {capture_id: request.capture_id, token: state.owner.token, revision: state.view.revision, document_revision: state.view.document_revision,
+    definition_ids: [...request.definition_ids], kind: request.kind};
+}
+
+// UI Copy generates its purpose's current UI selection and stamps what its freshness display follows.
 export function copyTicket(state:RecognitionState, ids:readonly string[], kind:SnippetKind):CopyTicket|null {
-  if (copyBlock(state, ids, kind) !== null || !hostCurrent(state) || !sameJson(ids, copySelection(state, kind))) return null;
-  if (state.view.capture_id === null) return null;
-  return {capture_id: state.view.capture_id, token: state.owner.token, revision: state.view.revision, document_revision: state.view.document_revision, definition_ids: [...ids], kind,
-    stamp: {basis: state.basis, definitions: Object.fromEntries(ids.map(id => {
-      const definition = state.document!.definitions.find(item => item.id === id)!;
-      return [id, {revision: definition.revision, mark: (kind === 'ocr_recognize' ? state.sourceMarks : state.marks)[id]}];
-    })), source: kind === 'template_recognize' ? state.view.revision : null, selection: state.trialSelection}};
+  const capture_id = state.view.capture_id;
+  const ticket = capture_id !== null && sameJson(ids, copySelection(state, kind)) ? generationTicket(state, {capture_id, kind, definition_ids: ids}) : null;
+  if (ticket === null) return null;
+  const marks = kind === 'ocr_recognize' ? state.sourceMarks : state.marks;
+  return {...ticket, stamp: {basis: state.basis, definitions: Object.fromEntries(ids.map(id => {
+    const definition = state.document!.definitions.find(item => item.id === id)!;
+    return [id, {revision: definition.revision, mark: marks[id]}];
+  })), source: kind === 'template_recognize' ? state.view.revision : null, selection: state.trialSelection}};
+}
+
+// Whether `result` is the host's source for exactly `ticket`'s request.
+function generatedFor(ticket:GenerationTicket, result:CopyResult):boolean {
+  return result.capture_id === ticket.capture_id && result.document_revision === ticket.document_revision
+    && sameJson(result.definition_ids, ticket.definition_ids);
+}
+
+// Provenance of a host generation for `ticket`; null when the result belongs to another request.
+export function snippetProvenance(ticket:GenerationTicket, result:CopyResult):SnippetProvenance|null {
+  if (!generatedFor(ticket, result)) return null;
+  return {revision: ticket.revision, capture: ticket.capture_id, kind: ticket.kind, ids: [...ticket.definition_ids], basis: result.basis,
+    verification: ticket.kind === 'game_content' ? 'not_applicable' : result.verified ? 'verified' : 'unverified'};
 }
 
 // `result` is the host's complete generated source envelope; `error` its refusal or the clipboard failure.
 export function applyCopy(state:RecognitionState, ticket:CopyTicket, result:CopyResult|null, error:Fault|null):RecognitionState {
   if (ticket.token !== state.owner.token || ticket.capture_id !== state.view.capture_id || ticket.document_revision !== state.view.document_revision
-    || (result !== null && (result.capture_id !== ticket.capture_id || result.document_revision !== ticket.document_revision))) return state;
+    || (result !== null && !generatedFor(ticket, result))) return state;
   const copy: CopyRecord = {capture_id: ticket.capture_id, definition_ids: result?.definition_ids ?? ticket.definition_ids, stamp: ticket.stamp,
     basis: result?.basis ?? null, verified: result?.verified ?? false, error};
   return {...state, copies: {...state.copies, [ticket.kind]: copy}};

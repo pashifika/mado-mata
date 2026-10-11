@@ -143,6 +143,10 @@ MACOSX_DEPLOYMENT_TARGET=26.5.2 python3 /absolute/pinned-mado-pilot/tools/setup-
 
 These public-facade controlled/replay seams cover terminal commitment, empty
 recognition, grouped queries, newer postconditions, placement and input bounds.
+The `sdk_examples_release_engine_results_and_check_visible_readiness` regression
+also executes SDK examples, checks separate result/observation release, and
+rejects ordinary non-ready text. The pinned facade eagerly links OpenCV even
+with testkit providers, so these tests retain the native build prerequisites.
 They neither discover a live target nor capture/send native input, and need no
 game or OCR model installation. They are separate from the ordinary full CI
 command and do not qualify a native OS/workload.

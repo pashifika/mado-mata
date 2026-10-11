@@ -255,7 +255,11 @@ fn recognition_pixel_reads_exact_odd_frame_bytes_and_refuses_exclusive_bounds() 
         );
     }
     assert_eq!(
-        serde_json::to_value(app.recognition_view(&loaded.owner, &loaded.revision).unwrap()).unwrap(),
+        serde_json::to_value(
+            app.recognition_view(&loaded.owner, &loaded.revision)
+                .unwrap()
+        )
+        .unwrap(),
         before,
     );
 }
@@ -285,7 +289,10 @@ fn recognition_pixel_reads_a_source_pixel_omitted_by_the_bounded_preview() {
     assert!(display.width < width && display.height < height);
     assert!(display.rgba.len() <= images::CROP_MAX_PIXELS * 4);
     assert!(
-        display.rgba.chunks_exact(4).all(|rgba| rgba == [0, 0, 0, 0]),
+        display
+            .rgba
+            .chunks_exact(4)
+            .all(|rgba| rgba == [0, 0, 0, 0]),
         "the unique bottom-right source pixel is absent from the display raster",
     );
     drop((preview, display));
@@ -497,8 +504,8 @@ fn recognition_pixel_preserves_draft_crops_evidence_saved_bytes_and_image_accoun
         raw.capture_id.as_deref().unwrap(),
     )
     .unwrap();
-    let before = serde_json::to_value(app.recognition_view(&raw.owner, &raw.revision).unwrap())
-        .unwrap();
+    let before =
+        serde_json::to_value(app.recognition_view(&raw.owner, &raw.revision).unwrap()).unwrap();
     let crop_budget = pending_crop_budget(&editor);
     let (preview_budget, staged_pixels) = {
         let state = lock(&app.workspaces);
@@ -515,16 +522,15 @@ fn recognition_pixel_preserves_draft_crops_evidence_saved_bytes_and_image_accoun
     let original = retained_frame(app);
     let package_path = Path::new(&editor.view.package_path);
     let saved_files = ["main.ts", "package.json", "recognition/authoring.json"];
-    let package_before =
-        saved_files.map(|relative| fs::read(package_path.join(relative)).unwrap());
+    let package_before = saved_files.map(|relative| fs::read(package_path.join(relative)).unwrap());
     let candidate = app.publisher.open(package_path).unwrap();
     let metadata_before = candidate.recognition().unwrap();
     let crop_before = candidate
         .recognition_crop(raw.capture_id.as_deref().unwrap(), "pending")
         .unwrap()
         .unwrap();
-    let samples = [(0, 0), (15, 0), (0, 11), (15, 11)]
-        .map(|(x, y)| original_pixel(app, &raw, x, y).unwrap());
+    let samples =
+        [(0, 0), (15, 0), (0, 11), (15, 11)].map(|(x, y)| original_pixel(app, &raw, x, y).unwrap());
     for sample in &samples {
         assert_eq!(sample.rgba, [90; 4]);
     }
@@ -599,9 +605,16 @@ fn recognition_pixel_preserves_busy_missing_frame_and_closing_refusals() {
         "WorkspaceBusy",
     );
     drop(command);
-    assert_eq!(original_pixel(app, &loaded, 0, 0).unwrap().rgba, [0, 0, 17, 255]);
     assert_eq!(
-        serde_json::to_value(app.recognition_view(&loaded.owner, &loaded.revision).unwrap()).unwrap(),
+        original_pixel(app, &loaded, 0, 0).unwrap().rgba,
+        [0, 0, 17, 255]
+    );
+    assert_eq!(
+        serde_json::to_value(
+            app.recognition_view(&loaded.owner, &loaded.revision)
+                .unwrap()
+        )
+        .unwrap(),
         before,
     );
     let original = retained_frame(app);
@@ -1484,6 +1497,63 @@ fn copy_never_certifies_a_trial_captured_at_an_older_package_revision() {
     assert!(
         !verified(&saved.committed_revision),
         "the displayed stale row cannot certify a fresh Copy receipt"
+    );
+}
+
+/// Retrieval's acceptance flavor on an owned PNG: setup generates without an engine report,
+/// trial or clipboard, leaves the view untouched, and a newer compatible frame keeps the
+/// same source applicable without inventing evidence.
+#[test]
+fn setup_generation_needs_no_capability_or_trial_and_survives_a_newer_frame() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let owner = &editor.view.owner;
+    let revision = &editor.view.revision;
+    let generate = |view: &RecognitionView| {
+        app.recognition_copy(
+            owner,
+            revision,
+            view.document_revision,
+            &[],
+            SnippetKind::GameContent,
+            &current_capture(app),
+        )
+    };
+    let loaded = editor.load();
+    let frame = loaded.frame.clone().unwrap();
+    assert!(
+        frame.confirmed,
+        "a new capture confirms its full-image default"
+    );
+    let first = generate(&loaded).unwrap();
+    assert!(
+        !first.verified,
+        "setup is geometry, never recognition evidence"
+    );
+    assert_eq!(
+        Some(first.basis),
+        loaded.document.as_ref().map(|document| document.basis)
+    );
+    let after = app.recognition_view(owner, revision).unwrap();
+    assert_eq!(after.capture_id, loaded.capture_id);
+    assert_eq!(after.document_revision, loaded.document_revision);
+    assert_eq!(after.frame.map(|frame| frame.id), Some(frame.id.clone()));
+    assert!(after.trial.is_none());
+    assert!(
+        after.capabilities["max_ocr_zones"].is_null(),
+        "generation never discovers engine capabilities"
+    );
+
+    let newer = editor.load();
+    let newer_frame = newer.frame.as_ref().unwrap();
+    assert_ne!(newer_frame.id, frame.id);
+    assert!(newer_frame.confirmed);
+    let second = generate(&newer).unwrap();
+    assert_eq!(second.source, first.source);
+    assert!(!second.verified);
+    assert!(
+        generate(&loaded).is_err(),
+        "the replaced frame's draft revision cannot generate"
     );
 }
 
