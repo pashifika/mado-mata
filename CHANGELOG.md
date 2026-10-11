@@ -5,6 +5,8 @@
 - Add a separate [Plugins dialog](docs/desktop.md#install-select-and-remove-the-adapter)
   for the application-supplied OMP adapter: reviewed user-scope Install, Update,
   Uninstall and checkout migration with verified readback and fresh-session guidance.
+  Separate System/External tabs and compact entries from per-plugin Details pages;
+  navigation retains in-flight actions, target selection and historical receipts.
 - Join Undo/Redo as two independent buttons; move editable Metadata history and
   Discard into its heading while keeping File actions in the source toolbar.
 - Add [OMP collaboration](docs/desktop.md#collaborate-through-omp) for shared

@@ -606,11 +606,14 @@ Open **Application → Plugins**, beside **App settings**. It is available after
 Setup even with no workspace selected and is independent of Settings Save/Cancel.
 Opening it does not save drafts, replace the Edit owner or remount the editor.
 
-The **System plugins → Agent integration → OMP** row shows the actual executable,
+The **System plugins** tab lists compact entries. Choose **Details** on **Agent
+integration** to open its page; the **OMP** target shows the actual executable,
 user installation root, installed version/source and version included with this
-build. System means MadoMata provenance, not OS-wide or mandatory installation.
-This integration has installation actions, not an On/Off switch. **External
-plugins** are explicitly unsupported.
+build. **Back to plugins** returns to the list. System means MadoMata provenance,
+not OS-wide or mandatory installation. This integration has installation actions,
+not an On/Off switch. The separate **External plugins** tab is unsupported and
+offers no import or installation action. Detail pages are application-provided;
+there is no public plugin settings-page SDK.
 
 - **Install** prepares a checked payload in
   `<data-dir>/plugins/omp/<version>-<content>/`, registers it through OMP and
@@ -632,23 +635,27 @@ installation at `$HOME/.omp`. Named profiles, redirected agent/plugin data and
 ambiguous executable discovery are refused; project-local installation is not
 offered. OMP's npm/link commands do not use generic scope flags to select a
 different registry. Enter an absolute executable path and choose **Check** to
-resolve discovery ambiguity. Missing, old or incapable clients are reported;
-MadoMata never installs or updates OMP itself or edits its private configuration.
+resolve discovery ambiguity. This is a session target selector, not a saved app
+preference. Missing, old or incapable clients are reported; MadoMata never installs
+or updates OMP itself or edits its private configuration.
 OMP 18.8.7 and 18.8.9 require `bun` on PATH for npm-plugin Uninstall.
 Management includes the executable's directory and usual user/Homebrew tool
 directories when launching OMP, including from a minimal-PATH GUI. Install Bun
 yourself if needed; a missing companion is reported as a failed operation, not
 adapter removal. MadoMata does not install companion tools.
 
-Every confirmation is tied to the displayed observation. Refresh, Check or an
-executable edit withdraws it; the host rechecks target/source before dispatch.
-Closing Plugins does not cancel an admitted action: reopen it to see progress
-or the read-back result. Draft editing and owner-attributed Stop/Return remain
-independent. Commands have finite duration/output bounds. A failed or unreadable
-readback is not success or proof of rollback; **Refresh** inspects current state
-without replaying the mutation. Interrupted publication is reported as unknown
-on subsequent inspection. Prepared payloads are outside configuration snapshots
-and are not automatically removed.
+Every confirmation is tied to the displayed observation. Refresh, Check, an
+executable edit, Back or Close withdraws it; the host rechecks target/source before
+dispatch. Tab and page navigation preserve the target selector and do not dispatch
+management commands. An admitted action continues across Back or Close: return to
+the entry to see progress or the **Last operation** receipt. Details retains that
+receipt's target attribution even after another executable is selected.
+Draft editing and owner-attributed Stop/Return remain independent. Commands have
+finite duration/output bounds. A failed or unreadable readback is not success or
+proof of rollback; **Refresh** inspects current state without replaying the
+mutation. Interrupted publication is reported as unknown on subsequent inspection.
+Prepared payloads are outside configuration snapshots and are not automatically
+removed.
 
 Before Update, migration or Uninstall, disconnect connected OMP sessions with
 `/mado disconnect {}`. Then start a fresh OMP session and use `/extensions` to

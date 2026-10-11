@@ -1,15 +1,31 @@
-/* Plugins dialog: a bounded column, so the header, strip and footer stay reachable at the minimum window size
-   while only the body scrolls. Selectors outrank the shared rules, which load after this file. */
+/* Plugins dialog: a bounded column, so the header, strip, navigation and footer stay reachable at the minimum window
+   size while only the body scrolls. Selectors outrank the shared rules, which load after this file. */
 .modal.plugins-dialog { width: min(700px, calc(100vw - 30px)); }
 .plugins-dialog[open] { display: flex; flex-direction: column; }
 .plugins-dialog > :not(.dialog-body) { flex: 0 0 auto; }
 .plugins-dialog > .dialog-body { flex: 1 1 auto; min-height: 0; max-height: none; overscroll-behavior-y: contain; }
 
-.plugin-section h3 { margin: 0 0 4px; font-size: 14px; }
-.plugin-section + .plugin-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
-.plugin-card { margin-top: 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-alt); }
-.plugin-card h4 { margin: 0 0 4px; font-size: 13px; }
-.plugin-card h5 { margin: 12px 0 6px; font-size: 10px; letter-spacing: .6px; text-transform: uppercase; color: var(--text-muted); }
+/* List tabs or the detail page's Back control; one compact row either way. */
+.plugins-nav { display: flex; align-items: flex-end; min-height: 38px; padding: 4px 24px 0; border-bottom: 1px solid var(--border); }
+.plugins-tabs { display: flex; gap: 2px; min-width: 0; }
+.plugins-dialog .plugins-tabs > button[role="tab"] { margin-bottom: -1px; padding: 8px 12px 7px; border: 0; border-bottom: 2px solid transparent; border-radius: 4px 4px 0 0;
+  background: transparent; color: var(--text-muted); font-size: 12px; font-weight: 500; white-space: nowrap; }
+.plugins-dialog .plugins-tabs > button[role="tab"]:hover:not(:disabled) { border-color: transparent; border-bottom-color: var(--border-strong); background: var(--surface-alt); color: var(--text); }
+.plugins-dialog .plugins-tabs > button[role="tab"][aria-selected="true"] { border-bottom-color: var(--accent); color: var(--text); font-weight: 600; }
+.plugins-dialog .plugins-nav > #plugins-back { align-self: center; margin-bottom: 4px; padding: 5px 10px; font-size: 12px; white-space: nowrap; }
+
+.plugin-list { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+.plugin-entry { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-alt); }
+.plugin-entry-text { display: grid; gap: 4px; flex: 1 1 auto; min-width: 0; }
+.plugin-entry h3 { margin: 0; font-size: 13px; }
+.plugin-entry p { margin: 0; font-size: 11px; overflow-wrap: anywhere; }
+.plugin-entry-target { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.plugin-entry-activity { color: var(--warn); font-weight: 600; }
+.plugin-entry-activity.plugin-outcome-verified { color: var(--ok); }
+.plugin-entry > button { flex-shrink: 0; white-space: nowrap; }
+
+.plugin-detail h3 { margin: 0 0 4px; font-size: 14px; }
+.plugin-detail h4 { margin: 14px 0 6px; font-size: 10px; letter-spacing: .6px; text-transform: uppercase; color: var(--text-muted); }
 
 .plugin-facts { display: grid; grid-template-columns: minmax(96px, 150px) minmax(0, 1fr); gap: 4px 10px; margin: 8px 0; font-size: 11px; }
 .plugin-facts dt { color: #6b7c90; }
@@ -17,7 +33,7 @@
 .plugin-facts .mono { font-size: 10px; }
 
 .plugin-targets { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.plugin-target { min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.plugin-target { min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-alt); }
 .plugin-target-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
 .tag.plugin-state-current { color: var(--ok); background: var(--ok-soft); }
 .tag:is(.plugin-state-update_available, .plugin-state-legacy, .plugin-state-conflict) { color: var(--warn); background: var(--warn-soft); }
@@ -33,7 +49,7 @@
 .plugin-state-help { margin: 8px 0; font-size: 11px; overflow-wrap: anywhere; }
 
 .plugin-confirmation { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--warn); border-radius: 6px; background: var(--warn-soft); overflow-wrap: anywhere; }
-.plugin-confirmation h5 { margin-top: 0; font-size: 12px; letter-spacing: 0; text-transform: none; color: var(--text); }
+.plugin-confirmation h5 { margin: 0 0 6px; font-size: 12px; }
 .plugin-confirmation p { font-size: 11px; }
 .plugin-confirmation .button-row { margin-bottom: 0; }
 .plugin-pending strong, .plugin-result > strong { display: block; }
