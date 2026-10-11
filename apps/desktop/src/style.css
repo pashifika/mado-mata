@@ -552,6 +552,9 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .repo-main { min-width: 0; }
 .main-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 9px 14px; border-bottom: 1px solid var(--border); background: var(--surface-alt); border-radius: var(--radius) var(--radius) 0 0; }
 .file-title { flex: 1 1 220px; min-width: 0; margin: 0; font-size: 13px; }
+.metadata-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: auto; }
+.metadata-actions > *, .metadata-actions button { flex-shrink: 0; }
+.metadata-actions button { padding: 5px 10px; min-height: 28px; font-size: 11px; white-space: nowrap; }
 .file-crumbs { margin: 2px 0 0; font-size: 13px; font-weight: 400; overflow-wrap: anywhere; }
 .crumb-separator { margin: 0 3px; color: var(--text-faint); }
 .repo-body { min-width: 0; padding: 14px 16px 16px; }

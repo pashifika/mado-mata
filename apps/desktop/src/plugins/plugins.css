@@ -1,0 +1,48 @@
+/* Plugins dialog: a bounded column, so the header, strip and footer stay reachable at the minimum window size
+   while only the body scrolls. Selectors outrank the shared rules, which load after this file. */
+.modal.plugins-dialog { width: min(700px, calc(100vw - 30px)); }
+.plugins-dialog[open] { display: flex; flex-direction: column; }
+.plugins-dialog > :not(.dialog-body) { flex: 0 0 auto; }
+.plugins-dialog > .dialog-body { flex: 1 1 auto; min-height: 0; max-height: none; overscroll-behavior-y: contain; }
+
+.plugin-section h3 { margin: 0 0 4px; font-size: 14px; }
+.plugin-section + .plugin-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.plugin-card { margin-top: 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-alt); }
+.plugin-card h4 { margin: 0 0 4px; font-size: 13px; }
+.plugin-card h5 { margin: 12px 0 6px; font-size: 10px; letter-spacing: .6px; text-transform: uppercase; color: var(--text-muted); }
+
+.plugin-facts { display: grid; grid-template-columns: minmax(96px, 150px) minmax(0, 1fr); gap: 4px 10px; margin: 8px 0; font-size: 11px; }
+.plugin-facts dt { color: #6b7c90; }
+.plugin-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.plugin-facts .mono { font-size: 10px; }
+
+.plugin-targets { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.plugin-target { min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.plugin-target-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.tag.plugin-state-current { color: var(--ok); background: var(--ok-soft); }
+.tag:is(.plugin-state-update_available, .plugin-state-legacy, .plugin-state-conflict) { color: var(--warn); background: var(--warn-soft); }
+.tag:is(.plugin-state-missing, .plugin-state-unsupported, .plugin-state-incompatible) { color: var(--danger); background: var(--danger-soft); }
+.plugin-target-heading strong { font-size: 13px; }
+.plugin-target-heading button { margin-left: auto; flex-shrink: 0; }
+
+.plugin-executable { margin: 10px 0 6px; }
+.plugin-executable-row { display: flex; gap: 6px; align-items: stretch; }
+.plugin-executable-row input { flex: 1 1 auto; font-family: var(--mono); font-size: 11px; }
+.plugin-executable-row button { flex-shrink: 0; }
+.plugin-identity > summary { font-size: 11px; color: var(--text-muted); }
+.plugin-state-help { margin: 8px 0; font-size: 11px; overflow-wrap: anywhere; }
+
+.plugin-confirmation { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--warn); border-radius: 6px; background: var(--warn-soft); overflow-wrap: anywhere; }
+.plugin-confirmation h5 { margin-top: 0; font-size: 12px; letter-spacing: 0; text-transform: none; color: var(--text); }
+.plugin-confirmation p { font-size: 11px; }
+.plugin-confirmation .button-row { margin-bottom: 0; }
+.plugin-pending strong, .plugin-result > strong { display: block; }
+.plugin-pending p, .plugin-result p { margin: 4px 0 0; font-size: 11px; }
+.plugin-sessions { margin-top: 12px; padding-top: 4px; border-top: 1px solid var(--border); font-size: 11px; }
+.plugin-sessions p { margin-bottom: 6px; }
+.plugin-unsupported { margin: 6px 0 0; padding: 10px 12px; border: 1px dashed var(--border-strong); border-radius: 6px; color: var(--text-muted); font-size: 11px; }
+
+@media (max-width: 560px) {
+  .plugin-facts { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .plugin-facts dd { margin-bottom: 6px; }
+}

@@ -368,17 +368,14 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const fileView = selected && <>
     {selected.diskChanged && <p className="inline-warning">{a.diskChangedHelp}</p>}
     {selected.missing && <p className="inline-warning">{a.missingHelp}</p>}
-    {text && (text.kind === 'manifest' || text.kind === 'schema' || text.kind === 'profile') && <div className="editor-toolbar">
-      <ButtonHint hint={a.discardHint}>
-        <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(text) || readOnly} onClick={() => handlers.discard(text.path)}>{a.discardFile}</button>
-      </ButtonHint>
-    </div>}
     {editable && <>
       {/* Find floats above the toolbar without moving controls or padding the code viewport. */}
       <div className="source-tools">
       <div className="editor-toolbar source-toolbar">
-        <button id="authoring-undo" type="button" disabled={sourceReadOnly || editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
-        <button id="authoring-redo" type="button" disabled={sourceReadOnly || editable.redo.length === 0 || editable.composing !== null} onClick={() => handlers.redo(editable.path)}>{a.redo}</button>
+        <div className="segmented" role="group" aria-label={`${a.undo} / ${a.redo}`}>
+          <button id="authoring-undo" type="button" disabled={sourceReadOnly || editable.undo.length === 0 || editable.composing !== null} onClick={() => handlers.undo(editable.path)}>{a.undo}</button>
+          <button id="authoring-redo" type="button" disabled={sourceReadOnly || editable.redo.length === 0 || editable.composing !== null} onClick={() => handlers.redo(editable.path)}>{a.redo}</button>
+        </div>
         <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(editable) || readOnly || editable.composing !== null} onClick={() => handlers.discard(editable.path)}>{a.discardFile}</button>
         <ButtonHint hint={a.completionHint}>
           <button id="authoring-complete" type="button" disabled={!completionContext} aria-keyshortcuts="Control+Space"
@@ -454,12 +451,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
     {text && (text.kind === 'manifest' || text.kind === 'schema' || text.kind === 'profile') && <div
       onCompositionStart={() => handlers.compositionStart(text.path, {start: 0, end: 0})}
       onCompositionEnd={() => handlers.compositionEnd(text.path)}>
-      <div className="editor-toolbar">
-        <button id="authoring-undo" type="button" disabled={formDisabled || text.undo.length === 0 || text.composing !== null}
-          onClick={() => handlers.undo(text.path)}>{a.undo}</button>
-        <button id="authoring-redo" type="button" disabled={formDisabled || text.redo.length === 0 || text.composing !== null}
-          onClick={() => handlers.redo(text.path)}>{a.redo}</button>
-      </div>
     {text?.kind === 'manifest' && <ManifestEditor key={text.path} draft={text} disabled={formDisabled}
       onReplace={next => handlers.replace(text.path, next)} onOpen={path => handlers.select(path, null)}/>}
     {text?.kind === 'schema' && <SchemaEditor key={text.path} draft={text} disabled={formDisabled} onReplace={(next, typed) => handlers.replace(text.path, next, typed)}/>}
@@ -573,6 +564,18 @@ export default function EditPage({session, label, handlers, recognition, recogni
           {selected && (fileDirty(selected) || selected.diskChanged) && <span className="tree-meta">
             {fileDirty(selected) && <span id="authoring-file-dirty" className="tag unsaved">{a.unsaved}</span>}
             {selected.diskChanged && <span className="tag stale">{a.diskChanged}</span>}</span>}
+          {text && (text.kind === 'manifest' || text.kind === 'schema' || text.kind === 'profile') && <div className="metadata-actions">
+            <div className="segmented" role="group" aria-label={`${a.undo} / ${a.redo}`}>
+              <button id="authoring-undo" type="button" disabled={formDisabled || text.undo.length === 0 || text.composing !== null}
+                onClick={() => handlers.undo(text.path)}>{a.undo}</button>
+              <button id="authoring-redo" type="button" disabled={formDisabled || text.redo.length === 0 || text.composing !== null}
+                onClick={() => handlers.redo(text.path)}>{a.redo}</button>
+            </div>
+            <ButtonHint hint={a.discardHint}>
+              <button id="authoring-discard-file" type="button" className="danger-text" disabled={!fileDirty(text) || readOnly}
+                onClick={() => handlers.discard(text.path)}>{a.discardFile}</button>
+            </ButtonHint>
+          </div>}
         </div>
         {selected && <div className="repo-body">{fileView}</div>}
         {recognitionSelected && <div className="repo-body">{recognition}</div>}

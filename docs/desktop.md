@@ -59,6 +59,11 @@ the ES2020 declaration closure from the pinned frontend TypeScript dependency.
 No CDN, runtime type download, package plugin or package-selected compiler is
 used. The editor and execution compiler share the application-owned SDK generator.
 
+The Rust shell embeds only the OMP adapter's `package.json`, `index.mjs` and
+`client.mjs` from `integrations/omp`. Debug and production shell builds include
+the same version/content-identified payload; installing it needs no runtime
+checkout, `node_modules` or online adapter registry.
+
 ```sh
 rustup toolchain install 1.98.1 --profile minimal
 npm ci --ignore-scripts --no-audit --no-fund --prefix tools/runtime-comparison/compiler
@@ -363,7 +368,9 @@ Neither action inspects, binds, or runs the package.
   its line endings and UTF-16 positions, including non-BMP characters. File-tree assets
   are inventory facts, not decoded or text-edited; image authoring belongs to
   **Recognition**.
-  Script actions share one compact row, with **Find** at the right.
+  Script actions share one compact row, with joined **Undo**/**Redo** buttons
+  and **Find** at the right. Undo and Redo remain separate keyboard-focusable
+  actions with independent availability and the selected file's existing history.
   **Find** or **Cmd/Ctrl+F** opens a panel immediately above that row.
   Normal Script buttons remain visible and available, without moving the toolbar
   or the code. The panel can cover part of the file heading at narrow widths.
@@ -386,6 +393,10 @@ Neither action inspects, binds, or runs the package.
   Malformed schema/preset bytes remain unchanged until deliberate repair and
   Save; rebuilding an invalid document requires confirmation. Saved local
   workspace profiles are not part of these forms.
+  Editable metadata places joined **Undo**/**Redo** and the separate
+  **Discard changes** action beside its heading/path. They affect only that
+  resource. Script history and Discard stay in the source toolbar; read-only
+  source maps, assets and Recognition controls are unchanged.
 - **+** beside the tree's collapse button adds a source, preset, JSON asset or
   source map. Image crops are saved separately through **Recognition**.
   Group headings, folders and blank tree space have no context menus.
@@ -578,7 +589,7 @@ separate work.
 
 ## Collaborate through OMP
 
-The checkout-owned [OMP extension](../integrations/omp/package.json) connects
+The application-supplied [OMP extension](../integrations/omp/package.json) connects
 to the desktop's main-window authoring controller through private, authenticated
 Unix-domain IPC. UI and OMP share the same unsaved drafts, Edit lease and
 publication rules; the adapter is not a second editor or a saved-file mirror.
@@ -591,17 +602,72 @@ UI-only authoring remains available without the adapter.
 Use OMP **18.8.7 or newer**, with no exact pin or upper bound. Registration
 requires OMP's tool, command, lifecycle and schema APIs; a missing capability
 or incompatible protocol is a refusal, not permission to fall back to disk.
-From the product repository root, link this checkout into OMP:
+Open **Application → Plugins**, beside **App settings**. It is available after
+Setup even with no workspace selected and is independent of Settings Save/Cancel.
+Opening it does not save drafts, replace the Edit owner or remount the editor.
+
+The **System plugins → Agent integration → OMP** row shows the actual executable,
+user installation root, installed version/source and version included with this
+build. System means MadoMata provenance, not OS-wide or mandatory installation.
+This integration has installation actions, not an On/Off switch. **External
+plugins** are explicitly unsupported.
+
+- **Install** prepares a checked payload in
+  `<data-dir>/plugins/omp/<version>-<content>/`, registers it through OMP and
+  reads back identity, version and source before reporting success.
+- **Update** is offered only for an older managed adapter. It installs the
+  newer included release, not an online latest release. Identical bytes need
+  no update; newer installed versions are not downgraded; the same version with
+  different content is a conflict.
+- **Review migration** recognizes the original `0.1.0` checkout runtime or the
+  current included runtime. Confirmation replaces only the displayed
+  registration and preserves the checkout. Arbitrary same-name code is not
+  adopted. Copied/non-link registrations require manual reconciliation.
+- **Uninstall** removes only the reviewed registration and verifies its absence.
+  Packages, unsaved drafts, Edit ownership, recovery journals, unrelated plugins
+  and prepared payloads are retained.
+
+Management currently supports the macOS desktop and the normal OMP user
+installation at `$HOME/.omp`. Named profiles, redirected agent/plugin data and
+ambiguous executable discovery are refused; project-local installation is not
+offered. OMP's npm/link commands do not use generic scope flags to select a
+different registry. Enter an absolute executable path and choose **Check** to
+resolve discovery ambiguity. Missing, old or incapable clients are reported;
+MadoMata never installs or updates OMP itself or edits its private configuration.
+OMP 18.8.7 and 18.8.9 require `bun` on PATH for npm-plugin Uninstall.
+Management includes the executable's directory and usual user/Homebrew tool
+directories when launching OMP, including from a minimal-PATH GUI. Install Bun
+yourself if needed; a missing companion is reported as a failed operation, not
+adapter removal. MadoMata does not install companion tools.
+
+Every confirmation is tied to the displayed observation. Refresh, Check or an
+executable edit withdraws it; the host rechecks target/source before dispatch.
+Closing Plugins does not cancel an admitted action: reopen it to see progress
+or the read-back result. Draft editing and owner-attributed Stop/Return remain
+independent. Commands have finite duration/output bounds. A failed or unreadable
+readback is not success or proof of rollback; **Refresh** inspects current state
+without replaying the mutation. Interrupted publication is reported as unknown
+on subsequent inspection. Prepared payloads are outside configuration snapshots
+and are not automatically removed.
+
+Before Update, migration or Uninstall, disconnect connected OMP sessions with
+`/mado disconnect {}`. Then start a fresh OMP session and use `/extensions` to
+inspect loading. Registration does not establish loading or connection, and
+already running sessions may retain their earlier code. MadoMata never restarts
+or terminates those sessions.
+
+For deliberate checkout development, the manual alternative remains:
 
 ```sh
 omp plugin link ./integrations/omp
 omp
 ```
 
-No adapter dependency installation, private settings, model plugin or OMP core
-change is required. Keep the linked checkout available. Alternatively, load only
-for one invocation with `omp -e ./integrations/omp/index.mjs`; do not also link
-the same extension. Use `/extensions` in a fresh OMP session to inspect loading.
+Keep that checkout available until explicit migration. Alternatively, load only
+for one invocation with `omp -e ./integrations/omp/index.mjs`; do not also register
+the same extension. No adapter dependency installation, model plugin or OMP core
+change is required.
+
 The extension registers `/mado` and 22 corresponding `mado_*` tools. For example,
 `/mado context {}` and `mado_context` with `{}` invoke the same operation.
 
@@ -659,16 +725,10 @@ result can change the adapter's binding to its returned `connection`. An owner
 changed by the desktop, a restarted instance or a lost lifecycle reply requires
 fresh discovery and explicit selection.
 
-To remove the linked adapter, first disconnect in OMP, then remove the link
-from a shell and start a fresh OMP session:
-
-```text
-/mado disconnect {}
-```
-
-```sh
-omp plugin uninstall @madomata/omp-authoring
-```
+Prefer the reviewed **Uninstall** action in Plugins. For a deliberately
+manually linked checkout, the equivalent shell removal remains
+`omp plugin uninstall @madomata/omp-authoring`; disconnect first and verify
+absence in a fresh session.
 
 For invocation-only loading, omit `-e` next time instead. Disconnect, OMP session
 switch and shutdown forget connection/cursor state and cancel pending adapter
@@ -922,11 +982,14 @@ calls:
   Adapter uninstall left package bytes and the unsaved UI draft unchanged;
   UI Save/Undo/Redo remained usable in a fresh adapter-absent OMP session.
 
-No newer OMP release was available when checked. This does not establish future
-compatibility, Windows/Linux interactive qualification, physical OS IME or
-native-picker acceptance, or native capture/OCR/input qualification. Composition
-used events on the real editor, and the owned PNG used the real host load command,
-not a native picker. No real OCR trial or trial-freshness claim was made.
+Those broader authoring observations used the then-available release. Subsequent
+management checks exercised real OMP `18.8.7` and `18.8.9` in isolated owned user
+state; the first application-managed adapter distribution is `0.1.1`.
+This does not establish future compatibility, Windows/Linux interactive
+qualification, physical OS IME or native-picker acceptance, or native
+capture/OCR/input qualification. Composition used events on the real editor,
+and the owned PNG used the real host load command, not a native picker.
+No real OCR trial or trial-freshness claim was made.
 The minimum is a floor, not a tested-version allowlist. Deterministic checks,
 actual WebView observations and separately authorized native evidence remain
 separate.
