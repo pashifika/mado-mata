@@ -52,6 +52,7 @@ export default function PluginsDialog({open, onClose, plugins: {state, session},
     const requested = focusRequest === null ? null : dialog.querySelector<HTMLElement>(focusRequest);
     if (requested && !requested.matches(':disabled')) {
       requested.focus();
+      requested.closest('.plugin-confirmation')?.scrollIntoView({block: 'nearest'});
       return;
     }
     const active = document.activeElement;
@@ -72,7 +73,7 @@ export default function PluginsDialog({open, onClose, plugins: {state, session},
 
   const admitted = unavailable === null;
   const applying = state.applying;
-  const status = applying ? p.running[applying.action] : state.inspecting ? p.inspecting : unavailable ?? '';
+  const status = applying ? p.running[applying.action] : state.inspecting ? p.inspecting : '';
   const tab = page.kind === 'list' ? page.tab : null;
 
   // Leaving a page withdraws its unconfirmed review; admitted reads and changes continue and report back.
@@ -113,7 +114,7 @@ export default function PluginsDialog({open, onClose, plugins: {state, session},
 
   return <Modal id="plugins" className="plugins-dialog" open={open} labelledBy="plugins-heading"
     onCancel={() => {if (state.confirmation) cancelReview(); else onClose();}} initialFocus="#plugins-tab-system">
-    <div className="dialog-header"><div><h2 id="plugins-heading">{p.heading}</h2><p>{p.intro}</p></div>
+    <div className="dialog-header"><h2 id="plugins-heading">{p.heading}</h2>
       <button type="button" className="icon" aria-label={p.close} title={p.close} onClick={onClose}>×</button></div>
     {strip}
     <div className="plugins-nav">
@@ -127,7 +128,7 @@ export default function PluginsDialog({open, onClose, plugins: {state, session},
           <span aria-hidden="true">← </span>{p.back}</button>}
     </div>
     <div className="dialog-body">
-      {unavailable && <p className="inline-warning">{unavailable}</p>}
+      {unavailable && <p className="inline-warning" role="status">{unavailable}</p>}
       {tab === 'system' && <div id="plugins-panel" role="tabpanel" aria-labelledby="plugins-tab-system">
         <p className="muted">{p.systemHelp}</p>
         <ul className="plugin-list">

@@ -2,7 +2,7 @@ import {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import {ACTION_ORDER, canReview, executableChanged, pluginBusy} from './plugin-management.ts';
-import type {PluginAction, PluginManagementState, PluginResult, PluginView} from './plugin-management.ts';
+import type {PluginAction, PluginManagementState, PluginResult, PluginTarget, PluginView} from './plugin-management.ts';
 
 // Stable identity of the System Agent integration plugin; it names its list entry and its detail page.
 export const AGENT_INTEGRATION = 'agent-integration';
@@ -12,12 +12,12 @@ function resultKind(result: PluginResult) {
   return result.error !== null ? 'rejected' : result.outcome?.status ?? 'unknown';
 }
 
-// Observed facts of one OMP target; a confirmation shows the captured observation it will act on.
+// Current observation; confirmation and historical results retain only their captured target identity.
 function TargetFacts({view}: {view: PluginView}) {
   const p = messages[useLocale()].ui.plugins;
   const compatibility = view.state === 'missing' || view.state === 'unsupported' || view.state === 'incompatible' ? view.state : 'compatible';
   return <dl className="plugin-facts">
-    <dt>{p.executable}</dt><dd className="mono">{view.target?.executable ?? p.notFound}</dd>
+    <dt>{p.executable}</dt><dd className="mono">{view.target?.executable ?? (view.state === 'missing' ? p.notFound : p.notEstablished)}</dd>
     <dt>{p.ompVersion}</dt><dd>{view.target ? `${view.target.version} · ` : ''}{p.minimum(view.minimum_omp_version)}</dd>
     <dt>{p.userRoot}</dt><dd className="mono">{view.target?.user_root ?? p.notEstablished}</dd>
     <dt>{p.installed}</dt><dd>{view.installed ? `${view.installed.version} · ${view.installed.managed ? p.managed : p.unmanaged}` : view.state === 'absent' ? p.notInstalled : p.notEstablished}</dd>
@@ -27,15 +27,20 @@ function TargetFacts({view}: {view: PluginView}) {
   </dl>;
 }
 
+function TargetIdentity({target}: {target: PluginTarget | null}) {
+  const p = messages[useLocale()].ui.plugins;
+  return target && <dl className="plugin-facts">
+    <dt>{p.executable}</dt><dd className="mono">{target.executable}</dd>
+    <dt>{p.userRoot}</dt><dd className="mono">{target.user_root}</dd>
+  </dl>;
+}
+
 function ResultNotice({result}: {result: PluginResult}) {
   const p = messages[useLocale()].ui.plugins;
   const kind = resultKind(result);
   const heading = p.result(kind, result.action);
   const issue = kind === 'rejected' ? fault(result.error) : result.outcome?.issue ?? null;
-  const target = result.target && <dl className="plugin-facts">
-    <dt>{p.executable}</dt><dd className="mono">{result.target.executable}</dd>
-    <dt>{p.userRoot}</dt><dd className="mono">{result.target.user_root}</dd>
-  </dl>;
+  const target = <TargetIdentity target={result.target}/>;
   if (kind === 'verified') return <div id="plugin-result" className="receipt plugin-result" tabIndex={-1} role="status">
     <strong>{heading}</strong>{target}<p>{p.freshSession[result.action]}</p>
   </div>;
@@ -87,12 +92,8 @@ export function AgentIntegrationDetail({state, admitted, onEdit, onRefresh, onCh
   return <section className="plugin-detail" aria-labelledby="plugin-agent-heading">
     <h3 id="plugin-agent-heading" tabIndex={-1}>{p.agentHeading}</h3>
     <p className="muted">{p.agentHelp}</p>
-    <dl className="plugin-facts">
-      <dt>{p.origin}</dt><dd>{p.originSystem}</dd>
-      <dt>{p.activation}</dt><dd>{p.activationInstallation}</dd>
-    </dl>
-    <h4 id="plugin-targets-heading">{p.targets}</h4>
-    <ul className="plugin-targets" aria-labelledby="plugin-targets-heading">
+    <p className="muted">{p.originSystem}</p>
+    <ul className="plugin-targets" aria-label={p.targets}>
       <li className="plugin-target" aria-labelledby="plugin-omp-heading">
         <div className="plugin-target-heading">
           <strong id="plugin-omp-heading">OMP</strong>
@@ -101,7 +102,7 @@ export function AgentIntegrationDetail({state, admitted, onEdit, onRefresh, onCh
           <button id="plugins-refresh" type="button" disabled={!admitted || busy} onClick={onRefresh}>{p.refresh}</button>
         </div>
         <div className="field plugin-executable">
-          <label htmlFor="plugin-executable">{p.executableLabel}</label>
+          <label htmlFor="plugin-executable">{p.executableSelection}</label>
           <div className="plugin-executable-row">
             <input id="plugin-executable" type="text" value={state.executable} spellCheck={false} autoComplete="off" autoCapitalize="off"
               placeholder={p.executablePlaceholder} aria-describedby="plugin-executable-help" onChange={event => onEdit(event.target.value)}/>
@@ -119,10 +120,9 @@ export function AgentIntegrationDetail({state, admitted, onEdit, onRefresh, onCh
               <dl className="plugin-facts"><dt>{p.includedContent}</dt><dd className="mono">{view.included_content}</dd>
                 <dt>{p.installedContent}</dt><dd className="mono">{view.installed ? view.installed.content ?? p.unknownContent : view.state === 'absent' ? p.notInstalled : p.notEstablished}</dd></dl>
             </details>
-            <p className="plugin-state-help">{p.stateHelp(view.state)}</p>
+            {view.state !== 'absent' && view.state !== 'current' && <p className="plugin-state-help">{p.stateHelp(view.state)}</p>}
             {view.issue && <FaultMessage title={p.issue} value={view.issue}/>}
             {executableChanged(state) && <p className="inline-warning">{p.executableChanged}</p>}
-            {state.stale && <p className="inline-warning">{p.stale}</p>}
             {state.withdrawn && <p className="inline-warning" role="status">{p.withdrawn}</p>}
             {offered.length > 0
               ? <div className="button-row">{offered.map(action => <button key={action} id={`plugin-action-${action}`} type="button"
@@ -134,7 +134,7 @@ export function AgentIntegrationDetail({state, admitted, onEdit, onRefresh, onCh
               <h5 id="plugin-confirm-heading">{p.confirmHeading[confirmation.action]}</h5>
               <p>{p.confirmBody(confirmation.action, {included: confirmation.view.included_version,
                 installed: confirmation.view.installed?.version ?? p.notInstalled, source: confirmation.view.installed?.source ?? p.notInstalled})}</p>
-              <TargetFacts view={confirmation.view}/>
+              <TargetIdentity target={confirmation.view.target}/>
               {confirmation.action !== 'install' && <p>{p.sessionDisconnect} <code>{'/mado disconnect {}'}</code></p>}
               <p className="field-help">{p.confirmScope}</p>
               <div className="button-row">

@@ -606,12 +606,12 @@ Open **Application → Plugins**, beside **App settings**. It is available after
 Setup even with no workspace selected and is independent of Settings Save/Cancel.
 Opening it does not save drafts, replace the Edit owner or remount the editor.
 
-The **System plugins** tab lists compact entries. Choose **Details** on **Agent
+The **System** tab lists compact entries. Choose **Details** on **Agent
 integration** to open its page; the **OMP** target shows the actual executable,
 user installation root, installed version/source and version included with this
-build. **Back to plugins** returns to the list. System means MadoMata provenance,
+build. **Back** returns to the list. System means MadoMata provenance,
 not OS-wide or mandatory installation. This integration has installation actions,
-not an On/Off switch. The separate **External plugins** tab is unsupported and
+not an On/Off switch. The separate **External** tab is unsupported and
 offers no import or installation action. Detail pages are application-provided;
 there is no public plugin settings-page SDK.
 

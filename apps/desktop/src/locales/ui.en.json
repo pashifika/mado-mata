@@ -1149,30 +1149,24 @@
   },
   "plugins": {
     "heading": "Plugins",
-    "intro": "Manage plugins for your user account on this machine. Plugins are separate from app settings and workspaces; opening this dialog does not change drafts, Edit ownership or packages.",
     "close": "Close plugins",
     "unavailable": "Plugin management is available once the application is ready. Nothing was read or changed.",
-    "systemHeading": "System plugins",
-    "systemHelp": "Supplied and maintained by MadoMata. System describes where a plugin comes from; it is not installed OS-wide, is not mandatory and can be uninstalled.",
-    "externalHeading": "External plugins",
-    "externalHelp": "External plugins are not supported. MadoMata does not install, import or load plugins from other sources and has no plugin marketplace.",
+    "systemHeading": "System",
+    "systemHelp": "Supplied and maintained by MadoMata.",
+    "externalHeading": "External",
+    "externalHelp": "External plugins are not supported.",
     "agentHeading": "Agent integration",
     "agentHelp": "Lets a supported coding agent work on Edit drafts through the explicit connect-and-disclose workflow. Installing it shares nothing by itself.",
     "agentSummary": "Lets a supported coding agent work on Edit drafts through the explicit /mado workflow.",
     "sources": "Plugin sources",
     "details": "Details",
-    "back": "Back to plugins",
+    "back": "Back",
     "entryNotRead": "Not read yet",
     "latestOperation": "Last operation:",
-    "origin": "Origin",
     "originSystem": "System · supplied by MadoMata",
-    "activation": "Activation",
-    "activationInstallation": "Installation only · no On/Off switch",
     "included": "Included with this build",
     "targets": "Agent targets",
-    "scope": "Scope",
     "userScope": "User installation",
-    "executableLabel": "OMP executable",
     "executablePlaceholder": "Automatic discovery",
     "executableHelp": "Leave blank to discover OMP for your user account, or enter the absolute path of another executable and choose Check. MadoMata never installs or updates OMP itself.",
     "check": "Check",
@@ -1183,6 +1177,7 @@
     "inspectFailedHelp": "Nothing was changed. Correct the executable or Refresh.",
     "notRead": "Not read yet. Refresh to read the OMP installation.",
     "executable": "Executable",
+    "executableSelection": "Executable to check",
     "notFound": "Not found",
     "ompVersion": "OMP version",
     "minimum": "requires {version} or newer",
@@ -1195,8 +1190,8 @@
     "source": "Installed source",
     "compatibility": "Compatibility",
     "compatibilityStates": {
-      "missing": "Not checked · OMP not found",
-      "unsupported": "Unsupported",
+      "missing": "Not checked",
+      "unsupported": "Not established",
       "incompatible": "Incompatible",
       "compatible": "Compatible"
     },
@@ -1207,7 +1202,7 @@
     "issue": "Target issue",
     "states": {
       "missing": "OMP not found",
-      "unsupported": "Unsupported",
+      "unsupported": "Unavailable",
       "incompatible": "Incompatible OMP",
       "absent": "Not installed",
       "current": "Up to date",
@@ -1216,16 +1211,14 @@
       "conflict": "Needs reconciliation"
     },
     "stateHelp": {
-      "missing": "No OMP executable was found for your user account. Install OMP yourself, or enter its absolute path and choose Check. Nothing will be installed.",
-      "unsupported": "Managed installation is not supported for this platform or installation scope. Nothing will be changed.",
+      "missing": "Install OMP yourself, or enter its absolute path and choose Check.",
+      "unsupported": "See the target issue below.",
       "incompatible": "This OMP is older than the supported minimum or lacks a required plugin-management capability. Update OMP yourself, then Refresh.",
-      "absent": "The adapter is not registered in this OMP user installation.",
-      "current": "The installed adapter matches the version and payload included with this build. No update is needed.",
       "update_available": "An older adapter installed by MadoMata can be updated to the version included with this build.",
       "legacy": "The same adapter is registered from another source, such as a checkout link. Review the migration to replace only that registration; the source itself is kept.",
-      "conflict": "The installed adapter is newer than the included one, or differs from it under the same version. It is not replaced or downgraded automatically."
+      "conflict": "Review the target issue below. Nothing is replaced or downgraded automatically."
     },
-    "unknownStateHelp": "This build does not recognize the reported installation state. Nothing will be changed.",
+    "unknownStateHelp": "This build does not recognize the reported installation state.",
     "actions": {
       "install": "Install",
       "update": "Update",
@@ -1252,7 +1245,7 @@
       "migrate": "Replaces only the registration from {source} with adapter {included} supplied by this build. The original source directory is not changed or deleted."
     },
     "confirm": {
-      "install": "Confirm install",
+      "install": "Confirm",
       "update": "Confirm update",
       "uninstall": "Confirm uninstall",
       "migrate": "Confirm migration"
@@ -1266,7 +1259,6 @@
       "migrate": "Migrating…"
     },
     "pending": "Target {executable}. Closing Plugins does not cancel this; reopen Plugins to see the read-back result.",
-    "stale": "The last request returned no current observation. Refresh before another change; nothing is retried automatically.",
     "result": {
       "verified": "{action} verified by read-back",
       "unknown": "{action} outcome unknown",
@@ -1285,7 +1277,7 @@
       "migrate": "Start a fresh OMP session to load the supplied adapter. Sessions already running keep the code they loaded."
     },
     "sessionHeading": "Running OMP sessions",
-    "sessionHelp": "Installation is not loading or connection. A registration change reaches only fresh OMP sessions; MadoMata never restarts, stops or reconfigures OMP.",
+    "sessionHelp": "Running OMP sessions keep the code they loaded. MadoMata does not restart or stop them.",
     "sessionDisconnect": "Before Update, Uninstall or migration, disconnect each connected session:",
     "sessionFresh": "Afterwards, start a fresh OMP session and inspect loading with:"
   },
