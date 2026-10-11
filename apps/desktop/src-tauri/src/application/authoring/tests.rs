@@ -940,7 +940,22 @@ fn pending_restore_evidence_blocks_commands_but_not_close_and_survives_shutdown(
 fn retired_application_can_still_close() {
     let sources = Sources::new();
     let app = sources.app();
-    app.prepare_reconstruction().unwrap();
+    // A logger timeout still retires the application.
+    match app.prepare_reconstruction() {
+        Ok(()) => {
+            let status = app.logger.status();
+            assert!(status.shutdown_complete);
+            assert!(!status.shutdown_timed_out);
+            assert_eq!(status.file_pending, 0);
+        }
+        Err(error) => {
+            assert_eq!(error.category, "LoggingShutdown");
+            assert_eq!(error.context["application_retired"], true);
+            assert_eq!(error.context["logging"]["accepting"], false);
+            assert_eq!(error.context["logging"]["shutdown_timed_out"], true);
+        }
+    }
+    assert!(app.closing.load(Ordering::Acquire));
     app.prepare_close(None).unwrap();
     assert_eq!(
         app.create_workspace("late", "Late").unwrap_err().category,
