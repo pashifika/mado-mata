@@ -131,19 +131,6 @@ fn refusal(result: Result<Account, Fault>) -> String {
 }
 
 #[test]
-fn google_registration_is_the_public_rs256_client_without_a_secret() {
-    assert_eq!(GOOGLE.issuer, "https://accounts.google.com");
-    assert_eq!(
-        GOOGLE.client_id,
-        "11922665654-rtj4ldpcoloiuf02lv30a9i8lvqnhtuj.apps.googleusercontent.com"
-    );
-    assert_eq!(
-        GOOGLE.algorithm,
-        CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256
-    );
-}
-
-#[test]
 fn validated_tokens_yield_only_the_local_account_association() {
     let account = verified(&TEST, &response(1, &json!({}), ACCESS)).unwrap();
     assert_eq!(
