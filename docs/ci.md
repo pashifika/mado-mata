@@ -180,6 +180,8 @@ The full check has these responsibilities:
   batch edits, ABA/IME refusal, structured-field provenance, chronological
   Undo, snippet dependencies, publication prefixes and lifecycle resolution.
   These deterministic checks do not prove physical OS IME or editor interaction.
+  Plugin-dialog state checks cover pending work across closure, withdrawn
+  confirmations and fresh-observation admission after failure.
 - Test the Rust application core with `--no-default-features --lib`: explicit
   setup/recovery, named Tab ownership, scoped profiles, source-preserving
   historical-layout imports, bounded snapshots, and journaled restore/rollback
@@ -187,6 +189,12 @@ The full check has these responsibilities:
   initialization-error and successful receipt-restore assertions join the real
   writer independently of the production shutdown deadline; a separate stalled-worker
   test checks the bounded shutdown and incomplete-cleanup outcome.
+  Plugin-management checks use owned Unix filesystem/process fixtures for
+  payload integrity, target/source/version refusals, lifecycle readback,
+  interrupted publication and finite output cleanup. The shell embeds the
+  finite adapter payload from tracked product files. Public checks require
+  neither installed OMP nor personal agent state; actual macOS dialog and
+  real OMP lifecycle acceptance remain separate local procedures.
   Command-retirement checks accept settled logging or an explicit `LoggingShutdown`
   refusal with retirement and closed admission; they do not assume disk-sync latency.
   Identifier cutover checks must cover canonical-XID lifecycle and unchanged

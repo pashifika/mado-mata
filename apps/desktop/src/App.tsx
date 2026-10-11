@@ -35,6 +35,8 @@ import type {StatusItem} from './status.ts';
 import SavedWorkspacesDialog from './components/SavedWorkspacesDialog.tsx';
 import Select from './components/Select.tsx';
 import SettingsDialog from './settings/SettingsDialog.tsx';
+import PluginsDialog from './plugins/PluginsDialog.tsx';
+import {usePluginManagement} from './plugins/usePluginManagement.ts';
 import WorkspaceSwitcher from './components/WorkspaceSwitcher.tsx';
 import type {WorkspaceOption} from './components/WorkspaceSwitcher.tsx';
 import {INITIAL_BOOTSTRAP, PollGate, initialSettings, reconstructed, recoveryBlock, reduceBootstrap, surface} from './bootstrap.ts';
@@ -140,6 +142,9 @@ export default function App() {
   const [pendingClose, setPendingClose] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [pluginsOpen, setPluginsOpen] = useState(false);
+  // Plugin management is application-scoped and outlives its dialog, so closing Plugins never cancels or forgets it.
+  const plugins = usePluginManagement();
   const [settingsDraft, setSettingsDraft] = useState<SettingsDraft>(() => settingsDraftFrom(null));
   const [dialogError, setDialogError] = useState<DialogError | null>(null);
   const [saveNotice, setSaveNotice] = useState<Message | null>(null);
@@ -1811,6 +1816,20 @@ export default function App() {
     setDialogOpen(true);
   }
 
+  // Available without a workspace; before the application is ready the dialog explains why nothing is read or changed.
+  function openPlugins() {
+    menuButton.current?.focus();
+    setMenuOpen(false);
+    setPluginsOpen(true);
+    if (normalReady && !closing) void plugins.session.refresh();
+  }
+
+  // Closing withdraws only an unconfirmed review; an admitted read or change keeps running and reports on reopen.
+  function closePlugins() {
+    setPluginsOpen(false);
+    plugins.session.dismiss();
+  }
+
   async function saveSettings() {
     const editable = parsedSettings.settings;
     if (settings === null || !normalReady || !editable || appBusy || commandReason !== null) return;
@@ -2394,6 +2413,7 @@ export default function App() {
           </button>
           {menuOpen && <div id="application-menu-items" ref={menu} className="dropdown" role="menu" aria-labelledby="application-menu" onKeyDown={menuKeys}>
             <button type="button" role="menuitem" id="menu-settings" disabled={settings === null || !normalReady} onClick={openSettings}>{t.appSettings}</button>
+            <button type="button" role="menuitem" id="menu-plugins" onClick={openPlugins}>{t.appPlugins}</button>
             <button type="button" role="menuitem" id="menu-restore" onClick={() => {menuButton.current?.focus(); setMenuOpen(false); setConfigurationOpen(true);}}>{ui.bootstrap.restoreHeading}</button>
             <button type="button" role="menuitem" id="menu-application-logs" aria-current={nav.kind === 'application' ? 'page' : undefined}
               aria-label={`${t.applicationLogs} · ${applicationLogCount}`} onClick={() => {setMenuOpen(false); go({kind: 'application'});}}>
@@ -2539,6 +2559,9 @@ export default function App() {
       retained={logs.items.length} evicted={logs.evicted}
       onSnapshot={() => void snapshot(null)} snapshotPending={bootstrap.snapshotPending} snapshotOutcome={bootstrap.snapshotOutcome} strip={ordinaryStrip('dialog')}
       authoring={compactAuthoring(() => {if (appBusy !== 'savingSettings') {setDialogOpen(false); returnToEdit();}}, true, appBusy === 'savingSettings')}/>
+    <PluginsDialog open={pluginsOpen} onClose={closePlugins} plugins={plugins}
+      unavailable={closing ? t.applicationClosing : normalReady ? null : ui.plugins.unavailable} strip={ordinaryStrip('plugins')}
+      authoring={compactAuthoring(() => {closePlugins(); returnToEdit();}, true)}/>
     <DirtyChoiceDialog intent={choice?.kind ?? null} drafts={authoring ? dirtyDrafts(authoring) : []} recognitionDirty={recognitionDirty} busy={choiceBusy}
       saveBlock={leaseLost ? ui.authoring.leaseLost : recognitionSaveReason}
       strip={ordinaryStrip('dirty')} authoring={compactAuthoring(() => {if (!choiceBusy) {setChoice(null); returnToEdit();}}, true, choiceBusy)}

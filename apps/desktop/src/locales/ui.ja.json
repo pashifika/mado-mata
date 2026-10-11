@@ -1147,6 +1147,140 @@
     "close": "閉じる",
     "reopenLabel": "{name} を再度開く"
   },
+  "plugins": {
+    "heading": "プラグイン",
+    "close": "プラグインを閉じる",
+    "unavailable": "プラグイン管理はアプリケーションの準備が整ってから使用できます。読み取りも変更も行っていません。",
+    "systemHeading": "システム",
+    "systemHelp": "MadoMata が提供・保守します。",
+    "externalHeading": "外部",
+    "externalHelp": "外部プラグインはサポートしていません。",
+    "agentHeading": "エージェント連携",
+    "agentHelp": "サポート対象のコーディングエージェントが、明示的な接続と開示の手順を通じて編集中の下書きを扱えるようにします。インストールしただけでは何も共有しません。",
+    "agentSummary": "サポート対象のコーディングエージェントが、明示的な /mado の手順で編集中の下書きを扱えるようにします。",
+    "sources": "プラグインの提供元",
+    "details": "詳細",
+    "back": "戻る",
+    "entryNotRead": "まだ読み取っていません",
+    "latestOperation": "直近の操作:",
+    "originSystem": "システム · MadoMata が提供",
+    "included": "このビルドに同梱",
+    "targets": "エージェントの対象",
+    "userScope": "ユーザーインストール",
+    "executablePlaceholder": "自動検出",
+    "executableHelp": "空欄にするとあなたのユーザーアカウントの OMP を検出します。別の実行ファイルを使う場合は絶対パスを入力して「確認」を選んでください。MadoMata は OMP 自体をインストールもアップデートもしません。",
+    "check": "確認",
+    "refresh": "再読み込み",
+    "executableChanged": "インストールを変更する前に、編集した実行ファイルを確認してください。",
+    "inspecting": "OMP のインストールを読み取っています…",
+    "inspectFailed": "OMP のインストールを読み取れませんでした",
+    "inspectFailedHelp": "何も変更していません。実行ファイルを修正するか、再読み込みしてください。",
+    "notRead": "まだ読み取っていません。再読み込みすると OMP のインストールを読み取ります。",
+    "executable": "実行ファイル",
+    "executableSelection": "確認する実行ファイル",
+    "notFound": "見つかりません",
+    "ompVersion": "OMP バージョン",
+    "minimum": "{version} 以降が必要",
+    "userRoot": "ユーザーインストールのルート",
+    "notEstablished": "未確定",
+    "installed": "インストール済みアダプター",
+    "notInstalled": "未インストール",
+    "managed": "MadoMata がインストール",
+    "unmanaged": "MadoMata 以外がインストール",
+    "source": "インストール元",
+    "compatibility": "互換性",
+    "compatibilityStates": {
+      "missing": "未確認",
+      "unsupported": "未確定",
+      "incompatible": "非互換",
+      "compatible": "互換"
+    },
+    "identity": "ペイロードの識別子",
+    "includedContent": "同梱ペイロード",
+    "installedContent": "インストール済みペイロード",
+    "unknownContent": "未識別",
+    "issue": "対象の問題",
+    "states": {
+      "missing": "OMP が見つかりません",
+      "unsupported": "管理できません",
+      "incompatible": "互換性のない OMP",
+      "absent": "未インストール",
+      "current": "最新",
+      "update_available": "アップデートあり",
+      "legacy": "移行が必要",
+      "conflict": "調整が必要"
+    },
+    "stateHelp": {
+      "missing": "OMP をご自身でインストールするか、絶対パスを入力して「確認」を選んでください。",
+      "unsupported": "理由は下の問題に表示しています。",
+      "incompatible": "この OMP はサポートする最低バージョンより古いか、必要なプラグイン管理機能がありません。OMP をご自身でアップデートしてから再読み込みしてください。",
+      "update_available": "MadoMata がインストールした古いアダプターを、このビルドに同梱のバージョンにアップデートできます。",
+      "legacy": "同じアダプターがチェックアウトのリンクなど別の場所から登録されています。移行を確定すると、その登録だけを置き換えます。元の場所自体は保持します。",
+      "conflict": "下に表示した問題を確認してください。自動で置き換えやダウングレードは行いません。"
+    },
+    "unknownStateHelp": "報告されたインストール状態をこのビルドは認識できません。",
+    "actions": {
+      "install": "インストール",
+      "update": "アップデート",
+      "uninstall": "アンインストール",
+      "migrate": "移行を確認"
+    },
+    "noActions": "この読み取り結果に対して実行できるインストールの変更はありません。",
+    "names": {
+      "install": "インストール",
+      "update": "アップデート",
+      "uninstall": "アンインストール",
+      "migrate": "移行"
+    },
+    "confirmHeading": {
+      "install": "エージェント連携をインストールしますか？",
+      "update": "エージェント連携をアップデートしますか？",
+      "uninstall": "エージェント連携をアンインストールしますか？",
+      "migrate": "既存の登録を移行しますか？"
+    },
+    "confirmBody": {
+      "install": "このビルドに同梱のアダプター {included} を、この OMP ユーザーインストールに登録します。他のプラグインや OMP の設定は変更しません。",
+      "update": "先にアダプター {included} を準備してから、登録済みの {installed} を置き換えて結果を読み戻します。他のプラグインは変更しません。",
+      "uninstall": "アダプター {installed} の登録だけを削除し、存在しないことを確認します。パッケージ、下書き、復旧ジャーナル、保存済みペイロードは保持します。",
+      "migrate": "{source} からの登録だけを、このビルドが提供するアダプター {included} に置き換えます。元のソースディレクトリは変更も削除もしません。"
+    },
+    "confirm": {
+      "install": "確定",
+      "update": "アップデートを確定",
+      "uninstall": "アンインストールを確定",
+      "migrate": "移行を確定"
+    },
+    "confirmScope": "ここに表示している読み取り結果にだけ適用します。「再読み込み」「確認」または実行ファイルの編集で、この確定待ちの操作は取り消されます。",
+    "withdrawn": "確定待ちの操作を取り消しました。読み取り結果または実行ファイルが変わりました。現在の内容を確認してから、もう一度確定してください。",
+    "running": {
+      "install": "インストール中…",
+      "update": "アップデート中…",
+      "uninstall": "アンインストール中…",
+      "migrate": "移行中…"
+    },
+    "pending": "対象 {executable}。プラグインを閉じてもこの操作は取り消されません。読み戻しの結果は、プラグインを再度開くと確認できます。",
+    "result": {
+      "verified": "{action}を読み戻しで確認しました",
+      "unknown": "{action}の結果は不明です",
+      "failed": "{action}に失敗しました",
+      "rejected": "{action}は完了していません"
+    },
+    "resultHelp": {
+      "unknown": "登録が変わった可能性がありますが、確認できませんでした。再読み込みして現在のインストールを確認してください。自動で再試行や巻き戻しはしません。",
+      "failed": "現在の読み戻し結果を上に表示しています。自動での巻き戻しは行っていません。",
+      "rejected": "ホストが要求を拒否したか、結果を報告しませんでした。再読み込みして現在のインストールを確認してください。自動で再試行はしません。"
+    },
+    "freshSession": {
+      "install": "新しい OMP セッションを開始するとアダプターを読み込みます。接続には引き続き明示的な /mado の手順を使います。",
+      "update": "新しい OMP セッションを開始すると新しいバージョンを読み込みます。実行中のセッションは読み込み済みのバージョンを使い続けます。",
+      "uninstall": "新しい OMP セッションを開始して、アダプターがないことを確認してください。実行中のセッションは削除したコードを保持している場合があります。",
+      "migrate": "新しい OMP セッションを開始すると提供版のアダプターを読み込みます。実行中のセッションは読み込み済みのコードを使い続けます。"
+    },
+    "sessionHeading": "実行中の OMP セッション",
+    "sessionHelp": "実行中の OMP セッションは読み込み済みのコードを使い続けます。MadoMata が再起動・停止することはありません。",
+    "sessionDisconnect": "アップデート、アンインストール、移行の前に、接続中の各セッションを切断してください:",
+    "sessionFresh": "その後、新しい OMP セッションを開始し、次のコマンドで読み込みを確認してください:"
+  },
   "recovery": {
     "eyebrow": "プロファイルの復旧",
     "heading": "拒否された保存済みプロファイル",
