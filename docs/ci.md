@@ -443,10 +443,23 @@ protection; branch rulesets and the required `CI Gate` context remain unchanged.
 The lightweight `dev-push-policy` job runs only on pushes. It suppresses duplicate
 `dev/<topic>` push checks only when an open promotion PR to `main` has both its
 head and base in this repository, with the exact pushed branch and commit SHA.
-The [selector](../tools/ci/select_checks.py) uses paginated GitHub CLI lookup with
-a 30-second timeout; invalid metadata, malformed responses, lookup failures, and
-an unconfirmed match keep all checks enabled. Main pushes, PRs (including forks),
-and manual dispatch never suppress checks or perform this lookup.
+Draft promotion PRs also qualify. The [selector](../tools/ci/select_checks.py)
+uses paginated GitHub CLI lookup with a 30-second timeout; invalid metadata,
+malformed responses, lookup failures, and an unconfirmed match keep all checks
+enabled. Main pushes, PRs (including forks), and manual dispatch never suppress
+checks or perform this lookup.
+
+Open the Draft promotion
+[before the final leaf merge](../CONTRIBUTING.md#ordinary-change-and-promotion)
+so the selector can find it. Selection happens once, at the beginning of the
+push run; a PR created after that lookup does not cancel work already admitted.
+An API response that has not yet caught up with the pushed head still keeps
+checks enabled. This suppresses duplicate work, not the push workflow or its
+skipped check entries, and does not remove GitHub's event labels.
+
+Draft PRs still run the normal PR checks on opening and head updates. Marking
+one ready for review triggers another PR run; its current-head `CI Gate` must
+pass before promotion.
 
 Only this selector job receives `pull-requests: read` alongside `contents: read`,
 using the read-only `github.token` as `GH_TOKEN`. API responses and credentials

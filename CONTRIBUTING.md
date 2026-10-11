@@ -74,10 +74,23 @@ the user explicitly requests it or a maintainer identifies an exceptional reason
 Record the request or reason in the PR before merging. This exception applies
 only to ordinary leaf PRs into `dev/<topic>`.
 
-When the topic's intended scope is complete, open `dev/<topic> -> main` and use a
-merge commit. Do not squash or rebase a promotion: the topic and `main` must
-retain shared ancestry. If strict checks require an update, reconcile through
-the sync procedure before promotion.
+Prepare `dev/<topic> -> main` as a Draft PR before merging the final leaf PR.
+Reuse an existing promotion PR rather than opening another. For example:
+
+```sh
+gh pr create --draft --base main --head dev/runtime-comparison
+```
+
+Keep the promotion in Draft while intended leaf work remains; each leaf still
+needs its own checked merge. The early Draft lets the push selector find a
+covering promotion when the final integration commit lands. See the
+[selection limits](docs/ci.md#hosted-workflow-and-required-gate).
+
+Once the topic's intended scope is complete, mark the promotion ready for review.
+This triggers a fresh PR run: wait for its `CI Gate` to pass on the current head
+and resolve review conversations before merging. Use a merge commit; never
+squash or rebase a promotion, so the topic and `main` retain shared ancestry.
+If strict checks require an update, reconcile through the sync procedure first.
 
 After any PR base change, follow the
 [retarget revalidation procedure](docs/ci.md#hosted-workflow-and-required-gate)
