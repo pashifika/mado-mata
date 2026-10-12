@@ -783,26 +783,6 @@ fn envelope_and_decompression_bounds_refuse_before_admission() {
     assert_eq!(fault.category, "PackageFormat", "{fault:?}");
     assert_eq!(fault.context["path"], "package/main.ts");
 
-    // A compressible non-image file cannot use unused image or envelope allowance.
-    let mut oversized = files("1.0.0");
-    oversized.insert(
-        "main.ts".into(),
-        payload(vec![b' '; PACKAGE_NON_IMAGE_BYTES + 1]),
-    );
-    let large_index: Value =
-        serde_json::from_slice(&format::encode_index(&oversized).unwrap()).unwrap();
-    let large = replaced(
-        &entries,
-        "package/main.ts",
-        vec![b' '; PACKAGE_NON_IMAGE_BYTES + 1],
-    );
-    let fault = import(
-        &selection,
-        &zip_of(&resigned(&large, &large_index), CompressionMethod::Deflated),
-    )
-    .unwrap_err();
-    assert!(fault.message.contains("non-image"), "{fault:?}");
-
     // Declared payload beyond the package total refuses from the directory alone.
     let total = declared_size(
         zip_of(&entries, CompressionMethod::Deflated),
@@ -843,6 +823,84 @@ fn envelope_and_decompression_bounds_refuse_before_admission() {
         prepare_import(&sparse, &idle()).unwrap_err().category,
         "PackageLimit"
     );
+}
+
+/// Sets the reserved Deflate block type in a member's first compressed byte: decoding
+/// that member refuses at once, while headers, sizes, CRC, index and signature stay valid.
+fn poisoned(mut bytes: Vec<u8>, name: &str) -> Vec<u8> {
+    let (_, local) = headers(&bytes, name);
+    let length = |offset: usize| {
+        usize::from(u16::from_le_bytes([
+            bytes[local + offset],
+            bytes[local + offset + 1],
+        ]))
+    };
+    let data = local + 30 + length(26) + length(28);
+    bytes[data] |= 0x06;
+    bytes
+}
+
+#[test]
+fn review_payload_non_image_budget_refuses_before_decompression() {
+    let selection = Root::new();
+    // Independently built and signed Deflate archives; export refuses oversized payloads.
+    let signed = |contents: &BTreeMap<String, PayloadBytes>| {
+        let index: Value =
+            serde_json::from_slice(&format::encode_index(contents).unwrap()).unwrap();
+        let mut entries: Entries = vec![
+            ("index.json".into(), Vec::new()),
+            ("signature.json".into(), Vec::new()),
+        ];
+        for (path, bytes) in contents {
+            entries.push((format!("package/{path}"), bytes.to_vec()));
+        }
+        zip_of(&resigned(&entries, &index), CompressionMethod::Deflated)
+    };
+    import(&selection, &signed(&files("1.0.0"))).unwrap();
+    let (whole, half) = (PACKAGE_NON_IMAGE_BYTES + 1, PACKAGE_NON_IMAGE_BYTES / 2);
+    // Aggregate files fit individually but exceed the shared non-image bound.
+    let cases: [(&str, &[(&str, usize)]); 3] = [
+        ("main.ts", &[("main.ts", whole)]),
+        ("package.json", &[("package.json", whole)]),
+        ("schema.json", &[("main.ts", half), ("schema.json", half)]),
+    ];
+    for (path, changes) in cases {
+        let name = format!("package/{path}");
+        let control = import(&selection, &poisoned(signed(&files("1.0.0")), &name)).unwrap_err();
+        assert_eq!(control.category, "PackageFormat", "{path}: {control:?}");
+        assert_eq!(control.context["path"], name, "{path}: {control:?}");
+        let mut oversized = files("1.0.0");
+        for &(changed, length) in changes {
+            let mut bytes = oversized[changed].to_vec();
+            bytes.resize(length, b' ');
+            oversized.insert(changed.into(), payload(bytes));
+        }
+        let limit = import(&selection, &signed(&oversized)).unwrap_err();
+        assert_ne!(limit.category, control.category, "{path}: {limit:?}");
+        let fault = import(&selection, &poisoned(signed(&oversized), &name)).unwrap_err();
+        assert_eq!(fault.category, limit.category, "{path}: {fault:?}");
+    }
+}
+
+#[test]
+fn review_payload_large_images_keep_their_allowance() {
+    let selection = Root::new();
+    let mut package = files("1.0.0");
+    let path = "assets/large.data";
+    let mut manifest: Value = serde_json::from_slice(&package["package.json"]).unwrap();
+    manifest["assets"]["large"] =
+        json!({"path":path,"format":"raw-rgba8","width":513,"height":513});
+    package.insert(
+        "package.json".into(),
+        payload(serde_json::to_vec(&manifest).unwrap()),
+    );
+    package.insert(path.into(), payload(vec![0; 513 * 513 * 4]));
+    let draft = PackageDraft::from_files(package, &crate::authoring::limits().unwrap()).unwrap();
+    let prepared = prepare_export(draft, &signer(), &idle()).unwrap();
+    let entries = members(&archive_of(&prepared));
+    let deflated = zip_of(&entries, CompressionMethod::Deflated);
+    let imported = import(&selection, &deflated).unwrap();
+    assert_eq!(imported.draft().revision(), prepared.draft().revision());
 }
 
 #[test]
@@ -1368,4 +1426,127 @@ fn expanded_installations_stay_unavailable_until_original_reimport() {
         managed_identity(&data.0, &container).unwrap(),
         Some(identity)
     );
+}
+
+/// One independently built and signed release of `package_id`, derived from the
+/// sample package.
+fn capacity_archive(signer: &Signer, package_id: &str, release: &str) -> Vec<u8> {
+    let mut contents = files(release);
+    for path in ["package.json", "profiles/default.json"] {
+        let mut value: Value = serde_json::from_slice(&contents[path]).unwrap();
+        value["package_id"] = json!(package_id);
+        contents.insert(
+            path.to_owned(),
+            payload(serde_json::to_vec_pretty(&value).unwrap()),
+        );
+    }
+    let draft = PackageDraft::from_files(contents, &crate::authoring::limits().unwrap()).unwrap();
+    archive_of(&prepare_export(draft, signer, &idle()).unwrap())
+}
+
+/// The catalog lists at most 256 installed releases, so at that capacity a new import
+/// refuses before anything is written, whether the catalog holds one package's
+/// releases or releases spread over packages and signers; a verified exact reimport
+/// stays unchanged and the catalog stays listable.
+#[test]
+fn review_capacity_full_catalog_refuses_new_imports_and_keeps_reimport() {
+    let data = Root::new();
+    let selection = Root::new();
+    let packages = data.0.join("pkgs");
+    let (local, foreign) = (signer(), Signer::from_seed([9; 32]));
+    let attempt = |signer: &Signer, package_id: &str, release: &str| {
+        import(&selection, &capacity_archive(signer, package_id, release)).unwrap()
+    };
+    // Places a release where a completed import leaves it, with the same private
+    // modes, without one publication call per catalog entry.
+    let place = |signer: &Signer, package_id: &str, release: &str| {
+        let archive = capacity_archive(signer, package_id, release);
+        let relative = format!(
+            "pkgs/{}/{package_id}/{}.mmpkg",
+            signer.key_id(),
+            format::sha256_hex(&archive)
+        );
+        data.put(&relative, &archive);
+        relative
+    };
+    let listed = || {
+        let catalog = installed_releases(&data.0).unwrap();
+        assert_eq!(catalog.len(), 256);
+        let faults: Vec<_> = catalog
+            .iter()
+            .filter_map(|release| release.fault.as_ref())
+            .collect();
+        assert!(faults.is_empty(), "{faults:?}");
+        catalog
+    };
+    let refuses = |prepared: &PreparedPackage| {
+        let before = snapshot(&packages);
+        let outcome = publish_import(&data.0, prepared, &idle());
+        let facts = prepared.facts();
+        let release = format!("{} {}", facts.package_id, facts.release_version);
+        assert_eq!(
+            outcome.as_ref().err().map(|fault| fault.category.as_str()),
+            Some("PackageLimit"),
+            "{release}: {outcome:?}"
+        );
+        assert_eq!(snapshot(&packages), before, "{release}");
+    };
+    let unchanged = |prepared: &PreparedPackage| {
+        let before = snapshot(&packages);
+        let again = publish_import(&data.0, prepared, &idle()).unwrap();
+        assert!(
+            again.unchanged && !again.committed && again.cleanup_error.is_none(),
+            "{again:?}"
+        );
+        assert_eq!(snapshot(&packages), before);
+    };
+    // New imports admissible below capacity: another release of the full package from
+    // its signer and from another signer, and a new package.
+    let next = attempt(&local, "sample", "1.1.0");
+    let rival = attempt(&foreign, "sample", "1.2.0");
+    let other = attempt(&foreign, "other", "1.0.0");
+
+    // One package's 256 distinct releases from one signer. The first is an ordinary
+    // import, so the import lock and folders exist before any comparison.
+    let first = attempt(&local, "sample", "1.0.0");
+    assert!(publish_import(&data.0, &first, &idle()).unwrap().committed);
+    let later: Vec<_> = (1..256)
+        .map(|patch| place(&local, "sample", &format!("1.0.{patch}")))
+        .collect();
+    let catalog = listed();
+    assert!(catalog.iter().all(|release| release.package_id == "sample"));
+    refuses(&next);
+    refuses(&other);
+    unchanged(&first);
+
+    // The same capacity spread over packages and signers: the upper half of those
+    // releases gives way to another signer's releases of the package and to single
+    // releases of other packages from both signers, one short of capacity.
+    for relative in &later[127..] {
+        fs::remove_file(data.0.join(relative)).unwrap();
+    }
+    for patch in 0..63 {
+        place(&foreign, "sample", &format!("2.0.{patch}"));
+    }
+    for index in 0..64 {
+        let signer = if index % 2 == 0 { &local } else { &foreign };
+        place(signer, &format!("spread-{index}"), "1.0.0");
+    }
+    // Below capacity a new release is admitted, and the filled catalog stays listable.
+    let published = publish_import(&data.0, &next, &idle()).unwrap();
+    assert!(published.committed && published.cleanup_error.is_none());
+    let catalog = listed();
+    let package_ids: std::collections::BTreeSet<_> = catalog
+        .iter()
+        .map(|release| release.package_id.as_str())
+        .collect();
+    let key_ids: std::collections::BTreeSet<_> = catalog
+        .iter()
+        .filter_map(|release| release.facts.as_ref())
+        .map(|facts| facts.key_id.as_str())
+        .collect();
+    assert_eq!((package_ids.len(), key_ids.len()), (65, 2));
+    unchanged(&next);
+    refuses(&other);
+    refuses(&rival);
 }

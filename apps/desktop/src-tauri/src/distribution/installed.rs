@@ -215,34 +215,12 @@ pub fn installed_releases(root: &Path) -> Result<Vec<InstalledRelease>, Fault> {
         Err(error) => return Err(io_fault("inspect installed releases", &packages, &error)),
     }
     let mut found = BTreeSet::new();
-    let mut count = 0;
-    for signer in listing(&packages)? {
-        let Some(_) = directory_name(&signer, &packages)?.filter(|key| format::is_digest(key))
-        else {
-            continue;
-        };
-        for package in listing(&signer.path())? {
-            let Some(package_id) = directory_name(&package, &packages)?
-                .filter(|package_id| PackageDraft::check_id(package_id).is_ok())
-            else {
-                continue;
-            };
-            for archive in listing(&package.path())? {
-                let name = archive.file_name();
-                let Some(artifact_id) = name.to_str().and_then(archive_digest) else {
-                    continue;
-                };
-                count += 1;
-                if count > MAX_INSTALLED {
-                    return Err(limit_fault("more than 256 installed releases"));
-                }
-                found.insert(InstalledIdentity {
-                    package_id: package_id.clone(),
-                    artifact_id: artifact_id.to_owned(),
-                });
-            }
-        }
-    }
+    catalog(&packages, |package_id, artifact_id| {
+        found.insert(InstalledIdentity {
+            package_id: package_id.to_owned(),
+            artifact_id: artifact_id.to_owned(),
+        });
+    })?;
     Ok(found
         .into_iter()
         .map(|identity| {
@@ -309,6 +287,13 @@ pub(super) fn publish(
             )
         })?;
         return Ok(publication(true, None));
+    }
+    // A new artifact must keep the catalog listable, counted exactly as listing does.
+    if catalog(&packages, |_, _| {})? >= MAX_INSTALLED {
+        return Err(identity.fault(
+            "PackageLimit",
+            "256 releases are already installed; this release was not installed",
+        ));
     }
     for (key, artifact_id) in releases(&packages, &identity.package_id)? {
         let other = InstalledIdentity {
@@ -390,6 +375,39 @@ fn layout(root: &Path, facts: &ReleaseFacts) -> Result<(PathBuf, InstalledIdenti
         .canonicalize()
         .map_err(|error| io_fault("resolve the data root", root, &error))?;
     Ok((root.join(PACKAGES), identity))
+}
+
+/// Visits every recognized archive entry below the signer and package folders, before
+/// de-duplication, and returns their number; more than [`MAX_INSTALLED`] refuses.
+/// Listing and publication share this count, so publication never installs a release
+/// listing would refuse.
+fn catalog(packages: &Path, mut visit: impl FnMut(&str, &str)) -> Result<usize, Fault> {
+    let mut count = 0;
+    for signer in listing(packages)? {
+        let Some(_) = directory_name(&signer, packages)?.filter(|key| format::is_digest(key))
+        else {
+            continue;
+        };
+        for package in listing(&signer.path())? {
+            let Some(package_id) = directory_name(&package, packages)?
+                .filter(|package_id| PackageDraft::check_id(package_id).is_ok())
+            else {
+                continue;
+            };
+            for archive in listing(&package.path())? {
+                let name = archive.file_name();
+                let Some(artifact_id) = name.to_str().and_then(archive_digest) else {
+                    continue;
+                };
+                count += 1;
+                if count > MAX_INSTALLED {
+                    return Err(limit_fault("more than 256 installed releases"));
+                }
+                visit(&package_id, artifact_id);
+            }
+        }
+    }
+    Ok(count)
 }
 
 /// Signer folders holding an entry, of any file type, named for this artifact.

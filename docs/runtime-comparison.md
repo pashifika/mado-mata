@@ -229,8 +229,10 @@ The signed message is the ASCII bytes `madomata-pkg-v1`, one LF byte, then the
 Bounds are 67 MiB for the archive, 1 MiB for the index, 16 KiB for the signature
 envelope and 128 payload files plus the two envelope members. Existing 64 MiB
 image, 1 MiB non-image, 65 MiB total and decoded-image limits still apply,
-including explicitly lower package limits. Reads/decompression enforce bounds
-while consuming data. Approved host dependencies are validated but not bundled.
+including explicitly lower package limits. The bounded manifest is verified
+first; signed file lengths then enforce image and non-image budgets before the
+remaining payload is reserved or decompressed. Reads also enforce each declared
+length while consuming data. Approved host dependencies are validated but not bundled.
 Original source and source maps remain readable; signing is not encryption.
 The archive-byte SHA-256 identifies the installed artifact, separately from the
 runtime inventory and execution-target identities. The CLI still consumes

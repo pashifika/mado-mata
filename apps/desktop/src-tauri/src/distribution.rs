@@ -383,12 +383,15 @@ fn verified_release(
     Ok((draft, facts))
 }
 
-/// Structure, exact envelope, membership, lengths and digests, in that order; payload
-/// members are decompressed only after the signed index admits them.
+/// Structure, exact envelope, membership, lengths, the payload budget and digests, in
+/// that order. `package.json` is bounded by its signed length before it is read, and
+/// its declarations admit every signed length before any other payload member is
+/// reserved or decompressed; the draft still validates the complete payload.
 fn verified_payload(
     bytes: &[u8],
     cancel: &AtomicBool,
 ) -> Result<(Envelope, BTreeMap<String, PayloadBytes>), Fault> {
+    const MANIFEST: &str = "package.json";
     let mut reader = archive::Reader::open(bytes)?;
     let index = reader.position(archive::INDEX)?;
     let index = reader.read(index, cancel)?;
@@ -407,23 +410,39 @@ fn verified_payload(
                 .with_context(json!({"path":path})),
         );
     }
-    let mut files = BTreeMap::new();
     for fact in &envelope.files {
-        let (position, size) = members[&fact.path];
-        if size != fact.bytes {
+        if members[&fact.path].1 != fact.bytes {
             return Err(
                 integrity_fault("payload length differs from the signed index")
                     .with_context(json!({"path":fact.path})),
             );
         }
-        let bytes = reader.read_payload(position, cancel)?;
+    }
+    let mut read = |fact: &FileFact| -> Result<PayloadBytes, Fault> {
+        let bytes = reader.read_payload(members[&fact.path].0, cancel)?;
         if format::hex(bytes.digest()) != fact.sha256 {
             return Err(
                 integrity_fault("payload digest differs from the signed index")
                     .with_context(json!({"path":fact.path})),
             );
         }
+        Ok(bytes)
+    };
+    let manifest = envelope.files.iter().find(|fact| fact.path == MANIFEST);
+    PackageDraft::check_manifest_length(manifest.map(|fact| fact.bytes))?;
+    let mut files = BTreeMap::new();
+    // A missing manifest was refused above.
+    if let Some(fact) = manifest {
+        let bytes = read(fact)?;
+        let total = envelope.files.iter().map(|file| file.bytes).sum();
+        let length = |path: &str| members.get(path).map(|&(_, size)| size);
+        PackageDraft::check_payload_budget(&bytes, length, total)?;
         files.insert(fact.path.clone(), bytes);
+    }
+    for fact in &envelope.files {
+        if fact.path != MANIFEST {
+            files.insert(fact.path.clone(), read(fact)?);
+        }
     }
     Ok((envelope, files))
 }
@@ -456,7 +475,7 @@ fn cancelled(cancel: &AtomicBool) -> Result<(), Fault> {
     }
 }
 
-fn destination_exists(destination: &Path) -> Fault {
+pub(crate) fn destination_exists(destination: &Path) -> Fault {
     Fault::new(
         "PackageDestinationExists",
         "the export destination already exists; choose another name",
