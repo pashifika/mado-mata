@@ -403,8 +403,10 @@ Neither action inspects, binds, or runs the package.
   controls; generated source maps are read-only facts. Metadata never
   opens in the source editor. Manifest controls preserve package identity and
   declarations while editing supported entries and portable target intent.
-  The optional **Distribution** form adds release version, name, description,
-  author/license and search game metadata through that same manifest draft.
+  The optional **Release and search metadata** form adds release version, name,
+  description, author/license and search game metadata through that same draft.
+  Release version and License have adjacent `i` help. Descriptions are plain text
+  with preserved line breaks.
   Localized game-name rows join an editable language key to its name. Typing
   filters i18n suggestions without selecting one; arrows mark a candidate,
   Enter/Tab accepts it, and Enter/Tab after typing normalizes a valid key outside
@@ -645,15 +647,17 @@ confidentiality, safety or execution permission.
 1. Add complete [distribution metadata](runtime-comparison.md#optional-distribution-metadata)
    to Manifest, including the authored release version. Export keeps the package
    ID and version; it does not bump either.
-2. Choose **Export PKG…**. Resolve unsaved Script, metadata, preset and Recognition
-   drafts with **Save and continue**, or cancel with drafts intact. Partial Save
-   success remains saved; failure or a later dirty draft stops preparation.
-3. Choose a missing `.mmpkg` filename outside the source. The application captures
+2. In Edit's left file rail, choose **Export PKG…**, below **Duplicate package…**.
+   Resolve unsaved Script, metadata, preset and Recognition drafts with **Save and
+   continue**, or cancel with drafts intact. Partial Save success remains saved;
+   failure or a later dirty draft stops preparation.
+3. Choose **Build and save…**, then a missing `.mmpkg` filename outside the source.
+   Nothing is written until the review is confirmed. The application captures
    saved bytes once and statically validates those exact bytes without running
    package code. Review package/release, revision, key fingerprint, file/byte
    totals, included source and destination.
-4. Confirm that review. A contributing edit or changed owner invalidates
-   confirmation; prepare again rather than exporting stale disk contents.
+4. Choose **Export** to confirm that review. A contributing edit or changed owner
+   invalidates confirmation; prepare again rather than exporting stale disk contents.
    Publication never overwrites an occupied filename. A committed artifact with
    failed staging cleanup is reported separately from clean success or rollback.
 

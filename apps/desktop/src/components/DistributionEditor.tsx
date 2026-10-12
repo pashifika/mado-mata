@@ -1,4 +1,5 @@
 import {useLayoutEffect, useRef} from 'react';
+import type {ReactNode} from 'react';
 import LanguageKeyInput from './LanguageKeyInput.tsx';
 import {RebuildControl, TextField} from './MetadataControls.tsx';
 import {HelpTrigger} from './ContextualHelp.tsx';
@@ -37,11 +38,12 @@ export default function DistributionEditor({manifest, onChange}: Props) {
     body = <><p id="authoring-distribution-invalid" className="inline-warning">{r.notObject}</p><div className="button-row">{remove}</div></>;
   } else {
     const view = readDistribution(distribution);
-    const text = (part: DistributionPart, id: string, label: string, help?: string) => {
+    const text = (part: DistributionPart, id: string, label: string, help?: string, info?: ReactNode) => {
       const issue = distributionTextIssue(part, view.text[part]);
       const error = issue === null ? null : issue === 'required' ? r.required : issue === 'length' && part !== 'game_id' ? r.textLength(DISTRIBUTION_TEXT_BYTES[part])
         : part === 'game_id' ? r.gameIdInvalid : r.versionInvalid;
-      return <TextField id={id} label={label} value={view.text[part]} help={help} error={error} onChange={next => onChange(withDistributionText(manifest, part, next))}/>;
+      return <TextField id={id} label={label} value={view.text[part]} help={help} info={info} error={error}
+        onChange={next => onChange(withDistributionText(manifest, part, next))}/>;
     };
     const descriptionIssue = distributionTextIssue('description', view.text.description);
     const game = view.game;
@@ -50,12 +52,14 @@ export default function DistributionEditor({manifest, onChange}: Props) {
         <li key={`${issue.code}:${'key' in issue ? issue.key : ''}`} className="inline-warning" data-issue={issue.code}>{r.issue(issue)}
           <button type="button" data-repair={issue.code} onClick={() => onChange(repairDistribution(manifest, issue))}>{r.repair(issue)}</button></li>)}</ul>}
       <div className="two-col">
-        {text('release_version', 'authoring-distribution-release-version', r.releaseVersion, r.releaseVersionHelp)}
+        {text('release_version', 'authoring-distribution-release-version', r.releaseVersion, undefined,
+          <HelpTrigger id="authoring-release-version-help" title={r.releaseVersion} hint={r.releaseVersionHint}><p>{r.releaseVersionHelp}</p></HelpTrigger>)}
         {text('name', 'authoring-distribution-name', r.name)}
       </div>
       <div className="two-col">
         {text('author_name', 'authoring-distribution-author-name', r.authorName)}
-        {text('license', 'authoring-distribution-license', r.license, r.licenseHelp)}
+        {text('license', 'authoring-distribution-license', r.license, undefined,
+          <HelpTrigger id="authoring-license-help" title={r.license} hint={r.licenseHint}><p>{r.licenseHelp}</p></HelpTrigger>)}
       </div>
       <div className="field"><label htmlFor="authoring-distribution-description">{r.description}</label>
         <textarea id="authoring-distribution-description" rows={3} value={view.text.description} aria-invalid={descriptionIssue !== null}

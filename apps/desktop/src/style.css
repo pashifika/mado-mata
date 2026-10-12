@@ -497,7 +497,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .recovery-panel .confirm-row { flex-basis: 100%; }
 
 /* Edit: a repository-style layout. A compact, collapsible tree on the left groups Files (scripts and assets by
-   folder) and Metadata (manifest, schema, presets, source maps) above the Duplicate entry; the right shows only the
+   folder) and Metadata (manifest, schema, presets, source maps) above the Duplicate and Export entries; the right shows only the
    selected file: the native textarea editor with a synchronized line-number gutter, a structured form or facts.
    Validation results follow. File changes live in row menus and small dialogs. */
 .repo-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; font-size: 11px; }
@@ -542,8 +542,10 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 /* A copy glyph (two offset squares) drawn with borders so it needs no icon font. */
 .copy-icon { position: relative; width: 10px; height: 10px; margin: 0 2px 0 1px; border: 1.5px solid currentColor; border-radius: 2px; }
 .copy-icon::after { content: ""; position: absolute; left: 1px; top: 1px; width: 8px; height: 8px; border: 1.5px solid currentColor; border-radius: 2px; background: var(--surface); }
-/* A viewfinder glyph (corner brackets around a region) for the Recognition entry. */
-.recognition-icon { width: 12px; height: 12px; margin-right: 1px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; }
+/* Viewfinder (Recognition) and upload-tray (Export) glyphs. */
+.recognition-icon, .export-icon { width: 12px; height: 12px; margin-right: 1px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; }
+/* A hinted rail action still fills its row. */
+.tree-row > .button-hint { flex: 1; min-width: 0; }
 /* Row menu buttons show on the current row, on hover and on focus; touch screens always show them. */
 .row-menu { flex-shrink: 0; width: 24px; height: 24px; padding: 0; border: 0; background: transparent; color: var(--text-muted); font-size: 15px; font-weight: 700; line-height: 1; opacity: 0; }
 .row-menu:hover:not(:disabled) { background: #dfe6ef; color: var(--text); }

@@ -23,8 +23,7 @@ interface Props {
   onPrepareAgain: () => void; onSigning: () => void; onClose: () => void;
 }
 
-// Export PKG for the Edit owner: explicit Save and continue or Cancel for unsaved drafts, one destination choice, an
-// owner-bound review of the captured saved revision and a publication receipt reported as the host committed it.
+// Resolve drafts, prepare one saved capture, then publish only after owner-bound review.
 export default function ExportDialog({flow, stale, packageId, release, drafts, recognitionDirty, saveBlock, signer, blocked,
   onSave, onChoose, onCancelPreparation, onConfirm, onPrepareAgain, onSigning, onClose}: Props) {
   const locale = useLocale();
@@ -62,6 +61,7 @@ export default function ExportDialog({flow, stale, packageId, release, drafts, r
         {step.sequence.failure?.error && <FaultMessage title={d.stoppedHeading} value={step.sequence.failure.error}/>}
       </section>}
       {(step.kind === 'ready' || step.kind === 'choosing') && <>
+        <p id="export-build-help">{d.buildHelp}</p>
         <dl className="run-identity"><dt>{d.signer}</dt><dd id="export-signer" className={signerUsable ? 'mono' : undefined}>
           {signer.info ? shortDigest(signer.info.key_id) : signer.statusError ? d.statusFailed : signer.info === null ? d.noKey : d.checking}</dd></dl>
         {signer.info === null && signer.statusError === null && <p className="inline-warning">{d.signerMissing}</p>}
@@ -90,7 +90,8 @@ export default function ExportDialog({flow, stale, packageId, release, drafts, r
       </>}
       {step?.kind === 'ready' && <>
         <button id="export-cancel" type="button" onClick={onClose}>{ui.common.cancel}</button>
-        <button id="export-choose" type="button" className="primary" disabled={!signerUsable || blocked !== null} onClick={onChoose}>{d.chooseDestination}</button>
+        <button id="export-choose" type="button" className="primary" aria-describedby="export-build-help" disabled={!signerUsable || blocked !== null}
+          onClick={onChoose}>{d.buildAndSave}</button>
       </>}
       {step?.kind === 'preparing' && <button id="export-cancel-preparation" type="button" disabled={step.cancelling} onClick={onCancelPreparation}>{d.cancelPreparation}</button>}
       {step?.kind === 'review' && <>

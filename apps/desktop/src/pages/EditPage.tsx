@@ -484,10 +484,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
         <ButtonHint hint={a.validationHelp}>
           <button id="authoring-validate" type="button" disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button>
         </ButtonHint>
-        <ButtonHint hint={d.exportHint}>
-          <button id="authoring-export" type="button" aria-haspopup="dialog" disabled={exportReason !== null} title={exportReason ?? undefined}
-            onClick={handlers.exportPackage}>{d.export}</button>
-        </ButtonHint>
         <ButtonHint hint={a.exitHint}>
           <button id="authoring-exit" type="button" disabled={locked || (pending !== null && pending.kind !== 'recognition_trial' && pending.kind !== 'validate')}
             onClick={handlers.exit}>{pending?.kind === 'exit' ? a.working : a.exit}</button>
@@ -568,6 +564,14 @@ export default function EditPage({session, label, handlers, recognition, recogni
             <li><div className="tree-row">
               <button id="authoring-duplicate-open" type="button" className="tree-folder tree-action" aria-haspopup="dialog" onClick={() => setDuplicating(true)}>
                 <span className="copy-icon" aria-hidden="true"/><span className="tree-name">{a.duplicateOpen}</span></button>
+            </div></li>
+            <li><div className="tree-row">
+              <ButtonHint hint={d.exportHint}>
+                <button id="authoring-export" type="button" className="tree-folder tree-action" aria-haspopup="dialog" disabled={exportReason !== null}
+                  title={exportReason ?? undefined} onClick={handlers.exportPackage}>
+                  <svg className="export-icon" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 8V1M3.5 3.5 6 1l2.5 2.5M1.5 7v3.5h9V7"/></svg>
+                  <span className="tree-name">{d.export}</span></button>
+              </ButtonHint>
             </div></li>
           </ul>
         </div>
