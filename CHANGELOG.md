@@ -22,6 +22,9 @@
   keep Stop reachable during publication without moving lost focus to it.
   Reject occupied export names before preparation, restore focus only to usable
   controls, and distinguish command contention from unsettled package cleanup on Close.
+- Read complete HTTP response frames in OIDC loopback tests without requiring
+  a graceful TCP close after oversized-header refusal; retain rejection,
+  secret-redaction and listener-closure checks.
 - Keep the retirement-close regression valid when bounded log shutdown times out;
   still verify retirement, close, and refused new commands without changing
   production shutdown behavior.

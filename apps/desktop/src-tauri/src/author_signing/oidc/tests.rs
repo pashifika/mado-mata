@@ -13,6 +13,7 @@ use openidconnect::{
 };
 use serde_json::{Value, json};
 use std::cell::RefCell;
+use std::io::BufRead;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -363,8 +364,30 @@ fn send(address: SocketAddr, target: &str) -> String {
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     write!(stream, "GET {target} HTTP/1.1\r\nHost: {address}\r\n\r\n").unwrap();
+    read_response(stream)
+}
+
+fn read_response(stream: TcpStream) -> String {
+    let mut stream = io::BufReader::new(stream);
     let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
+    let mut length = None;
+    loop {
+        let start = response.len();
+        assert_ne!(stream.read_line(&mut response).unwrap(), 0);
+        let line = &response[start..];
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("Content-Length: ") {
+            length = Some(value.trim().parse::<u64>().unwrap());
+        }
+    }
+    // A refused oversized request can reset TCP after the complete HTTP response.
+    let length = length.expect("callback response needs Content-Length");
+    assert_eq!(
+        stream.take(length).read_to_string(&mut response).unwrap() as u64,
+        length
+    );
     response
 }
 
@@ -475,8 +498,7 @@ fn an_oversized_callback_header_reports_refusal_instead_of_waiting_for_another_r
         "GET /?state={STATE}&code=code-under-test HTTP/1.1\r\nHost: {address}\r\nCookie: local={}\r\n\r\n",
         "a".repeat(MAX_REQUEST_HEAD),
     ).unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
+    let response = read_response(stream);
     assert!(response.starts_with("HTTP/1.1 400"));
     assert!(!response.contains(STATE) && !response.contains("code-under-test"));
     assert_eq!(
