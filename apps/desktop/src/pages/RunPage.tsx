@@ -9,6 +9,7 @@ import {FaultMessage} from '../components/ResultPanel.tsx';
 import {ButtonHint, HelpTrigger} from '../components/ContextualHelp.tsx';
 import type {RunView} from './ExecutionPage.tsx';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, chooseLane, editDraft, hasWorkspaceEdits} from '../workspace.ts';
+import {shortDigest} from '../distribution.ts';
 import type {Bound, BoundWorkspace, Derived, NativeConsent} from '../workspace.ts';
 import {AUTHORING_RECOVERY, recoveryPath} from '../authoring.ts';
 import type {PageAuthoring} from './EditPage.tsx';
@@ -49,6 +50,9 @@ export default function RunPage({workspace, label, derived, run, locked, active,
   const [confirmEdit, setConfirmEdit] = useState(false);
   const a = t.authoring;
   const editOwner = authoring.role === 'owner';
+  // Installed releases reinspect by saved identity and have no Edit entry point.
+  const installed = workspace.savedPackage?.source.kind === 'installed' ? workspace.savedPackage.source : null;
+  const reinspectable = installed !== null || workspace.inspectPath.trim() !== '';
   const reinspectButton = useRef<HTMLButtonElement>(null);
   const confirmRow = useRef<HTMLDivElement>(null);
   // Set only when the confirmation row closes while it owns focus. Focus returns to Reinspect; once the submitted
@@ -108,7 +112,8 @@ export default function RunPage({workspace, label, derived, run, locked, active,
       {workspace.error?.category === AUTHORING_RECOVERY && <div className="button-row">
         <button id="workspace-recover" type="button" disabled={locked} onClick={() => authoring.onRecover(recoveryPath(workspace.error!, bound.packagePath))}>{a.recover}</button>
         <span className="muted">{a.recoverHelp}</span></div>}
-      {workspace.sourceError && <FaultMessage title={workspace.sourceError.category === UNSUPPORTED_SOURCE ? t.guidance.unsupportedHeading : t.guidance.unavailableHeading} value={workspace.sourceError}/>}
+      {workspace.sourceError && <FaultMessage title={workspace.sourceError.category === UNSUPPORTED_SOURCE ? t.guidance.unsupportedHeading
+        : installed ? t.distribution.installedUnavailableHeading : t.guidance.unavailableHeading} value={workspace.sourceError}/>}
     </div>
     <section className="panel summary-panel run-summary" aria-label={t.run.summary}>
       <div className="summary-item"><span className="eyebrow">{t.run.status}</span>
@@ -138,16 +143,17 @@ export default function RunPage({workspace, label, derived, run, locked, active,
             <div className="package-text"><strong>{bound.package.package_id}</strong>
               <span className="mono" title={bound.packagePath}>{bound.package.runtime} · {bound.packagePath}</span></div>
             <span className="tag">{t.run.inspected(workspace.revision)}</span>
+            {installed && <span id="run-installed-source" className="tag" title={installed.artifact_id}>{t.distribution.installedSource(shortDigest(installed.artifact_id))}</span>}
             {confirmReinspect
               ? <div ref={confirmRow} className="confirm-row" role="alertdialog" aria-labelledby="confirm-reinspect-text">
                 <span id="confirm-reinspect-text">{t.run.confirmReinspect}</span>
                 <button type="button" className="danger-text" onClick={() => closeConfirm(true)}>{t.run.discardReinspect}</button>
                 <button type="button" autoFocus onClick={() => closeConfirm(false)}>{t.run.keepDraft}</button></div>
-              : <ButtonHint hint={t.run.reinspectHint}><button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()}
+              : <ButtonHint hint={t.run.reinspectHint}><button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !reinspectable}
                 title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button></ButtonHint>}
             {editOwner
               ? <button id="edit-package-return" type="button" onClick={authoring.onReturn}>{a.returnToEdit}</button>
-              : confirmEdit
+              : installed !== null ? null : confirmEdit
                 ? <div className="confirm-row" role="alertdialog" aria-labelledby="confirm-edit-text">
                   <span id="confirm-edit-text">{a.confirmEdit}</span>
                   <button id="edit-discard" type="button" className="danger-text" onClick={() => {setConfirmEdit(false); authoring.onOpen(bound.packagePath);}}>{a.discardEdit}</button>
@@ -159,7 +165,7 @@ export default function RunPage({workspace, label, derived, run, locked, active,
               onChange={event => handlers.inspectPath(event.target.value)}/></div>
           {bound.profilesError && <><FaultMessage title={t.run.profilesError} value={bound.profilesError}/>
             {bound.profilesError.category === 'ProfileRejected' && workspace.recovery === null
-              ? <p className="muted">{t.run.rejectedHelp} <button id="recover-reinspect" type="button" className="link" disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !workspace.inspectPath.trim()} onClick={confirmedReinspect}>{t.run.recoverReinspect}</button></p>
+              ? <p className="muted">{t.run.rejectedHelp} <button id="recover-reinspect" type="button" className="link" disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !reinspectable} onClick={confirmedReinspect}>{t.run.recoverReinspect}</button></p>
               : <p className="muted">{t.run.profilesHelp}</p>}</>}
           <div className="two-col">
             <div className="field"><label htmlFor="profile-select">{t.run.savedProfile}</label>

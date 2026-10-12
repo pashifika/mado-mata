@@ -89,7 +89,7 @@ impl Lease {
 }
 
 impl Workspaces {
-    fn authoring(&self, owner: &AuthoringRef) -> Result<&Lease, Fault> {
+    pub(super) fn authoring(&self, owner: &AuthoringRef) -> Result<&Lease, Fault> {
         self.authoring
             .as_ref()
             .filter(|lease| lease.owner == *owner)
@@ -101,7 +101,7 @@ impl Workspaces {
             })
     }
 
-    fn authoring_revision(
+    pub(super) fn authoring_revision(
         &self,
         owner: &AuthoringRef,
         revision: &str,

@@ -39,6 +39,8 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
   const source = workspace.sourceError;
   const saved = workspace.savedPackage;
   const unsupported = source !== null && source.category === UNSUPPORTED_SOURCE;
+  const d = t.distribution;
+  const installed = saved !== null && saved.source.kind === 'installed';
   const context = workspace.recovery?.view ?? null;
   const candidate = context !== null && context.relocation;
   const pending = context !== null && context.binding_required;
@@ -47,8 +49,9 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
   const [eyebrow, heading, intro] = candidate ? [t.recovery.eyebrow, t.recovery.relocationHeading, t.recovery.relocationHelp]
     : pending ? [g.bindingEyebrow, g.bindingHeading, g.bindingHelp]
     : source === null ? saved === null ? [g.eyebrow, g.heading, g.intro] : [g.savedEyebrow, g.savedHeading, g.savedHelp]
-    : unsupported ? [g.unsupportedEyebrow, g.unsupportedHeading, g.unsupportedHelp] : [g.unavailableEyebrow, g.unavailableHeading, g.unavailableHelp];
-  const sourceHeading = unsupported ? g.unsupportedHeading : g.unavailableHeading;
+    : unsupported ? [g.unsupportedEyebrow, g.unsupportedHeading, g.unsupportedHelp]
+    : installed ? [d.installedUnavailableEyebrow, d.installedUnavailableHeading, d.installedUnavailableHelp] : [g.unavailableEyebrow, g.unavailableHeading, g.unavailableHelp];
+  const sourceHeading = unsupported ? g.unsupportedHeading : installed ? d.installedUnavailableHeading : g.unavailableHeading;
   const path = workspace.inspectPath;
   const a = t.authoring;
   const destination = packageDestination(packagesRoot, workspace.editPackageId.trim());
@@ -118,7 +121,9 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
         {source !== null && <FaultMessage title={sourceHeading} value={source}/>}
         {source === null && saved !== null && <p id="saved-unbound" className="muted">{g.savedUnbound}</p>}
         {source === null && saved === null && <p className="muted">{context !== null ? g.noSavedBinding : g.where}</p>}
-        {saved !== null && <dl className="run-identity"><dt>{saved.source.kind === 'directory' ? t.reopen.directory(saved.package_id) : t.reopen.archive(saved.package_id)}</dt><dd className="mono">{saved.source.path}</dd></dl>}
+        {saved !== null && <dl className="run-identity">{saved.source.kind === 'installed'
+          ? <><dt>{d.installedSource(saved.package_id)}</dt><dd id="saved-installed" className="mono">{saved.source.artifact_id}</dd></>
+          : <><dt>{saved.source.kind === 'directory' ? t.reopen.directory(saved.package_id) : t.reopen.archive(saved.package_id)}</dt><dd className="mono">{saved.source.path}</dd></>}</dl>}
       </div>
     </section>
     {owner && <section id="guidance-edit-owner" className="panel open-form" aria-labelledby="guidance-edit-owner-heading"><div className="panel-body">

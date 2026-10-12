@@ -1,7 +1,9 @@
-import {AUTHORING_RUNTIMES, SCHEMA_BOUNDS, SCHEMA_DEPTH, SCHEMA_TYPES, formatJson, isObject, nodeIssues, parseJson, presetIssues, readManifest,
-  renameProperty, repairNode, repairPreset, repairable, schemaIssues, schemaProperties, schemaType, topDefaults, withEntry, withHelper, withKeyword,
-  withProperty, withRequired, withTarget, withTopDefaults, withType, withoutProperty} from './metadata.ts';
-import type {EntryName, JsonObject, ManifestTarget, PresetIssue, SchemaIssue, SchemaType} from './metadata.ts';
+import {AUTHORING_RUNTIMES, DISTRIBUTION_ENTRIES, DISTRIBUTION_PARTS, SCHEMA_BOUNDS, SCHEMA_DEPTH, SCHEMA_TYPES, formatJson, isObject, nodeIssues, parseJson,
+  presetIssues, readDistribution, readManifest, renameProperty, repairNode, repairPreset, repairable, schemaIssues, schemaProperties, schemaType, topDefaults,
+  withAliases, withDistribution, withDistributionText, withEntry, withHelper, withKeyword, withNameRows, withProperty, withRequired, withTarget, withTopDefaults,
+  withType, withoutProperty} from './metadata.ts';
+import type {DistributionPart, EntryName, JsonObject, ManifestTarget, PresetIssue, SchemaIssue, SchemaType} from './metadata.ts';
+import {canonicalLanguageKey} from './i18n-language.ts';
 import {MAX_DEFINITIONS, MAX_DOCUMENT_BYTES, MAX_EXPECTED_BYTES, MAX_NAME_BYTES, createDefinition, deleteDefinition, regionFromEdges, renameDefinition,
   sameJson, setContent, setExpected, setKind, setRegion, setRights, utf8Bytes} from './recognition.ts';
 import type {Edges, PixelRect, RecognitionKind, RecognitionNotice, RecognitionState, TemplateRights} from './recognition.ts';
@@ -20,6 +22,12 @@ export type FieldOperation =
   | {field:'entry'; entry:EntryName; part:'module'|'function'; value:string}
   | {field:'helper'; enabled:boolean}
   | {field:'target'; target:ManifestTarget|null}
+  // Manifest distribution metadata. `declared` adds the empty object or removes the whole member; a localized name is
+  // set or (null) removed by its language, and aliases are replaced as one list. Internal tags have no operation.
+  | {field:'distribution'; declared:boolean}
+  | {field:'distribution'; part:DistributionPart; value:string}
+  | {field:'gameName'; key:string; name:string|null}
+  | {field:'gameAliases'; aliases:string[]}
   // Options schema form.
   | {field:'type'; node:SchemaNode; type:SchemaType}
   | {field:'bound'; node:SchemaNode; key:string; value:number|null}
@@ -137,6 +145,17 @@ export function parseField(value:unknown):FieldOperation|null {
       // As in the form, an empty title or bundle ID means "not declared".
       return {field: 'target', target: {id: target.id, windowTitle: (target.windowTitle as string|null) || null, bundleId: (target.bundleId as string|null) || null}};
     }
+    case 'distribution':
+      if (Object.hasOwn(op, 'declared')) {
+        return exact(op, ['field', 'declared']) && typeof op.declared === 'boolean' ? {field: 'distribution', declared: op.declared} : null;
+      }
+      return exact(op, ['field', 'part', 'value']) && typeof op.part === 'string' && (DISTRIBUTION_PARTS as readonly string[]).includes(op.part) && text(op.value)
+        ? {field: 'distribution', part: op.part as DistributionPart, value: op.value} : null;
+    case 'gameName':
+      return exact(op, ['field', 'key', 'name']) && text(op.key) && (op.name === null || text(op.name))
+        ? {field: 'gameName', key: op.key, name: op.name as string|null} : null;
+    case 'gameAliases':
+      return exact(op, ['field', 'aliases']) && Array.isArray(op.aliases) && op.aliases.every(text) ? {field: 'gameAliases', aliases: [...op.aliases]} : null;
     case 'type': case 'addProperty': {
       const node = schemaNode(op.node);
       const type = typeof op.type === 'string' && (SCHEMA_TYPES as readonly string[]).includes(op.type) ? op.type as SchemaType : null;
@@ -218,7 +237,7 @@ export function parseField(value:unknown):FieldOperation|null {
 
 export function fieldDomain(op:FieldOperation):FieldDomain {
   switch (op.field) {
-    case 'runtime': case 'entry': case 'helper': case 'target': return 'manifest';
+    case 'runtime': case 'entry': case 'helper': case 'target': case 'distribution': case 'gameName': case 'gameAliases': return 'manifest';
     case 'option': return 'preset';
     case 'repair': return 'node' in op ? 'schema' : 'preset';
     case 'name': case 'expected': case 'kind': case 'region': case 'search': case 'delete': return 'definition';
@@ -254,9 +273,44 @@ function manifestField(value:Json, op:FieldOperation):Step {
       return done(withHelper(value, op.enabled));
     case 'target':
       return done(withTarget(value, op.target));
+    case 'distribution': case 'gameName': case 'gameAliases':
+      return distributionField(value, op);
     default:
       return fail('unsupported_field', 'This field does not apply to the manifest');
   }
+}
+
+// Distribution edits go through the form's helpers. As in the form, a part that is not in an editable shape is only
+// changed by its repair in the desktop, and a localized name is addressed by its canonical language, never by a row
+// whose language another row shares.
+function distributionField(manifest:JsonObject, op:Extract<FieldOperation, {field:'distribution'|'gameName'|'gameAliases'}>):Step {
+  if ('declared' in op) return done(withDistribution(manifest, op.declared));
+  const distribution = manifest.distribution;
+  if (distribution === undefined) return fail('invalid_field', 'Declare distribution metadata first');
+  if (!isObject(distribution)) return fail('invalid_field', 'The distribution metadata is not an object; repair it in the desktop');
+  if ('part' in op && op.part !== 'game_id') return done(withDistributionText(manifest, op.part, op.value));
+  const game = readDistribution(distribution).game;
+  if (game === null) return fail('invalid_field', 'The game metadata is not an object; repair it in the desktop');
+  if ('part' in op) return done(withDistributionText(manifest, op.part, op.value));
+  if (op.field === 'gameAliases') {
+    if (game.aliases === null) return fail('invalid_field', 'The aliases are not a list of texts; repair them in the desktop');
+    if (op.aliases.length > DISTRIBUTION_ENTRIES) return fail('invalid_field', `At most ${DISTRIBUTION_ENTRIES} aliases are allowed`);
+    return done(withAliases(manifest, op.aliases));
+  }
+  const rows = game.names;
+  if (rows === null) return fail('invalid_field', 'The localized names are not a map of texts; repair them in the desktop');
+  const key = canonicalLanguageKey(op.key);
+  if (key === null) return fail('invalid_field', 'The key must be a language tag such as en, ja, zh-Hant or pt-BR');
+  const matches = rows.flatMap((row, index) => canonicalLanguageKey(row.key) === key ? [index] : []);
+  if (matches.length > 1) return fail('invalid_field', 'Several localized names use this language; resolve them in the desktop');
+  const [match] = matches;
+  if (op.name === null) {
+    return match === undefined ? fail('invalid_field', 'No localized name uses this language')
+      : done(withNameRows(manifest, rows.filter((_, index) => index !== match)));
+  }
+  if (match === undefined && rows.length >= DISTRIBUTION_ENTRIES) return fail('invalid_field', `At most ${DISTRIBUTION_ENTRIES} localized names are allowed`);
+  const row = {key, name: op.name};
+  return done(withNameRows(manifest, match === undefined ? [...rows, row] : rows.map((item, index) => index === match ? row : item)));
 }
 
 // The node at `path` and how to put a replacement back, exactly as the nested schema form passes its changes up.

@@ -26,11 +26,12 @@ export default function Modal({id, open, onCancel, labelledBy, className, locked
       element.querySelector<HTMLElement>(initialFocus ?? 'input, select, textarea, button:not([disabled])')?.focus();
     } else if (!open && element.open) {
       element.close();
-      const previous = opener.current;
-      const target = previous instanceof HTMLElement && previous.isConnected
-        && previous.getClientRects().length > 0 && !previous.matches(':disabled')
-        ? previous : returnFocus?.() ?? document.getElementById('workspace-select');
-      target?.focus();
+      const usable = (target: Element | null | undefined): target is HTMLElement => target instanceof HTMLElement
+        && target !== document.body && target.isConnected && target.getClientRects().length > 0 && !target.matches(':disabled');
+      let target = opener.current;
+      if (!usable(target)) target = returnFocus?.() ?? null;
+      if (!usable(target)) target = document.getElementById('workspace-select');
+      if (usable(target)) target.focus();
     }
   }, [open, initialFocus]);
   return <dialog id={id} ref={dialog} className={className ? `modal ${className}` : 'modal'} aria-labelledby={labelledBy}

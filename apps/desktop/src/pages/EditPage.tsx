@@ -62,6 +62,8 @@ export interface EditHandlers {
   catalog: (edit: CatalogEdit) => Promise<boolean>;
   // The host places the copy in the configured packages root (the sources folder) under the new ID.
   duplicate: (packageId: string) => void;
+  // Opens Export PKG for the saved revision; unsaved drafts are resolved inside its dialog.
+  exportPackage: () => void;
   exit: () => void;
 }
 
@@ -93,12 +95,15 @@ interface Props {
   leaseLost: boolean;
   // The validation child still holds the work reservation, as reported by the host controller.
   validationActive: boolean;
+  // Why Export PKG cannot start beyond this page's own rules (for example another operation is active).
+  exportBlock: string | null;
 }
 
-export default function EditPage({session, label, handlers, recognition, recognitionDirty, recognitionSaveBlock, packagesRoot, completionPreferences, locked, lockReason, leaseLost, validationActive}: Props) {
+export default function EditPage({session, label, handlers, recognition, recognitionDirty, recognitionSaveBlock, packagesRoot, completionPreferences, locked, lockReason, leaseLost, validationActive, exportBlock}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const a = t.authoring;
+  const d = t.distribution;
   const drafts = draftList(session);
   const dirty = dirtyDrafts(session);
   const recognitionSelected = session.destination === 'recognition';
@@ -291,6 +296,9 @@ export default function EditPage({session, label, handlers, recognition, recogni
   }
   const addReason = catalogReason({kind: 'add', path: '', file_kind: 'source', text: ''});
   const duplicateReason = publishReason ?? (pending !== null || validating ? a.block('pending') : null);
+  // Export keeps package ID and release version; it needs a settled, refreshed saved revision.
+  const exportReason = duplicateReason
+    ?? (session.refreshRequired || session.conflict ? a.block('refresh') : null) ?? exportBlock;
   // The entry dialog closes before the host flow starts, so the unsaved-changes choice never stacks on top of it.
   function duplicate() {
     const id = duplicateId.trim();
@@ -549,6 +557,14 @@ export default function EditPage({session, label, handlers, recognition, recogni
             <li><div className="tree-row">
               <button id="authoring-duplicate-open" type="button" className="tree-folder tree-action" aria-haspopup="dialog" onClick={() => setDuplicating(true)}>
                 <span className="copy-icon" aria-hidden="true"/><span className="tree-name">{a.duplicateOpen}</span></button>
+            </div></li>
+            <li><div className="tree-row">
+              <ButtonHint hint={d.exportHint}>
+                <button id="authoring-export" type="button" className="tree-folder tree-action" aria-haspopup="dialog" disabled={exportReason !== null}
+                  title={exportReason ?? undefined} onClick={handlers.exportPackage}>
+                  <svg className="export-icon" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 8V1M3.5 3.5 6 1l2.5 2.5M1.5 7v3.5h9V7"/></svg>
+                  <span className="tree-name">{d.export}</span></button>
+              </ButtonHint>
             </div></li>
           </ul>
         </div>

@@ -1,7 +1,8 @@
 # Desktop checkout: authoring, controlled/replay and macOS Native runs
 
 MadoMata's trusted Tauri/React WebView provides directory-package and Recognition
-authoring, inspection, profiles, run control, App-local OCR settings, and logs.
+authoring, signed package transfer, inspection, profiles, run control, App-local
+OCR settings, and logs.
 Package code runs in the supervised QuickJS runner, never in the WebView.
 Controlled runs need no OCR installation. Recorded replay uses real engine
 OCR/template recognition over explicitly selected, previously authorized frames.
@@ -77,6 +78,18 @@ apps/desktop/src-tauri/target/debug/mado-mata-desktop
 `custom-protocol` serves the built application assets; no Vite server is needed.
 These commands do not enable the test-only `webdriver` feature. Normal builds
 have no automation listener, and release builds do not register that listener.
+
+Google author enrollment additionally requires the matching Desktop registration's
+`client_secret` string in Cargo's **build-time** `OIDC_CLIENT_KEY_GOOGLE`
+environment variable. Supply it through a non-echoing credential loader, not a
+command-line literal, tracked file or log. Rebuild and restart MadoMata after
+changing it; no runtime environment override is read. Public checks and ordinary
+builds need no value: unconfigured enrollment reports `SigningConfiguration`
+before opening the browser. Import, editing, controlled runs and offline signing
+with an existing enrolled key remain available. The value is extractable from a
+configured binary, not confidential-client authentication; see
+[ADR 0009](adr/0009-google-native-client-registration.md).
+
 The [shell decision](adr/0002-desktop-runner-boundary.md) describes the real
 WKWebView boundary; the [replay decision](adr/0003-desktop-recorded-replay.md)
 records its separate engine child and bounded consuming evidence.
@@ -246,6 +259,8 @@ The shell-independent core retains its public root namespaces:
 | `application.rs` | `workspaces` owns Tab/session transitions; `authoring` owns the global Edit lease and validation/close lifecycle; `profiles` owns ordinary profile commands and desktop value checks; `recovery` owns schema reconciliation, repair/reset authority, and explicit binding retry; `targets` owns target commands; `native_run` captures and resolves reviewed bundle correspondence; `operations` owns execution, collection, and shutdown |
 | `storage.rs` | `settings`, `tabs`, `profiles`, and `targets` own their records and persistence; `fs` owns bounded reads, safe paths, and atomic file publication |
 | `authoring.rs` | `catalog` owns prospective declarations; `publication` owns source revisions, changed-file staging, and interrupted-publication recovery |
+| `author_signing.rs` | Google OIDC enrollment, local Ed25519 custody and bounded index signing |
+| `distribution.rs` | Signed envelopes, ZIP consumption/publication and installed-release verification; `application/distribution.rs` owns command, review and cancellation admission |
 
 `Application` retains command admission and authoritative workspace/Store locks.
 `Store` and `ProfileStore` retain owner and shared-budget coordination.
@@ -349,17 +364,18 @@ Neither action inspects, binds, or runs the package.
   ask only for Package ID and show the derived destination. Settings Save creates
   nothing; valid Create/Duplicate creates missing parents. Changing the root
   neither moves existing packages nor retargets an active Edit session.
-- `authoring` remains private publication-journal storage. `pkgs` is reserved for
-  downloaded/packaged content; this does not add a download or archive feature.
-  Existing explicit roots and package references under `pkgs` remain usable.
+- `authoring` remains private publication-journal storage. `pkgs` holds imported
+  signed archives; there is no remote download. Installed releases are run-only:
+  the app and shared OMP authoring offer no source view, Edit or Duplicate.
+  Ordinary, non-managed directories under `pkgs` retain directory support.
 - Create and Duplicate require a missing destination. Existing package roots,
   links, traversal and aliases are refused. Under the App data root, source is
   allowed only within `sources` or `pkgs`, never configuration or journals.
   **Open for Edit** still accepts an existing external package directory.
-- The collapsible left tree contains **Files**, **Metadata**, **Recognition**
-  and **Duplicate**. Selecting a file or metadata item displays its editor,
-  form or facts on the right. Collapsing the navigation leaves the current
-  detail and drafts intact.
+- The collapsible left tree contains **Files**, **Metadata**, **Recognition**,
+  **Duplicate** and **Export PKG…**. Selecting a file or metadata item displays
+  its editor, form or facts on the right. Collapsing the navigation leaves the
+  current detail and drafts intact.
 - **Files** contains scripts and assets in expandable folders. Folder nodes come
   from declared paths: adding or renaming `src/lib/helper.ts` creates its parents.
   There is no independent empty-folder operation. Scripts have independent
@@ -387,6 +403,18 @@ Neither action inspects, binds, or runs the package.
   controls; generated source maps are read-only facts. Metadata never
   opens in the source editor. Manifest controls preserve package identity and
   declarations while editing supported entries and portable target intent.
+  The optional **Release and search metadata** form adds release version, name,
+  description, author/license and search game metadata through that same draft.
+  Release version and License have adjacent `i` help. Descriptions are plain text
+  with preserved line breaks.
+  Localized game-name rows join an editable language key to its name. Typing
+  filters i18n suggestions without selecting one; arrows mark a candidate,
+  Enter/Tab accepts it, and Enter/Tab after typing normalizes a valid key outside
+  the list. Add/remove retains focus and the selected resource's Undo/Redo.
+  Canonical duplicates remain visible and editable, never silently overwritten.
+  Aliases' `i` help includes executable basenames; these strings never select
+  Target application. Existing internal tags are preserved without tag controls.
+  See the [metadata contract](runtime-comparison.md#optional-distribution-metadata).
   Schema **Fields** pair the type selector and field-name input in one joined
   control, like Logs filters, including the new-field row. Names commit on Enter
   or focus loss; empty or duplicate names retain adjacent validation feedback.
@@ -584,8 +612,106 @@ existing package are refused before creating directories or archives.
 Interruption regressions cover process-level failures, not physical power loss.
 Windows directory sync retains the
 [existing platform limitation](adr/0005-desktop-configuration-recovery.md).
-Custom archives, remote download, game input, and native qualification remain
-separate work.
+Legacy custom archives, remote download and native qualification remain outside
+this authoring flow. Signed transfer is described below.
+
+## Transfer signed packages
+
+### Enroll a local signing key
+
+Open **Export PKG… → Signing details…** in a directory-package Edit session.
+Choose **Sign in with Google and create key**, then select the account and
+consent in the external browser. Enrollment uses the app-approved Desktop
+registration, PKCE, a temporary loopback listener and validated OIDC tokens.
+The interaction expires after five minutes; cancellation closes the owned
+attempt but does not claim settlement before its worker has returned.
+
+A successful enrollment creates one independently random Ed25519 identity in
+`<data-dir>/keys/active.json`. On macOS, `keys/` must be `0700` and the file
+`0600`; Windows uses ordinary inherited permissions, not a custom ACL.
+**The private key is an unencrypted, user-managed file.** Ordinary configuration
+backup/restore/reset and package transfer exclude the entire key store.
+Keep any private-key backup separately protected. Losing it loses that signing
+identity; signing in again cannot reconstruct it. Corrupt or existing records
+are never silently replaced.
+
+Subsequent exports open that local key and work offline, without refreshing an
+OIDC session. Signing details describe a cached **local** account association.
+Recipients see signature validity relative to the included key, its fingerprint,
+and **unverified account attribution** separately. Neither a valid signature nor
+an authored name/license certifies legal authorship, current Google login, source
+confidentiality, safety or execution permission.
+
+### Export a saved revision
+
+1. Add complete [distribution metadata](runtime-comparison.md#optional-distribution-metadata)
+   to Manifest, including the authored release version. Export keeps the package
+   ID and version; it does not bump either.
+2. In Edit's left file rail, choose **Export PKG…**, below **Duplicate package…**.
+   Resolve unsaved Script, metadata, preset and Recognition drafts with **Save and
+   continue**, or cancel with drafts intact. Partial Save success remains saved;
+   failure or a later dirty draft stops preparation.
+3. Choose **Build and save…**, then a missing `.mmpkg` filename outside the source.
+   Existing filenames are refused before preparation, even if the native panel
+   offered replacement. Nothing is written until the review is confirmed.
+   The application captures saved bytes once and statically validates those exact
+   bytes without running package code. Review package/release, revision, key
+   fingerprint, file/byte totals, included source and destination.
+4. Choose **Export** to confirm that review. A contributing edit or changed owner
+   invalidates confirmation; prepare again rather than exporting stale disk contents.
+   Publication never overwrites an occupied filename. A committed artifact with
+   failed staging cleanup is reported separately from clean success or rollback.
+
+The archive contains declared original source, source maps, schemas, packaged
+presets and assets. It is **not encrypted**. It contains no local profiles,
+target/launch settings, capture originals, signing keys, tokens or host libraries.
+The [format contract](runtime-comparison.md#signed-mmpkg-format) fixes its bounds.
+
+### Import and explicitly select
+
+Exit Edit and choose **Import PKG…** on a workspace's Guidance or Run page.
+Select a `.mmpkg`, inspect its verified release/key/source facts, and confirm.
+Verification and static compilation do not execute scripts. Import can finish
+alongside an active Run or Check without changing its owner or captured inputs.
+The Import dialog keeps that operation's Stop available, including during publication.
+It never selects a source, changes a Tab's profiles/targets or starts a run.
+
+Installed files live at
+`<data-dir>/pkgs/<key_id>/<package_id>/<archive-sha256>.mmpkg`.
+The original archive is retained without extracted source, source maps, envelope
+sidecars or receipts. `key_id` is the signing public key's SHA-256 fingerprint,
+not an OIDC subject or Server author ID; `package_id` is stable, not a display name.
+Identical reimport is unchanged only after reverifying the installed file.
+A different artifact claiming the same package/release is refused across signer
+namespaces; distinct versions coexist without automatic latest-version selection.
+The catalog admits at most 256 archives across all signers and packages. At that
+limit, new imports refuse before publication; verified identical reimport remains
+unchanged and the existing catalog stays available.
+
+Use **Select** to inspect and bind a release to that Tab. The saved reference
+remains `{kind: "installed", package_id, artifact_id}`. Reopen, Reinspect and Start
+verify archive digest, signature, payload and storage identity; missing, corrupt
+or ambiguous content refuses while retaining that reference and local settings.
+Execution uses the verified in-memory inventory, not an extracted directory.
+
+Selecting another version of the same signer/package reuses existing profile
+reconciliation: IDs and compatible custom values remain, supported missing
+top-level defaults are added, and incompatible values require **Recovery** rather
+than silent coercion or deletion. Choose the saved profile again after selecting
+the release to run its values. Existing Target compatibility checks still apply.
+A different signer is refused before profile or source-binding writes; use another
+Workspace. No account-switching or key-rotation manager is added.
+
+Installed releases cannot be opened, edited or duplicated through the app or OMP,
+including direct archive-path requests. The archive is still **unencrypted** and
+can be inspected with external tools; these controls do not enforce usage rights.
+
+Previous expanded installations are left intact but are no longer executable.
+Reimport the original `.mmpkg` to restore its unchanged saved reference and profiles.
+The app does not repack old payloads into a new artifact or call missing content
+configuration corruption. See [ADR 0010](adr/0010-archive-only-package-consumption.md)
+for the cutover and future decryption boundary. Legacy CustomZip remains
+unsupported; no Server, entitlement, download or native authorization is added.
 
 ## Collaborate through OMP
 
@@ -811,7 +937,7 @@ Structured targets require `fields`, not replacement JSON text. The
 
 | Resource kind | Supported `field` values |
 | --- | --- |
-| `manifest` | `runtime`, `entry`, `helper`, `target` |
+| `manifest` | `runtime`, `entry`, `helper`, `target`, `distribution`, `gameName`, `gameAliases` |
 | `schema` | `type`, `bound`, `enum`, `addProperty`, `removeProperty`, `renameProperty`, `required`, `removeDefault`, `default`, `repair` with `node` |
 | `profile` | `option`, `repair` without `node` |
 | `recognition_definition` | `name`, `expected`, `kind`, `region`, `search`, `delete` |
@@ -832,6 +958,15 @@ integer coordinates, not normalized fractions:
 /mado edit {"edits":[{"resource":"DEFINITION","version":"VERSION","fields":[{"field":"expected","value":"Ready"}]}]}
 /mado edit {"edits":[{"resource":"BASIS","version":"VERSION","fields":[{"field":"content","content":{"x":0,"y":0,"width":640,"height":360}}]}]}
 ```
+
+Distribution edits use `{field: "distribution", declared: true|false}` or
+`{field: "distribution", part, value}`; parts are `release_version`, `name`,
+`description`, `author_name`, `license` and `game_id`. Localized names use
+`{field: "gameName", key, name}` (`null` removes a key); aliases use
+`{field: "gameAliases", aliases}`. They share normal versions, draft history
+and Save. Internal tags and unrelated manifest/target fields are preserved.
+Use the application-supplied adapter's **Update** action for this schema change
+(adapter `0.1.2`); no OMP signing or arbitrary-message-signing tool is exposed.
 
 Recognition edits address only the active capture and reuse each field's
 existing admission rules. Geometry edits require the applicable loaded,
@@ -2219,10 +2354,12 @@ safe readable malformed, unsupported, and orphaned configuration is preserved
 byte for byte. Missing entries remain absent. An empty managed set reports
 `NothingToBackUp` without creating a destination or archive.
 
-Package directories and custom archives, models, logs, other roots, earlier
-backups, unrelated files, and temporary/journal data are excluded. An unresolved
-owned `.pending` write or restore transaction blocks capture rather than being
-silently omitted. Unsafe, unreadable, linked, aliased, oversized, or changing
+Package directories, installed signed containers, archives, the complete `keys/`
+store, models, logs, other roots, earlier backups, unrelated files, and
+temporary/journal data are excluded. Saved installed-source references remain
+configuration; restoring one does not supply its payload or signing key.
+An unresolved owned `.pending` write or restore transaction blocks capture rather
+than being silently omitted. Unsafe, unreadable, linked, aliased, oversized, or changing
 managed data is refused. Capture serializes with configuration writers; archive
 I/O does not hold the operation-control lock, so owner-bound Stop stays available.
 

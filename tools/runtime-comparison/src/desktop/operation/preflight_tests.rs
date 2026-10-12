@@ -77,6 +77,7 @@ fn refused_before_resolve(
                 Ok(StartPreparation {
                     environment,
                     native: (),
+                    inventory: None,
                 })
             },
             move |_, _| {

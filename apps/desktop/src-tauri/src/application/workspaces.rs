@@ -1,11 +1,12 @@
 use super::profiles::{check_webview_value, validated_profiles};
 use super::{
-    Application, MAX_SESSION_COUNTER, Selected, Selection, Workspace, WorkspaceCatalog,
-    WorkspaceRef, WorkspaceView, Workspaces, lock,
+    Application, InstalledSelection, MAX_SESSION_COUNTER, Selected, Selection, Workspace,
+    WorkspaceCatalog, WorkspaceRef, WorkspaceView, Workspaces, lock,
 };
 use crate::authoring::Publisher;
+use crate::distribution::{self, InstalledIdentity, InstalledRelease, VerifiedInstalled};
 use crate::storage::{MAX_OPEN_TABS, PackageSource, TabRecord};
-use mado_runtime_comparison::desktop::DesktopController;
+use mado_runtime_comparison::desktop::{DesktopController, PackageInfo};
 use mado_runtime_comparison::inventory::Inventory;
 use mado_runtime_comparison::model::{Fault, Plan};
 use serde_json::json;
@@ -164,30 +165,47 @@ impl Application {
                         "Saved selected package reference is missing",
                     )
                 })
-                .and_then(|reference| match &reference.source {
-                    PackageSource::Directory { path } => {
-                        let mut reference = workspace.clone();
-                        reference.revision = 1;
-                        let selected = Self::inspect_selection(
+                .and_then(|reference| {
+                    let mut session = workspace.clone();
+                    session.revision = 1;
+                    let selected = match &reference.source {
+                        PackageSource::Directory { path } => Self::inspect_selection(
                             runner,
                             publisher,
                             Path::new(path),
-                            reference,
+                            session,
                             &tab.internal_name,
                             &tab.display_name,
-                        )?;
-                        if selected.inventory.package_id != *package_id {
+                        )?,
+                        // Restart reverifies the retained archive; no earlier result is reused.
+                        PackageSource::Installed {
+                            package_id: installed,
+                            artifact_id,
+                        } => Self::inspect_installed_selection(
+                            runner,
+                            publisher,
+                            &InstalledIdentity {
+                                package_id: installed.clone(),
+                                artifact_id: artifact_id.clone(),
+                            },
+                            session,
+                            &tab.internal_name,
+                            &tab.display_name,
+                        )?,
+                        PackageSource::CustomArchive { .. } => {
                             return Err(Fault::new(
-                                "PackageIdentity",
-                                "Saved source now identifies another package",
+                                "UnsupportedPackageSource",
+                                "Custom package archives are not supported",
                             ));
                         }
-                        Ok(selected)
+                    };
+                    if selected.inventory.package_id != *package_id {
+                        return Err(Fault::new(
+                            "PackageIdentity",
+                            "Saved source now identifies another package",
+                        ));
                     }
-                    PackageSource::CustomArchive { .. } => Err(Fault::new(
-                        "UnsupportedPackageSource",
-                        "Custom package archives are not supported",
-                    )),
+                    Ok(selected)
                 });
             match result {
                 Ok(value) => {
@@ -214,6 +232,8 @@ impl Application {
         }
     }
 
+    /// A path naming an installed release (its archive, or a former expanded container)
+    /// keeps its installed identity and verification; it is never admitted as a directory.
     pub(super) fn inspect_selection(
         runner: &DesktopController,
         publisher: &Publisher,
@@ -223,17 +243,21 @@ impl Application {
         display_name: &str,
     ) -> Result<Selected, Fault> {
         publisher.check_admission(path)?;
+        if let Some(identity) = distribution::managed_identity(publisher.data_root(), path)? {
+            return Self::inspect_installed_selection(
+                runner,
+                publisher,
+                &identity,
+                workspace,
+                internal_name,
+                display_name,
+            );
+        }
         let path = path
             .canonicalize()
             .map_err(|_| Fault::new("Package", "Package location cannot be resolved"))?;
         let package = runner.inspect(&path)?;
-        check_webview_value(&package.schema, "$.schema")?;
-        for (name, preset) in &package.profiles {
-            check_webview_value(preset, &format!("$.presets[{name:?}]"))?;
-        }
-        if let Some(defaults) = &package.effective_defaults {
-            check_webview_value(defaults, "$.effective_defaults")?;
-        }
+        check_package_values(&package)?;
         let mut plan: Plan = serde_json::from_str(include_str!(
             "../../../../../tools/runtime-comparison/fixtures/manual-plan.json"
         ))
@@ -252,9 +276,83 @@ impl Application {
             internal_name: internal_name.to_owned(),
             display_name: display_name.to_owned(),
             path,
+            installed: None,
             inventory: Arc::new(inventory),
             package: Arc::new(package),
         })
+    }
+
+    /// Verify the installed archive, then statically inspect that same capture. The
+    /// selection's inventory is exactly the verified bytes; nothing is extracted.
+    pub(super) fn inspect_installed_selection(
+        runner: &DesktopController,
+        publisher: &Publisher,
+        identity: &InstalledIdentity,
+        workspace: WorkspaceRef,
+        internal_name: &str,
+        display_name: &str,
+    ) -> Result<Selected, Fault> {
+        let (verified, inventory, package) = Self::verify_installed(runner, publisher, identity)?;
+        check_package_values(&package)?;
+        Ok(Selected {
+            workspace,
+            internal_name: internal_name.to_owned(),
+            display_name: display_name.to_owned(),
+            path: verified.archive_path().to_path_buf(),
+            installed: Some(InstalledSelection {
+                identity: identity.clone(),
+                key_id: verified.facts().key_id.clone(),
+            }),
+            inventory: Arc::new(inventory),
+            package: Arc::new(package),
+        })
+    }
+
+    fn verify_installed(
+        runner: &DesktopController,
+        publisher: &Publisher,
+        identity: &InstalledIdentity,
+    ) -> Result<(VerifiedInstalled, Inventory, PackageInfo), Fault> {
+        let verified = distribution::verify_installed(
+            publisher.data_root(),
+            &identity.package_id,
+            &identity.artifact_id,
+        )?;
+        let inventory = verified.draft().validate()?;
+        if inventory.package_id != identity.package_id {
+            return Err(Fault::new(
+                "InstalledIntegrity",
+                "Installed payload names another package than its release identity",
+            )
+            .with_context(json!({
+                "package_id":identity.package_id,"artifact_id":identity.artifact_id,
+            })));
+        }
+        let package = runner.inspect_inventory(inventory.clone())?;
+        publisher.check_admission(verified.archive_path())?;
+        Ok((verified, inventory, package))
+    }
+
+    /// Capture a selection's current package for a later mutation check. Installed
+    /// releases are reverified in full rather than reread as a directory.
+    pub(super) fn reinspect(&self, selected: &Selected) -> Result<PackageInfo, Fault> {
+        self.publisher.check_admission(&selected.path)?;
+        match &selected.installed {
+            Some(installed) => {
+                Ok(Self::verify_installed(&self.runner, &self.publisher, &installed.identity)?.2)
+            }
+            None => self.runner.inspect(&selected.path),
+        }
+    }
+
+    /// Installed releases for explicit selection; each archive is reverified per call.
+    pub fn package_installed_list(&self) -> Result<Vec<InstalledRelease>, Fault> {
+        let result = (|| {
+            let (_command, state) = self.command_state()?;
+            drop(state);
+            distribution::installed_releases(&self.root)
+        })();
+        self.outcome(None, "package_installed_list", None, result)
     }
 
     fn selection(&self, selected: &Selected) -> Selection {
@@ -272,6 +370,15 @@ impl Application {
             internal_name: selected.internal_name.clone(),
             display_name: selected.display_name.clone(),
             package_path: selected.path.to_string_lossy().into_owned(),
+            source: match &selected.installed {
+                Some(installed) => PackageSource::Installed {
+                    package_id: installed.identity.package_id.clone(),
+                    artifact_id: installed.identity.artifact_id.clone(),
+                },
+                None => PackageSource::Directory {
+                    path: selected.path.to_string_lossy().into_owned(),
+                },
+            },
             package: selected.package.clone(),
             profiles,
             profiles_error,
@@ -335,5 +442,18 @@ impl Application {
     }
 }
 
+fn check_package_values(package: &PackageInfo) -> Result<(), Fault> {
+    check_webview_value(&package.schema, "$.schema")?;
+    for (name, preset) in &package.profiles {
+        check_webview_value(preset, &format!("$.presets[{name:?}]"))?;
+    }
+    if let Some(defaults) = &package.effective_defaults {
+        check_webview_value(defaults, "$.effective_defaults")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod installed_tests;
 #[cfg(test)]
 mod tests;

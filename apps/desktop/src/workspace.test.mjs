@@ -11,8 +11,8 @@ const schema={type:'object',properties:{count:{type:'integer',default:1},mode:{t
 function profile(id,name,values,packageId='pkg-a',schemaIdentity='schema-1'){
   return {version:1,id,name,package_id:packageId,schema_identity:schemaIdentity,values};
 }
-function selection(id,revision,{path='/pkg/'+id,packageId='pkg-'+id,profiles=[profile('prof-'+id,'Saved '+id,{count:5},packageId)],schemaIdentity='schema-1',internal=id,display='Tab '+id}={}){
-  return {workspace_id:id,revision,internal_name:internal,display_name:display,package_path:path,profiles_error:null,profiles,
+function selection(id,revision,{path='/pkg/'+id,packageId='pkg-'+id,profiles=[profile('prof-'+id,'Saved '+id,{count:5},packageId)],schemaIdentity='schema-1',internal=id,display='Tab '+id,source={kind:'directory',path}}={}){
+  return {workspace_id:id,revision,internal_name:internal,display_name:display,package_path:path,source,profiles_error:null,profiles,
     package:{package_id:packageId,inventory_identity:'inv-'+id,schema_identity:schemaIdentity,runtime:'quickjs',schema,profiles:{fast:{options:{count:9}}},effective_defaults:null,target:null,target_identity:null}};
 }
 function view(id,{internal=id,display='Tab '+id,selection:bound=null,sourceError=null,savedPackage=null,recovery=null,revision=bound?bound.revision:0}={}){
@@ -104,6 +104,28 @@ test('a failed saved directory is kept visible and prefilled, a saved custom arc
   assert.equal(repaired.sourceError,null);
   assert.deepEqual(repaired.savedPackage,{package_id:'pkg-a',source:{kind:'directory',path:'/games/alpha-moved'}});
   assert.equal(repaired.inspectPath,'/games/alpha-moved');
+});
+
+test('an installed release binds and fails as its explicit installed reference, never as a directory or Edit location',()=>{
+  const installed={kind:'installed',package_id:'pkg-a',artifact_id:'a'.repeat(64)};
+  const archive='/data/pkgs/'+'b'.repeat(64)+'/pkg-a/'+'a'.repeat(64)+'.mmpkg';
+  const selected=selection('a',1,{path:archive,packageId:'pkg-a',source:installed});
+  const bound=bindSelection(workspaceFromView(view('a')),selected);
+  assert.deepEqual(bound.savedPackage,{package_id:'pkg-a',source:installed});
+  assert.equal(bound.bound.packagePath,archive);
+  // Restoring the bound release keeps its archive for Reinspect but offers nothing to open for Edit.
+  const restored=workspaceFromView(view('a',{selection:selected,savedPackage:{package_id:'pkg-a',source:installed}}));
+  assert.equal(restored.inspectPath,archive);
+  assert.equal(restored.editPath,'');
+  const directory=workspaceFromView(view('b',{selection:selection('b',1)}));
+  assert.equal(directory.editPath,'/pkg/b');
+  // A tampered or missing release keeps its saved identity and offers no directory prefill.
+  const tampered={category:'InstalledIntegrity',message:'payload digest mismatch',context:{package_id:'pkg-a',artifact_id:installed.artifact_id}};
+  const refused=workspaceFromView(view('a',{revision:2,sourceError:tampered,savedPackage:{package_id:'pkg-a',source:installed}}));
+  assert.equal(refused.bound,null);
+  assert.deepEqual(refused.savedPackage,{package_id:'pkg-a',source:installed});
+  assert.equal(refused.inspectPath,'');
+  assert.throws(()=>commandValues(refused,undefined),error=>error instanceof LocalFault&&error.presentation.key==='unboundWorkspace');
 });
 
 test('a catalog from one Tab never reaches another Tab bound to the same package source',()=>{

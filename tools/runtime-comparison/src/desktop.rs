@@ -8,7 +8,7 @@ mod recognition;
 #[cfg(test)]
 mod test_support;
 
-use crate::inventory::TargetDeclaration;
+use crate::inventory::{Inventory, TargetDeclaration};
 use crate::model::{Control, Fault, NativeBudgets, Plan};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -141,6 +141,9 @@ pub struct NativeTarget {
 pub struct StartPreparation<P = ()> {
     pub environment: Option<crate::environment::OcrEnvironment>,
     pub native: P,
+    /// A package the host captured and verified itself. When present, execution uses
+    /// exactly this inventory and never rereads `package_path`.
+    pub inventory: Option<Inventory>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

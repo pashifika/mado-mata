@@ -59,8 +59,7 @@ impl Application {
             let (_command, state) = self.command_state()?;
             let selected = state.resolve(workspace)?.clone();
             drop(state);
-            self.publisher.check_admission(&selected.path)?;
-            let current = self.runner.inspect(&selected.path)?;
+            let current = self.reinspect(&selected)?;
             if current.inventory_identity != selected.inventory.identity {
                 return Err(Fault::new(
                     "InventoryChanged",

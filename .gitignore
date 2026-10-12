@@ -24,6 +24,7 @@ target
 # Private planning, reference material, and execution evidence.
 /rasen/
 /.rasen/
+/.secret/
 /examples/
 /local_docs/
 /.cache/
