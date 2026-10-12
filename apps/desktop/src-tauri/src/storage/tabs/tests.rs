@@ -127,11 +127,11 @@ fn installed_references_persist_explicitly_and_refuse_malformed_identities() {
     let directory = Directory::new();
     let store = directory.store();
     store.create_tab("Owner", "Owner").unwrap();
-    store.bind_package("Owner", "example", &directory.0).unwrap();
-    let artifact = "0123456789abcdef".repeat(4);
-    let bound = store
-        .bind_installed("Owner", "example", &artifact)
+    store
+        .bind_package("Owner", "example", &directory.0)
         .unwrap();
+    let artifact = "0123456789abcdef".repeat(4);
+    let bound = store.bind_installed("Owner", "example", &artifact).unwrap();
     let installed = PackageSource::Installed {
         package_id: "example".into(),
         artifact_id: artifact.clone(),

@@ -106,12 +106,19 @@ test('a failed saved directory is kept visible and prefilled, a saved custom arc
   assert.equal(repaired.inspectPath,'/games/alpha-moved');
 });
 
-test('an installed release binds and fails as its explicit installed reference, never as its payload directory',()=>{
+test('an installed release binds and fails as its explicit installed reference, never as a directory or Edit location',()=>{
   const installed={kind:'installed',package_id:'pkg-a',artifact_id:'a'.repeat(64)};
-  const payload='/data/pkgs/pkg-a/'+'a'.repeat(64)+'/package';
-  const bound=bindSelection(workspaceFromView(view('a')),selection('a',1,{path:payload,packageId:'pkg-a',source:installed}));
+  const archive='/data/pkgs/'+'b'.repeat(64)+'/pkg-a/'+'a'.repeat(64)+'.mmpkg';
+  const selected=selection('a',1,{path:archive,packageId:'pkg-a',source:installed});
+  const bound=bindSelection(workspaceFromView(view('a')),selected);
   assert.deepEqual(bound.savedPackage,{package_id:'pkg-a',source:installed});
-  assert.equal(bound.bound.packagePath,payload);
+  assert.equal(bound.bound.packagePath,archive);
+  // Restoring the bound release keeps its archive for Reinspect but offers nothing to open for Edit.
+  const restored=workspaceFromView(view('a',{selection:selected,savedPackage:{package_id:'pkg-a',source:installed}}));
+  assert.equal(restored.inspectPath,archive);
+  assert.equal(restored.editPath,'');
+  const directory=workspaceFromView(view('b',{selection:selection('b',1)}));
+  assert.equal(directory.editPath,'/pkg/b');
   // A tampered or missing release keeps its saved identity and offers no directory prefill.
   const tampered={category:'InstalledIntegrity',message:'payload digest mismatch',context:{package_id:'pkg-a',artifact_id:installed.artifact_id}};
   const refused=workspaceFromView(view('a',{revision:2,sourceError:tampered,savedPackage:{package_id:'pkg-a',source:installed}}));

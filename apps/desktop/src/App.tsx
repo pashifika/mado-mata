@@ -605,8 +605,8 @@ export default function App() {
     return commandReason ?? (closing ? t.applicationClosing : null);
   }
 
-  // Explicit selection of one installed release for this Tab only: the host reverifies the signed container and runs
-  // the ordinary inspection, profile reconciliation and durable binding. Import never reaches here by itself.
+  // Explicit selection of one installed release for this Tab only: the host reverifies the signed archive and runs
+  // the ordinary inspection, signer continuity, profile reconciliation and durable binding. Import never reaches here.
   function selectInstalled(workspace: Workspace, packageId: string, artifactId: string) {
     if (inspectBlock(workspace) !== null) return;
     invalidateOwnerTarget(workspace.id);
@@ -1828,7 +1828,7 @@ export default function App() {
   // or Cancel; it never presents stale disk bytes as the visible drafts.
   function openExport() {
     const session = authoringController.current();
-    if (!session || session.managed || exportFlowRef.current !== null || choiceRunning.current) return;
+    if (!session || exportFlowRef.current !== null || choiceRunning.current) return;
     updateExportFlow(() => ({owner: session.owner, step: exportReadiness(authoringController, session.owner, null)}));
     void readSigner();
   }
@@ -2789,11 +2789,11 @@ export default function App() {
           recognitionSaveBlock={recognitionSaveReason} exportBlock={active ? ui.authoring.blockedActive : null}
           completionPreferences={editorCompletion.current}
           recognition={authoring.recognition
-            ? <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null || authoring.managed}
+            ? <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null}
               leaseLost={leaseLost} trialActive={recognitionActive}
               nativeSelection={nativeSelection && sameAuthoringRef(nativeSelection.owner, authoring.owner) && nativeSelection.revision === authoring.revision ? nativeSelection : null}
               onState={update => {
-                if (!captureTransition.current && !closing && choice === null && !choiceRunning.current && !leaseLost && !authoring.managed) updateRecognition(authoring.owner.token, update);
+                if (!captureTransition.current && !closing && choice === null && !choiceRunning.current && !leaseLost) updateRecognition(authoring.owner.token, update);
               }}
               handlers={{
                 load: newCapture => void changeRecognitionCapture({newCapture}), selectCapture: captureId => void changeRecognitionCapture({captureId}),

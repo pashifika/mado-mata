@@ -244,9 +244,17 @@ struct Selected {
     internal_name: String,
     display_name: String,
     path: PathBuf,
-    installed: Option<crate::distribution::InstalledIdentity>,
+    installed: Option<InstalledSelection>,
     inventory: Arc<Inventory>,
     package: Arc<PackageInfo>,
+}
+
+/// A selected installed release: its persisted reference and the signing key verified
+/// with it. The archive digest fixes the key, so it holds for this artifact everywhere.
+#[derive(Clone)]
+struct InstalledSelection {
+    identity: crate::distribution::InstalledIdentity,
+    key_id: String,
 }
 
 #[derive(Clone)]

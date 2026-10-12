@@ -66,7 +66,7 @@ fn export(release: &str) -> PreparedPackage {
 }
 
 fn archive_of(prepared: &PreparedPackage) -> Vec<u8> {
-    prepared.archive.as_ref().unwrap().to_vec()
+    prepared.archive.to_vec()
 }
 
 /// Reads members with the ZIP library, independent of the package reader.
@@ -226,6 +226,23 @@ fn snapshot(directory: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     found
 }
 
+/// Every path below `directory`, relative with `/` separators, sorted.
+fn tree(directory: &Path) -> Vec<String> {
+    let mut paths: Vec<_> = snapshot(directory)
+        .into_iter()
+        .map(|(path, _)| {
+            path.strip_prefix(directory)
+                .unwrap()
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
@@ -244,6 +261,7 @@ fn read_only(directory: &Path) {
     );
 }
 
+#[cfg(unix)]
 fn rewrite(path: PathBuf, change: impl FnOnce(Vec<u8>) -> Vec<u8>) {
     let bytes = fs::read(&path).unwrap();
     // Rewriting an existing file keeps its private mode and single link.
@@ -297,55 +315,49 @@ fn exported_release_installs_and_reverifies_through_every_consumer() {
 
     let imported = prepare_import(&destination, &idle()).unwrap();
     assert_eq!(imported.facts(), &facts);
-    assert!(imported.archive.is_none());
+    // The review retains the exact captured bytes for installation.
+    assert_eq!(&*imported.archive, archive.as_slice());
     assert_eq!(imported.draft().files(), prepared.draft().files());
     imported.draft().validate().unwrap();
     // Confirmation uses the captured artifact, never a reopened replacement.
     fs::write(&destination, b"replacement after review").unwrap();
 
+    let file = installed_destination(&data.0, &facts).unwrap();
+    assert_eq!(
+        file,
+        data.0
+            .canonicalize()
+            .unwrap()
+            .join("pkgs")
+            .join(&facts.key_id)
+            .join("sample")
+            .join(format!("{}.mmpkg", facts.artifact_id))
+    );
     let installed = publish_import(&data.0, &imported, &idle()).unwrap();
     assert!(installed.committed && !installed.unchanged && installed.cleanup_error.is_none());
-    let container = data
-        .0
-        .canonicalize()
-        .unwrap()
-        .join("pkgs/sample")
-        .join(&facts.artifact_id);
-    assert_eq!(Path::new(&installed.path), container);
-    assert_eq!(
-        fs::read(container.join("index.json")).unwrap(),
-        member(&entries, "index.json")
-    );
-    assert_eq!(
-        fs::read(container.join("signature.json")).unwrap(),
-        member(&entries, "signature.json")
-    );
-    assert_eq!(
-        fs::read(container.join("package/main.ts")).unwrap(),
-        SOURCE.as_bytes()
-    );
-    let receipt: Value =
-        serde_json::from_slice(&fs::read(container.join("receipt.json")).unwrap()).unwrap();
-    assert_eq!(
-        receipt,
-        json!({
-            "version":1,"artifact_id":facts.artifact_id,"package_id":"sample","release_version":"1.0.0",
-            "key_id":facts.key_id,"index_sha256":format::sha256_hex(&member(&entries, "index.json"))
-        })
-    );
+    assert_eq!(Path::new(&installed.path), file);
+    // The installation is the original archive file alone: nothing is extracted and
+    // no envelope copy or receipt is written beside it.
+    assert_eq!(fs::read(&file).unwrap(), archive);
+    let layout = [
+        "pkgs".to_owned(),
+        "pkgs/.import.lock".to_owned(),
+        format!("pkgs/{}", facts.key_id),
+        format!("pkgs/{}/sample", facts.key_id),
+        format!("pkgs/{}/sample/{}.mmpkg", facts.key_id, facts.artifact_id),
+    ];
+    assert_eq!(tree(&data.0), layout);
 
     let verified = verify_installed(&data.0, "sample", &facts.artifact_id).unwrap();
     assert_eq!(verified.facts(), &facts);
-    assert_eq!(verified.payload_path(), container.join("package"));
+    assert_eq!(verified.archive_path(), file);
     assert_eq!(verified.draft().files(), prepared.draft().files());
     verified.draft().validate().unwrap();
 
     let again = publish_import(&data.0, &imported, &idle()).unwrap();
     assert!(again.unchanged && !again.committed && again.cleanup_error.is_none());
-    assert_eq!(
-        names(container.parent().unwrap()),
-        [facts.artifact_id.clone()]
-    );
+    assert_eq!(Path::new(&again.path), file);
+    assert_eq!(tree(&data.0), layout);
 
     let listed = installed_releases(&data.0).unwrap();
     assert_eq!(listed.len(), 1);
@@ -356,11 +368,11 @@ fn exported_release_installs_and_reverifies_through_every_consumer() {
         package_id: "sample".into(),
         artifact_id: facts.artifact_id.clone(),
     };
+    // The archive and any path beneath its name are never ordinary package locations.
     for path in [
-        container.clone(),
-        container.join("package"),
-        container.join("package/profiles/default.json"),
-        container.join("package/missing/new.ts"),
+        file.clone(),
+        file.join("main.ts"),
+        file.join("package/profiles/default.json"),
     ] {
         assert_eq!(
             managed_identity(&data.0, &path).unwrap(),
@@ -368,13 +380,17 @@ fn exported_release_installs_and_reverifies_through_every_consumer() {
             "{path:?}"
         );
     }
+    let package = file.parent().unwrap();
+    for path in [
+        package.to_owned(),
+        package.parent().unwrap().to_owned(),
+        data.0.join("pkgs"),
+        output.0.clone(),
+    ] {
+        assert_eq!(managed_identity(&data.0, &path).unwrap(), None, "{path:?}");
+    }
     assert_eq!(
-        managed_identity(&data.0, &data.0.join("pkgs/sample")).unwrap(),
-        None
-    );
-    assert_eq!(managed_identity(&data.0, &output.0).unwrap(), None);
-    assert_eq!(
-        managed_identity(&output.0.join("absent"), &container).unwrap(),
+        managed_identity(&output.0.join("absent"), &file).unwrap(),
         None
     );
 }
@@ -387,9 +403,19 @@ fn ordinary_pkgs_directories_are_never_adopted() {
     fs::create_dir_all(&digest_named).unwrap();
     fs::write(plain.join("package.json"), b"{}").unwrap();
     fs::write(digest_named.join("main.ts"), b"export {};").unwrap();
+    // A signer-shaped folder holding an ordinary package and a non-artifact archive name.
+    let namespace = data.0.join("pkgs").join("b".repeat(64)).join("plain");
+    fs::create_dir_all(&namespace).unwrap();
+    fs::write(namespace.join("package.json"), b"{}").unwrap();
+    fs::write(namespace.join("notes.mmpkg"), b"not an artifact").unwrap();
     assert!(installed_releases(&data.0).unwrap().is_empty());
-    for path in [&plain, &digest_named] {
-        assert_eq!(managed_identity(&data.0, path).unwrap(), None);
+    for path in [
+        &plain,
+        &digest_named,
+        &namespace,
+        &namespace.join("notes.mmpkg"),
+    ] {
+        assert_eq!(managed_identity(&data.0, path).unwrap(), None, "{path:?}");
     }
     assert_eq!(
         verify_installed(&data.0, "../plain", &"a".repeat(64))
@@ -402,6 +428,13 @@ fn ordinary_pkgs_directories_are_never_adopted() {
             .unwrap_err()
             .category,
         "InstalledReference"
+    );
+    // An ordinary folder shaped like an artifact reference is never read as one.
+    assert_eq!(
+        verify_installed(&data.0, "plain", &"a".repeat(64))
+            .unwrap_err()
+            .category,
+        "InstalledMissing"
     );
 }
 
@@ -446,17 +479,33 @@ fn independent_containers_are_admitted_and_release_conflicts_refuse() {
             original.facts().artifact_id
         );
     }
-    let package = data.0.join("pkgs/sample");
-    assert_eq!(names(&package), [original.facts().artifact_id.clone()]);
+    // A refused release creates nothing, not even its signer folder.
+    let packages = data.0.join("pkgs");
+    let key = signer().key_id().to_owned();
+    assert_eq!(names(&packages), [".import.lock".to_owned(), key.clone()]);
+    assert_eq!(
+        names(&packages.join(&key).join("sample")),
+        [format!("{}.mmpkg", original.facts().artifact_id)]
+    );
 
-    // Distinct release versions coexist; nothing chooses a latest one.
+    // Distinct release versions coexist, also from another signer; nothing chooses a
+    // latest one.
     let next = import(&selection, &archive_of(&export("1.1.0"))).unwrap();
     publish_import(&data.0, &next, &idle()).unwrap();
+    let foreign = prepare_export(draft("2.0.0"), &Signer::from_seed([9; 32]), &idle()).unwrap();
+    let foreign = import(&selection, &archive_of(&foreign)).unwrap();
+    assert_ne!(foreign.facts().key_id, key);
+    let published = publish_import(&data.0, &foreign, &idle()).unwrap();
+    assert_eq!(
+        Path::new(&published.path),
+        installed_destination(&data.0, foreign.facts()).unwrap()
+    );
     let listed = installed_releases(&data.0).unwrap();
-    assert_eq!(listed.len(), 2);
+    assert_eq!(listed.len(), 3);
     assert!(listed.iter().all(|release| release.fault.is_none()));
-    verify_installed(&data.0, "sample", &original.facts().artifact_id).unwrap();
-    verify_installed(&data.0, "sample", &next.facts().artifact_id).unwrap();
+    for release in [&original, &next, &foreign] {
+        verify_installed(&data.0, "sample", &release.facts().artifact_id).unwrap();
+    }
 }
 
 #[test]
@@ -928,11 +977,16 @@ fn export_publication_never_replaces_and_reports_committed_truth() {
 fn import_publication_is_exclusive_atomic_and_reports_committed_truth() {
     let data = Root::new();
     let selection = Root::new();
-    let imported = import(&selection, &archive_of(&export("1.0.0"))).unwrap();
+    let archive = archive_of(&export("1.0.0"));
+    let imported = import(&selection, &archive).unwrap();
     let artifact = imported.facts().artifact_id.clone();
-    let package = data.0.join("pkgs/sample");
+    let destination = installed_destination(&data.0, imported.facts()).unwrap();
+    let file_name = format!("{artifact}.mmpkg");
+    let package = destination.parent().unwrap().to_owned();
+    let signer_folder = package.parent().unwrap().to_owned();
 
-    // An ordinary editable package at the release location is preserved, not adopted.
+    // An ordinary editable package or file at the release location is preserved, not
+    // adopted.
     fs::create_dir_all(&package).unwrap();
     fs::write(package.join("package.json"), b"{}").unwrap();
     assert_eq!(
@@ -942,7 +996,16 @@ fn import_publication_is_exclusive_atomic_and_reports_committed_truth() {
         "PackageConflict"
     );
     assert_eq!(names(&package), ["package.json"]);
-    fs::remove_dir_all(&package).unwrap();
+    fs::remove_dir_all(&signer_folder).unwrap();
+    fs::write(&signer_folder, b"operator file").unwrap();
+    assert_eq!(
+        publish_import(&data.0, &imported, &idle())
+            .unwrap_err()
+            .category,
+        "PackageConflict"
+    );
+    assert_eq!(fs::read(&signer_folder).unwrap(), b"operator file");
+    fs::remove_file(&signer_folder).unwrap();
     fs::write(data.0.join("pkgs/package.json"), b"{}").unwrap();
     assert_eq!(
         publish_import(&data.0, &imported, &idle())
@@ -950,7 +1013,7 @@ fn import_publication_is_exclusive_atomic_and_reports_committed_truth() {
             .category,
         "PackageConflict"
     );
-    assert!(!package.exists());
+    assert!(!signer_folder.exists());
     fs::remove_file(data.0.join("pkgs/package.json")).unwrap();
 
     // Another importer holding the data-root lock excludes this one.
@@ -976,14 +1039,18 @@ fn import_publication_is_exclusive_atomic_and_reports_committed_truth() {
         "PackageCancelled"
     );
     let cancel = idle();
-    let fault = installed::publish(&data.0, &imported, &cancel, &mut |stage, _| {
+    let fault = installed::publish(&data.0, &imported, &cancel, &mut |stage, path| {
         if stage == Stage::Staged {
+            // The staged installation is the captured archive file itself.
+            assert!(fs::symlink_metadata(path).unwrap().is_file());
+            assert_eq!(fs::read(path).unwrap(), archive);
             cancel.store(true, Ordering::Release);
         }
         Ok(())
     })
     .unwrap_err();
     assert_eq!(fault.category, "PackageCancelled");
+    assert!(fault.context.get("cleanup_error").is_none());
     assert!(names(&package).is_empty());
     assert!(installed_releases(&data.0).unwrap().is_empty());
 
@@ -993,18 +1060,20 @@ fn import_publication_is_exclusive_atomic_and_reports_committed_truth() {
     assert_eq!(fault.category, "ConfigurationIo", "{fault:?}");
     assert!(names(&package).is_empty());
 
+    // A file that appears before the rename wins; the staging copy is removed.
     let fault = installed::publish(&data.0, &imported, &idle(), &mut |stage, path| {
         if stage == Stage::Publish {
-            fs::create_dir(path).unwrap();
+            fs::write(path, b"racing writer").unwrap();
         }
         Ok(())
     })
     .unwrap_err();
     assert_eq!(fault.category, "PackageConflict");
-    assert_eq!(names(&package), [artifact.clone()]);
-    assert!(names(&package.join(&artifact)).is_empty());
-    fs::remove_dir(package.join(&artifact)).unwrap();
+    assert_eq!(names(&package), [file_name.clone()]);
+    assert_eq!(fs::read(&destination).unwrap(), b"racing writer");
+    fs::remove_file(&destination).unwrap();
 
+    // Failed removal of refused staging is reported and the evidence retained.
     let cancel = idle();
     let fault = installed::publish(&data.0, &imported, &cancel, &mut |stage, _| {
         if stage == Stage::Staged {
@@ -1020,9 +1089,16 @@ fn import_publication_is_exclusive_atomic_and_reports_committed_truth() {
     let retained = names(&package);
     assert_eq!(retained.len(), 1);
     assert!(retained[0].starts_with(".install-"));
+    // Retained staging is neither listed nor read as the installation.
     assert!(installed_releases(&data.0).unwrap().is_empty());
-    fs::remove_dir_all(package.join(&retained[0])).unwrap();
+    assert_eq!(
+        verify_installed(&data.0, "sample", &artifact)
+            .unwrap_err()
+            .category,
+        "InstalledMissing"
+    );
 
+    // A durable artifact whose finishing work fails is committed, not rolled back.
     let published = installed::publish(&data.0, &imported, &idle(), &mut |stage, _| {
         if stage == Stage::Committed {
             set_mode(&package, 0o300);
@@ -1033,7 +1109,140 @@ fn import_publication_is_exclusive_atomic_and_reports_committed_truth() {
     set_mode(&package, 0o700);
     assert!(published.committed && !published.unchanged);
     assert_eq!(published.cleanup_error.unwrap().category, "ConfigurationIo");
-    assert_eq!(names(&package), [artifact.clone()]);
+    assert_eq!(names(&package), [retained[0].clone(), file_name]);
+    assert_eq!(fs::read(&destination).unwrap(), archive);
+    assert_eq!(
+        verify_installed(&data.0, "sample", &artifact)
+            .unwrap()
+            .facts(),
+        imported.facts()
+    );
+    let again = publish_import(&data.0, &imported, &idle()).unwrap();
+    assert!(again.unchanged && !again.committed);
+}
+
+#[cfg(unix)]
+#[test]
+fn installed_tampering_refuses_and_reimport_never_repairs() {
+    let selection = Root::new();
+    let archive = archive_of(&export("1.0.0"));
+    let cases: [(&str, fn(&Path, &Path), &str); 8] = [
+        (
+            "archive byte",
+            |file: &Path, _: &Path| {
+                rewrite(file.to_owned(), |mut bytes| {
+                    let middle = bytes.len() / 2;
+                    bytes[middle] ^= 1;
+                    bytes
+                });
+            },
+            "InstalledIntegrity",
+        ),
+        (
+            "appended byte",
+            |file: &Path, _: &Path| {
+                rewrite(file.to_owned(), |mut bytes| {
+                    bytes.push(0);
+                    bytes
+                });
+            },
+            "InstalledIntegrity",
+        ),
+        (
+            "truncated",
+            |file: &Path, _: &Path| {
+                rewrite(file.to_owned(), |mut bytes| {
+                    bytes.truncate(bytes.len() / 2);
+                    bytes
+                });
+            },
+            "InstalledIntegrity",
+        ),
+        (
+            "readable by others",
+            |file: &Path, _: &Path| set_mode(file, 0o644),
+            "InstalledIntegrity",
+        ),
+        (
+            "hard link",
+            |file: &Path, spare: &Path| fs::hard_link(file, spare.join("alias.mmpkg")).unwrap(),
+            "InstalledIntegrity",
+        ),
+        (
+            "symbolic link",
+            |file: &Path, spare: &Path| {
+                let moved = spare.join("moved.mmpkg");
+                fs::rename(file, &moved).unwrap();
+                std::os::unix::fs::symlink(&moved, file).unwrap();
+            },
+            "InstalledIntegrity",
+        ),
+        (
+            "directory",
+            |file: &Path, _: &Path| {
+                fs::remove_file(file).unwrap();
+                fs::create_dir(file).unwrap();
+            },
+            "InstalledIntegrity",
+        ),
+        (
+            "missing",
+            |file: &Path, _: &Path| fs::remove_file(file).unwrap(),
+            "InstalledMissing",
+        ),
+    ];
+    for (label, tamper, category) in cases {
+        let data = Root::new();
+        let spare = Root::new();
+        let imported = import(&selection, &archive).unwrap();
+        publish_import(&data.0, &imported, &idle()).unwrap();
+        let artifact = imported.facts().artifact_id.clone();
+        let file = installed_destination(&data.0, imported.facts()).unwrap();
+        let package = file.parent().unwrap().to_owned();
+        tamper(&file, &spare.0);
+        let fault = verify_installed(&data.0, "sample", &artifact).unwrap_err();
+        assert_eq!(fault.category, category, "{label}: {fault:?}");
+        assert_eq!(fault.context["artifact_id"], artifact.as_str(), "{label}");
+        let listed = installed_releases(&data.0).unwrap();
+        if category == "InstalledMissing" {
+            assert_eq!(fault.context["reimport_required"], true, "{label}");
+            assert!(listed.is_empty(), "{label}");
+            // Only the original archive restores a missing installation.
+            let restored = publish_import(&data.0, &imported, &idle()).unwrap();
+            assert!(restored.committed, "{label}");
+            verify_installed(&data.0, "sample", &artifact).unwrap();
+            continue;
+        }
+        assert_eq!(listed.len(), 1, "{label}");
+        assert!(listed[0].facts.is_none(), "{label}");
+        assert_eq!(
+            listed[0].fault.as_ref().unwrap().category,
+            category,
+            "{label}"
+        );
+        let before = snapshot(&package);
+        let fault = publish_import(&data.0, &imported, &idle()).unwrap_err();
+        assert_eq!(fault.category, "InstalledIntegrity", "{label}: {fault:?}");
+        assert_eq!(snapshot(&package), before, "{label}");
+    }
+
+    // An unreadable archive refuses as a storage failure, not as missing, and verifies
+    // again once readable; nothing repairs or replaces it.
+    let data = Root::new();
+    let imported = import(&selection, &archive).unwrap();
+    publish_import(&data.0, &imported, &idle()).unwrap();
+    let artifact = imported.facts().artifact_id.clone();
+    let file = installed_destination(&data.0, imported.facts()).unwrap();
+    set_mode(&file, 0o200);
+    assert_eq!(
+        File::open(&file).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied,
+        "file modes must be enforced for this regression"
+    );
+    let fault = verify_installed(&data.0, "sample", &artifact).unwrap_err();
+    set_mode(&file, 0o600);
+    assert_eq!(fault.category, "InstalledIntegrity", "{fault:?}");
+    assert_eq!(fault.context["cause"]["category"], "PackageStorage");
     assert_eq!(
         verify_installed(&data.0, "sample", &artifact)
             .unwrap()
@@ -1043,113 +1252,120 @@ fn import_publication_is_exclusive_atomic_and_reports_committed_truth() {
 }
 
 #[test]
-fn installed_tampering_refuses_and_reimport_never_repairs() {
-    let selection = Root::new();
-    let archive = archive_of(&export("1.0.0"));
-    let cases: [(&str, fn(&Path), &str); 9] = [
-        (
-            "payload byte",
-            |c: &Path| {
-                rewrite(c.join("package/main.ts"), |mut bytes| {
-                    bytes[0] ^= 1;
-                    bytes
-                });
-            },
-            "InstalledIntegrity",
-        ),
-        (
-            "payload extra",
-            |c: &Path| fs::write(c.join("package/extra.ts"), b"export {};").unwrap(),
-            "InstalledIntegrity",
-        ),
-        (
-            "payload missing file",
-            |c: &Path| fs::remove_file(c.join("package/schema.json")).unwrap(),
-            "InstalledIntegrity",
-        ),
-        (
-            "reserialized index",
-            |c: &Path| {
-                rewrite(c.join("index.json"), |bytes| {
-                    serde_json::to_vec_pretty(&serde_json::from_slice::<Value>(&bytes).unwrap())
-                        .unwrap()
-                });
-            },
-            "InstalledIntegrity",
-        ),
-        (
-            "receipt release",
-            |c: &Path| {
-                rewrite(c.join("receipt.json"), |bytes| {
-                    let mut receipt: Value = serde_json::from_slice(&bytes).unwrap();
-                    receipt["release_version"] = json!("9.9.9");
-                    serde_json::to_vec(&receipt).unwrap()
-                });
-            },
-            "InstalledIntegrity",
-        ),
-        (
-            "container extra",
-            |c: &Path| fs::write(c.join("notes.txt"), b"unsigned").unwrap(),
-            "InstalledIntegrity",
-        ),
-        (
-            "signature missing",
-            |c: &Path| fs::remove_file(c.join("signature.json")).unwrap(),
-            "InstalledMissing",
-        ),
-        (
-            "receipt missing",
-            |c: &Path| fs::remove_file(c.join("receipt.json")).unwrap(),
-            "InstalledMissing",
-        ),
-        (
-            "payload missing",
-            |c: &Path| fs::remove_dir_all(c.join("package")).unwrap(),
-            "InstalledMissing",
-        ),
-    ];
-    for (label, tamper, category) in cases {
-        let data = Root::new();
-        let imported = import(&selection, &archive).unwrap();
-        publish_import(&data.0, &imported, &idle()).unwrap();
-        let artifact = imported.facts().artifact_id.clone();
-        let container = data.0.join("pkgs/sample").join(&artifact);
-        tamper(&container);
-        let fault = verify_installed(&data.0, "sample", &artifact).unwrap_err();
-        assert_eq!(fault.category, category, "{label}: {fault:?}");
-        assert_eq!(fault.context["artifact_id"], artifact.as_str(), "{label}");
-        let listed = installed_releases(&data.0).unwrap();
-        assert_eq!(listed.len(), 1, "{label}");
-        assert!(listed[0].facts.is_none(), "{label}");
-        assert_eq!(
-            listed[0].fault.as_ref().unwrap().category,
-            category,
-            "{label}"
-        );
-        // A managed container stays copy-before-edit even with a broken envelope.
-        assert!(
-            managed_identity(&data.0, &container.join("package"))
-                .unwrap()
-                .is_some(),
-            "{label}"
-        );
-        let before = snapshot(&container);
-        let fault = publish_import(&data.0, &imported, &idle()).unwrap_err();
-        assert_eq!(fault.category, "InstalledIntegrity", "{label}: {fault:?}");
-        assert_eq!(snapshot(&container), before, "{label}");
-    }
-
+fn installed_archives_bind_signer_folder_package_and_one_location() {
     let data = Root::new();
-    let imported = import(&selection, &archive).unwrap();
+    let selection = Root::new();
+    let imported = import(&selection, &archive_of(&export("1.0.0"))).unwrap();
     publish_import(&data.0, &imported, &idle()).unwrap();
     let artifact = imported.facts().artifact_id.clone();
-    fs::remove_dir_all(data.0.join("pkgs/sample").join(&artifact)).unwrap();
+    let file = installed_destination(&data.0, imported.facts()).unwrap();
+    let package = file.parent().unwrap().to_owned();
+    let signer_folder = package.parent().unwrap().to_owned();
+    let foreign = signer_folder.with_file_name("b".repeat(64));
+    let copy = foreign.join("sample").join(file.file_name().unwrap());
+
+    // A second location for one artifact is listed once, with one attributable fault,
+    // and neither location is chosen.
+    fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    fs::copy(&file, &copy).unwrap();
+    let fault = verify_installed(&data.0, "sample", &artifact).unwrap_err();
+    assert_eq!(fault.category, "InstalledIntegrity", "{fault:?}");
+    assert_eq!(fault.context["key_ids"].as_array().unwrap().len(), 2);
+    let listed = installed_releases(&data.0).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (
+            listed[0].package_id.as_str(),
+            listed[0].artifact_id.as_str()
+        ),
+        ("sample", artifact.as_str())
+    );
+    assert_eq!(
+        listed[0].fault.as_ref().unwrap().category,
+        "InstalledIntegrity"
+    );
+    let fault = publish_import(&data.0, &imported, &idle()).unwrap_err();
+    assert_eq!(fault.category, "PackageConflict", "{fault:?}");
+    assert_eq!(fs::read(&copy).unwrap(), fs::read(&file).unwrap());
+
+    // Only the signer folder named by the signed key verifies the archive.
+    fs::remove_file(&file).unwrap();
+    let fault = verify_installed(&data.0, "sample", &artifact).unwrap_err();
+    assert_eq!(fault.category, "InstalledIntegrity", "{fault:?}");
+    assert_eq!(fault.context["key_id"], "b".repeat(64));
+    assert!(installed_releases(&data.0).unwrap()[0].fault.is_some());
+    fs::remove_dir_all(&foreign).unwrap();
+
+    // The package folder is bound to the package the archive names.
+    assert!(
+        publish_import(&data.0, &imported, &idle())
+            .unwrap()
+            .committed
+    );
+    verify_installed(&data.0, "sample", &artifact).unwrap();
+    fs::rename(&package, signer_folder.join("renamed")).unwrap();
     assert_eq!(
         verify_installed(&data.0, "sample", &artifact)
             .unwrap_err()
             .category,
         "InstalledMissing"
     );
+    let fault = verify_installed(&data.0, "renamed", &artifact).unwrap_err();
+    assert_eq!(fault.category, "InstalledIntegrity", "{fault:?}");
+    let listed = installed_releases(&data.0).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].package_id, "renamed");
+    assert!(listed[0].fault.is_some());
+}
+
+#[test]
+fn expanded_installations_stay_unavailable_until_original_reimport() {
+    let data = Root::new();
+    let selection = Root::new();
+    let archive = archive_of(&export("1.0.0"));
+    let imported = import(&selection, &archive).unwrap();
+    let artifact = imported.facts().artifact_id.clone();
+    // A container written by the superseded expanded layout.
+    let relative = format!("pkgs/sample/{artifact}");
+    for (name, body) in members(&archive) {
+        data.put(&format!("{relative}/{name}"), &body);
+    }
+    data.put(&format!("{relative}/receipt.json"), b"{}");
+    let container = data.0.join(&relative);
+    let before = snapshot(&container);
+    let identity = InstalledIdentity {
+        package_id: "sample".into(),
+        artifact_id: artifact.clone(),
+    };
+
+    // It is never read, listed or run; its reference asks for the original archive.
+    let fault = verify_installed(&data.0, "sample", &artifact).unwrap_err();
+    assert_eq!(fault.category, "InstalledMissing", "{fault:?}");
+    assert_eq!(fault.context["reimport_required"], true);
     assert!(installed_releases(&data.0).unwrap().is_empty());
+    // Its paths, including new ones, stay refused as ordinary packages.
+    for path in [
+        container.clone(),
+        container.join("package/main.ts"),
+        container.join("package/new.ts"),
+    ] {
+        assert_eq!(
+            managed_identity(&data.0, &path).unwrap(),
+            Some(identity.clone()),
+            "{path:?}"
+        );
+    }
+
+    // Reimporting the original archive restores the same identity beside it; the old
+    // container is neither rebuilt nor removed.
+    let restored = publish_import(&data.0, &imported, &idle()).unwrap();
+    assert!(restored.committed && restored.cleanup_error.is_none());
+    let verified = verify_installed(&data.0, "sample", &artifact).unwrap();
+    assert_eq!(verified.facts(), imported.facts());
+    assert_eq!(Path::new(&restored.path), verified.archive_path());
+    assert_eq!(snapshot(&container), before);
+    assert_eq!(
+        managed_identity(&data.0, &container).unwrap(),
+        Some(identity)
+    );
 }

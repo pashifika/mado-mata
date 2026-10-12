@@ -63,8 +63,6 @@ export interface AuthoringSession {
   conflict:boolean;
   refreshError:Fault|null; error:Fault|null; notice:Message|null;
   validation:ValidationState|null;
-  // A verified installed release opened read-only: the host refuses its writes and Duplicate makes an editable copy.
-  managed:boolean;
 }
 
 export interface SaveTicket {token:string; path:string; expected:string; draftRevision:number; text:string}
@@ -119,8 +117,7 @@ export function openSession(view:AuthoringView, notice:Message|null = null):Auth
   const manifest = view.files.find(file => file.kind === 'manifest')?.path;
   const selected = order.find(path => drafts.get(path)?.kind === 'source') ?? manifest ?? firstEditable(order, drafts);
   return {owner: view.owner, packagePath: view.package_path, packageId: view.package_id, revision: view.revision, order, drafts, selected,
-    destination: 'file', recognition: null, reveal: 0, pending: null, refreshRequired: false, conflict: false, refreshError: null, error: null, notice, validation: null,
-    managed: view.managed};
+    destination: 'file', recognition: null, reveal: 0, pending: null, refreshRequired: false, conflict: false, refreshError: null, error: null, notice, validation: null};
 }
 
 function withDraft(session:AuthoringSession, draft:FileDraft):AuthoringSession {
@@ -322,7 +319,7 @@ function mergeView(session:AuthoringSession, view:AuthoringView):{session:Author
   }
   const order = view.files.map(file => file.path);
   const selected = session.selected !== null && drafts.has(session.selected) ? session.selected : firstEditable(order, drafts);
-  return {session: {...session, packagePath: view.package_path, packageId: view.package_id, revision: view.revision, order, drafts, selected, managed: view.managed}, changed};
+  return {session: {...session, packagePath: view.package_path, packageId: view.package_id, revision: view.revision, order, drafts, selected}, changed};
 }
 
 // The commit is truth even when the follow-up read failed: the saved text becomes the file's base, and a later

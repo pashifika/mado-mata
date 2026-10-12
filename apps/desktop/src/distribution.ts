@@ -20,7 +20,7 @@ export interface DistributionReview extends ReleaseFacts {
 export interface Publication {
   path:string; package_id:string; release_version:string; artifact_id:string; unchanged:boolean; committed:boolean; cleanup_error:Fault|null;
 }
-// One managed installation, reverified per listing: exactly one of `facts` (verified) and `fault` (attributable) is set.
+// One installed release archive, reverified per listing: exactly one of `facts` (verified) and `fault` (attributable) is set.
 export interface InstalledRelease {package_id:string; artifact_id:string; facts:ReleaseFacts|null; fault:Fault|null}
 // Public local signer facts. `display_label` is a cached local account label, not a verified publisher identity.
 export interface SigningInfo {key_id:string; display_label:string; enrolled_at:number; provider:string; local_only:boolean}

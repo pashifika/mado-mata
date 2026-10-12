@@ -482,7 +482,6 @@ impl Fixture {
     }
 }
 
-
 #[test]
 fn versions_follow_release_precedence() {
     let version = |text| Version::parse(text).unwrap();
@@ -762,7 +761,10 @@ fn identical_newer_or_same_version_different_content_is_never_replaced() {
         "PluginActionUnavailable"
     );
     let cases = [
-        (fixture.managed("999.0.0", FILES[1].1), "PluginNewerInstalled"),
+        (
+            fixture.managed("999.0.0", FILES[1].1),
+            "PluginNewerInstalled",
+        ),
         (
             fixture.managed(&included.version.to_string(), b"// other bytes"),
             "PluginContentMismatch",

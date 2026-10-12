@@ -127,7 +127,8 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
 
 // A host view becomes a session: unbound, unusable saved source, or bound to real inventory. No draft is restored.
 // A failed saved directory stays visible and prefilled so repairing it needs no retyping of an unseen path; a saved
-// installed release or custom archive is shown but never offered as a directory request.
+// installed release or custom archive is shown but never offered as a directory request, and an installed archive is
+// never offered as an Edit location.
 export function workspaceFromView(view:WorkspaceView, notice:Message|null = null):Workspace {
   const saved = view.saved_package;
   const path = view.selection?.package_path ?? (saved !== null && saved.source.kind === 'directory' ? saved.source.path : '');
@@ -135,7 +136,7 @@ export function workspaceFromView(view:WorkspaceView, notice:Message|null = null
     id: view.workspace_id, revision: view.revision, internalName: view.internal_name, displayName: view.display_name,
     bound: view.selection ? fromSelection(view.selection) : null, sourceError: view.source_error, savedPackage: saved,
     page: 'run', error: null, notice, logFilter: {text: '', level: ''}, busy: null, disclosedRun: null,
-    inspectPath: path, editPath: path, editPackageId: '', legacyImport: null,
+    inspectPath: path, editPath: view.selection?.source.kind === 'installed' ? '' : path, editPackageId: '', legacyImport: null,
     recovery: view.recovery ? recoveryState(view.recovery, null) : null, recoveryOutcomes: [],
   };
 }

@@ -457,15 +457,20 @@ impl DesktopController {
         replay_descriptor_path: Option<String>,
     ) -> Result<String, Fault> {
         self.check_environment_with_preparation(package, replay_descriptor_path, move |_| {
-            Ok(environment)
+            Ok(StartPreparation {
+                environment,
+                ..StartPreparation::default()
+            })
         })
     }
 
+    /// `prepare` may supply the host's own verified capture of `package`; the check
+    /// then uses exactly that inventory and never rereads the package location.
     pub fn check_environment_with_preparation(
         &self,
         package: Option<(PathBuf, String)>,
         replay_descriptor_path: Option<String>,
-        prepare: impl FnOnce(&Control) -> Result<Option<OcrEnvironment>, Fault> + Send + 'static,
+        prepare: impl FnOnce(&Control) -> Result<StartPreparation, Fault> + Send + 'static,
     ) -> Result<String, Fault> {
         self.reserve(
             "environment_check",
@@ -478,7 +483,11 @@ impl DesktopController {
                     replay_descriptor_path.as_deref(),
                 )?;
                 evidence.stage("input_capture", observer);
-                let environment = control
+                let StartPreparation {
+                    environment,
+                    inventory,
+                    ..
+                } = control
                     .check()
                     .and_then(|()| prepare(control))
                     .map_err(|error| evidence.fault(error, true))?;
@@ -489,6 +498,7 @@ impl DesktopController {
                     engine,
                     environment.as_ref(),
                     package.as_ref(),
+                    inventory,
                     replay_descriptor_path.as_deref(),
                     evidence,
                     control,
@@ -1187,6 +1197,7 @@ fn execute_check(
     executable: &Path,
     environment: Option<&OcrEnvironment>,
     package: Option<&(PathBuf, String)>,
+    captured: Option<Inventory>,
     descriptor: Option<&str>,
     mut evidence: Evidence,
     control: &Control,
@@ -1217,7 +1228,10 @@ fn execute_check(
         }
         control.check()?;
         // Package capture remains lane-independent; replay's larger bound covers expanded frames.
-        let inventory = Inventory::capture_with_stop(path, &manual_plan()?.limits, Some(control))?;
+        let inventory = match captured {
+            Some(inventory) => inventory,
+            None => Inventory::capture_with_stop(path, &manual_plan()?.limits, Some(control))?,
+        };
         control.check()?;
         if inventory.identity != *expected {
             return Err(Fault::new(

@@ -192,7 +192,7 @@ Unknown/duplicate fields and invalid types are refused. Bounds use UTF-8 bytes:
 | --- | --- |
 | `release_version` | Strict SemVer 2.0.0, at most 128 bytes; core integers have no artificial `u64` ceiling |
 | `name`, `author_name`, `license` | Nonempty, at most 256 bytes each |
-| `description` | At most 8 KiB; rendered as text |
+| `description` | At most 8 KiB; plain text with preserved line breaks |
 | `game.id` | Portable component, at most 128 bytes; search-only |
 | `game.names` | 1–64 entries; language keys at most 64 ASCII bytes, names nonempty and at most 256 bytes |
 | `game.aliases` | Up to 64 nonempty search strings of at most 256 bytes; no machine paths |
@@ -235,6 +235,15 @@ Original source and source maps remain readable; signing is not encryption.
 The archive-byte SHA-256 identifies the installed artifact, separately from the
 runtime inventory and execution-target identities. The CLI still consumes
 captured package directories; archive import/verification belongs to the desktop.
+
+The desktop retains that original archive at
+`<data-dir>/pkgs/<key_id>/<package_id>/<archive-sha256>.mmpkg`, without extracted
+payload files or receipt sidecars. Installed reads reverify the digest, signed
+payload and signer namespace before producing the captured Inventory.
+Application/OMP source viewing, editing and duplication are unavailable for
+installed releases; external archive inspection remains possible.
+[ADR 0010](adr/0010-archive-only-package-consumption.md) records the storage,
+settings-continuity and future decryption boundaries.
 
 ### Optional portable target declaration
 

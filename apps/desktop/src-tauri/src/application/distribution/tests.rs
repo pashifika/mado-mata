@@ -1,5 +1,5 @@
 use super::*;
-use crate::application::test_support::{Fixture, preferences, view_ref};
+use crate::application::test_support::{Fixture, preferences, view_ref, workspace_ref};
 use crate::bootstrap::{Bootstrap, Phase};
 
 #[test]
@@ -183,10 +183,14 @@ fn import_confirmation_uses_reviewed_bytes_and_never_selects_a_workspace() {
             .category,
         "PackageReviewStale"
     );
+    let reviewed = std::fs::read(&archive).unwrap();
     std::fs::write(&archive, b"the original selected file changed after review").unwrap();
     let installed = app.package_import_publish(&owner, &review.token).unwrap();
     assert!(installed.committed);
     assert_eq!(installed.artifact_id, exported.facts.artifact_id);
+    // The reviewed destination is the published file and holds exactly the reviewed bytes.
+    assert_eq!(installed.path, review.destination);
+    assert_eq!(std::fs::read(&installed.path).unwrap(), reviewed);
     assert!(
         app.workspace_catalog()
             .unwrap()
@@ -206,6 +210,16 @@ fn import_confirmation_uses_reviewed_bytes_and_never_selects_a_workspace() {
         }
     );
     assert_eq!(selection.package.package_id, editor.package_id);
+    // Selection runs the verified archive itself; it is never opened as a source directory.
+    assert_eq!(selection.package_path, installed.path);
+    let installed_archive = Path::new(&installed.path);
+    assert_eq!(
+        app.authoring_open(&workspace_ref(&selection), installed_archive)
+            .unwrap_err()
+            .category,
+        "ManagedPackage"
+    );
+    assert!(app.authoring_owner().is_none());
     assert_eq!(
         app.package_installed_list().unwrap()[0].artifact_id,
         installed.artifact_id

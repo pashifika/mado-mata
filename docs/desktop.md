@@ -365,17 +365,17 @@ Neither action inspects, binds, or runs the package.
   nothing; valid Create/Duplicate creates missing parents. Changing the root
   neither moves existing packages nor retargets an active Edit session.
 - `authoring` remains private publication-journal storage. `pkgs` holds imported
-  signed releases; there is no remote download. Managed releases are read-only
-  until Duplicate creates a source with a distinct package ID. Ordinary,
-  non-managed directories already under `pkgs` retain directory support.
+  signed archives; there is no remote download. Installed releases are run-only:
+  the app and shared OMP authoring offer no source view, Edit or Duplicate.
+  Ordinary, non-managed directories under `pkgs` retain directory support.
 - Create and Duplicate require a missing destination. Existing package roots,
   links, traversal and aliases are refused. Under the App data root, source is
   allowed only within `sources` or `pkgs`, never configuration or journals.
   **Open for Edit** still accepts an existing external package directory.
-- The collapsible left tree contains **Files**, **Metadata**, **Recognition**
-  and **Duplicate**. Selecting a file or metadata item displays its editor,
-  form or facts on the right. Collapsing the navigation leaves the current
-  detail and drafts intact.
+- The collapsible left tree contains **Files**, **Metadata**, **Recognition**,
+  **Duplicate** and **Export PKG…**. Selecting a file or metadata item displays
+  its editor, form or facts on the right. Collapsing the navigation leaves the
+  current detail and drafts intact.
 - **Files** contains scripts and assets in expandable folders. Folder nodes come
   from declared paths: adding or renaming `src/lib/helper.ts` creates its parents.
   There is no independent empty-folder operation. Scripts have independent
@@ -673,25 +673,39 @@ Select a `.mmpkg`, inspect its verified release/key/source facts, and confirm.
 Verification and static compilation do not execute scripts. Import alone never
 selects a source, changes a Tab's profiles/targets or starts a run.
 
-Installed containers live at
-`<data-dir>/pkgs/<package_id>/<archive-sha256>/`: exact `index.json` and
-`signature.json`, a host-owned `receipt.json`, and executable bytes under
-`package/`. Identical reimport is unchanged only after reverifying the existing
-container. A different artifact claiming the same package/release is refused;
-distinct versions coexist without an updater or automatic latest selection.
+Installed files live at
+`<data-dir>/pkgs/<key_id>/<package_id>/<archive-sha256>.mmpkg`.
+The original archive is retained without extracted source, source maps, envelope
+sidecars or receipts. `key_id` is the signing public key's SHA-256 fingerprint,
+not an OIDC subject or Server author ID; `package_id` is stable, not a display name.
+Identical reimport is unchanged only after reverifying the installed file.
+A different artifact claiming the same package/release is refused across signer
+namespaces; distinct versions coexist without automatic latest-version selection.
 
-Use **Select** on an installed release to inspect and bind it to that Tab.
-Its persisted source is `{kind: "installed", package_id, artifact_id}`, not a
-directory alias. Reopen, Reinspect and Start reverify the installed envelope and
-payload; absent/corrupt bytes retain the saved reference with a refusal.
-Existing profile reconciliation and per-Tab target ownership still apply.
-Start captures the verified inventory rather than reopening mutable paths.
+Use **Select** to inspect and bind a release to that Tab. The saved reference
+remains `{kind: "installed", package_id, artifact_id}`. Reopen, Reinspect and Start
+verify archive digest, signature, payload and storage identity; missing, corrupt
+or ambiguous content refuses while retaining that reference and local settings.
+Execution uses the verified in-memory inventory, not an extracted directory.
 
-Installed releases are read-only through both UI and shared OMP authoring,
-including direct payload-path requests. Use **Duplicate package…** with a new
-package ID to create editable source; the copy does not retain an original
-signature badge. Legacy CustomZip artifacts remain unsupported. No Server,
-marketplace, entitlement, download or native authorization is added.
+Selecting another version of the same signer/package reuses existing profile
+reconciliation: IDs and compatible custom values remain, supported missing
+top-level defaults are added, and incompatible values require **Recovery** rather
+than silent coercion or deletion. Choose the saved profile again after selecting
+the release to run its values. Existing Target compatibility checks still apply.
+A different signer is refused before profile or source-binding writes; use another
+Workspace. No account-switching or key-rotation manager is added.
+
+Installed releases cannot be opened, edited or duplicated through the app or OMP,
+including direct archive-path requests. The archive is still **unencrypted** and
+can be inspected with external tools; these controls do not enforce usage rights.
+
+Previous expanded installations are left intact but are no longer executable.
+Reimport the original `.mmpkg` to restore its unchanged saved reference and profiles.
+The app does not repack old payloads into a new artifact or call missing content
+configuration corruption. See [ADR 0010](adr/0010-archive-only-package-consumption.md)
+for the cutover and future decryption boundary. Legacy CustomZip remains
+unsupported; no Server, entitlement, download or native authorization is added.
 
 ## Collaborate through OMP
 

@@ -1,10 +1,10 @@
 use super::profiles::{check_webview_value, validated_profiles};
 use super::{
-    Application, MAX_SESSION_COUNTER, Selected, Selection, Workspace, WorkspaceCatalog,
-    WorkspaceRef, WorkspaceView, Workspaces, lock,
+    Application, InstalledSelection, MAX_SESSION_COUNTER, Selected, Selection, Workspace,
+    WorkspaceCatalog, WorkspaceRef, WorkspaceView, Workspaces, lock,
 };
 use crate::authoring::Publisher;
-use crate::distribution::{self, InstalledIdentity, InstalledRelease};
+use crate::distribution::{self, InstalledIdentity, InstalledRelease, VerifiedInstalled};
 use crate::storage::{MAX_OPEN_TABS, PackageSource, TabRecord};
 use mado_runtime_comparison::desktop::{DesktopController, PackageInfo};
 use mado_runtime_comparison::inventory::Inventory;
@@ -177,7 +177,7 @@ impl Application {
                             &tab.internal_name,
                             &tab.display_name,
                         )?,
-                        // Restart reverifies the retained container; no earlier result is reused.
+                        // Restart reverifies the retained archive; no earlier result is reused.
                         PackageSource::Installed {
                             package_id: installed,
                             artifact_id,
@@ -232,8 +232,8 @@ impl Application {
         }
     }
 
-    /// A path inside a managed release keeps its installed identity and verification;
-    /// it is never admitted as an ordinary directory.
+    /// A path naming an installed release (its archive, or a former expanded container)
+    /// keeps its installed identity and verification; it is never admitted as a directory.
     pub(super) fn inspect_selection(
         runner: &DesktopController,
         publisher: &Publisher,
@@ -282,8 +282,8 @@ impl Application {
         })
     }
 
-    /// Verify the installed envelope, receipt and payload, then statically inspect that
-    /// same capture. The selection's inventory is exactly the verified bytes.
+    /// Verify the installed archive, then statically inspect that same capture. The
+    /// selection's inventory is exactly the verified bytes; nothing is extracted.
     pub(super) fn inspect_installed_selection(
         runner: &DesktopController,
         publisher: &Publisher,
@@ -292,14 +292,17 @@ impl Application {
         internal_name: &str,
         display_name: &str,
     ) -> Result<Selected, Fault> {
-        let (path, inventory, package) = Self::verify_installed(runner, publisher, identity)?;
+        let (verified, inventory, package) = Self::verify_installed(runner, publisher, identity)?;
         check_package_values(&package)?;
         Ok(Selected {
             workspace,
             internal_name: internal_name.to_owned(),
             display_name: display_name.to_owned(),
-            path,
-            installed: Some(identity.clone()),
+            path: verified.archive_path().to_path_buf(),
+            installed: Some(InstalledSelection {
+                identity: identity.clone(),
+                key_id: verified.facts().key_id.clone(),
+            }),
             inventory: Arc::new(inventory),
             package: Arc::new(package),
         })
@@ -309,7 +312,7 @@ impl Application {
         runner: &DesktopController,
         publisher: &Publisher,
         identity: &InstalledIdentity,
-    ) -> Result<(std::path::PathBuf, Inventory, PackageInfo), Fault> {
+    ) -> Result<(VerifiedInstalled, Inventory, PackageInfo), Fault> {
         let verified = distribution::verify_installed(
             publisher.data_root(),
             &identity.package_id,
@@ -326,8 +329,8 @@ impl Application {
             })));
         }
         let package = runner.inspect_inventory(inventory.clone())?;
-        publisher.check_admission(verified.payload_path())?;
-        Ok((verified.payload_path().to_path_buf(), inventory, package))
+        publisher.check_admission(verified.archive_path())?;
+        Ok((verified, inventory, package))
     }
 
     /// Capture a selection's current package for a later mutation check. Installed
@@ -335,12 +338,14 @@ impl Application {
     pub(super) fn reinspect(&self, selected: &Selected) -> Result<PackageInfo, Fault> {
         self.publisher.check_admission(&selected.path)?;
         match &selected.installed {
-            Some(identity) => Ok(Self::verify_installed(&self.runner, &self.publisher, identity)?.2),
+            Some(installed) => {
+                Ok(Self::verify_installed(&self.runner, &self.publisher, &installed.identity)?.2)
+            }
             None => self.runner.inspect(&selected.path),
         }
     }
 
-    /// Installed releases for explicit selection; each container is reverified per call.
+    /// Installed releases for explicit selection; each archive is reverified per call.
     pub fn package_installed_list(&self) -> Result<Vec<InstalledRelease>, Fault> {
         let result = (|| {
             let (_command, state) = self.command_state()?;
@@ -366,9 +371,9 @@ impl Application {
             display_name: selected.display_name.clone(),
             package_path: selected.path.to_string_lossy().into_owned(),
             source: match &selected.installed {
-                Some(identity) => PackageSource::Installed {
-                    package_id: identity.package_id.clone(),
-                    artifact_id: identity.artifact_id.clone(),
+                Some(installed) => PackageSource::Installed {
+                    package_id: installed.identity.package_id.clone(),
+                    artifact_id: installed.identity.artifact_id.clone(),
                 },
                 None => PackageSource::Directory {
                     path: selected.path.to_string_lossy().into_owned(),
@@ -449,6 +454,6 @@ fn check_package_values(package: &PackageInfo) -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod installed_tests;
+#[cfg(test)]
+mod tests;

@@ -12,8 +12,8 @@ const MAIN='export const a = 1;\n';
 function file(path,kind,text){
   return {path,kind,text,bytes:text===null?4:new TextEncoder().encode(text).length};
 }
-function packageView({token=owner.token,revision='rev-1',main=MAIN,managed=false}={}){
-  return {owner:{...owner,token},package_path:'/private/packages/a',package_id:'example.a',revision,managed,
+function packageView({token=owner.token,revision='rev-1',main=MAIN}={}){
+  return {owner:{...owner,token},package_path:'/private/packages/a',package_id:'example.a',revision,
     files:[file('package.json','manifest',MANIFEST),file('main.ts','source',main),file('images/logo.png','asset',null)]};
 }
 function setup(view=packageView()){
@@ -57,7 +57,7 @@ test('an export capture needs clean saved drafts and goes stale for good after a
   assert.equal(controller.exportCurrent(fresh),true);
 });
 
-test('saved revision, Edit owner and managed releases bound export captures',()=>{
+test('saved revision and Edit owner bound export captures',()=>{
   const controller=setup();
   const ticket=controller.exportTicket();
   type(controller,'main.ts','// saved\n');
@@ -70,16 +70,6 @@ test('saved revision, Edit owner and managed releases bound export captures',()=
   controller.update(()=>openSession(packageView({token:'authoring-1-2',revision:'rev-2',main:save.text})));
   assert.equal(controller.exportCurrent(saved),false);
   assert.notEqual(controller.exportTicket(),null);
-  // A verified installed release is copy-before-edit: no capture, and agent edits are refused like the person's.
-  const managed=setup(packageView({managed:true}));
-  assert.equal(managed.exportTicket(),null);
-  const description=managed.describe();
-  const main=description.resources.find(item=>item.path==='main.ts');
-  const response=managed.handle({id:'e',owner:description.owner,package:description.package,
-    operation:{kind:'edit',edits:[{resource:main.id,version:main.version,text:'changed'}]}});
-  assert.equal(response.ok,false);
-  assert.equal(response.error.code,'managed_package');
-  assert.equal(managed.current().drafts.get('main.ts').text,MAIN);
 });
 
 test('a delayed Save reply keeps the later draft dirty and stops export before preparation',async()=>{

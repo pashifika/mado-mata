@@ -270,12 +270,6 @@ impl Application {
         self.collect(&mut state);
         state.work_idle()?;
         let candidate = state.authoring_revision(owner, revision)?;
-        if candidate.managed().is_some() {
-            return Err(Fault::new(
-                "ManagedPackage",
-                "Duplicate the installed release to a source project before exporting",
-            ));
-        }
         let (attempt, token) = self.distribution_attempt(&owner.workspace)?;
         lock(&self.distribution).review = None;
         drop(state);
@@ -327,11 +321,7 @@ impl Application {
             .inspect_inventory(prepared.draft().validate()?)?;
         cancelled(&attempt.cancel)?;
         let facts = prepared.facts();
-        let destination = self
-            .root
-            .join("pkgs")
-            .join(&facts.package_id)
-            .join(&facts.artifact_id);
+        let destination = distribution::installed_destination(&self.root, facts)?;
         let view = DistributionReview {
             facts: facts.clone(),
             token,

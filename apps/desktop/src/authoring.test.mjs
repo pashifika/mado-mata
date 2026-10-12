@@ -560,6 +560,7 @@ test('real compiler envelopes expose each diagnostic message and source location
 const schema={type:'object',properties:{count:{type:'integer',default:1}}};
 function selection(id,revision,path){
   return {workspace_id:id,revision,internal_name:id,display_name:'Tab '+id,package_path:path,profiles_error:null,profiles:[],
+    source:{kind:'directory',path},
     package:{package_id:'pkg',inventory_identity:'inv-'+id,schema_identity:'schema-1',runtime:'quickjs',schema,profiles:{},effective_defaults:null,target:null,target_identity:null}};
 }
 function workspaceView(id,revision,bound,path='/pkg/edited'){

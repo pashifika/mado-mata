@@ -435,7 +435,7 @@ export class AuthoringController {
   };
 
   #exportable(session:AuthoringSession):boolean {
-    return !session.managed && !session.refreshRequired && !session.conflict && !draftList(session).some(fileDirty)
+    return !session.refreshRequired && !session.conflict && !draftList(session).some(fileDirty)
       && !(session.recognition !== null && recognitionDirty(session.recognition));
   }
 
@@ -747,8 +747,6 @@ export class AuthoringController {
   // recognition Undo and freshness rules for recognition fields.
   #edit(session:AuthoringSession, lineage:Lineage, operation:Extract<Operation, {kind:'edit'}>,
     editBlock:CollaborationEditBlock|undefined):CollaborationEditResult|CollaborationError {
-    // A verified installed release is copy-before-edit for agents exactly as for the person: Duplicate first.
-    if (session.managed) return refusal('managed_package', 'This installed release is read-only; duplicate it to a source package to edit');
     // Catalog publication, Refresh, Exit and Duplicate replace or rebase drafts; Save keeps later edits dirty instead.
     const pending = session.pending?.kind;
     if (pending === 'catalog' || pending === 'refresh' || pending === 'exit' || pending === 'duplicate') {

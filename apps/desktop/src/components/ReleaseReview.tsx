@@ -6,7 +6,8 @@ import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
 // The facts of one host review. Package-supplied text renders as text only; key-relative signature validity and the
-// unverified account attribution stay separate claims, and source inclusion is disclosed without a secrecy claim.
+// unverified account attribution stay separate claims, and source inclusion (and, for an install, usage-only
+// handling) is disclosed without a secrecy claim.
 export function ReviewFacts({review, idPrefix, installing}: {review: DistributionReview; idPrefix: string; installing: boolean}) {
   const locale = useLocale();
   const d = messages[locale].ui.distribution;
@@ -28,7 +29,7 @@ export function ReviewFacts({review, idPrefix, installing}: {review: Distributio
       <dt>{d.artifact}</dt><dd id={`${idPrefix}-artifact`} className="mono">{review.artifact_id}</dd>
       <dt>{installing ? d.installDestination : d.destination}</dt><dd id={`${idPrefix}-destination`} className="mono">{review.destination}</dd>
     </dl>
-    <p id={`${idPrefix}-source-included`} className="inline-warning">{d.sourceIncluded}</p>
+    <p id={`${idPrefix}-source-included`} className="inline-warning">{installing ? d.installSourceIncluded : d.sourceIncluded}</p>
   </>;
 }
 

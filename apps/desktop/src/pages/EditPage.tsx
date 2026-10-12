@@ -183,9 +183,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const saveReason = selected ? saveBlock(session, selected.path) : null;
   const savable = dirty.filter(draft => !draft.missing);
   const saveAllReason = pending !== null ? a.block('pending') : session.refreshRequired || session.conflict ? a.block('refresh') : null;
-  // A managed installed release stays read-only: the host refuses its writes and Duplicate makes an editable copy.
-  const readOnly = pending?.kind === 'exit' || pending?.kind === 'duplicate' || session.managed;
-  const writeLocked = publishLocked || session.managed;
+  const readOnly = pending?.kind === 'exit' || pending?.kind === 'duplicate';
   const summary = useMemo(() => editable && query ? matchSummary(editable.text, query, editable.range) : null,
     [editable?.text, query, editable?.range.start, editable?.range.end]);
   const sourceReadOnly = readOnly || leaseLost || editable?.missing === true;
@@ -293,14 +291,13 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const publishReason = leaseLost ? a.leaseLostShort : locked ? lockReason ?? a.block('pending') : null;
   function catalogReason(edit: CatalogEdit): string | null {
     if (publishReason !== null) return publishReason;
-    if (session.managed) return d.managedHeading;
     const block = catalogBlock(session, edit);
     return block === null ? null : a.block(block);
   }
   const addReason = catalogReason({kind: 'add', path: '', file_kind: 'source', text: ''});
   const duplicateReason = publishReason ?? (pending !== null || validating ? a.block('pending') : null);
-  // Export keeps package ID and release version; it needs a settled, refreshed saved revision of a source package.
-  const exportReason = session.managed ? d.managedExport : duplicateReason
+  // Export keeps package ID and release version; it needs a settled, refreshed saved revision.
+  const exportReason = duplicateReason
     ?? (session.refreshRequired || session.conflict ? a.block('refresh') : null) ?? exportBlock;
   // The entry dialog closes before the host flow starts, so the unsaved-changes choice never stacks on top of it.
   function duplicate() {
@@ -477,9 +474,9 @@ export default function EditPage({session, label, handlers, recognition, recogni
     <div className="page-heading"><div><span className="eyebrow">{a.scope(label)}</span><h1 aria-labelledby="authoring-heading"><span id="authoring-heading">{session.packageId}</span>
       <HelpTrigger title={a.scope(label)} hint={a.introHint}><p>{a.intro}</p></HelpTrigger></h1></div>
       <div className="actions">
-        <button id="authoring-save" type="button" className="primary" disabled={writeLocked || !selected || saveReason !== null}
+        <button id="authoring-save" type="button" className="primary" disabled={publishLocked || !selected || saveReason !== null}
           title={saveReason ? a.block(saveReason) : undefined} onClick={() => selected && handlers.save(selected.path)}>{pending?.kind === 'save' ? a.working : a.save}</button>
-        <button id="authoring-save-all" type="button" disabled={writeLocked || (savable.length === 0 && (!recognitionDirty || recognitionSaveBlock !== null)) || saveAllReason !== null}
+        <button id="authoring-save-all" type="button" disabled={publishLocked || (savable.length === 0 && (!recognitionDirty || recognitionSaveBlock !== null)) || saveAllReason !== null}
           title={saveAllReason ?? recognitionSaveBlock ?? undefined} onClick={handlers.saveAll}>{a.saveAll}</button>
         <ButtonHint hint={a.validationHelp}>
           <button id="authoring-validate" type="button" disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button>
@@ -491,10 +488,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
       </div>
     </div>
     {leaseLost && <p id="authoring-lease-lost" className="inline-warning" role="alert">{a.leaseLost}</p>}
-    {session.managed && <section id="authoring-managed" className="inline-warning" aria-labelledby="authoring-managed-heading">
-      <strong id="authoring-managed-heading">{d.managedHeading}</strong> {d.managedHelp}
-      <button id="authoring-managed-duplicate" type="button" aria-haspopup="dialog" disabled={duplicateReason !== null} title={duplicateReason ?? undefined}
-        onClick={() => setDuplicating(true)}>{d.managedDuplicate}</button></section>}
     {session.error && <div id="authoring-error"><FaultMessage title={a.actionFailed} value={session.error}/></div>}
     {recoveryFault && <div className="button-row"><button id="authoring-recover" type="button" disabled={locked} onClick={handlers.recover}>{a.recover}</button>
       <span className="muted">{a.recoverHelp}</span></div>}

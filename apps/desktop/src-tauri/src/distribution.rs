@@ -3,7 +3,9 @@
 //!
 //! Export signs exactly one captured [`PackageDraft`] and builds its archive once;
 //! import captures one selected archive, verifies its structure, exact signed envelope
-//! and payload digests, then keeps only the verified payload and envelope bytes.
+//! and payload digests, and keeps those exact archive bytes with the decoded payload.
+//! Installation publishes those bytes as one file and every installed read decodes
+//! the file again through the same verified boundary; nothing is extracted.
 //! Signature validity is relative to the included public key; it never verifies an
 //! account, publisher or entitlement. Callers own static inventory/compiler
 //! validation, review receipts and operation ownership.
@@ -16,8 +18,8 @@ mod installed;
 mod tests;
 
 pub use installed::{
-    InstalledIdentity, InstalledRelease, VerifiedInstalled, installed_releases, managed_identity,
-    verify_installed,
+    InstalledIdentity, InstalledRelease, VerifiedInstalled, installed_destination,
+    installed_releases, managed_identity, verify_installed,
 };
 
 use crate::author_signing::Signer;
@@ -72,15 +74,15 @@ pub struct Publication {
     pub cleanup_error: Option<Fault>,
 }
 
-/// One verified capture: the payload draft, its exact envelope bytes and, for an
-/// export, the archive bytes built once from them.
+/// One verified capture: the payload draft and the exact archive bytes it came from,
+/// built once for an export or captured once for an import.
 #[derive(Debug)]
 pub struct PreparedPackage {
     draft: PackageDraft,
     facts: ReleaseFacts,
-    index: Vec<u8>,
-    signature: Vec<u8>,
-    archive: Option<archive::Bytes>,
+    archive: archive::Bytes,
+    /// Only an export is written to an operator-chosen file.
+    exported: bool,
 }
 
 impl PreparedPackage {
@@ -151,29 +153,23 @@ pub fn prepare_export(
     Ok(PreparedPackage {
         draft,
         facts,
-        index,
-        signature,
-        archive: Some(archive),
+        archive,
+        exported: true,
     })
 }
 
-/// Captures the selected archive once and verifies it completely; the archive bytes
-/// are dropped once the payload and envelope are retained.
+/// Captures the selected archive once and verifies it completely; the exact captured
+/// bytes are retained so installation publishes what was reviewed.
 pub fn prepare_import(path: &Path, cancel: &AtomicBool) -> Result<PreparedPackage, Fault> {
     cancelled(cancel)?;
     let archive = read_selected(path, cancel)?;
     let artifact_id = format::sha256_hex(&archive);
-    let (envelope, files) = verified_payload(&archive, cancel)?;
-    drop(archive);
-    cancelled(cancel)?;
-    let draft = PackageDraft::from_files(files, &crate::authoring::limits()?)?;
-    let facts = ReleaseFacts::new(&draft, &envelope.key_id, artifact_id)?;
+    let (draft, facts) = verified_release(&archive, artifact_id, cancel)?;
     Ok(PreparedPackage {
         draft,
         facts,
-        index: envelope.index,
-        signature: envelope.signature,
-        archive: None,
+        archive,
+        exported: false,
     })
 }
 
@@ -187,8 +183,9 @@ pub fn publish_export(
     publish_export_with(prepared, destination, cancel, &mut |_, _| Ok(()))
 }
 
-/// Installs the complete verified container under `<root>/pkgs/` without replacing
-/// another container; identical verified reimport is reported unchanged.
+/// Installs the captured archive bytes as the one file named by
+/// [`installed_destination`] without replacing anything; identical verified reimport
+/// is reported unchanged.
 pub fn publish_import(
     root: &Path,
     prepared: &PreparedPackage,
@@ -204,12 +201,13 @@ fn publish_export_with(
     hook: Hook<'_>,
 ) -> Result<Publication, Fault> {
     cancelled(cancel)?;
-    let archive = prepared.archive.as_ref().ok_or_else(|| {
-        Fault::new(
+    if !prepared.exported {
+        return Err(Fault::new(
             "PackagePrepared",
             "only a prepared export can be published as an archive",
-        )
-    })?;
+        ));
+    }
+    let archive = &*prepared.archive;
     let directory = destination
         .parent()
         .filter(|directory| destination.is_absolute() && !directory.as_os_str().is_empty())
@@ -278,22 +276,22 @@ fn write_staged(
     for chunk in archive.chunks(CHUNK) {
         cancelled(cancel)?;
         file.write_all(chunk)
-            .map_err(|error| io_fault("write export staging", staging, &error))?;
+            .map_err(|error| io_fault("write package staging", staging, &error))?;
     }
     file.sync_all()
-        .map_err(|error| io_fault("sync export staging", staging, &error))
+        .map_err(|error| io_fault("sync package staging", staging, &error))
 }
 
 /// Compares the staged file with the prepared bytes without a second full buffer.
 fn verify_staged(staging: &Path, archive: &[u8]) -> Result<(), Fault> {
     let mut file =
-        File::open(staging).map_err(|error| io_fault("reopen export staging", staging, &error))?;
+        File::open(staging).map_err(|error| io_fault("reopen package staging", staging, &error))?;
     let mut buffer = vec![0; CHUNK];
     let mut offset = 0;
     loop {
         let read = file
             .read(&mut buffer)
-            .map_err(|error| io_fault("read export staging", staging, &error))?;
+            .map_err(|error| io_fault("read package staging", staging, &error))?;
         if read == 0 {
             break;
         }
@@ -314,13 +312,23 @@ fn verify_staged(staging: &Path, archive: &[u8]) -> Result<(), Fault> {
 
 /// Bounded single capture of an operator-selected file; a change while reading refuses.
 fn read_selected(path: &Path, cancel: &AtomicBool) -> Result<archive::Bytes, Fault> {
-    let mut file =
+    let file =
         File::open(path).map_err(|error| io_fault("open the selected package", path, &error))?;
+    read_archive(path, file, cancel).map(|(bytes, _)| bytes)
+}
+
+/// Bounded single capture of one opened archive file, charged to the payload budget;
+/// a change while reading refuses. Returns the bytes and the opened file's metadata.
+fn read_archive(
+    path: &Path,
+    mut file: File,
+    cancel: &AtomicBool,
+) -> Result<(archive::Bytes, fs::Metadata), Fault> {
     let before = file
         .metadata()
-        .map_err(|error| io_fault("inspect the selected package", path, &error))?;
+        .map_err(|error| io_fault("inspect the package archive", path, &error))?;
     if !before.is_file() {
-        return Err(format_fault("the selected package is not a regular file"));
+        return Err(format_fault("the package archive is not a regular file"));
     }
     let length = usize::try_from(before.len())
         .ok()
@@ -337,13 +345,13 @@ fn read_selected(path: &Path, cancel: &AtomicBool) -> Result<archive::Bytes, Fau
         let read = (&mut limited)
             .take(CHUNK as u64)
             .read_to_end(&mut bytes)
-            .map_err(|error| io_fault("read the selected package", path, &error))?;
+            .map_err(|error| io_fault("read the package archive", path, &error))?;
         if read == 0 {
             break;
         }
     }
     let after = fs::metadata(path)
-        .map_err(|error| io_fault("inspect the selected package", path, &error))?;
+        .map_err(|error| io_fault("inspect the package archive", path, &error))?;
     let changed = bytes.len() != length
         || after.len() != before.len()
         || after.modified().ok() != before.modified().ok();
@@ -355,10 +363,24 @@ fn read_selected(path: &Path, cancel: &AtomicBool) -> Result<archive::Bytes, Fau
     if changed {
         return Err(Fault::new(
             "PackageChanged",
-            "the selected package changed while being read; select it again",
+            "the package archive changed while being read; select it again",
         ));
     }
-    archive::Bytes::new(bytes, reservation)
+    Ok((archive::Bytes::new(bytes, reservation)?, before))
+}
+
+/// Verifies captured archive bytes into a PackageDraft for import and installed reads.
+/// Callers validate that in-memory draft into the execution Inventory.
+fn verified_release(
+    archive: &[u8],
+    artifact_id: String,
+    cancel: &AtomicBool,
+) -> Result<(PackageDraft, ReleaseFacts), Fault> {
+    let (envelope, files) = verified_payload(archive, cancel)?;
+    cancelled(cancel)?;
+    let draft = PackageDraft::from_files(files, &crate::authoring::limits()?)?;
+    let facts = ReleaseFacts::new(&draft, &envelope.key_id, artifact_id)?;
+    Ok((draft, facts))
 }
 
 /// Structure, exact envelope, membership, lengths and digests, in that order; payload
@@ -372,7 +394,7 @@ fn verified_payload(
     let index = reader.read(index, cancel)?;
     let signature = reader.position(archive::SIGNATURE)?;
     let signature = reader.read(signature, cancel)?;
-    let envelope = format::verify(index, signature)?;
+    let envelope = format::verify(&index, &signature)?;
     let mut members = BTreeMap::new();
     for (position, member) in reader.members().iter().enumerate() {
         if let Some(path) = member.name.strip_prefix(archive::PAYLOAD_PREFIX) {
@@ -404,26 +426,6 @@ fn verified_payload(
         files.insert(fact.path.clone(), bytes);
     }
     Ok((envelope, files))
-}
-
-/// Captured files must be exactly the signed facts, by path, length and digest.
-fn matches_index(files: &BTreeMap<String, PayloadBytes>, facts: &[FileFact]) -> Result<(), Fault> {
-    if let Some(path) = differing_member(files.keys(), facts) {
-        return Err(
-            integrity_fault("payload files differ from the signed index")
-                .with_context(json!({"path":path})),
-        );
-    }
-    for fact in facts {
-        let bytes = &files[&fact.path];
-        if bytes.len() != fact.bytes || format::hex(bytes.digest()) != fact.sha256 {
-            return Err(
-                integrity_fault("payload bytes differ from the signed index")
-                    .with_context(json!({"path":fact.path})),
-            );
-        }
-    }
-    Ok(())
 }
 
 /// The first path present on only one side; both sides are sorted and unique.
@@ -503,11 +505,21 @@ fn note(fault: &mut Fault, key: &str, value: Value) {
 /// Installs `source` through the real export, archive file, import and publication path.
 #[cfg(test)]
 pub(crate) fn install_for_test(root: &Path, source: &Path) -> InstalledIdentity {
+    install_for_test_with(root, source, [7; 32])
+}
+
+/// [`install_for_test`] signed by the key derived from `seed`.
+#[cfg(test)]
+pub(crate) fn install_for_test_with(
+    root: &Path,
+    source: &Path,
+    seed: [u8; 32],
+) -> InstalledIdentity {
     let cancel = AtomicBool::new(false);
     let draft = PackageDraft::capture(source, &crate::authoring::limits().unwrap()).unwrap();
-    let prepared = prepare_export(draft, &Signer::from_seed([7; 32]), &cancel).unwrap();
+    let prepared = prepare_export(draft, &Signer::from_seed(seed), &cancel).unwrap();
     let file = temporary(&std::env::temp_dir(), "mmpkg-fixture");
-    fs::write(&file, &**prepared.archive.as_ref().unwrap()).unwrap();
+    fs::write(&file, &*prepared.archive).unwrap();
     let imported = prepare_import(&file, &cancel);
     fs::remove_file(&file).unwrap();
     let imported = imported.unwrap();

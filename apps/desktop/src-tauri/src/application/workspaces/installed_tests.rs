@@ -1,23 +1,30 @@
 use super::*;
-use crate::application::InspectionKind;
 use crate::application::test_support::*;
-use crate::authoring::CatalogEdit;
-use crate::distribution::install_for_test;
+use crate::application::{InspectionKind, RecoveryStatus};
+use crate::distribution::install_for_test_with;
 use crate::storage::{Store, TabRecord};
-use mado_runtime_comparison::inventory::DraftFileKind;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// A distributable copy of the shared fixture installed through the real import path.
-/// The authored source is removed afterwards so nothing can silently read it back.
-fn installed(fixture: &Fixture, name: &str) -> InstalledIdentity {
-    let source = fixture.package_at(name);
+const SIGNER: [u8; 32] = [7; 32];
+const OTHER_SIGNER: [u8; 32] = [9; 32];
+
+/// One release of the shared fixture, optionally with another schema, installed through
+/// the real export, archive file, import and publication path. The authored source is
+/// removed afterwards so nothing can silently read it back.
+fn release(
+    fixture: &Fixture,
+    version: &str,
+    signer: [u8; 32],
+    schema: Option<Value>,
+) -> InstalledIdentity {
+    let source = fixture.package_at(&format!("release-{version}-{}", signer[0]));
     let manifest_path = source.join("package.json");
     let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
     manifest["distribution"] = json!({
-        "version":1,"release_version":"1.0.0-rc.1+fixture","name":"M0 workload",
+        "version":1,"release_version":version,"name":"M0 workload",
         "description":"Fixture release","author_name":"Fixture author","license":"MIT",
         "game":{"id":"fixture-game","names":{"en":"Fixture Game"},"aliases":["fixture.exe"]},
     });
@@ -26,9 +33,33 @@ fn installed(fixture: &Fixture, name: &str) -> InstalledIdentity {
         serde_json::to_vec_pretty(&manifest).unwrap(),
     )
     .unwrap();
-    let identity = install_for_test(&fixture.root, &source);
+    if let Some(schema) = schema {
+        fs::write(
+            source.join("schema.json"),
+            serde_json::to_vec(&schema).unwrap(),
+        )
+        .unwrap();
+    }
+    let identity = install_for_test_with(&fixture.root, &source, signer);
     fs::remove_dir_all(&source).unwrap();
     identity
+}
+
+fn installed(fixture: &Fixture) -> InstalledIdentity {
+    release(fixture, "1.0.0-rc.1+fixture", SIGNER, None)
+}
+
+/// The shared fixture schema after one change.
+fn schema(change: impl FnOnce(&mut Value)) -> Value {
+    let mut schema: Value =
+        serde_json::from_slice(&fs::read(package_path().join("schema.json")).unwrap()).unwrap();
+    change(&mut schema);
+    schema
+}
+
+/// A compatible later schema: one more top-level option with a default.
+fn with_retries(schema: &mut Value) {
+    schema["properties"]["retries"] = json!({"type":"integer","minimum":0,"maximum":5,"default":2});
 }
 
 fn reference(identity: &InstalledIdentity) -> PackageSource {
@@ -38,12 +69,43 @@ fn reference(identity: &InstalledIdentity) -> PackageSource {
     }
 }
 
-fn container(fixture: &Fixture, identity: &InstalledIdentity) -> PathBuf {
-    fixture
-        .root
-        .join("pkgs")
-        .join(&identity.package_id)
-        .join(&identity.artifact_id)
+/// The verified archive of one installed release.
+fn archive(fixture: &Fixture, identity: &InstalledIdentity) -> PathBuf {
+    distribution::verify_installed(&fixture.root, &identity.package_id, &identity.artifact_id)
+        .unwrap()
+        .archive_path()
+        .to_path_buf()
+}
+
+fn select(
+    application: &Application,
+    workspace: &WorkspaceRef,
+    identity: &InstalledIdentity,
+) -> Selection {
+    let outcome = application
+        .inspect_installed(workspace, &identity.package_id, &identity.artifact_id)
+        .unwrap();
+    assert_eq!(outcome.kind, InspectionKind::Bound);
+    outcome.workspace.selection.unwrap()
+}
+
+/// Imports the exact original bytes of a release again through the application.
+fn import_again(
+    fixture: &Fixture,
+    application: &Application,
+    workspace: &WorkspaceRef,
+    bytes: &[u8],
+) {
+    let file = fixture.root.join("original.mmpkg");
+    fs::write(&file, bytes).unwrap();
+    let review = application
+        .package_import_prepare(workspace, &file)
+        .unwrap();
+    let publication = application
+        .package_import_publish(workspace, &review.token)
+        .unwrap();
+    assert!(publication.committed && publication.cleanup_error.is_none());
+    fs::remove_file(&file).unwrap();
 }
 
 fn restart(root: &Path) -> Arc<Application> {
@@ -55,7 +117,7 @@ fn restart(root: &Path) -> Arc<Application> {
     .unwrap()
 }
 
-/// Every regular file below `root`, so the installed original can be compared exactly.
+/// Every regular file below `root`, so stored bytes can be compared exactly.
 fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut found = BTreeMap::new();
     let mut pending = vec![root.to_path_buf()];
@@ -75,6 +137,16 @@ fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     found
 }
 
+/// Installed files apart from the import lock, by absolute path.
+fn installed_files(fixture: &Fixture) -> BTreeMap<PathBuf, Vec<u8>> {
+    let packages = fixture.root.join("pkgs").canonicalize().unwrap();
+    files(&packages)
+        .into_iter()
+        .filter(|(path, _)| path != Path::new(".import.lock"))
+        .map(|(path, bytes)| (packages.join(path), bytes))
+        .collect()
+}
+
 #[test]
 fn installed_release_is_selected_explicitly_and_reverified_on_restart_and_start() {
     let fixture = Fixture::new();
@@ -82,8 +154,12 @@ fn installed_release_is_selected_explicitly_and_reverified_on_restart_and_start(
     let workspace = application
         .create_workspace("Installed", "Installed")
         .unwrap();
-    let identity = installed(&fixture, "release");
+    let identity = installed(&fixture);
     let reference = reference(&identity);
+    let archive = archive(&fixture, &identity);
+    // The installation is exactly the signed archive; nothing is extracted beside it.
+    let stored = installed_files(&fixture);
+    assert_eq!(stored.keys().collect::<Vec<_>>(), [&archive]);
     // Installing a release neither selects nor binds it.
     let before = application.workspace_catalog().unwrap();
     assert!(before.open[0].selection.is_none());
@@ -96,33 +172,15 @@ fn installed_release_is_selected_explicitly_and_reverified_on_restart_and_start(
             .is_empty()
     );
 
-    let outcome = application
-        .inspect_installed(
-            &view_ref(&workspace),
-            &identity.package_id,
-            &identity.artifact_id,
-        )
-        .unwrap();
-    assert_eq!(outcome.kind, InspectionKind::Bound);
-    let selection = outcome.workspace.selection.unwrap();
+    let selection = select(application, &view_ref(&workspace), &identity);
     assert_eq!(selection.source, reference);
-    assert_eq!(
-        PathBuf::from(&selection.package_path),
-        container(&fixture, &identity)
-            .join("package")
-            .canonicalize()
-            .unwrap()
-    );
-    assert_eq!(outcome.workspace.saved_package.unwrap().source, reference);
+    assert_eq!(PathBuf::from(&selection.package_path), archive);
     let tab = lock(&application.store).tab("Installed").unwrap();
     assert_eq!(tab.packages[0].source, reference);
 
-    // Naming the managed payload as a directory keeps the installed form and checks.
+    // Naming the archive keeps the installed form and its checks.
     let by_path = application
-        .inspect(
-            Path::new(&selection.package_path),
-            &workspace_ref(&selection),
-        )
+        .inspect(&archive, &workspace_ref(&selection))
         .unwrap();
     assert_eq!(by_path.kind, InspectionKind::Bound);
     let selection = by_path.workspace.selection.unwrap();
@@ -132,7 +190,7 @@ fn installed_release_is_selected_explicitly_and_reverified_on_restart_and_start(
         reference
     );
 
-    // Start verifies the release itself and only then reaches the absent runner.
+    // Start verifies the archive itself and only then reaches the absent runner.
     application
         .start(&workspace_ref(&selection), request(&selection))
         .unwrap();
@@ -149,27 +207,22 @@ fn installed_release_is_selected_explicitly_and_reverified_on_restart_and_start(
         selection.package.inventory_identity
     );
     restarted.shutdown().unwrap();
+    // Selection, Start and restart run the captured archive bytes without extracting them.
+    assert_eq!(installed_files(&fixture), stored);
 }
 
 #[test]
-fn changed_or_missing_installed_content_refuses_and_keeps_the_saved_reference() {
+fn changed_or_missing_installed_archive_refuses_until_the_original_is_imported_again() {
     let fixture = Fixture::new();
     let application = &fixture.application;
     let workspace = application
         .create_workspace("Installed", "Installed")
         .unwrap();
-    let identity = installed(&fixture, "release");
+    let identity = installed(&fixture);
     let reference = reference(&identity);
-    let selection = application
-        .inspect_installed(
-            &view_ref(&workspace),
-            &identity.package_id,
-            &identity.artifact_id,
-        )
-        .unwrap()
-        .workspace
-        .selection
-        .unwrap();
+    let archive = archive(&fixture, &identity);
+    let original = fs::read(&archive).unwrap();
+    let selection = select(application, &view_ref(&workspace), &identity);
     let saved = application
         .save_profile(
             &workspace_ref(&selection),
@@ -178,16 +231,13 @@ fn changed_or_missing_installed_content_refuses_and_keeps_the_saved_reference() 
             selection.package.profiles["template-first"]["options"].clone(),
         )
         .unwrap();
-    let tab_path = fixture.root.join("tabs/Installed/tab.config");
-    let tab_before = fs::read(&tab_path).unwrap();
-    let profile_before = fs::read(profile_path(&fixture, "Installed", &saved)).unwrap();
+    let tab = fixture.root.join("tabs/Installed");
+    let stored = files(&tab);
 
-    // Changed bytes after selection are caught by Start's own verification.
-    let payload = PathBuf::from(&selection.package_path);
-    let source = payload.join("main.js");
-    let mut changed = fs::read(&source).unwrap();
-    changed.extend_from_slice(b"\n// changed after selection\n");
-    fs::write(&source, changed).unwrap();
+    // Changed archive bytes after selection are caught by Start's own verification.
+    let mut changed = original.clone();
+    changed.extend_from_slice(b"changed after selection");
+    fs::write(&archive, &changed).unwrap();
     application
         .start(&workspace_ref(&selection), request(&selection))
         .unwrap();
@@ -218,19 +268,15 @@ fn changed_or_missing_installed_content_refuses_and_keeps_the_saved_reference() 
             .category,
         "InstalledIntegrity"
     );
-    // The payload path is never adopted as an ordinary directory to bypass integrity.
+    // The archive path is never adopted as an ordinary package location.
     assert_eq!(
         application
-            .inspect(&payload, &workspace_ref(&selection))
+            .inspect(&archive, &workspace_ref(&selection))
             .unwrap_err()
             .category,
         "InstalledIntegrity"
     );
-    assert_eq!(fs::read(&tab_path).unwrap(), tab_before);
-    assert_eq!(
-        fs::read(profile_path(&fixture, "Installed", &saved)).unwrap(),
-        profile_before
-    );
+    assert_eq!(files(&tab), stored);
 
     application.shutdown().unwrap();
     let restarted = restart(&fixture.root);
@@ -240,18 +286,28 @@ fn changed_or_missing_installed_content_refuses_and_keeps_the_saved_reference() 
     assert_eq!(view.saved_package.unwrap().source, reference);
     restarted.shutdown().unwrap();
 
-    fs::remove_dir_all(container(&fixture, &identity)).unwrap();
+    fs::remove_file(&archive).unwrap();
     let restarted = restart(&fixture.root);
     let view = restarted.workspace_catalog().unwrap().open.remove(0);
     assert!(view.selection.is_none());
-    assert_eq!(view.source_error.unwrap().category, "InstalledMissing");
-    assert_eq!(view.saved_package.unwrap().source, reference);
-    restarted.shutdown().unwrap();
-    assert_eq!(fs::read(&tab_path).unwrap(), tab_before);
     assert_eq!(
-        fs::read(profile_path(&fixture, "Installed", &saved)).unwrap(),
-        profile_before
+        view.source_error.as_ref().unwrap().category,
+        "InstalledMissing"
     );
+    assert_eq!(view.saved_package.as_ref().unwrap().source, reference);
+
+    // Importing the original archive again restores the unchanged saved reference.
+    import_again(&fixture, &restarted, &view_ref(&view), &original);
+    restarted.shutdown().unwrap();
+    let restored = restart(&fixture.root);
+    let view = restored.workspace_catalog().unwrap().open.remove(0);
+    assert!(view.source_error.is_none());
+    let selection = view.selection.unwrap();
+    assert_eq!(selection.source, reference);
+    assert_eq!(selection.profiles[0].id, saved.id);
+    restored.shutdown().unwrap();
+    assert_eq!(fs::read(&archive).unwrap(), original);
+    assert_eq!(files(&tab), stored);
 }
 
 #[test]
@@ -270,7 +326,7 @@ fn selecting_an_installed_release_relocates_through_profile_checks_without_trans
         .unwrap();
     let profile_before = fs::read(profile_path(&fixture, "Owner", &saved)).unwrap();
     let other = application.create_workspace("Other", "Other").unwrap();
-    let identity = installed(&fixture, "release");
+    let identity = installed(&fixture);
 
     let outcome = application
         .inspect_installed(
@@ -306,20 +362,173 @@ fn selecting_an_installed_release_relocates_through_profile_checks_without_trans
 }
 
 #[test]
+fn same_signer_release_upgrade_keeps_profiles_and_recovers_an_incompatible_schema() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let workspace = application
+        .create_workspace("Installed", "Installed")
+        .unwrap();
+    let first = installed(&fixture);
+    let selection = select(application, &view_ref(&workspace), &first);
+    let custom = json!({"priorities":["ocr"],"actions":{"template":"E","ocr":"F"}});
+    let saved = application
+        .save_profile(&workspace_ref(&selection), None, "Custom", custom)
+        .unwrap();
+
+    // A later release of the same signer and package adds an option with a default.
+    let added = release(&fixture, "1.1.0", SIGNER, Some(schema(with_retries)));
+    let outcome = application
+        .inspect_installed(
+            &workspace_ref(&selection),
+            &added.package_id,
+            &added.artifact_id,
+        )
+        .unwrap();
+    assert_eq!(outcome.kind, InspectionKind::Bound);
+    assert_eq!(outcome.outcomes.len(), 1);
+    assert_eq!(outcome.outcomes[0].profile_id, saved.id);
+    assert_eq!(outcome.outcomes[0].status, RecoveryStatus::Saved);
+    let upgraded = outcome.workspace.selection.unwrap();
+    assert_eq!(upgraded.source, reference(&added));
+    assert_eq!(upgraded.profiles.len(), 1);
+    let profile = &upgraded.profiles[0];
+    assert_eq!(profile.id, saved.id);
+    assert_eq!(profile.name, "Custom");
+    assert_eq!(profile.values["priorities"], json!(["ocr"]));
+    assert_eq!(profile.values["actions"], json!({"template":"E","ocr":"F"}));
+    assert_eq!(profile.values["retries"], 2);
+    assert_eq!(
+        lock(&application.store).tab("Installed").unwrap().packages[0].source,
+        reference(&added)
+    );
+
+    // A release rejecting a saved value leaves the profile for repair, never coerced.
+    let narrowed = release(
+        &fixture,
+        "2.0.0",
+        SIGNER,
+        Some(schema(|schema| {
+            with_retries(schema);
+            schema["properties"]["actions"]["properties"]["template"] =
+                json!({"type":"string","enum":["A","C"]});
+        })),
+    );
+    let file = profile_path(&fixture, "Installed", &saved);
+    let before = fs::read(&file).unwrap();
+    let outcome = application
+        .inspect_installed(
+            &workspace_ref(&upgraded),
+            &narrowed.package_id,
+            &narrowed.artifact_id,
+        )
+        .unwrap();
+    assert_eq!(outcome.kind, InspectionKind::RecoveryRequired);
+    assert_eq!(outcome.outcomes[0].status, RecoveryStatus::RepairRequired);
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert_eq!(
+        lock(&application.store).tab("Installed").unwrap().packages[0].source,
+        reference(&added)
+    );
+    let recovery = outcome.workspace.recovery.unwrap();
+    assert_eq!(recovery.profiles[0].profile.id, saved.id);
+    let repaired = application
+        .repair_profile(
+            &recovery.context,
+            &saved.id,
+            json!({"priorities":["ocr"],"actions":{"template":"C","ocr":"F"},"retries":2}),
+        )
+        .unwrap();
+    assert!(repaired.issue.is_none());
+    let bound = application.retry_binding(&recovery.context).unwrap();
+    assert_eq!(bound.kind, InspectionKind::Bound);
+    let selection = bound.workspace.selection.unwrap();
+    assert_eq!(selection.source, reference(&narrowed));
+    assert_eq!(selection.profiles[0].id, saved.id);
+    assert_eq!(selection.profiles[0].values["actions"]["template"], "C");
+}
+
+#[test]
+fn another_or_unknown_signer_is_refused_before_any_tab_write() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let workspace = application
+        .create_workspace("Installed", "Installed")
+        .unwrap();
+    let first = installed(&fixture);
+    let selection = select(application, &view_ref(&workspace), &first);
+    application
+        .save_profile(
+            &workspace_ref(&selection),
+            None,
+            "Kept",
+            json!({"priorities":["ocr"],"actions":{"template":"E","ocr":"F"}}),
+        )
+        .unwrap();
+    let tab = fixture.root.join("tabs/Installed");
+    let stored = files(&tab);
+    let refused = |identity: &InstalledIdentity| {
+        application
+            .inspect_installed(
+                &workspace_ref(&selection),
+                &identity.package_id,
+                &identity.artifact_id,
+            )
+            .unwrap_err()
+    };
+
+    // The same package ID under another signing key installs as a distinct release but
+    // never takes over this Tab's profiles, Target or binding.
+    let foreign = release(&fixture, "1.1.0", OTHER_SIGNER, Some(schema(with_retries)));
+    let fault = refused(&foreign);
+    assert_eq!(fault.category, "InstalledSigner");
+    assert_eq!(
+        fault.context["saved_artifact_id"],
+        first.artifact_id.as_str()
+    );
+    assert_eq!(
+        application
+            .inspect(&archive(&fixture, &foreign), &workspace_ref(&selection))
+            .unwrap_err()
+            .category,
+        "InstalledSigner"
+    );
+    assert_eq!(files(&tab), stored);
+    let view = application.workspace_catalog().unwrap().open.remove(0);
+    assert_eq!(view.revision, selection.revision);
+    assert_eq!(view.selection.unwrap().source, reference(&first));
+    // Another Tab may use that signer's release.
+    let other = application.create_workspace("Other", "Other").unwrap();
+    assert_eq!(
+        select(application, &view_ref(&other), &foreign).source,
+        reference(&foreign)
+    );
+
+    // Without its archive the saved release's signer is unknown, so even the same
+    // signer's later release waits until the original is imported again.
+    let later = release(&fixture, "1.2.0", SIGNER, None);
+    let saved_archive = archive(&fixture, &first);
+    let original = fs::read(&saved_archive).unwrap();
+    fs::remove_file(&saved_archive).unwrap();
+    let fault = refused(&later);
+    assert_eq!(fault.category, "InstalledSigner");
+    assert_eq!(fault.context["cause"]["category"], "InstalledMissing");
+    assert_eq!(files(&tab), stored);
+    import_again(&fixture, application, &workspace_ref(&selection), &original);
+    assert_eq!(
+        select(application, &workspace_ref(&selection), &later).source,
+        reference(&later)
+    );
+}
+
+#[test]
 fn configuration_restore_keeps_installed_references_without_payload_or_keys() {
     let fixture = Fixture::new();
     let application = &fixture.application;
     let workspace = application
         .create_workspace("Installed", "Installed")
         .unwrap();
-    let identity = installed(&fixture, "release");
-    application
-        .inspect_installed(
-            &view_ref(&workspace),
-            &identity.package_id,
-            &identity.artifact_id,
-        )
-        .unwrap();
+    let identity = installed(&fixture);
+    select(application, &view_ref(&workspace), &identity);
     let capture = application.capture_configuration().unwrap();
     assert!(capture.files.keys().all(|path| !path.starts_with("pkgs/")));
     let tab: TabRecord =
@@ -348,90 +557,52 @@ fn configuration_restore_keeps_installed_references_without_payload_or_keys() {
 }
 
 #[test]
-fn managed_payload_is_read_only_until_duplicated_to_a_new_source() {
+fn installed_archives_and_former_containers_are_never_opened_as_source() {
     let fixture = Fixture::new();
     let application = &fixture.application;
     let workspace = application.create_workspace("Edit", "Edit").unwrap();
-    let identity = installed(&fixture, "release");
-    let container = container(&fixture, &identity);
-    let original = files(&container);
+    let identity = installed(&fixture);
+    let archive = archive(&fixture, &identity);
+    // A former expanded container of the release is recognized only to be refused.
+    let former = fixture
+        .root
+        .join("pkgs")
+        .join(&identity.package_id)
+        .join(&identity.artifact_id);
+    fs::create_dir_all(former.join("package")).unwrap();
+    fs::copy(
+        package_path().join("package.json"),
+        former.join("package/package.json"),
+    )
+    .unwrap();
+    let packages = files(&fixture.root.join("pkgs"));
 
-    let editor = application
-        .authoring_open(&view_ref(&workspace), &container.join("package"))
-        .unwrap();
-    assert!(editor.managed);
-    for refusal in [
-        application.authoring_save(
-            &editor.owner,
-            &editor.revision,
-            "main.js",
-            "export const replaced = true;\n".into(),
-        ),
-        application.authoring_catalog(
-            &editor.owner,
-            &editor.revision,
-            CatalogEdit::Remove {
-                path: "profiles/ocr-first.json".into(),
-            },
-        ),
-    ] {
-        assert_eq!(refusal.unwrap_err().category, "ManagedPackage");
+    for path in [&archive, &former, &former.join("package")] {
+        assert_eq!(
+            application
+                .authoring_open(&view_ref(&workspace), path)
+                .unwrap_err()
+                .category,
+            "ManagedPackage",
+            "{path:?}"
+        );
+        assert!(application.authoring_owner().is_none());
     }
-    // No new source can be created inside the release container either.
-    assert_eq!(
-        application
-            .publisher
-            .create(&container.join("package/nested"), "nested")
-            .unwrap_err()
-            .category,
-        "ManagedPackage"
-    );
-    assert_eq!(files(&container), original);
-
-    let copy = application
-        .authoring_duplicate(&editor.owner, &editor.revision, "m0-copy")
-        .unwrap();
-    assert!(!copy.managed);
-    let copy_root = PathBuf::from(&copy.package_path);
-    assert!(!copy_root.starts_with(&container));
-    let text = |path: &str| -> Value {
-        serde_json::from_str(
-            copy.files
-                .iter()
-                .find(|file| file.path == path)
-                .unwrap()
-                .text
-                .as_deref()
-                .unwrap(),
-        )
-        .unwrap()
-    };
-    // Owner records follow the new ID; authored release facts stay as plain copied metadata.
-    let manifest = text("package.json");
-    assert_eq!(manifest["package_id"], "m0-copy");
-    assert_eq!(manifest["distribution"]["author_name"], "Fixture author");
-    for preset in copy
-        .files
-        .iter()
-        .filter(|file| file.kind == DraftFileKind::Profile)
-    {
-        assert_eq!(text(&preset.path)["package_id"], "m0-copy");
+    // No new source can be created at or below an installed release either.
+    for path in [archive.join("nested"), former.join("package/nested")] {
+        assert_eq!(
+            application
+                .publisher
+                .create(&path, "nested")
+                .unwrap_err()
+                .category,
+            "ManagedPackage",
+            "{path:?}"
+        );
     }
-    // Signed-envelope evidence never travels with the editable copy.
-    for evidence in ["index.json", "signature.json", "receipt.json"] {
-        assert!(!copy_root.join(evidence).exists());
-    }
-    let saved = application
-        .authoring_save(
-            &copy.owner,
-            &copy.revision,
-            "decisions.js",
-            "export const edited = true;\n".into(),
-        )
-        .unwrap();
-    assert!(saved.view.is_some_and(|view| !view.managed));
-    assert_eq!(files(&container), original);
-    application.authoring_exit(&copy.owner).unwrap();
+    assert_eq!(files(&fixture.root.join("pkgs")), packages);
+    let view = application.workspace_catalog().unwrap().open.remove(0);
+    assert_eq!(view.revision, workspace.revision);
 }
 
 #[test]
@@ -445,7 +616,6 @@ fn ordinary_directories_under_pkgs_keep_directory_authoring_and_binding() {
     let editor = application
         .authoring_open(&view_ref(&workspace), &plain)
         .unwrap();
-    assert!(!editor.managed);
     let saved = application
         .authoring_save(
             &editor.owner,

@@ -50,7 +50,7 @@ export default function RunPage({workspace, label, derived, run, locked, active,
   const [confirmEdit, setConfirmEdit] = useState(false);
   const a = t.authoring;
   const editOwner = authoring.role === 'owner';
-  // An installed release reinspects by its saved identity; a typed directory path still requests a directory.
+  // Installed releases reinspect by saved identity and have no Edit entry point.
   const installed = workspace.savedPackage?.source.kind === 'installed' ? workspace.savedPackage.source : null;
   const reinspectable = installed !== null || workspace.inspectPath.trim() !== '';
   const reinspectButton = useRef<HTMLButtonElement>(null);
@@ -153,7 +153,7 @@ export default function RunPage({workspace, label, derived, run, locked, active,
                 title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button></ButtonHint>}
             {editOwner
               ? <button id="edit-package-return" type="button" onClick={authoring.onReturn}>{a.returnToEdit}</button>
-              : confirmEdit
+              : installed !== null ? null : confirmEdit
                 ? <div className="confirm-row" role="alertdialog" aria-labelledby="confirm-edit-text">
                   <span id="confirm-edit-text">{a.confirmEdit}</span>
                   <button id="edit-discard" type="button" className="danger-text" onClick={() => {setConfirmEdit(false); authoring.onOpen(bound.packagePath);}}>{a.discardEdit}</button>

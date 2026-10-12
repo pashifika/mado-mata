@@ -23,8 +23,8 @@ use tauri::{Emitter, Manager};
 
 mod cache_commands;
 mod collaboration_commands;
-mod ocr_setup_commands;
 mod distribution_commands;
+mod ocr_setup_commands;
 #[cfg(target_os = "macos")]
 mod picker;
 mod plugin_commands;
@@ -567,8 +567,10 @@ fn request_close(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         if let Ok(application) = app.state::<Backend>().bootstrap.running_application() {
-            if let Err(fault) = application.prepare_distribution_close(None)
-                .and_then(|_| application.prepare_close(None)) {
+            if let Err(fault) = application
+                .prepare_distribution_close(None)
+                .and_then(|_| application.prepare_close(None))
+            {
                 if fault.category == "AuthoringActive" {
                     let _ = app.emit("authoring-close-requested", ());
                 } else {

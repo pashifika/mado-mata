@@ -178,7 +178,11 @@ impl Bootstrap {
                 Err(error) if matches!(status.state, Phase::Ready) => {
                     let transient = matches!(
                         error.category.as_str(),
-                        "WorkspaceBusy" | "OcrSetupBusy" | "OcrSetupCleanup" | "PackageBusy" | "PackageCleanup"
+                        "WorkspaceBusy"
+                            | "OcrSetupBusy"
+                            | "OcrSetupCleanup"
+                            | "PackageBusy"
+                            | "PackageCleanup"
                     );
                     status.stage = if error.category == "RestorePending" {
                         status.pending_restore = true;

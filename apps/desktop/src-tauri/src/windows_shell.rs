@@ -77,25 +77,38 @@ pub async fn choose_package(
 ) -> Result<Option<String>, Fault> {
     let (send, mut receive) = tauri::async_runtime::channel(1);
     let parent = window.clone();
-    window.run_on_main_thread(move || {
-        let result = (|| {
-            guard.validate()?;
-            let hwnd = parent.hwnd().map_err(|_| Fault::new("PackagePicker", "The parent window is unavailable"))?;
-            let result = package_file(hwnd.0 as HWND, exporting, suggested_name.as_deref())?;
-            guard.validate()?;
-            Ok(result)
-        })();
-        let _ = send.try_send(result);
-    }).map_err(|_| Fault::new("PackagePicker", "Could not schedule package file selection"))?;
-    receive.recv().await.ok_or_else(|| Fault::new("PackagePicker", "Package file selection did not complete"))?
+    window
+        .run_on_main_thread(move || {
+            let result = (|| {
+                guard.validate()?;
+                let hwnd = parent
+                    .hwnd()
+                    .map_err(|_| Fault::new("PackagePicker", "The parent window is unavailable"))?;
+                let result = package_file(hwnd.0 as HWND, exporting, suggested_name.as_deref())?;
+                guard.validate()?;
+                Ok(result)
+            })();
+            let _ = send.try_send(result);
+        })
+        .map_err(|_| Fault::new("PackagePicker", "Could not schedule package file selection"))?;
+    receive
+        .recv()
+        .await
+        .ok_or_else(|| Fault::new("PackagePicker", "Package file selection did not complete"))?
 }
 
 #[expect(unsafe_code, reason = "audited owner-modal Win32 package file dialog")]
-fn package_file(owner: HWND, exporting: bool, suggested: Option<&str>) -> Result<Option<String>, Fault> {
+fn package_file(
+    owner: HWND,
+    exporting: bool,
+    suggested: Option<&str>,
+) -> Result<Option<String>, Fault> {
     use windows_sys::Win32::UI::Controls::Dialogs::{GetSaveFileNameW, OFN_OVERWRITEPROMPT};
     let mut path = [0_u16; MAX_PATH_BYTES + 1];
     if let Some(name) = suggested {
-        for (destination, unit) in path.iter_mut().zip(name.encode_utf16()) { *destination = unit; }
+        for (destination, unit) in path.iter_mut().zip(name.encode_utf16()) {
+            *destination = unit;
+        }
     }
     let mut dialog = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
@@ -105,25 +118,57 @@ fn package_file(owner: HWND, exporting: bool, suggested: Option<&str>) -> Result
         lpstrFile: path.as_mut_ptr(),
         nMaxFile: path.len() as u32,
         lpstrDefExt: windows_sys::core::w!("mmpkg"),
-        Flags: OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT
-            | OFN_HIDEREADONLY | OFN_NODEREFERENCELINKS
-            | if exporting { OFN_OVERWRITEPROMPT } else { OFN_FILEMUSTEXIST },
+        Flags: OFN_EXPLORER
+            | OFN_PATHMUSTEXIST
+            | OFN_NOCHANGEDIR
+            | OFN_DONTADDTORECENT
+            | OFN_HIDEREADONLY
+            | OFN_NODEREFERENCELINKS
+            | if exporting {
+                OFN_OVERWRITEPROMPT
+            } else {
+                OFN_FILEMUSTEXIST
+            },
         ..Default::default()
     };
     // SAFETY: The owner and every UTF-16 buffer remain live through this main-thread modal call.
-    let accepted = unsafe { if exporting { GetSaveFileNameW(&mut dialog) } else { GetOpenFileNameW(&mut dialog) } };
+    let accepted = unsafe {
+        if exporting {
+            GetSaveFileNameW(&mut dialog)
+        } else {
+            GetOpenFileNameW(&mut dialog)
+        }
+    };
     if accepted == 0 {
         // SAFETY: Read this thread's common-dialog error immediately after failure.
         let error = unsafe { CommDlgExtendedError() };
-        return if error == 0 { Ok(None) } else { Err(Fault::new("PackagePicker", format!("File dialog failed ({error:#x})"))) };
+        return if error == 0 {
+            Ok(None)
+        } else {
+            Err(Fault::new(
+                "PackagePicker",
+                format!("File dialog failed ({error:#x})"),
+            ))
+        };
     }
-    let length = path.iter().position(|unit| *unit == 0)
+    let length = path
+        .iter()
+        .position(|unit| *unit == 0)
         .ok_or_else(|| Fault::new("PackagePicker", "Selected path exceeds its bound"))?;
     let path = String::from_utf16(&path[..length])
         .map_err(|_| Fault::new("PackagePicker", "Selected path is not valid Unicode"))?;
-    if path.len() > MAX_PATH_BYTES || !Path::new(&path).is_absolute() || path.chars().any(char::is_control)
-        || !Path::new(&path).extension().and_then(|part| part.to_str()).is_some_and(|part| part.eq_ignore_ascii_case("mmpkg")) {
-        return Err(Fault::new("PackagePicker", "Select a bounded absolute .mmpkg path"));
+    if path.len() > MAX_PATH_BYTES
+        || !Path::new(&path).is_absolute()
+        || path.chars().any(char::is_control)
+        || !Path::new(&path)
+            .extension()
+            .and_then(|part| part.to_str())
+            .is_some_and(|part| part.eq_ignore_ascii_case("mmpkg"))
+    {
+        return Err(Fault::new(
+            "PackagePicker",
+            "Select a bounded absolute .mmpkg path",
+        ));
     }
     Ok(Some(path))
 }

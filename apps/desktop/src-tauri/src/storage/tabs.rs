@@ -30,8 +30,8 @@ pub struct PackageReference {
     pub source: PackageSource,
 }
 
-/// `Installed` names one managed signed release by package and archive identity; its
-/// payload location is derived, never stored, and every consumer reverifies it.
+/// `Installed` names one installed signed release by package and archive identity; its
+/// archive location is derived, never stored, and every consumer reverifies it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PackageSource {
@@ -340,7 +340,7 @@ fn validate_source(package_id: &str, source: &PackageSource) -> Result<(), Fault
             package_id: installed,
             artifact_id,
         } => {
-            // The archive SHA-256 identifies one release container; it is not a path.
+            // The archive SHA-256 identifies one installed release; it is not a path.
             if installed != package_id
                 || artifact_id.len() != 64
                 || !artifact_id

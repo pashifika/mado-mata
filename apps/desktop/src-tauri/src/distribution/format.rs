@@ -28,11 +28,9 @@ pub(super) struct FileFact {
     pub(super) sha256: String,
 }
 
-/// The exact envelope bytes together with the facts their valid signature covers.
-#[derive(Clone, Debug)]
+/// The facts a valid signature over the exact envelope bytes covers.
+#[derive(Debug)]
 pub(super) struct Envelope {
-    pub(super) index: Vec<u8>,
-    pub(super) signature: Vec<u8>,
     pub(super) files: Vec<FileFact>,
     pub(super) key_id: String,
 }
@@ -133,14 +131,14 @@ pub(super) fn encode_signature(
 
 /// Verifies the signature over `madomata-pkg-v1\n` plus the exact index bytes, then
 /// strictly decodes the index. Validity is relative to the included public key only.
-pub(super) fn verify(index: Vec<u8>, signature: Vec<u8>) -> Result<Envelope, Fault> {
+pub(super) fn verify(index: &[u8], signature: &[u8]) -> Result<Envelope, Fault> {
     if index.len() > MAX_INDEX_BYTES {
         return Err(limit_fault("package index exceeds 1 MiB"));
     }
     if signature.len() > MAX_SIGNATURE_BYTES {
         return Err(limit_fault("package signature envelope exceeds 16 KiB"));
     }
-    let document = strict_json(&signature).map_err(|cause| {
+    let document = strict_json(signature).map_err(|cause| {
         signature_fault("signature.json is not strict JSON").with_context(json!({"cause":cause}))
     })?;
     let fields = members(
@@ -170,17 +168,12 @@ pub(super) fn verify(index: Vec<u8>, signature: Vec<u8>) -> Result<Envelope, Fau
         .map_err(|_| signature_fault("included public key is not a valid Ed25519 key"))?;
     let mut message = Vec::with_capacity(SIGNING_DOMAIN.len() + index.len());
     message.extend_from_slice(SIGNING_DOMAIN);
-    message.extend_from_slice(&index);
+    message.extend_from_slice(index);
     key.verify_strict(&message, &Signature::from_bytes(&signature_bytes))
         .map_err(|_| signature_fault("signature does not verify over the exact package index"))?;
     drop(message);
-    let files = decode_index(&index)?;
-    Ok(Envelope {
-        index,
-        signature,
-        files,
-        key_id,
-    })
+    let files = decode_index(index)?;
+    Ok(Envelope { files, key_id })
 }
 
 fn decode_base64(value: &Value) -> Option<Vec<u8>> {
