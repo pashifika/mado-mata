@@ -39,6 +39,14 @@ impl Workspaces {
         self.work_idle()
     }
 
+    /// Import touches no selection, snapshot or owner; only a lease or picker refuses it.
+    pub(super) fn import_idle(&self) -> Result<(), Fault> {
+        if self.authoring.is_some() || self.target_picker.is_some() {
+            return self.idle();
+        }
+        Ok(())
+    }
+
     pub(super) fn work_idle(&self) -> Result<(), Fault> {
         self.work_idle_except_native()?;
         if self

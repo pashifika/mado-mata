@@ -652,10 +652,11 @@ confidentiality, safety or execution permission.
    continue**, or cancel with drafts intact. Partial Save success remains saved;
    failure or a later dirty draft stops preparation.
 3. Choose **Build and save…**, then a missing `.mmpkg` filename outside the source.
-   Nothing is written until the review is confirmed. The application captures
-   saved bytes once and statically validates those exact bytes without running
-   package code. Review package/release, revision, key fingerprint, file/byte
-   totals, included source and destination.
+   Existing filenames are refused before preparation, even if the native panel
+   offered replacement. Nothing is written until the review is confirmed.
+   The application captures saved bytes once and statically validates those exact
+   bytes without running package code. Review package/release, revision, key
+   fingerprint, file/byte totals, included source and destination.
 4. Choose **Export** to confirm that review. A contributing edit or changed owner
    invalidates confirmation; prepare again rather than exporting stale disk contents.
    Publication never overwrites an occupied filename. A committed artifact with
@@ -670,8 +671,10 @@ The [format contract](runtime-comparison.md#signed-mmpkg-format) fixes its bound
 
 Exit Edit and choose **Import PKG…** on a workspace's Guidance or Run page.
 Select a `.mmpkg`, inspect its verified release/key/source facts, and confirm.
-Verification and static compilation do not execute scripts. Import alone never
-selects a source, changes a Tab's profiles/targets or starts a run.
+Verification and static compilation do not execute scripts. Import can finish
+alongside an active Run or Check without changing its owner or captured inputs.
+The Import dialog keeps that operation's Stop available, including during publication.
+It never selects a source, changes a Tab's profiles/targets or starts a run.
 
 Installed files live at
 `<data-dir>/pkgs/<key_id>/<package_id>/<archive-sha256>.mmpkg`.
@@ -681,6 +684,9 @@ not an OIDC subject or Server author ID; `package_id` is stable, not a display n
 Identical reimport is unchanged only after reverifying the installed file.
 A different artifact claiming the same package/release is refused across signer
 namespaces; distinct versions coexist without automatic latest-version selection.
+The catalog admits at most 256 archives across all signers and packages. At that
+limit, new imports refuse before publication; verified identical reimport remains
+unchanged and the existing catalog stays available.
 
 Use **Select** to inspect and bind a release to that Tab. The saved reference
 remains `{kind: "installed", package_id, artifact_id}`. Reopen, Reinspect and Start

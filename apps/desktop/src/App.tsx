@@ -2895,7 +2895,7 @@ export default function App() {
       onEnroll={() => void enrollSigner()} onCancelEnroll={cancelEnrollment} onClose={() => {if (!enrolling.current) setSigningWorkspace(null);}}/>
     <ImportDialog flow={importFlow} label={importFlow ? labelOf(importFlow.workspace.workspace_id) : ''}
       stale={importFlow?.step.kind === 'review' && !workspaces.some(item => sameWorkspace(workspaceRef(item), importFlow.workspace))}
-      blocked={commandReason ?? (closing ? t.applicationClosing : null)}
+      blocked={commandReason ?? (closing ? t.applicationClosing : null)} strip={ordinaryStrip('import')}
       onConfirm={() => void confirmImport()} onCancelPreparation={cancelImportPreparation} onClose={closeImport}/>
     </StatusSurface>
   </div></LocaleContext>;

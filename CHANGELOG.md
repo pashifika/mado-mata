@@ -17,6 +17,11 @@
   Remove installed-source viewing, editing and duplication through the app and OMP.
   Reuse same-signer version settings; refuse signer changes before local mutations.
   Old expanded installations require reimporting their original `.mmpkg`.
+- Keep signed-transfer bounds consistent before publication and decompression.
+  Allow import alongside an active Run/Check without changing its captured inputs;
+  keep Stop reachable during publication without moving lost focus to it.
+  Reject occupied export names before preparation, restore focus only to usable
+  controls, and distinguish command contention from unsettled package cleanup on Close.
 - Keep the retirement-close regression valid when bounded log shutdown times out;
   still verify retirement, close, and refused new commands without changing
   production shutdown behavior.

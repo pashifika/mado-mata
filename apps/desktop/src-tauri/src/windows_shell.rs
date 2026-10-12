@@ -103,7 +103,7 @@ fn package_file(
     exporting: bool,
     suggested: Option<&str>,
 ) -> Result<Option<String>, Fault> {
-    use windows_sys::Win32::UI::Controls::Dialogs::{GetSaveFileNameW, OFN_OVERWRITEPROMPT};
+    use windows_sys::Win32::UI::Controls::Dialogs::GetSaveFileNameW;
     let mut path = [0_u16; MAX_PATH_BYTES + 1];
     if let Some(name) = suggested {
         for (destination, unit) in path.iter_mut().zip(name.encode_utf16()) {
@@ -124,11 +124,7 @@ fn package_file(
             | OFN_DONTADDTORECENT
             | OFN_HIDEREADONLY
             | OFN_NODEREFERENCELINKS
-            | if exporting {
-                OFN_OVERWRITEPROMPT
-            } else {
-                OFN_FILEMUSTEXIST
-            },
+            | if exporting { 0 } else { OFN_FILEMUSTEXIST },
         ..Default::default()
     };
     // SAFETY: The owner and every UTF-16 buffer remain live through this main-thread modal call.

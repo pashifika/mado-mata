@@ -195,6 +195,9 @@ impl Application {
         self.cancel_distribution();
         while lock(&self.distribution).active.is_some() || self.command_guard().is_err() {
             if Instant::now() >= deadline {
+                if lock(&self.distribution).active.is_none() {
+                    return self.command_guard().map(drop);
+                }
                 return Err(Fault::new(
                     "PackageCleanup",
                     "Package operation has not settled; cleanup remains unconfirmed",
@@ -245,7 +248,7 @@ impl Application {
             }
             state.work_idle()?;
         } else {
-            state.idle()?;
+            state.import_idle()?;
         }
         let mut slot = lock(&self.distribution);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -311,7 +314,7 @@ impl Application {
         let (_command, mut state) = self.command_state()?;
         self.collect(&mut state);
         state.resolve_workspace(workspace)?;
-        state.idle()?;
+        state.import_idle()?;
         let (attempt, token) = self.distribution_attempt(workspace)?;
         lock(&self.distribution).review = None;
         drop(state);
@@ -374,7 +377,7 @@ impl Application {
         let (_command, mut state) = self.command_state()?;
         self.collect(&mut state);
         state.resolve_workspace(workspace)?;
-        state.idle()?;
+        state.import_idle()?;
         let review = self.take_distribution_review(workspace, None, token)?;
         let (attempt, _) = self.distribution_attempt(workspace)?;
         drop(state);
@@ -496,5 +499,9 @@ fn export_destination(path: &Path, source: &Path) -> Result<PathBuf, Fault> {
             "Export destination must be outside the source package",
         ));
     }
-    Ok(parent.join(path.file_name().ok_or_else(stale)?))
+    let destination = parent.join(path.file_name().ok_or_else(stale)?);
+    if crate::storage::exists(&destination)? {
+        return Err(distribution::destination_exists(&destination));
+    }
+    Ok(destination)
 }

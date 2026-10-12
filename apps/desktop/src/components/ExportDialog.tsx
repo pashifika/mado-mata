@@ -1,3 +1,4 @@
+import {useEffect} from 'react';
 import Modal from './Modal.tsx';
 import {PublicationResult, ReviewFacts} from './ReleaseReview.tsx';
 import {FaultMessage} from './ResultPanel.tsx';
@@ -36,6 +37,15 @@ export default function ExportDialog({flow, stale, packageId, release, drafts, r
   const signerUsable = signer.info != null && signer.statusError === null;
   const status = step?.kind === 'saving' ? d.saving : step?.kind === 'choosing' ? d.choosing : step?.kind === 'publishing' ? d.publishing
     : step?.kind === 'preparing' ? step.cancelling ? d.cancelling : '' : blocked ?? '';
+  // A step change unmounts the focused action: Build and save takes lost focus, else the first footer action (Cancel at review).
+  useEffect(() => {
+    const dialog = document.getElementById('export-dialog');
+    if (!(dialog instanceof HTMLDialogElement) || !dialog.open) return;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active !== dialog) return;
+    (dialog.querySelector<HTMLElement>('#export-choose:not(:disabled)')
+      ?? dialog.querySelector<HTMLElement>('.dialog-footer button:not(:disabled)'))?.focus();
+  }, [step?.kind, stale]);
   return <Modal id="export-dialog" open={flow !== null} onCancel={onClose} labelledBy="export-heading" locked={busy}
     initialFocus={step?.kind === 'drafts' ? '#export-cancel' : undefined}
     returnFocus={() => document.getElementById('authoring-export')}>
