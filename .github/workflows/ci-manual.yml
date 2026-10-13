@@ -86,7 +86,7 @@ jobs:
     name: Controlled runtime and desktop (macOS arm64)
     needs: dev-push-policy
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.dev-push-policy.outputs.skip-checks != 'true') }}
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -105,6 +105,8 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal
       - name: Install pinned Python dependency
         run: python3 -m pip install --require-hashes -r tools/ci/requirements.txt
+      - name: Check model-free native engine consumers
+        run: python3 tools/ci/check_engine_macos.py
       - name: Install checksum-verified native tools
         run: python3 tools/ci/install_tools.py
       - name: Check tracked repository, runtime, desktop core, and macOS shell

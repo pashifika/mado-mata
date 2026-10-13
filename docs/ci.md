@@ -76,15 +76,41 @@ The version and integrity sources are:
 | GitHub Actions | Full commit SHAs | [Workflows](#hosted-workflow-and-required-gate) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
-CI uses Python 3.13, `ubuntu-24.04`, `macos-15`, and `windows-2025`. The macOS job
+CI uses Python 3.13, `ubuntu-24.04`, `macos-26`, and `windows-2025`. The macOS job
 prints and requires `arm64`; runtime checks also print their actual host identity.
 Linux and macOS run the full public check, including pinned actionlint and
 offline local-link validation. Windows retains `--runtime-only` because the
-native-tool installer has no Windows assets. The event-specific PR, push and
-manual workflows use the same platform scope; none performs physical-device
-GUI/game acceptance or the optional engine-feature consumer suite.
+native-tool installer has no Windows assets. Before the full check, macOS also
+runs the model-free `engine` consumer library suite described below. The
+event-specific PR, push and manual workflows use the same platform scope; none
+performs physical-device GUI/game acceptance.
 Update versions, integrity values, workflow references, and this guide together
 through a checked Change. A new installer host needs a verified release asset.
+
+The hosted macOS engine command is:
+
+```sh
+python3 tools/ci/check_engine_macos.py
+```
+
+It requires native arm64 macOS **26.5.2 or newer**, preserves the SDK deployment
+floor, and resolves `tools/setup-native.py` from the exact `mado-pilot` Git
+revision in the consumer manifest and lockfile. No sibling checkout is needed.
+It follows that revision's upstream hosted procedure: install Homebrew
+`opencv@4`, print the actual version, validate native OpenCV/libclang, install the
+locked trusted TypeScript compiler, and run the unfiltered consumer
+`cargo test --locked --features engine --lib` suite. The Homebrew OpenCV **major**
+is constrained to 4; its minor version is intentionally not a qualification pin.
+The resolved version is visible in the job log. Temporary files, npm/Homebrew
+caches and this engine build live under `.cache/engine-consumer`.
+
+These controlled-provider tests include frame commit rejection, discarded OCR
+completion and macOS provider-terminal/process-exit precedence. They need no
+game, model download, native capture permission, input route or manual action.
+They are not real OCR, physical Apple Silicon acceptance, R6 qualification or
+evidence that input had an application effect. The ordinary local
+`check.py` command still does not enable `engine`; the hosted workflow invokes
+this additional command explicitly, and its failure fails the mandatory gate.
 
 Target metadata parsing uses `plist` in-process, with the exactly pinned
 `enable_unstable_features_that_may_break_with_minor_version_bumps` feature for

@@ -963,6 +963,14 @@ class RepositoryPolicyTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         check_ci_workflow(workflow, self.manifest["actions"])
 
+    def test_macos_engine_consumer_execution_is_mandatory(self):
+        workflow = deepcopy(self.workflow)
+        steps = workflow["jobs"]["runtime-macos"]["steps"]
+        engine = next(step for step in steps if step.get("run") == "python3 tools/ci/check_engine_macos.py")
+        steps.remove(engine)
+        with self.assertRaises(ValueError):
+            check_ci_workflow(workflow, self.manifest["actions"])
+
     def test_runtime_artifacts_cannot_widen_or_weaken_checks(self):
         mutations = (
             "wrong pin", "broad path", "extra private path", "missing stderr", "hidden excluded",

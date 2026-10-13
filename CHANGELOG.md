@@ -5,9 +5,11 @@
 - Cover PNG encoding failure before capture acceptance: no frame commit or
   published transfer, with the acquired session still closed exactly once.
 
-- Run the full repository check on hosted macOS arm64, including checksum-pinned
-  actionlint and offline local-link validation. Keep Windows runtime-only,
-  event-specific gate isolation and physical-device acceptance separate.
+- Run the full repository check and model-free engine consumer tests on hosted
+  macOS 26 arm64, including checksum-pinned actionlint and offline local-link
+  validation. Resolve native setup from the pinned SDK checkout; preserve its
+  macOS deployment floor and record the installed OpenCV 4 version. Keep Windows
+  runtime-only, event-specific gate isolation and physical acceptance separate.
 
 - Support native Windows OMP Agent integration with reviewed installation
   management, bounded Job-owned command trees and private authenticated named
