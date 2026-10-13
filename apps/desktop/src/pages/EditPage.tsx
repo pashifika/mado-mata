@@ -1,4 +1,4 @@
-import {Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
+import {Fragment, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
 import {flushSync} from 'react-dom';
 import CatalogDialog from '../components/CatalogDialog.tsx';
@@ -11,9 +11,9 @@ import ManifestEditor from '../components/ManifestEditor.tsx';
 import Modal from '../components/Modal.tsx';
 import {AssetView, SourceMapView} from '../components/MetadataFacts.tsx';
 import PresetEditor from '../components/PresetEditor.tsx';
-import {FaultMessage} from '../components/ResultPanel.tsx';
+import {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import SchemaEditor from '../components/SchemaEditor.tsx';
-import SourceEditor from '../editor/SourceEditor.tsx';
+import DeferredView from '../components/DeferredView.tsx';
 import type {SourceEditorHandle} from '../editor/SourceEditor.tsx';
 import {CompletionClient} from '../editor/completion-client.ts';
 import type {CompletionContext, CompletionKey, CompletionStatus} from '../editor/completion-types.ts';
@@ -24,6 +24,8 @@ import {packageDestination} from '../state.ts';
 import type {AuthoringFileKind, CatalogEdit, EditorCompletionPreferences} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
+
+const SourceEditor = lazy(() => import('../editor/SourceEditor.tsx'));
 
 // Metadata row order in the tree's Metadata group; the Files group holds sources and assets.
 const METADATA_ORDER: Record<AuthoringFileKind, number> = {manifest: 0, schema: 1, profile: 2, source_map: 3, source: 4, asset: 5};
@@ -257,7 +259,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
   function replaceMatch(all: boolean) {
     if (!editable || sourceReadOnly || sourceEditor.current?.composing()) return;
     const ticket = {owner: session.owner.token, path: editable.path, revision: editable.revision};
-    const before = selection.current;
+    const before = sourceEditor.current ? selection.current : editable.range;
     const result = replacementEdit(currentSession.current, ticket, query, replacement, all, before);
     setReplacementNotice(result.kind === 'refused' ? result.reason : null);
     if (result.kind === 'edit') {
@@ -269,11 +271,11 @@ export default function EditPage({session, label, handlers, recognition, recogni
 
   function find(backward: boolean) {
     if (!editable) return;
-    const match = findMatch(editable.text, query, selection.current ?? editable.range, backward);
+    const match = findMatch(editable.text, query, sourceEditor.current ? selection.current : editable.range, backward);
     if (match) handlers.reveal(editable.path, match);
   }
-  // The outgoing selection matters only for the text editor, whose caret is restored when returning to the file.
-  const previous = () => editable ? selection.current : null;
+  // While the editor chunk is pending, the selected draft owns its caret; the ref may still name another file.
+  const previous = () => editable ? sourceEditor.current ? selection.current : editable.range : null;
   const presetIds = new Map(manifest?.profiles.map(([id, path]): [string, string] => [path, id]) ?? []);
   const mapModules = new Map(manifest?.sourceMaps.map(([module, path]): [string, string] => [path, module]) ?? []);
   const metadata = drafts.filter(draft => !draft.missing && !treeKind(draft.kind)).sort((left, right) => METADATA_ORDER[left.kind] - METADATA_ORDER[right.kind]);
@@ -435,6 +437,8 @@ export default function EditPage({session, label, handlers, recognition, recogni
       </div>}
       </div>
       <div className="source-editing-area">
+      <DeferredView key={`${session.owner.token}:${editable.path}`} fallback={<p role="status">{t.bootstrap.state('loading')}</p>}
+        error={cause => <FaultMessage title={a.editorLabel(editable.path)} value={fault(cause)}/>}>
       <SourceEditor key={`${session.owner.token}:${editable.path}`} draft={editable} reveal={session.reveal} readOnly={sourceReadOnly}
         selection={selection} control={sourceEditor} context={completionContext} request={requestCompletion} accepts={acceptsCompletion}
         completionPreferences={completionPreferences}
@@ -449,6 +453,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
         onCompositionEnd={() => handlers.compositionEnd(editable.path)}
         onUndo={() => handlers.undo(editable.path)} onRedo={() => handlers.redo(editable.path)} onSave={() => handlers.save(editable.path)}
         onFind={openSearch} onFindNext={find}/>
+      </DeferredView>
       </div>
       <div className="completion-status">
         <span>{a.completionList}<HelpTrigger title={a.completionList} hint={a.completionHint}><p>{a.completionScope}</p></HelpTrigger></span>

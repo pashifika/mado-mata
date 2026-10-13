@@ -20,7 +20,8 @@
 
 .package-library-body { display: grid; flex: 1 1 auto; grid-template-columns: minmax(240px, 2fr) minmax(0, 3fr); grid-template-rows: minmax(0, 1fr); min-height: 0; }
 .package-library-list, .package-library-scroll { min-height: 0; overflow: auto; overscroll-behavior: contain; }
-.package-library-list { padding: 12px 16px 12px 24px; border-right: 1px solid var(--border); }
+/* Keep the absolute-positioned live status inside its own scrollport, not the outer dialog. */
+.package-library-list { position: relative; padding: 12px 16px 12px 24px; border-right: 1px solid var(--border); }
 .package-library-detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .package-library-scroll { flex: 1 1 auto; padding: 12px 24px; overflow-wrap: anywhere; }
 .package-library-back-row { display: none; }
