@@ -1939,13 +1939,19 @@ as described in [the manifest contract](runtime-comparison.md#optional-portable-
 A targetless package still runs existing controlled/replay workflows; a missing,
 invalid, or incompatible local target is not an execution prerequisite.
 
-1. For the **actual game**, choose **Application bundle (.app)** and use
-   **Open…** at the right edge of its path field to select the outer application,
-   including a supported iOS-on-Mac wrapper. Game and launcher paths each occupy
-   their own full-width row. Do not navigate to the internal executable. Cancel
-   keeps the draft. Manual absolute paths and direct executable configuration
-   remain available. A separate bundle launcher uses the same picker; it does
-   not identify or replace the game.
+1. Choose the **actual game**, not its launcher:
+   - **Windows:** use **Open…** at the right edge of the game path field to
+     select its `.exe`. The native chooser sets **Executable file** and that
+     field only. With **Use a separate launcher** checked, its own **Open…**
+     selects the launcher independently. Shortcuts, directories, reparse-point
+     files and non-`.exe` selections are refused.
+   - **macOS:** choose **Application bundle (.app)** and use **Open…** to select
+     the outer application, including a supported iOS-on-Mac wrapper. Do not
+     navigate to the internal executable. A separate bundle launcher uses the
+     same picker; it does not identify or replace the game.
+   Game and launcher paths each occupy their own full-width row. Cancel keeps
+   the draft. Selection does not Check, Save or grant execution authority.
+   Manual absolute paths and direct executable configuration remain available.
 2. Add or remove arguments as individual rows, like schema **Allowed values**.
    Drag the left handle to reorder; with the handle focused, Up/Down arrow keys
    move that argument one position. Empty fields remain empty arguments; spaces
@@ -1955,7 +1961,7 @@ invalid, or incompatible local target is not an execution prerequisite.
    directory; an explicit directory for a bundle recipient is refused before
    launch, not ignored. The exact window title has its own full-width row.
    Supply it when the package leaves it local; a package-required title is read-only.
-3. Leave all input fields blank for capture-only use. To configure future input,
+3. On macOS, leave all input fields blank for capture-only use. To configure future input,
    explicitly select a complete policy. Process-directed input requires a pointer
    mode: Core Graphics permits either focus policy; AppKit background requires
    preserved focus. System input requires an already focused target and no
@@ -1974,10 +1980,16 @@ invalid, or incompatible local target is not an execution prerequisite.
    updates at the same canonical location remain compatible; this is not a
    signed-binary or content check.
 
-The native picker is an asynchronous sheet, available only while Run/OCR is
-idle. While it is open, new Run/OCR and another picker are refused; state polling
-continues. A late selection cannot overwrite a changed draft, another Tab, or a
-closed/reinspected owner. Bundle metadata is reread on every Check/Save:
+An unbound draft uses the host platform. A saved binding from another platform
+is retained without conversion; its native picker is unavailable on this host.
+Windows selection and Check/Save configure filesystem metadata only: they do
+not enable Windows Native Start or running-application discovery.
+
+The native picker uses an asynchronous macOS sheet or a Windows owner-modal
+file dialog, available only while Run/OCR is idle. While it is open, new Run/OCR
+and another picker are refused; state polling continues. A late selection
+cannot overwrite a changed draft, another Tab, or a closed/reinspected owner.
+Bundle metadata is reread on every Check/Save:
 same-process changes to executable names and identifiers do not reuse cached
 values. Participating plists remain bounded to **64 KiB**, **8,192 events**, and
 **32 nesting levels**. Unsupported alternate metadata locations, including

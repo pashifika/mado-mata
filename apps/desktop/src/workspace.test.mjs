@@ -458,8 +458,8 @@ function targetConfiguration(path='/metadata/game') {
   return {platform:'macos',game:{kind:'executable',path},launcher:null,arguments:['','--literal','two words'],
     working_directory:null,window_title:'Exact title',input:{route:'process_directed',focus:'preserve',pointer_mode:'core_graphics',click_hold_ms:0}};
 }
-function targetView(state,{revision=0,configuration=null,compatible=true,id='binding-1'}={}) {
-  return {context:state.context,compatible,
+function targetView(state,{revision=0,configuration=null,compatible=true,id='binding-1',platform='macos'}={}) {
+  return {platform,context:state.context,compatible,
     record:{version:1,internal_name:state.context.internal_name,package_id:state.context.package_id,revision,
       binding:configuration ? {id,package_id:state.context.package_id,target_id:'game',declaration_identity:'declaration-1',configuration,
         resolution:{game:{path:configuration.game.path,executable:configuration.game.path},launcher:null,working_directory:null}} : null}};
@@ -537,6 +537,44 @@ test('native application choice edits only the issuing game or launcher and canc
   assert.equal(state.draft,before);
   assert.equal(state.draftRevision,revision);
   assert.equal(state.view.record,saved);
+});
+
+test('Windows executable choices preserve field ownership, cancellation and explicit persistence',()=>{
+  const initial=targetState(targetSelection());
+  let state=readTarget(initial,targetView(initial,{platform:'windows'}));
+  assert.equal(state.draft.platform,'windows');
+  const saved=state.view.record;
+  state=beginApplicationPicker(state,'game');
+  state=completeApplicationPicker(state,state.picker,'C:\\Game\\日本語.EXE');
+  assert.deepEqual([state.draft.gameKind,state.draft.gamePath],['executable','C:\\Game\\日本語.EXE']);
+  state=editTarget(state,{...state.draft,separateLauncher:true,arguments:['','two words']});
+  state=beginApplicationPicker(state,'launcher');
+  state=completeApplicationPicker(state,state.picker,'C:\\Launcher\\launch.exe');
+  const configuration=readTargetDraft(state.draft).configuration;
+  assert.deepEqual(configuration.game,{kind:'executable',path:'C:\\Game\\日本語.EXE'});
+  assert.deepEqual(configuration.launcher,{kind:'executable',path:'C:\\Launcher\\launch.exe'});
+  assert.deepEqual(configuration.arguments,['','two words']);
+  assert.equal(configuration.input,null);
+  assert.equal(state.view.record,saved);
+  const draft=state.draft, revision=state.draftRevision;
+  for (const error of [null,{category:'TargetPicker',message:'invalid selection',context:null}]) {
+    state=beginApplicationPicker(state,'game');
+    state=completeApplicationPicker(state,state.picker,null,error);
+    assert.equal(state.draft,draft);
+    assert.equal(state.draftRevision,revision);
+    assert.equal(state.view.record,saved);
+  }
+  const reopened=readTarget(initial,targetView(initial,{platform:'windows',revision:1,configuration}));
+  assert.deepEqual(readTargetDraft(reopened.draft).configuration,configuration);
+  assert.equal(targetDirty(reopened),false);
+});
+
+test('a native picker never converts a foreign-platform saved binding',()=>{
+  const saved=loadedBundle();
+  const windows=readTarget(saved,{...saved.view,platform:'windows'});
+  assert.equal(windows.view.record,saved.view.record);
+  assert.equal(windows.draft,saved.draft);
+  assert.equal(beginApplicationPicker(windows,'game'),windows);
 });
 
 test('late application picker cannot overwrite an edited-back draft, replaced owner, or refreshed record',()=>{

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Support native Windows `.exe` selection for separate game and launcher target
+  fields. Preserve Cancel, stale-owner refusal, metadata-only Check, explicit
+  Save and restart readback; reject shortcuts and reparse-point files. Keep
+  saved foreign-platform bindings unchanged and Windows Native Start unavailable.
+
 - Bound the native preflight regression's settlement wait by its admitted
   operation and containment budgets, without changing production deadlines.
 

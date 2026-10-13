@@ -177,6 +177,7 @@ pub struct TargetContext {
 
 #[derive(Debug, Serialize)]
 pub struct TargetView {
+    pub platform: &'static str,
     pub context: TargetContext,
     pub record: TargetRecord,
     pub compatible: bool,

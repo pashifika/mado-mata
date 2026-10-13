@@ -48,7 +48,7 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
   const parsed = readTargetDraft(draft);
   const expectation = targetExpectation(state);
   const disabled = locked || active || pickerBusy || expectation === null || state.operation !== null;
-  const chooseDisabled = disabled || draft.platform === 'windows' || state.application.pending !== null || state.picker !== null;
+  const chooseDisabled = disabled || state.view?.platform !== draft.platform || state.application.pending !== null || state.picker !== null;
   const application = state.application;
   const running = application.result?.response.observation;
   const observedAt = running ? new Date(running.observed_at_ms) : null;
