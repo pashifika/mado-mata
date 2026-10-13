@@ -343,7 +343,6 @@ fn an_unconfigured_build_refuses_before_network_browser_or_callback_binding() {
 fn loopback() -> (TcpListener, SocketAddr) {
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();
-    assert!(TcpListener::bind(address).is_err(), "fixture address must be exclusive");
     (listener, address)
 }
 
@@ -353,6 +352,7 @@ fn waiting(
     within: Duration,
 ) -> JoinHandle<Result<String, Fault>> {
     let state = CsrfToken::new(STATE.into());
+    // Joining this owner observes teardown; a freed port may already have a new owner.
     thread::spawn(move || {
         receive(&listener, &state, Instant::now() + within, &cancelled)
             .map(|code| code.secret().clone())
@@ -406,8 +406,6 @@ fn only_the_correlated_callback_completes_and_its_listener_then_closes() {
     assert!(!page.contains("code-under-test") && !page.contains(STATE));
     assert_eq!(handle.join().unwrap().unwrap(), "4/code-under-test");
     drop(idle);
-    // Observe release of this attempt's exclusive address, not a new outbound connection.
-    drop(TcpListener::bind(address).expect("callback listener released its address"));
 }
 
 #[test]
@@ -464,7 +462,6 @@ fn cancellation_deadline_and_stray_requests_end_the_wait() {
         "SigningCancelled"
     );
     assert!(requested.elapsed() < Duration::from_secs(2));
-    drop(TcpListener::bind(address).expect("cancelled listener released its address"));
 
     let (listener, _) = loopback();
     let started = Instant::now();
@@ -506,5 +503,4 @@ fn an_oversized_callback_header_reports_refusal_instead_of_waiting_for_another_r
         handle.join().unwrap().unwrap_err().category,
         "SigningCallback"
     );
-    drop(TcpListener::bind(address).expect("refused listener released its address"));
 }

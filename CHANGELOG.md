@@ -37,8 +37,8 @@
   controls, and distinguish command contention from unsettled package cleanup on Close.
 - Read complete HTTP response frames in OIDC loopback tests without requiring
   a graceful TCP close after oversized-header refusal; retain rejection,
-  secret-redaction and listener-closure checks. Check closure by reclaiming the
-  exclusive listening address rather than making a new outbound connection.
+  secret-redaction and callback completion checks. Await the listener-owning
+  thread rather than probing a TCP address that can already have a new owner.
 - Keep the retirement-close regression valid when bounded log shutdown times out;
   still verify retirement, close, and refused new commands without changing
   production shutdown behavior.
