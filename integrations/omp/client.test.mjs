@@ -37,12 +37,17 @@ async function windowsFixtureAcl(paths, pipe, extraUser = false) {
   const script = String.raw`
     $ErrorActionPreference = 'Stop'
     $config = [Console]::In.ReadToEnd() | ConvertFrom-Json
-    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $user = $identity.User
     foreach ($path in $config.paths) {
       $directory = [IO.Directory]::Exists($path)
       $acl = if ($directory) { [Security.AccessControl.DirectorySecurity]::new() } else { [Security.AccessControl.FileSecurity]::new() }
       $existing = if ($directory) { [IO.Directory]::GetAccessControl($path) } else { [IO.File]::GetAccessControl($path) }
-      if (-not $existing.GetOwner([Security.Principal.SecurityIdentifier]).Equals($user)) { throw 'fixture owner mismatch' }
+      $owner = $existing.GetOwner([Security.Principal.SecurityIdentifier])
+      if (-not $owner.Equals($user) -and -not $owner.Equals($identity.Owner)) { throw 'fixture owner mismatch' }
+      # Elevated hosted runners may default newly created objects to their owner
+      # group. Assign only our fresh fixtures to the exact test user.
+      if (-not $owner.Equals($user)) { $acl.SetOwner($user) }
       $acl.SetAccessRuleProtection($true, $false)
       $rule = if ($directory) {
         [Security.AccessControl.FileSystemAccessRule]::new($user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
@@ -52,18 +57,24 @@ async function windowsFixtureAcl(paths, pipe, extraUser = false) {
         $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'), 'Read', 'Allow'))
       }
       if ($directory) { [IO.Directory]::SetAccessControl($path, $acl) } else { [IO.File]::SetAccessControl($path, $acl) }
+      $actual = if ($directory) { [IO.Directory]::GetAccessControl($path) } else { [IO.File]::GetAccessControl($path) }
+      if (-not $actual.GetOwner([Security.Principal.SecurityIdentifier]).Equals($user)) { throw 'fixture owner assignment failed' }
     }
     if ($config.pipe) {
       $rights = [IO.Pipes.PipeAccessRights]::ReadWrite -bor [IO.Pipes.PipeAccessRights]::ChangePermissions
+      if (-not $identity.Owner.Equals($user)) { $rights = $rights -bor [IO.Pipes.PipeAccessRights]::TakeOwnership }
       $client = [IO.Pipes.NamedPipeClientStream]::new('.', $config.pipe.Substring(9), $rights, [IO.Pipes.PipeOptions]::None,
         [Security.Principal.TokenImpersonationLevel]::Identification, [IO.HandleInheritability]::None)
       try {
         $client.Connect(5000)
         $acl = [IO.Pipes.PipeSecurity]::new()
-        if (-not $client.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier]).Equals($user)) { throw 'fixture pipe owner mismatch' }
+        $owner = $client.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier])
+        if (-not $owner.Equals($user) -and -not $owner.Equals($identity.Owner)) { throw 'fixture pipe owner mismatch' }
+        if (-not $owner.Equals($user)) { $acl.SetOwner($user) }
         $acl.SetAccessRuleProtection($true, $false)
         $acl.AddAccessRule([IO.Pipes.PipeAccessRule]::new($user, 'FullControl', 'Allow'))
         $client.SetAccessControl($acl)
+        if (-not $client.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier]).Equals($user)) { throw 'fixture pipe owner assignment failed' }
       } finally { $client.Dispose() }
     }
   `;

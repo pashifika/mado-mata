@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Assign fresh Windows OMP test fixtures to the exact test user when hosted
+  runners default ownership to a group; retain strict production owner checks.
+
 - Cover PNG encoding failure before capture acceptance: no frame commit or
   published transfer, with the acquired session still closed exactly once.
 
