@@ -4,6 +4,303 @@ import {connect} from 'node:net';
 import {homedir} from 'node:os';
 import {dirname, isAbsolute, join, resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
+import {spawn} from 'node:child_process';
+import {Duplex} from 'node:stream';
+
+const WINDOWS = process.platform === 'win32';
+const PIPE_PREFIX = '\\\\.\\pipe\\mado-mata-collaboration-';
+// A fixed in-memory helper: no command interpolation, script file, compiler,
+// profile, PATH lookup or child process. Literal inputs (including credentials)
+// travel only over stdin. Reflection.Emit supplies the few handle APIs that
+// Node/Bun and .NET's path-based ACL APIs cannot safely express.
+const WINDOWS_HELPER = String.raw`
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$inputStream = [Console]::OpenStandardInput()
+$outputStream = [Console]::OpenStandardOutput()
+$pins = [Collections.Generic.List[IDisposable]]::new()
+$pipe = $null
+try {
+  $line = [Collections.Generic.List[byte]]::new()
+  while ($true) {
+    $b = $inputStream.ReadByte()
+    if ($b -lt 0 -or $line.Count -ge 32768) { throw 'UnsafeEndpoint' }
+    if ($b -eq 10) { break }
+    $line.Add([byte]$b)
+  }
+  $config = [Text.UTF8Encoding]::new($false, $true).GetString($line.ToArray()) | ConvertFrom-Json
+  $assembly = [AppDomain]::CurrentDomain.DefineDynamicAssembly([Reflection.AssemblyName]::new('MadoMataLocalIPC'), [Reflection.Emit.AssemblyBuilderAccess]::Run)
+  $module = $assembly.DefineDynamicModule('Native')
+  $builder = $module.DefineType('Native', 'Public, Sealed, Abstract')
+  $methods = @{}
+  function Native($name, $dll, $result, [Type[]]$arguments) {
+    $method = $builder.DefineMethod($name, 'Public, Static, PinvokeImpl', $result, $arguments)
+    $method.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
+    $attribute = [Runtime.InteropServices.DllImportAttribute]
+    $method.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new($attribute.GetConstructor(@([string])), @($dll),
+      [Reflection.FieldInfo[]]@($attribute.GetField('SetLastError'), $attribute.GetField('CharSet'), $attribute.GetField('CallingConvention')),
+      [object[]]@($true, [Runtime.InteropServices.CharSet]::Unicode, [Runtime.InteropServices.CallingConvention]::Winapi)))
+    $methods[$name] = $method
+  }
+  $ptr = [IntPtr]; $refPtr = $ptr.MakeByRefType(); $uint = [uint32]; $refUint = $uint.MakeByRefType()
+  Native CreateFileW kernel32.dll $ptr @([string],$uint,$uint,$ptr,$uint,$uint,$ptr)
+  Native GetFileInformationByHandle kernel32.dll ([bool]) @($ptr,$ptr)
+  Native GetFileInformationByHandleEx kernel32.dll ([bool]) @($ptr,[int],$ptr,$uint)
+  Native GetSecurityInfo advapi32.dll $uint @($ptr,[int],$uint,$refPtr,$refPtr,$refPtr,$refPtr,$refPtr)
+  Native GetSecurityDescriptorLength advapi32.dll $uint @($ptr)
+  Native LocalFree kernel32.dll $ptr @($ptr)
+  Native CloseHandle kernel32.dll ([bool]) @($ptr)
+  Native GetNamedPipeServerProcessId kernel32.dll ([bool]) @($ptr,$refUint)
+  Native OpenProcess kernel32.dll $ptr @($uint,[bool],$uint)
+  Native OpenProcessToken advapi32.dll ([bool]) @($ptr,$uint,$refPtr)
+  Native GetTokenInformation advapi32.dll ([bool]) @($ptr,[int],$ptr,$uint,$refUint)
+  # Declare P/Invoke through DllImport metadata (DefinePInvokeMethod ignores a
+  # later SetLastError attribute on Framework). Capture the error before returning
+  # to PowerShell, whose own native calls can replace the thread's last error.
+  $open = $builder.DefineMethod('OpenFile', 'Public, Static', $ptr, [Type[]]@([string],$uint,$uint,$ptr,$uint,$uint,$ptr,$refUint))
+  $il = $open.GetILGenerator()
+  $opened = $il.DeclareLocal($ptr)
+  for ($i = 0; $i -lt 7; $i++) { $il.Emit([Reflection.Emit.OpCodes]::Ldarg, [int16]$i) }
+  $il.Emit([Reflection.Emit.OpCodes]::Call, $methods['CreateFileW'])
+  $il.Emit([Reflection.Emit.OpCodes]::Stloc, $opened)
+  $il.Emit([Reflection.Emit.OpCodes]::Ldarg, [int16]7)
+  $il.Emit([Reflection.Emit.OpCodes]::Call, [Runtime.InteropServices.Marshal].GetMethod('GetLastWin32Error', [Type[]]@()))
+  $il.Emit([Reflection.Emit.OpCodes]::Stind_I4)
+  $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $opened)
+  $il.Emit([Reflection.Emit.OpCodes]::Ret)
+  $native = $builder.CreateType()
+  $user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  function CheckAcl([IntPtr]$handle, [bool]$private) {
+    $owner = $group = $dacl = $sacl = $descriptor = [IntPtr]::Zero
+    if ([Native]::GetSecurityInfo($handle, 1, 5, [ref]$owner, [ref]$group, [ref]$dacl, [ref]$sacl, [ref]$descriptor) -ne 0) { throw 'UnsafeEndpoint' }
+    try {
+      $size = [Native]::GetSecurityDescriptorLength($descriptor)
+      if ($size -gt 65536) { throw 'UnsafeEndpoint' }
+      $bytes = [byte[]]::new($size)
+      [Runtime.InteropServices.Marshal]::Copy($descriptor, $bytes, 0, $size)
+      $acl = [Security.AccessControl.RawSecurityDescriptor]::new($bytes, 0)
+      if ($acl.Owner.Value -ne $user -or $null -eq $acl.DiscretionaryAcl -or
+        ($private -and ([int]$acl.ControlFlags -band 4096) -eq 0)) { throw 'UnsafeEndpoint' }
+      foreach ($ace in $acl.DiscretionaryAcl) {
+        if (-not $private -and ([int]$ace.AceFlags -band 8) -ne 0) { continue }
+        if (-not $private -and $ace.AceType -eq [Security.AccessControl.AceType]::AccessDenied) { continue }
+        if ($ace.AceType -ne [Security.AccessControl.AceType]::AccessAllowed) { throw 'UnsafeEndpoint' }
+        if ($ace.SecurityIdentifier.Value -eq $user) { continue }
+        if ($private) { throw 'UnsafeEndpoint' }
+        if ($ace.SecurityIdentifier.Value -in @('S-1-5-18', 'S-1-5-32-544')) { continue }
+        # Generic write/all, write-owner/DACL/delete, directory delete-child and file writes.
+        if (($ace.AccessMask -band 0x500d0156) -ne 0) { throw 'UnsafeEndpoint' }
+      }
+    } finally { [void][Native]::LocalFree($descriptor) }
+  }
+  function Pin([string]$path, [bool]$directory, [int]$privacy) {
+    $access = if ($directory) { 0x20080 } else { 0x80020000L }
+    # Directories deny delete sharing; descriptor readers share the host's
+    # existing write/delete handle but never request either authority themselves.
+    $share = if ($directory) { 3 } else { 7 }
+    $errorCode = [uint32]0
+    $raw = [Native]::OpenFile($path, $access, $share, [IntPtr]::Zero, 3, 0x02200000, [IntPtr]::Zero, [ref]$errorCode)
+    if ($raw -eq [IntPtr]::new(-1)) {
+      if ($errorCode -in @(2, 3)) { throw 'ENOENT' }
+      throw 'UnsafeEndpoint'
+    }
+    $handle = [Microsoft.Win32.SafeHandles.SafeFileHandle]::new($raw, $true)
+    $pins.Add($handle)
+    $info = [Runtime.InteropServices.Marshal]::AllocHGlobal(52)
+    try {
+      if (-not [Native]::GetFileInformationByHandle($raw, $info)) { throw 'UnsafeEndpoint' }
+      $attributes = [Runtime.InteropServices.Marshal]::ReadInt32($info, 0)
+      if (($attributes -band 0x400) -ne 0 -or (($attributes -band 16) -ne 0) -ne $directory -or
+        (-not $directory -and [Runtime.InteropServices.Marshal]::ReadInt32($info, 40) -ne 1)) { throw 'UnsafeEndpoint' }
+      if ($privacy -ge 0) { CheckAcl $raw ($privacy -eq 1) }
+      if (-not [Native]::GetFileInformationByHandleEx($raw, 18, $info, 24)) { throw 'UnsafeEndpoint' }
+      $identity = [byte[]]::new(24)
+      [Runtime.InteropServices.Marshal]::Copy($info, $identity, 0, 24)
+      return @{handle=$handle; identity=[Convert]::ToBase64String($identity)}
+    } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($info) }
+  }
+  $root = [string]$config.root
+  if ($root -notmatch '^[a-zA-Z]:\\' -or $root.IndexOf(':', 2) -ge 0 -or $root.IndexOf([char]0) -ge 0) { throw 'UnsafeEndpoint' }
+  $root = [IO.Path]::GetFullPath($root).TrimEnd('\')
+  if ($root.Length -le 3) { throw 'UnsafeEndpoint' }
+  $path = $root.Substring(0, 3)
+  if ([IO.DriveInfo]::new($path).DriveType -eq [IO.DriveType]::Network) { throw 'UnsafeEndpoint' }
+  foreach ($part in $root.Substring(3).Split('\')) {
+    if (-not $part) { continue }
+    $path = [IO.Path]::Combine($path, $part)
+    $rootPin = Pin $path $true $(if ($path -eq $root) { 0 } else { -1 })
+  }
+  if (-not $rootPin) { throw 'UnsafeEndpoint' }
+  $directory = [IO.Path]::Combine($root, 'collaboration')
+  $directoryPin = Pin $directory $true 1
+  if ($config.mode -eq 'list') {
+    $names = [Collections.Generic.List[string]]::new()
+    $count = 0
+    foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($directory)) {
+      if (++$count -gt 1024) { throw 'DiscoveryLimit' }
+      if (-not $entry.EndsWith('.json', [StringComparison]::Ordinal)) { continue }
+      $names.Add([IO.Path]::GetFileNameWithoutExtension($entry))
+      if ($names.Count -gt 64) { throw 'DiscoveryLimit' }
+    }
+    $result = @{names=$names.ToArray()}
+  } else {
+    $instance = [string]$config.instance
+    if ($instance -cnotmatch '^[a-zA-Z0-9_-]{1,128}$') { throw 'InvalidInstance' }
+    $descriptorPin = Pin ([IO.Path]::Combine($directory, $instance + '.json')) $false 1
+    $file = [IO.FileStream]::new($descriptorPin.handle, [IO.FileAccess]::Read)
+    $pins.Add($file)
+    if ($file.Length -gt 4096) { throw 'UnsafeEndpoint' }
+    $bytes = [byte[]]::new(4097)
+    $used = 0
+    while ($used -lt $bytes.Length) {
+      $count = $file.Read($bytes, $used, $bytes.Length - $used)
+      if ($count -eq 0) { break }
+      $used += $count
+    }
+    if ($used -gt 4096) { throw 'UnsafeEndpoint' }
+    $value = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, 0, $used) | ConvertFrom-Json
+    if (($value.protocol -isnot [int] -and $value.protocol -isnot [long]) -or $value.protocol -ne 1 -or
+      $value.instance -isnot [string] -or $value.instance -cne $instance) { throw 'ProtocolMismatch' }
+    $prefix = '\\.\pipe\mado-mata-collaboration-'
+    if ($instance -cnotmatch '^[a-f0-9]{32}$' -or $value.socket -isnot [string] -or $value.socket -cne ($prefix + $instance) -or
+      $value.token -isnot [string] -or $value.token -cnotmatch '^[a-f0-9]{64}$' -or
+      ($value.pid -isnot [int] -and $value.pid -isnot [long]) -or $value.pid -le 0 -or $value.pid -gt [uint32]::MaxValue) { throw 'UnsafeEndpoint' }
+    $identity = $rootPin.identity + ':' + $directoryPin.identity + ':' + $descriptorPin.identity
+    $value | Add-Member -NotePropertyName dataRoot -NotePropertyValue $root
+    $value | Add-Member -NotePropertyName windowsIdentity -NotePropertyValue $identity
+    if ($config.mode -eq 'descriptor') { $result = $value }
+    elseif ($config.mode -eq 'request') {
+      $expected = $config.endpoint
+      if ($expected.windowsIdentity -cne $identity -or $expected.token -cne $value.token -or
+        $expected.socket -cne $value.socket -or $expected.pid -ne $value.pid) { throw 'EndpointChanged' }
+      $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $value.socket.Substring($prefix.Length - 'mado-mata-collaboration-'.Length),
+        [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous, [Security.Principal.TokenImpersonationLevel]::Identification)
+      $pipe.Connect(5000)
+      $serverPid = [uint32]0
+      if (-not [Native]::GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(), [ref]$serverPid) -or
+        $serverPid -ne $value.pid) { throw 'EndpointChanged' }
+      CheckAcl $pipe.SafePipeHandle.DangerousGetHandle() $true
+      $process = [Native]::OpenProcess(4096, $false, $serverPid)
+      if ($process -eq [IntPtr]::Zero) { throw 'UnsafeEndpoint' }
+      $token = [IntPtr]::Zero
+      $tokenBytes = [Runtime.InteropServices.Marshal]::AllocHGlobal(4096)
+      try {
+        $needed = [uint32]0
+        if (-not [Native]::OpenProcessToken($process, 8, [ref]$token) -or
+          -not [Native]::GetTokenInformation($token, 1, $tokenBytes, 4096, [ref]$needed)) { throw 'UnsafeEndpoint' }
+        $peerSid = [Security.Principal.SecurityIdentifier]::new([Runtime.InteropServices.Marshal]::ReadIntPtr($tokenBytes))
+        if ($peerSid.Value -ne $user) { throw 'UnsafeEndpoint' }
+        # Handshake precedes any request bytes. These two async copies preserve the
+        # exact existing frame/cancel protocol; no parsing, retry or replay here.
+        $outputStream.WriteByte(1)
+        $outputStream.Flush()
+        $sending = $inputStream.CopyToAsync($pipe)
+        $receiving = $pipe.CopyToAsync($outputStream)
+        [void][Threading.Tasks.Task]::WaitAny([Threading.Tasks.Task[]]@($sending, $receiving), 35000)
+      } finally {
+        if ($token -ne [IntPtr]::Zero) { [void][Native]::CloseHandle($token) }
+        [void][Native]::CloseHandle($process)
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($tokenBytes)
+      }
+    } else { throw 'UnsafeEndpoint' }
+  }
+  if ($null -ne $result) {
+    $encoded = [Text.Encoding]::UTF8.GetBytes(($result | ConvertTo-Json -Depth 12 -Compress))
+    $outputStream.Write($encoded, 0, $encoded.Length)
+  }
+} catch {
+  $code = $_.Exception.Message
+  if ($code -notin @('ENOENT','UnsafeEndpoint','DiscoveryLimit','InvalidInstance','ProtocolMismatch','EndpointChanged')) { $code = 'UnsafeEndpoint' }
+  [Console]::Error.Write($code)
+  exit 1
+} finally {
+  if ($null -ne $pipe) { $pipe.Dispose() }
+  for ($i = $pins.Count - 1; $i -ge 0; $i--) { $pins[$i].Dispose() }
+}
+`;
+
+async function startWindowsHelper(input) {
+  const system = process.env.SystemRoot;
+  if (typeof system !== 'string' || !/^[a-z]:\\/i.test(system) || system.includes('\0')) {
+    failure('UnsafeEndpoint', 'The trusted Windows system directory is unavailable.');
+  }
+  const executable = join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const canonical = await realpath(executable).catch(() => null);
+  if (canonical?.toLowerCase() !== resolve(executable).toLowerCase()) {
+    failure('UnsafeEndpoint', 'The Windows privacy helper must be the system executable.');
+  }
+  const child = spawn(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+    WINDOWS_HELPER], {windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']});
+  let code = '';
+  child.stderr.on('data', bytes => { if (code.length < 256) code += bytes.toString('utf8').slice(0, 256 - code.length); });
+  // Always observe startup and stdin errors, including cancellation during spawn.
+  child.stdin.on('error', () => {});
+  const closed = new Promise(resolveClose => {
+    child.on('error', () => {});
+    child.once('close', status => resolveClose(status));
+  });
+  const stop = () => { child.stdin.destroy(); child.stdout.destroy(); if (child.exitCode === null) child.kill(); };
+  child.stdin.write(`${JSON.stringify(input)}\n`);
+  return {child, closed, stop, error: () => new CollaborationError(
+    ['ENOENT', 'DiscoveryLimit', 'InvalidInstance', 'ProtocolMismatch', 'EndpointChanged'].includes(code) ? code : 'UnsafeEndpoint',
+    'The Windows collaboration endpoint could not be verified safely.')};
+}
+
+async function windowsInspect(input, signal) {
+  if (signal?.aborted) failure('Cancelled', 'The request was cancelled before submission.');
+  const helper = await startWindowsHelper(input);
+  let used = 0, cancelled = false, timedOut = false;
+  const chunks = [];
+  const cancel = () => { cancelled = true; helper.stop(); };
+  const timer = setTimeout(() => { timedOut = true; helper.stop(); }, 10_000);
+  signal?.addEventListener('abort', cancel, {once: true});
+  if (signal?.aborted) cancel();
+  helper.child.stdout.on('data', bytes => {
+    used += bytes.length;
+    if (used > 32768) helper.stop(); else chunks.push(bytes);
+  });
+  try {
+    const status = await helper.closed;
+    if (cancelled) failure('Cancelled', 'The request was cancelled before submission.');
+    if (timedOut) failure('PrivacyCheckTimeout', 'The bounded Windows privacy check did not finish.');
+    if (status !== 0 || used > 32768) throw helper.error();
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
+}
+
+async function windowsConnect(endpoint, signal) {
+  if (!endpoint.dataRoot || !endpoint.windowsIdentity || endpoint.socket !== `${PIPE_PREFIX}${endpoint.instance}`) {
+    failure('UnsafeEndpoint', 'Discover and explicitly select a private Windows endpoint.');
+  }
+  const helper = await startWindowsHelper({mode: 'request', root: endpoint.dataRoot, instance: endpoint.instance, endpoint});
+  return new Promise((resolveConnection, reject) => {
+    let ready = false, failureCode;
+    const cancel = () => { failureCode = 'Cancelled'; helper.stop(); };
+    const timer = setTimeout(() => { failureCode = 'PrivacyCheckTimeout'; helper.stop(); }, 10_000);
+    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); };
+    signal?.addEventListener('abort', cancel, {once: true});
+    if (signal?.aborted) cancel();
+    const onReadable = () => {
+      const byte = helper.child.stdout.read(1);
+      if (byte === null) return;
+      helper.child.stdout.removeListener('readable', onReadable);
+      if (byte[0] !== 1) { helper.stop(); return; }
+      ready = true;
+      cleanup();
+      const socket = Duplex.from({readable: helper.child.stdout, writable: helper.child.stdin});
+      socket.on('error', () => {}); // Cover the handoff before request installs its outcome listener.
+      socket.once('close', helper.stop);
+      // Request owns subsequent cancellation/deadline and waits for actual child exit.
+      resolveConnection({socket, closed: helper.closed, stop: helper.stop});
+    };
+    helper.child.stdout.on('readable', onReadable);
+    helper.closed.then(() => {
+      cleanup();
+      if (!ready) reject(failureCode ? new CollaborationError(failureCode,
+        'The Windows connection was cancelled or expired before submission.') : helper.error());
+    });
+  });
+}
 
 export const PROTOCOL = 1;
 export const MINIMUM_OMP = '18.8.7';
@@ -62,6 +359,12 @@ export function defaultDataRoot() {
   return process.env.MADOMATA_DATA_DIR || join(homedir(), '.config', 'mado-mata');
 }
 
+function windowsRoot(dataRoot) {
+  // Rust canonical paths can carry the local extended-length prefix. Never
+  // convert an extended UNC/device path into an accepted local drive path.
+  return resolve(dataRoot).replace(/^\\\\\?\\(?=[a-z]:\\)/i, '');
+}
+
 async function descriptorDirectory(dataRoot) {
   // Canonicalize the explicitly selected root; system aliases such as /var are not endpoint links.
   const root = await realpath(resolve(dataRoot));
@@ -71,10 +374,11 @@ async function descriptorDirectory(dataRoot) {
   return directory;
 }
 
-export async function readDescriptor(dataRoot, instance) {
+export async function readDescriptor(dataRoot, instance, signal) {
   if (!ID.test(instance)) failure('InvalidInstance', 'Select an instance returned by discovery.');
   let handle;
   try {
+    if (WINDOWS) return await windowsInspect({mode: 'descriptor', root: windowsRoot(dataRoot), instance}, signal);
     const directory = await descriptorDirectory(dataRoot);
     const parent = await lstat(directory);
     const path = join(directory, `${instance}.json`);
@@ -108,33 +412,38 @@ export async function readDescriptor(dataRoot, instance) {
     }
     return {...value, socketIdentity: {dev: socket.dev, ino: socket.ino}};
   } catch (error) {
-    if (error instanceof CollaborationError) throw error;
     if (error.code === 'ENOENT' || error.code === 'ECONNREFUSED') failure('DesktopUnavailable', 'The selected desktop endpoint is absent or stale.');
+    if (error instanceof CollaborationError) throw error;
     failure('UnsafeEndpoint', 'The collaboration descriptor could not be read safely.');
   } finally { await handle?.close(); }
 }
 
 export async function discover(dataRoot = defaultDataRoot(), signal) {
-  let directory;
-  try { directory = await descriptorDirectory(dataRoot); }
-  catch (error) {
+  let names;
+  try {
+    if (WINDOWS) {
+      ({names} = await windowsInspect({mode: 'list', root: windowsRoot(dataRoot)}, signal));
+    } else {
+      const directory = await descriptorDirectory(dataRoot);
+      names = [];
+      let scanned = 0;
+      for await (const entry of await opendir(directory)) {
+        if (++scanned > 1024) failure('DiscoveryLimit', 'The collaboration directory exceeds its entry allowance.');
+        if (!entry.name.endsWith('.json')) continue;
+        names.push(entry.name.slice(0, -5));
+        if (names.length > INSTANCE_LIMIT) failure('DiscoveryLimit', 'Too many instance descriptors; reconcile stale instances explicitly.');
+      }
+    }
+  } catch (error) {
     if (error.code === 'ENOENT') return {instances: [], disclosure: DISCLOSURE};
     if (error instanceof CollaborationError) throw error;
     failure('DiscoveryUnavailable', 'The selected data root cannot be inspected.');
-  }
-  const names = [];
-  let scanned = 0;
-  for await (const entry of await opendir(directory)) {
-    if (++scanned > 1024) failure('DiscoveryLimit', 'The collaboration directory exceeds its entry allowance.');
-    if (!entry.name.endsWith('.json')) continue;
-    names.push(entry.name.slice(0, -5));
-    if (names.length > INSTANCE_LIMIT) failure('DiscoveryLimit', 'Too many instance descriptors; reconcile stale instances explicitly.');
   }
   const instances = [];
   for (const instance of names.sort()) {
     if (signal?.aborted) failure('Cancelled', 'Discovery was cancelled.');
     try {
-      const endpoint = await readDescriptor(dataRoot, instance);
+      const endpoint = await readDescriptor(dataRoot, instance, signal);
       const reply = await request(endpoint, null, null, {kind: 'describe'}, signal);
       instances.push({instance, protocol: PROTOCOL, available: reply.ok, ...(reply.ok ? reply.result : {error: reply.error})});
     } catch (error) {
@@ -152,19 +461,22 @@ export function publicError(error) {
 
 export async function request(endpoint, owner, packageIdentity, operation, signal) {
   if (signal?.aborted) failure('Cancelled', 'The request was cancelled before submission.');
-  const current = await lstat(endpoint.socket).catch(() => null);
-  if (!current || !sameFile(current, endpoint.socketIdentity)) failure('EndpointChanged', 'The selected endpoint changed; discover and select it again.');
-  privateEntry(current, 'socket');
+  if (!WINDOWS) {
+    const current = await lstat(endpoint.socket).catch(() => null);
+    if (!current || !sameFile(current, endpoint.socketIdentity)) failure('EndpointChanged', 'The selected endpoint changed; discover and select it again.');
+    privateEntry(current, 'socket');
+  }
   const id = randomUUID();
   const body = Buffer.from(JSON.stringify({protocol: PROTOCOL, id, instance: endpoint.instance, token: endpoint.token, owner, package: packageIdentity, operation}));
   if (body.length > FRAME_BYTES) failure('PayloadLimit', 'The whole request exceeds the advertised transport limit.');
   const header = Buffer.alloc(4);
   header.writeUInt32BE(body.length);
   const mutation = !READ_ONLY.has(operation.kind);
+  const connection = WINDOWS ? await windowsConnect(endpoint, signal) : {socket: connect({path: endpoint.socket})};
   return new Promise((resolveReply, reject) => {
     let sent = false, settled = false;
     let cancellationTimer;
-    const socket = connect({path: endpoint.socket});
+    const {socket} = connection;
     const prefix = Buffer.alloc(4);
     let prefixUsed = 0, payload = null, payloadUsed = 0;
     const unknown = () => sent && mutation ? 'unknown' : 'not_applied';
@@ -175,7 +487,10 @@ export async function request(endpoint, owner, packageIdentity, operation, signa
       clearTimeout(cancellationTimer);
       signal?.removeEventListener('abort', cancel);
       socket.destroy();
-      if (error) reject(error); else resolveReply(reply);
+      connection.stop?.();
+      // Windows termination is not detached: settle only after its actual exit.
+      if (connection.closed) connection.closed.then(() => { if (error) reject(error); else resolveReply(reply); });
+      else if (error) reject(error); else resolveReply(reply);
     };
     const cancel = () => {
       if (settled || cancellationTimer) return;
@@ -196,14 +511,15 @@ export async function request(endpoint, owner, packageIdentity, operation, signa
       : 'The current desktop controller did not reply.', unknown())), 35_000);
     signal?.addEventListener('abort', cancel, {once: true});
     if (signal?.aborted) { cancel(); return; }
-    socket.once('connect', () => {
+    const submit = () => {
       if (settled) return;
       sent = true;
       socket.cork();
       socket.write(header);
       socket.write(body);
       socket.uncork();
-    });
+    };
+    if (WINDOWS) queueMicrotask(submit); else socket.once('connect', submit);
     socket.on('data', bytes => {
       if (settled) return;
       let offset = 0;
@@ -242,6 +558,8 @@ export async function request(endpoint, owner, packageIdentity, operation, signa
       ? 'The connection was lost after submission; outcome is unknown. Read current state before another mutation.'
       : 'The selected desktop endpoint is unavailable.', unknown())));
     socket.once('close', () => finish(new CollaborationError('ReplyUnavailable', 'The desktop closed the connection without a result.', unknown())));
+    connection.closed?.then(() => finish(new CollaborationError('ReplyUnavailable',
+      'The Windows transport closed without a result.', unknown())));
   });
 }
 
@@ -316,7 +634,7 @@ export class AuthoringConnection {
     signal?.addEventListener('abort', cancel, {once: true});
     if (signal?.aborted) controller.abort();
     try {
-      const endpoint = await readDescriptor(dataRoot, instance);
+      const endpoint = await readDescriptor(dataRoot, instance, controller.signal);
       const response = await request(endpoint, null, null, {kind: 'describe'}, controller.signal);
       if (generation !== this.generation || controller.signal.aborted) failure('ConnectionChanged', 'Connection selection was cancelled or superseded.');
       if (!response.ok) return response;

@@ -22,6 +22,10 @@ mod target;
 #[cfg(all(test, unix))]
 mod tests;
 mod version;
+#[cfg(windows)]
+mod windows_target;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 use mado_runtime_comparison::model::Fault;
 use payload::{Included, NAME, PLUGINS};
@@ -311,7 +315,7 @@ impl PluginManager {
         Self::with_client(
             root,
             Environment::capture(home),
-            cfg!(target_os = "macos"),
+            cfg!(any(target_os = "macos", windows)),
             Box::new(Cli),
         )
     }
@@ -656,7 +660,7 @@ impl PluginManager {
         if !self.platform {
             return Err(Fault::new(
                 "PluginPlatform",
-                "Managed OMP installation is available only in the macOS desktop",
+                "Managed OMP installation is available only in the macOS and Windows desktop",
             ));
         }
         let root = self.root.as_deref().map_err(Fault::clone)?;
@@ -998,7 +1002,12 @@ fn registered(
         }
         (Some(entry), Some(metadata)) => (entry, metadata),
     };
-    if entry.path.as_deref() != Some(display(registration).as_str()) {
+    #[cfg(not(windows))]
+    let listed_registration = entry.path.as_deref() == Some(display(registration).as_str());
+    #[cfg(windows)]
+    let listed_registration = entry.path.as_deref()
+        .is_some_and(|listed| windows_target::same_registration(listed, registration));
+    if !listed_registration {
         return Ok((
             Conflict,
             Vec::new(),

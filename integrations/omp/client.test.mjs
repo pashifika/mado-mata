@@ -1,14 +1,16 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:net';
-import {chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile} from 'node:fs/promises';
+import {chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {once} from 'node:events';
-import {AuthoringConnection, checkCompatibility, FRAME_BYTES, publicError, readDescriptor, request} from './client.mjs';
+import {spawn} from 'node:child_process';
+import {randomBytes} from 'node:crypto';
+import {AuthoringConnection, checkCompatibility, discover, FRAME_BYTES, publicError, readDescriptor, request} from './client.mjs';
 import register from './index.mjs';
 
-const unix = {skip: process.platform === 'win32'};
+const WINDOWS = process.platform === 'win32';
 const hostApi = {registerTool() {}, registerCommand() {}, on() {}, zod: {object() {}}};
 const versions = [
   {scenario: 'rejects an older OMP minor', version: '18.7.99', code: 'OmpVersionTooOld'},
@@ -28,11 +30,58 @@ function frame(value) {
   size.writeUInt32BE(body.length);
   return Buffer.concat([size, body]);
 }
+
+// Only newly owned fixture paths/pipe ACLs are changed. Production privacy checks
+// still inspect real Windows security descriptors; these are not bypassed.
+async function windowsFixtureAcl(paths, pipe, extraUser = false) {
+  const script = String.raw`
+    $ErrorActionPreference = 'Stop'
+    $config = [Console]::In.ReadToEnd() | ConvertFrom-Json
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    foreach ($path in $config.paths) {
+      $directory = [IO.Directory]::Exists($path)
+      $acl = if ($directory) { [Security.AccessControl.DirectorySecurity]::new() } else { [Security.AccessControl.FileSecurity]::new() }
+      $existing = if ($directory) { [IO.Directory]::GetAccessControl($path) } else { [IO.File]::GetAccessControl($path) }
+      if (-not $existing.GetOwner([Security.Principal.SecurityIdentifier]).Equals($user)) { throw 'fixture owner mismatch' }
+      $acl.SetAccessRuleProtection($true, $false)
+      $rule = if ($directory) {
+        [Security.AccessControl.FileSystemAccessRule]::new($user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+      } else { [Security.AccessControl.FileSystemAccessRule]::new($user, 'FullControl', 'Allow') }
+      $acl.AddAccessRule($rule)
+      if ($config.extraUser) {
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'), 'Read', 'Allow'))
+      }
+      if ($directory) { [IO.Directory]::SetAccessControl($path, $acl) } else { [IO.File]::SetAccessControl($path, $acl) }
+    }
+    if ($config.pipe) {
+      $rights = [IO.Pipes.PipeAccessRights]::ReadWrite -bor [IO.Pipes.PipeAccessRights]::ChangePermissions
+      $client = [IO.Pipes.NamedPipeClientStream]::new('.', $config.pipe.Substring(9), $rights, [IO.Pipes.PipeOptions]::None,
+        [Security.Principal.TokenImpersonationLevel]::Identification, [IO.HandleInheritability]::None)
+      try {
+        $client.Connect(5000)
+        $acl = [IO.Pipes.PipeSecurity]::new()
+        if (-not $client.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier]).Equals($user)) { throw 'fixture pipe owner mismatch' }
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.AddAccessRule([IO.Pipes.PipeAccessRule]::new($user, 'FullControl', 'Allow'))
+        $client.SetAccessControl($acl)
+      } finally { $client.Dispose() }
+    }
+  `;
+  const child = spawn(join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {windowsHide: true, stdio: ['pipe', 'ignore', 'pipe']});
+  let error = '';
+  child.stderr.on('data', bytes => { error += bytes.toString(); });
+  const timer = setTimeout(() => child.kill(), 10_000);
+  child.stdin.end(JSON.stringify({paths, pipe, extraUser}));
+  try { assert.equal((await once(child, 'close'))[0], 0, error); }
+  finally { clearTimeout(timer); }
+}
 async function peer(t, handler) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'mc-'));
   const directory = join(root, 'collaboration');
   await mkdir(directory, {mode: 0o700});
-  const path = join(root, 's');
+  const instance = randomBytes(16).toString('hex');
+  const path = WINDOWS ? `\\\\.\\pipe\\mado-mata-collaboration-${instance}` : join(root, 's');
   const sockets = new Set();
   const server = createServer(socket => {
     sockets.add(socket);
@@ -45,21 +94,22 @@ async function peer(t, handler) {
         const count = input.readUInt32BE();
         const value = JSON.parse(input.subarray(4, 4 + count));
         input = input.subarray(4 + count);
-        handler(value, socket, result => socket.write(frame({protocol: 1, instance: 'test-instance', id: value.id, owner: value.owner, ...result})));
+        handler(value, socket, result => socket.write(frame({protocol: 1, instance, id: value.id, owner: value.owner, ...result})));
       }
     });
   });
-  server.listen(path);
-  await once(server, 'listening');
-  await chmod(path, 0o600);
-  const descriptor = {protocol: 1, instance: 'test-instance', socket: path, token: 'a'.repeat(64), pid: process.pid};
-  const descriptorPath = join(directory, 'test-instance.json');
-  await writeFile(descriptorPath, JSON.stringify(descriptor), {mode: 0o600});
   t.after(async () => {
     for (const socket of sockets) socket.destroy();
     await new Promise(resolve => server.close(resolve));
     await rm(root, {recursive: true, force: true});
   });
+  server.listen(path);
+  await once(server, 'listening');
+  if (!WINDOWS) await chmod(path, 0o600);
+  const descriptor = {protocol: 1, instance, socket: path, token: 'a'.repeat(64), pid: process.pid};
+  const descriptorPath = join(directory, `${instance}.json`);
+  await writeFile(descriptorPath, JSON.stringify(descriptor), {mode: 0o600});
+  if (WINDOWS) await windowsFixtureAcl([root, directory, descriptorPath], path);
   return {root, descriptorPath, path, endpoint: await readDescriptor(root, descriptor.instance)};
 }
 // A scripted desktop recording each request; cancellation frames are ignored.
@@ -80,7 +130,7 @@ function holder() {
 }
 const describe = {owner: 'owner-a', package: 'package-a', selected: 'file-a', resources: [{id: 'file-a', version: 'v1'}], pending: null, cursor: 'c1'};
 const ownerless = {owner: null, package: null, selected: null, resources: [], pending: null, cursor: null};
-const selection = fixture => ({dataRoot: fixture.root, instance: 'test-instance', owner: 'owner-a', package: 'package-a', acceptDisclosure: true});
+const selection = fixture => ({dataRoot: fixture.root, instance: fixture.endpoint.instance, owner: 'owner-a', package: 'package-a', acceptDisclosure: true});
 const partial = {complete: false, committed: [{path: 'main.ts', revision: 'rev-2'}], remaining: [{resource: 'file-b', version: 'v1'}],
   savedRevision: 'rev-2', refreshRequired: true, failure: {code: 'host_io', message: 'The package view could not be read'}};
 
@@ -93,22 +143,68 @@ const unsafeDescriptors = [
     await symlink(`${path}.target`, path);
   }},
 ];
-for (const {scenario, makeUnsafe} of unsafeDescriptors) test(scenario, unix, async t => {
+for (const {scenario, makeUnsafe} of unsafeDescriptors) test(scenario, {skip: WINDOWS}, async t => {
   let calls = 0;
   const fixture = await peer(t, () => { calls += 1; });
   await makeUnsafe(fixture.descriptorPath);
-  await assert.rejects(readDescriptor(fixture.root, 'test-instance'), {code: 'UnsafeEndpoint'});
+  await assert.rejects(readDescriptor(fixture.root, fixture.endpoint.instance), {code: 'UnsafeEndpoint'});
   assert.equal(calls, 0);
 });
 
-test('refuses an oversized declared response before reading its body', unix, async t => {
+test('discovery of a missing selected root remains empty', async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'mc-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  assert.deepEqual((await discover(join(root, 'absent'))).instances, []);
+});
+
+test('Windows accepts a read-only shared root but rejects a readable descriptor ACL', {skip: !WINDOWS}, async t => {
+  let calls = 0;
+  const fixture = await peer(t, () => { calls += 1; });
+  await windowsFixtureAcl([fixture.root], null, true);
+  assert.equal((await readDescriptor(fixture.root, fixture.endpoint.instance)).instance, fixture.endpoint.instance);
+  await windowsFixtureAcl([fixture.descriptorPath], null, true);
+  await assert.rejects(readDescriptor(fixture.root, fixture.endpoint.instance), {code: 'UnsafeEndpoint'});
+  assert.equal(calls, 0);
+});
+
+test('Windows rejects a junction in the selected endpoint path', {skip: !WINDOWS}, async t => {
+  const fixture = await peer(t, () => assert.fail('no request may be submitted'));
+  const alias = join(fixture.root, 'alias');
+  await symlink(fixture.root, alias, 'junction');
+  await assert.rejects(readDescriptor(alias, fixture.endpoint.instance), {code: 'UnsafeEndpoint'});
+});
+
+test('Windows rejects remote pipes and descriptor replacement before submission', {skip: !WINDOWS}, async t => {
+  let calls = 0;
+  const fixture = await peer(t, () => { calls += 1; });
+  const descriptor = JSON.parse(await readFile(fixture.descriptorPath));
+  await writeFile(fixture.descriptorPath, JSON.stringify({...descriptor, socket: '\\\\remote\\pipe\\mado-mata-collaboration-' + descriptor.instance}));
+  await assert.rejects(readDescriptor(fixture.root, descriptor.instance), {code: 'UnsafeEndpoint'});
+  await rename(fixture.descriptorPath, fixture.descriptorPath + '.old');
+  await writeFile(fixture.descriptorPath, JSON.stringify(descriptor));
+  await windowsFixtureAcl([fixture.descriptorPath], null);
+  await assert.rejects(request(fixture.endpoint, 'owner-a', 'package-a', {kind: 'save_all'}), {code: 'EndpointChanged', outcome: 'not_applied'});
+  assert.equal(calls, 0);
+});
+
+test('Windows checks the actual connected pipe server PID before sending a frame', {skip: !WINDOWS}, async t => {
+  let calls = 0;
+  const fixture = await peer(t, () => { calls += 1; });
+  const descriptor = JSON.parse(await readFile(fixture.descriptorPath));
+  await writeFile(fixture.descriptorPath, JSON.stringify({...descriptor, pid: process.pid + 1}));
+  const wrong = await readDescriptor(fixture.root, descriptor.instance);
+  await assert.rejects(request(wrong, 'owner-a', 'package-a', {kind: 'save_all'}), {code: 'EndpointChanged', outcome: 'not_applied'});
+  assert.equal(calls, 0);
+});
+
+test('refuses an oversized declared response before reading its body', async t => {
   const fixture = await peer(t, (_request, socket) => {
     const header = Buffer.alloc(4); header.writeUInt32BE(FRAME_BYTES + 1); socket.write(header);
   });
   await assert.rejects(request(fixture.endpoint, null, null, {kind: 'describe'}), {code: 'FrameLimit', outcome: 'not_applied'});
 });
 
-test('an unknown edit is reconciled only by an idle context and then one complete same-version page chain', unix, async t => {
+test('an unknown edit is reconciled only by an idle context and then one complete same-version page chain', async t => {
   const draft = {pending: 'save', version: 'v2', text: 'committed draft'};
   let edits = 0;
   const fixture = await desktop(t, (operation, reply, socket) => {
@@ -151,7 +247,7 @@ test('an unknown edit is reconciled only by an idle context and then one complet
   assert.equal(edits, 2);
 });
 
-test('an unknown edit fences its targets, dependents and package-wide changes but not unrelated drafts; a removed target needs no read', unix, async t => {
+test('an unknown edit fences its targets, dependents and package-wide changes but not unrelated drafts; a removed target needs no read', async t => {
   const resources = [{id: 'file-a', version: 'v1'}, {id: 'file-b', version: 'v1'}];
   let lost = true;
   const fixture = await desktop(t, (operation, reply, socket) => {
@@ -174,7 +270,7 @@ test('an unknown edit fences its targets, dependents and package-wide changes bu
   assert.deepEqual(fixture.kinds(), ['describe', 'edit', 'edit', 'describe', 'save_all']);
 });
 
-test('a lost Save all blocks further publication until an idle context, while refresh and cancel stay available', unix, async t => {
+test('a lost Save all blocks further publication until an idle context, while refresh and cancel stay available', async t => {
   const host = {pending: null};
   const fixture = await desktop(t, (operation, reply, socket) => {
     if (operation.kind === 'describe') reply({ok: true, result: {...describe, pending: host.pending}});
@@ -199,7 +295,7 @@ test('a lost Save all blocks further publication until an idle context, while re
   assert.deepEqual(fixture.kinds(), ['describe', 'save_all', 'refresh', 'cancel', 'describe', 'describe', 'save']);
 });
 
-test('a Save reporting an unknown host failure fences its resource like a lost reply', unix, async t => {
+test('a Save reporting an unknown host failure fences its resource like a lost reply', async t => {
   const fixture = await desktop(t, (operation, reply) => reply({ok: true, result: operation.kind === 'describe' ? describe
     : {...partial, committed: [], remaining: [{resource: 'file-a', version: 'v1'}], refreshRequired: false, failure: {code: 'host_io', message: 'Save failed', outcome: 'unknown'}}}));
   const connection = new AuthoringConnection();
@@ -210,7 +306,7 @@ test('a Save reporting an unknown host failure fences its resource like a lost r
   assert.deepEqual(fixture.kinds(), ['describe', 'save']);
 });
 
-test('a Save all delivered after the connection changed stays visible as partial, not unapplied', unix, async t => {
+test('a Save all delivered after the connection changed stays visible as partial, not unapplied', async t => {
   const {held, hold} = holder();
   const fixture = await desktop(t, (operation, reply) => {
     if (operation.kind === 'describe') reply({ok: true, result: describe});
@@ -231,7 +327,7 @@ test('a Save all delivered after the connection changed stays visible as partial
   assert.equal(connection.reconciliation(), null);
 });
 
-test('no-owner selection needs both nulls, and only an explicit lifecycle result moves the binding', unix, async t => {
+test('no-owner selection needs both nulls, and only an explicit lifecycle result moves the binding', async t => {
   let current = ownerless;
   const fixture = await desktop(t, (operation, reply) => {
     if (operation.kind === 'describe') reply({ok: true, result: current});
@@ -251,7 +347,7 @@ test('no-owner selection needs both nulls, and only an explicit lifecycle result
     [['describe', null, null], ['describe', null, null], ['create', null, null], ['describe', 'owner-b', 'package-b']]);
 });
 
-test('a lost lifecycle result requires an explicit reconnect and never adopts the successor owner', unix, async t => {
+test('a lost lifecycle result requires an explicit reconnect and never adopts the successor owner', async t => {
   let current = describe;
   const fixture = await desktop(t, (operation, reply, socket) => {
     if (operation.kind === 'describe') reply({ok: true, result: current});
@@ -269,7 +365,7 @@ test('a lost lifecycle result requires an explicit reconnect and never adopts th
     [['describe', null], ['exit', 'owner-a'], ['describe', 'owner-a'], ['describe', null]]);
 });
 
-test('a lifecycle result with an unknown outcome requires reconnect even when it names a connection', unix, async t => {
+test('a lifecycle result with an unknown outcome requires reconnect even when it names a connection', async t => {
   const fixture = await desktop(t, (operation, reply) => reply({ok: true, result: operation.kind === 'describe' ? describe
     : {complete: false, connection: {owner: 'owner-b', package: 'package-b'}, previousReleased: true, failure: {code: 'host_io', message: 'Open failed', outcome: 'unknown'}, publication: null}}));
   const connection = new AuthoringConnection();
@@ -281,7 +377,7 @@ test('a lifecycle result with an unknown outcome requires reconnect even when it
   assert.equal(fixture.requests.at(-1).owner, 'owner-a');
 });
 
-test('a lifecycle result delivered after reselection never moves the new binding', unix, async t => {
+test('a lifecycle result delivered after reselection never moves the new binding', async t => {
   const {held, hold} = holder();
   const fixture = await desktop(t, (operation, reply) => {
     if (operation.kind === 'describe') reply({ok: true, result: describe});
@@ -300,7 +396,7 @@ test('a lifecycle result delivered after reselection never moves the new binding
   assert.equal(fixture.requests.at(-1).owner, 'owner-a');
 });
 
-test('notices continue from the latest context, keep their cursor when a poll fails, and never adopt another owner', unix, async t => {
+test('notices continue from the latest context, keep their cursor when a poll fails, and never adopt another owner', async t => {
   const ownerGap = reply => reply({ok: true, result: {cursor: null, gap: 'owner', changes: [], more: false, savedRevision: null}});
   const polls = [
     reply => reply({ok: true, result: {cursor: 'c2', gap: null, changes: [{resource: 'file-a', path: 'main.ts', kind: 'source', version: 'v2'}], more: false, savedRevision: 'rev-1'}}),
@@ -323,7 +419,7 @@ test('notices continue from the latest context, keep their cursor when a poll fa
   assert.deepEqual(sent.map(value => value.owner), ['owner-a', 'owner-a', 'owner-a', 'owner-a']);
 });
 
-test('identical concurrent notice polls share one desktop request', unix, async t => {
+test('identical concurrent notice polls share one desktop request', async t => {
   const {held, hold} = holder();
   const fixture = await desktop(t, (operation, reply) => {
     if (operation.kind === 'describe') reply({ok: true, result: describe});
@@ -337,12 +433,12 @@ test('identical concurrent notice polls share one desktop request', unix, async 
   assert.deepEqual(fixture.kinds(), ['describe', 'notices']);
 });
 
-test('cancellation before server claim receives a definitive not-applied result', unix, async t => {
+test('cancellation before server claim receives a definitive not-applied result', async t => {
   let admitted;
   let notifyRequest;
   const received = new Promise(resolve => { notifyRequest = resolve; });
   const fixture = await peer(t, (value, socket) => {
-    if (value.cancel) socket.write(frame({protocol: 1, instance: 'test-instance', id: value.cancel, owner: null, ok: false, error: {code: 'cancelled', outcome: 'not_applied'}}));
+    if (value.cancel) socket.write(frame({protocol: 1, instance: value.instance, id: value.cancel, owner: null, ok: false, error: {code: 'cancelled', outcome: 'not_applied'}}));
     else { admitted = value.id; notifyRequest(); }
   });
   const abort = new AbortController();
@@ -355,7 +451,7 @@ test('cancellation before server claim receives a definitive not-applied result'
   assert.equal(result.error.outcome, 'not_applied');
 });
 
-test('session teardown cannot adopt an in-flight connection selection', unix, async t => {
+test('session teardown cannot adopt an in-flight connection selection', async t => {
   let release;
   const received = new Promise(resolve => { release = resolve; });
   const fixture = await peer(t, (_value, _socket, reply) => release(() => reply({ok: true, result: describe})));
@@ -368,7 +464,7 @@ test('session teardown cannot adopt an in-flight connection selection', unix, as
   await assert.rejects(connection.call({kind: 'describe'}), {code: 'NotConnected'});
 });
 
-test('a context read never adopts a successor Edit owner', unix, async t => {
+test('a context read never adopts a successor Edit owner', async t => {
   let snapshots = 0;
   const fixture = await peer(t, (_value, _socket, reply) => {
     snapshots += 1;
@@ -380,7 +476,7 @@ test('a context read never adopts a successor Edit owner', unix, async t => {
   assert.equal(connection.binding.owner, 'owner-a');
 });
 
-test('parallel requests above the adapter allowance are refused before submission', unix, async t => {
+test('parallel requests above the adapter allowance are refused before submission', async t => {
   const waiting = [];
   let allReceived;
   const received = new Promise(resolve => { allReceived = resolve; });
@@ -399,8 +495,8 @@ test('parallel requests above the adapter allowance are refused before submissio
   await Promise.all(pending);
 });
 
-test('a connection-cap refusal is not confused with a lost mutation result', unix, async t => {
-  const fixture = await peer(t, (_value, socket) => socket.write(frame({protocol: 1, id: null, instance: 'test-instance', owner: null,
+test('a connection-cap refusal is not confused with a lost mutation result', async t => {
+  const fixture = await peer(t, (value, socket) => socket.write(frame({protocol: 1, id: null, instance: value.instance, owner: null,
     ok: false, error: {code: 'busy', message: 'Connection limit', outcome: 'not_applied'}})));
   const result = await request(fixture.endpoint, 'owner-a', 'package-a', {kind: 'edit', edits: [{resource: 'file-a', version: 'v1', text: 'new'}]});
   assert.equal(result.ok, false);
@@ -424,7 +520,7 @@ function omp() {
   };
 }
 
-test('a partial Save all is a tool error that keeps its committed prefix', unix, async t => {
+test('a partial Save all is a tool error that keeps its committed prefix', async t => {
   const fixture = await desktop(t, (operation, reply) => reply({ok: true, result: operation.kind === 'describe' ? describe : partial}));
   const extension = omp();
   await extension.run('connect', selection(fixture));
@@ -433,13 +529,13 @@ test('a partial Save all is a tool error that keeps its committed prefix', unix,
   assert.deepEqual(saved.details.result, partial);
 });
 
-test('a session switch cancels in-flight work, withholds its result and clears the connection', unix, async t => {
+test('a session switch cancels in-flight work, withholds its result and clears the connection', async t => {
   const {held, hold} = holder();
   const cancelled = [];
   const fixture = await peer(t, (value, socket, reply) => {
     if (value.cancel !== undefined) {
       cancelled.push(value.cancel);
-      socket.write(frame({protocol: 1, instance: 'test-instance', id: value.cancel, owner: null, ok: false, error: {code: 'cancelled', message: 'Cancelled', outcome: 'not_applied'}}));
+      socket.write(frame({protocol: 1, instance: value.instance, id: value.cancel, owner: null, ok: false, error: {code: 'cancelled', message: 'Cancelled', outcome: 'not_applied'}}));
     } else if (value.operation.kind === 'describe') reply({ok: true, result: describe});
     else hold(value.id);
   });
@@ -455,7 +551,7 @@ test('a session switch cancels in-flight work, withholds its result and clears t
   assert.equal((await extension.run('context', {})).details.error.code, 'NotConnected');
 });
 
-test('/mado shares the tool connection and never starts a model turn', unix, async t => {
+test('/mado shares the tool connection and never starts a model turn', async t => {
   const fixture = await desktop(t, (_operation, reply) => reply({ok: true, result: describe}));
   const extension = omp();
   await extension.command(`connect ${JSON.stringify(selection(fixture))}`);
