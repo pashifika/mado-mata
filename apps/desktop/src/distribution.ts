@@ -6,7 +6,7 @@ import type {AuthoringRef, Fault, WorkspaceRef} from './types.ts';
 // Public facts of one captured signed release. The signature is valid relative to `key_id` only; nothing here verifies
 // an account, a publisher or authorship. `revision` is the captured saved revision, `artifact_id` the archive SHA-256.
 export interface ReleaseFacts {
-  package_id:string; release_version:string; name:string; description:string; game_names:Record<string,string>;
+  package_id:string; release_version:string; name:string; description:string; author_name:string; game_names:Record<string,string>;
   key_id:string; revision:string; artifact_id:string; files:number; bytes:number;
 }
 // A host review of exactly one captured artifact, bound to its originating Workspace (and Edit owner for export).

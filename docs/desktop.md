@@ -207,6 +207,40 @@ use **Exit** or **Close window**, then relaunch. Retry cannot start a second wri
 or turn a previous timeout into a successful flush. This is distinct from a
 repairable settings read failure.
 
+### Diagnose local configuration
+
+Open **Configuration doctor** from Setup/Recovery or the Application menu. It
+reads the selected data folder even when Application construction failed.
+Settings, transactions, saved workspaces, source references, profiles and Targets
+are reported separately as **Passed**, **Failed** or **Not examined**; a bad owner
+does not hide safe siblings. Reports are bounded to 512 checks and 256 KiB.
+The summary retains failures even when some scope remains unexamined.
+Target records and pending writes are also checked before a source is bound.
+Paths and artifact identifiers are behind **Local details**. Raw configuration,
+profile values, package source, signing keys and credentials are not returned.
+
+Diagnosis writes nothing, settles no transaction, grants no execution authority
+and starts no compiler, script, network, capture, OCR or input. Ordinary diagnosis
+checks installed-archive presence, not signatures. A package-library problem's
+**Diagnose…** action explicitly verifies that one artifact; other archives and
+unavailable schemas remain unexamined. An observation is not an atomic snapshot
+or a health guarantee for a later operation.
+
+Recovery buttons only open the existing Import, workspace inspection/profile
+recovery, Retry, snapshot or restore flow. Retry remains available from an
+explicit doctor route even if the retained Application is Ready; opening it
+does not reconstruct the session or grant disposal consent. Each flow retains
+its own admission, confirmation and preservation rules. Artifact-only findings
+without a workspace owner offer manual guidance rather than borrowing another
+workspace. Closed or changed workspace sessions cannot receive an old report's
+action. Preserve the failing document, error category
+and original archive before repair; do not replace unknown failures with defaults.
+
+Doctor is intended to grow toward supported repair assistance. This delivery
+provides diagnosis and navigation only; it does not run a general repair engine.
+Any future repair must identify its target, preserve prior state, require
+explicit consent and verify the resulting state.
+
 ### Import the historical default root
 
 Only when the new default root is absent, launch may offer the historical
@@ -669,12 +703,37 @@ The [format contract](runtime-comparison.md#signed-mmpkg-format) fixes its bound
 
 ### Import and explicitly select
 
-Exit Edit and choose **Import PKG…** on a workspace's Guidance or Run page.
-Select a `.mmpkg`, inspect its verified release/key/source facts, and confirm.
+On Guidance, choose **Packages…** at the upper right. On Run, choose **Change…**
+inside **Package source**, immediately to the right of **Reinspect**. This region
+separates source identity/status and editing actions from profile settings;
+**Source details** discloses the location, runtime and artifact identity.
+Installed sources also keep directory replacement in those details. A pending
+replacement remains visible outside the collapsed details, so **Reinspect** never
+silently changes its target. Both library entries open the same bounded popup.
+Use **Import PKG…** there, select a `.mmpkg`, inspect its verified release/key/source
+facts, and confirm.
 Verification and static compilation do not execute scripts. Import can finish
 alongside an active Run or Check without changing its owner or captured inputs.
 The Import dialog keeps that operation's Stop available, including during publication.
 It never selects a source, changes a Tab's profiles/targets or starts a run.
+
+The library groups verified releases by signing key and package ID, with separate
+version and artifact choices. Search matches package names, IDs and all localized
+game names without rereading disk. Lists and details scroll inside the popup;
+**Back** retains the query, filter, highlight and list position. Import returns to
+the same browse without selecting anything. A newly opened library starts fresh.
+Rows show the package-declared **Author** and saved or explicitly browsed version,
+not a key fingerprint. An unchosen multi-version group summarizes its authors
+and version count without guessing a current/latest version. Author text is not
+publisher certification; grouping and replacement checks still use verified keys.
+Fault entries stay separate and cannot be selected. **Diagnose…** observes one
+problem without adopting its source or repairing files.
+
+Highlighting or opening details does not select a package. There is no automatic
+latest version: choose an exact artifact, then **Apply** to the workspace named
+in the footer. A dirty draft requires discard confirmation. Cancel, search,
+refresh and diagnosis leave the saved source unchanged. Stop remains available
+in library, diagnosis and Import while an owned operation continues.
 
 Installed files live at
 `<data-dir>/pkgs/<key_id>/<package_id>/<archive-sha256>.mmpkg`.

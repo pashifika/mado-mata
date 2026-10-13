@@ -7,6 +7,7 @@ use mado_mata_desktop::authoring::CatalogEdit;
 use mado_mata_desktop::backup::SnapshotReceipt;
 use mado_mata_desktop::bootstrap::{Bootstrap, BootstrapStatus, selected_roots};
 use mado_mata_desktop::collaboration::Collaboration;
+use mado_mata_desktop::doctor::{DoctorReport, DoctorRequest};
 use mado_mata_desktop::plugin_management::PluginManager;
 use mado_mata_desktop::storage::{EditableSettings, LegacyImport, Profile, Settings};
 use mado_mata_desktop::target::{TargetConfiguration, TargetExpectation, TargetResolution};
@@ -60,6 +61,15 @@ async fn background<T: Send + 'static>(
 async fn bootstrap_status(state: tauri::State<'_, Backend>) -> Result<BootstrapStatus, Fault> {
     let bootstrap = state.bootstrap.clone();
     background(move || bootstrap.ensure_started()).await
+}
+
+#[tauri::command]
+async fn configuration_doctor(
+    request: DoctorRequest,
+    state: tauri::State<'_, Backend>,
+) -> Result<DoctorReport, Fault> {
+    let bootstrap = state.bootstrap.clone();
+    background(move || Ok(bootstrap.configuration_doctor(request))).await
 }
 
 #[tauri::command]
@@ -687,6 +697,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap_status,
+            configuration_doctor,
             native_run_limits,
             initialize,
             retry_bootstrap,

@@ -31,7 +31,7 @@ function type(controller,path,inserted){
   });
 }
 function review(ticket,extra={}){
-  return {package_id:'example.a',release_version:'1.2.0-rc.1+build.5',name:'Example',description:'<b>text</b>',game_names:{en:'Game'},key_id:'k'.repeat(64),
+  return {package_id:'example.a',release_version:'1.2.0-rc.1+build.5',name:'Example',description:'<b>text</b>',author_name:'Package Author',game_names:{en:'Game'},key_id:'k'.repeat(64),
     revision:ticket.revision,artifact_id:'a'.repeat(64),files:3,bytes:120,token:'review-1',workspace:ticket.owner.workspace,owner:ticket.owner,
     destination:'/exports/example.a-1.2.0-rc.1+build.5.mmpkg',runtime:'mado-host-v1',signature_valid:true,account_verified:false,...extra};
 }

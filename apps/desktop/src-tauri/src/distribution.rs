@@ -21,6 +21,7 @@ pub use installed::{
     InstalledIdentity, InstalledRelease, VerifiedInstalled, installed_destination,
     installed_releases, managed_identity, verify_installed,
 };
+pub(crate) use installed::observe_installed;
 
 use crate::author_signing::Signer;
 use crate::configuration::{create_private_file, publish_no_replace, sync_directory, temporary};
@@ -52,6 +53,8 @@ pub struct ReleaseFacts {
     pub release_version: String,
     pub name: String,
     pub description: String,
+    /// Package-declared author from the signed manifest, not a verified identity.
+    pub author_name: String,
     pub game_names: BTreeMap<String, String>,
     pub key_id: String,
     pub revision: String,
@@ -107,6 +110,7 @@ impl ReleaseFacts {
             release_version: distribution.release_version.clone(),
             name: distribution.name.clone(),
             description: distribution.description.clone(),
+            author_name: distribution.author_name.clone(),
             game_names: distribution.game.names.clone(),
             key_id: key_id.to_owned(),
             revision: draft.revision().to_owned(),
@@ -521,13 +525,7 @@ fn note(fault: &mut Fault, key: &str, value: Value) {
     fault.context[key] = value;
 }
 
-/// Installs `source` through the real export, archive file, import and publication path.
-#[cfg(test)]
-pub(crate) fn install_for_test(root: &Path, source: &Path) -> InstalledIdentity {
-    install_for_test_with(root, source, [7; 32])
-}
-
-/// [`install_for_test`] signed by the key derived from `seed`.
+/// Installs `source` through export, import and publication using the key derived from `seed`.
 #[cfg(test)]
 pub(crate) fn install_for_test_with(
     root: &Path,

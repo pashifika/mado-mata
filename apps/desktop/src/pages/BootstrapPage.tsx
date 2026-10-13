@@ -1,7 +1,7 @@
 import Select from '../components/Select.tsx';
 import NavigationHeader from '../components/NavigationHeader.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
-import {reconstructionBlock, recoveryBlock, restoreBlock, restoreOutcome} from '../bootstrap.ts';
+import {reconstructionBlock, recoveryBlock, restoreBlock, restoreOutcome, retryOffered} from '../bootstrap.ts';
 import type {Admission, BootstrapEvent, BootstrapUi} from '../bootstrap.ts';
 import type {BootstrapStatus} from '../types.ts';
 import {messages} from '../i18n.ts';
@@ -10,7 +10,7 @@ import {useLocale} from '../locale.tsx';
 
 export interface BootstrapHandlers {
   onInitialize: () => void; onRetry: () => void; onImportRoot: () => void;
-  onSnapshot: () => void; onRestore: () => void; onRecover: (rollback: boolean) => void; onExit: () => void; onDismiss: () => void;
+  onSnapshot: () => void; onRestore: () => void; onRecover: (rollback: boolean) => void; onExit: () => void; onDismiss: () => void; onDoctor: () => void;
 }
 
 interface Props {
@@ -19,6 +19,8 @@ interface Props {
   // Inside the Ready shell the Application keeps running; presentation choice and Initialize are not offered there,
   // and the page heading sits below the shell's own top-level heading.
   inShell: boolean;
+  // Navigation intent from an explicit Retry route; the host status stays authoritative for state, stage and cause.
+  retryIntent: boolean;
 }
 
 function Facts({status}: {status: BootstrapStatus}) {
@@ -45,7 +47,7 @@ function Receipt({ui}: {ui: BootstrapUi}) {
 
 // Setup and Recovery are root-level surfaces. The host status is authoritative: its stage and cause stay visible
 // through form edits, failed actions and notices until an authoritative action replaces the status.
-export default function BootstrapPage({ui, status, dispatch, handlers, admission, exiting, inShell}: Props) {
+export default function BootstrapPage({ui, status, dispatch, handlers, admission, exiting, inShell, retryIntent}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const b = t.bootstrap;
@@ -62,6 +64,9 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
   const recoverBlock = recoveryBlock(status, admission, ui.restore.recoverDiscard);
   const restore = restoreBlock(status, ui.restore, admission);
   const recoverySupported = status.pending_restore && status.recovery_supported === true;
+  const retry = retryOffered(status, retryIntent);
+  // The heading names the requested Retry; the eyebrow and facts keep the authoritative state.
+  const retryRequested = ready && retryIntent && retry;
   // Protocol refusal and repairable validation failures retain different guidance.
   const outcome = restoreOutcome(status);
   const recoveryIntro = outcome !== null ? b.recoveryOutcome[outcome] : inShell ? b.laterFault : b.recoveryIntro;
@@ -101,8 +106,8 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
         <button id="bootstrap-exit" type="button" disabled={exiting} onClick={handlers.onExit}>{exiting ? b.exiting : b.exit}</button></div>
     </header></NavigationHeader>}
     <Content className="content bootstrap-content" aria-labelledby="bootstrap-heading">
-      <div className="page-heading"><div><span className="eyebrow">{b.state(status.state)}</span><Heading id="bootstrap-heading">{setup ? b.setupHeading : ready ? b.restoreHeading : b.recoveryHeading}</Heading>
-        <p>{setup ? b.setupIntro : ready ? b.restoreHelp : recoveryIntro}</p></div>
+      <div className="page-heading"><div><span className="eyebrow">{b.state(status.state)}</span><Heading id="bootstrap-heading">{setup ? b.setupHeading : ready && !retryRequested ? b.restoreHeading : b.recoveryHeading}</Heading>
+        <p>{setup ? b.setupIntro : retryRequested ? b.retryHelp : ready ? b.restoreHelp : recoveryIntro}</p></div>
         {ready && inShell && <button type="button" onClick={handlers.onDismiss}>{t.common.close}</button>}
       </div>
       {!inShell && <p className="field-help">{b.presentationHelp}</p>}
@@ -116,6 +121,7 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
         {ui.actionError && <><FaultMessage title={b.actionFailed} value={ui.actionError}/>
           <div className="button-row"><button type="button" onClick={() => dispatch({type: 'dismissActionError'})}>{t.common.close}</button><span className="muted">{b.actionFailedHelp}</span></div></>}
         <p className="field-help">{b.disclosure}</p>
+        <button id="bootstrap-doctor" type="button" aria-haspopup="dialog" disabled={exiting} onClick={handlers.onDoctor}>{t.doctor.heading}</button>
       </div></section>
       {status.pending_restore && <section className="panel" aria-labelledby="pending-heading"><div className="panel-body">
         <h2 id="pending-heading">{b.pendingRestore}</h2><p className="muted">{recoverySupported ? b.pendingRestoreHelp : outcome === 'unsupported' ? b.unsupportedPendingHelp : b.blockedPendingHelp}</p>
@@ -151,7 +157,7 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
         <div className="button-row"><button id="initialize" type="button" className="primary" disabled={initializeBlocked} onClick={handlers.onInitialize}>{b.initialize}</button>
           <span className="muted">{b.initializeHelp}</span></div>
       </div></section>}
-      {((!setup && !ready && !status.pending_restore) || (status.pending_restore && !recoverySupported)) && <section className="panel" aria-labelledby="retry-heading"><div className="panel-body">
+      {retry && <section className="panel" aria-labelledby="retry-heading"><div className="panel-body">
         <h2 id="retry-heading">{b.retry}</h2><p className="muted">{b.retryHelp}</p>
         {discardRequired && <div className="switch-row"><label htmlFor="retry-discard">{b.discardConfirm}</label>
           <input id="retry-discard" type="checkbox" checked={ui.restore.retryDiscard} disabled={pending} onChange={event => dispatch({type: 'restore', draft: {...ui.restore, retryDiscard: event.target.checked}})}/></div>}
