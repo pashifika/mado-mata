@@ -129,7 +129,10 @@ impl Bootstrap {
     }
 
     /// A fresh observation, independent of startup and all mutation/operation locks.
-    pub fn configuration_doctor(&self, request: crate::doctor::DoctorRequest) -> crate::doctor::DoctorReport {
+    pub fn configuration_doctor(
+        &self,
+        request: crate::doctor::DoctorRequest,
+    ) -> crate::doctor::DoctorReport {
         crate::doctor::observe(self.root.as_deref(), &request)
     }
 
@@ -985,7 +988,12 @@ mod tests {
             let restored = bootstrap
                 .restore_snapshot(&archive, Some(&preimage.generation), true, true)
                 .unwrap();
-            assert!(matches!(restored.state, Phase::Ready));
+            assert!(
+                matches!(restored.state, Phase::Ready),
+                "snapshot version {version} restore failed at {}: {:?}",
+                restored.stage,
+                restored.fault
+            );
             assert_eq!(configuration::capture(&root).unwrap(), capture);
             assert_eq!(fs::read(&archive).unwrap(), archive_bytes);
             assert!(!restore::pending(&root).unwrap());
@@ -1276,7 +1284,12 @@ mod tests {
         let restored = bootstrap
             .restore_snapshot(archive, Some(&current.generation), true, true)
             .unwrap();
-        assert!(matches!(restored.state, Phase::Ready));
+        assert!(
+            matches!(restored.state, Phase::Ready),
+            "restore failed at {}: {:?}",
+            restored.stage,
+            restored.fault
+        );
         let restored_settings = restored.settings.unwrap();
         assert_eq!(restored_settings.locale, Locale::English);
         assert_eq!(
@@ -1362,7 +1375,7 @@ mod tests {
             .restore_snapshot(archive, Some(&preimage.generation), true, true)
             .unwrap();
         assert!(matches!(failed.state, Phase::Recovery));
-        assert_eq!(failed.stage, "application");
+        assert_eq!(failed.stage, "application", "{:?}", failed.fault);
         assert!(!failed.application_available);
         assert!(failed.settings.is_none());
         assert!(!failed.pending_restore);
@@ -1615,7 +1628,10 @@ mod tests {
         let root = home.0.join("diagnosis");
         put(&root.join("settings.json"), b"{preserved");
         let mut bootstrap = Bootstrap::new(
-            Ok(root.clone()), None, home.0.join("no-runner"), home.0.join("no-engine"),
+            Ok(root.clone()),
+            None,
+            home.0.join("no-runner"),
+            home.0.join("no-engine"),
         );
         bootstrap.make_application = |_, _, _, _| panic!("doctor constructed an Application");
         bootstrap.recover_configuration = |_, _| panic!("doctor recovered configuration");
