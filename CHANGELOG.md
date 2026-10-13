@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Bound the native preflight regression's settlement wait by its admitted
+  operation and containment budgets, without changing production deadlines.
+
 - Assign fresh Windows OMP test fixtures to the exact test user when hosted
   runners default ownership to a group; retain strict production owner checks.
 

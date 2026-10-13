@@ -1,7 +1,7 @@
 use super::*;
-#[cfg(target_os = "macos")]
-use crate::desktop::test_support::request;
 use crate::desktop::test_support::settled;
+#[cfg(target_os = "macos")]
+use crate::desktop::test_support::{request, settled_with_timeout};
 #[cfg(target_os = "macos")]
 use crate::desktop::{NativeIntent, native_limits};
 use crate::inventory::PackageDraft;
@@ -67,6 +67,18 @@ fn refused_before_resolve(
     engine: PathBuf,
     environment: Option<OcrEnvironment>,
 ) -> Fault {
+    let intent = request.native_intent.as_ref().unwrap();
+    // Native preflight fingerprints the real test executable. Its settlement
+    // bound must cover the admitted operation and containment, not the generic
+    // five-second controlled-test wait. Production deadlines remain unchanged.
+    let settlement = Duration::from_millis(
+        intent
+            .limits
+            .budgets()
+            .operation_ms(intent.max_exit_recoveries)
+            .unwrap()
+            + intent.limits.containment_ms,
+    );
     let controller = DesktopController::new("unused-controlled".into(), engine);
     let resolved = Arc::new(AtomicBool::new(false));
     let called = resolved.clone();
@@ -92,7 +104,7 @@ fn refused_before_resolve(
             },
         )
         .unwrap();
-    let view = settled(&controller);
+    let view = settled_with_timeout(&controller, settlement);
     assert!(!resolved.load(Ordering::Acquire));
     assert_eq!(
         view.native_preparation,

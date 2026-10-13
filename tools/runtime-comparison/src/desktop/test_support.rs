@@ -29,13 +29,23 @@ pub(super) fn request(inventory: &Inventory) -> StartRequest {
 }
 
 pub(super) fn settled(controller: &DesktopController) -> ControllerView {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    settled_with_timeout(controller, Duration::from_secs(5))
+}
+
+pub(super) fn settled_with_timeout(
+    controller: &DesktopController,
+    timeout: Duration,
+) -> ControllerView {
+    let deadline = Instant::now() + timeout;
     loop {
         let view = controller.poll();
         if view.state == "terminal" {
             return view;
         }
-        assert!(Instant::now() < deadline, "operation did not settle");
+        assert!(
+            Instant::now() < deadline,
+            "operation did not settle: {view:?}"
+        );
         thread::sleep(Duration::from_millis(2));
     }
 }
