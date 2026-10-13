@@ -87,7 +87,7 @@ covering promotion when the final integration commit lands. See the
 [selection limits](docs/ci.md#hosted-workflow-and-required-gate).
 
 Once the topic's intended scope is complete, mark the promotion ready for review.
-This triggers a fresh PR run: wait for its `CI Gate` to pass on the current head
+This alone does not rerun CI. Require its current-head PR `CI Gate` to pass
 and resolve review conversations before merging. Use a merge commit; never
 squash or rebase a promotion, so the topic and `main` retain shared ancestry.
 If strict checks require an update, reconcile through the sync procedure first.

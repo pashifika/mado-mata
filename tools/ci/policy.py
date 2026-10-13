@@ -26,7 +26,7 @@ REQUIRED_FILES = {
     "tools/runtime-comparison/compiler/compile.mjs",
 }
 CONCURRENCY_GROUP = "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}"
-PR_TYPES = {"opened", "synchronize", "reopened", "ready_for_review"}
+PR_TYPES = {"opened", "synchronize", "reopened"}
 CI_WORKFLOWS = {
     "ci.yml": "pull_request",
     "ci-push.yml": "push",

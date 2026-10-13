@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Do not start CI when a PR is marked ready for review. Retain opening, head
+  updates, reopening, and explicit base-retarget revalidation.
 - Add [signed package transfer](docs/desktop.md#transfer-signed-packages):
   distribution metadata, Google author enrollment, offline Ed25519 export and
   verified `.mmpkg` import. Installed releases require explicit selection;
