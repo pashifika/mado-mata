@@ -948,6 +948,21 @@ class RepositoryPolicyTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         check_ci_workflow(workflow, self.manifest["actions"])
 
+    def test_full_hosted_lanes_cannot_drop_workflow_or_link_checks(self):
+        for name in ("repository", "runtime-macos"):
+            for mutation in ("runtime only", "missing native tools"):
+                with self.subTest(job=name, mutation=mutation):
+                    workflow = deepcopy(self.workflow)
+                    steps = workflow["jobs"][name]["steps"]
+                    if mutation == "runtime only":
+                        check = next(step for step in steps if "tools/ci/check.py" in step.get("run", ""))
+                        check["run"] = "python3 tools/ci/check.py --runtime-only"
+                    else:
+                        installer = next(step for step in steps if step.get("run") == "python3 tools/ci/install_tools.py")
+                        steps.remove(installer)
+                    with self.assertRaises(ValueError):
+                        check_ci_workflow(workflow, self.manifest["actions"])
+
     def test_runtime_artifacts_cannot_widen_or_weaken_checks(self):
         mutations = (
             "wrong pin", "broad path", "extra private path", "missing stderr", "hidden excluded",

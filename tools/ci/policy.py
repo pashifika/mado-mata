@@ -312,7 +312,8 @@ def check_ci_workflow(workflow, pins, label="ci.yml"):
             "python3 -c \"import platform; print(platform.platform(), platform.machine()); assert platform.machine() == 'arm64'\"",
             f"rustup toolchain install {RUST_VERSION} --profile minimal",
             "python3 -m pip install --require-hashes -r tools/ci/requirements.txt",
-            "python3 tools/ci/check.py --runtime-only",
+            "python3 tools/ci/install_tools.py",
+            "python3 tools/ci/check.py",
         ],
         "runtime-windows": [
             "git config --global core.symlinks true",

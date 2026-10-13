@@ -78,6 +78,11 @@ The version and integrity sources are:
 
 CI uses Python 3.13, `ubuntu-24.04`, `macos-15`, and `windows-2025`. The macOS job
 prints and requires `arm64`; runtime checks also print their actual host identity.
+Linux and macOS run the full public check, including pinned actionlint and
+offline local-link validation. Windows retains `--runtime-only` because the
+native-tool installer has no Windows assets. The event-specific PR, push and
+manual workflows use the same platform scope; none performs physical-device
+GUI/game acceptance or the optional engine-feature consumer suite.
 Update versions, integrity values, workflow references, and this guide together
 through a checked Change. A new installer host needs a verified release asset.
 

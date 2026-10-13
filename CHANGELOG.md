@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Run the full repository check on hosted macOS arm64, including checksum-pinned
+  actionlint and offline local-link validation. Keep Windows runtime-only,
+  event-specific gate isolation and physical-device acceptance separate.
+
 - Support native Windows OMP Agent integration with reviewed installation
   management, bounded Job-owned command trees and private authenticated named
   pipes. Release adapter `0.1.3`; preserve explicit owner/disclosure checks,
