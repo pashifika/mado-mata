@@ -60,8 +60,8 @@ pub struct ProcessCorrespondence {
     pub executable_path: PathBuf,
 }
 
+#[cfg(feature = "engine")]
 impl ProcessCorrespondence {
-    #[cfg(any(feature = "engine", test))]
     pub(super) fn matches(
         &self,
         process_id: u32,

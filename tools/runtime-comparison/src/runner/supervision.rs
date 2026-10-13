@@ -142,15 +142,24 @@ pub(crate) fn run_once_after_milestone(
     )
 }
 
-fn child_loader_environment(command: &mut Command, plan: &Plan) -> Result<Value, Fault> {
+fn child_loader_environment(
+    command: &mut Command,
+    plan: &Plan,
+    operation: Operation,
+) -> Result<Value, Fault> {
+    #[cfg(not(windows))]
+    let _ = operation;
     // The ORT API opt-out leaves the POSIX uploader alive. Suppress its
     // initialization before any native library or child thread starts.
     command.env("ORT_DISABLE_TELEMETRY", "1");
     #[cfg(windows)]
     {
         command.env_remove("MADO_COMPILER_NODE");
-        // Resolve Node before restricting the engine's DLL search path.
-        if plan.candidate == "typescript" {
+        // Environment checks initialize only the backend, without a compiler or VM.
+        // Script execution resolves Node before restricting the DLL search path.
+        if operation == Operation::Run
+            && matches!(plan.candidate.as_str(), "javascript" | "typescript")
+        {
             command.env("MADO_COMPILER_NODE", crate::typescript::node_from_path()?);
         }
     }
@@ -334,7 +343,7 @@ fn supervise(
     let transfer_assets = invocation.inventory.assets.clone();
     let mut command = Command::new(executable);
     command.arg("child");
-    let loader_environment = match child_loader_environment(&mut command, plan) {
+    let loader_environment = match child_loader_environment(&mut command, plan, operation) {
         Ok(environment) => environment,
         Err(error) => {
             return loader_prerequisite_record(run, plan, inventory, operation, error, started);
@@ -951,7 +960,7 @@ pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     let mut command =
         Command::new(std::env::current_exe().map_err(|e| Fault::new("Startup", e.to_string()))?);
     command.arg("child");
-    child_loader_environment(&mut command, &invocation.plan)?;
+    child_loader_environment(&mut command, &invocation.plan, invocation.operation)?;
     let mut child = OwnedChild::spawn(&mut command, ChildStdio::Protocol, Environment::Inherited)?;
     let mut control = child
         .stdin
@@ -1189,3 +1198,6 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;
