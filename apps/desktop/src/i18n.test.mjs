@@ -153,7 +153,14 @@ const adapterArguments = {
   'ui.distribution.preparing': [['rev-A']], 'ui.distribution.contentSummary': [[3,4096]], 'ui.distribution.exported': [['/exports/a.mmpkg']],
   'ui.distribution.cleanupFailed': [['/exports/a.mmpkg']], 'ui.distribution.verifying': [['/downloads/a.mmpkg']],
   'ui.distribution.compatible': [['typescript']], 'ui.distribution.installedDone': [['Example','1.2.0']],
-  'ui.distribution.selectLabel': [['Example','1.2.0']], 'ui.distribution.installedSource': [['example.a']],
+  'ui.distribution.installedSource': [['example.a']],
+  'ui.packageLibrary.openLabel': [['workspace-A']], 'ui.packageLibrary.changeLabel': [['workspace-A']],
+  'ui.packageLibrary.filterProblems': [[0],[2]], 'ui.packageLibrary.results': [[1],[2]], 'ui.packageLibrary.versions': [[1],[2]],
+  'ui.packageLibrary.currentDirectory': [['/packages/a']], 'ui.packageLibrary.currentArchive': [['/packages/a.zip']],
+  'ui.packageLibrary.currentInstalled': [['Example','1.2.0']], 'ui.packageLibrary.currentInstalledUnlisted': [['example.a']],
+  'ui.packageLibrary.signer': [['key-A']], 'ui.packageLibrary.noMatches': [['query-A']],
+  'ui.packageLibrary.chooseVersion': [['workspace-A']], 'ui.packageLibrary.target': [['Example','1.2.0','sha-A','workspace-A']],
+  'ui.packageLibrary.selectFor': [['workspace-A']], 'ui.packageLibrary.selectForLabel': [['Example','1.2.0','workspace-A']],
 };
 
 for (const locale of ['en','ja']) {

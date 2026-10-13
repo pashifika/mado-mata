@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add a read-only Configuration doctor available before Application construction,
+  with bounded owner-scoped findings, explicit unexamined scope and existing
+  recovery entry points. It neither rewrites configuration nor grants execution
+  authority.
+- Replace the inline installed-package list with a searchable, viewport-bounded
+  library popup. Group releases by signer/package, preserve browsing through
+  Import and diagnosis, and require exact-artifact selection for the captured
+  workspace. Keep Stop independent of catalog verification.
+- Isolate controlled-plan test filenames across concurrent calls instead of relying
+  on clock resolution alone.
 - Add [signed package transfer](docs/desktop.md#transfer-signed-packages):
   distribution metadata, Google author enrollment, offline Ed25519 export and
   verified `.mmpkg` import. Installed releases require explicit selection;
@@ -24,7 +34,8 @@
   controls, and distinguish command contention from unsettled package cleanup on Close.
 - Read complete HTTP response frames in OIDC loopback tests without requiring
   a graceful TCP close after oversized-header refusal; retain rejection,
-  secret-redaction and listener-closure checks.
+  secret-redaction and listener-closure checks. Check closure by reclaiming the
+  exclusive listening address rather than making a new outbound connection.
 - Keep the retirement-close regression valid when bounded log shutdown times out;
   still verify retirement, close, and refused new commands without changing
   production shutdown behavior.

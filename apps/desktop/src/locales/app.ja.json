@@ -45,7 +45,6 @@
     "preparingImport": "パッケージアーカイブを検証しています",
     "publishingImport": "パッケージをインストールしています",
     "readingSigner": "ローカル署名鍵を確認しています",
-    "readingInstalled": "インストール済みパッケージを確認しています",
     "application": "アプリケーション",
     "menu": "メニュー",
     "workspace": "ワークスペース",

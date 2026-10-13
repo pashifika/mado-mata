@@ -158,6 +158,58 @@ pub fn verify_installed(
     verify_unique(&packages, &identity, &keys)
 }
 
+/// Metadata-only lookup for diagnosis. Presence is not archive verification.
+pub(crate) fn observe_installed(
+    root: &Path,
+    package_id: &str,
+    artifact_id: &str,
+) -> Result<(), Fault> {
+    let identity = InstalledIdentity::checked(package_id, artifact_id)?;
+    let packages = root.join(PACKAGES);
+    if !crate::storage::exists(&packages)? {
+        return Err(identity.missing());
+    }
+    crate::storage::check_directory(&packages).map_err(|cause| {
+        identity.caused("InstalledIntegrity", "installed releases are unavailable", cause)
+    })?;
+    let mut found = false;
+    for entry in listing(&packages)? {
+        let name = entry.file_name();
+        let Some(key) = name.to_str().filter(|key| format::is_digest(key)) else {
+            continue;
+        };
+        let signer = packages.join(key);
+        if entry.file_type().map_err(|error| io_fault("inspect signer location", &signer, &error))?.is_file() {
+            continue;
+        }
+        crate::storage::check_directory(&signer).map_err(|cause| {
+            identity.caused("InstalledIntegrity", "installed signer location is unsafe", cause)
+        })?;
+        let package = signer.join(package_id);
+        if !crate::storage::exists(&package)? {
+            continue;
+        }
+        crate::storage::check_directory(&package).map_err(|cause| {
+            identity.caused("InstalledIntegrity", "installed package location is unsafe", cause)
+        })?;
+        let archive = package.join(identity.file_name());
+        if !crate::storage::exists(&archive)? {
+            continue;
+        }
+        if found {
+            return Err(identity.fault("InstalledIntegrity", "installed artifact has ambiguous locations"));
+        }
+        crate::storage::checked_file(&archive, super::MAX_ARCHIVE_BYTES).map_err(|cause| {
+            identity.caused("InstalledIntegrity", "installed archive is unsafe", cause)
+        })?;
+        found = true;
+    }
+    if !found {
+        return Err(identity.missing());
+    }
+    Ok(())
+}
+
 /// Identifies an installed archive, or a superseded expanded container, from its
 /// location: the archive itself and any path beneath its name, or the container and
 /// any descendant. Valid or not, such paths are never ordinary packages. Other paths

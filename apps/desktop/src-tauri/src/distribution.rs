@@ -21,6 +21,7 @@ pub use installed::{
     InstalledIdentity, InstalledRelease, VerifiedInstalled, installed_destination,
     installed_releases, managed_identity, verify_installed,
 };
+pub(crate) use installed::observe_installed;
 
 use crate::author_signing::Signer;
 use crate::configuration::{create_private_file, publish_no_replace, sync_directory, temporary};
@@ -521,13 +522,7 @@ fn note(fault: &mut Fault, key: &str, value: Value) {
     fault.context[key] = value;
 }
 
-/// Installs `source` through the real export, archive file, import and publication path.
-#[cfg(test)]
-pub(crate) fn install_for_test(root: &Path, source: &Path) -> InstalledIdentity {
-    install_for_test_with(root, source, [7; 32])
-}
-
-/// [`install_for_test`] signed by the key derived from `seed`.
+/// Installs `source` through export, import and publication using the key derived from `seed`.
 #[cfg(test)]
 pub(crate) fn install_for_test_with(
     root: &Path,

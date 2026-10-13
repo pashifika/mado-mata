@@ -22,7 +22,10 @@ import type {CreateDraft} from './components/CreateWorkspaceDialog.tsx';
 import DirtyChoiceDialog from './components/DirtyChoiceDialog.tsx';
 import ExportDialog from './components/ExportDialog.tsx';
 import ImportDialog from './components/ImportDialog.tsx';
-import InstalledPackages from './components/InstalledPackages.tsx';
+import PackageLibraryDialog from './components/PackageLibraryDialog.tsx';
+import ConfigurationDoctor, {DoctorContent} from './components/ConfigurationDoctor.tsx';
+import {currentDoctorOwner, reduceDoctor} from './doctor-state.ts';
+import type {DoctorCheck, DoctorReport, DoctorRoute} from './doctor-types.ts';
 import SigningDialog from './components/SigningDialog.tsx';
 import Notifications from './components/Notifications.tsx';
 import NavigationHeader from './components/NavigationHeader.tsx';
@@ -197,6 +200,9 @@ export default function App() {
   // A fresh, reverified listing per read; a failed read shows no earlier facts as current.
   const [installed, setInstalled] = useState<{releases: InstalledRelease[] | null; error: Fault | null; loading: boolean}>({releases: null, error: null, loading: false});
   const installedRead = useRef(0);
+  const [library, setLibrary] = useState<{workspace: WorkspaceRef; label: string} | null>(null);
+  const [doctor, doctorDispatch] = useReducer(reduceDoctor, null);
+  const doctorRead = useRef(0);
   const [signer, setSigner] = useState<SignerState>({info: undefined, statusError: null, enrollError: null, cancelError: null, enrolling: false, cancelling: false});
   const enrolling = useRef(false);
   // The Edit owner's Workspace that owns the shown signing details and any enrollment they start.
@@ -401,6 +407,8 @@ export default function App() {
     setCreateOpen(false);
     setSavedOpen(false);
     setConfigurationOpen(false);
+    closeLibrary();
+    doctorDispatch({type: 'close'});
     setCreateDraft(EMPTY_CREATE);
     setReveal(null);
     setOperation(null);
@@ -608,7 +616,8 @@ export default function App() {
   // Explicit selection of one installed release for this Tab only: the host reverifies the signed archive and runs
   // the ordinary inspection, signer continuity, profile reconciliation and durable binding. Import never reaches here.
   function selectInstalled(workspace: Workspace, packageId: string, artifactId: string) {
-    if (inspectBlock(workspace) !== null) return;
+    if (!openWorkspaces.current.some(item => sameWorkspace(workspaceRef(item), workspaceRef(workspace))) || inspectBlock(workspace) !== null) return;
+    closeLibrary();
     invalidateOwnerTarget(workspace.id);
     const origin: Origin = {id: workspace.id, revision: workspace.revision};
     const ref = workspaceRef(workspace);
@@ -1927,12 +1936,20 @@ export default function App() {
     updateExportFlow(() => null);
   }
 
+  function importBlock(workspace: Workspace | null): string | null {
+    if (!workspace || !openWorkspaces.current.some(item => sameWorkspace(workspaceRef(item), workspaceRef(workspace)))) return ui.packageLibrary.staleOwner;
+    const owner = leaseOwnerNow();
+    if (owner !== null) return ui.authoring.blockedOther(labelOf(owner));
+    return importFlowRef.current !== null ? ui.authoring.block('pending') : commandReason ?? (closing ? t.applicationClosing : null);
+  }
+
   // Import verifies one picked archive for this Tab and installs it only after explicit confirmation of that review. It
   // never selects the release, changes another Tab or replaces an active run snapshot.
   async function importPackage(workspace: Workspace) {
-    if (importFlowRef.current !== null || commandReason !== null || closing || leaseOwnerNow() !== null) return;
+    if (importBlock(workspace) !== null) return;
     const ref = workspaceRef(workspace);
-    updateImportFlow(() => ({workspace: ref, step: {kind: 'choosing'}}));
+    // Close the library's native dialog before a host-owned picker can appear.
+    flushSync(() => updateImportFlow(() => ({workspace: ref, step: {kind: 'choosing'}})));
     let picked: string | null;
     try {
       picked = await invoke<string | null>('package_pick', {workspace: ref, exporting: false, suggestedName: null});
@@ -1946,7 +1963,11 @@ export default function App() {
       return;
     }
     const attempt = ++distributionAttempt.current;
-    updateImportFlow(current => current?.step.kind === 'choosing' ? {workspace: ref, step: {kind: 'preparing', attempt, path, cancelling: false, cancelError: null}} : current);
+    if (!openWorkspaces.current.some(item => sameWorkspace(workspaceRef(item), ref))) {
+      updateImportFlow(current => current?.step.kind === 'choosing' && sameWorkspace(current.workspace, ref) ? null : current);
+      return;
+    }
+    updateImportFlow(current => current?.step.kind === 'choosing' && sameWorkspace(current.workspace, ref) ? {workspace: ref, step: {kind: 'preparing', attempt, path, cancelling: false, cancelError: null}} : current);
     try {
       const review = await workspaceCall(workspace.id, 'preparingImport', () => invoke<DistributionReview>('package_import_prepare', {workspace: ref, path}));
       updateImportFlow(current => {
@@ -1997,11 +2018,10 @@ export default function App() {
   }
 
   async function refreshInstalled() {
-    if (hostCommand.current !== null) return;
     const read = ++installedRead.current;
     setInstalled(current => ({...current, loading: true}));
     try {
-      const releases = await authoringCall('readingInstalled', () => invoke<InstalledRelease[]>('package_installed_list'));
+      const releases = await invoke<InstalledRelease[]>('package_installed_list');
       if (read === installedRead.current) setInstalled({releases, error: null, loading: false});
     } catch (cause) {
       if (read === installedRead.current) setInstalled({releases: null, error: fault(cause), loading: false});
@@ -2010,6 +2030,75 @@ export default function App() {
   useEffect(() => {
     if (normalReady) void refreshInstalled();
   }, [normalReady]);
+  function openLibrary(workspace: Workspace) {
+    doctorDispatch({type: 'close'});
+    setLibrary({workspace: workspaceRef(workspace), label: workspaceLabel(workspace, workspaces)});
+    void refreshInstalled();
+  }
+
+  function closeLibrary() {
+    ++installedRead.current;
+    setInstalled(current => ({...current, loading: false}));
+    setLibrary(null);
+    doctorDispatch({type: 'close'});
+  }
+
+  const libraryWorkspace = library ? workspaces.find(item => sameWorkspace(workspaceRef(item), library.workspace)) ?? null : null;
+  const selectedSource = selected?.savedPackage?.source;
+  const selectedRelease = selectedSource?.kind === 'installed' ? installed.releases?.find(release =>
+    release.package_id === selectedSource.package_id && release.artifact_id === selectedSource.artifact_id)?.facts : null;
+  // A suspended popup never resumes against a retired owner. Durable Import outcomes stay in their own flow.
+  useEffect(() => {
+    if (library !== null && libraryWorkspace === null) closeLibrary();
+  }, [library, libraryWorkspace]);
+
+  function diagnose(origin: 'application' | 'library', target: {package_id: string; artifact_id: string} | null = null) {
+    if (closing) return;
+    const request = ++doctorRead.current;
+    doctorDispatch({type: 'request', state: {request, origin, package: target,
+      owners: openWorkspaces.current.map(item => ({internalName: item.internalName, ref: workspaceRef(item)})),
+      pending: true, report: null, error: null}});
+    void invoke<DoctorReport>('configuration_doctor', {request: {package: target}}).then(
+      report => doctorDispatch({type: 'report', request, report}),
+      cause => doctorDispatch({type: 'failed', request, error: fault(cause)}));
+  }
+
+  function doctorWorkspace(check: DoctorCheck): Workspace | null {
+    if (!doctor) return null;
+    const ref = currentDoctorOwner(doctor, check.owner.internal_name,
+      openWorkspaces.current.map(item => ({internalName: item.internalName, ref: workspaceRef(item)})));
+    const workspace = ref ? openWorkspaces.current.find(item => sameWorkspace(workspaceRef(item), ref)) : null;
+    return workspace && (check.owner.package_id === null || workspace.savedPackage?.package_id === check.owner.package_id) ? workspace : null;
+  }
+
+  function doctorRouteBlock(check: DoctorCheck, route: DoctorRoute): string | null {
+    const blocked = pendingCommandReason ?? (closing ? t.applicationClosing : null);
+    if (blocked !== null) return blocked;
+    if (route === 'import_original' || route === 'inspect' || route === 'profile_recovery') {
+      const workspace = doctorWorkspace(check);
+      if (!workspace) return ui.doctor.ownerUnavailable;
+      if (route === 'import_original') return importBlock(workspace);
+    }
+    return null;
+  }
+
+  function doctorRoute(check: DoctorCheck, route: DoctorRoute) {
+    if (!doctor || doctor.pending || doctorRouteBlock(check, route) !== null || !doctor.report?.checks.includes(check) || !check.routes.includes(route)) return;
+    const workspace = doctorWorkspace(check);
+    if (route === 'import_original') {
+      if (!workspace) return;
+      doctorDispatch({type: 'close'});
+      void importPackage(workspace);
+    } else if (route === 'inspect' || route === 'profile_recovery') {
+      if (!workspace) return;
+      closeLibrary();
+      go({kind: 'workspace', id: workspace.id});
+      change(workspace.id, item => ({...item, page: 'run'}));
+    } else if (route !== 'manual') {
+      closeLibrary();
+      setConfigurationOpen(true);
+    }
+  }
 
   const editHandlers: EditHandlers = {
     select: (path, previous) => authoringController.update(session => session && selectFile(session, path, previous)),
@@ -2192,6 +2281,7 @@ export default function App() {
       void bootstrapAction('recovering', () => invoke<BootstrapStatus>('recover_restore', {rollback, confirm:bootstrap.restore.recoverConfirm, discard:bootstrap.restore.recoverDiscard}), true);
     },
     onExit: () => void exitApplication(),
+    onDoctor: () => diagnose('application'),
     onDismiss: () => {setConfigurationOpen(false); menuButton.current?.focus();},
   };
 
@@ -2629,6 +2719,13 @@ export default function App() {
       message={stripMessage && {text: renderMessage(locale, stripMessage.text), error: stripMessage.error}}
       stopDisabled={stopping || closing || (!authoringWorkerPending && (!view.run || !busy(view.state) || view.state === 'stopping' || starting !== null))}
       onStop={() => void (authoringWorkerPending || validationActive || recognitionActive ? stopValidation() : stopRun())}/> : null;
+  const doctorContent = doctor ? <DoctorContent state={doctor}
+    onRefresh={() => diagnose(doctor.origin, doctor.package)} onRoute={doctorRoute}
+    routeBlock={doctorRouteBlock}/> : null;
+  const doctorDialog = <ConfigurationDoctor open={doctor?.origin === 'application'} onClose={() => doctorDispatch({type: 'close'})}
+    strip={ordinaryStrip('doctor')} authoring={compactAuthoring(() => {doctorDispatch({type: 'close'}); returnToEdit();}, true)}>
+    {doctorContent}
+  </ConfigurationDoctor>;
 
   if (shell !== 'shell') {
     // Before the first resolved status the shell is already real: presentation choice and Exit work, nothing is assumed.
@@ -2650,6 +2747,7 @@ export default function App() {
           </main>
         </div>
         : <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={false}/>}
+      {doctorDialog}
     </LocaleContext>;
   }
 
@@ -2727,6 +2825,7 @@ export default function App() {
             <button type="button" role="menuitem" id="menu-settings" disabled={settings === null || !normalReady} onClick={openSettings}>{t.appSettings}</button>
             <button type="button" role="menuitem" id="menu-plugins" onClick={openPlugins}>{t.appPlugins}</button>
             <button type="button" role="menuitem" id="menu-restore" onClick={() => {menuButton.current?.focus(); setMenuOpen(false); setConfigurationOpen(true);}}>{ui.bootstrap.restoreHeading}</button>
+            <button type="button" role="menuitem" id="menu-doctor" disabled={closing} onClick={() => {menuButton.current?.focus(); setMenuOpen(false); diagnose('application');}}>{ui.doctor.heading}</button>
             <button type="button" role="menuitem" id="menu-application-logs" aria-current={nav.kind === 'application' ? 'page' : undefined}
               aria-label={`${t.applicationLogs} · ${applicationLogCount}`} onClick={() => {setMenuOpen(false); go({kind: 'application'});}}>
               {t.applicationLogs}<span className="count" title={String(applicationLogCount)}>{Math.min(applicationLogCount, 99)}</span>
@@ -2816,11 +2915,18 @@ export default function App() {
           : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
             recovery={recoveryHandlers(selected)} authoring={pageAuthoring(selected)} packagesRoot={packagesRoot}/>)}
-        {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && <InstalledPackages key={`installed:${selected.id}:${selected.revision}`}
-          saved={selected.savedPackage?.source ?? null} dirty={dirtyDraft(selected)} releases={installed.releases} error={installed.error} loading={installed.loading}
-          importBlock={leaseOwnerId !== null ? ui.authoring.blockedOther(labelOf(leaseOwnerId)) : importFlow !== null ? ui.authoring.block('pending') : commandReason ?? (closing ? t.applicationClosing : null)} selectBlock={inspectBlock(selected)}
-          onImport={() => void importPackage(selected)} onRefresh={() => void refreshInstalled()}
-          onSelect={release => selectInstalled(selected, release.package_id, release.artifact_id)}/>}
+        {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && <section className="panel"><div className="panel-body">
+          <div className="button-row">
+            {selected.savedPackage && <span className="muted package-source-summary">{selected.savedPackage.source.kind === 'installed'
+              ? selectedRelease ? ui.packageLibrary.currentInstalled(selectedRelease.name, selectedRelease.release_version)
+                : ui.packageLibrary.currentInstalledUnlisted(selected.savedPackage.package_id)
+              : selected.savedPackage.source.kind === 'directory' ? ui.packageLibrary.currentDirectory(selected.savedPackage.source.path)
+                : ui.packageLibrary.currentArchive(selected.savedPackage.source.path)}</span>}
+            <button id="installed-open" type="button" aria-haspopup="dialog" disabled={closing || !normalReady}
+              aria-label={(selected.savedPackage ? ui.packageLibrary.changeLabel : ui.packageLibrary.openLabel)(workspaceLabel(selected, workspaces))}
+              onClick={() => openLibrary(selected)}>{selected.savedPackage ? ui.packageLibrary.change : ui.packageLibrary.open}</button>
+          </div>
+        </div></section>}
         {selected && selected.page === 'execution' && selectedRun && <ExecutionPage label={workspaceLabel(selected, workspaces)} revision={selected.revision}
           run={selectedRun} snapshot={operation?.snapshot ?? null} starting={starting?.workspaceId === selected.id}
           disclosed={selectedRun.view.run !== null && selected.disclosedRun === selectedRun.view.run}
@@ -2893,9 +2999,24 @@ export default function App() {
       onConfirm={() => void confirmExport()} onPrepareAgain={prepareExportAgain} onSigning={openSigning} onClose={closeExport}/>
     <SigningDialog open={signingWorkspace !== null} signer={signer} enrollBlock={closing ? t.applicationClosing : null}
       onEnroll={() => void enrollSigner()} onCancelEnroll={cancelEnrollment} onClose={() => {if (!enrolling.current) setSigningWorkspace(null);}}/>
+    <PackageLibraryDialog open={library !== null} suspended={importFlow !== null}
+      owner={library?.label ?? ''} saved={libraryWorkspace?.savedPackage?.source ?? null} dirty={libraryWorkspace ? dirtyDraft(libraryWorkspace) : false}
+      releases={installed.releases} error={installed.error} loading={installed.loading}
+      importBlock={importBlock(libraryWorkspace)}
+      selectBlock={libraryWorkspace ? inspectBlock(libraryWorkspace) : ui.packageLibrary.staleOwner}
+      onImport={() => {if (libraryWorkspace) void importPackage(libraryWorkspace);}} onRefresh={() => void refreshInstalled()}
+      onSelect={release => {if (libraryWorkspace) selectInstalled(libraryWorkspace, release.package_id, release.artifact_id);}}
+      onCancel={closeLibrary} onDiagnose={target => diagnose('library', target)}
+      diagnosis={doctor?.origin === 'library' ? doctorContent : null} onBackFromDiagnosis={() => doctorDispatch({type: 'close'})}
+      returnFocus={() => document.getElementById('installed-open')} strip={ordinaryStrip('library')}
+      authoring={compactAuthoring(() => {closeLibrary(); returnToEdit();}, true)}/>
+    {doctorDialog}
     <ImportDialog flow={importFlow} label={importFlow ? labelOf(importFlow.workspace.workspace_id) : ''}
       stale={importFlow?.step.kind === 'review' && !workspaces.some(item => sameWorkspace(workspaceRef(item), importFlow.workspace))}
       blocked={commandReason ?? (closing ? t.applicationClosing : null)} strip={ordinaryStrip('import')}
+      refreshError={installed.loading ? null : installed.error}
+      authoring={compactAuthoring(() => {closeImport(); closeLibrary(); returnToEdit();}, true,
+        importFlow?.step.kind === 'choosing' || importFlow?.step.kind === 'preparing' || importFlow?.step.kind === 'publishing')}
       onConfirm={() => void confirmImport()} onCancelPreparation={cancelImportPreparation} onClose={closeImport}/>
     </StatusSurface>
   </div></LocaleContext>;

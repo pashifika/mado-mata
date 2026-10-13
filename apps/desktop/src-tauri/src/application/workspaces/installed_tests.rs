@@ -148,6 +148,22 @@ fn installed_files(fixture: &Fixture) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 #[test]
+fn installed_listing_releases_stop_admission_locks_before_archive_work() {
+    let fixture = Fixture::new();
+    let identity = installed(&fixture);
+    let releases = fixture.application.package_installed_list_with(|root| {
+        {
+            let _command = fixture.application.commands.try_lock().expect("command lock retained");
+            let _state = fixture.application.workspaces.try_lock().expect("operation lock retained");
+        }
+        distribution::installed_releases(root)
+    }).unwrap();
+    assert_eq!(releases.len(), 1);
+    assert_eq!(releases[0].artifact_id, identity.artifact_id);
+    assert!(releases[0].fault.is_none());
+}
+
+#[test]
 fn installed_release_is_selected_explicitly_and_reverified_on_restart_and_start() {
     let fixture = Fixture::new();
     let application = &fixture.application;
@@ -295,9 +311,24 @@ fn changed_or_missing_installed_archive_refuses_until_the_original_is_imported_a
         "InstalledMissing"
     );
     assert_eq!(view.saved_package.as_ref().unwrap().source, reference);
+    let diagnosis = crate::doctor::observe(Ok(&fixture.root), &crate::doctor::DoctorRequest::default());
+    assert!(diagnosis.checks.iter().any(|check| {
+        check.owner.internal_name.as_deref() == Some("Installed")
+            && check.code == "archive_missing"
+    }));
 
     // Importing the original archive again restores the unchanged saved reference.
     import_again(&fixture, &restarted, &view_ref(&view), &original);
+    let rebound = select(&restarted, &view_ref(&view), &identity);
+    assert_eq!(rebound.source, reference);
+    assert_eq!(rebound.profiles[0].id, saved.id);
+    let diagnosis = crate::doctor::observe(Ok(&fixture.root), &crate::doctor::DoctorRequest {
+        package: Some(identity.clone()),
+    });
+    assert!(diagnosis.checks.iter().any(|check| {
+        check.scope == crate::doctor::Scope::PackageVerification
+            && check.status == crate::doctor::Status::Passed
+    }));
     restarted.shutdown().unwrap();
     let restored = restart(&fixture.root);
     let view = restored.workspace_catalog().unwrap().open.remove(0);

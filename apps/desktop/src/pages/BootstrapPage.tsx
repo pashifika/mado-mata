@@ -10,7 +10,7 @@ import {useLocale} from '../locale.tsx';
 
 export interface BootstrapHandlers {
   onInitialize: () => void; onRetry: () => void; onImportRoot: () => void;
-  onSnapshot: () => void; onRestore: () => void; onRecover: (rollback: boolean) => void; onExit: () => void; onDismiss: () => void;
+  onSnapshot: () => void; onRestore: () => void; onRecover: (rollback: boolean) => void; onExit: () => void; onDismiss: () => void; onDoctor: () => void;
 }
 
 interface Props {
@@ -116,6 +116,7 @@ export default function BootstrapPage({ui, status, dispatch, handlers, admission
         {ui.actionError && <><FaultMessage title={b.actionFailed} value={ui.actionError}/>
           <div className="button-row"><button type="button" onClick={() => dispatch({type: 'dismissActionError'})}>{t.common.close}</button><span className="muted">{b.actionFailedHelp}</span></div></>}
         <p className="field-help">{b.disclosure}</p>
+        <button id="bootstrap-doctor" type="button" aria-haspopup="dialog" disabled={exiting} onClick={handlers.onDoctor}>{t.doctor.heading}</button>
       </div></section>
       {status.pending_restore && <section className="panel" aria-labelledby="pending-heading"><div className="panel-body">
         <h2 id="pending-heading">{b.pendingRestore}</h2><p className="muted">{recoverySupported ? b.pendingRestoreHelp : outcome === 'unsupported' ? b.unsupportedPendingHelp : b.blockedPendingHelp}</p>
