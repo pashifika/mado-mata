@@ -161,7 +161,8 @@ export default function App() {
   const [createDraft, setCreateDraft] = useState<CreateDraft>(EMPTY_CREATE);
   const [createError, setCreateError] = useState<Fault | null>(null);
   const [savedOpen, setSavedOpen] = useState(false);
-  const [configurationOpen, setConfigurationOpen] = useState(false);
+  // In-shell configuration page: `retry` is an explicit Retry route; neither changes the authoritative BootstrapStatus.
+  const [configurationIntent, setConfigurationIntent] = useState<'configuration' | 'retry' | null>(null);
   const [reopening, setReopening] = useState<string | null>(null);
   const [reopenError, setReopenError] = useState<Fault | null>(null);
   const [appFilter, setAppFilter] = useState<LogFilter>(EMPTY_FILTER);
@@ -407,7 +408,7 @@ export default function App() {
     setDialogOpen(false);
     setCreateOpen(false);
     setSavedOpen(false);
-    setConfigurationOpen(false);
+    setConfigurationIntent(null);
     closeLibrary();
     doctorDispatch({type: 'close'});
     setCreateDraft(EMPTY_CREATE);
@@ -618,8 +619,11 @@ export default function App() {
   // the ordinary inspection, signer continuity, profile reconciliation and durable binding. Import never reaches here.
   function selectInstalled(workspace: Workspace, packageId: string, artifactId: string) {
     if (!openWorkspaces.current.some(item => sameWorkspace(workspaceRef(item), workspaceRef(workspace))) || inspectBlock(workspace) !== null) return;
-    if (library !== null) setLibraryFocus(workspace.id);
-    closeLibrary();
+    // Popup closure invalidates only the popup's own listing; a saved-identity Reinspect keeps the startup read.
+    if (library !== null) {
+      setLibraryFocus(workspace.id);
+      closeLibrary();
+    }
     invalidateOwnerTarget(workspace.id);
     const origin: Origin = {id: workspace.id, revision: workspace.revision};
     const ref = workspaceRef(workspace);
@@ -2112,7 +2116,7 @@ export default function App() {
       change(workspace.id, item => ({...item, page: 'run'}));
     } else if (route !== 'manual') {
       closeLibrary();
-      setConfigurationOpen(true);
+      setConfigurationIntent(route === 'retry' ? 'retry' : 'configuration');
     }
   }
 
@@ -2298,7 +2302,7 @@ export default function App() {
     },
     onExit: () => void exitApplication(),
     onDoctor: () => diagnose('application'),
-    onDismiss: () => {setConfigurationOpen(false); menuButton.current?.focus();},
+    onDismiss: () => {setConfigurationIntent(null); menuButton.current?.focus();},
   };
 
   // Closing resolves drafts first; shutdown retains the lease until owned work settles.
@@ -2762,7 +2766,7 @@ export default function App() {
             {bootstrap.actionError && <FaultMessage title={ui.bootstrap.actionFailed} value={bootstrap.actionError}/>}
           </main>
         </div>
-        : <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={false}/>}
+        : <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={false} retryIntent={false}/>}
       {doctorDialog}
     </LocaleContext>;
   }
@@ -2840,7 +2844,7 @@ export default function App() {
           {menuOpen && <div id="application-menu-items" ref={menu} className="dropdown" role="menu" aria-labelledby="application-menu" onKeyDown={menuKeys}>
             <button type="button" role="menuitem" id="menu-settings" disabled={settings === null || !normalReady} onClick={openSettings}>{t.appSettings}</button>
             <button type="button" role="menuitem" id="menu-plugins" onClick={openPlugins}>{t.appPlugins}</button>
-            <button type="button" role="menuitem" id="menu-restore" onClick={() => {menuButton.current?.focus(); setMenuOpen(false); setConfigurationOpen(true);}}>{ui.bootstrap.restoreHeading}</button>
+            <button type="button" role="menuitem" id="menu-restore" onClick={() => {menuButton.current?.focus(); setMenuOpen(false); setConfigurationIntent('configuration');}}>{ui.bootstrap.restoreHeading}</button>
             <button type="button" role="menuitem" id="menu-doctor" disabled={closing} onClick={() => {menuButton.current?.focus(); setMenuOpen(false); diagnose('application');}}>{ui.doctor.heading}</button>
             <button type="button" role="menuitem" id="menu-application-logs" aria-current={nav.kind === 'application' ? 'page' : undefined}
               aria-label={`${t.applicationLogs} · ${applicationLogCount}`} onClick={() => {setMenuOpen(false); go({kind: 'application'});}}>
@@ -2892,7 +2896,8 @@ export default function App() {
       <button type="button" autoFocus onClick={() => {setPendingClose(null); focusWorkspaceSelection(workspaces.length);}}>{t.keepOpen}</button>
     </div>}
     {pollError && <div className="content-wide"><FaultMessage title={t.connectionFailed} value={pollError}/></div>}
-    {(inShellRecovery || configurationOpen) && status && <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={true}/>}
+    {(inShellRecovery || configurationIntent !== null) && status && <BootstrapPage ui={bootstrap} status={status} dispatch={dispatch} handlers={bootstrapHandlers} admission={admission} exiting={closing} inShell={true}
+      retryIntent={configurationIntent === 'retry'}/>}
     {status?.state === 'ready' && status.fault && <div className="content-wide"><FaultMessage title={`${ui.bootstrap.stage} · ${status.stage}`} value={status.fault}/>
       <div className="button-row"><button id="refresh-status" type="button" disabled={bootstrap.pending !== null} onClick={() => void bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false)}>{ui.reopen.refresh}</button>
         <span className="muted">{ui.bootstrap.actionFailedHelp}</span></div></div>}

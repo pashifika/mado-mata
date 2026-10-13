@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {currentDoctorOwner, reduceDoctor} from './doctor-state.ts';
+import {currentDoctorOwner, doctorSummary, reduceDoctor} from './doctor-state.ts';
 
 const owner = {internalName: 'saved-a', ref: {workspace_id: 'session-a', revision: 2}};
 const request = id => ({type: 'request', state: {request: id, origin: 'application', owners: [owner], package: null, pending: true, report: null, error: null}});
@@ -25,4 +25,16 @@ test('a stored owner cannot retarget navigation to a reopened or changed session
   assert.equal(currentDoctorOwner(state, 'saved-a', [{...owner, ref: {...owner.ref, revision: 3}}]), null);
   assert.equal(currentDoctorOwner(state, 'saved-a', [{...owner, ref: {workspace_id: 'reopened-a', revision: 2}}]), null);
   assert.equal(currentDoctorOwner(state, null, [owner]), null);
+});
+
+test('a failure stays visible beside unexamined scope, and unexamined scope never reads as complete', () => {
+  const check = status => ({scope: 'settings', owner: {internal_name: null, package_id: null, artifact_id: null, profile_id: null},
+    status, code: 'checked', fault_category: null, routes: [], details: {path: null}});
+  const summary = (statuses, truncated = false) => doctorSummary({root: '/isolated', checks: statuses.map(check), truncated});
+  assert.equal(summary(['failed', 'unexamined']), 'failedPartial');
+  assert.equal(summary(['failed'], true), 'failedPartial');
+  assert.equal(summary(['passed', 'unexamined']), 'partial');
+  assert.equal(summary(['passed'], true), 'partial');
+  assert.equal(summary(['failed', 'passed']), 'failed');
+  assert.equal(summary(['passed']), 'checked');
 });

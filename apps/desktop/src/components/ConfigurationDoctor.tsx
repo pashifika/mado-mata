@@ -5,6 +5,7 @@ import {FaultMessage} from './ResultPanel.tsx';
 import {AuthoringFooterStatus} from './StatusSurface.tsx';
 import type {AuthoringStatusProps} from './StatusSurface.tsx';
 import type {DoctorCheck, DoctorRoute} from '../doctor-types.ts';
+import {doctorSummary} from '../doctor-state.ts';
 import type {DoctorState} from '../doctor-state.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
@@ -19,12 +20,10 @@ export function DoctorContent({state, onRefresh, onRoute, routeBlock}: {
   const ui = messages[useLocale()].ui;
   const d = ui.doctor;
   const report = state.report;
-  const incomplete = report?.truncated || report?.checks.some(check => check.status === 'unexamined');
-  const failed = report?.checks.some(check => check.status === 'failed');
   return <section className="doctor-content" aria-label={d.heading}>
     <p className="muted">{d.intro}</p>
     <div className="button-row"><button id="doctor-refresh" type="button" disabled={state.pending} onClick={onRefresh}>{d.refresh}</button>
-      <span role="status">{state.pending ? d.loading : report ? incomplete ? d.partial : failed ? d.failed : d.checked : ''}</span></div>
+      <span role="status">{state.pending ? d.loading : report ? d[doctorSummary(report)] : ''}</span></div>
     {state.error && <FaultMessage title={d.requestFailed} value={state.error}/>}
     {report && <>
       {report.truncated && <p className="inline-warning">{d.truncated}</p>}

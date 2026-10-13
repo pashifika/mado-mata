@@ -58,6 +58,10 @@ export default function RunPage({workspace, label, derived, run, locked, active,
   // Installed releases reinspect by saved identity and have no Edit entry point.
   const installed = workspace.savedPackage?.source.kind === 'installed' ? workspace.savedPackage.source : null;
   const reinspectable = installed !== null || workspace.inspectPath.trim() !== '';
+  // A changed path makes Reinspect inspect that directory instead of the installed release (see App); its
+  // attribution stays visible while the one editable field remains in the collapsed details.
+  const pendingPath = installed !== null && workspace.inspectPath.trim() !== '' && workspace.inspectPath.trim() !== bound.packagePath
+    ? workspace.inspectPath.trim() : null;
   const reinspectButton = useRef<HTMLButtonElement>(null);
   const confirmRow = useRef<HTMLDivElement>(null);
   // Set only when the confirmation row closes while it owns focus. Focus returns to Reinspect; once the submitted
@@ -152,6 +156,7 @@ export default function RunPage({workspace, label, derived, run, locked, active,
             <div className="package-source-heading"><span id="package-source-heading" className="eyebrow">{t.run.sourceEyebrow}</span>
               <div className="package-source-controls">
                 {!confirmReinspect && <ButtonHint hint={t.run.reinspectHint}><button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !reinspectable}
+                  aria-describedby={pendingPath !== null ? 'package-source-pending' : undefined}
                   title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button></ButtonHint>}
                 {packageAction}
               </div></div>
@@ -159,6 +164,7 @@ export default function RunPage({workspace, label, derived, run, locked, active,
               <strong>{installed ? release ? t.packageLibrary.currentInstalled(release.name, release.release_version) : t.distribution.installedSource(bound.package.package_id)
                 : t.reopen.directory(bound.package.package_id)}</strong>
               <span className="tag">{t.run.inspected(workspace.revision)}</span></div>
+            {pendingPath !== null && <p id="package-source-pending" className="inline-warning">{t.run.pendingSource(pendingPath)}</p>}
             {installed === null && pathField}
             {(confirmReinspect || editOwner || installed === null) && <div className="package-source-actions">
               {confirmReinspect && <div ref={confirmRow} className="confirm-row" role="alertdialog" aria-labelledby="confirm-reinspect-text">

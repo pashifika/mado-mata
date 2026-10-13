@@ -57,7 +57,7 @@ const adapterArguments = {
   'ui.ocrSetup.state': [['missing'],['verified'],['manual'],['unsupported'],['future-state']],
   'ui.ocrSetup.stage': [['downloading'],['verifying'],['complete'],['cancelled'],['future-stage']],
   'ui.run.heading': [['profile-A']], 'ui.run.owned': [[null],['run-A']],
-  'ui.run.settled': [[null],['run-A']], 'ui.run.inspected': [[2]],
+  'ui.run.settled': [[null],['run-A']], 'ui.run.inspected': [[2]], 'ui.run.pendingSource': [['/packages/a']],
   'ui.run.descriptorHelp': [[4096]],
   'ui.run.startUses': [[null,false,null,null],['profile-A',false,null,null],[null,true,null,null],['profile-A',true,'environment-A','corpus-A']],
   'ui.run.olderRevision': [[1,2]],

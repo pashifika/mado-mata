@@ -186,8 +186,17 @@ pub(crate) fn observe_installed(
             identity.caused("InstalledIntegrity", "installed signer location is unsafe", cause)
         })?;
         let package = signer.join(package_id);
-        if !crate::storage::exists(&package)? {
-            continue;
+        match fs::symlink_metadata(&package) {
+            Ok(metadata) if metadata.is_file() => continue,
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(identity.caused(
+                    "InstalledIntegrity",
+                    "installed package location is unavailable",
+                    io_fault("inspect package location", &package, &error),
+                ));
+            }
         }
         crate::storage::check_directory(&package).map_err(|cause| {
             identity.caused("InstalledIntegrity", "installed package location is unsafe", cause)

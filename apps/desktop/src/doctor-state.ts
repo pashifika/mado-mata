@@ -26,6 +26,15 @@ export function reduceDoctor(state: DoctorState | null, event: DoctorEvent): Doc
     : {...state, pending: false, report: null, error: event.error};
 }
 
+export type DoctorSummary = 'failedPartial' | 'partial' | 'failed' | 'checked';
+
+// Unexamined scope never hides a failure, and a report with unexamined scope never reads as complete.
+export function doctorSummary(report: DoctorReport): DoctorSummary {
+  const partial = report.truncated || report.checks.some(check => check.status === 'unexamined');
+  const failed = report.checks.some(check => check.status === 'failed');
+  return failed ? partial ? 'failedPartial' : 'failed' : partial ? 'partial' : 'checked';
+}
+
 // A report names storage owners, not mutation authority. Navigation retains the observed live session.
 export function currentDoctorOwner(state: DoctorState, internalName: string | null, live: DoctorOwner[]): WorkspaceRef | null {
   if (internalName === null) return null;

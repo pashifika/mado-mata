@@ -214,6 +214,7 @@ reads the selected data folder even when Application construction failed.
 Settings, transactions, saved workspaces, source references, profiles and Targets
 are reported separately as **Passed**, **Failed** or **Not examined**; a bad owner
 does not hide safe siblings. Reports are bounded to 512 checks and 256 KiB.
+The summary retains failures even when some scope remains unexamined.
 Target records and pending writes are also checked before a source is bound.
 Paths and artifact identifiers are behind **Local details**. Raw configuration,
 profile values, package source, signing keys and credentials are not returned.
@@ -226,9 +227,13 @@ unavailable schemas remain unexamined. An observation is not an atomic snapshot
 or a health guarantee for a later operation.
 
 Recovery buttons only open the existing Import, workspace inspection/profile
-recovery, Retry, snapshot or restore flow. Each retains its own admission,
-confirmation and preservation rules. Closed or changed workspace sessions cannot
-receive an old report's action. Preserve the failing document, error category
+recovery, Retry, snapshot or restore flow. Retry remains available from an
+explicit doctor route even if the retained Application is Ready; opening it
+does not reconstruct the session or grant disposal consent. Each flow retains
+its own admission, confirmation and preservation rules. Artifact-only findings
+without a workspace owner offer manual guidance rather than borrowing another
+workspace. Closed or changed workspace sessions cannot receive an old report's
+action. Preserve the failing document, error category
 and original archive before repair; do not replace unknown failures with defaults.
 
 Doctor is intended to grow toward supported repair assistance. This delivery
@@ -702,8 +707,9 @@ On Guidance, choose **Packages…** at the upper right. On Run, choose **Change�
 inside **Package source**, immediately to the right of **Reinspect**. This region
 separates source identity/status and editing actions from profile settings;
 **Source details** discloses the location, runtime and artifact identity.
-Installed sources also keep directory replacement in those details. Both entries
-open the same bounded library.
+Installed sources also keep directory replacement in those details. A pending
+replacement remains visible outside the collapsed details, so **Reinspect** never
+silently changes its target. Both library entries open the same bounded popup.
 Use **Import PKG…** there, select a `.mmpkg`, inspect its verified release/key/source
 facts, and confirm.
 Verification and static compilation do not execute scripts. Import can finish

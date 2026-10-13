@@ -227,7 +227,11 @@ impl Scan<'_> {
         let routes: &[Route] = if code == "pending_transaction" {
             &[Route::Manual, Route::Retry]
         } else if matches!(scope, Scope::Source | Scope::PackageVerification) {
-            &[Route::Manual, Route::Inspect, Route::Retry]
+            if owner.internal_name.is_some() {
+                &[Route::Manual, Route::Inspect, Route::Retry]
+            } else {
+                &[Route::Manual, Route::Retry]
+            }
         } else if code == "invalid_document" {
             &[Route::Manual, Route::Snapshot, Route::Restore, Route::Retry]
         } else {
@@ -343,7 +347,8 @@ impl Scan<'_> {
 
     fn source_failure(&mut self, scope: Scope, owner: &Owner, error: &Fault) {
         let (code, routes): (_, &[Route]) = match error.category.as_str() {
-            "InstalledMissing" => ("archive_missing", &[Route::ImportOriginal, Route::Inspect]),
+            "InstalledMissing" if owner.internal_name.is_some() => ("archive_missing", &[Route::ImportOriginal, Route::Inspect]),
+            "InstalledMissing" => ("archive_missing", &[Route::Manual, Route::Retry]),
             "InstalledReference" => ("invalid_document", &[Route::Manual, Route::Retry]),
             _ => ("archive_invalid", &[Route::Manual, Route::Retry]),
         };
@@ -371,8 +376,14 @@ impl Scan<'_> {
         }
         // Only fixed member names are observed; expanded source is never opened.
         match distribution::managed_identity(self.root, &self.root.join(&relative)) {
-            Ok(Some(_)) => self.note(scope, owner, Status::Failed, "legacy_layout_refused", None,
-                &relative, &[Route::ImportOriginal, Route::Inspect]),
+            Ok(Some(_)) => {
+                let routes: &[Route] = if owner.internal_name.is_some() {
+                    &[Route::ImportOriginal, Route::Inspect]
+                } else {
+                    &[Route::Manual, Route::Retry]
+                };
+                self.note(scope, owner, Status::Failed, "legacy_layout_refused", None, &relative, routes);
+            }
             Ok(None) => self.note(scope, owner, Status::Unexamined, "source_unexamined", None,
                 &relative, &[Route::Manual]),
             Err(error) => self.failure(scope, owner, &error, &relative),

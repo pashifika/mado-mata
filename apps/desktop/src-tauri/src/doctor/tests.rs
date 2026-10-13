@@ -121,6 +121,42 @@ fn invalid_references_profiles_and_targets_keep_each_other_attributable() {
 }
 
 #[test]
+fn ownerless_missing_archive_keeps_manual_routes_without_borrowing_a_tab() {
+    let root = Root::new();
+    tab(&root, "Saved", &["sample"]);
+    root.put(&format!("pkgs/{}/sample", "0".repeat(64)), b"unrelated package-name file");
+    let request = DoctorRequest {
+        package: Some(InstalledIdentity { package_id: "sample".into(), artifact_id: "a".repeat(64) }),
+    };
+    let before = snapshot(&root.0);
+    let diagnosis = observe(Ok(&root.0), &request);
+    let check = diagnosis.checks.iter().find(|check| check.scope == Scope::PackageVerification
+        && check.code == "archive_missing").unwrap();
+    assert_eq!(check.status, Status::Failed);
+    assert!(check.owner.internal_name.is_none());
+    assert_eq!(check.routes, [Route::Manual, Route::Retry]);
+    assert!(diagnosis.checks.iter().any(|check| check.scope == Scope::Source
+        && check.owner.internal_name.as_deref() == Some("Saved")
+        && check.code == "archive_missing"
+        && check.routes == [Route::ImportOriginal, Route::Inspect]));
+    assert_eq!(snapshot(&root.0), before);
+
+    // Unsafe legacy ancestry reaches the generic failure route, not the import route.
+    root.put("pkgs/sample", b"retained ordinary file");
+    let before = snapshot(&root.0);
+    let diagnosis = observe(Ok(&root.0), &request);
+    let check = diagnosis.checks.iter().find(|check| check.scope == Scope::PackageVerification
+        && check.code == "read_refused").unwrap();
+    assert!(check.owner.internal_name.is_none());
+    assert_eq!(check.routes, [Route::Manual, Route::Retry]);
+    assert!(diagnosis.checks.iter().any(|check| check.scope == Scope::Source
+        && check.owner.internal_name.as_deref() == Some("Saved")
+        && check.code == "read_refused"
+        && check.routes == [Route::Manual, Route::Inspect, Route::Retry]));
+    assert_eq!(snapshot(&root.0), before);
+}
+
+#[test]
 fn absent_root_and_optional_target_do_not_initialize_defaults() {
     let root = Root::new();
     let missing = root.0.join("absent");
@@ -283,5 +319,41 @@ fn protected_links_and_unreadable_owners_refuse_without_reading_descendants() {
     let diagnosis = report(&root);
     assert!(has(&diagnosis, Scope::Source, Some("Installed"), Status::Failed, "archive_invalid"));
     assert!(!has(&diagnosis, Scope::Source, Some("Installed"), Status::Failed, "archive_missing"));
+}
+
+#[cfg(unix)]
+#[test]
+fn installed_package_locations_refuse_links_and_unsafe_directories_without_writes() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let root = Root::new();
+    let outside = Root::new();
+    outside.put("ordinary-file", b"PRIVATE_EXTERNAL_DOCUMENT");
+    tab(&root, "Saved", &["sample"]);
+    let signer = root.0.join("pkgs").join("0".repeat(64));
+    storage::private_directory(&signer).unwrap();
+    let package = signer.join("sample");
+    symlink(outside.0.join("ordinary-file"), &package).unwrap();
+    let request = DoctorRequest {
+        package: Some(InstalledIdentity { package_id: "sample".into(), artifact_id: "a".repeat(64) }),
+    };
+    let before = snapshot(&root.0);
+    let external = snapshot(&outside.0);
+    let diagnosis = observe(Ok(&root.0), &request);
+    assert!(has(&diagnosis, Scope::PackageVerification, None, Status::Failed, "archive_invalid"));
+    assert!(has(&diagnosis, Scope::Source, Some("Saved"), Status::Failed, "archive_invalid"));
+    assert!(!diagnosis.checks.iter().any(|check| check.code == "archive_missing"));
+    assert_eq!(snapshot(&root.0), before);
+    assert_eq!(snapshot(&outside.0), external);
+
+    fs::remove_file(&package).unwrap();
+    storage::private_directory(&package).unwrap();
+    fs::set_permissions(&package, fs::Permissions::from_mode(0o755)).unwrap();
+    let before = snapshot(&root.0);
+    let diagnosis = observe(Ok(&root.0), &request);
+    assert!(has(&diagnosis, Scope::PackageVerification, None, Status::Failed, "archive_invalid"));
+    assert!(has(&diagnosis, Scope::Source, Some("Saved"), Status::Failed, "archive_invalid"));
+    assert!(!diagnosis.checks.iter().any(|check| check.code == "archive_missing"));
+    assert_eq!(snapshot(&root.0), before);
+    assert_eq!(snapshot(&outside.0), external);
 }
 

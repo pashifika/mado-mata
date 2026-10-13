@@ -6,6 +6,8 @@
   with bounded owner-scoped findings, explicit unexamined scope and existing
   recovery entry points. It neither rewrites configuration nor grants execution
   authority.
+  Keep failures visible beside unexamined scope, avoid ownerless workspace routes,
+  and expose guarded Retry even when the retained Application is still Ready.
 - Replace the inline installed-package list with a searchable, viewport-bounded
   library popup. Group releases by signer/package, preserve browsing through
   Import and diagnosis, and require exact-artifact selection for the captured
@@ -13,6 +15,7 @@
   Show declared authors and current versions instead of key fingerprints, with
   an explicit Apply action. Put Packages… at Guidance's upper right and group
   Reinspect and Change… in Run's source header, apart from editing and details.
+  Keep a pending directory replacement visible when source details are collapsed.
 - Isolate controlled-plan test filenames across concurrent calls instead of relying
   on clock resolution alone.
 - Add [signed package transfer](docs/desktop.md#transfer-signed-packages):

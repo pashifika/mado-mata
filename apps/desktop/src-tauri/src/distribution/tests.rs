@@ -1488,11 +1488,26 @@ fn doctor_observes_exact_archive_restoration_without_adopting_expanded_content()
     data.put("tabs/Saved/sample/target.config", &serde_json::to_vec(&target).unwrap());
     let saved = snapshot(&data.0.join("tabs"));
     let expanded = snapshot(&data.0.join(&legacy));
+    let before_missing = snapshot(&data.0);
     let missing = observe(Ok(&data.0), &request);
     assert!(missing.checks.iter().any(|check| check.scope == Scope::Source
         && check.owner.internal_name.as_deref() == Some("Saved")
         && check.fault_category.as_deref() == Some("InstalledMissing")
         && check.routes == [Route::ImportOriginal, Route::Inspect]));
+    assert!(missing.checks.iter().any(|check| check.scope == Scope::Source
+        && check.owner.internal_name.as_deref() == Some("Saved")
+        && check.code == "legacy_layout_refused"
+        && check.routes == [Route::ImportOriginal, Route::Inspect]));
+    for code in ["archive_missing", "legacy_layout_refused"] {
+        let check = missing.checks.iter().find(|check|
+            check.scope == Scope::PackageVerification && check.code == code).unwrap();
+        assert_eq!(check.status, Status::Failed);
+        assert!(check.owner.internal_name.is_none());
+        assert_eq!(check.owner.package_id.as_deref(), Some("sample"));
+        assert_eq!(check.owner.artifact_id.as_deref(), Some(reference.artifact_id.as_str()));
+        assert_eq!(check.routes, [Route::Manual, Route::Retry]);
+    }
+    assert_eq!(snapshot(&data.0), before_missing);
     assert_eq!(snapshot(&data.0.join("tabs")), saved);
     assert_eq!(snapshot(&data.0.join(&legacy)), expanded);
 
@@ -1502,9 +1517,19 @@ fn doctor_observes_exact_archive_restoration_without_adopting_expanded_content()
     data.put(&format!("pkgs/{}/unrelated/{}.mmpkg", imported.facts().key_id, "f".repeat(64)), b"not an archive");
     // A regular file cannot contain an artifact, even when its name resembles a signing key.
     data.put(&format!("pkgs/{}", "e".repeat(64)), b"unrelated file");
+    // A regular package-name file under another signer cannot contain this artifact.
+    data.put(&format!("pkgs/{}/sample", "0".repeat(64)), b"unrelated package-name file");
+    let before_restored = snapshot(&data.0);
     let restored = observe(Ok(&data.0), &request);
     assert!(restored.checks.iter().any(|check| check.scope == Scope::PackageVerification
         && check.status == Status::Passed && check.code == "verified"));
+    assert!(restored.checks.iter().any(|check| check.scope == Scope::Source
+        && check.owner.internal_name.as_deref() == Some("Saved")
+        && check.status == Status::Passed && check.code == "archive_present"
+        && check.routes == [Route::Inspect]));
+    assert!(!restored.checks.iter().any(|check| check.scope == Scope::Source
+        && check.status == Status::Failed));
+    assert_eq!(snapshot(&data.0), before_restored);
     assert!(restored.checks.iter().any(|check| check.owner.profile_id.as_deref() == Some(&profile.id)
         && check.code == "verified"));
     assert!(restored.checks.iter().any(|check| check.owner.profile_id.as_deref() == Some(&rejected.id)
