@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Cover PNG encoding failure before capture acceptance: no frame commit or
+  published transfer, with the acquired session still closed exactly once.
+
 - Run the full repository check on hosted macOS arm64, including checksum-pinned
   actionlint and offline local-link validation. Keep Windows runtime-only,
   event-specific gate isolation and physical-device acceptance separate.

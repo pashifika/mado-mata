@@ -183,6 +183,38 @@ fn operation() -> mp::OperationContext {
 }
 
 #[test]
+fn encoding_failure_never_commits_or_publishes_and_still_closes() {
+    let (engine, port) = fixture(false, None);
+    let id = identity();
+    let authority = CaptureAuthority::new(id.clone()).unwrap();
+    authority.admit(&id).unwrap();
+    let operation = operation();
+    let session = engine
+        .open(
+            port.target,
+            &mp::OpenRequest::new().require_window_geometry(window_geometry()),
+            &operation,
+        )
+        .unwrap();
+    let result = acquisition::capture(
+        session,
+        geometry(),
+        &id,
+        &authority,
+        &operation,
+        || Ok(()),
+        |_| Err(Fault::new("ImageEncoding", "controlled encoder failure")),
+    );
+    assert_eq!(result.primary.unwrap().category, "ImageEncoding");
+    assert!(result.transfer.is_none());
+    assert!(matches!(result.cleanup, CaptureCleanup::Clean));
+    assert_eq!(port.acquisitions.load(Ordering::Relaxed), 1);
+    assert_eq!(port.producer.conversions(), 1);
+    assert_eq!(port.commits.load(Ordering::Relaxed), 0);
+    assert_eq!(port.closes.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn recorded_terminal_after_mapping_before_host_commit_refuses_the_prepared_png() {
     let (engine, port) = fixture(false, None);
     let id = identity();
