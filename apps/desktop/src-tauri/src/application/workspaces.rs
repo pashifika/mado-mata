@@ -347,10 +347,19 @@ impl Application {
 
     /// Installed releases for explicit selection; each archive is reverified per call.
     pub fn package_installed_list(&self) -> Result<Vec<InstalledRelease>, Fault> {
+        self.package_installed_list_with(distribution::installed_releases)
+    }
+
+    fn package_installed_list_with(
+        &self,
+        read: impl FnOnce(&Path) -> Result<Vec<InstalledRelease>, Fault>,
+    ) -> Result<Vec<InstalledRelease>, Fault> {
         let result = (|| {
-            let (_command, state) = self.command_state()?;
-            drop(state);
-            distribution::installed_releases(&self.root)
+            {
+                let (_command, _state) = self.command_state()?;
+            }
+            // A catalog observation grants no authority; verification must not hold Stop's lock.
+            read(&self.root)
         })();
         self.outcome(None, "package_installed_list", None, result)
     }

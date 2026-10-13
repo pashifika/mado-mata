@@ -33,6 +33,7 @@ mod ocr_setup;
 mod operations;
 pub use ocr_setup::SetupOperation;
 mod profiles;
+pub(crate) use profiles::check_webview_value;
 mod recovery;
 mod target_observation;
 mod targets;

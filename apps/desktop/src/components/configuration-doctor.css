@@ -1,0 +1,12 @@
+.modal.configuration-doctor { width: min(880px, calc(100vw - 32px)); max-height: calc(100dvh - 24px); }
+.configuration-doctor[open] { display: flex; flex-direction: column; }
+.configuration-doctor > :not(.dialog-body) { flex: 0 0 auto; }
+.configuration-doctor > .dialog-body { flex: 1 1 auto; min-height: 0; max-height: none; overflow: auto; overscroll-behavior-y: contain; }
+.doctor-content, .doctor-check { min-width: 0; overflow-wrap: anywhere; }
+.doctor-checks { list-style: none; padding: 0; margin: 16px 0; display: grid; gap: 12px; }
+.doctor-check { padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.doctor-check-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.doctor-check p { margin: 8px 0; }
+.doctor-check .mono, .doctor-root .mono { white-space: normal; overflow-wrap: anywhere; }
+.doctor-routes { display: grid; gap: 8px; }
+.doctor-routes button { white-space: normal; }

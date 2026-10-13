@@ -279,6 +279,7 @@ fn exported_release_installs_and_reverifies_through_every_consumer() {
     assert_eq!(facts.release_version, "1.0.0");
     assert_eq!(facts.name, "Sample");
     assert_eq!(facts.description, "Plain <b>text</b>");
+    assert_eq!(facts.author_name, "Author");
     assert_eq!(facts.game_names["ja"], "サンプル");
     assert_eq!(facts.key_id, signer().key_id());
     assert_eq!(facts.revision, draft("1.0.0").revision());
@@ -1426,6 +1427,131 @@ fn expanded_installations_stay_unavailable_until_original_reimport() {
         managed_identity(&data.0, &container).unwrap(),
         Some(identity)
     );
+}
+
+#[test]
+fn doctor_observes_exact_archive_restoration_without_adopting_expanded_content() {
+    use crate::doctor::{DoctorRequest, Route, Scope, Status, observe};
+    use crate::storage::{PackageReference, PackageSource, Profile, TabRecord};
+    use crate::target::{ResolvedLocation, TargetBinding, TargetRecord, TargetResolution};
+    let data = Root::new();
+    let selection = Root::new();
+    let original = archive_of(&export("1.0.0-doctor-fixture"));
+    let imported = import(&selection, &original).unwrap();
+    let reference = InstalledIdentity {
+        package_id: "sample".into(),
+        artifact_id: imported.facts().artifact_id.clone(),
+    };
+    let request = DoctorRequest { package: Some(reference.clone()) };
+    let legacy = format!("pkgs/sample/{}", reference.artifact_id);
+    // Generic supported recovery, not a reproduction of the undiagnosed operator report.
+    for (name, body) in members(&original) {
+        data.put(&format!("{legacy}/{name}"), &body);
+    }
+    data.put(&format!("{legacy}/receipt.json"), b"retained legacy evidence");
+    let tab = TabRecord {
+        version: 1, internal_name: "Saved".into(), display_name: "Saved".into(), open: true,
+        packages: vec![PackageReference {
+            package_id: "sample".into(),
+            source: PackageSource::Installed {
+                package_id: reference.package_id.clone(), artifact_id: reference.artifact_id.clone(),
+            },
+        }],
+        selected_package_id: Some("sample".into()),
+    };
+    data.put("tabs/Saved/tab.config", &serde_json::to_vec(&tab).unwrap());
+    let schema: Value = serde_json::from_slice(&imported.draft().files()["schema.json"]).unwrap();
+    let profile = Profile {
+        version: 1, id: crate::storage::new_id().unwrap(), name: "Kept".into(),
+        package_id: "sample".into(),
+        schema_identity: mado_runtime_comparison::model::identity(&schema).unwrap(),
+        values: json!({"message":"PRIVATE_KEPT_VALUE"}),
+    };
+    data.put(&format!("tabs/Saved/sample/{}.config", profile.id), &serde_json::to_vec(&profile).unwrap());
+    let rejected = Profile {
+        id: crate::storage::new_id().unwrap(), values: json!({"message":42}), ..profile.clone()
+    };
+    data.put(&format!("tabs/Saved/sample/{}.config", rejected.id), &serde_json::to_vec(&rejected).unwrap());
+    let declaration = crate::target::tests::declaration();
+    let target = TargetRecord {
+        version: 1, internal_name: "Saved".into(), package_id: "sample".into(), revision: 1,
+        binding: Some(TargetBinding {
+            id: crate::storage::new_id().unwrap(), package_id: "sample".into(),
+            target_id: declaration.id.clone(), declaration_identity: declaration.identity().unwrap(),
+            configuration: crate::target::tests::configuration("/fixture/game"),
+            resolution: TargetResolution {
+                game: ResolvedLocation { path: "/fixture/game".into(), executable: "/fixture/game".into() },
+                launcher: None, working_directory: None,
+            },
+        }),
+    };
+    data.put("tabs/Saved/sample/target.config", &serde_json::to_vec(&target).unwrap());
+    let saved = snapshot(&data.0.join("tabs"));
+    let expanded = snapshot(&data.0.join(&legacy));
+    let before_missing = snapshot(&data.0);
+    let missing = observe(Ok(&data.0), &request);
+    assert!(missing.checks.iter().any(|check| check.scope == Scope::Source
+        && check.owner.internal_name.as_deref() == Some("Saved")
+        && check.fault_category.as_deref() == Some("InstalledMissing")
+        && check.routes == [Route::ImportOriginal, Route::Inspect]));
+    assert!(missing.checks.iter().any(|check| check.scope == Scope::Source
+        && check.owner.internal_name.as_deref() == Some("Saved")
+        && check.code == "legacy_layout_refused"
+        && check.routes == [Route::ImportOriginal, Route::Inspect]));
+    for code in ["archive_missing", "legacy_layout_refused"] {
+        let check = missing.checks.iter().find(|check|
+            check.scope == Scope::PackageVerification && check.code == code).unwrap();
+        assert_eq!(check.status, Status::Failed);
+        assert!(check.owner.internal_name.is_none());
+        assert_eq!(check.owner.package_id.as_deref(), Some("sample"));
+        assert_eq!(check.owner.artifact_id.as_deref(), Some(reference.artifact_id.as_str()));
+        assert_eq!(check.routes, [Route::Manual, Route::Retry]);
+    }
+    assert_eq!(snapshot(&data.0), before_missing);
+    assert_eq!(snapshot(&data.0.join("tabs")), saved);
+    assert_eq!(snapshot(&data.0.join(&legacy)), expanded);
+
+    let publication = publish_import(&data.0, &imported, &idle()).unwrap();
+    assert!(publication.committed);
+    // An unrelated unreadable/invalid archive is never part of this explicit scope.
+    data.put(&format!("pkgs/{}/unrelated/{}.mmpkg", imported.facts().key_id, "f".repeat(64)), b"not an archive");
+    // A regular file cannot contain an artifact, even when its name resembles a signing key.
+    data.put(&format!("pkgs/{}", "e".repeat(64)), b"unrelated file");
+    // A regular package-name file under another signer cannot contain this artifact.
+    data.put(&format!("pkgs/{}/sample", "0".repeat(64)), b"unrelated package-name file");
+    let before_restored = snapshot(&data.0);
+    let restored = observe(Ok(&data.0), &request);
+    assert!(restored.checks.iter().any(|check| check.scope == Scope::PackageVerification
+        && check.status == Status::Passed && check.code == "verified"));
+    assert!(restored.checks.iter().any(|check| check.scope == Scope::Source
+        && check.owner.internal_name.as_deref() == Some("Saved")
+        && check.status == Status::Passed && check.code == "archive_present"
+        && check.routes == [Route::Inspect]));
+    assert!(!restored.checks.iter().any(|check| check.scope == Scope::Source
+        && check.status == Status::Failed));
+    assert_eq!(snapshot(&data.0), before_restored);
+    assert!(restored.checks.iter().any(|check| check.owner.profile_id.as_deref() == Some(&profile.id)
+        && check.code == "verified"));
+    assert!(restored.checks.iter().any(|check| check.owner.profile_id.as_deref() == Some(&rejected.id)
+        && check.code == "profile_incompatible" && check.routes.contains(&Route::ProfileRecovery)));
+    assert!(restored.checks.iter().any(|check| check.scope == Scope::Target && check.code == "target_incompatible"));
+    assert!(!restored.checks.iter().any(|check| check.owner.package_id.as_deref() == Some("unrelated")));
+    assert!(!serde_json::to_string(&restored).unwrap().contains("PRIVATE_KEPT_VALUE"));
+    assert_eq!(snapshot(&data.0.join("tabs")), saved);
+    assert_eq!(snapshot(&data.0.join(&legacy)), expanded);
+    assert_eq!(fs::read(&publication.path).unwrap(), original);
+    assert_eq!(managed_identity(&data.0, &data.0.join(&legacy)).unwrap(), Some(reference));
+
+    fs::write(&publication.path, b"tampered").unwrap();
+    let metadata_only = observe(Ok(&data.0), &DoctorRequest::default());
+    assert!(metadata_only.checks.iter().any(|check| check.scope == Scope::Source && check.code == "archive_present"));
+    assert!(!metadata_only.checks.iter().any(|check| check.scope == Scope::PackageVerification && check.status == Status::Passed));
+    let integrity = observe(Ok(&data.0), &request);
+    assert!(integrity.checks.iter().any(|check| check.scope == Scope::PackageVerification
+        && check.code == "archive_invalid" && check.fault_category.as_deref() == Some("InstalledIntegrity")
+        && !check.routes.contains(&Route::ImportOriginal)));
+    assert_eq!(snapshot(&data.0.join("tabs")), saved);
+    assert_eq!(snapshot(&data.0.join(&legacy)), expanded);
 }
 
 /// One independently built and signed release of `package_id`, derived from the

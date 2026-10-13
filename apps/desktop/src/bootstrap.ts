@@ -201,3 +201,11 @@ export function recoveryBlock(status:BootstrapStatus, admission:Admission, disca
   if (!status.pending_restore || status.recovery_supported !== true) return 'pendingRestore';
   return reconstructionBlock(status, admission, discard);
 }
+
+// Retry is offered for unusable configuration and for pending evidence this binary cannot recover. A Ready
+// Application offers it only on explicit navigation intent; the intent never replaces the authoritative status and
+// Retry keeps its own admission and disposal consent.
+export function retryOffered(status:BootstrapStatus, intent:boolean):boolean {
+  if (status.pending_restore) return status.recovery_supported !== true;
+  return status.state !== 'setup' && (status.state !== 'ready' || intent);
+}

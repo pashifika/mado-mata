@@ -45,7 +45,6 @@
     "preparingImport": "Verifying package archive",
     "publishingImport": "Installing package",
     "readingSigner": "Reading local signing key",
-    "readingInstalled": "Reading installed packages",
     "application": "Application",
     "menu": "Menu",
     "workspace": "Workspace",

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Add a read-only Configuration doctor available before Application construction,
+  with bounded owner-scoped findings, explicit unexamined scope and existing
+  recovery entry points. It neither rewrites configuration nor grants execution
+  authority.
+  Keep failures visible beside unexamined scope, avoid ownerless workspace routes,
+  and expose guarded Retry even when the retained Application is still Ready.
+- Replace the inline installed-package list with a searchable, viewport-bounded
+  library popup. Group releases by signer/package, preserve browsing through
+  Import and diagnosis, and require exact-artifact selection for the captured
+  workspace. Keep Stop independent of catalog verification.
+  Show declared authors and current versions instead of key fingerprints, with
+  an explicit Apply action. Put Packages… at Guidance's upper right and group
+  Reinspect and Change… in Run's source header, apart from editing and details.
+  Keep a pending directory replacement visible when source details are collapsed.
+- Isolate controlled-plan test filenames across concurrent calls instead of relying
+  on clock resolution alone.
 - Add [signed package transfer](docs/desktop.md#transfer-signed-packages):
   distribution metadata, Google author enrollment, offline Ed25519 export and
   verified `.mmpkg` import. Installed releases require explicit selection;
@@ -24,7 +40,8 @@
   controls, and distinguish command contention from unsettled package cleanup on Close.
 - Read complete HTTP response frames in OIDC loopback tests without requiring
   a graceful TCP close after oversized-header refusal; retain rejection,
-  secret-redaction and listener-closure checks.
+  secret-redaction and callback completion checks. Await the listener-owning
+  thread rather than probing a TCP address that can already have a new owner.
 - Keep the retirement-close regression valid when bounded log shutdown times out;
   still verify retirement, close, and refused new commands without changing
   production shutdown behavior.
