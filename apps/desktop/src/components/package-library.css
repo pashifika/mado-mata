@@ -7,7 +7,6 @@
 .package-library-heading { min-width: 0; }
 .package-library-heading .eyebrow, #package-library-current { overflow-wrap: anywhere; }
 #package-library-current .tag { margin-left: 6px; }
-.package-source-summary { min-width: 0; overflow-wrap: anywhere; }
 
 .package-library-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 24px; border-bottom: 1px solid var(--border); }
 .package-library-toolbar > input[type="search"] { flex: 1 1 220px; width: auto; font-size: 12px; }

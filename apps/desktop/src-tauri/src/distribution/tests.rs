@@ -279,6 +279,7 @@ fn exported_release_installs_and_reverifies_through_every_consumer() {
     assert_eq!(facts.release_version, "1.0.0");
     assert_eq!(facts.name, "Sample");
     assert_eq!(facts.description, "Plain <b>text</b>");
+    assert_eq!(facts.author_name, "Author");
     assert_eq!(facts.game_names["ja"], "サンプル");
     assert_eq!(facts.key_id, signer().key_id());
     assert_eq!(facts.revision, draft("1.0.0").revision());

@@ -101,6 +101,14 @@ export function initialArtifact(group: LibraryGroup, saved: ArtifactRef | null):
   return group.versions.length === 1 ? group.versions[0].release.artifact_id : null;
 }
 
+// Display an exact highlighted/saved/sole version, never an inferred latest. An unchosen group summarizes all authors.
+export function groupSummary(group: LibraryGroup, saved: ArtifactRef | null, highlight: Highlight | null): {authors: (string | null)[]; version: LibraryVersion | null} {
+  const artifact = highlight?.kind === 'group' && highlight.id === group.id ? highlight.artifact : initialArtifact(group, saved);
+  const version = group.versions.find(item => item.release.artifact_id === artifact) ?? null;
+  const authors = [...new Set((version ? [version] : group.versions).map(item => item.facts.author_name.trim() || null))];
+  return {authors, version};
+}
+
 // Resolves a highlight against the shown listing. A highlight hidden by search or gone after refresh resolves to
 // nothing rather than to another release; a vanished version leaves its group without a chosen version.
 export function resolveHighlight(shown: Library, highlight: Highlight | null): Resolved | null {

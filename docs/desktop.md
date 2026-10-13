@@ -231,6 +231,11 @@ confirmation and preservation rules. Closed or changed workspace sessions cannot
 receive an old report's action. Preserve the failing document, error category
 and original archive before repair; do not replace unknown failures with defaults.
 
+Doctor is intended to grow toward supported repair assistance. This delivery
+provides diagnosis and navigation only; it does not run a general repair engine.
+Any future repair must identify its target, preserve prior state, require
+explicit consent and verify the resulting state.
+
 ### Import the historical default root
 
 Only when the new default root is absent, launch may offer the historical
@@ -693,8 +698,11 @@ The [format contract](runtime-comparison.md#signed-mmpkg-format) fixes its bound
 
 ### Import and explicitly select
 
-On Guidance, choose **Installed packages…**; on Run, choose **Change…** beside the
-saved-source summary. Both open the same bounded package library for that workspace.
+On Guidance, choose **Packages…** at the upper right. On Run, choose **Change…**
+inside **Package source**. This region separates source identity/status and
+Reinspect/Edit actions from profile settings; **Source details** discloses the
+location, runtime and artifact identity. Installed sources also keep directory
+replacement in those details. Both entries open the same bounded library.
 Use **Import PKG…** there, select a `.mmpkg`, inspect its verified release/key/source
 facts, and confirm.
 Verification and static compilation do not execute scripts. Import can finish
@@ -707,12 +715,16 @@ version and artifact choices. Search matches package names, IDs and all localize
 game names without rereading disk. Lists and details scroll inside the popup;
 **Back** retains the query, filter, highlight and list position. Import returns to
 the same browse without selecting anything. A newly opened library starts fresh.
+Rows show the package-declared **Author** and saved or explicitly browsed version,
+not a key fingerprint. An unchosen multi-version group summarizes its authors
+and version count without guessing a current/latest version. Author text is not
+publisher certification; grouping and replacement checks still use verified keys.
 Fault entries stay separate and cannot be selected. **Diagnose…** observes one
 problem without adopting its source or repairing files.
 
 Highlighting or opening details does not select a package. There is no automatic
-latest version: choose an exact artifact, then use the explicit workspace-named
-selection action. A dirty draft requires discard confirmation. Cancel, search,
+latest version: choose an exact artifact, then **Apply** to the workspace named
+in the footer. A dirty draft requires discard confirmation. Cancel, search,
 refresh and diagnosis leave the saved source unchanged. Stop remains available
 in library, diagnosis and Import while an owned operation continues.
 

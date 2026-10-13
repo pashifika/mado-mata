@@ -1,10 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {buildLibrary, filterLibrary, initialArtifact, libraryOutcome, locate, resolveHighlight, savedArtifact} from './package-library.ts';
+import {buildLibrary, filterLibrary, groupSummary, initialArtifact, libraryOutcome, locate, resolveHighlight, savedArtifact} from './package-library.ts';
 
 const KEY_A='a'.repeat(64), KEY_B='b'.repeat(64);
-function verified(packageId,artifact,{key=KEY_A,version='1.0.0',name='Sample Tool',games={}}={}){
-  return {package_id:packageId,artifact_id:artifact,fault:null,facts:{package_id:packageId,release_version:version,name,description:'',
+function verified(packageId,artifact,{key=KEY_A,version='1.0.0',name='Sample Tool',author='Package Author',games={}}={}){
+  return {package_id:packageId,artifact_id:artifact,fault:null,facts:{package_id:packageId,release_version:version,name,description:'',author_name:author,
     game_names:games,key_id:key,revision:'rev-1',artifact_id:artifact,files:1,bytes:10}};
 }
 function broken(packageId,artifact){
@@ -23,11 +23,52 @@ test('versions of one signer and package form one group ordered by authored labe
   assert.equal(initialArtifact(buildLibrary([releases[0]]).groups[0],null),'c3');
 });
 
-test('signing keys separate groups that share a name and package ID; names never merge or split them',()=>{
-  const library=buildLibrary([verified('example.a','a1'),verified('example.a','b1',{key:KEY_B}),verified('example.a','a2',{name:'Renamed Tool',version:'2.0.0'})]);
+test('signing keys separate groups that share a name, author and package ID; declared metadata never merges or splits them',()=>{
+  const library=buildLibrary([verified('example.a','a1'),verified('example.a','b1',{key:KEY_B}),
+    verified('example.a','a2',{name:'Renamed Tool',author:'Another Author',version:'2.0.0'})]);
   assert.deepEqual(library.groups.map(group=>[group.key_id,group.package_id,versionsOf(group).map(([,artifact])=>artifact)]),
     [[KEY_A,'example.a',['a1','a2']],[KEY_B,'example.a',['b1']]]);
   assert.deepEqual(library.groups[0].names,['Sample Tool','Renamed Tool']);
+});
+
+test('row metadata follows the saved exact artifact or a browsed candidate, not a matching version label or latest',()=>{
+  const candidate=verified('example.a','a1',{author:'Candidate Author'});
+  const saved=verified('example.a','z1',{author:'Saved Author'});
+  const newer=verified('example.a','n2',{version:'2.0.0',author:'Newer Author'});
+  const group=buildLibrary([candidate,newer,saved]).groups[0];
+  const savedRef={package_id:'example.a',artifact_id:'z1'};
+  assert.deepEqual(groupSummary(group,savedRef,null),{authors:['Saved Author'],version:group.versions[1]});
+  const highlight={kind:'group',id:group.id,artifact:'a1'};
+  assert.deepEqual(groupSummary(group,savedRef,highlight),{authors:['Candidate Author'],version:group.versions[0]});
+  assert.equal(initialArtifact(group,savedRef),'z1','browsing does not change the saved exact version');
+  assert.equal(groupSummary(group,savedRef,{kind:'group',id:'another-group',artifact:'a1'}).version.release,saved);
+  assert.equal(groupSummary(group,savedRef,{kind:'group',id:group.id,artifact:'removed'}).version,null,
+    'refresh does not substitute another exact artifact for a vanished candidate');
+});
+
+test('an unchosen multi-version row summarizes authors deterministically and leaves every exact version accessible',()=>{
+  const releases=[verified('example.a','c3',{version:'1.9.0',author:'Team A'}),
+    verified('example.a','b2',{version:'1.10.0',author:'Team B'}),verified('example.a','a1',{version:'1.10.0',author:'Team B'})];
+  const group=buildLibrary(releases).groups[0];
+  const summary=groupSummary(group,null,null);
+  assert.deepEqual(summary,{authors:['Team B','Team A'],version:null});
+  assert.deepEqual(groupSummary(buildLibrary([...releases].reverse()).groups[0],null,null),summary);
+  assert.deepEqual(versionsOf(group),[['1.10.0','a1'],['1.10.0','b2'],['1.9.0','c3']]);
+  assert.equal(initialArtifact(group,null),null);
+  assert.equal(groupSummary(group,null,{kind:'group',id:group.id,artifact:'c3'}).version.release,releases[0]);
+  const sole=buildLibrary([releases[0]]).groups[0];
+  assert.deepEqual(groupSummary(sole,null,null),{authors:['Team A'],version:sole.versions[0]});
+});
+
+test('whitespace-only declared authors remain explicit without rewriting signed metadata',()=>{
+  const blank=verified('example.a','a1',{author:' \t '});
+  const named=verified('example.a','b2',{author:'  Declared Author  '});
+  const group=buildLibrary([blank,named]).groups[0];
+  assert.deepEqual(groupSummary(group,null,null).authors,[null,'Declared Author']);
+  assert.deepEqual(groupSummary(group,{package_id:'example.a',artifact_id:'a1'},null).authors,[null]);
+  assert.deepEqual(groupSummary(group,null,{kind:'group',id:group.id,artifact:'b2'}).authors,['Declared Author']);
+  assert.equal(blank.facts.author_name,' \t ');
+  assert.equal(named.facts.author_name,'  Declared Author  ');
 });
 
 test('an entry without verified facts stays an attributable problem outside every trusted group',()=>{

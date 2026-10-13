@@ -53,6 +53,8 @@ pub struct ReleaseFacts {
     pub release_version: String,
     pub name: String,
     pub description: String,
+    /// Package-declared author from the signed manifest, not a verified identity.
+    pub author_name: String,
     pub game_names: BTreeMap<String, String>,
     pub key_id: String,
     pub revision: String,
@@ -108,6 +110,7 @@ impl ReleaseFacts {
             release_version: distribution.release_version.clone(),
             name: distribution.name.clone(),
             description: distribution.description.clone(),
+            author_name: distribution.author_name.clone(),
             game_names: distribution.game.names.clone(),
             key_id: key_id.to_owned(),
             revision: draft.revision().to_owned(),

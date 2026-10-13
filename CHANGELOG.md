@@ -10,6 +10,9 @@
   library popup. Group releases by signer/package, preserve browsing through
   Import and diagnosis, and require exact-artifact selection for the captured
   workspace. Keep Stop independent of catalog verification.
+  Show declared authors and current versions instead of key fingerprints, with
+  an explicit Apply action. Put Packages… at Guidance's upper right and Change…
+  inside Run's separated source overview, operations and technical details.
 - Isolate controlled-plan test filenames across concurrent calls instead of relying
   on clock resolution alone.
 - Add [signed package transfer](docs/desktop.md#transfer-signed-packages):

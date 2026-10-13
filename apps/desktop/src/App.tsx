@@ -201,6 +201,7 @@ export default function App() {
   const [installed, setInstalled] = useState<{releases: InstalledRelease[] | null; error: Fault | null; loading: boolean}>({releases: null, error: null, loading: false});
   const installedRead = useRef(0);
   const [library, setLibrary] = useState<{workspace: WorkspaceRef; label: string} | null>(null);
+  const [libraryFocus, setLibraryFocus] = useState<string | null>(null);
   const [doctor, doctorDispatch] = useReducer(reduceDoctor, null);
   const doctorRead = useRef(0);
   const [signer, setSigner] = useState<SignerState>({info: undefined, statusError: null, enrollError: null, cancelError: null, enrolling: false, cancelling: false});
@@ -617,6 +618,7 @@ export default function App() {
   // the ordinary inspection, signer continuity, profile reconciliation and durable binding. Import never reaches here.
   function selectInstalled(workspace: Workspace, packageId: string, artifactId: string) {
     if (!openWorkspaces.current.some(item => sameWorkspace(workspaceRef(item), workspaceRef(workspace))) || inspectBlock(workspace) !== null) return;
+    if (library !== null) setLibraryFocus(workspace.id);
     closeLibrary();
     invalidateOwnerTarget(workspace.id);
     const origin: Origin = {id: workspace.id, revision: workspace.revision};
@@ -2043,6 +2045,14 @@ export default function App() {
     doctorDispatch({type: 'close'});
   }
 
+  // The one installed-open launcher for `workspace`; pages only place it, while admission and the owner stay here.
+  function libraryLauncher(workspace: Workspace, bound: boolean) {
+    const owner = workspaceLabel(workspace, workspaces);
+    return <button id="installed-open" type="button" aria-haspopup="dialog" disabled={closing || !normalReady}
+      aria-label={bound ? ui.packageLibrary.changeLabel(owner) : ui.packageLibrary.openLabel(owner)}
+      onClick={() => openLibrary(workspace)}>{bound ? ui.packageLibrary.change : ui.packageLibrary.open}</button>;
+  }
+
   const libraryWorkspace = library ? workspaces.find(item => sameWorkspace(workspaceRef(item), library.workspace)) ?? null : null;
   const selectedSource = selected?.savedPackage?.source;
   const selectedRelease = selectedSource?.kind === 'installed' ? installed.releases?.find(release =>
@@ -2051,6 +2061,12 @@ export default function App() {
   useEffect(() => {
     if (library !== null && libraryWorkspace === null) closeLibrary();
   }, [library, libraryWorkspace]);
+  useEffect(() => {
+    if (libraryFocus === null || workspaces.some(item => item.id === libraryFocus && item.busy !== null)) return;
+    setLibraryFocus(null);
+    // Wait for the binding render to replace the old page's opener; never steal focus the user moved elsewhere.
+    if (selected?.id === libraryFocus && document.activeElement === document.body) document.getElementById('installed-open')?.focus();
+  }, [libraryFocus, workspaces, selected?.id]);
 
   function diagnose(origin: 'application' | 'library', target: {package_id: string; artifact_id: string} | null = null) {
     if (closing) return;
@@ -2911,22 +2927,12 @@ export default function App() {
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id}
             handlers={handlers(selected)} authoring={pageAuthoring(selected)} environment={savedEnvironment}
-            nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error}/>
+            nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error}
+            packageAction={libraryLauncher(selected, true)} release={selectedRelease ?? null}/>
           : <GuidancePage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
             onPath={value => change(selected.id, item => ({...item, inspectPath: value, error: null}))} onInspect={() => inspectFor(selected)} activeOwner={activeOwner(selected)}
-            recovery={recoveryHandlers(selected)} authoring={pageAuthoring(selected)} packagesRoot={packagesRoot}/>)}
-        {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && <section className="panel"><div className="panel-body">
-          <div className="button-row">
-            {selected.savedPackage && <span className="muted package-source-summary">{selected.savedPackage.source.kind === 'installed'
-              ? selectedRelease ? ui.packageLibrary.currentInstalled(selectedRelease.name, selectedRelease.release_version)
-                : ui.packageLibrary.currentInstalledUnlisted(selected.savedPackage.package_id)
-              : selected.savedPackage.source.kind === 'directory' ? ui.packageLibrary.currentDirectory(selected.savedPackage.source.path)
-                : ui.packageLibrary.currentArchive(selected.savedPackage.source.path)}</span>}
-            <button id="installed-open" type="button" aria-haspopup="dialog" disabled={closing || !normalReady}
-              aria-label={(selected.savedPackage ? ui.packageLibrary.changeLabel : ui.packageLibrary.openLabel)(workspaceLabel(selected, workspaces))}
-              onClick={() => openLibrary(selected)}>{selected.savedPackage ? ui.packageLibrary.change : ui.packageLibrary.open}</button>
-          </div>
-        </div></section>}
+            recovery={recoveryHandlers(selected)} authoring={pageAuthoring(selected)} packagesRoot={packagesRoot}
+            packageAction={libraryLauncher(selected, false)}/>)}
         {selected && selected.page === 'execution' && selectedRun && <ExecutionPage label={workspaceLabel(selected, workspaces)} revision={selected.revision}
           run={selectedRun} snapshot={operation?.snapshot ?? null} starting={starting?.workspaceId === selected.id}
           disclosed={selectedRun.view.run !== null && selected.disclosedRun === selectedRun.view.run}

@@ -269,12 +269,10 @@ function catalog(data: typeof enData) {
       currentInstalled: (name: string, version: string) => interpolate(data.packageLibrary.currentInstalled, {name, version}),
       currentInstalledUnlisted: (id: string) => interpolate(data.packageLibrary.currentInstalledUnlisted, {id}),
       versions: (count: number) => interpolate(data.packageLibrary.versions[count === 1 ? 'one' : 'other'], {count}),
-      signer: (key: string) => interpolate(data.packageLibrary.signer, {key}),
       noMatches: (query: string) => interpolate(data.packageLibrary.noMatches, {query}),
       chooseVersion: (owner: string) => interpolate(data.packageLibrary.chooseVersion, {owner}),
       target: (name: string, version: string, artifact: string, owner: string) => interpolate(data.packageLibrary.target, {name, version, artifact, owner}),
-      selectFor: (owner: string) => interpolate(data.packageLibrary.selectFor, {owner}),
-      selectForLabel: (name: string, version: string, owner: string) => interpolate(data.packageLibrary.selectForLabel, {name, version, owner}),
+      applyLabel: (name: string, version: string, owner: string) => interpolate(data.packageLibrary.applyLabel, {name, version, owner}),
     },
     doctor: data.doctor,
     // i18n-owned language-key suggestions and their labels; see i18n-language.ts.

@@ -6,7 +6,7 @@ import {AuthoringFooterStatus} from './StatusSurface.tsx';
 import type {AuthoringStatusProps} from './StatusSurface.tsx';
 import {shortDigest} from '../distribution.ts';
 import type {InstalledRelease} from '../distribution.ts';
-import {buildLibrary, filterLibrary, initialArtifact, libraryOutcome, locate, resolveHighlight, sameArtifact, savedArtifact} from '../package-library.ts';
+import {buildLibrary, filterLibrary, groupSummary, initialArtifact, libraryOutcome, locate, resolveHighlight, sameArtifact, savedArtifact} from '../package-library.ts';
 import type {ArtifactRef, Highlight, LibraryFilter, LibraryGroup} from '../package-library.ts';
 import type {Fault, PackageSource} from '../types.ts';
 import {messages} from '../i18n.ts';
@@ -205,12 +205,14 @@ export default function PackageLibraryDialog({open, suspended, owner, saved, dir
     {shown.groups.length > 0 && <ul id="package-library-groups" className="package-library-rows" aria-label={d.installedHeading}>
       {shown.groups.map(group => {
         const highlighted = resolved?.kind === 'group' && resolved.group.id === group.id;
+        const summary = groupSummary(group, savedRef, highlight);
+        const authors = summary.authors.map(author => author ?? p.authorUnavailable).join(' · ');
         return <li key={group.id}>
           <button type="button" className="package-library-row" data-row={group.id} aria-current={highlighted ? 'true' : undefined} onClick={() => openGroup(group)}>
             <span className="package-library-row-title"><strong>{group.names.join(' · ')}</strong>
-              {group.versions.some(version => sameArtifact(version.release, savedRef)) && savedTag}</span>
+              {summary.version && sameArtifact(summary.version.release, savedRef) && savedTag}</span>
             <span className="mono">{group.package_id}</span>
-            <span className="muted">{`${p.versions(group.versions.length)} · ${p.signer(shortDigest(group.key_id))}`}</span>
+            <span className="muted">{`${authors} · ${summary.version?.facts.release_version ?? p.versions(group.versions.length)}`}</span>
           </button>
         </li>;
       })}
@@ -253,11 +255,12 @@ export default function PackageLibraryDialog({open, suspended, owner, saved, dir
     </>;
   } else {
     const {group, version} = resolved;
+    const authors = groupSummary(group, savedRef, highlight).authors.map(author => author ?? p.authorUnavailable).join(' · ');
     detail = <>
       <h3 id="package-library-detail-heading" tabIndex={-1}>{group.names.join(' · ')}</h3>
       <dl className="package-library-facts">
         <dt>{d.packageId}</dt><dd className="mono">{group.package_id}</dd>
-        <dt>{d.keyFingerprint}</dt><dd className="mono">{group.key_id}</dd>
+        <dt>{p.author}</dt><dd>{authors}</dd>
         <dt>{d.signature}</dt><dd>{d.signatureValid}</dd>
         <dt>{d.account}</dt><dd>{d.accountUnverified}</dd>
       </dl>
@@ -343,8 +346,8 @@ export default function PackageLibraryDialog({open, suspended, owner, saved, dir
       {authoring && <AuthoringFooterStatus key={authoring.activity.owner.token} {...authoring} idPrefix="package-library-authoring"/>}
       <button id="close-package-library" type="button" onClick={onCancel}>{ui.common.close}</button>
       {!diagnosing && !confirming && <button id="package-library-select" type="button" className="primary" disabled={target === null || selectBlock !== null}
-        title={selectBlock ?? undefined} aria-label={target ? p.selectForLabel(target.facts.name, target.facts.release_version, owner) : undefined}
-        onClick={select}>{p.selectFor(owner)}</button>}
+        title={selectBlock ?? undefined} aria-label={target ? p.applyLabel(target.facts.name, target.facts.release_version, owner) : undefined}
+        onClick={select}>{p.apply}</button>}
     </div>
   </Modal>;
 }

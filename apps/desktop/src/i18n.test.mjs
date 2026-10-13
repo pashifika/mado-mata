@@ -158,9 +158,9 @@ const adapterArguments = {
   'ui.packageLibrary.filterProblems': [[0],[2]], 'ui.packageLibrary.results': [[1],[2]], 'ui.packageLibrary.versions': [[1],[2]],
   'ui.packageLibrary.currentDirectory': [['/packages/a']], 'ui.packageLibrary.currentArchive': [['/packages/a.zip']],
   'ui.packageLibrary.currentInstalled': [['Example','1.2.0']], 'ui.packageLibrary.currentInstalledUnlisted': [['example.a']],
-  'ui.packageLibrary.signer': [['key-A']], 'ui.packageLibrary.noMatches': [['query-A']],
+  'ui.packageLibrary.noMatches': [['query-A']],
   'ui.packageLibrary.chooseVersion': [['workspace-A']], 'ui.packageLibrary.target': [['Example','1.2.0','sha-A','workspace-A']],
-  'ui.packageLibrary.selectFor': [['workspace-A']], 'ui.packageLibrary.selectForLabel': [['Example','1.2.0','workspace-A']],
+  'ui.packageLibrary.applyLabel': [['Example','1.2.0','workspace-A']],
 };
 
 for (const locale of ['en','ja']) {
