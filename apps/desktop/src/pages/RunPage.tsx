@@ -149,20 +149,22 @@ export default function RunPage({workspace, label, derived, run, locked, active,
         <div className="panel-heading"><h2 id="config-heading">{t.run.configuration}</h2><span className="tag">{dirty ? t.common.unsavedChanges : t.run.savedValues}</span></div>
         <div className="panel-body">
           <section className="package-source" aria-labelledby="package-source-heading">
-            <div className="package-source-heading"><span id="package-source-heading" className="eyebrow">{t.run.sourceEyebrow}</span>{packageAction}</div>
+            <div className="package-source-heading"><span id="package-source-heading" className="eyebrow">{t.run.sourceEyebrow}</span>
+              <div className="package-source-controls">
+                {!confirmReinspect && <ButtonHint hint={t.run.reinspectHint}><button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !reinspectable}
+                  title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button></ButtonHint>}
+                {packageAction}
+              </div></div>
             <div className="package-source-identity">
               <strong>{installed ? release ? t.packageLibrary.currentInstalled(release.name, release.release_version) : t.distribution.installedSource(bound.package.package_id)
                 : t.reopen.directory(bound.package.package_id)}</strong>
               <span className="tag">{t.run.inspected(workspace.revision)}</span></div>
             {installed === null && pathField}
-            <div className="package-source-actions">
-              {confirmReinspect
-                ? <div ref={confirmRow} className="confirm-row" role="alertdialog" aria-labelledby="confirm-reinspect-text">
+            {(confirmReinspect || editOwner || installed === null) && <div className="package-source-actions">
+              {confirmReinspect && <div ref={confirmRow} className="confirm-row" role="alertdialog" aria-labelledby="confirm-reinspect-text">
                   <span id="confirm-reinspect-text">{t.run.confirmReinspect}</span>
                   <button type="button" className="danger-text" onClick={() => closeConfirm(true)}>{t.run.discardReinspect}</button>
-                  <button type="button" autoFocus onClick={() => closeConfirm(false)}>{t.run.keepDraft}</button></div>
-                : <ButtonHint hint={t.run.reinspectHint}><button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !reinspectable}
-                  title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button></ButtonHint>}
+                  <button type="button" autoFocus onClick={() => closeConfirm(false)}>{t.run.keepDraft}</button></div>}
               {editOwner
                 ? <button id="edit-package-return" type="button" onClick={authoring.onReturn}>{a.returnToEdit}</button>
                 : installed !== null ? null : confirmEdit
@@ -171,7 +173,7 @@ export default function RunPage({workspace, label, derived, run, locked, active,
                     <button id="edit-discard" type="button" className="danger-text" onClick={() => {setConfirmEdit(false); authoring.onOpen(bound.packagePath);}}>{a.discardEdit}</button>
                     <button id="edit-keep" type="button" autoFocus onClick={() => setConfirmEdit(false)}>{t.run.keepDraft}</button></div>
                   : <button id="edit-package" type="button" disabled={authoring.block !== null} title={authoring.block ?? undefined} onClick={confirmedEdit}>{a.editPackage}</button>}
-            </div>
+            </div>}
             <details className="package-source-details"><summary>{t.run.sourceDetails}</summary>
               <dl className="run-identity">
                 <dt>{t.distribution.packageId}</dt><dd className="mono">{bound.package.package_id}</dd>

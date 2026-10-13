@@ -699,10 +699,11 @@ The [format contract](runtime-comparison.md#signed-mmpkg-format) fixes its bound
 ### Import and explicitly select
 
 On Guidance, choose **Packages…** at the upper right. On Run, choose **Change…**
-inside **Package source**. This region separates source identity/status and
-Reinspect/Edit actions from profile settings; **Source details** discloses the
-location, runtime and artifact identity. Installed sources also keep directory
-replacement in those details. Both entries open the same bounded library.
+inside **Package source**, immediately to the right of **Reinspect**. This region
+separates source identity/status and editing actions from profile settings;
+**Source details** discloses the location, runtime and artifact identity.
+Installed sources also keep directory replacement in those details. Both entries
+open the same bounded library.
 Use **Import PKG…** there, select a `.mmpkg`, inspect its verified release/key/source
 facts, and confirm.
 Verification and static compilation do not execute scripts. Import can finish
