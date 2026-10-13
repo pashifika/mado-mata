@@ -93,6 +93,13 @@ engine build, acquire the following separately; the harness downloads nothing:
   No `PATH` search, alternate runtime, accelerator preference, or fallback is used.
 - The accepted detector and recognizer below, under one canonical model root.
 
+JavaScript and TypeScript execution also require the pinned Node.js **24.18.0**
+on an absolute `PATH` entry before launch. On Windows, the supervisor resolves
+that trusted executable before restricting the child's DLL search path to the
+selected native-library directories; it does not widen that path for Node.
+Initialization-only environment checks do not compile or evaluate package
+modules and do not require Node.
+
 Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/CONTRIBUTING.md#native-development-prerequisites)
 and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
 Its `tools/setup-native.py` configures only the command it launches; it installs

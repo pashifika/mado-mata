@@ -158,9 +158,14 @@ The full check has these responsibilities:
 - Run the checkout-owned OMP adapter tests without installing OMP or private
   plugins. These exercise registration/schema compatibility, explicit instance/
   owner selection, cancellation, session teardown, notice continuation and
-  unknown-outcome reconciliation. The compatibility floor is OMP `18.8.7`, not
-  an exact pin or upper bound; simulated API/version cases are not evidence
-  that an installed future release works.
+  unknown-outcome reconciliation. Windows cases use system Windows PowerShell
+  to exercise real private local pipes, ACL/reparse/replacement checks and
+  connected-server identity; Unix-only ownership cases remain platform-specific.
+  The technical compatibility floor is OMP `18.8.7`, not an exact pin or upper
+  bound. Actual integration acceptance separately uses the OMP installed locally
+  at test time and records its executable, exact version, OS and adapter identity;
+  historical-version downloads/reproduction are not required. Simulated
+  API/version cases do not establish that an installed release works.
 - Run the shared SDK catalog unit tests. Runtime `sdk_examples` tests discover
   the public catalog, compile examples with the pinned trusted compiler under
   empty and representative option schemas, and execute applicable behavior on
@@ -315,6 +320,13 @@ python3 tools/ci/check.py --runtime-only
 On Windows, use `python` in place of `python3` and preserve the tracked symlink
 as described in [development guidance](development-guidance.md#claude-symlink).
 Hosted Windows enables Git symlink checkout before fetching the repository.
+When keeping Windows scratch inside the checkout, choose a short writable
+`TEMP`/`TMP`/`TMPDIR`, for example `%CD%\.cache\ci-tmp`, and create it before
+launching the check. The disposable snapshot adds nested Cargo output paths;
+MSVC can fail with `LNK1104` on a long build-script output pathname even when
+application data publication supports extended Windows paths. Shorten the
+toolchain scratch root, not the application-path acceptance scenario.
+
 The two narrower modes are mutually exclusive. Missing tools, invalid input,
 or failing commands remain failures; neither mode substitutes for the full gate.
 These checks do not install remote rulesets or verify live GitHub enforcement.
@@ -401,7 +413,7 @@ npm run build --prefix apps/desktop
 cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib
 ```
 
-On macOS only, after the frontend build:
+On macOS and Windows, after the frontend build:
 
 ```sh
 cargo +1.98.1 build --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --features custom-protocol

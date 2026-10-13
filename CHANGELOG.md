@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Support native Windows OMP Agent integration with reviewed installation
+  management, bounded Job-owned command trees and private authenticated named
+  pipes. Release adapter `0.1.3`; preserve explicit owner/disclosure checks,
+  unknown outcomes, existing OMP sessions and macOS transport behavior.
+  Pass identity-checked ordinary Windows source paths to OMP's link command,
+  avoiding malformed junctions from duplicated native namespace prefixes.
+  Base actual integration acceptance on the locally installed OMP at test time,
+  recording its version rather than requiring historical-version reproduction.
+- Load application, preview, Edit, Recognition and source-editor code at their
+  actual view boundaries instead of one oversized startup bundle. Preserve
+  session ownership, operation controls and focus while local chunks load.
+- Contain the package library's hidden live status within its list scrollport,
+  preventing large Windows catalogs from scrolling the outer dialog.
+- Support long Windows paths during atomic no-replace configuration publication,
+  including restore displacement and recovery. Keep existing-destination refusal
+  and verify continuation/rollback without shortening the configured data root.
+- Scope intentional Unix-only process limits/outcomes and directory mutability
+  diagnostics to their consumers; remove unused test/import bindings and gate
+  engine-only correspondence methods precisely, retaining global warnings.
+- Preserve the trusted Node executable for Windows JavaScript and TypeScript
+  runs before restricting the native DLL search path. Keep initialization-only
+  environment checks independent of Node and retain parser isolation.
 - Do not start CI when a PR is marked ready for review. Retain opening, head
   updates, reopening, and explicit base-retarget revalidation.
 - Add a read-only Configuration doctor available before Application construction,
