@@ -438,10 +438,10 @@ Hosted checks use three event-exclusive workflows:
 - [CI (push)](../.github/workflows/ci-push.yml): pushes to `main` and `dev/**`.
 - [CI (manual)](../.github/workflows/ci-manual.yml): manual dispatch.
 
-PR events are limited to `opened`, `synchronize`, `reopened`, and
-`ready_for_review`. The PR workflow does
-not subscribe to `edited`: changing a PR title, description, or task-list
-checkbox creates no new CI workflow run or skipped checks. A job-level `if`
+PR events are limited to `opened`, `synchronize`, and `reopened`. The PR workflow
+does not subscribe to `edited` or `ready_for_review`: changing a PR title,
+description, or task-list checkbox, or marking it ready for review, creates no
+new CI workflow run or skipped checks. A job-level `if`
 would only skip jobs after a workflow run already exists, so it is not a
 substitute for removing the event subscription. There are no workflow path
 filters. Manual dispatch becomes available when the workflow is on the default
@@ -477,8 +477,9 @@ checks enabled. This suppresses duplicate work, not the push workflow or its
 skipped check entries, and does not remove GitHub's event labels.
 
 Draft PRs still run the normal PR checks on opening and head updates. Marking
-one ready for review triggers another PR run; its current-head `CI Gate` must
-pass before promotion.
+one ready for review does not rerun checks or replace their results. Its
+current-head PR `CI Gate` must still pass before promotion; the base-retarget
+revalidation procedure above remains required.
 
 Only this selector job receives `pull-requests: read` alongside `contents: read`,
 using the read-only `github.token` as `GH_TOKEN`. API responses and credentials

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Do not start CI when a PR is marked ready for review. Retain opening, head
+  updates, reopening, and explicit base-retarget revalidation.
 - Add a read-only Configuration doctor available before Application construction,
   with bounded owner-scoped findings, explicit unexamined scope and existing
   recovery entry points. It neither rewrites configuration nor grants execution
