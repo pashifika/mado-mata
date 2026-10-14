@@ -1,6 +1,7 @@
 import {useMemo} from 'react';
 import Select from './Select.tsx';
-import {JsonErrorNotice, NormalizationNotice} from './MetadataControls.tsx';
+import DistributionEditor from './DistributionEditor.tsx';
+import {JsonErrorNotice, NormalizationNotice, TextField} from './MetadataControls.tsx';
 import type {FileDraft} from '../authoring.ts';
 import {AUTHORING_RUNTIMES, ENTRY_NAMES, HELPER_DEPENDENCY, HELPER_VERSION, bundleIdValid, entryFunctionValid, formatJson, isObject, parseJson, readManifest,
   windowTitleValid, withEntry, withHelper, withTarget} from '../metadata.ts';
@@ -14,18 +15,9 @@ interface Props {
   onReplace: (text: string) => void; onOpen: (path: string) => void;
 }
 
-function TextField({id, label, value, help, error, onChange}: {id: string; label: string; value: string; help?: string; error: string | null; onChange: (value: string) => void}) {
-  const described = [help ? `${id}-help` : '', error ? `${id}-error` : ''].filter(Boolean).join(' ');
-  return <div className="field"><label htmlFor={id}>{label}</label>
-    <input id={id} type="text" value={value} spellCheck={false} autoCapitalize="off" autoCorrect="off" aria-invalid={error !== null}
-      aria-describedby={described || undefined} onChange={event => onChange(event.target.value)}/>
-    {help && <p id={`${id}-help`} className="field-help">{help}</p>}
-    {error && <p id={`${id}-error`} className="field-error">{error}</p>}</div>;
-}
-
-// The manifest as a form: runtime, entry exports, the approved helper and the portable target declaration are edited
-// in place; identity and file declarations are facts here, changed through Duplicate and the file menus. The host
-// validates every Save, so a rejected edit stays a draft with the refusal shown.
+// The manifest as a form: runtime, entry exports, the approved helper, the portable target declaration and the optional
+// release/search metadata are edited in place; identity and file declarations are facts here, changed through Duplicate
+// and the file menus. The host validates every Save, so a rejected edit stays a draft with the refusal shown.
 export default function ManifestEditor({draft, disabled, onReplace, onOpen}: Props) {
   const a = messages[useLocale()].ui.authoring;
   const document = useMemo(() => parseJson(draft.text), [draft.text]);
@@ -87,6 +79,7 @@ export default function ManifestEditor({draft, disabled, onReplace, onOpen}: Pro
             onChange={bundle => setTarget({...target, bundleId: bundle === '' ? null : bundle})}/>
         </>}
       </fieldset>
+      <DistributionEditor manifest={value} onChange={update}/>
     </fieldset>
     <section id="authoring-manifest-declarations" aria-labelledby="authoring-manifest-declarations-heading">
       <h3 id="authoring-manifest-declarations-heading">{a.declarationsHeading}</h3>

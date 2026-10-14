@@ -1,7 +1,8 @@
 # Desktop checkout: authoring, controlled/replay and macOS Native runs
 
 MadoMata's trusted Tauri/React WebView provides directory-package and Recognition
-authoring, inspection, profiles, run control, App-local OCR settings, and logs.
+authoring, signed package transfer, inspection, profiles, run control, App-local
+OCR settings, and logs.
 Package code runs in the supervised QuickJS runner, never in the WebView.
 Controlled runs need no OCR installation. Recorded replay uses real engine
 OCR/template recognition over explicitly selected, previously authorized frames.
@@ -54,10 +55,13 @@ set. The runtime's trusted compiler has its own
 No package selected by the operator can install dependencies or run lifecycle
 scripts.
 
-Vite bundles the editor and a lazy TypeScript language-service worker, including
-the ES2020 declaration closure from the pinned frontend TypeScript dependency.
-No CDN, runtime type download, package plugin or package-selected compiler is
-used. The editor and execution compiler share the application-owned SDK generator.
+Vite emits local chunks for the application, Edit, Recognition and the independent
+preview surface. CodeMirror loads when a source is opened; the TypeScript
+language-service worker remains demand-loaded and includes the ES2020 declaration
+closure from the pinned frontend TypeScript dependency. View loading does not
+replace the owning session or operation controls. No CDN, runtime type download,
+package plugin or package-selected compiler is used. The editor and execution
+compiler share the application-owned SDK generator.
 
 The Rust shell embeds only the OMP adapter's `package.json`, `index.mjs` and
 `client.mjs` from `integrations/omp`. Debug and production shell builds include
@@ -77,6 +81,18 @@ apps/desktop/src-tauri/target/debug/mado-mata-desktop
 `custom-protocol` serves the built application assets; no Vite server is needed.
 These commands do not enable the test-only `webdriver` feature. Normal builds
 have no automation listener, and release builds do not register that listener.
+
+Google author enrollment additionally requires the matching Desktop registration's
+`client_secret` string in Cargo's **build-time** `OIDC_CLIENT_KEY_GOOGLE`
+environment variable. Supply it through a non-echoing credential loader, not a
+command-line literal, tracked file or log. Rebuild and restart MadoMata after
+changing it; no runtime environment override is read. Public checks and ordinary
+builds need no value: unconfigured enrollment reports `SigningConfiguration`
+before opening the browser. Import, editing, controlled runs and offline signing
+with an existing enrolled key remain available. The value is extractable from a
+configured binary, not confidential-client authentication; see
+[ADR 0009](adr/0009-google-native-client-registration.md).
+
 The [shell decision](adr/0002-desktop-runner-boundary.md) describes the real
 WKWebView boundary; the [replay decision](adr/0003-desktop-recorded-replay.md)
 records its separate engine child and bounded consuming evidence.
@@ -194,6 +210,40 @@ use **Exit** or **Close window**, then relaunch. Retry cannot start a second wri
 or turn a previous timeout into a successful flush. This is distinct from a
 repairable settings read failure.
 
+### Diagnose local configuration
+
+Open **Configuration doctor** from Setup/Recovery or the Application menu. It
+reads the selected data folder even when Application construction failed.
+Settings, transactions, saved workspaces, source references, profiles and Targets
+are reported separately as **Passed**, **Failed** or **Not examined**; a bad owner
+does not hide safe siblings. Reports are bounded to 512 checks and 256 KiB.
+The summary retains failures even when some scope remains unexamined.
+Target records and pending writes are also checked before a source is bound.
+Paths and artifact identifiers are behind **Local details**. Raw configuration,
+profile values, package source, signing keys and credentials are not returned.
+
+Diagnosis writes nothing, settles no transaction, grants no execution authority
+and starts no compiler, script, network, capture, OCR or input. Ordinary diagnosis
+checks installed-archive presence, not signatures. A package-library problem's
+**Diagnose…** action explicitly verifies that one artifact; other archives and
+unavailable schemas remain unexamined. An observation is not an atomic snapshot
+or a health guarantee for a later operation.
+
+Recovery buttons only open the existing Import, workspace inspection/profile
+recovery, Retry, snapshot or restore flow. Retry remains available from an
+explicit doctor route even if the retained Application is Ready; opening it
+does not reconstruct the session or grant disposal consent. Each flow retains
+its own admission, confirmation and preservation rules. Artifact-only findings
+without a workspace owner offer manual guidance rather than borrowing another
+workspace. Closed or changed workspace sessions cannot receive an old report's
+action. Preserve the failing document, error category
+and original archive before repair; do not replace unknown failures with defaults.
+
+Doctor is intended to grow toward supported repair assistance. This delivery
+provides diagnosis and navigation only; it does not run a general repair engine.
+Any future repair must identify its target, preserve prior state, require
+explicit consent and verify the resulting state.
+
 ### Import the historical default root
 
 Only when the new default root is absent, launch may offer the historical
@@ -246,6 +296,8 @@ The shell-independent core retains its public root namespaces:
 | `application.rs` | `workspaces` owns Tab/session transitions; `authoring` owns the global Edit lease and validation/close lifecycle; `profiles` owns ordinary profile commands and desktop value checks; `recovery` owns schema reconciliation, repair/reset authority, and explicit binding retry; `targets` owns target commands; `native_run` captures and resolves reviewed bundle correspondence; `operations` owns execution, collection, and shutdown |
 | `storage.rs` | `settings`, `tabs`, `profiles`, and `targets` own their records and persistence; `fs` owns bounded reads, safe paths, and atomic file publication |
 | `authoring.rs` | `catalog` owns prospective declarations; `publication` owns source revisions, changed-file staging, and interrupted-publication recovery |
+| `author_signing.rs` | Google OIDC enrollment, local Ed25519 custody and bounded index signing |
+| `distribution.rs` | Signed envelopes, ZIP consumption/publication and installed-release verification; `application/distribution.rs` owns command, review and cancellation admission |
 
 `Application` retains command admission and authoritative workspace/Store locks.
 `Store` and `ProfileStore` retain owner and shared-budget coordination.
@@ -349,17 +401,18 @@ Neither action inspects, binds, or runs the package.
   ask only for Package ID and show the derived destination. Settings Save creates
   nothing; valid Create/Duplicate creates missing parents. Changing the root
   neither moves existing packages nor retargets an active Edit session.
-- `authoring` remains private publication-journal storage. `pkgs` is reserved for
-  downloaded/packaged content; this does not add a download or archive feature.
-  Existing explicit roots and package references under `pkgs` remain usable.
+- `authoring` remains private publication-journal storage. `pkgs` holds imported
+  signed archives; there is no remote download. Installed releases are run-only:
+  the app and shared OMP authoring offer no source view, Edit or Duplicate.
+  Ordinary, non-managed directories under `pkgs` retain directory support.
 - Create and Duplicate require a missing destination. Existing package roots,
   links, traversal and aliases are refused. Under the App data root, source is
   allowed only within `sources` or `pkgs`, never configuration or journals.
   **Open for Edit** still accepts an existing external package directory.
-- The collapsible left tree contains **Files**, **Metadata**, **Recognition**
-  and **Duplicate**. Selecting a file or metadata item displays its editor,
-  form or facts on the right. Collapsing the navigation leaves the current
-  detail and drafts intact.
+- The collapsible left tree contains **Files**, **Metadata**, **Recognition**,
+  **Duplicate** and **Export PKG…**. Selecting a file or metadata item displays
+  its editor, form or facts on the right. Collapsing the navigation leaves the
+  current detail and drafts intact.
 - **Files** contains scripts and assets in expandable folders. Folder nodes come
   from declared paths: adding or renaming `src/lib/helper.ts` creates its parents.
   There is no independent empty-folder operation. Scripts have independent
@@ -387,6 +440,18 @@ Neither action inspects, binds, or runs the package.
   controls; generated source maps are read-only facts. Metadata never
   opens in the source editor. Manifest controls preserve package identity and
   declarations while editing supported entries and portable target intent.
+  The optional **Release and search metadata** form adds release version, name,
+  description, author/license and search game metadata through that same draft.
+  Release version and License have adjacent `i` help. Descriptions are plain text
+  with preserved line breaks.
+  Localized game-name rows join an editable language key to its name. Typing
+  filters i18n suggestions without selecting one; arrows mark a candidate,
+  Enter/Tab accepts it, and Enter/Tab after typing normalizes a valid key outside
+  the list. Add/remove retains focus and the selected resource's Undo/Redo.
+  Canonical duplicates remain visible and editable, never silently overwritten.
+  Aliases' `i` help includes executable basenames; these strings never select
+  Target application. Existing internal tags are preserved without tag controls.
+  See the [metadata contract](runtime-comparison.md#optional-distribution-metadata).
   Schema **Fields** pair the type selector and field-name input in one joined
   control, like Logs filters, including the new-field row. Names commit on Enter
   or focus loss; empty or duplicate names retain adjacent validation feedback.
@@ -584,24 +649,163 @@ existing package are refused before creating directories or archives.
 Interruption regressions cover process-level failures, not physical power loss.
 Windows directory sync retains the
 [existing platform limitation](adr/0005-desktop-configuration-recovery.md).
-Custom archives, remote download, game input, and native qualification remain
-separate work.
+Legacy custom archives, remote download and native qualification remain outside
+this authoring flow. Signed transfer is described below.
+
+## Transfer signed packages
+
+### Enroll a local signing key
+
+Open **Export PKG… → Signing details…** in a directory-package Edit session.
+Choose **Sign in with Google and create key**, then select the account and
+consent in the external browser. Enrollment uses the app-approved Desktop
+registration, PKCE, a temporary loopback listener and validated OIDC tokens.
+The interaction expires after five minutes; cancellation closes the owned
+attempt but does not claim settlement before its worker has returned.
+
+A successful enrollment creates one independently random Ed25519 identity in
+`<data-dir>/keys/active.json`. On macOS, `keys/` must be `0700` and the file
+`0600`; Windows uses ordinary inherited permissions, not a custom ACL.
+**The private key is an unencrypted, user-managed file.** Ordinary configuration
+backup/restore/reset and package transfer exclude the entire key store.
+Keep any private-key backup separately protected. Losing it loses that signing
+identity; signing in again cannot reconstruct it. Corrupt or existing records
+are never silently replaced.
+
+Subsequent exports open that local key and work offline, without refreshing an
+OIDC session. Signing details describe a cached **local** account association.
+Recipients see signature validity relative to the included key, its fingerprint,
+and **unverified account attribution** separately. Neither a valid signature nor
+an authored name/license certifies legal authorship, current Google login, source
+confidentiality, safety or execution permission.
+
+### Export a saved revision
+
+1. Add complete [distribution metadata](runtime-comparison.md#optional-distribution-metadata)
+   to Manifest, including the authored release version. Export keeps the package
+   ID and version; it does not bump either.
+2. In Edit's left file rail, choose **Export PKG…**, below **Duplicate package…**.
+   Resolve unsaved Script, metadata, preset and Recognition drafts with **Save and
+   continue**, or cancel with drafts intact. Partial Save success remains saved;
+   failure or a later dirty draft stops preparation.
+3. Choose **Build and save…**, then a missing `.mmpkg` filename outside the source.
+   Existing filenames are refused before preparation, even if the native panel
+   offered replacement. Nothing is written until the review is confirmed.
+   The application captures saved bytes once and statically validates those exact
+   bytes without running package code. Review package/release, revision, key
+   fingerprint, file/byte totals, included source and destination.
+4. Choose **Export** to confirm that review. A contributing edit or changed owner
+   invalidates confirmation; prepare again rather than exporting stale disk contents.
+   Publication never overwrites an occupied filename. A committed artifact with
+   failed staging cleanup is reported separately from clean success or rollback.
+
+The archive contains declared original source, source maps, schemas, packaged
+presets and assets. It is **not encrypted**. It contains no local profiles,
+target/launch settings, capture originals, signing keys, tokens or host libraries.
+The [format contract](runtime-comparison.md#signed-mmpkg-format) fixes its bounds.
+
+### Import and explicitly select
+
+On Guidance, choose **Packages…** at the upper right. On Run, choose **Change…**
+inside **Package source**, immediately to the right of **Reinspect**. This region
+separates source identity/status and editing actions from profile settings;
+**Source details** discloses the location, runtime and artifact identity.
+Installed sources also keep directory replacement in those details. A pending
+replacement remains visible outside the collapsed details, so **Reinspect** never
+silently changes its target. Both library entries open the same bounded popup.
+Use **Import PKG…** there, select a `.mmpkg`, inspect its verified release/key/source
+facts, and confirm.
+Verification and static compilation do not execute scripts. Import can finish
+alongside an active Run or Check without changing its owner or captured inputs.
+The Import dialog keeps that operation's Stop available, including during publication.
+It never selects a source, changes a Tab's profiles/targets or starts a run.
+
+The library groups verified releases by signing key and package ID, with separate
+version and artifact choices. Search matches package names, IDs and all localized
+game names without rereading disk. Lists and details scroll inside the popup;
+**Back** retains the query, filter, highlight and list position. Import returns to
+the same browse without selecting anything. A newly opened library starts fresh.
+Rows show the package-declared **Author** and saved or explicitly browsed version,
+not a key fingerprint. An unchosen multi-version group summarizes its authors
+and version count without guessing a current/latest version. Author text is not
+publisher certification; grouping and replacement checks still use verified keys.
+Fault entries stay separate and cannot be selected. **Diagnose…** observes one
+problem without adopting its source or repairing files.
+
+Highlighting or opening details does not select a package. There is no automatic
+latest version: choose an exact artifact, then **Apply** to the workspace named
+in the footer. A dirty draft requires discard confirmation. Cancel, search,
+refresh and diagnosis leave the saved source unchanged. Stop remains available
+in library, diagnosis and Import while an owned operation continues.
+
+Installed files live at
+`<data-dir>/pkgs/<key_id>/<package_id>/<archive-sha256>.mmpkg`.
+The original archive is retained without extracted source, source maps, envelope
+sidecars or receipts. `key_id` is the signing public key's SHA-256 fingerprint,
+not an OIDC subject or Server author ID; `package_id` is stable, not a display name.
+Identical reimport is unchanged only after reverifying the installed file.
+A different artifact claiming the same package/release is refused across signer
+namespaces; distinct versions coexist without automatic latest-version selection.
+The catalog admits at most 256 archives across all signers and packages. At that
+limit, new imports refuse before publication; verified identical reimport remains
+unchanged and the existing catalog stays available.
+
+Use **Select** to inspect and bind a release to that Tab. The saved reference
+remains `{kind: "installed", package_id, artifact_id}`. Reopen, Reinspect and Start
+verify archive digest, signature, payload and storage identity; missing, corrupt
+or ambiguous content refuses while retaining that reference and local settings.
+Execution uses the verified in-memory inventory, not an extracted directory.
+
+Selecting another version of the same signer/package reuses existing profile
+reconciliation: IDs and compatible custom values remain, supported missing
+top-level defaults are added, and incompatible values require **Recovery** rather
+than silent coercion or deletion. Choose the saved profile again after selecting
+the release to run its values. Existing Target compatibility checks still apply.
+A different signer is refused before profile or source-binding writes; use another
+Workspace. No account-switching or key-rotation manager is added.
+
+Installed releases cannot be opened, edited or duplicated through the app or OMP,
+including direct archive-path requests. The archive is still **unencrypted** and
+can be inspected with external tools; these controls do not enforce usage rights.
+
+Previous expanded installations are left intact but are no longer executable.
+Reimport the original `.mmpkg` to restore its unchanged saved reference and profiles.
+The app does not repack old payloads into a new artifact or call missing content
+configuration corruption. See [ADR 0010](adr/0010-archive-only-package-consumption.md)
+for the cutover and future decryption boundary. Legacy CustomZip remains
+unsupported; no Server, entitlement, download or native authorization is added.
 
 ## Collaborate through OMP
 
 The application-supplied [OMP extension](../integrations/omp/package.json) connects
 to the desktop's main-window authoring controller through private, authenticated
-Unix-domain IPC. UI and OMP share the same unsaved drafts, Edit lease and
-publication rules; the adapter is not a second editor or a saved-file mirror.
-The desktop must be running with Setup completed. Windows collaboration is
-unavailable in this transport; Linux checks do not qualify a desktop workflow.
-UI-only authoring remains available without the adapter.
+local IPC: Unix-domain sockets on macOS and named pipes on Windows. UI and OMP
+share the same unsaved drafts, Edit lease and publication rules; the adapter is
+not a second editor or a saved-file mirror. The desktop must be running with
+Setup completed. Linux checks do not qualify a desktop workflow. UI-only
+authoring remains available without the adapter.
+
+Windows collaboration uses system Windows PowerShell and .NET Framework to
+verify handle-based ownership, ACLs and the actual connected server process
+before sending a request. It needs no compiler, temporary DLL or extra adapter
+dependency. Policies that prevent this verification produce a refusal; do not
+bypass them. The selected root must be current-user-owned on a local drive,
+without reparse components or another user's write/delete authority. Read-only
+root sharing is allowed; the collaboration directory, descriptors and pipe
+remain private. MadoMata does not rewrite an existing root's ACL to make it pass.
 
 ### Install, select and remove the adapter
 
 Use OMP **18.8.7 or newer**, with no exact pin or upper bound. Registration
 requires OMP's tool, command, lifecycle and schema APIs; a missing capability
 or incompatible protocol is a refusal, not permission to fall back to disk.
+Actual integration acceptance uses the OMP installed locally at test time and
+records its executable, exact version, OS and adapter identity. Historical
+releases below are evidence, not required download/downgrade or reproduction
+targets. The technical minimum and capability/protocol guards are separate from
+that tested-version baseline; a passing local run does not qualify other
+unexecuted versions or operating systems.
+
 Open **Application → Plugins**, beside **App settings**. It is available after
 Setup even with no workspace selected and is independent of Settings Save/Cancel.
 Opening it does not save drafts, replace the Edit owner or remount the editor.
@@ -630,21 +834,23 @@ there is no public plugin settings-page SDK.
   Packages, unsaved drafts, Edit ownership, recovery journals, unrelated plugins
   and prepared payloads are retained.
 
-Management currently supports the macOS desktop and the normal OMP user
-installation at `$HOME/.omp`. Named profiles, redirected agent/plugin data and
-ambiguous executable discovery are refused; project-local installation is not
-offered. OMP's npm/link commands do not use generic scope flags to select a
+Management supports the macOS and Windows desktops and the normal OMP user
+installation at `$HOME/.omp` (`%USERPROFILE%\.omp` on Windows). Windows uses a
+native `omp.exe`, not a command script or WSL launcher. Named profiles, redirected
+agent/plugin data and ambiguous executable discovery are refused; project-local
+installation is not offered. OMP's npm/link commands do not use generic scope flags to select a
 different registry. Enter an absolute executable path and choose **Check** to
 resolve discovery ambiguity. This is a session target selector, not a saved app
 preference. Target checks also read the client's home/config/agent dotenv files;
 directory overrides or unverifiable files refuse management, while ordinary
 non-routing entries remain usable. Missing, old or incapable clients are reported;
 MadoMata never installs or updates OMP itself or edits OMP-owned configuration.
-OMP 18.8.7 and 18.8.9 require `bun` on PATH for npm-plugin Uninstall.
-Management includes the executable's directory and usual user/Homebrew tool
-directories when launching OMP, including from a minimal-PATH GUI. Install Bun
-yourself if needed; a missing companion is reported as a failed operation, not
-adapter removal. MadoMata does not install companion tools.
+The observed OMP releases require `bun` on PATH for npm-plugin Uninstall.
+Management includes the executable's directory and usual user tool directories,
+including `.bun/bin` on Windows and Homebrew directories on macOS, even from a
+minimal-PATH GUI. Install Bun yourself if needed; a missing companion is reported
+as a failed operation, not adapter removal. MadoMata does not install companion
+tools.
 
 Every confirmation is tied to the displayed observation. Refresh, Check, an
 executable edit, Back or Close withdraws it; the host rechecks target/source before
@@ -656,9 +862,10 @@ Draft editing and owner-attributed Stop/Return remain independent. All managemen
 reads and mutations take exclusive ownership of the actual user installation,
 including across application data roots and HOME aliases. A competing request
 is refused without waiting; **Refresh** after the owner settles.
-Commands have finite duration/output bounds and settle their owned process group,
-including OMP's Bun companion. Application shutdown drains and, if needed,
-interrupts both inspections and mutations, then waits for owned settlement.
+Commands have finite duration/output bounds and settle their owned process tree,
+including OMP's Bun companion: a Unix process group or a Windows non-breakaway
+Job assigned atomically at process creation. Application shutdown drains and,
+if needed, interrupts both inspections and mutations, then waits for owned settlement.
 It does not signal existing OMP sessions. A failed or unreadable readback is not
 success or proof of rollback; **Refresh** inspects current state without replaying
 the mutation. Interrupted publication is reported
@@ -667,7 +874,7 @@ snapshots and are not automatically removed.
 
 Each mutation reserves an application-owned
 `$HOME/.omp/mado-mata-plugin-unsettled.json` safety marker before dispatch and
-removes it only after its command group is confirmed ended. An unsettled command
+removes it only after its owned command tree is confirmed ended. An unsettled command
 or an interruption can leave it behind, refusing management across restarts and
 data roots. Follow the reported reconciliation guidance: establish that this
 MadoMata management command and its descendants have ended, inspect the actual
@@ -811,7 +1018,7 @@ Structured targets require `fields`, not replacement JSON text. The
 
 | Resource kind | Supported `field` values |
 | --- | --- |
-| `manifest` | `runtime`, `entry`, `helper`, `target` |
+| `manifest` | `runtime`, `entry`, `helper`, `target`, `distribution`, `gameName`, `gameAliases` |
 | `schema` | `type`, `bound`, `enum`, `addProperty`, `removeProperty`, `renameProperty`, `required`, `removeDefault`, `default`, `repair` with `node` |
 | `profile` | `option`, `repair` without `node` |
 | `recognition_definition` | `name`, `expected`, `kind`, `region`, `search`, `delete` |
@@ -832,6 +1039,15 @@ integer coordinates, not normalized fractions:
 /mado edit {"edits":[{"resource":"DEFINITION","version":"VERSION","fields":[{"field":"expected","value":"Ready"}]}]}
 /mado edit {"edits":[{"resource":"BASIS","version":"VERSION","fields":[{"field":"content","content":{"x":0,"y":0,"width":640,"height":360}}]}]}
 ```
+
+Distribution edits use `{field: "distribution", declared: true|false}` or
+`{field: "distribution", part, value}`; parts are `release_version`, `name`,
+`description`, `author_name`, `license` and `game_id`. Localized names use
+`{field: "gameName", key, name}` (`null` removes a key); aliases use
+`{field: "gameAliases", aliases}`. They share normal versions, draft history
+and Save. Internal tags and unrelated manifest/target fields are preserved.
+Use the application-supplied adapter's **Update** action for this schema change
+(adapter `0.1.2`); no OMP signing or arbitrary-message-signing tool is exposed.
 
 Recognition edits address only the active capture and reuse each field's
 existing admission rules. Geometry edits require the applicable loaded,
@@ -1010,14 +1226,25 @@ calls:
 Those broader authoring observations used the then-available release. Subsequent
 management checks exercised real OMP `18.8.7` and `18.8.9` in isolated owned user
 state; the first application-managed adapter distribution is `0.1.1`.
-This does not establish future compatibility, Windows/Linux interactive
-qualification, physical OS IME or native-picker acceptance, or native
-capture/OCR/input qualification. Composition used events on the real editor,
+Those historical observations do not establish future compatibility or
+Windows/Linux interactive qualification, physical OS IME or native-picker
+acceptance, or native capture/OCR/input qualification. Composition used events on the real editor,
 and the owned PNG used the real host load command, not a native picker.
 No real OCR trial or trial-freshness claim was made.
 The minimum is a floor, not a tested-version allowlist. Deterministic checks,
 actual WebView observations and separately authorized native evidence remain
 separate.
+
+Native Windows checks used the then-local OMP `18.10.3`, Bun `1.4.3` and included
+adapter `0.1.3` in isolated owned user/data roots. Real managed Update from `0.1.2`,
+Uninstall, Install and restarted readback succeeded. A fresh automatically loaded
+OMP session discovered the actual desktop, explicitly selected its Edit owner,
+read and edited an unsaved source draft visible in the WebView, rejected a stale
+version, and observed GUI Undo through the same controller. Saved bytes were
+unchanged; retired-owner access was refused. Disconnect and session shutdown
+completed with no model turns, and a fresh session after Uninstall had no adapter.
+These are Windows integration observations, not a replay of the broader macOS
+matrix or native game qualification.
 
 ## Acquire a native historical frame
 
@@ -1712,13 +1939,19 @@ as described in [the manifest contract](runtime-comparison.md#optional-portable-
 A targetless package still runs existing controlled/replay workflows; a missing,
 invalid, or incompatible local target is not an execution prerequisite.
 
-1. For the **actual game**, choose **Application bundle (.app)** and use
-   **Open…** at the right edge of its path field to select the outer application,
-   including a supported iOS-on-Mac wrapper. Game and launcher paths each occupy
-   their own full-width row. Do not navigate to the internal executable. Cancel
-   keeps the draft. Manual absolute paths and direct executable configuration
-   remain available. A separate bundle launcher uses the same picker; it does
-   not identify or replace the game.
+1. Choose the **actual game**, not its launcher:
+   - **Windows:** use **Open…** at the right edge of the game path field to
+     select its `.exe`. The native chooser sets **Executable file** and that
+     field only. With **Use a separate launcher** checked, its own **Open…**
+     selects the launcher independently. Shortcuts, directories, reparse-point
+     files and non-`.exe` selections are refused.
+   - **macOS:** choose **Application bundle (.app)** and use **Open…** to select
+     the outer application, including a supported iOS-on-Mac wrapper. Do not
+     navigate to the internal executable. A separate bundle launcher uses the
+     same picker; it does not identify or replace the game.
+   Game and launcher paths each occupy their own full-width row. Cancel keeps
+   the draft. Selection does not Check, Save or grant execution authority.
+   Manual absolute paths and direct executable configuration remain available.
 2. Add or remove arguments as individual rows, like schema **Allowed values**.
    Drag the left handle to reorder; with the handle focused, Up/Down arrow keys
    move that argument one position. Empty fields remain empty arguments; spaces
@@ -1728,7 +1961,7 @@ invalid, or incompatible local target is not an execution prerequisite.
    directory; an explicit directory for a bundle recipient is refused before
    launch, not ignored. The exact window title has its own full-width row.
    Supply it when the package leaves it local; a package-required title is read-only.
-3. Leave all input fields blank for capture-only use. To configure future input,
+3. On macOS, leave all input fields blank for capture-only use. To configure future input,
    explicitly select a complete policy. Process-directed input requires a pointer
    mode: Core Graphics permits either focus policy; AppKit background requires
    preserved focus. System input requires an already focused target and no
@@ -1747,10 +1980,16 @@ invalid, or incompatible local target is not an execution prerequisite.
    updates at the same canonical location remain compatible; this is not a
    signed-binary or content check.
 
-The native picker is an asynchronous sheet, available only while Run/OCR is
-idle. While it is open, new Run/OCR and another picker are refused; state polling
-continues. A late selection cannot overwrite a changed draft, another Tab, or a
-closed/reinspected owner. Bundle metadata is reread on every Check/Save:
+An unbound draft uses the host platform. A saved binding from another platform
+is retained without conversion; its native picker is unavailable on this host.
+Windows selection and Check/Save configure filesystem metadata only: they do
+not enable Windows Native Start or running-application discovery.
+
+The native picker uses an asynchronous macOS sheet or a Windows owner-modal
+file dialog, available only while Run/OCR is idle. While it is open, new Run/OCR
+and another picker are refused; state polling continues. A late selection
+cannot overwrite a changed draft, another Tab, or a closed/reinspected owner.
+Bundle metadata is reread on every Check/Save:
 same-process changes to executable names and identifiers do not reuse cached
 values. Participating plists remain bounded to **64 KiB**, **8,192 events**, and
 **32 nesting levels**. Unsupported alternate metadata locations, including
@@ -2219,10 +2458,12 @@ safe readable malformed, unsupported, and orphaned configuration is preserved
 byte for byte. Missing entries remain absent. An empty managed set reports
 `NothingToBackUp` without creating a destination or archive.
 
-Package directories and custom archives, models, logs, other roots, earlier
-backups, unrelated files, and temporary/journal data are excluded. An unresolved
-owned `.pending` write or restore transaction blocks capture rather than being
-silently omitted. Unsafe, unreadable, linked, aliased, oversized, or changing
+Package directories, installed signed containers, archives, the complete `keys/`
+store, models, logs, other roots, earlier backups, unrelated files, and
+temporary/journal data are excluded. Saved installed-source references remain
+configuration; restoring one does not supply its payload or signing key.
+An unresolved owned `.pending` write or restore transaction blocks capture rather
+than being silently omitted. Unsafe, unreadable, linked, aliased, oversized, or changing
 managed data is refused. Capture serializes with configuration writers; archive
 I/O does not hold the operation-control lock, so owner-bound Stop stays available.
 
@@ -2314,6 +2555,11 @@ requires checking the entire installed generation. Failure restores the exact
 prior managed bytes and absence, including historical metadata, or keeps Recovery
 and its evidence if publication or cleanup remains unresolved.
 Installed configuration and successful Application reconstruction are separate.
+
+Windows no-replace publication uses extended-length paths, including long
+displaced-preimage names under the restore journal. It resolves relative spelling
+without requiring the destination to exist or resolving links. Existing
+destinations still refuse; there is no overwriting or cross-volume copy fallback.
 
 Before deleting preimages, cleanup publishes a version-3 `.restore-completion`.
 This marker keeps restart admission blocked even after partial journal deletion.
@@ -2445,8 +2691,12 @@ include [LICENSE](../apps/desktop/src-tauri/resources/ocr-model-LICENSE.txt),
 [NOTICE](../apps/desktop/src-tauri/resources/ocr-model-NOTICE.txt) and a receipt.
 Runtime installs retain the official `LICENSE` and `ThirdPartyNotices.txt`; their
 reviewed provenance is recorded in the [runtime notice](../apps/desktop/src-tauri/resources/ocr-runtime-NOTICE.txt).
-Receipts never replace byte verification. Maintainers can edit transport sources
-and guidance in the catalog, then run the offline resource tests:
+Receipts record the acquisition engine revision, not a reuse restriction. Recheck
+and Download reuse complete installs across engine revisions after the same
+content and license checks. Model notices must remain nonempty; runtime notices
+must match the pinned bytes. Receipts and corrupt files are not replaced.
+Byte verification remains required, and engine compatibility still needs Check.
+Maintainers can edit transport sources and guidance, then run the offline resource tests:
 
 ```sh
 cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib ocr_setup
@@ -2582,7 +2832,10 @@ successful Check is not permission, native qualification, or proof of game effec
    events across both attempts, with **1 s** waits and **100 ms** pacing.
    Final cleanup retains its separate **1 s** cleanup and **2 s** containment bounds.
    A click consumes three events, or four with a hold; key press/release each
-   consume one. Producer frames and restricted cleanup releases are not ordinary
+   consume one. A drag with `N` points and `D` positive waits consumes
+   `N + 2 + D`; the same aggregate allowance applies. See the
+   [Script action bounds](runtime-native.md#script-actions-and-drag-bounds).
+   Producer frames and restricted cleanup releases are not ordinary
    acquisition/input budget entries. Any reviewed-tuple change withdraws consent.
    Longer duration grants no extra frames, input, attempts or cleanup time.
    The 900-second ceiling is an admission policy, not proof of useful ten-minute
@@ -2607,6 +2860,10 @@ successful Check is not permission, native qualification, or proof of game effec
    focus, permissions or elevation, substitute a route, or retry uncertain input
    or launch. The launched app can independently present windows or change focus;
    disabling API prompts cannot suppress macOS Gatekeeper UI.
+   Input approval also covers drags, including held movement and release.
+   Stop discards the remaining path and attempts owned-button release, which may activate a card;
+   unresolved release remains a cleanup failure. To cancel a card normally,
+   author a return-to-hand path and verify its result on a newer frame.
 7. Preflight validates captured package/profile, static compilation/imports, assets
    and required resources without evaluating package code or acquiring capture/input.
    The existing runner then enters `readiness()` before attaching a target.

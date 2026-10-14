@@ -91,6 +91,85 @@ test('manifest and preset fields follow their forms, including the current optio
   assert.equal(patchMetadata('profile',preset,preset,fields({field:'repair',issue:{code:'packageId'}}),scope).code,'invalid_field');
 });
 
+// A saved manifest with complete distribution metadata, internal tags and a declared target.
+const DISTRIBUTED={version:1,package_id:'example.a',runtime:'typescript',sources:['main.ts'],target:{id:'game',window_title:'Game'},
+  distribution:{version:1,release_version:'1.2.0-beta.1+build.5',name:'Example',description:'<b>text</b>',author_name:'A',license:'MIT',
+    game:{id:'example-game',names:{en:'Example',ja:'例'},aliases:['EX','Example.exe']},tags:['internal','kept']}};
+const MANIFEST_SCOPE={packageId:'example.a',schema:null};
+
+test('distribution field operations accept only their exact typed shapes',()=>{
+  for (const item of [
+    {field:'distribution'},{field:'distribution',declared:'yes'},{field:'distribution',declared:true,part:'name',value:'x'},
+    {field:'distribution',part:'tags',value:'x'},{field:'distribution',part:'version',value:'1'},{field:'distribution',part:'name',value:1},
+    {field:'gameName',key:'en'},{field:'gameName',key:'en',name:1},{field:'gameName',key:'\ud800',name:'x'},
+    {field:'gameAliases',aliases:'EX'},{field:'gameAliases',aliases:[1]},{field:'tags',tags:['x']},
+  ]) assert.equal(parseField(item),null,JSON.stringify(item));
+  assert.deepEqual(parseField({field:'distribution',declared:false}),{field:'distribution',declared:false});
+  assert.deepEqual(parseField({field:'distribution',part:'game_id',value:'g'}),{field:'distribution',part:'game_id',value:'g'});
+  assert.deepEqual(parseField({field:'gameName',key:'pt-br',name:null}),{field:'gameName',key:'pt-br',name:null});
+  assert.deepEqual(parseField({field:'gameAliases',aliases:['EX']}),{field:'gameAliases',aliases:['EX']});
+});
+
+test('every other manifest field edit keeps distribution metadata and internal tags exactly',()=>{
+  const saved=JSON.stringify(DISTRIBUTED);
+  const next=JSON.parse(patchMetadata('manifest',saved,saved,fields({field:'helper',enabled:true},{field:'runtime',value:'javascript'},
+    {field:'target',target:{id:'game',windowTitle:'Game',bundleId:'com.example.game'}}),MANIFEST_SCOPE));
+  assert.deepEqual(next.distribution,DISTRIBUTED.distribution);
+  // A distribution edit never touches the target declaration or the tags.
+  const edited=JSON.parse(patchMetadata('manifest',saved,saved,fields({field:'distribution',part:'game_id',value:'other-game'},
+    {field:'distribution',part:'release_version',value:'2.0.0'},{field:'gameAliases',aliases:['OG']}),MANIFEST_SCOPE));
+  assert.deepEqual([edited.target,edited.distribution.tags,edited.distribution.game.names],[DISTRIBUTED.target,['internal','kept'],{en:'Example',ja:'例'}]);
+  assert.deepEqual([edited.distribution.game.id,edited.distribution.release_version,edited.distribution.game.aliases],['other-game','2.0.0',['OG']]);
+  // Removing only the edits restores the saved bytes.
+  assert.equal(patchMetadata('manifest',JSON.stringify(edited),saved,fields({field:'distribution',part:'game_id',value:'example-game'},
+    {field:'distribution',part:'release_version',value:'1.2.0-beta.1+build.5'},{field:'gameAliases',aliases:['EX','Example.exe']}),MANIFEST_SCOPE),saved);
+});
+
+test('a localized name is addressed by its canonical language and never overwrites or merges conflicting rows',()=>{
+  const saved=JSON.stringify(DISTRIBUTED);
+  const names=(text,...ops)=>{
+    const result=patchMetadata('manifest',text,saved,fields(...ops),MANIFEST_SCOPE);
+    return typeof result==='string' ? JSON.parse(result).distribution.game.names : result.code;
+  };
+  assert.deepEqual(names(saved,{field:'gameName',key:'PT_br',name:'Exemplo'},{field:'gameName',key:'EN',name:'Example!'}),
+    {en:'Example!',ja:'例',['pt-BR']:'Exemplo'});
+  assert.deepEqual(names(saved,{field:'gameName',key:'ja',name:null}),{en:'Example'});
+  for (const [op,code] of [
+    [{field:'gameName',key:'english',name:'x'},'invalid_field'],
+    [{field:'gameName',key:'fr',name:null},'invalid_field'],
+  ]) assert.equal(names(saved,op),code,JSON.stringify(op));
+  // The person has two rows for the same language (kept as pairs) and an unfinished one: an agent can add another
+  // language without touching them, but cannot pick one of the conflicting rows.
+  const conflicting=JSON.stringify({...DISTRIBUTED,distribution:{...DISTRIBUTED.distribution,game:{...DISTRIBUTED.distribution.game,
+    names:[['en','Example'],['en','Sample'],['','']]}}});
+  assert.deepEqual(names(conflicting,{field:'gameName',key:'ko',name:'예'}),[['en','Example'],['en','Sample'],['',''],['ko','예']]);
+  assert.equal(names(conflicting,{field:'gameName',key:'en',name:'Other'}),'invalid_field');
+  assert.equal(names(conflicting,{field:'gameName',key:'en',name:null}),'invalid_field');
+  const capped=JSON.stringify({...DISTRIBUTED,distribution:{...DISTRIBUTED.distribution,game:{...DISTRIBUTED.distribution.game,
+    names:Object.fromEntries(Array.from({length:64},(_,index)=>[`en-${String(index).padStart(3,'0')}`,'x']))}}});
+  assert.equal(names(capped,{field:'gameName',key:'ja',name:'x'}),'invalid_field');
+  assert.equal(patchMetadata('manifest',saved,saved,fields({field:'gameAliases',aliases:Array(65).fill('x')}),MANIFEST_SCOPE).code,'invalid_field');
+});
+
+test('declaring and removing distribution metadata is explicit, and malformed parts change only through desktop repairs',()=>{
+  const plain=JSON.stringify({version:1,package_id:'example.a',sources:['main.ts']});
+  for (const op of [{field:'distribution',part:'name',value:'x'},{field:'gameName',key:'en',name:'x'},{field:'gameAliases',aliases:[]}]) {
+    assert.equal(patchMetadata('manifest',plain,plain,fields(op),MANIFEST_SCOPE).code,'invalid_field',JSON.stringify(op));
+  }
+  const declared=patchMetadata('manifest',plain,plain,fields({field:'distribution',declared:true}),MANIFEST_SCOPE);
+  assert.deepEqual(JSON.parse(declared).distribution,{version:1,release_version:'',name:'',description:'',author_name:'',license:'',game:{id:'',names:{},aliases:[]}});
+  const saved=JSON.stringify(DISTRIBUTED);
+  assert.equal(patchMetadata('manifest',saved,saved,fields({field:'distribution',declared:true}),MANIFEST_SCOPE),saved,'declaring keeps an existing object');
+  assert.equal(patchMetadata('manifest',declared,plain,fields({field:'distribution',declared:false}),MANIFEST_SCOPE),plain);
+  const malformed=JSON.stringify({...DISTRIBUTED,distribution:{...DISTRIBUTED.distribution,game:'example'}});
+  for (const op of [{field:'distribution',part:'game_id',value:'x'},{field:'gameName',key:'en',name:'x'},{field:'gameAliases',aliases:[]}]) {
+    assert.equal(patchMetadata('manifest',malformed,malformed,fields(op),MANIFEST_SCOPE).code,'invalid_field',JSON.stringify(op));
+  }
+  assert.equal(JSON.parse(patchMetadata('manifest',malformed,malformed,fields({field:'distribution',part:'name',value:'New'}),MANIFEST_SCOPE)).distribution.game,'example');
+  assert.equal(patchMetadata('manifest',JSON.stringify({...DISTRIBUTED,distribution:'x'}),null,fields({field:'distribution',part:'name',value:'x'}),MANIFEST_SCOPE).code,
+    'invalid_field');
+});
+
 test('recognition fields reuse geometry, limits, freshness and bounded Undo without taking the person\'s selection',()=>{
   // The person is renaming r1 (an open coalescing group) with r1 selected and one checked trial row.
   const state=toggleTrial(renameDefinition(loaded(),'r1','Health'),'r2');

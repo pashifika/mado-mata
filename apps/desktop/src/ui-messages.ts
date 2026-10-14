@@ -1,7 +1,7 @@
 import enData from './locales/ui.en.json' with {type: 'json'};
 import jaData from './locales/ui.ja.json' with {type: 'json'};
 import {interpolate} from './i18n-format.ts';
-import type {PresetIssue, SchemaIssue, SourceMapIssue} from './metadata.ts';
+import type {DistributionIssue, NameKeyIssue, PresetIssue, SchemaIssue, SourceMapIssue} from './metadata.ts';
 
 function known(labels: Record<string, string>, value: string, key = value): string {
   return Object.hasOwn(labels, key) ? labels[key] : value;
@@ -84,6 +84,7 @@ function catalog(data: typeof enData) {
       owned: (operation: string | null) => interpolate(data.run.owned, {operation: operation ?? data.common.none}),
       settled: (operation: string | null) => interpolate(data.run.settled, {operation: operation ?? data.common.none}),
       inspected: (revision: number) => interpolate(data.run.inspected, {revision}),
+      pendingSource: (path: string) => interpolate(data.run.pendingSource, {path}),
       descriptorHelp: (limit: number) => interpolate(data.run.descriptorHelp, {limit}),
       startUses: (profile: string | null, replay: boolean, environment: string | null, descriptor: string | null) => interpolate(data.run.startUses[replay ? profile === null ? 'replayDraft' : 'replayProfile' : profile === null ? 'draft' : 'profile'], {profile: profile ?? '', environment: environment ?? data.run.noSavedEnvironment, descriptor: descriptor ?? data.common.none}),
       olderRevision: (old: number, current: number) => interpolate(data.run.olderRevision, {old, current}),
@@ -232,7 +233,59 @@ function catalog(data: typeof enData) {
       characters: (count: number) => interpolate(data.authoring.characters[count === 1 ? 'one' : 'other'], {count}),
       sourceMapIssue: (issue: SourceMapIssue) => interpolate(data.authoring.sourceMapIssue[issue.code], {index: 'index' in issue ? issue.index + 1 : ''}),
     },
+    releaseMetadata: {
+      ...data.releaseMetadata,
+      issue: (issue: DistributionIssue) => interpolate(data.releaseMetadata.issue[issue.code], {key: issueKey(issue)}),
+      repair: (issue: DistributionIssue) => interpolate(data.releaseMetadata.repair[issue.code], {key: issueKey(issue)}),
+      textLength: (limit: number) => interpolate(data.releaseMetadata.textLength, {limit}),
+      nameRow: (row: number) => interpolate(data.releaseMetadata.nameRow, {row}),
+      removeName: (row: number) => interpolate(data.releaseMetadata.removeName, {row}),
+      suggestionCount: (count: number) => interpolate(data.releaseMetadata.suggestionCount[count === 0 ? 'none' : count === 1 ? 'one' : 'other'], {count}),
+      keyIssue: (issue: NameKeyIssue) => interpolate(data.releaseMetadata.keyIssue[issue.code],
+        {row: issue.code === 'duplicate' ? issue.row : '', canonical: issue.code === 'canonical' ? issue.canonical : ''}),
+      namesLimit: (limit: number) => interpolate(data.releaseMetadata.namesLimit, {limit}),
+      alias: (index: number) => interpolate(data.releaseMetadata.alias, {index}),
+      removeAlias: (index: number) => interpolate(data.releaseMetadata.removeAlias, {index}),
+      aliasesLimit: (limit: number) => interpolate(data.releaseMetadata.aliasesLimit, {limit}),
+    },
+    distribution: {
+      ...data.distribution,
+      preparing: (revision: string) => interpolate(data.distribution.preparing, {revision}),
+      contentSummary: (files: number, bytes: number) => interpolate(data.distribution.contentSummary, {files, bytes}),
+      exported: (path: string) => interpolate(data.distribution.exported, {path}),
+      cleanupFailed: (path: string) => interpolate(data.distribution.cleanupFailed, {path}),
+      verifying: (path: string) => interpolate(data.distribution.verifying, {path}),
+      compatible: (runtime: string) => interpolate(data.distribution.compatible, {runtime}),
+      installedDone: (name: string, version: string) => interpolate(data.distribution.installedDone, {name, version}),
+      installedSource: (id: string) => interpolate(data.distribution.installedSource, {id}),
+    },
+    packageLibrary: {
+      ...data.packageLibrary,
+      openLabel: (owner: string) => interpolate(data.packageLibrary.openLabel, {owner}),
+      changeLabel: (owner: string) => interpolate(data.packageLibrary.changeLabel, {owner}),
+      filterProblems: (count: number) => interpolate(data.packageLibrary.filterProblems, {count}),
+      results: (count: number) => interpolate(data.packageLibrary.results[count === 1 ? 'one' : 'other'], {count}),
+      currentDirectory: (path: string) => interpolate(data.packageLibrary.currentDirectory, {path}),
+      currentArchive: (path: string) => interpolate(data.packageLibrary.currentArchive, {path}),
+      currentInstalled: (name: string, version: string) => interpolate(data.packageLibrary.currentInstalled, {name, version}),
+      currentInstalledUnlisted: (id: string) => interpolate(data.packageLibrary.currentInstalledUnlisted, {id}),
+      versions: (count: number) => interpolate(data.packageLibrary.versions[count === 1 ? 'one' : 'other'], {count}),
+      noMatches: (query: string) => interpolate(data.packageLibrary.noMatches, {query}),
+      chooseVersion: (owner: string) => interpolate(data.packageLibrary.chooseVersion, {owner}),
+      target: (name: string, version: string, artifact: string, owner: string) => interpolate(data.packageLibrary.target, {name, version, artifact, owner}),
+      applyLabel: (name: string, version: string, owner: string) => interpolate(data.packageLibrary.applyLabel, {name, version, owner}),
+    },
+    doctor: data.doctor,
+    // i18n-owned language-key suggestions and their labels; see i18n-language.ts.
+    languageKeys: data.languageKeys,
   };
+}
+
+// The manifest member an issue names, as written in package.json.
+function issueKey(issue: DistributionIssue): string {
+  if (issue.code === 'version') return 'version';
+  if (issue.code !== 'type') return issue.key;
+  return issue.key === 'id' || issue.key === 'names' || issue.key === 'aliases' ? `game.${issue.key}` : issue.key;
 }
 
 const en = catalog(enData);

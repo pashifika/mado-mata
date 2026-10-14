@@ -656,13 +656,66 @@ fresh evidence. The retained split-cohort reproduction, which formerly created
 three passing rows only when combined, now creates none. Legacy evidence without
 the new cohort identity remains readable but cannot be silently upgraded.
 
-One native finding remains unresolved: target loss during recognition can race
-with result publication because the pinned public facade exposes completed
-closure, not capture terminal state or an atomic publication guard. Known
-`TargetLost`/closed errors are latched and prior receipts survive, but this does
-not close that race. See the [native limitation](runtime-native.md).
+At that repair revision, target loss during recognition could still race with
+publication: the pinned public facade lacked capture-terminal state and an
+atomic publication guard. Known `TargetLost`/closed errors were latched and
+prior receipts survived, but that did not close the race.
 No Windows rerun, live native operation, permission request, game launch, input,
-focus change, or adoption decision was performed by this repair pass.
+focus change, or adoption decision was performed by that September repair pass.
+
+### Current Windows reconciliation
+
+The current engine pin `4b4f3296838a9eecdcb00e9d2bb3121a25cdc240` supplies
+`Session::commit_frame`; consuming observation, recognition, query and
+postcondition publication now use terminal-aware commitment. The earlier
+missing-API explanation is obsolete. See the
+[current native boundary](runtime-native.md).
+
+The Windows continuation executed 252 engine library tests and the 199-case
+supervised controlled corpus successfully. macOS-only provider-terminal/process-
+exit ordering tests were not executed on Windows. Portable tests do not close
+the remaining consuming native race, lifecycle or both-OS qualification.
+
+A separate current g-004 recorded-replay cohort collected 48 invocations:
+eight warmups and 40 measurements across four candidates and two priorities.
+Collection completed, but workflow acceptance failed. Rust, Lua and TypeScript
+returned with clean cleanup but false required postconditions; JavaScript was
+blocked by parser-executable discovery after native DLL search-path restriction.
+The retained original outcomes are not upgraded by a subsequent repair.
+Diagnostic OCR on the same retained after-frame returned separate name and
+level regions, not the single exact-text region required by the workload.
+Neither concatenating regions nor weakening that predicate is treated as a fix.
+
+After the operation-specific Windows parser repair, the real subprocess
+regression and 253 engine library tests passed without warnings. A separately
+frozen cohort used the already supported bounded-detector profile, retaining
+the same recorded corpus, exact predicate, resources, prospective budgets and
+sample policy. All 48 invocations satisfied the independent decisions, ordered
+controlled effects, receipts, newer-frame postconditions and cleanup oracles.
+It is not pooled with the failed g-004 cohort; the saved machine selection was
+not changed. Five measurements per candidate/priority support p50, not p95/p99.
+
+Its owned-copy lifetime probe completed ten real replay workflows, retained-
+source query/repeated-result checks, observed in-flight OCR cancellation,
+model-content replacement refusal, restoration and runner release within the
+declared bounds. That run's replacement-over-existing operation returned Windows
+OS error 5 before changed runtime bytes reached the cached engine. Its separate
+post-exit refusal/restoration results remain distinct; the original failure is
+not rewritten.
+
+A later, separately bounded same-process probe retired the fixture-owned loaded
+runtime's pathname, published altered bytes at the original path, and observed
+`Blocked` / `runtime_validation` / `configuration_changed`. It then restored the
+original file by rename and completed a fresh real workflow with the same
+configuration identity. Both sessions closed cleanly, retained engine/model
+owners were released, and the outer process exited 0 and was reaped. This closes
+the Windows same-process cached-runtime mismatch criterion without writing a
+mapped file or modifying installed resources. It is not a native lifecycle or
+both-OS qualification pass, nor an additional pooled performance sample.
+
+These observations are controlled/replay evidence, not live game effects or
+an adoption decision. Full native qualification, R6 and both-OS adoption remain
+incomplete; neither later desktop acceptance nor API availability closes them.
 
 ## Candidate and authoring observations
 

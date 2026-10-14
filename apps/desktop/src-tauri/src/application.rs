@@ -26,11 +26,14 @@ pub use authoring::{
     RecognitionFrame, RecognitionPickerGuard, RecognitionPixel, RecognitionSaved, RecognitionTrial,
     RecognitionView,
 };
+mod distribution;
+pub use distribution::{DistributionPickerGuard, DistributionReview};
 mod native_run;
 mod ocr_setup;
 mod operations;
 pub use ocr_setup::SetupOperation;
 mod profiles;
+pub(crate) use profiles::check_webview_value;
 mod recovery;
 mod target_observation;
 mod targets;
@@ -60,6 +63,7 @@ pub struct Selection {
     pub internal_name: String,
     pub display_name: String,
     pub package_path: String,
+    pub source: crate::storage::PackageSource,
     #[serde(serialize_with = "serialize_shared")]
     pub package: Arc<PackageInfo>,
     pub profiles: Vec<Profile>,
@@ -173,6 +177,7 @@ pub struct TargetContext {
 
 #[derive(Debug, Serialize)]
 pub struct TargetView {
+    pub platform: &'static str,
     pub context: TargetContext,
     pub record: TargetRecord,
     pub compatible: bool,
@@ -241,8 +246,17 @@ struct Selected {
     internal_name: String,
     display_name: String,
     path: PathBuf,
+    installed: Option<InstalledSelection>,
     inventory: Arc<Inventory>,
     package: Arc<PackageInfo>,
+}
+
+/// A selected installed release: its persisted reference and the signing key verified
+/// with it. The archive digest fixes the key, so it holds for this artifact everywhere.
+#[derive(Clone)]
+struct InstalledSelection {
+    identity: crate::distribution::InstalledIdentity,
+    key_id: String,
 }
 
 #[derive(Clone)]
@@ -294,6 +308,7 @@ pub struct Application {
     // Stop never waits for command, workspace, store, or publication locks.
     authoring_stop: Mutex<Option<authoring::StopOwner>>,
     ocr_setup: Mutex<ocr_setup::SetupSlot>,
+    distribution: Mutex<distribution::DistributionSlot>,
     native_engine: PathBuf,
     #[cfg(test)]
     command_admitted: AtomicBool,
@@ -441,6 +456,7 @@ impl Application {
             publisher,
             authoring_stop: Mutex::new(None),
             ocr_setup: Mutex::new(ocr_setup::SetupSlot::default()),
+            distribution: Mutex::new(distribution::DistributionSlot::default()),
             native_engine: engine,
             #[cfg(test)]
             command_admitted: AtomicBool::new(false),
@@ -481,6 +497,7 @@ impl Application {
     > {
         let guards = self.reconstruction_state()?;
         self.setup_idle()?;
+        self.distribution_idle()?;
         // Root lookup must not wait on a preparation worker's Store lock.
         if crate::restore::pending(&self.root)? {
             return Err(Fault::new(
@@ -606,6 +623,7 @@ impl Application {
         // workspace state while waiting for Store (Stop needs that state).
         let _command = self.command_guard()?;
         self.setup_idle()?;
+        self.distribution_idle()?;
         let store = lock(&self.store);
         configuration::capture(store.root())
     }

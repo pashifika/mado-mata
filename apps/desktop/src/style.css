@@ -211,6 +211,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .page-heading p { font-size: 12px; color: var(--text-muted); margin: 8px 0 0; }
 .page-heading .actions { display: flex; gap: 9px; flex-shrink: 0; align-items: flex-end; }
 .page-heading .actions > button, .page-heading .actions .button-hint > button { padding: 9px 16px; }
+.page-heading.guidance-heading { flex-direction: row; align-items: flex-start; }
 .inline-label { display: grid; gap: 4px; min-width: 200px; }
 .operation-status { min-height: 30px; padding: 0 2px 8px; color: #52657c; font-size: 12px; overflow-wrap: anywhere; }
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 2px 3px #12223b06; min-width: 0; }
@@ -232,10 +233,20 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .save-status { color: var(--ok); font-weight: 600; }
 .save-status.unsaved { color: var(--warn); }
 .run-grid { display: grid; grid-template-columns: minmax(300px, 1.15fr) minmax(300px, 1fr); gap: 18px; align-items: start; }
-.package-card { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-alt); }
-.package-text { display: grid; min-width: 0; flex: 1; }
-.package-text strong { font-size: 12px; overflow-wrap: anywhere; }
-.package-text .mono { color: var(--text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Keep source controls together and technical details separate from profiles. */
+.package-source { display: grid; gap: 10px; margin-bottom: 18px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-alt); min-width: 0; }
+.package-source-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.package-source-controls { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
+.package-source-controls button { padding: 5px 10px; font-size: 12px; }
+.package-source-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.package-source-identity strong { min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.package-source .field { margin-bottom: 0; }
+.package-source-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.package-source-actions > .confirm-row { flex-basis: 100%; }
+.package-source-details { font-size: 11px; }
+.package-source-details > summary { padding: 0; color: var(--text-muted); }
+.package-source-details .run-identity { margin-top: 8px; }
+.package-source-details .field { margin-top: 10px; }
 .identity-text { color: #65738a; overflow-wrap: anywhere; margin: 6px 0 0; }
 .button-row { display: flex; gap: 7px; margin: 4px 0 8px; flex-wrap: wrap; align-items: center; }
 .button-row button { padding-left: 10px; padding-right: 10px; }
@@ -497,7 +508,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .recovery-panel .confirm-row { flex-basis: 100%; }
 
 /* Edit: a repository-style layout. A compact, collapsible tree on the left groups Files (scripts and assets by
-   folder) and Metadata (manifest, schema, presets, source maps) above the Duplicate entry; the right shows only the
+   folder) and Metadata (manifest, schema, presets, source maps) above the Duplicate and Export entries; the right shows only the
    selected file: the native textarea editor with a synchronized line-number gutter, a structured form or facts.
    Validation results follow. File changes live in row menus and small dialogs. */
 .repo-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; font-size: 11px; }
@@ -542,8 +553,10 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 /* A copy glyph (two offset squares) drawn with borders so it needs no icon font. */
 .copy-icon { position: relative; width: 10px; height: 10px; margin: 0 2px 0 1px; border: 1.5px solid currentColor; border-radius: 2px; }
 .copy-icon::after { content: ""; position: absolute; left: 1px; top: 1px; width: 8px; height: 8px; border: 1.5px solid currentColor; border-radius: 2px; background: var(--surface); }
-/* A viewfinder glyph (corner brackets around a region) for the Recognition entry. */
-.recognition-icon { width: 12px; height: 12px; margin-right: 1px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; }
+/* Viewfinder (Recognition) and upload-tray (Export) glyphs. */
+.recognition-icon, .export-icon { width: 12px; height: 12px; margin-right: 1px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; }
+/* A hinted rail action still fills its row. */
+.tree-row > .button-hint { flex: 1; min-width: 0; }
 /* Row menu buttons show on the current row, on hover and on focus; touch screens always show them. */
 .row-menu { flex-shrink: 0; width: 24px; height: 24px; padding: 0; border: 0; background: transparent; color: var(--text-muted); font-size: 15px; font-weight: 700; line-height: 1; opacity: 0; }
 .row-menu:hover:not(:disabled) { background: #dfe6ef; color: var(--text); }
@@ -662,6 +675,21 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .enum-item input { flex: 1; }
 .schema-default { margin: 6px 0 0; overflow-wrap: anywhere; }
 .metadata-number small { display: block; margin-top: 4px; }
+/* Release and search metadata. Each localized-name row joins the language-key combobox and the name with the Logs
+   input-select-group border; the combobox takes the place of that group's left-hand select. */
+.distribution-form textarea { resize: vertical; }
+.distribution-list { display: grid; gap: 8px; }
+.distribution-list > button { justify-self: start; }
+.distribution-rows { display: grid; gap: 8px; }
+.distribution-row-controls { display: flex; align-items: stretch; gap: 6px; min-width: 0; }
+.distribution-row-controls > .input-select-group { flex: 1 1 auto; }
+.input-select-group > .language-key-input { flex: 0 0 120px; width: 120px; border-right: 1px solid var(--border); border-radius: var(--radius-sm) 0 0 var(--radius-sm); background: var(--surface-alt); font-family: var(--mono); }
+.input-select-group > .language-key-input:focus { background: var(--surface); }
+.language-key-popup .select-option { min-height: 30px; padding: 6px 8px; }
+.distribution-alias .field-error { margin-top: 4px; }
+/* Package distribution review text: package-supplied description is plain text, never HTML. */
+.distribution-description { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.distribution-names { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
 
 @media (max-width: 1100px) {
   .content { padding: 22px 20px 36px; }
@@ -694,6 +722,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
   .workspace-pages { border-left: 0; padding-left: 0; }
   .log-toolbar { flex-wrap: wrap; }
   .log-toolbar .input-select-group { flex-basis: 100%; }
+  .input-select-group > .language-key-input { flex-basis: 88px; width: 88px; }
   .content { padding: 16px 12px 28px; }
   .panel-heading, .panel-body { padding-left: 14px; padding-right: 14px; }
   .summary-panel { grid-template-columns: 1fr; }

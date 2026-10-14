@@ -6,6 +6,7 @@ use super::{
     ProfileRecoveryOutcome, RecoverableProfile, RecoveryMutation, RecoveryRef, RecoveryStatus,
     RecoveryView, Selected, Workspace, WorkspaceRef, WorkspaceView, Workspaces, lock,
 };
+use crate::distribution::{self, InstalledIdentity};
 use crate::storage::{
     PackageReference, PackageSource, ProfileStore, RecoveryRecord, Store, portable_values,
 };
@@ -125,15 +126,94 @@ fn compatibility(store: &ProfileStore, selected: &Selected) -> Result<(), Fault>
 }
 
 fn bind(store: &Store, selected: &Selected) -> Result<Option<PackageReference>, Fault> {
-    Ok(store
-        .bind_package(
+    let tab = match &selected.installed {
+        Some(installed) => store.bind_installed(
+            &selected.internal_name,
+            &selected.inventory.package_id,
+            &installed.identity.artifact_id,
+        )?,
+        None => store.bind_package(
             &selected.internal_name,
             &selected.inventory.package_id,
             &selected.path,
-        )?
+        )?,
+    };
+    Ok(tab
         .packages
         .into_iter()
         .find(|reference| reference.package_id == selected.inventory.package_id))
+}
+
+/// Whether a saved reference already names this candidate; any other directory, source
+/// form or installed artifact is a relocation that must pass replacement checks.
+fn same_source(source: &PackageSource, selected: &Selected) -> bool {
+    match (source, &selected.installed) {
+        (PackageSource::Directory { path }, None) => Path::new(path) == selected.path.as_path(),
+        (
+            PackageSource::Installed {
+                package_id,
+                artifact_id,
+            },
+            Some(installed),
+        ) => {
+            *package_id == installed.identity.package_id
+                && *artifact_id == installed.identity.artifact_id
+        }
+        _ => false,
+    }
+}
+
+/// An installed release replacing another installed artifact of this package in a
+/// Tab must carry the same verified signing key; a different signer never inherits its
+/// profiles, Target or binding. The saved artifact is verified now: an unavailable one
+/// cannot establish its signer, so it is never assumed.
+fn check_signer(
+    root: &Path,
+    saved: Option<&PackageReference>,
+    selected: &Selected,
+) -> Result<(), Fault> {
+    let (
+        Some(PackageSource::Installed {
+            package_id,
+            artifact_id,
+        }),
+        Some(candidate),
+    ) = (
+        saved.map(|reference| &reference.source),
+        &selected.installed,
+    )
+    else {
+        return Ok(());
+    };
+    // The archive digest fixes the signer, so the saved artifact itself needs no check.
+    if *artifact_id == candidate.identity.artifact_id {
+        return Ok(());
+    }
+    let mut context = json!({
+        "internal_name":selected.internal_name,
+        "package_id":package_id,
+        "saved_artifact_id":artifact_id,
+        "artifact_id":candidate.identity.artifact_id,
+        "key_id":candidate.key_id,
+    });
+    let previous = distribution::verify_installed(root, package_id, artifact_id).map_err(|cause| {
+        let mut context = context.clone();
+        context["cause"] = json!(cause);
+        Fault::new(
+            "InstalledSigner",
+            "The installed release saved in this Tab cannot be verified, so its signer is unknown; import its original .mmpkg again before replacing it",
+        )
+        .with_context(context)
+    })?;
+    if previous.facts().key_id != candidate.key_id {
+        context["saved_key_id"] = json!(previous.facts().key_id);
+        return Err(Fault::new(
+            "InstalledSigner",
+            "This release is signed by a different key than the installed release saved in this Tab; use another Tab for it",
+        )
+        .with_context(context));
+    }
+    Ok(())
 }
 
 fn reconcile(store: &ProfileStore, context: &mut RecoveryContext) {
@@ -192,6 +272,49 @@ impl Application {
         path: &Path,
         workspace: &WorkspaceRef,
     ) -> Result<InspectionOutcome, Fault> {
+        self.inspect_candidate(workspace, "inspect", |reference, previous| {
+            Self::inspect_selection(
+                &self.runner,
+                &self.publisher,
+                path,
+                reference,
+                &previous.internal_name,
+                &previous.display_name,
+            )
+        })
+    }
+
+    /// Explicitly select one installed release for this Tab through the ordinary
+    /// inspection, signer continuity, profile reconciliation and binding checks. Import
+    /// never calls this.
+    pub fn inspect_installed(
+        &self,
+        workspace: &WorkspaceRef,
+        package_id: &str,
+        artifact_id: &str,
+    ) -> Result<InspectionOutcome, Fault> {
+        let identity = InstalledIdentity {
+            package_id: package_id.to_owned(),
+            artifact_id: artifact_id.to_owned(),
+        };
+        self.inspect_candidate(workspace, "inspect_installed", |reference, previous| {
+            Self::inspect_installed_selection(
+                &self.runner,
+                &self.publisher,
+                &identity,
+                reference,
+                &previous.internal_name,
+                &previous.display_name,
+            )
+        })
+    }
+
+    fn inspect_candidate(
+        &self,
+        workspace: &WorkspaceRef,
+        action: &str,
+        select: impl FnOnce(WorkspaceRef, &Workspace) -> Result<Selected, Fault>,
+    ) -> Result<InspectionOutcome, Fault> {
         let result = (|| {
             let (_command, mut state) = self.command_state()?;
             state.resolve_workspace(workspace)?;
@@ -201,14 +324,15 @@ impl Application {
             let reference = next_revision(workspace)?;
             self.invalidate_target_observation(Some(workspace));
             drop(state);
-            let selected = Self::inspect_selection(
-                &self.runner,
-                &self.publisher,
-                path,
-                reference.clone(),
-                &previous.internal_name,
-                &previous.display_name,
-            )?;
+            let selected = select(reference.clone(), &previous)?;
+            // Signer continuity is settled before reconciliation or binding can write; the
+            // saved archive is verified without holding the store.
+            let saved = lock(&self.store)
+                .tab(&previous.internal_name)?
+                .packages
+                .into_iter()
+                .find(|reference| reference.package_id == selected.inventory.package_id);
+            check_signer(&self.root, saved.as_ref(), &selected)?;
             let mut context = RecoveryContext {
                 reference: RecoveryRef {
                     token: format!("recovery-{}-{}", reference.workspace_id, reference.revision),
@@ -229,12 +353,16 @@ impl Application {
                 let existing = tab.packages.iter().find(|reference| {
                     reference.package_id == context.selected.inventory.package_id
                 });
+                if existing != saved.as_ref() {
+                    return Err(Fault::new(
+                        "StaleIdentity",
+                        "Saved package ownership changed; inspect it again",
+                    ));
+                }
                 context.source_reference = existing.cloned();
                 context.selected_package_id = tab.selected_package_id;
-                context.relocation = existing.is_some_and(|reference| !matches!(
-                    &reference.source,
-                    PackageSource::Directory { path } if Path::new(path) == context.selected.path.as_path()
-                ));
+                context.relocation = existing
+                    .is_some_and(|reference| !same_source(&reference.source, &context.selected));
                 if existing.is_some() {
                     let profiles = store.profile_store(
                         &previous.internal_name,
@@ -253,7 +381,7 @@ impl Application {
             };
             Ok(self.publish_inspection(workspace, previous, context, binding))
         })();
-        self.reported(workspace, "inspect", result)
+        self.reported(workspace, action, result)
     }
 
     /// Inspection and binding retry succeed as commands even when the candidate was
@@ -341,8 +469,7 @@ impl Application {
     }
 
     fn check_recovery_inventory(&self, context: &RecoveryContext) -> Result<(), Fault> {
-        self.publisher.check_admission(&context.selected.path)?;
-        let current = self.runner.inspect(&context.selected.path)?;
+        let current = self.reinspect(&context.selected)?;
         if current.inventory_identity != context.selected.inventory.identity {
             return Err(Fault::new(
                 "InventoryChanged",

@@ -156,6 +156,7 @@ impl Host {
             || !state.queue.is_empty()
             || state.active.is_some()
             || !state.held_keys.is_empty()
+            || !state.held_buttons.is_empty()
             || state.receipts.len() != state.released_receipts.len()
             || self.inner.physical.load(Ordering::Acquire) != 0
             || !lock(&self.inner.workers).is_empty()
@@ -320,6 +321,12 @@ impl Host {
                 return Err(Fault::new(
                     "FocusRefused",
                     "configured focus requirement is not satisfied",
+                ));
+            }
+            if state.input_closed {
+                return Err(Fault::new(
+                    "AdmissionClosed",
+                    "input admission closed by an interrupted drag batch",
                 ));
             }
             if self.inner.plan.lane == "controlled" {

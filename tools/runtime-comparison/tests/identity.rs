@@ -17,12 +17,15 @@ struct PlanFile(PathBuf);
 
 impl PlanFile {
     fn new(plan: &Plan) -> Self {
+        static NEXT_PLAN: AtomicU64 = AtomicU64::new(0);
+        let sequence = NEXT_PLAN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("mado-identity-{}-{nonce}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "mado-identity-{}-{nonce}-{sequence}.json", std::process::id()
+        ));
         let file = File::create_new(&path).expect("create private controlled plan");
         let owner = Self(path);
         serde_json::to_writer(file, plan).expect("write controlled plan");

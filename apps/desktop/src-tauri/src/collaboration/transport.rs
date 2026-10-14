@@ -1,6 +1,6 @@
 //! Socket admission, ticket correlation and bounded lifetimes.
 
-use super::endpoint::{self, Endpoint, Readable};
+use super::endpoint::{self, Endpoint, Listener, Stream, Wake};
 use super::protocol::{self, Claimed, Outcome, Request};
 use super::{
     FRAME_BYTES, HostOwner, MAX_CLIENTS, MAX_PENDING, Notify, OUTBOX_FRAMES, RESPONSE_TIMEOUT,
@@ -10,7 +10,6 @@ use mado_runtime_comparison::model::Fault;
 use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -47,7 +46,7 @@ impl Default for Settings {
 
 struct Client {
     id: u64,
-    stream: UnixStream,
+    stream: Stream,
     workers: AtomicU8,
     outbox: Mutex<Option<SyncSender<Vec<u8>>>>,
 }
@@ -106,6 +105,7 @@ struct Hub {
     settings: Settings,
     state: Mutex<State>,
     changed: Condvar,
+    workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -136,7 +136,7 @@ fn same_secret(left: &[u8], right: &[u8]) -> bool {
             == 0
 }
 
-fn read_until(mut stream: &UnixStream, mut bytes: &mut [u8], deadline: Instant) -> io::Result<()> {
+fn read_until(mut stream: &Stream, mut bytes: &mut [u8], deadline: Instant) -> io::Result<()> {
     while !bytes.is_empty() {
         let remaining = deadline
             .checked_duration_since(Instant::now())
@@ -153,7 +153,7 @@ fn read_until(mut stream: &UnixStream, mut bytes: &mut [u8], deadline: Instant) 
     Ok(())
 }
 
-fn read_frame(mut stream: &UnixStream, timeout: Duration) -> Result<Option<Vec<u8>>, FrameError> {
+fn read_frame(mut stream: &Stream, timeout: Duration) -> Result<Option<Vec<u8>>, FrameError> {
     let mut header = [0_u8; 4];
     // A connection may idle between frames, never inside one.
     stream.set_read_timeout(None)?;
@@ -180,7 +180,7 @@ fn read_frame(mut stream: &UnixStream, timeout: Duration) -> Result<Option<Vec<u
     Ok(Some(body))
 }
 
-fn write_loop(mut stream: &UnixStream, outbox: Receiver<Vec<u8>>) {
+fn write_loop(mut stream: &Stream, outbox: Receiver<Vec<u8>>) {
     for frame in outbox {
         if stream.write_all(&frame).is_err() {
             break;
@@ -198,16 +198,11 @@ impl Hub {
         lock(&self.state)
     }
 
-    fn accept_loop(self: &Arc<Self>, listener: &UnixListener, wake: &UnixStream) {
+    fn accept_loop(self: &Arc<Self>, listener: &Listener, wake: &Wake) {
         loop {
-            match endpoint::wait_readable(listener, wake) {
-                Ok(Readable::Wake) => return,
-                Ok(Readable::Listener) => {}
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => return,
-            }
-            match listener.accept() {
-                Ok((stream, _)) => self.connect(stream),
+            match endpoint::accept(listener, wake) {
+                Ok(None) => return,
+                Ok(Some(stream)) => self.connect(stream),
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -220,13 +215,13 @@ impl Hub {
         }
     }
 
-    fn connect(self: &Arc<Self>, stream: UnixStream) {
+    fn connect(self: &Arc<Self>, stream: Stream) {
         // BSD-derived systems let accepted sockets inherit the listener's O_NONBLOCK.
         if stream.set_nonblocking(false).is_err()
             || stream
                 .set_write_timeout(Some(self.settings.write_timeout))
                 .is_err()
-            || endpoint::peer_uid(&stream).ok() != Some(endpoint::effective_uid())
+            || !endpoint::same_user(&stream)
         {
             return;
         }
@@ -270,12 +265,15 @@ impl Hub {
                 write_loop(&writer_client.stream, outbox);
                 hub.worker_done(&writer_client);
             });
-        if started.is_err() {
-            self.disconnect(&client);
-            // Neither worker started; release both reservations.
-            self.worker_done(&client);
-            self.worker_done(&client);
-            return;
+        match started {
+            Ok(worker) => self.retain_worker(worker),
+            Err(_) => {
+                self.disconnect(&client);
+                // Neither worker started; release both reservations.
+                self.worker_done(&client);
+                self.worker_done(&client);
+                return;
+            }
         }
         let hub = self.clone();
         let reader_client = client.clone();
@@ -285,10 +283,26 @@ impl Hub {
                 hub.read_loop(&reader_client);
                 hub.worker_done(&reader_client);
             });
-        if started.is_err() {
-            self.disconnect(&client);
-            self.worker_done(&client);
+        match started {
+            Ok(worker) => self.retain_worker(worker),
+            Err(_) => {
+                self.disconnect(&client);
+                self.worker_done(&client);
+            }
         }
+    }
+
+    fn retain_worker(&self, worker: JoinHandle<()>) {
+        let mut workers = lock(&self.workers);
+        let mut index = 0;
+        while index < workers.len() {
+            if workers[index].is_finished() {
+                let _ = workers.swap_remove(index).join();
+            } else {
+                index += 1;
+            }
+        }
+        workers.push(worker);
     }
 
     fn read_loop(&self, client: &Arc<Client>) {
@@ -478,6 +492,7 @@ impl Hub {
             self.state()
                 .clients
                 .retain(|current| current.id != client.id);
+            self.changed.notify_all();
         }
     }
 
@@ -626,7 +641,7 @@ impl Hub {
 
 pub(super) struct Server {
     hub: Arc<Hub>,
-    wake: UnixStream,
+    wake: Wake,
     accept: Mutex<Option<JoinHandle<()>>>,
     timer: Mutex<Option<JoinHandle<()>>>,
     endpoint: Mutex<Endpoint>,
@@ -642,10 +657,13 @@ fn spawn_fault(error: &io::Error) -> Fault {
 
 impl Server {
     pub(super) fn start(root: &Path, hooks: Hooks, settings: Settings) -> Result<Self, Fault> {
+        #[cfg(unix)]
         let instance = crate::storage::new_id()?;
+        #[cfg(windows)]
+        let instance = endpoint::random_hex::<16>()?;
         let token = endpoint::random_hex::<32>()?;
         let (mut published, listener) = endpoint::create(root, &instance, &token)?;
-        let (wake, wake_reader) = match UnixStream::pair() {
+        let (wake, wake_reader) = match endpoint::wake_pair() {
             Ok(pair) => pair,
             Err(error) => {
                 published.remove();
@@ -667,6 +685,7 @@ impl Server {
                     requests: Vec::new(),
                 }),
                 changed: Condvar::new(),
+                workers: Mutex::new(Vec::new()),
             }),
             wake,
             accept: Mutex::new(None),
@@ -777,12 +796,28 @@ impl Server {
                 Outcome::Unknown,
             ));
         }
-        for client in state.clients.drain(..) {
+        for client in &state.clients {
             client.close();
         }
         state.stopped = true;
         self.hub.changed.notify_all();
         drop(state);
+        // Flush queued terminal replies within one shared allowance, not one
+        // allowance per frame/client. Then interrupt every remaining I/O and join.
+        let flush_deadline = Instant::now() + self.hub.settings.write_timeout;
+        let mut state = self.hub.state();
+        while !state.clients.is_empty() && Instant::now() < flush_deadline {
+            state = self.hub.changed
+                .wait_timeout(state, flush_deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(PoisonError::into_inner).0;
+        }
+        for client in &state.clients {
+            let _ = client.stream.shutdown(Shutdown::Both);
+        }
+        drop(state);
+        for worker in lock(&self.hub.workers).drain(..) {
+            let _ = worker.join();
+        }
         if let Some(timer) = lock(&self.timer).take() {
             let _ = timer.join();
         }

@@ -59,8 +59,7 @@ impl Application {
             let (_command, state) = self.command_state()?;
             let selected = state.resolve(workspace)?.clone();
             drop(state);
-            self.publisher.check_admission(&selected.path)?;
-            let current = self.runner.inspect(&selected.path)?;
+            let current = self.reinspect(&selected)?;
             if current.inventory_identity != selected.inventory.identity {
                 return Err(Fault::new(
                     "InventoryChanged",
@@ -149,7 +148,7 @@ fn exact_integer(number: &serde_json::Number) -> Option<i128> {
         .or_else(|| number.as_u64().map(i128::from))
 }
 
-pub(super) fn check_webview_value(value: &Value, path: &str) -> Result<(), Fault> {
+pub(crate) fn check_webview_value(value: &Value, path: &str) -> Result<(), Fault> {
     match value {
         Value::Number(number) => {
             let floating = number.as_f64().expect("JSON numbers are finite");

@@ -5,12 +5,14 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 mod capture;
+mod distribution;
 mod draft;
 mod validation;
 
 #[cfg(test)]
 mod image_tests;
 
+pub use distribution::{Distribution, DistributionGame};
 pub use draft::{DraftFileKind, PackageDraft};
 use validation::portable_component;
 
@@ -228,6 +230,12 @@ struct Manifest {
         skip_serializing_if = "Option::is_none"
     )]
     target: Option<TargetDeclaration>,
+    #[serde(
+        default,
+        deserialize_with = "distribution::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    distribution: Option<Distribution>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -256,6 +264,27 @@ impl Inventory {
                 })?;
                 target.validate()?;
                 Ok(target)
+            })
+            .transpose()
+    }
+
+    /// Strict optional release/search metadata; never part of target identity.
+    pub fn distribution(&self) -> Result<Option<Distribution>, Fault> {
+        let manifest = self
+            .metadata
+            .get("manifest")
+            .and_then(Value::as_object)
+            .ok_or_else(|| invalid("inventory manifest is missing or invalid"))?;
+        manifest
+            .get("distribution")
+            .map(|value| {
+                let distribution = Distribution::deserialize(value).map_err(|error| {
+                    invalid("invalid inventory distribution metadata").with_context(json!({
+                        "path":"package.json","field":"distribution","cause":error.to_string()
+                    }))
+                })?;
+                distribution.validate()?;
+                Ok(distribution)
             })
             .transpose()
     }

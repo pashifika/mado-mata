@@ -150,7 +150,7 @@ impl PayloadBytes {
         &self.0.bytes
     }
 
-    pub(crate) fn digest(&self) -> &sha2::digest::Output<Sha256> {
+    pub fn digest(&self) -> &sha2::digest::Output<Sha256> {
         self.0.digest.get_or_init(|| Sha256::digest(&self.0.bytes))
     }
 

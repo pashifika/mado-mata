@@ -3,7 +3,7 @@ use super::validation::{
     ImageBudget, catalog, declare, portable_component, portable_path, sha256, validate_asset,
     validate_manifest, validate_source,
 };
-use super::{Inventory, Manifest, invalid};
+use super::{Distribution, Inventory, Manifest, invalid};
 use crate::images::PayloadBytes;
 use crate::model::{Fault, Limits};
 use serde::Serialize;
@@ -63,6 +63,29 @@ impl PackageDraft {
         portable_component(id)
     }
 
+    /// `package.json` is required and bounded by its length, before anyone reads it.
+    pub fn check_manifest_length(length: Option<usize>) -> Result<(), Fault> {
+        let length = length.ok_or_else(|| invalid("package.json is required"))?;
+        if length > crate::images::PACKAGE_NON_IMAGE_BYTES {
+            return Err(invalid("package non-image byte limit exceeded"));
+        }
+        Ok(())
+    }
+
+    /// The payload budget from `package.json` and file lengths alone: its declarations,
+    /// image bytes and dimensions, then the non-image and total bounds. Archive readers
+    /// apply it to signed lengths before reading any other file; `from_files` applies
+    /// the same budget to captured bytes.
+    pub fn check_payload_budget(
+        manifest: &[u8],
+        length: impl Fn(&str) -> Option<usize>,
+        total: usize,
+    ) -> Result<(), Fault> {
+        Self::check_manifest_length(Some(manifest.len()))?;
+        payload_budget(manifest, length, total)?;
+        Ok(())
+    }
+
     pub fn from_files(
         files: BTreeMap<String, PayloadBytes>,
         limits: &Limits,
@@ -104,24 +127,12 @@ impl PackageDraft {
                 }
             }
         }
-        let raw = files
-            .get("package.json")
-            .ok_or_else(|| invalid("package.json is required"))?;
-        if raw.len() > crate::images::PACKAGE_NON_IMAGE_BYTES {
-            return Err(invalid("package non-image byte limit exceeded"));
-        }
-        let manifest: Manifest = serde_json::from_slice(raw).map_err(|error| {
-            invalid("invalid package.json").with_context(json!({"path":"package.json","line":error.line(),"column":error.column(),"cause":error.to_string()}))
-        })?;
-        validate_manifest(&manifest)?;
-        let mut image_budget = ImageBudget::default();
-        for (id, asset) in &manifest.assets {
-            let bytes = files.get(&asset.path).ok_or_else(|| {
-                invalid("declared file is missing").with_context(json!({"path":asset.path}))
-            })?;
-            image_budget.add(id, asset, bytes.len())?;
-        }
-        image_budget.check_total(total)?;
+        Self::check_manifest_length(files.get("package.json").map(|raw| raw.len()))?;
+        let (manifest, image_budget) = payload_budget(
+            &files["package.json"],
+            |path| files.get(path).map(|bytes| bytes.len()),
+            total,
+        )?;
         let mut declared = BTreeSet::from(["package.json".to_owned()]);
         let mut kinds = BTreeMap::from([("package.json".to_owned(), DraftFileKind::Manifest)]);
         let mut add = |path: &str, kind| -> Result<(), Fault> {
@@ -233,7 +244,33 @@ impl PackageDraft {
     pub fn manifest(&self) -> Result<Value, Fault> {
         serde_json::to_value(&self.manifest).map_err(|error| invalid(error.to_string()))
     }
+    /// Validated with the draft; absent for ordinary directory packages.
+    pub fn distribution(&self) -> Option<&Distribution> {
+        self.manifest.distribution.as_ref()
+    }
     pub fn validate(&self) -> Result<Inventory, Fault> {
         inventory_from_files(self.files.clone(), &self.limits)
     }
+}
+
+/// Parses and validates a bounded `package.json`, then charges its declared assets and
+/// the total by length; callers bound the manifest first.
+fn payload_budget(
+    raw: &[u8],
+    length: impl Fn(&str) -> Option<usize>,
+    total: usize,
+) -> Result<(Manifest, ImageBudget), Fault> {
+    let manifest: Manifest = serde_json::from_slice(raw).map_err(|error| {
+        invalid("invalid package.json").with_context(json!({"path":"package.json","line":error.line(),"column":error.column(),"cause":error.to_string()}))
+    })?;
+    validate_manifest(&manifest)?;
+    let mut image_budget = ImageBudget::default();
+    for (id, asset) in &manifest.assets {
+        let bytes = length(&asset.path).ok_or_else(|| {
+            invalid("declared file is missing").with_context(json!({"path":asset.path}))
+        })?;
+        image_budget.add(id, asset, bytes)?;
+    }
+    image_budget.check_total(total)?;
+    Ok((manifest, image_budget))
 }

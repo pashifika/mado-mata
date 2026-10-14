@@ -1,4 +1,4 @@
-use mado_mata_desktop::application::RecognitionPickerGuard;
+use mado_mata_desktop::application::{RecognitionPickerGuard, TargetPickerGuard};
 use mado_runtime_comparison::model::Fault;
 use std::os::windows::fs::MetadataExt;
 use std::path::Path;
@@ -18,34 +18,71 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
 
+#[derive(Clone, Copy)]
+enum FileKind {
+    Png,
+    Executable,
+}
+
+impl FileKind {
+    fn category(self) -> &'static str {
+        match self {
+            Self::Png => "RecognitionPicker",
+            Self::Executable => "TargetPicker",
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Executable => "exe",
+        }
+    }
+}
+
 pub async fn choose_png(
     window: tauri::WebviewWindow,
     guard: RecognitionPickerGuard,
+) -> Result<Option<String>, Fault> {
+    choose_file(window, FileKind::Png, move || guard.validate()).await
+}
+
+pub async fn choose_executable(
+    window: tauri::WebviewWindow,
+    guard: TargetPickerGuard,
+) -> Result<Option<String>, Fault> {
+    choose_file(window, FileKind::Executable, move || guard.validate()).await
+}
+
+async fn choose_file(
+    window: tauri::WebviewWindow,
+    kind: FileKind,
+    validate: impl Fn() -> Result<(), Fault> + Send + 'static,
 ) -> Result<Option<String>, Fault> {
     let (send, mut receive) = tauri::async_runtime::channel(1);
     let parent = window.clone();
     window
         .run_on_main_thread(move || {
             let result = (|| {
-                guard.validate()?;
+                validate()?;
                 let hwnd = parent
                     .hwnd()
-                    .map_err(|error| Fault::new("RecognitionPicker", error.to_string()))?;
-                open_file(hwnd.0 as HWND)
+                    .map_err(|error| Fault::new(kind.category(), error.to_string()))?;
+                open_file(hwnd.0 as HWND, kind)
             })();
-            let _ = send.try_send((result, guard));
+            let _ = send.try_send((result, validate));
         })
-        .map_err(|error| Fault::new("RecognitionPicker", error.to_string()))?;
-    let (selected, guard) = receive
+        .map_err(|error| Fault::new(kind.category(), error.to_string()))?;
+    let (selected, validate) = receive
         .recv()
         .await
-        .ok_or_else(|| Fault::new("RecognitionPicker", "File selection did not complete"))?;
+        .ok_or_else(|| Fault::new(kind.category(), "File selection did not complete"))?;
     let selected = selected?;
     super::background(move || {
         // The dialog pumps messages; filesystem access must not block the event loop.
-        guard.validate()?;
-        let selected = selected.map(|path| selected_path(&path)).transpose()?;
-        guard.validate()?;
+        validate()?;
+        let selected = selected.map(|path| selected_path(path, kind)).transpose()?;
+        validate()?;
         Ok(selected)
     })
     .await
@@ -67,6 +104,106 @@ pub async fn choose_directory(window: tauri::WebviewWindow) -> Result<Option<Str
         .recv()
         .await
         .ok_or_else(|| Fault::new("OcrSetupPicker", "Folder selection did not complete"))?
+}
+
+pub async fn choose_package(
+    window: tauri::WebviewWindow,
+    guard: mado_mata_desktop::application::DistributionPickerGuard,
+    exporting: bool,
+    suggested_name: Option<String>,
+) -> Result<Option<String>, Fault> {
+    let (send, mut receive) = tauri::async_runtime::channel(1);
+    let parent = window.clone();
+    window
+        .run_on_main_thread(move || {
+            let result = (|| {
+                guard.validate()?;
+                let hwnd = parent
+                    .hwnd()
+                    .map_err(|_| Fault::new("PackagePicker", "The parent window is unavailable"))?;
+                let result = package_file(hwnd.0 as HWND, exporting, suggested_name.as_deref())?;
+                guard.validate()?;
+                Ok(result)
+            })();
+            let _ = send.try_send(result);
+        })
+        .map_err(|_| Fault::new("PackagePicker", "Could not schedule package file selection"))?;
+    receive
+        .recv()
+        .await
+        .ok_or_else(|| Fault::new("PackagePicker", "Package file selection did not complete"))?
+}
+
+#[expect(unsafe_code, reason = "audited owner-modal Win32 package file dialog")]
+fn package_file(
+    owner: HWND,
+    exporting: bool,
+    suggested: Option<&str>,
+) -> Result<Option<String>, Fault> {
+    use windows_sys::Win32::UI::Controls::Dialogs::GetSaveFileNameW;
+    let mut path = [0_u16; MAX_PATH_BYTES + 1];
+    if let Some(name) = suggested {
+        for (destination, unit) in path.iter_mut().zip(name.encode_utf16()) {
+            *destination = unit;
+        }
+    }
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: windows_sys::core::w!("MadoMata package (*.mmpkg)\0*.mmpkg\0"),
+        nFilterIndex: 1,
+        lpstrFile: path.as_mut_ptr(),
+        nMaxFile: path.len() as u32,
+        lpstrDefExt: windows_sys::core::w!("mmpkg"),
+        Flags: OFN_EXPLORER
+            | OFN_PATHMUSTEXIST
+            | OFN_NOCHANGEDIR
+            | OFN_DONTADDTORECENT
+            | OFN_HIDEREADONLY
+            | OFN_NODEREFERENCELINKS
+            | if exporting { 0 } else { OFN_FILEMUSTEXIST },
+        ..Default::default()
+    };
+    // SAFETY: The owner and every UTF-16 buffer remain live through this main-thread modal call.
+    let accepted = unsafe {
+        if exporting {
+            GetSaveFileNameW(&mut dialog)
+        } else {
+            GetOpenFileNameW(&mut dialog)
+        }
+    };
+    if accepted == 0 {
+        // SAFETY: Read this thread's common-dialog error immediately after failure.
+        let error = unsafe { CommDlgExtendedError() };
+        return if error == 0 {
+            Ok(None)
+        } else {
+            Err(Fault::new(
+                "PackagePicker",
+                format!("File dialog failed ({error:#x})"),
+            ))
+        };
+    }
+    let length = path
+        .iter()
+        .position(|unit| *unit == 0)
+        .ok_or_else(|| Fault::new("PackagePicker", "Selected path exceeds its bound"))?;
+    let path = String::from_utf16(&path[..length])
+        .map_err(|_| Fault::new("PackagePicker", "Selected path is not valid Unicode"))?;
+    if path.len() > MAX_PATH_BYTES
+        || !Path::new(&path).is_absolute()
+        || path.chars().any(char::is_control)
+        || !Path::new(&path)
+            .extension()
+            .and_then(|part| part.to_str())
+            .is_some_and(|part| part.eq_ignore_ascii_case("mmpkg"))
+    {
+        return Err(Fault::new(
+            "PackagePicker",
+            "Select a bounded absolute .mmpkg path",
+        ));
+    }
+    Ok(Some(path))
 }
 
 #[expect(
@@ -144,8 +281,11 @@ fn open_directory(owner: HWND) -> Result<Option<String>, Fault> {
 }
 
 #[expect(unsafe_code, reason = "audited owner-modal Win32 common file dialog")]
-fn open_file(owner: HWND) -> Result<Option<String>, Fault> {
-    let filter = windows_sys::core::w!("PNG image (*.png)\0*.png\0");
+fn open_file(owner: HWND, kind: FileKind) -> Result<Option<String>, Fault> {
+    let filter = match kind {
+        FileKind::Png => windows_sys::core::w!("PNG image (*.png)\0*.png\0"),
+        FileKind::Executable => windows_sys::core::w!("Windows executable (*.exe)\0*.exe\0"),
+    };
     let mut path = [0_u16; MAX_PATH_BYTES + 1];
     let mut dialog = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
@@ -171,7 +311,7 @@ fn open_file(owner: HWND) -> Result<Option<String>, Fault> {
             Ok(None)
         } else {
             Err(Fault::new(
-                "RecognitionPicker",
+                kind.category(),
                 format!("File dialog failed ({error:#x})"),
             ))
         };
@@ -179,37 +319,37 @@ fn open_file(owner: HWND) -> Result<Option<String>, Fault> {
     let length = path
         .iter()
         .position(|unit| *unit == 0)
-        .ok_or_else(|| Fault::new("RecognitionPicker", "Selected path exceeds its bound"))?;
+        .ok_or_else(|| Fault::new(kind.category(), "Selected path exceeds its bound"))?;
     String::from_utf16(&path[..length])
         .map(Some)
-        .map_err(|_| Fault::new("RecognitionPicker", "Selected path is not valid Unicode"))
+        .map_err(|_| Fault::new(kind.category(), "Selected path is not valid Unicode"))
 }
 
-fn selected_path(value: &str) -> Result<String, Fault> {
-    let path = Path::new(value);
+fn selected_path(value: String, kind: FileKind) -> Result<String, Fault> {
+    let path = Path::new(&value);
     if value.len() > MAX_PATH_BYTES
         || value.chars().any(char::is_control)
         || !path.is_absolute()
         || !path
             .extension()
             .and_then(|part| part.to_str())
-            .is_some_and(|part| part.eq_ignore_ascii_case("png"))
+            .is_some_and(|part| part.eq_ignore_ascii_case(kind.extension()))
     {
         return Err(Fault::new(
-            "RecognitionPicker",
+            kind.category(),
             "Select a bounded absolute path with the required extension",
         ));
     }
-    let io = |error: std::io::Error| Fault::new("RecognitionPicker", error.to_string());
+    let io = |error: std::io::Error| Fault::new(kind.category(), error.to_string());
     let metadata = std::fs::symlink_metadata(path).map_err(io)?;
     if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Fault::new(
-            "RecognitionPicker",
+            kind.category(),
             "Selected file must be regular, not a reparse point",
         ));
     }
-    // The PNG loader independently revalidates identity at use time.
-    Ok(value.to_owned())
+    // The consuming PNG loader or target metadata check revalidates at use time.
+    Ok(value)
 }
 
 struct ClipboardWindow(HWND);
@@ -324,6 +464,44 @@ pub fn copy_text(text: &str) -> Result<(), Fault> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn executable_selection_rejects_missing_files_directories_and_other_extensions() {
+        let executable = std::env::current_exe()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            selected_path(executable.clone(), FileKind::Executable).unwrap(),
+            executable
+        );
+        assert!(selected_path(executable.clone(), FileKind::Png).is_err());
+        let directory = std::env::temp_dir().join(format!("picker-{}.exe", xid::new()));
+        std::fs::create_dir(&directory).unwrap();
+        let value = directory.to_str().unwrap().to_owned();
+        assert_eq!(
+            selected_path(value.clone(), FileKind::Executable)
+                .unwrap_err()
+                .category,
+            "TargetPicker"
+        );
+        std::fs::remove_dir(&directory).unwrap();
+        assert!(selected_path(value, FileKind::Executable).is_err());
+        for value in [
+            "relative.exe",
+            "C:\\invalid\\name.exe\n",
+            "C:\\file.lnk",
+            "C:\\file.txt",
+        ] {
+            assert_eq!(
+                selected_path(value.into(), FileKind::Executable)
+                    .unwrap_err()
+                    .category,
+                "TargetPicker"
+            );
+        }
+    }
 
     #[test]
     fn clipboard_refuses_oversized_or_embedded_nul_before_touching_system_clipboard() {

@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {INITIAL_BOOTSTRAP,PollGate,initialSettings,reconstructed,reconstructionBlock,recoveryBlock,reduceBootstrap,restoreBlock,restoreOutcome,surface} from './bootstrap.ts';
+import {INITIAL_BOOTSTRAP,PollGate,initialSettings,reconstructed,reconstructionBlock,recoveryBlock,reduceBootstrap,restoreBlock,restoreOutcome,retryOffered,surface} from './bootstrap.ts';
 import {DEFAULT_NOTIFICATIONS} from './state.ts';
 
 const fault={category:'StorageFormat',message:'settings.json is not valid JSON',context:{stage:'settings'}};
@@ -111,6 +111,19 @@ test('retry and recovery require settled operations and explicit retained-sessio
   assert.equal(reconstructionBlock(status(),idle,false),'discard');
   assert.equal(reconstructionBlock(status(),idle,true),null);
   assert.equal(reconstructionBlock(recovery,idle,false),null);
+});
+
+test('a Ready Application offers Retry only on explicit navigation intent, still behind disposal consent',()=>{
+  const ready=status();
+  assert.equal(retryOffered(ready,false),false);
+  assert.equal(retryOffered(ready,true),true);
+  assert.equal(reconstructionBlock(ready,idle,false),'discard');
+  assert.equal(reconstructionBlock(ready,{...idle,command:true},true),'command');
+  assert.equal(retryOffered(recovery,false),true);
+  assert.equal(retryOffered(status({state:'setup',stage:'settings',application_available:false}),true),false);
+  // Recoverable pending evidence keeps Recover as its route; unsupported evidence keeps Retry without intent.
+  assert.equal(retryOffered(status({pending_restore:true,recovery_supported:true}),true),false);
+  assert.equal(retryOffered(status({pending_restore:true,recovery_supported:false}),false),true);
 });
 
 for (const {scenario,supported,context} of [

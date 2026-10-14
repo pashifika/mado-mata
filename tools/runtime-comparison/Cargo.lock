@@ -188,6 +188,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "displaydoc"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.7",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -317,6 +328,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "icu_locale_core"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56e28588da92eee5c3201a6eff33fabdd49b62269c8938d4ff050ce4d900deb"
+dependencies = [
+ "displaydoc",
+ "litemap",
+ "serde",
+ "tinystr",
+ "writeable",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -359,6 +383,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "litemap"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -389,7 +419,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "mado-pilot-adapter-replay",
  "mado-pilot-backend-onnx",
@@ -402,7 +432,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-adapter-replay"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",
@@ -413,7 +443,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-assets"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "flate2",
  "mado-pilot-core",
@@ -428,7 +458,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-backend-onnx"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "libloading",
  "mado-pilot-capture",
@@ -442,7 +472,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-backend-opencv"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",
@@ -453,7 +483,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-capture"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "mado-pilot-core",
 ]
@@ -461,12 +491,12 @@ dependencies = [
 [[package]]
 name = "mado-pilot-core"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 
 [[package]]
 name = "mado-pilot-input"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "mado-pilot-core",
 ]
@@ -474,7 +504,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-ocr"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",
@@ -485,7 +515,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-platform-macos"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "cc",
  "mado-pilot-capture",
@@ -496,7 +526,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-platform-windows"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",
@@ -507,7 +537,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-runtime"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "mado-pilot-assets",
  "mado-pilot-capture",
@@ -520,7 +550,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-testkit"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",
@@ -535,7 +565,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-vision"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=4b4f3296838a9eecdcb00e9d2bb3121a25cdc240#4b4f3296838a9eecdcb00e9d2bb3121a25cdc240"
+source = "git+https://github.com/pashifika/mado-pilot?rev=453132bcf4128c180dc0699dfccca5fe1f098164#453132bcf4128c180dc0699dfccca5fe1f098164"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",
@@ -546,6 +576,7 @@ name = "mado-runtime-comparison"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "icu_locale_core",
  "libc",
  "mado-pilot",
  "mado-pilot-capture",
@@ -558,6 +589,7 @@ dependencies = [
  "objc2-foundation",
  "png",
  "rquickjs",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1060,7 +1092,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1128,6 +1160,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d62a2e0561533f2ca2561d0cf27fd9fedb640a1bf2616ff5d5c80d99017faadc"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
 name = "sysctl"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1171,7 +1214,18 @@ checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "tinystr"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1e27c91459209c2986af3dcf603a5a74a4368754ce37414f59acc971167f643"
+dependencies = [
+ "displaydoc",
+ "serde_core",
+ "zerovec",
 ]
 
 [[package]]
@@ -1353,7 +1407,7 @@ checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1364,7 +1418,7 @@ checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1435,6 +1489,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ab703352da6a72f35c39a533526393725640575bb211f61987a2748323ad956"
 
 [[package]]
+name = "writeable"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
 name = "xid"
 version = "1.1.1"
 source = "git+https://github.com/pashifika/xid-rs?rev=bb7de7a0370d051f7fc07f31b87db62549118bfe#bb7de7a0370d051f7fc07f31b87db62549118bfe"
@@ -1447,6 +1507,22 @@ dependencies = [
  "sysctl",
  "thiserror",
  "winreg",
+]
+
+[[package]]
+name = "zerofrom"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ec05a11813ea801ff6d75110ad09cd0824ddba17dfe17128ea0d5f68e6c5272"
+
+[[package]]
+name = "zerovec"
+version = "0.11.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb0464e17806c1d976d5cba29399c7f08e516e279e2ba493f63123b5fca67dd8"
+dependencies = [
+ "serde",
+ "zerofrom",
 ]
 
 [[package]]

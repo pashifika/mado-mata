@@ -1,4 +1,5 @@
 import {useEffect, useRef, useState} from 'react';
+import type {ReactNode} from 'react';
 import {ButtonHint, HelpTrigger} from '../components/ContextualHelp.tsx';
 import ProfileRecovery from '../components/ProfileRecovery.tsx';
 import type {RecoveryHandlers} from '../components/ProfileRecovery.tsx';
@@ -24,6 +25,8 @@ interface Props {
   recovery: RecoveryHandlers;
   authoring: PageAuthoring;
   packagesRoot: string;
+  // The App-owned installed-package launcher; this page only places it.
+  packageAction: ReactNode;
 }
 
 // Main content for a Tab without a usable package. Honest states: no saved package (Edit guidance), a saved custom
@@ -32,13 +35,15 @@ interface Props {
 // profiles block binding. Inspect and Edit Open/Create are separate real actions; neither runs package code or
 // invents inventory. The saved reference is shown so the operator knows which source to repair; showing it grants
 // nothing, and a recovery candidate is not a selection until an explicit binding retry succeeds.
-export default function GuidancePage({workspace, label, locked, lockReason, onPath, onInspect, activeOwner, recovery, authoring, packagesRoot}: Props) {
+export default function GuidancePage({workspace, label, locked, lockReason, onPath, onInspect, activeOwner, recovery, authoring, packagesRoot, packageAction}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const g = t.guidance;
   const source = workspace.sourceError;
   const saved = workspace.savedPackage;
   const unsupported = source !== null && source.category === UNSUPPORTED_SOURCE;
+  const d = t.distribution;
+  const installed = saved !== null && saved.source.kind === 'installed';
   const context = workspace.recovery?.view ?? null;
   const candidate = context !== null && context.relocation;
   const pending = context !== null && context.binding_required;
@@ -47,8 +52,9 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
   const [eyebrow, heading, intro] = candidate ? [t.recovery.eyebrow, t.recovery.relocationHeading, t.recovery.relocationHelp]
     : pending ? [g.bindingEyebrow, g.bindingHeading, g.bindingHelp]
     : source === null ? saved === null ? [g.eyebrow, g.heading, g.intro] : [g.savedEyebrow, g.savedHeading, g.savedHelp]
-    : unsupported ? [g.unsupportedEyebrow, g.unsupportedHeading, g.unsupportedHelp] : [g.unavailableEyebrow, g.unavailableHeading, g.unavailableHelp];
-  const sourceHeading = unsupported ? g.unsupportedHeading : g.unavailableHeading;
+    : unsupported ? [g.unsupportedEyebrow, g.unsupportedHeading, g.unsupportedHelp]
+    : installed ? [d.installedUnavailableEyebrow, d.installedUnavailableHeading, d.installedUnavailableHelp] : [g.unavailableEyebrow, g.unavailableHeading, g.unavailableHelp];
+  const sourceHeading = unsupported ? g.unsupportedHeading : installed ? d.installedUnavailableHeading : g.unavailableHeading;
   const path = workspace.inspectPath;
   const a = t.authoring;
   const destination = packageDestination(packagesRoot, workspace.editPackageId.trim());
@@ -108,8 +114,9 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
     if (discard && intent !== null) enterEdit(intent);
   }
   return <>
-    <div className="page-heading"><div><span className="eyebrow">{g.scope(label)}</span><h1>{heading}</h1>
-      <p>{intro}</p></div></div>
+    <div className="page-heading guidance-heading"><div><span className="eyebrow">{g.scope(label)}</span><h1>{heading}</h1>
+      <p>{intro}</p></div>
+      <div className="actions">{packageAction}</div></div>
     <section className="panel guidance-panel" aria-labelledby="guidance-heading">
       <div className="panel-heading"><div><span className="eyebrow">{eyebrow}</span><h2 aria-labelledby="guidance-heading"><span id="guidance-heading">{heading}</span>
         {activeOwner !== null && <HelpTrigger title={heading} hint={g.stopHint}><p>{activeOwner === 'application' ? g.applicationStopHelp : g.stopHelp}</p></HelpTrigger>}</h2></div>
@@ -118,7 +125,9 @@ export default function GuidancePage({workspace, label, locked, lockReason, onPa
         {source !== null && <FaultMessage title={sourceHeading} value={source}/>}
         {source === null && saved !== null && <p id="saved-unbound" className="muted">{g.savedUnbound}</p>}
         {source === null && saved === null && <p className="muted">{context !== null ? g.noSavedBinding : g.where}</p>}
-        {saved !== null && <dl className="run-identity"><dt>{saved.source.kind === 'directory' ? t.reopen.directory(saved.package_id) : t.reopen.archive(saved.package_id)}</dt><dd className="mono">{saved.source.path}</dd></dl>}
+        {saved !== null && <dl className="run-identity">{saved.source.kind === 'installed'
+          ? <><dt>{d.installedSource(saved.package_id)}</dt><dd id="saved-installed" className="mono">{saved.source.artifact_id}</dd></>
+          : <><dt>{saved.source.kind === 'directory' ? t.reopen.directory(saved.package_id) : t.reopen.archive(saved.package_id)}</dt><dd className="mono">{saved.source.path}</dd></>}</dl>}
       </div>
     </section>
     {owner && <section id="guidance-edit-owner" className="panel open-form" aria-labelledby="guidance-edit-owner-heading"><div className="panel-body">

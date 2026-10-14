@@ -1,4 +1,4 @@
-import {Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
+import {Fragment, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
 import {flushSync} from 'react-dom';
 import CatalogDialog from '../components/CatalogDialog.tsx';
@@ -11,9 +11,9 @@ import ManifestEditor from '../components/ManifestEditor.tsx';
 import Modal from '../components/Modal.tsx';
 import {AssetView, SourceMapView} from '../components/MetadataFacts.tsx';
 import PresetEditor from '../components/PresetEditor.tsx';
-import {FaultMessage} from '../components/ResultPanel.tsx';
+import {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import SchemaEditor from '../components/SchemaEditor.tsx';
-import SourceEditor from '../editor/SourceEditor.tsx';
+import DeferredView from '../components/DeferredView.tsx';
 import type {SourceEditorHandle} from '../editor/SourceEditor.tsx';
 import {CompletionClient} from '../editor/completion-client.ts';
 import type {CompletionContext, CompletionKey, CompletionStatus} from '../editor/completion-types.ts';
@@ -24,6 +24,8 @@ import {packageDestination} from '../state.ts';
 import type {AuthoringFileKind, CatalogEdit, EditorCompletionPreferences} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
+
+const SourceEditor = lazy(() => import('../editor/SourceEditor.tsx'));
 
 // Metadata row order in the tree's Metadata group; the Files group holds sources and assets.
 const METADATA_ORDER: Record<AuthoringFileKind, number> = {manifest: 0, schema: 1, profile: 2, source_map: 3, source: 4, asset: 5};
@@ -62,6 +64,8 @@ export interface EditHandlers {
   catalog: (edit: CatalogEdit) => Promise<boolean>;
   // The host places the copy in the configured packages root (the sources folder) under the new ID.
   duplicate: (packageId: string) => void;
+  // Opens Export PKG for the saved revision; unsaved drafts are resolved inside its dialog.
+  exportPackage: () => void;
   exit: () => void;
 }
 
@@ -93,12 +97,15 @@ interface Props {
   leaseLost: boolean;
   // The validation child still holds the work reservation, as reported by the host controller.
   validationActive: boolean;
+  // Why Export PKG cannot start beyond this page's own rules (for example another operation is active).
+  exportBlock: string | null;
 }
 
-export default function EditPage({session, label, handlers, recognition, recognitionDirty, recognitionSaveBlock, packagesRoot, completionPreferences, locked, lockReason, leaseLost, validationActive}: Props) {
+export default function EditPage({session, label, handlers, recognition, recognitionDirty, recognitionSaveBlock, packagesRoot, completionPreferences, locked, lockReason, leaseLost, validationActive, exportBlock}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const a = t.authoring;
+  const d = t.distribution;
   const drafts = draftList(session);
   const dirty = dirtyDrafts(session);
   const recognitionSelected = session.destination === 'recognition';
@@ -252,7 +259,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
   function replaceMatch(all: boolean) {
     if (!editable || sourceReadOnly || sourceEditor.current?.composing()) return;
     const ticket = {owner: session.owner.token, path: editable.path, revision: editable.revision};
-    const before = selection.current;
+    const before = sourceEditor.current ? selection.current : editable.range;
     const result = replacementEdit(currentSession.current, ticket, query, replacement, all, before);
     setReplacementNotice(result.kind === 'refused' ? result.reason : null);
     if (result.kind === 'edit') {
@@ -264,11 +271,11 @@ export default function EditPage({session, label, handlers, recognition, recogni
 
   function find(backward: boolean) {
     if (!editable) return;
-    const match = findMatch(editable.text, query, selection.current ?? editable.range, backward);
+    const match = findMatch(editable.text, query, sourceEditor.current ? selection.current : editable.range, backward);
     if (match) handlers.reveal(editable.path, match);
   }
-  // The outgoing selection matters only for the text editor, whose caret is restored when returning to the file.
-  const previous = () => editable ? selection.current : null;
+  // While the editor chunk is pending, the selected draft owns its caret; the ref may still name another file.
+  const previous = () => editable ? sourceEditor.current ? selection.current : editable.range : null;
   const presetIds = new Map(manifest?.profiles.map(([id, path]): [string, string] => [path, id]) ?? []);
   const mapModules = new Map(manifest?.sourceMaps.map(([module, path]): [string, string] => [path, module]) ?? []);
   const metadata = drafts.filter(draft => !draft.missing && !treeKind(draft.kind)).sort((left, right) => METADATA_ORDER[left.kind] - METADATA_ORDER[right.kind]);
@@ -291,6 +298,9 @@ export default function EditPage({session, label, handlers, recognition, recogni
   }
   const addReason = catalogReason({kind: 'add', path: '', file_kind: 'source', text: ''});
   const duplicateReason = publishReason ?? (pending !== null || validating ? a.block('pending') : null);
+  // Export keeps package ID and release version; it needs a settled, refreshed saved revision.
+  const exportReason = duplicateReason
+    ?? (session.refreshRequired || session.conflict ? a.block('refresh') : null) ?? exportBlock;
   // The entry dialog closes before the host flow starts, so the unsaved-changes choice never stacks on top of it.
   function duplicate() {
     const id = duplicateId.trim();
@@ -427,6 +437,8 @@ export default function EditPage({session, label, handlers, recognition, recogni
       </div>}
       </div>
       <div className="source-editing-area">
+      <DeferredView key={`${session.owner.token}:${editable.path}`} fallback={<p role="status">{t.bootstrap.state('loading')}</p>}
+        error={cause => <FaultMessage title={a.editorLabel(editable.path)} value={fault(cause)}/>}>
       <SourceEditor key={`${session.owner.token}:${editable.path}`} draft={editable} reveal={session.reveal} readOnly={sourceReadOnly}
         selection={selection} control={sourceEditor} context={completionContext} request={requestCompletion} accepts={acceptsCompletion}
         completionPreferences={completionPreferences}
@@ -441,6 +453,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
         onCompositionEnd={() => handlers.compositionEnd(editable.path)}
         onUndo={() => handlers.undo(editable.path)} onRedo={() => handlers.redo(editable.path)} onSave={() => handlers.save(editable.path)}
         onFind={openSearch} onFindNext={find}/>
+      </DeferredView>
       </div>
       <div className="completion-status">
         <span>{a.completionList}<HelpTrigger title={a.completionList} hint={a.completionHint}><p>{a.completionScope}</p></HelpTrigger></span>
@@ -549,6 +562,14 @@ export default function EditPage({session, label, handlers, recognition, recogni
             <li><div className="tree-row">
               <button id="authoring-duplicate-open" type="button" className="tree-folder tree-action" aria-haspopup="dialog" onClick={() => setDuplicating(true)}>
                 <span className="copy-icon" aria-hidden="true"/><span className="tree-name">{a.duplicateOpen}</span></button>
+            </div></li>
+            <li><div className="tree-row">
+              <ButtonHint hint={d.exportHint}>
+                <button id="authoring-export" type="button" className="tree-folder tree-action" aria-haspopup="dialog" disabled={exportReason !== null}
+                  title={exportReason ?? undefined} onClick={handlers.exportPackage}>
+                  <svg className="export-icon" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 8V1M3.5 3.5 6 1l2.5 2.5M1.5 7v3.5h9V7"/></svg>
+                  <span className="tree-name">{d.export}</span></button>
+              </ButtonHint>
             </div></li>
           </ul>
         </div>

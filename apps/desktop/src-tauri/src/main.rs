@@ -7,6 +7,7 @@ use mado_mata_desktop::authoring::CatalogEdit;
 use mado_mata_desktop::backup::SnapshotReceipt;
 use mado_mata_desktop::bootstrap::{Bootstrap, BootstrapStatus, selected_roots};
 use mado_mata_desktop::collaboration::Collaboration;
+use mado_mata_desktop::doctor::{DoctorReport, DoctorRequest};
 use mado_mata_desktop::plugin_management::PluginManager;
 use mado_mata_desktop::storage::{EditableSettings, LegacyImport, Profile, Settings};
 use mado_mata_desktop::target::{TargetConfiguration, TargetExpectation, TargetResolution};
@@ -23,6 +24,7 @@ use tauri::{Emitter, Manager};
 
 mod cache_commands;
 mod collaboration_commands;
+mod distribution_commands;
 mod ocr_setup_commands;
 #[cfg(target_os = "macos")]
 mod picker;
@@ -59,6 +61,15 @@ async fn background<T: Send + 'static>(
 async fn bootstrap_status(state: tauri::State<'_, Backend>) -> Result<BootstrapStatus, Fault> {
     let bootstrap = state.bootstrap.clone();
     background(move || bootstrap.ensure_started()).await
+}
+
+#[tauri::command]
+async fn configuration_doctor(
+    request: DoctorRequest,
+    state: tauri::State<'_, Backend>,
+) -> Result<DoctorReport, Fault> {
+    let bootstrap = state.bootstrap.clone();
+    background(move || Ok(bootstrap.configuration_doctor(request))).await
 }
 
 #[tauri::command]
@@ -322,12 +333,16 @@ async fn choose_target_application(
     {
         picker::choose(window, guard).await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows_shell::choose_executable(window, guard).await
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (window, guard);
         Err(Fault::new(
             "TargetPlatform",
-            "Application selection requires macOS",
+            "Application selection requires Windows or macOS",
         ))
     }
 }
@@ -553,6 +568,7 @@ async fn app_close(
     let bootstrap = state.bootstrap.clone();
     background(move || {
         if let Ok(application) = bootstrap.running_application() {
+            application.prepare_distribution_close(owner.as_ref())?;
             application.prepare_close(owner.as_ref())?;
         }
         close(&app);
@@ -565,7 +581,10 @@ fn request_close(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         if let Ok(application) = app.state::<Backend>().bootstrap.running_application() {
-            if let Err(fault) = application.prepare_close(None) {
+            if let Err(fault) = application
+                .prepare_distribution_close(None)
+                .and_then(|_| application.prepare_close(None))
+            {
                 if fault.category == "AuthoringActive" {
                     let _ = app.emit("authoring-close-requested", ());
                 } else {
@@ -682,6 +701,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap_status,
+            configuration_doctor,
             native_run_limits,
             initialize,
             retry_bootstrap,
@@ -693,6 +713,16 @@ fn main() {
             reopen_workspace,
             workspace_catalog,
             inspect,
+            distribution_commands::package_pick,
+            distribution_commands::package_export_prepare,
+            distribution_commands::package_export_publish,
+            distribution_commands::package_import_prepare,
+            distribution_commands::package_import_publish,
+            distribution_commands::package_distribution_cancel,
+            distribution_commands::package_installed_list,
+            distribution_commands::inspect_installed,
+            distribution_commands::author_signing_status,
+            distribution_commands::author_signing_enroll,
             repair_profile,
             reset_profile,
             retry_binding,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {messages,renderMessage,LocalFault} from './i18n.ts';
 import {interpolate} from './i18n-format.ts';
+import {LANGUAGE_KEY_BYTES,canonicalLanguageKey,languageCandidates,languageKeyValid} from './i18n-language.ts';
 import {readDraft,readSettingsDraft,environmentDraft,DEFAULT_NOTIFICATIONS,SUPPORTED_PROFILES} from './state.ts';
 import {applyIfCurrent,bindSelection,editDraft,updateBound,viewLogs,workspaceFromView} from './workspace.ts';
 import {emptyStack,ingestCards,interactCard,tickCards} from './notifications.ts';
@@ -35,7 +36,7 @@ const adapterArguments = {
   'app.waitForCommand': [['savingSettings'],['creatingWorkspace'],['importingProfiles'],['repairingProfile']],
   'app.recoverySaved': [['profile-A','P']], 'app.recoveryEarlierSaved': [['profile-A','P']],
   'app.inspectionOutcomes': [[0,1],[2,0]],
-  'app.editOwner': [['workspace-A']], 'app.authoringWait': [['savingFile'],['exitingEdit']],
+  'app.editOwner': [['workspace-A']], 'app.authoringWait': [['savingFile'],['exitingEdit'],['preparingExport'],['publishingImport']],
   'app.authoringDuplicated': [['/pkg-B','pkg-B']], 'app.authoringSaved': [['src/main.ts','rev-A']],
   'app.authoringEarlierSaved': [['src/main.ts','rev-A']], 'app.authoringSavedRefreshFailed': [['src/main.ts','rev-A']],
   'app.authoringCatalogSaved': [['rev-A']], 'app.authoringCatalogRefreshFailed': [['rev-A']], 'app.authoringRefreshed': [['rev-A']],
@@ -56,7 +57,7 @@ const adapterArguments = {
   'ui.ocrSetup.state': [['missing'],['verified'],['manual'],['unsupported'],['future-state']],
   'ui.ocrSetup.stage': [['downloading'],['verifying'],['complete'],['cancelled'],['future-stage']],
   'ui.run.heading': [['profile-A']], 'ui.run.owned': [[null],['run-A']],
-  'ui.run.settled': [[null],['run-A']], 'ui.run.inspected': [[2]],
+  'ui.run.settled': [[null],['run-A']], 'ui.run.inspected': [[2]], 'ui.run.pendingSource': [['/packages/a']],
   'ui.run.descriptorHelp': [[4096]],
   'ui.run.startUses': [[null,false,null,null],['profile-A',false,null,null],[null,true,null,null],['profile-A',true,'environment-A','corpus-A']],
   'ui.run.olderRevision': [[1,2]],
@@ -141,6 +142,25 @@ const adapterArguments = {
   'ui.authoring.sourceMapIssue': ['root','version','sources','mappings','sourceRoot'].map(code=>[{code}]).concat([[{code:'source',index:0}]]),
   'ui.recovery.outcomeStatus': [['saved'],['repair_required'],['storage_failed'],['future-status']],
   'ui.recovery.confirmReset': [['profile-A','P','workspace-A','pkg-A']],
+  'ui.releaseMetadata.issue': [[{code:'version'}],[{code:'member',key:'extra'}],[{code:'gameMember',key:'extra'}],
+    ...['release_version','name','description','author_name','license','game','id','names','aliases'].map(key=>[{code:'type',key}])],
+  'ui.releaseMetadata.repair': [[{code:'version'}],[{code:'member',key:'extra'}],[{code:'gameMember',key:'extra'}],
+    ...['release_version','game','names','aliases'].map(key=>[{code:'type',key}])],
+  'ui.releaseMetadata.textLength': [[128],[8192]], 'ui.releaseMetadata.nameRow': [[1]], 'ui.releaseMetadata.removeName': [[2]],
+  'ui.releaseMetadata.suggestionCount': [[0],[1],[32]],
+  'ui.releaseMetadata.keyIssue': [[{code:'empty'}],[{code:'invalid'}],[{code:'duplicate',row:1}],[{code:'canonical',canonical:'zh-Hant'}]],
+  'ui.releaseMetadata.namesLimit': [[64]], 'ui.releaseMetadata.alias': [[1]], 'ui.releaseMetadata.removeAlias': [[1]], 'ui.releaseMetadata.aliasesLimit': [[64]],
+  'ui.distribution.preparing': [['rev-A']], 'ui.distribution.contentSummary': [[3,4096]], 'ui.distribution.exported': [['/exports/a.mmpkg']],
+  'ui.distribution.cleanupFailed': [['/exports/a.mmpkg']], 'ui.distribution.verifying': [['/downloads/a.mmpkg']],
+  'ui.distribution.compatible': [['typescript']], 'ui.distribution.installedDone': [['Example','1.2.0']],
+  'ui.distribution.installedSource': [['example.a']],
+  'ui.packageLibrary.openLabel': [['workspace-A']], 'ui.packageLibrary.changeLabel': [['workspace-A']],
+  'ui.packageLibrary.filterProblems': [[0],[2]], 'ui.packageLibrary.results': [[1],[2]], 'ui.packageLibrary.versions': [[1],[2]],
+  'ui.packageLibrary.currentDirectory': [['/packages/a']], 'ui.packageLibrary.currentArchive': [['/packages/a.zip']],
+  'ui.packageLibrary.currentInstalled': [['Example','1.2.0']], 'ui.packageLibrary.currentInstalledUnlisted': [['example.a']],
+  'ui.packageLibrary.noMatches': [['query-A']],
+  'ui.packageLibrary.chooseVersion': [['workspace-A']], 'ui.packageLibrary.target': [['Example','1.2.0','sha-A','workspace-A']],
+  'ui.packageLibrary.applyLabel': [['Example','1.2.0','workspace-A']],
 };
 
 for (const locale of ['en','ja']) {
@@ -260,4 +280,36 @@ test('unknown diagnostic identifiers stay raw and localized controls do not repl
     assert.deepEqual(viewLogs([entry],{kind:'workspace',id:'a'},{text:'Unknown SDK',level:'error'}).shown,[entry]);
     assert.deepEqual(viewLogs([entry],{kind:'workspace',id:'a'},{text:'not-searchable',level:''}).shown,[]);
   }
+});
+
+// The host's ICU4X normalization (language, script, region, sorted variants), without alias replacement.
+for (const {input,canonical} of [
+  {input:'en',canonical:'en'},{input:'EN',canonical:'en'},{input:'zh-hant',canonical:'zh-Hant'},{input:'PT_br',canonical:'pt-BR'},
+  {input:'es-419',canonical:'es-419'},{input:'zh-HANT-tw',canonical:'zh-Hant-TW'},{input:'fr-ca',canonical:'fr-CA'},{input:'de-1996',canonical:'de-1996'},
+  {input:'sl-ROZAJ-biske',canonical:'sl-biske-rozaj'},{input:'iw',canonical:'iw'},{input:'und',canonical:'und'},
+  {input:'',canonical:null},{input:'english',canonical:null},{input:'zh-yue',canonical:null},{input:'en-',canonical:null},{input:'-en',canonical:null},
+  {input:'en--US',canonical:null},{input:'en-US-u-ca-gregory',canonical:null},{input:'x-private',canonical:null},{input:'i-klingon',canonical:null},
+  {input:'sl-rozaj-ROZAJ',canonical:null},{input:'ja-日本',canonical:null},{input:' en',canonical:null},{input:'Latn',canonical:null},
+  {input:`en-${Array.from({length:7},(_,index)=>`variant${index}`).join('-')}`,canonical:null},
+]) {
+  test(`language key ${JSON.stringify(input)} canonicalizes to ${JSON.stringify(canonical)}`,()=>{
+    assert.equal(canonicalLanguageKey(input),canonical);
+    assert.equal(languageKeyValid(input),canonical===input);
+    if (canonical!==null) assert.equal(canonicalLanguageKey(canonical),canonical,'canonical keys are fixed points');
+  });
+}
+
+test('language-key suggestions are i18n-owned canonical keys beyond the UI locales, filtered by key or localized label',()=>{
+  const en=messages.en.ui.languageKeys, ja=messages.ja.ui.languageKeys;
+  assert.deepEqual(Object.keys(ja),Object.keys(en));
+  for (const key of Object.keys(en)) assert.ok(languageKeyValid(key)&&new TextEncoder().encode(key).length<=LANGUAGE_KEY_BYTES,key);
+  for (const key of ['en','ja','zh-Hant','pt-BR']) assert.ok(Object.hasOwn(en,key),key);
+  assert.ok(Object.keys(en).length>2,'the application translations do not define the vocabulary');
+  assert.equal(languageCandidates(en,'').length,Object.keys(en).length);
+  assert.deepEqual(languageCandidates(en,'pt').map(item=>item.key).slice(0,2),['pt','pt-BR']);
+  assert.deepEqual(languageCandidates(en,'PT_b').map(item=>item.key),['pt-BR']);
+  assert.deepEqual(languageCandidates(en,'trad').map(item=>item.key),['zh-Hant']);
+  assert.deepEqual(languageCandidates(ja,'日本').map(item=>item.key),['ja']);
+  // A valid key outside the suggestions is simply not suggested; it stays acceptable.
+  assert.deepEqual([languageCandidates(en,'fr-ca'),canonicalLanguageKey('fr-ca')],[[],'fr-CA']);
 });

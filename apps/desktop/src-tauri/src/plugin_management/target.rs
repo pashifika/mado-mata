@@ -19,16 +19,25 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 /// OMP's per-user state directory below HOME.
 pub(super) const OMP_DIRECTORY: &str = ".omp";
 const EXECUTABLE: &str = "omp";
+#[cfg(windows)]
+const LAUNCHER: &str = "omp.exe";
+#[cfg(not(windows))]
+const LAUNCHER: &str = EXECUTABLE;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_SEARCH: usize = 64;
 const MAX_INVENTORY: usize = 4096;
+#[cfg(not(windows))]
 const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+#[cfg(windows)]
+const DEFAULT_PATH: &str = "";
 /// Variables that select profile, agent-state or plugin-data locations for OMP.
-const OVERRIDES: [&str; 5] = [
+const OVERRIDES: [&str; 7] = [
     "OMP_PROFILE",
     "PI_PROFILE",
     "PI_CODING_AGENT_DIR",
     "PI_CONFIG_DIR",
+    "OMP_CODING_AGENT_DIR",
+    "OMP_CONFIG_DIR",
     "XDG_DATA_HOME",
 ];
 /// The same selections in the client's dotenv files, where OMP also mirrors
@@ -102,7 +111,13 @@ fn definition(line: &str) -> Option<(&'static str, Option<&str>)> {
         .unwrap_or(line.len());
     let name = DOTENV_OVERRIDES
         .into_iter()
-        .find(|name| *name == &line[..end])?;
+        .find(|name| {
+            if cfg!(windows) {
+                name.eq_ignore_ascii_case(&line[..end])
+            } else {
+                *name == &line[..end]
+            }
+        })?;
     let rest = line[end..].trim_start();
     let rest = rest
         .strip_prefix('=')
@@ -187,9 +202,9 @@ pub(super) fn dotenv(home: &Path) -> Result<Vec<Value>, Fault> {
 }
 
 /// Takes the advisory lock on the user root below `home`, the canonical
-/// directory every HOME and data root of this installation resolves to. The
-/// directory is created only when missing, as the client's own registration
-/// would. `None` while another owner holds it.
+/// directory every home and data root of this installation resolves to. Unix
+/// locks the directory; Windows locks a private, non-replaceable file in it.
+/// The directory is created only when missing. `None` while another owner holds it.
 fn own(home: &Path) -> io::Result<Option<File>> {
     let user_root = home.join(OMP_DIRECTORY);
     if let Err(error) = fs::create_dir(&user_root)
@@ -197,7 +212,10 @@ fn own(home: &Path) -> io::Result<Option<File>> {
     {
         return Err(error);
     }
+    #[cfg(not(windows))]
     let file = File::open(&user_root)?;
+    #[cfg(windows)]
+    let file = super::windows_target::lock_file(&user_root)?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(TryLockError::WouldBlock) => Ok(None),
@@ -367,6 +385,8 @@ pub(super) struct Environment {
     pub(super) path: Option<OsString>,
     pub(super) tmpdir: Option<OsString>,
     pub(super) variables: Vec<(&'static str, OsString)>,
+    #[cfg(windows)]
+    pub(super) native: Vec<(&'static str, OsString)>,
 }
 
 impl Environment {
@@ -382,9 +402,16 @@ impl Environment {
             })
             .unwrap_or_default();
         // GUI launches often lack the shell PATH; these are the usual user installations.
+        #[cfg(not(windows))]
         search.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
         if let Ok(home) = &home {
             search.extend([".bun/bin", ".local/bin"].map(|directory| home.join(directory)));
+        }
+        #[cfg(windows)]
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+            .filter(|directory| directory.is_absolute())
+        {
+            search.push(local.join("omp"));
         }
         let mut seen = BTreeSet::new();
         search.retain(|directory| seen.insert(directory.clone()));
@@ -396,6 +423,11 @@ impl Environment {
             variables: OVERRIDES
                 .iter()
                 .filter_map(|name| std::env::var_os(name).map(|value| (*name, value)))
+                .collect(),
+            #[cfg(windows)]
+            native: ["SYSTEMROOT", "WINDIR", "TEMP", "TMP", "LOCALAPPDATA", "APPDATA"]
+                .into_iter()
+                .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
                 .collect(),
         }
     }
@@ -423,7 +455,8 @@ impl Environment {
                 std::env::join_paths(
                     std::iter::once(directory.to_path_buf())
                         .chain(self.search.iter().cloned())
-                        .chain(std::env::split_paths(&inherited)),
+                        .chain(std::env::split_paths(&inherited))
+                        .filter(|directory| !cfg!(windows) || directory.is_absolute()),
                 )
                 .ok()
             })
@@ -434,6 +467,13 @@ impl Environment {
             ("TERM", OsString::from("dumb")),
             ("NO_COLOR", OsString::from("1")),
         ];
+        #[cfg(windows)]
+        {
+            // Bun/Node and native children agree on one explicitly established
+            // home. Do not inherit a second home or a profile selection.
+            environment.push(("USERPROFILE", home.as_os_str().to_owned()));
+            environment.extend(self.native.iter().cloned());
+        }
         if let Some(tmpdir) = &self.tmpdir {
             environment.push(("TMPDIR", tmpdir.clone()));
         }
@@ -446,6 +486,8 @@ impl Environment {
 pub(super) struct Executable {
     pub(super) path: PathBuf,
     fingerprint: Fingerprint,
+    #[cfg(windows)]
+    identity: (u64, [u8; 16]),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -482,6 +524,12 @@ fn runnable(metadata: &fs::Metadata) -> bool {
 }
 
 fn executable(path: &Path) -> io::Result<Option<Executable>> {
+    #[cfg(windows)]
+    if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("exe")) {
+        // Batch, PowerShell and POSIX wrappers are not executable launch plans.
+        // Windows management invokes the installed standalone native OMP only.
+        return Ok(None);
+    }
     match fs::metadata(path) {
         Ok(metadata) if runnable(&metadata) => {}
         Ok(_) => return Ok(None),
@@ -489,11 +537,27 @@ fn executable(path: &Path) -> io::Result<Option<Executable>> {
         Err(error) => return Err(error),
     }
     let canonical = path.canonicalize()?;
+    #[cfg(not(windows))]
     let metadata = fs::metadata(&canonical)?;
+    #[cfg(windows)]
+    let (metadata, identity) = super::windows_target::metadata(&canonical)?;
     Ok(runnable(&metadata).then(|| Executable {
         fingerprint: Fingerprint::of(&metadata),
         path: canonical,
+        #[cfg(windows)]
+        identity,
     }))
+}
+
+fn same_executable(left: &Executable, right: &Executable) -> bool {
+    #[cfg(windows)]
+    {
+        left.identity == right.identity
+    }
+    #[cfg(not(windows))]
+    {
+        left.path == right.path
+    }
 }
 
 /// Finds exactly one `omp` in the search directories; several distinct files
@@ -501,8 +565,17 @@ fn executable(path: &Path) -> io::Result<Option<Executable>> {
 pub(super) fn discover(search: &[PathBuf]) -> Result<Executable, Refusal> {
     let mut found: Vec<Executable> = Vec::new();
     for directory in search {
-        if let Ok(Some(candidate)) = executable(&directory.join(EXECUTABLE)) {
-            if !found.iter().any(|known| known.path == candidate.path) {
+        let candidate = executable(&directory.join(LAUNCHER));
+        #[cfg(windows)]
+        if let Err(error) = &candidate {
+            return Err((
+                PluginState::Unsupported,
+                Fault::new("PluginExecutableUnverified", "An OMP candidate could not be inspected; select a native executable explicitly")
+                    .with_context(json!({"directory": display(directory), "kind": format!("{:?}", error.kind()), "os_code": error.raw_os_error()})),
+            ));
+        }
+        if let Ok(Some(candidate)) = candidate {
+            if !found.iter().any(|known| same_executable(known, &candidate)) {
                 found.push(candidate);
             }
         }
@@ -552,7 +625,11 @@ pub(super) fn selected(path: &Path) -> Result<Executable, Refusal> {
             PluginState::Missing,
             Fault::new(
                 "PluginExecutableMissing",
-                "The selected path is not an executable file",
+                if cfg!(windows) {
+                    "The selected path is not a native Windows OMP .exe file; shell launchers are not supported"
+                } else {
+                    "The selected path is not an executable file"
+                },
             )
             .with_context(json!({"executable": display(path)})),
         )),

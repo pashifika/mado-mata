@@ -21,12 +21,13 @@ REQUIRED_FILES = {
     "tools/ci/check.py", "tools/ci/branch_flow.py", "tools/ci/gate.py", "tools/ci/select_checks.py",
     "tools/ci/policy.py", "tools/ci/tooling.py", "tools/ci/install_tools.py",
     "tools/ci/test_ci.py", "tools/ci/requirements.txt",
+    "tools/ci/check_engine_macos.py",
     "tools/runtime-comparison/Cargo.toml", "tools/runtime-comparison/Cargo.lock",
     "tools/runtime-comparison/compiler/package.json", "tools/runtime-comparison/compiler/package-lock.json",
     "tools/runtime-comparison/compiler/compile.mjs",
 }
 CONCURRENCY_GROUP = "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}"
-PR_TYPES = {"opened", "synchronize", "reopened", "ready_for_review"}
+PR_TYPES = {"opened", "synchronize", "reopened"}
 CI_WORKFLOWS = {
     "ci.yml": "pull_request",
     "ci-push.yml": "push",
@@ -36,7 +37,7 @@ HOSTED_RUNNERS = {
     SELECTOR_JOB: "ubuntu-24.04",
     "branch-flow": "ubuntu-24.04",
     "repository": "ubuntu-24.04",
-    "runtime-macos": "macos-15",
+    "runtime-macos": "macos-26",
     "runtime-windows": "windows-2025",
     "gate": "ubuntu-24.04",
 }
@@ -312,7 +313,9 @@ def check_ci_workflow(workflow, pins, label="ci.yml"):
             "python3 -c \"import platform; print(platform.platform(), platform.machine()); assert platform.machine() == 'arm64'\"",
             f"rustup toolchain install {RUST_VERSION} --profile minimal",
             "python3 -m pip install --require-hashes -r tools/ci/requirements.txt",
-            "python3 tools/ci/check.py --runtime-only",
+            "python3 tools/ci/check_engine_macos.py",
+            "python3 tools/ci/install_tools.py",
+            "python3 tools/ci/check.py",
         ],
         "runtime-windows": [
             "git config --global core.symlinks true",

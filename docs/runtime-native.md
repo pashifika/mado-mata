@@ -1,7 +1,7 @@
 # Runtime comparison: replay and native prerequisites
 
 The optional `engine` feature consumes the public `mado-pilot` facade at
-`4b4f3296838a9eecdcb00e9d2bb3121a25cdc240`. The harness uses no sibling path
+`453132bcf4128c180dc0699dfccca5fe1f098164`. The harness uses no sibling path
 dependency, fake OCR backend, or substitute input route. macOS startup adds
 read-only Foundation/libproc lifetime checks during startup and exact bound-lifetime
 checks during execution; capture and input still use the public facade.
@@ -93,8 +93,15 @@ engine build, acquire the following separately; the harness downloads nothing:
   No `PATH` search, alternate runtime, accelerator preference, or fallback is used.
 - The accepted detector and recognizer below, under one canonical model root.
 
-Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/CONTRIBUTING.md#native-development-prerequisites)
-and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
+JavaScript and TypeScript execution also require the pinned Node.js **24.18.0**
+on an absolute `PATH` entry before launch. On Windows, the supervisor resolves
+that trusted executable before restricting the child's DLL search path to the
+selected native-library directories; it does not widen that path for Node.
+Initialization-only environment checks do not compile or evaluate package
+modules and do not require Node.
+
+Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/453132bcf4128c180dc0699dfccca5fe1f098164/CONTRIBUTING.md#native-development-prerequisites)
+and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/453132bcf4128c180dc0699dfccca5fe1f098164/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
 Its `tools/setup-native.py` configures only the command it launches; it installs
 nothing. A separately obtained, revision-pinned public checkout can provide that
 setup tool without becoming the application's dependency source. From this
@@ -508,16 +515,51 @@ frame geometry. If an OS runs an installed bundle through another mounted path,
 establish that correspondence independently and pin the observed runtime path.
 A shared bundle identifier, title, or PID alone is not an identity repair.
 
-The action shapes are `{"kind":"key_down","key":"A"}`,
-`{"kind":"key_up","key":"A"}`, and
-`{"kind":"click","x":100,"y":200,"button":"left"}`. Click coordinates are finite
-capture pixels inside the retained observation; buttons are `left`, `right`, or
-`middle`. By default, a native click expands into move/press/release, consuming
-three SDK events. A positive `click_hold_ms` inserts a delay and consumes four.
+### Script actions and drag bounds
+
+Supported actions include:
+
+```json
+[
+  {"kind":"key_down","key":"A"},
+  {"kind":"key_up","key":"A"},
+  {"kind":"click","x":100,"y":200,"button":"left"},
+  {"kind":"drag","button":"left","path":[
+    {"x":100,"y":200,"hold_ms":50},
+    {"x":100,"y":120,"hold_ms":50},
+    {"x":240,"y":120}
+  ]}
+]
+```
+
+Pointer coordinates are finite capture pixels inside the retained observation;
+fractional coordinates are allowed. Buttons are `left`, `right`, or `middle`.
+A click consumes three SDK events, or four with positive `click_hold_ms`.
 Keys must be balanced inside one sequence; unowned releases, repeated presses,
-unsupported names, and held keys are refused.
-`representative_actions` declares approved operation kinds, not a title-based
-permission or an instruction to execute those example actions.
+unsupported names, and held keys are refused. `representative_actions` grants
+operation kinds, not example coordinates: click authority does not grant drag.
+
+A drag has **2–64** ordered points. Move to the first point, press, then visit
+each remaining point while held and release at the last point. Optional
+`hold_ms` defaults to zero and waits **after arrival** (after the press at the
+first point); each value is an integer **0–1000**, totaling at most **5000 ms**
+per drag. Repeated points and return-to-start paths remain literal.
+`click_hold_ms` does not add waits to drag.
+
+For `N` points and `D` positive waits, a drag consumes `N + 2 + D` events.
+A batch containing drag is capped at **256 expanded events**, further restricted
+by the attempt's remaining authority. The entire batch must fit its configured
+wait and remaining execution time at admission and dispatch; it is not split,
+interpolated or retried. Logical completion requires the ordinary final release.
+
+Returning a card to hand is an explicit path followed by a newer-frame check.
+**Stop is not game cancellation:** it discards remaining ordinary movement and
+attempts owned-button release. That release can activate a card;
+cleanup can also remain unresolved. Cleanup release never completes the drag
+or proves rollback. Controlled/replay use a non-native sink; replay gestures do
+not modify recorded pixels or manufacture a successful postcondition.
+macOS cleanup uses the last successfully submitted or possibly effective pointer
+destination, not an observed physical pointer position.
 
 `limits.max_actions` also bounds JavaScript promise creation and executed jobs.
 Keep adequate VM startup allowance there and use `native.input.max_actions` for

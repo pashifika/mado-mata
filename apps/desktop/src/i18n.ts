@@ -11,7 +11,8 @@ export type Command = "initializing" | "retrying" | "importingRoot" | "restoring
   | "repairingProfile" | "resettingProfile" | "retryingBinding" | "discardingRecovery"
   | "openingPackage" | "creatingPackage" | "duplicatingPackage" | "savingFile" | "changingCatalog" | "refreshingPackage"
   | "exitingEdit" | "recoveringPackage" | "readingRecognition" | "loadingRecognition" | "updatingRecognition"
-  | "savingRecognition" | "copyingRecognition";
+  | "savingRecognition" | "copyingRecognition" | "preparingExport" | "publishingExport" | "preparingImport" | "publishingImport"
+  | "readingSigner";
 
 // `ui` supplies wording an app message reuses, so a retained fault renders both parts in the current language.
 function appMessages(copy: typeof en, ui: typeof uiMessages.en) {

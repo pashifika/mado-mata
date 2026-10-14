@@ -6,11 +6,14 @@ use super::{
     Application, CheckInputs, OperationOwner, Poll, RetainedCheck, WorkspaceRef, WorkspaceResult,
     Workspaces, lock,
 };
+use crate::distribution::InstalledIdentity;
 use crate::logging::LogStatus;
 use mado_runtime_comparison::desktop::{StartPreparation, StartRequest};
+use mado_runtime_comparison::inventory::Inventory;
 use mado_runtime_comparison::model::Fault;
 use serde_json::{Value, json};
 use std::io::Write;
+use std::path::Path;
 use std::sync::{Arc, OnceLock, atomic::Ordering, mpsc};
 use std::time::Duration;
 
@@ -34,6 +37,14 @@ impl Workspaces {
             .with_context(json!({"owner":lease.owner})));
         }
         self.work_idle()
+    }
+
+    /// Import touches no selection, snapshot or owner; only a lease or picker refuses it.
+    pub(super) fn import_idle(&self) -> Result<(), Fault> {
+        if self.authoring.is_some() || self.target_picker.is_some() {
+            return self.idle();
+        }
+        Ok(())
     }
 
     pub(super) fn work_idle(&self) -> Result<(), Fault> {
@@ -179,6 +190,7 @@ impl Application {
                 }
             })?;
             self.setup_idle()?;
+            self.distribution_idle()?;
             self.collect(&mut state);
             state.idle()?;
             state.native_ready()?;
@@ -226,6 +238,11 @@ impl Application {
             desktop_options(&selected.inventory, request.values.clone())?;
             let internal_name = selected.internal_name.clone();
             let native_package = native.then(|| selected.package.clone());
+            let installed = selected
+                .installed
+                .as_ref()
+                .map(|installed| installed.identity.clone());
+            let data_root = self.root.clone();
             let store = self.store.clone();
             let (acquired, ready) = mpsc::sync_channel(1);
             let run = self.runner.start_with_preparation(
@@ -266,9 +283,16 @@ impl Application {
                         (environment, binding)
                     };
                     control.check()?;
+                    // An installed release runs exactly the archive bytes verified here,
+                    // never a cached result or an extracted copy.
+                    let inventory = installed
+                        .map(|identity| installed_inventory(&data_root, &identity))
+                        .transpose()?;
+                    control.check()?;
                     Ok(StartPreparation {
                         environment,
                         native: binding,
+                        inventory,
                     })
                 },
                 |captured, attempt| {
@@ -325,6 +349,13 @@ impl Application {
                 .transpose()?;
             let package = selected
                 .map(|selected| (selected.path.clone(), selected.inventory.identity.clone()));
+            let installed = selected.and_then(|selected| {
+                selected
+                    .installed
+                    .as_ref()
+                    .map(|installed| installed.identity.clone())
+            });
+            let data_root = self.root.clone();
             let scope = selected.map(|selected| {
                 (
                     selected.internal_name.clone(),
@@ -345,15 +376,28 @@ impl Application {
                 package,
                 replay_descriptor_path,
                 move |control| {
-                    let store = lock(&store);
-                    let _ = acquired.send(());
+                    let environment = {
+                        let store = lock(&store);
+                        let _ = acquired.send(());
+                        control.check()?;
+                        if let Some((internal_name, package_id)) = &scope {
+                            store.profile_store(internal_name, package_id)?;
+                        }
+                        let environment = store.settings()?.ocr_environment;
+                        let _ = captured.set(environment.clone());
+                        environment
+                    };
                     control.check()?;
-                    if let Some((internal_name, package_id)) = &scope {
-                        store.profile_store(internal_name, package_id)?;
-                    }
-                    let environment = store.settings()?.ocr_environment;
-                    let _ = captured.set(environment.clone());
-                    Ok(environment)
+                    // Like Start, an installed release is checked from its verified archive.
+                    let inventory = installed
+                        .map(|identity| installed_inventory(&data_root, &identity))
+                        .transpose()?;
+                    control.check()?;
+                    Ok(StartPreparation {
+                        environment,
+                        native: (),
+                        inventory,
+                    })
                 },
             )?;
             state.owner = Some(OperationOwner {
@@ -406,6 +450,7 @@ impl Application {
                 self.invalidate_target_observation(None);
                 self.cancel_native();
                 self.cancel_setup();
+                self.cancel_distribution();
                 let mut outcome = self.runner.shutdown();
                 // Publication holds command admission, not the Stop/runner lock.
                 // A forced shutdown retains its lease/journal if storage cannot settle.
@@ -465,6 +510,9 @@ impl Application {
                     }
                 }
                 if let Err(error) = self.settle_setup(deadline) {
+                    outcome = Err(error);
+                }
+                if let Err(error) = self.settle_distribution(deadline) {
                     outcome = Err(error);
                 }
                 if let Some(bridge) = lock(&self.bridge).take() {
@@ -581,6 +629,13 @@ fn report_log_shutdown(status: LogStatus) {
     {
         let _ = wait.recv_timeout(Duration::from_millis(50));
     }
+}
+
+/// The inventory of an installed release, verified from its archive on this call.
+fn installed_inventory(root: &Path, identity: &InstalledIdentity) -> Result<Inventory, Fault> {
+    crate::distribution::verify_installed(root, &identity.package_id, &identity.artifact_id)?
+        .draft()
+        .validate()
 }
 
 #[cfg(test)]

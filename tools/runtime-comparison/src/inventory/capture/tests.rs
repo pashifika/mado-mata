@@ -199,7 +199,6 @@ fn appledouble_dot_suffixes_are_not_ignored() {
     }
 }
 
-
 #[test]
 fn os_metadata_names_cannot_be_declared_as_package_files() {
     let fixture = Fixture::new();

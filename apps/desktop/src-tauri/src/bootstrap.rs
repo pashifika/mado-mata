@@ -128,6 +128,14 @@ impl Bootstrap {
         }
     }
 
+    /// A fresh observation, independent of startup and all mutation/operation locks.
+    pub fn configuration_doctor(
+        &self,
+        request: crate::doctor::DoctorRequest,
+    ) -> crate::doctor::DoctorReport {
+        crate::doctor::observe(self.root.as_deref(), &request)
+    }
+
     pub fn ensure_started(&self) -> Result<BootstrapStatus, Fault> {
         if lock(&self.state).phase == Phase::Loading {
             match self.begin() {
@@ -178,7 +186,11 @@ impl Bootstrap {
                 Err(error) if matches!(status.state, Phase::Ready) => {
                     let transient = matches!(
                         error.category.as_str(),
-                        "WorkspaceBusy" | "OcrSetupBusy" | "OcrSetupCleanup"
+                        "WorkspaceBusy"
+                            | "OcrSetupBusy"
+                            | "OcrSetupCleanup"
+                            | "PackageBusy"
+                            | "PackageCleanup"
                     );
                     status.stage = if error.category == "RestorePending" {
                         status.pending_restore = true;
@@ -976,7 +988,12 @@ mod tests {
             let restored = bootstrap
                 .restore_snapshot(&archive, Some(&preimage.generation), true, true)
                 .unwrap();
-            assert!(matches!(restored.state, Phase::Ready));
+            assert!(
+                matches!(restored.state, Phase::Ready),
+                "snapshot version {version} restore failed at {}: {:?}",
+                restored.stage,
+                restored.fault
+            );
             assert_eq!(configuration::capture(&root).unwrap(), capture);
             assert_eq!(fs::read(&archive).unwrap(), archive_bytes);
             assert!(!restore::pending(&root).unwrap());
@@ -1267,7 +1284,12 @@ mod tests {
         let restored = bootstrap
             .restore_snapshot(archive, Some(&current.generation), true, true)
             .unwrap();
-        assert!(matches!(restored.state, Phase::Ready));
+        assert!(
+            matches!(restored.state, Phase::Ready),
+            "restore failed at {}: {:?}",
+            restored.stage,
+            restored.fault
+        );
         let restored_settings = restored.settings.unwrap();
         assert_eq!(restored_settings.locale, Locale::English);
         assert_eq!(
@@ -1353,7 +1375,7 @@ mod tests {
             .restore_snapshot(archive, Some(&preimage.generation), true, true)
             .unwrap();
         assert!(matches!(failed.state, Phase::Recovery));
-        assert_eq!(failed.stage, "application");
+        assert_eq!(failed.stage, "application", "{:?}", failed.fault);
         assert!(!failed.application_available);
         assert!(failed.settings.is_none());
         assert!(!failed.pending_restore);
@@ -1598,6 +1620,31 @@ mod tests {
         fs::set_permissions(root.join("tabs"), fs::Permissions::from_mode(0o700)).unwrap();
         assert!(matches!(bootstrap.retry(true).unwrap().state, Phase::Ready));
         bootstrap.shutdown().unwrap();
+    }
+
+    #[test]
+    fn doctor_requires_neither_startup_nor_recovery_action_admission() {
+        let home = Home::new();
+        let root = home.0.join("diagnosis");
+        put(&root.join("settings.json"), b"{preserved");
+        let mut bootstrap = Bootstrap::new(
+            Ok(root.clone()),
+            None,
+            home.0.join("no-runner"),
+            home.0.join("no-engine"),
+        );
+        bootstrap.make_application = |_, _, _, _| panic!("doctor constructed an Application");
+        bootstrap.recover_configuration = |_, _| panic!("doctor recovered configuration");
+        let _action = bootstrap.begin().unwrap();
+        let report = bootstrap.configuration_doctor(crate::doctor::DoctorRequest::default());
+        assert!(report.checks.iter().any(|check| {
+            check.scope == crate::doctor::Scope::Settings
+                && check.status == crate::doctor::Status::Failed
+        }));
+        assert!(matches!(bootstrap.status().state, Phase::Loading));
+        assert!(!bootstrap.status().application_available);
+        assert_eq!(fs::read(root.join("settings.json")).unwrap(), b"{preserved");
+        assert!(!root.join("logs").exists());
     }
 
     #[test]

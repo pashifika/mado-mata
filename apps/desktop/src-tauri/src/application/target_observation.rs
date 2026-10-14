@@ -388,10 +388,10 @@ impl Application {
         state.resolve(workspace)?;
         self.collect(&mut state);
         state.idle()?;
-        if !cfg!(target_os = "macos") {
+        if !cfg!(any(target_os = "macos", windows)) {
             return Err(Fault::new(
                 "TargetPlatform",
-                "Application selection requires macOS",
+                "Application selection requires Windows or macOS",
             ));
         }
         state.target_picker = Some(workspace.clone());

@@ -316,9 +316,9 @@ fn hash_assets(hasher: &mut Sha256, assets: &BTreeMap<String, PayloadBytes>) {
     }
 }
 
-struct BoundedWriter {
-    count: usize,
-    limit: usize,
+pub(super) struct BoundedWriter {
+    pub(super) count: usize,
+    pub(super) limit: usize,
 }
 
 impl Write for BoundedWriter {
@@ -338,6 +338,9 @@ pub(super) fn validate_manifest(manifest: &Manifest) -> Result<(), Fault> {
     portable_component(&manifest.package_id)?;
     if let Some(target) = &manifest.target {
         target.validate()?;
+    }
+    if let Some(distribution) = &manifest.distribution {
+        distribution.validate()?;
     }
     if manifest.version != 1
         || !matches!(

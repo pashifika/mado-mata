@@ -39,6 +39,14 @@ Installation needs network access; the local-link check does not contact remote
 sites. Do not replace the installer with an unpinned package-manager download or
 skip integrity verification when a download fails.
 
+When overriding `TEMP`, `TMP` and `TMPDIR` for cache-local verification on Unix,
+use a short absolute directory and create it before starting the check. Socket
+fixtures append their own directory and file names; the complete pathname must
+fit the platform's Unix-domain socket limit. A long checkout or Change name can
+produce `listen EINVAL` or `path must be shorter than SUN_LEN` before the intended
+assertion runs. Shorten the owned scratch path rather than skipping those tests
+or changing socket/privacy checks. Keep the full logs outside that short path.
+
 The full check runs `npm ci --ignore-scripts --no-audit --no-fund` in the
 application-owned compiler and desktop directories inside a temporary
 tracked-file snapshot. It verifies Node's exact version and uses the committed
@@ -66,6 +74,8 @@ The version and integrity sources are:
 | Saved-image payloads | png 0.18.1; flate2 1.1.9 (default features disabled; `rust_backend`) | [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock) |
 | Desktop configuration | zip 8.6.0 (default features disabled; `deflate-flate2` for reviewed runtime archives), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Desktop OCR acquisition | ureq 3.4.2 with only `rustls`; rustls 0.23.45 in the lockfile; tar 0.4.46 without default features; flate2 1.1.9 with only `rust_backend` | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock); fixed HTTPS sources, bounded transfers/selected-member extraction, exact hashes, retained notices, no shell or installer |
+| Package metadata | semver 1.0.28, icu_locale_core 2.3.0 (`alloc`, no default features) | Exact [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock); shared bounded SemVer/language identifiers |
+| Local author signing | openidconnect 4.0.1 (no default features), ed25519-dalek 2.2.0 (`std`, `zeroize`), base64 0.22.1, getrandom 0.4.3; existing bounded ureq/rustls transport | Exact [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Desktop persisted identifiers | Public `pashifika/xid-rs` Git dependency at the immutable `rev` in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml), repeated in its [lockfile](../apps/desktop/src-tauri/Cargo.lock); default features disabled | The public checkout fetches the Fork directly; no maintenance checkout or local path override is required |
 | macOS application metadata, picker, and clipboard | objc2 0.6.4, block2 0.6.2; objc2-foundation, objc2-app-kit, objc2-core-foundation, objc2-security, objc2-uniform-type-identifiers 0.3.2 | macOS-target-scoped exact pins in the [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Application launch library | libc 0.2.189 on Unix; objc2 0.6.4, block2 0.6.2 and objc2-foundation/objc2-app-kit 0.3.2 on macOS | [Library manifest](../crates/application-launch/Cargo.toml) and [lockfile](../crates/application-launch/Cargo.lock); no Desktop or runtime dependency |
@@ -74,10 +84,42 @@ The version and integrity sources are:
 | GitHub Actions | Full commit SHAs | [Workflows](#hosted-workflow-and-required-gate) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
-CI uses Python 3.13, `ubuntu-24.04`, `macos-15`, and `windows-2025`. The macOS job
+CI uses Python 3.13, `ubuntu-24.04`, `macos-26`, and `windows-2025`. The macOS job
 prints and requires `arm64`; runtime checks also print their actual host identity.
+Linux and macOS run the full public check, including pinned actionlint and
+offline local-link validation. Windows retains `--runtime-only` because the
+native-tool installer has no Windows assets. Before the full check, macOS also
+runs the model-free `engine` consumer library suite described below. The
+event-specific PR, push and manual workflows use the same platform scope; none
+performs physical-device GUI/game acceptance.
 Update versions, integrity values, workflow references, and this guide together
 through a checked Change. A new installer host needs a verified release asset.
+
+The hosted macOS engine command is:
+
+```sh
+python3 tools/ci/check_engine_macos.py
+```
+
+It requires native arm64 macOS **26.5.2 or newer**, preserves the SDK deployment
+floor, and resolves `tools/setup-native.py` from the exact `mado-pilot` Git
+revision in the consumer manifest and lockfile. No sibling checkout is needed.
+It follows that revision's upstream hosted procedure: install Homebrew
+`opencv@4`, print the actual version, validate native OpenCV/libclang, install the
+locked trusted TypeScript compiler, and run the unfiltered consumer
+`cargo test --locked --features engine --lib` suite. The Homebrew OpenCV **major**
+is constrained to 4; its minor version is intentionally not a qualification pin.
+The resolved version is visible in the job log. npm/Homebrew caches and this
+engine build live under `.cache/engine-consumer`; temporary files use the shorter
+`.cache/et` directory so fixture socket names fit macOS's pathname limit.
+
+These controlled-provider tests include frame commit rejection, discarded OCR
+completion and macOS provider-terminal/process-exit precedence. They need no
+game, model download, native capture permission, input route or manual action.
+They are not real OCR, physical Apple Silicon acceptance, R6 qualification or
+evidence that input had an application effect. The ordinary local
+`check.py` command still does not enable `engine`; the hosted workflow invokes
+this additional command explicitly, and its failure fails the mandatory gate.
 
 Target metadata parsing uses `plist` in-process, with the exactly pinned
 `enable_unstable_features_that_may_break_with_minor_version_bumps` feature for
@@ -122,6 +164,23 @@ recursive discovery of ignored planning, sibling checkouts, installed authoring
 packages, or extracted reference applications. New files must enter the intended
 tracked change before that inventory covers them; never force-add private directories.
 
+Signed-package checks cover strict metadata, real cryptographic/archive
+consumption, exact captured-byte export/import/Start, local key publication,
+installed-source persistence and draft/review cancellation. OIDC protocol tests
+use locally signed fixture tokens and loopback requests, not a real account.
+Actual Google consent, native file dialogs, offline two-root desktop transfer and
+Windows/macOS interaction remain separate local acceptance.
+
+Ordinary CI must not receive `OIDC_CLIENT_KEY_GOOGLE` or attach the protected
+`release` environment to pull-request checks. Public builds work without it and
+refuse only new enrollment with an actionable configuration error. A separately
+approved trusted build may map the `release` environment's secret of that name
+to Cargo's environment as the `client_secret` string, never JSON or a logged
+command-line argument. This native registration value is extractable from the
+resulting binary, not confidential authentication; see
+[ADR 0009](adr/0009-google-native-client-registration.md). Release packaging
+remains unresolved; this does not introduce a release workflow.
+
 The full check has these responsibilities:
 
 - Validate ruleset JSON and intended semantics, exact required-context agreement,
@@ -139,9 +198,14 @@ The full check has these responsibilities:
 - Run the checkout-owned OMP adapter tests without installing OMP or private
   plugins. These exercise registration/schema compatibility, explicit instance/
   owner selection, cancellation, session teardown, notice continuation and
-  unknown-outcome reconciliation. The compatibility floor is OMP `18.8.7`, not
-  an exact pin or upper bound; simulated API/version cases are not evidence
-  that an installed future release works.
+  unknown-outcome reconciliation. Windows cases use system Windows PowerShell
+  to exercise real private local pipes, ACL/reparse/replacement checks and
+  connected-server identity; Unix-only ownership cases remain platform-specific.
+  The technical compatibility floor is OMP `18.8.7`, not an exact pin or upper
+  bound. Actual integration acceptance separately uses the OMP installed locally
+  at test time and records its executable, exact version, OS and adapter identity;
+  historical-version downloads/reproduction are not required. Simulated
+  API/version cases do not establish that an installed release works.
 - Run the shared SDK catalog unit tests. Runtime `sdk_examples` tests discover
   the public catalog, compile examples with the pinned trusted compiler under
   empty and representative option schemas, and execute applicable behavior on
@@ -165,7 +229,10 @@ The full check has these responsibilities:
   Script-requested startup, no-request cleanup, one-shot/polled preparation,
   typed startup failures, and independent phase deadlines versus explicit Stop.
   Those child fixtures run serially so the CPU-expiry case cannot starve unrelated
-  startup assertions; their phase deadlines and protocol checks remain unchanged.
+  startup assertions. Native handshake cases admit a bounded 10-second startup
+  budget for cold debug-executable fingerprinting and JavaScript preparation;
+  the independent 5-second CPU-expiry case still proves deadline enforcement.
+  Production deadlines and protocol assertions are unchanged.
   Submitted receipts and physical cleanup ownership remain separate outcomes.
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
   run its state tests (including per-file history, stale saves, source-diagnostic
@@ -268,6 +335,7 @@ the product root:
 npm test --prefix integrations/omp
 node --test tools/runtime-comparison/compiler/sdk.test.mjs
 cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml --test sdk_examples
+cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml --lib
 ```
 
 The full and runtime-only entrypoints include these scopes alongside desktop
@@ -275,6 +343,14 @@ tests. Actual installed-OMP loading and communication with a macOS WebView
 remain separate [local observations](desktop.md#observed-compatibility-boundary),
 not hosted-CI claims. Adapter installation and removal belong to the
 [desktop guide](desktop.md#install-select-and-remove-the-adapter).
+
+The controlled SDK examples cover direct, lifted-target and return-to-hand
+drags, incomplete receipts and held-button Stop. Host tests cover event/time
+bounds, ordered progress and owned cleanup. Native lowering/authority tests
+also require the separately configured `engine`-enabled library suite described
+in [the native guide](runtime-native.md#consumer-publication-regressions); they use public
+testkit input, not a live target. These checks do not qualify a game's drag
+route or establish that a release activated or cancelled a card.
 
 For governance policy and its behavioral tests only, after Python dependency
 setup:
@@ -296,6 +372,13 @@ python3 tools/ci/check.py --runtime-only
 On Windows, use `python` in place of `python3` and preserve the tracked symlink
 as described in [development guidance](development-guidance.md#claude-symlink).
 Hosted Windows enables Git symlink checkout before fetching the repository.
+When keeping Windows scratch inside the checkout, choose a short writable
+`TEMP`/`TMP`/`TMPDIR`, for example `%CD%\.cache\ci-tmp`, and create it before
+launching the check. The disposable snapshot adds nested Cargo output paths;
+MSVC can fail with `LNK1104` on a long build-script output pathname even when
+application data publication supports extended Windows paths. Shorten the
+toolchain scratch root, not the application-path acceptance scenario.
+
 The two narrower modes are mutually exclusive. Missing tools, invalid input,
 or failing commands remain failures; neither mode substitutes for the full gate.
 These checks do not install remote rulesets or verify live GitHub enforcement.
@@ -382,7 +465,7 @@ npm run build --prefix apps/desktop
 cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib
 ```
 
-On macOS only, after the frontend build:
+On macOS and Windows, after the frontend build:
 
 ```sh
 cargo +1.98.1 build --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --features custom-protocol
@@ -419,10 +502,10 @@ Hosted checks use three event-exclusive workflows:
 - [CI (push)](../.github/workflows/ci-push.yml): pushes to `main` and `dev/**`.
 - [CI (manual)](../.github/workflows/ci-manual.yml): manual dispatch.
 
-PR events are limited to `opened`, `synchronize`, `reopened`, and
-`ready_for_review`. The PR workflow does
-not subscribe to `edited`: changing a PR title, description, or task-list
-checkbox creates no new CI workflow run or skipped checks. A job-level `if`
+PR events are limited to `opened`, `synchronize`, and `reopened`. The PR workflow
+does not subscribe to `edited` or `ready_for_review`: changing a PR title,
+description, or task-list checkbox, or marking it ready for review, creates no
+new CI workflow run or skipped checks. A job-level `if`
 would only skip jobs after a workflow run already exists, so it is not a
 substitute for removing the event subscription. There are no workflow path
 filters. Manual dispatch becomes available when the workflow is on the default
@@ -458,8 +541,9 @@ checks enabled. This suppresses duplicate work, not the push workflow or its
 skipped check entries, and does not remove GitHub's event labels.
 
 Draft PRs still run the normal PR checks on opening and head updates. Marking
-one ready for review triggers another PR run; its current-head `CI Gate` must
-pass before promotion.
+one ready for review does not rerun checks or replace their results. Its
+current-head PR `CI Gate` must still pass before promotion; the base-retarget
+revalidation procedure above remains required.
 
 Only this selector job receives `pull-requests: read` alongside `contents: read`,
 using the read-only `github.token` as `GH_TOKEN`. API responses and credentials

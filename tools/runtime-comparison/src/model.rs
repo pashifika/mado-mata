@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-pub const ENGINE_REVISION: &str = "4b4f3296838a9eecdcb00e9d2bb3121a25cdc240";
+pub const ENGINE_REVISION: &str = "453132bcf4128c180dc0699dfccca5fe1f098164";
 pub const MAX_TRANSPORT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 
@@ -568,6 +568,31 @@ impl Control {
             fault.context = serde_json::json!({"stage":phase});
         }
         Err(fault)
+    }
+
+    // Controlled input effects linearize with Stop; never perform a wait in this closure.
+    pub(crate) fn with_input_admission<T>(
+        &self,
+        effect: impl FnOnce() -> Result<T, Fault>,
+    ) -> Result<T, Fault> {
+        let _owner_gate = self.owner.as_ref().map(|owner| {
+            owner
+                .admission_gate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        });
+        let _gate = self
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.check()?;
+        if !self.admission.load(Ordering::Acquire) {
+            return Err(Fault::new(
+                "AdmissionClosed",
+                "ordinary input admission is closed",
+            ));
+        }
+        effect()
     }
 
     /// Admit one external launch. A later Stop cannot revoke this admission.

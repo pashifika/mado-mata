@@ -9,45 +9,71 @@ use std::sync::Arc;
 impl DesktopController {
     /// Capture and statically validate only; no package module is evaluated.
     pub fn inspect(&self, package: &Path) -> Result<PackageInfo, Fault> {
+        self.check_open()?;
+        let limits = manual_plan()?.limits;
+        let inventory = Inventory::capture(package, &limits)?;
+        inspect_captured(inventory, &limits)
+    }
+
+    /// Statically validate an inventory captured elsewhere without rereading its
+    /// source or evaluating package code. Desktop capture bounds are required so
+    /// the identity agrees with path-based inspection of the same bytes.
+    pub fn inspect_inventory(&self, inventory: Inventory) -> Result<PackageInfo, Fault> {
+        self.check_open()?;
+        let limits = manual_plan()?.limits;
+        let bounds = json!({"files": limits.snapshot_files, "bytes": limits.snapshot_bytes});
+        if inventory.metadata.get("capture_limits") != Some(&bounds) {
+            return Err(Fault::new(
+                "Inventory",
+                "inventory capture bounds differ from desktop inspection bounds",
+            ));
+        }
+        inventory.validate()?;
+        inspect_captured(inventory, &limits)
+    }
+
+    fn check_open(&self) -> Result<(), Fault> {
         if self.state().closed {
             return Err(Fault::new(
                 "ControllerClosed",
                 "controller is shutting down",
             ));
         }
-        let limits = manual_plan()?.limits;
-        let inventory = Inventory::capture(package, &limits)?;
-        let runtime = runtime(&inventory)?;
-        let inventory = match runtime.as_str() {
-            "typescript" => {
-                crate::typescript::compile(&inventory, &limits)?;
-                inventory
-            }
-            "javascript" => inspect_javascript(inventory, &limits)?,
-            _ => unreachable!("runtime() admits only QuickJS languages"),
-        };
-        let defaults = profile(&inventory.package_id, &inventory.schema, json!({}));
-        let effective_defaults =
-            resolve_options(&inventory.schema, &defaults, &inventory.package_id).ok();
-        let target = inventory.target()?;
-        let target_identity = target
-            .as_ref()
-            .map(TargetDeclaration::identity)
-            .transpose()?;
-        let info = PackageInfo {
-            schema_identity: identity(&inventory.schema)?,
-            package_id: inventory.package_id,
-            inventory_identity: inventory.identity,
-            runtime,
-            schema: inventory.schema,
-            profiles: inventory.profiles,
-            effective_defaults,
-            target,
-            target_identity,
-        };
-        encode_bounded(&info, 2 * 1024 * 1024)?;
-        Ok(info)
+        Ok(())
     }
+}
+
+fn inspect_captured(inventory: Inventory, limits: &Limits) -> Result<PackageInfo, Fault> {
+    let runtime = runtime(&inventory)?;
+    let inventory = match runtime.as_str() {
+        "typescript" => {
+            crate::typescript::compile(&inventory, limits)?;
+            inventory
+        }
+        "javascript" => inspect_javascript(inventory, limits)?,
+        _ => unreachable!("runtime() admits only QuickJS languages"),
+    };
+    let defaults = profile(&inventory.package_id, &inventory.schema, json!({}));
+    let effective_defaults =
+        resolve_options(&inventory.schema, &defaults, &inventory.package_id).ok();
+    let target = inventory.target()?;
+    let target_identity = target
+        .as_ref()
+        .map(TargetDeclaration::identity)
+        .transpose()?;
+    let info = PackageInfo {
+        schema_identity: identity(&inventory.schema)?,
+        package_id: inventory.package_id,
+        inventory_identity: inventory.identity,
+        runtime,
+        schema: inventory.schema,
+        profiles: inventory.profiles,
+        effective_defaults,
+        target,
+        target_identity,
+    };
+    encode_bounded(&info, 2 * 1024 * 1024)?;
+    Ok(info)
 }
 
 fn inspect_javascript(inventory: Inventory, limits: &Limits) -> Result<Inventory, Fault> {

@@ -11,8 +11,8 @@ const schema={type:'object',properties:{count:{type:'integer',default:1},mode:{t
 function profile(id,name,values,packageId='pkg-a',schemaIdentity='schema-1'){
   return {version:1,id,name,package_id:packageId,schema_identity:schemaIdentity,values};
 }
-function selection(id,revision,{path='/pkg/'+id,packageId='pkg-'+id,profiles=[profile('prof-'+id,'Saved '+id,{count:5},packageId)],schemaIdentity='schema-1',internal=id,display='Tab '+id}={}){
-  return {workspace_id:id,revision,internal_name:internal,display_name:display,package_path:path,profiles_error:null,profiles,
+function selection(id,revision,{path='/pkg/'+id,packageId='pkg-'+id,profiles=[profile('prof-'+id,'Saved '+id,{count:5},packageId)],schemaIdentity='schema-1',internal=id,display='Tab '+id,source={kind:'directory',path}}={}){
+  return {workspace_id:id,revision,internal_name:internal,display_name:display,package_path:path,source,profiles_error:null,profiles,
     package:{package_id:packageId,inventory_identity:'inv-'+id,schema_identity:schemaIdentity,runtime:'quickjs',schema,profiles:{fast:{options:{count:9}}},effective_defaults:null,target:null,target_identity:null}};
 }
 function view(id,{internal=id,display='Tab '+id,selection:bound=null,sourceError=null,savedPackage=null,recovery=null,revision=bound?bound.revision:0}={}){
@@ -104,6 +104,28 @@ test('a failed saved directory is kept visible and prefilled, a saved custom arc
   assert.equal(repaired.sourceError,null);
   assert.deepEqual(repaired.savedPackage,{package_id:'pkg-a',source:{kind:'directory',path:'/games/alpha-moved'}});
   assert.equal(repaired.inspectPath,'/games/alpha-moved');
+});
+
+test('an installed release binds and fails as its explicit installed reference, never as a directory or Edit location',()=>{
+  const installed={kind:'installed',package_id:'pkg-a',artifact_id:'a'.repeat(64)};
+  const archive='/data/pkgs/'+'b'.repeat(64)+'/pkg-a/'+'a'.repeat(64)+'.mmpkg';
+  const selected=selection('a',1,{path:archive,packageId:'pkg-a',source:installed});
+  const bound=bindSelection(workspaceFromView(view('a')),selected);
+  assert.deepEqual(bound.savedPackage,{package_id:'pkg-a',source:installed});
+  assert.equal(bound.bound.packagePath,archive);
+  // Restoring the bound release keeps its archive for Reinspect but offers nothing to open for Edit.
+  const restored=workspaceFromView(view('a',{selection:selected,savedPackage:{package_id:'pkg-a',source:installed}}));
+  assert.equal(restored.inspectPath,archive);
+  assert.equal(restored.editPath,'');
+  const directory=workspaceFromView(view('b',{selection:selection('b',1)}));
+  assert.equal(directory.editPath,'/pkg/b');
+  // A tampered or missing release keeps its saved identity and offers no directory prefill.
+  const tampered={category:'InstalledIntegrity',message:'payload digest mismatch',context:{package_id:'pkg-a',artifact_id:installed.artifact_id}};
+  const refused=workspaceFromView(view('a',{revision:2,sourceError:tampered,savedPackage:{package_id:'pkg-a',source:installed}}));
+  assert.equal(refused.bound,null);
+  assert.deepEqual(refused.savedPackage,{package_id:'pkg-a',source:installed});
+  assert.equal(refused.inspectPath,'');
+  assert.throws(()=>commandValues(refused,undefined),error=>error instanceof LocalFault&&error.presentation.key==='unboundWorkspace');
 });
 
 test('a catalog from one Tab never reaches another Tab bound to the same package source',()=>{
@@ -436,8 +458,8 @@ function targetConfiguration(path='/metadata/game') {
   return {platform:'macos',game:{kind:'executable',path},launcher:null,arguments:['','--literal','two words'],
     working_directory:null,window_title:'Exact title',input:{route:'process_directed',focus:'preserve',pointer_mode:'core_graphics',click_hold_ms:0}};
 }
-function targetView(state,{revision=0,configuration=null,compatible=true,id='binding-1'}={}) {
-  return {context:state.context,compatible,
+function targetView(state,{revision=0,configuration=null,compatible=true,id='binding-1',platform='macos'}={}) {
+  return {platform,context:state.context,compatible,
     record:{version:1,internal_name:state.context.internal_name,package_id:state.context.package_id,revision,
       binding:configuration ? {id,package_id:state.context.package_id,target_id:'game',declaration_identity:'declaration-1',configuration,
         resolution:{game:{path:configuration.game.path,executable:configuration.game.path},launcher:null,working_directory:null}} : null}};
@@ -515,6 +537,44 @@ test('native application choice edits only the issuing game or launcher and canc
   assert.equal(state.draft,before);
   assert.equal(state.draftRevision,revision);
   assert.equal(state.view.record,saved);
+});
+
+test('Windows executable choices preserve field ownership, cancellation and explicit persistence',()=>{
+  const initial=targetState(targetSelection());
+  let state=readTarget(initial,targetView(initial,{platform:'windows'}));
+  assert.equal(state.draft.platform,'windows');
+  const saved=state.view.record;
+  state=beginApplicationPicker(state,'game');
+  state=completeApplicationPicker(state,state.picker,'C:\\Game\\日本語.EXE');
+  assert.deepEqual([state.draft.gameKind,state.draft.gamePath],['executable','C:\\Game\\日本語.EXE']);
+  state=editTarget(state,{...state.draft,separateLauncher:true,arguments:['','two words']});
+  state=beginApplicationPicker(state,'launcher');
+  state=completeApplicationPicker(state,state.picker,'C:\\Launcher\\launch.exe');
+  const configuration=readTargetDraft(state.draft).configuration;
+  assert.deepEqual(configuration.game,{kind:'executable',path:'C:\\Game\\日本語.EXE'});
+  assert.deepEqual(configuration.launcher,{kind:'executable',path:'C:\\Launcher\\launch.exe'});
+  assert.deepEqual(configuration.arguments,['','two words']);
+  assert.equal(configuration.input,null);
+  assert.equal(state.view.record,saved);
+  const draft=state.draft, revision=state.draftRevision;
+  for (const error of [null,{category:'TargetPicker',message:'invalid selection',context:null}]) {
+    state=beginApplicationPicker(state,'game');
+    state=completeApplicationPicker(state,state.picker,null,error);
+    assert.equal(state.draft,draft);
+    assert.equal(state.draftRevision,revision);
+    assert.equal(state.view.record,saved);
+  }
+  const reopened=readTarget(initial,targetView(initial,{platform:'windows',revision:1,configuration}));
+  assert.deepEqual(readTargetDraft(reopened.draft).configuration,configuration);
+  assert.equal(targetDirty(reopened),false);
+});
+
+test('a native picker never converts a foreign-platform saved binding',()=>{
+  const saved=loadedBundle();
+  const windows=readTarget(saved,{...saved.view,platform:'windows'});
+  assert.equal(windows.view.record,saved.view.record);
+  assert.equal(windows.draft,saved.draft);
+  assert.equal(beginApplicationPicker(windows,'game'),windows);
 });
 
 test('late application picker cannot overwrite an edited-back draft, replaced owner, or refreshed record',()=>{

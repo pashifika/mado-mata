@@ -4,9 +4,15 @@ use super::{Collaboration, FRAME_BYTES, lock};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream as LocalStream;
+#[cfg(windows)]
+use super::endpoint::Stream as LocalStream;
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -36,11 +42,17 @@ impl Fixture {
             crate::storage::new_id().unwrap()
         ));
         let root = base.join("root");
+        #[cfg(unix)]
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&root)
             .unwrap();
+        #[cfg(windows)]
+        {
+            fs::create_dir_all(&base).unwrap();
+            super::endpoint::test_directory(&root).unwrap();
+        }
         let (sender, tickets) = mpsc::channel();
         let host_owner = Arc::new(Mutex::new(Some(OWNER.to_owned())));
         let deliver = Arc::new(AtomicBool::new(true));
@@ -117,14 +129,14 @@ impl Drop for Fixture {
 }
 
 struct Peer {
-    stream: UnixStream,
+    stream: LocalStream,
     instance: String,
     token: String,
 }
 
 impl Peer {
     fn connect(descriptor: &Value) -> Self {
-        let stream = UnixStream::connect(descriptor["socket"].as_str().unwrap()).unwrap();
+        let stream = LocalStream::connect(descriptor["socket"].as_str().unwrap()).unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
         Self {
             stream,
@@ -199,6 +211,8 @@ fn ok(result: &Value) -> Value {
 fn private_endpoint_relays_requests_through_main_window_tickets() {
     let fixture = Fixture::new();
     let (path, descriptor) = fixture.ready();
+    #[cfg(unix)]
+    {
     let uid = fs::metadata(&fixture.root).unwrap().uid();
 
     let file = fs::symlink_metadata(&path).unwrap();
@@ -210,6 +224,7 @@ fn private_endpoint_relays_requests_through_main_window_tickets() {
     assert!(file.len() <= 4096);
     let directory = fs::symlink_metadata(fixture.collaboration_directory()).unwrap();
     assert_eq!((directory.uid(), directory.mode() & 0o777), (uid, 0o700));
+    }
     let mut fields: Vec<_> = descriptor.as_object().unwrap().keys().cloned().collect();
     fields.sort();
     assert_eq!(
@@ -225,6 +240,9 @@ fn private_endpoint_relays_requests_through_main_window_tickets() {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     );
+    #[cfg(unix)]
+    {
+    let uid = fs::metadata(&fixture.root).unwrap().uid();
     let socket = Path::new(descriptor["socket"].as_str().unwrap());
     assert!(socket.as_os_str().len() <= 100);
     assert_eq!(socket.canonicalize().unwrap(), socket);
@@ -239,6 +257,12 @@ fn private_endpoint_relays_requests_through_main_window_tickets() {
         (socket_directory.uid(), socket_directory.mode() & 0o777),
         (uid, 0o700)
     );
+    }
+    #[cfg(windows)]
+    {
+        assert!(path.exists());
+        assert_eq!(descriptor["socket"], format!("{}{}", super::endpoint::PIPE_PREFIX, descriptor["instance"].as_str().unwrap()));
+    }
     // Attaching again keeps the same endpoint.
     assert_eq!(
         fixture.collaboration.ready().unwrap().instance,
@@ -754,6 +778,7 @@ fn client_and_pending_bounds_refuse_with_structured_frames() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn shutdown_drains_claimed_work_and_removes_only_owned_files() {
     let fixture = Fixture::new();
@@ -799,7 +824,7 @@ fn shutdown_drains_claimed_work_and_removes_only_owned_files() {
     assert!(!path.exists() && !socket.exists() && !socket.parent().unwrap().exists());
     assert_eq!(fs::read(&unrelated).unwrap(), b"{}");
     // A stale descriptor cannot reach a listener.
-    assert!(UnixStream::connect(&socket).is_err());
+    assert!(LocalStream::connect(&socket).is_err());
     assert_eq!(
         fixture.collaboration.ready().unwrap_err().category,
         "Closing"
@@ -829,6 +854,7 @@ fn shutdown_without_drain_reports_claimed_work_unknown() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn shutdown_leaves_substituted_endpoint_files() {
     let fixture = Fixture::new();
@@ -839,6 +865,7 @@ fn shutdown_leaves_substituted_endpoint_files() {
     assert_eq!(fs::read(&path).unwrap(), b"substitute");
 }
 
+#[cfg(unix)]
 #[test]
 fn endpoint_requires_an_existing_private_configuration_root() {
     let fixture = Fixture::new();
@@ -896,4 +923,10 @@ fn endpoint_requires_an_existing_private_configuration_root() {
     // A refused start leaves no endpoint and can be retried.
     fixture.ready();
     assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::*;
+    include!("windows_tests.rs");
 }

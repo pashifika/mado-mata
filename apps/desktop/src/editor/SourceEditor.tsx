@@ -17,6 +17,7 @@ import type {CompletionCandidate, CompletionContext, CompletionKey, CompletionRe
 import {SourcePositions, sourceDifference} from './source-positions.ts';
 import {CompletionSession} from './completion-session.ts';
 import type {SourceChange} from './source-positions.ts';
+import {useDeferredFocus} from '../components/DeferredView.tsx';
 
 export interface SourceEditorHandle {complete: () => void; focus: () => void; composing: () => boolean}
 interface Props {
@@ -161,6 +162,8 @@ export default function SourceEditor(props: Props) {
   const settings = useRef(new Compartment());
   const completion = useRef<CompletionSession | null>(null);
   const [caret, setCaret] = useState({line: 1, column: 1, lines: 1});
+  const canFocus = useDeferredFocus();
+  const initialReveal = useRef(true);
 
   useImperativeHandle(props.control, () => ({complete: () => {
     const view = editor.current;
@@ -394,7 +397,7 @@ export default function SourceEditor(props: Props) {
     view.contentDOM.addEventListener('compositionend', compositionEnd, true);
     view.contentDOM.addEventListener('blur', blur);
     track(view);
-    view.focus();
+    if (canFocus()) view.focus();
     return () => {
       alive = false;
       session?.cancel();
@@ -432,8 +435,10 @@ export default function SourceEditor(props: Props) {
     const view = editor.current, mapping = positions.current;
     if (!view || !mapping) return;
     const anchor = mapping.toEditor(props.draft.range.start), head = mapping.toEditor(props.draft.range.end, 1);
-    view.dispatch({selection: {anchor, head}, effects: EditorView.scrollIntoView(head, {y: 'nearest'}), annotations: synchronize.of(true)});
-    view.focus();
+    const focus = !initialReveal.current || view.hasFocus || canFocus();
+    view.dispatch({selection: {anchor, head}, effects: focus ? EditorView.scrollIntoView(head, {y: 'nearest'}) : undefined, annotations: synchronize.of(true)});
+    if (focus) view.focus();
+    initialReveal.current = false;
   }, [props.reveal, props.draft.path]);
 
   useLayoutEffect(() => {

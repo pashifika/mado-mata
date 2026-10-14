@@ -103,7 +103,7 @@ class BranchFlowTests(unittest.TestCase):
                         validate_event("pull_request", event, REPO)
 
     def test_fresh_pr_events_revalidate_the_current_route(self):
-        for action in ("opened", "synchronize", "reopened", "ready_for_review"):
+        for action in ("opened", "synchronize", "reopened"):
             for base, head, accepted in (
                 ("dev/runtime", "change/capture", True),
                 ("main", "change/capture", False),
@@ -118,6 +118,13 @@ class BranchFlowTests(unittest.TestCase):
                     else:
                         with self.assertRaises(ValueError):
                             validate_event("pull_request", event, REPO)
+
+    def test_review_readiness_is_not_a_validation_event(self):
+        event = pull_request()
+        event["action"] = "ready_for_review"
+        event["pull_request"]["draft"] = False
+        with self.assertRaises(ValueError):
+            validate_event("pull_request", event, REPO)
 
     def test_edited_payloads_are_not_validation_events(self):
         # Checkbox check/uncheck, free-text, title, and base edits all have the
@@ -790,12 +797,9 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_pr_trigger_excludes_edits_and_retains_validation_events(self):
         check_ci_workflow(self.workflow, self.manifest["actions"])
-        required = {"opened", "synchronize", "reopened", "ready_for_review"}
-        configured = self.workflow["on"]["pull_request"]["types"]
-        self.assertEqual(set(configured), required)
-        # Reject reintroducing edited (including checkbox changes) at the
-        # subscription boundary, not merely skipping jobs after a run exists.
-        for activity in ("edited", "labeled", "unlabeled", "closed"):
+        required = {"opened", "synchronize", "reopened"}
+        # Metadata-only events must be excluded before a workflow run exists.
+        for activity in ("edited", "ready_for_review", "converted_to_draft", "labeled", "unlabeled", "closed"):
             with self.subTest(unwanted_activity=activity):
                 workflow = deepcopy(self.workflow)
                 workflow["on"]["pull_request"]["types"].append(activity)
@@ -943,6 +947,29 @@ class RepositoryPolicyTests(unittest.TestCase):
                         check["working-directory"] = "other-checkout"
                     with self.assertRaises(ValueError):
                         check_ci_workflow(workflow, self.manifest["actions"])
+
+    def test_full_hosted_lanes_cannot_drop_workflow_or_link_checks(self):
+        for name in ("repository", "runtime-macos"):
+            for mutation in ("runtime only", "missing native tools"):
+                with self.subTest(job=name, mutation=mutation):
+                    workflow = deepcopy(self.workflow)
+                    steps = workflow["jobs"][name]["steps"]
+                    if mutation == "runtime only":
+                        check = next(step for step in steps if "tools/ci/check.py" in step.get("run", ""))
+                        check["run"] = "python3 tools/ci/check.py --runtime-only"
+                    else:
+                        installer = next(step for step in steps if step.get("run") == "python3 tools/ci/install_tools.py")
+                        steps.remove(installer)
+                    with self.assertRaises(ValueError):
+                        check_ci_workflow(workflow, self.manifest["actions"])
+
+    def test_macos_engine_consumer_execution_is_mandatory(self):
+        workflow = deepcopy(self.workflow)
+        steps = workflow["jobs"]["runtime-macos"]["steps"]
+        engine = next(step for step in steps if step.get("run") == "python3 tools/ci/check_engine_macos.py")
+        steps.remove(engine)
+        with self.assertRaises(ValueError):
+            check_ci_workflow(workflow, self.manifest["actions"])
 
     def test_runtime_artifacts_cannot_widen_or_weaken_checks(self):
         mutations = (
