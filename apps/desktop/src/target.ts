@@ -42,8 +42,8 @@ export interface TargetState {
 }
 const idleApplication:RunningApplicationState = {pending:null, result:null, issue:null, cancelled:false};
 
-function blankDraft(declaration:TargetDeclaration|null):TargetDraft {
-  return {platform:'macos', gameKind:'', gamePath:'', separateLauncher:false, launcherKind:'', launcherPath:'', arguments:[],
+function blankDraft(declaration:TargetDeclaration|null, platform:TargetConfiguration['platform'] = 'macos'):TargetDraft {
+  return {platform, gameKind:'', gamePath:'', separateLauncher:false, launcherKind:'', launcherPath:'', arguments:[],
     workingDirectory:'', windowTitle:declaration?.window_title ?? '', route:'', focus:'', pointerMode:'', clickHold:''};
 }
 
@@ -72,7 +72,7 @@ function sameContext(a:TargetContext, b:TargetContext):boolean {
 
 function savedDraft(state:TargetState):TargetDraft {
   const binding = state.view?.compatible ? state.view.record.binding : null;
-  return binding ? configurationDraft(binding.configuration) : blankDraft(state.declaration);
+  return binding ? configurationDraft(binding.configuration) : blankDraft(state.declaration, state.view?.platform === 'windows' ? 'windows' : 'macos');
 }
 
 export function targetDirty(state:TargetState):boolean {
@@ -141,6 +141,7 @@ export function cancelRunningApplication(state:TargetState, requestId:string):Ta
 export function beginApplicationPicker(state:TargetState, field:TargetPickerField, issued?:TargetPickerTicket):TargetState {
   const ticket = issued?.ticket ?? targetTicket(state);
   if (!ticket || !state.declaration || state.operation !== null || state.picker !== null
+    || state.view?.platform !== state.draft.platform
     || !currentTargetDraft(state, ticket) || !currentRecord(state, ticket)
     || (field === 'launcher' && !state.draft.separateLauncher)) return state;
   return {...state, picker:issued ?? {ticket, field}, pickerIssue:null};
@@ -150,9 +151,10 @@ export function completeApplicationPicker(state:TargetState, picker:TargetPicker
   if (state.picker !== picker || !currentTargetDraft(state, picker.ticket) || !currentRecord(state, picker.ticket)) return state;
   const settled = {...state, picker:null, pickerIssue:error};
   if (path === null || error !== null) return settled;
+  const kind = state.draft.platform === 'windows' ? 'executable' : 'bundle';
   return picker.field === 'game'
-    ? editTarget(settled, {...state.draft, gameKind:'bundle', gamePath:path})
-    : editTarget(settled, {...state.draft, launcherKind:'bundle', launcherPath:path});
+    ? editTarget(settled, {...state.draft, gameKind:kind, gamePath:path})
+    : editTarget(settled, {...state.draft, launcherKind:kind, launcherPath:path});
 }
 
 export function invalidateApplicationPicker(state:TargetState):TargetState {

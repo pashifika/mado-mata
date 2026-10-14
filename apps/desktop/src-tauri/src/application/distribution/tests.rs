@@ -455,7 +455,7 @@ fn review_import_still_refuses_an_edit_lease_without_consuming_the_review() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[test]
 fn review_import_still_refuses_an_open_target_picker() {
     let author = Fixture::new();

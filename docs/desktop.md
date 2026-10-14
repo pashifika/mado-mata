@@ -55,10 +55,13 @@ set. The runtime's trusted compiler has its own
 No package selected by the operator can install dependencies or run lifecycle
 scripts.
 
-Vite bundles the editor and a lazy TypeScript language-service worker, including
-the ES2020 declaration closure from the pinned frontend TypeScript dependency.
-No CDN, runtime type download, package plugin or package-selected compiler is
-used. The editor and execution compiler share the application-owned SDK generator.
+Vite emits local chunks for the application, Edit, Recognition and the independent
+preview surface. CodeMirror loads when a source is opened; the TypeScript
+language-service worker remains demand-loaded and includes the ES2020 declaration
+closure from the pinned frontend TypeScript dependency. View loading does not
+replace the owning session or operation controls. No CDN, runtime type download,
+package plugin or package-selected compiler is used. The editor and execution
+compiler share the application-owned SDK generator.
 
 The Rust shell embeds only the OMP adapter's `package.json`, `index.mjs` and
 `client.mjs` from `integrations/omp`. Debug and production shell builds include
@@ -776,17 +779,33 @@ unsupported; no Server, entitlement, download or native authorization is added.
 
 The application-supplied [OMP extension](../integrations/omp/package.json) connects
 to the desktop's main-window authoring controller through private, authenticated
-Unix-domain IPC. UI and OMP share the same unsaved drafts, Edit lease and
-publication rules; the adapter is not a second editor or a saved-file mirror.
-The desktop must be running with Setup completed. Windows collaboration is
-unavailable in this transport; Linux checks do not qualify a desktop workflow.
-UI-only authoring remains available without the adapter.
+local IPC: Unix-domain sockets on macOS and named pipes on Windows. UI and OMP
+share the same unsaved drafts, Edit lease and publication rules; the adapter is
+not a second editor or a saved-file mirror. The desktop must be running with
+Setup completed. Linux checks do not qualify a desktop workflow. UI-only
+authoring remains available without the adapter.
+
+Windows collaboration uses system Windows PowerShell and .NET Framework to
+verify handle-based ownership, ACLs and the actual connected server process
+before sending a request. It needs no compiler, temporary DLL or extra adapter
+dependency. Policies that prevent this verification produce a refusal; do not
+bypass them. The selected root must be current-user-owned on a local drive,
+without reparse components or another user's write/delete authority. Read-only
+root sharing is allowed; the collaboration directory, descriptors and pipe
+remain private. MadoMata does not rewrite an existing root's ACL to make it pass.
 
 ### Install, select and remove the adapter
 
 Use OMP **18.8.7 or newer**, with no exact pin or upper bound. Registration
 requires OMP's tool, command, lifecycle and schema APIs; a missing capability
 or incompatible protocol is a refusal, not permission to fall back to disk.
+Actual integration acceptance uses the OMP installed locally at test time and
+records its executable, exact version, OS and adapter identity. Historical
+releases below are evidence, not required download/downgrade or reproduction
+targets. The technical minimum and capability/protocol guards are separate from
+that tested-version baseline; a passing local run does not qualify other
+unexecuted versions or operating systems.
+
 Open **Application → Plugins**, beside **App settings**. It is available after
 Setup even with no workspace selected and is independent of Settings Save/Cancel.
 Opening it does not save drafts, replace the Edit owner or remount the editor.
@@ -815,21 +834,23 @@ there is no public plugin settings-page SDK.
   Packages, unsaved drafts, Edit ownership, recovery journals, unrelated plugins
   and prepared payloads are retained.
 
-Management currently supports the macOS desktop and the normal OMP user
-installation at `$HOME/.omp`. Named profiles, redirected agent/plugin data and
-ambiguous executable discovery are refused; project-local installation is not
-offered. OMP's npm/link commands do not use generic scope flags to select a
+Management supports the macOS and Windows desktops and the normal OMP user
+installation at `$HOME/.omp` (`%USERPROFILE%\.omp` on Windows). Windows uses a
+native `omp.exe`, not a command script or WSL launcher. Named profiles, redirected
+agent/plugin data and ambiguous executable discovery are refused; project-local
+installation is not offered. OMP's npm/link commands do not use generic scope flags to select a
 different registry. Enter an absolute executable path and choose **Check** to
 resolve discovery ambiguity. This is a session target selector, not a saved app
 preference. Target checks also read the client's home/config/agent dotenv files;
 directory overrides or unverifiable files refuse management, while ordinary
 non-routing entries remain usable. Missing, old or incapable clients are reported;
 MadoMata never installs or updates OMP itself or edits OMP-owned configuration.
-OMP 18.8.7 and 18.8.9 require `bun` on PATH for npm-plugin Uninstall.
-Management includes the executable's directory and usual user/Homebrew tool
-directories when launching OMP, including from a minimal-PATH GUI. Install Bun
-yourself if needed; a missing companion is reported as a failed operation, not
-adapter removal. MadoMata does not install companion tools.
+The observed OMP releases require `bun` on PATH for npm-plugin Uninstall.
+Management includes the executable's directory and usual user tool directories,
+including `.bun/bin` on Windows and Homebrew directories on macOS, even from a
+minimal-PATH GUI. Install Bun yourself if needed; a missing companion is reported
+as a failed operation, not adapter removal. MadoMata does not install companion
+tools.
 
 Every confirmation is tied to the displayed observation. Refresh, Check, an
 executable edit, Back or Close withdraws it; the host rechecks target/source before
@@ -841,9 +862,10 @@ Draft editing and owner-attributed Stop/Return remain independent. All managemen
 reads and mutations take exclusive ownership of the actual user installation,
 including across application data roots and HOME aliases. A competing request
 is refused without waiting; **Refresh** after the owner settles.
-Commands have finite duration/output bounds and settle their owned process group,
-including OMP's Bun companion. Application shutdown drains and, if needed,
-interrupts both inspections and mutations, then waits for owned settlement.
+Commands have finite duration/output bounds and settle their owned process tree,
+including OMP's Bun companion: a Unix process group or a Windows non-breakaway
+Job assigned atomically at process creation. Application shutdown drains and,
+if needed, interrupts both inspections and mutations, then waits for owned settlement.
 It does not signal existing OMP sessions. A failed or unreadable readback is not
 success or proof of rollback; **Refresh** inspects current state without replaying
 the mutation. Interrupted publication is reported
@@ -852,7 +874,7 @@ snapshots and are not automatically removed.
 
 Each mutation reserves an application-owned
 `$HOME/.omp/mado-mata-plugin-unsettled.json` safety marker before dispatch and
-removes it only after its command group is confirmed ended. An unsettled command
+removes it only after its owned command tree is confirmed ended. An unsettled command
 or an interruption can leave it behind, refusing management across restarts and
 data roots. Follow the reported reconciliation guidance: establish that this
 MadoMata management command and its descendants have ended, inspect the actual
@@ -1204,14 +1226,25 @@ calls:
 Those broader authoring observations used the then-available release. Subsequent
 management checks exercised real OMP `18.8.7` and `18.8.9` in isolated owned user
 state; the first application-managed adapter distribution is `0.1.1`.
-This does not establish future compatibility, Windows/Linux interactive
-qualification, physical OS IME or native-picker acceptance, or native
-capture/OCR/input qualification. Composition used events on the real editor,
+Those historical observations do not establish future compatibility or
+Windows/Linux interactive qualification, physical OS IME or native-picker
+acceptance, or native capture/OCR/input qualification. Composition used events on the real editor,
 and the owned PNG used the real host load command, not a native picker.
 No real OCR trial or trial-freshness claim was made.
 The minimum is a floor, not a tested-version allowlist. Deterministic checks,
 actual WebView observations and separately authorized native evidence remain
 separate.
+
+Native Windows checks used the then-local OMP `18.10.3`, Bun `1.4.3` and included
+adapter `0.1.3` in isolated owned user/data roots. Real managed Update from `0.1.2`,
+Uninstall, Install and restarted readback succeeded. A fresh automatically loaded
+OMP session discovered the actual desktop, explicitly selected its Edit owner,
+read and edited an unsaved source draft visible in the WebView, rejected a stale
+version, and observed GUI Undo through the same controller. Saved bytes were
+unchanged; retired-owner access was refused. Disconnect and session shutdown
+completed with no model turns, and a fresh session after Uninstall had no adapter.
+These are Windows integration observations, not a replay of the broader macOS
+matrix or native game qualification.
 
 ## Acquire a native historical frame
 
@@ -1906,13 +1939,19 @@ as described in [the manifest contract](runtime-comparison.md#optional-portable-
 A targetless package still runs existing controlled/replay workflows; a missing,
 invalid, or incompatible local target is not an execution prerequisite.
 
-1. For the **actual game**, choose **Application bundle (.app)** and use
-   **Open…** at the right edge of its path field to select the outer application,
-   including a supported iOS-on-Mac wrapper. Game and launcher paths each occupy
-   their own full-width row. Do not navigate to the internal executable. Cancel
-   keeps the draft. Manual absolute paths and direct executable configuration
-   remain available. A separate bundle launcher uses the same picker; it does
-   not identify or replace the game.
+1. Choose the **actual game**, not its launcher:
+   - **Windows:** use **Open…** at the right edge of the game path field to
+     select its `.exe`. The native chooser sets **Executable file** and that
+     field only. With **Use a separate launcher** checked, its own **Open…**
+     selects the launcher independently. Shortcuts, directories, reparse-point
+     files and non-`.exe` selections are refused.
+   - **macOS:** choose **Application bundle (.app)** and use **Open…** to select
+     the outer application, including a supported iOS-on-Mac wrapper. Do not
+     navigate to the internal executable. A separate bundle launcher uses the
+     same picker; it does not identify or replace the game.
+   Game and launcher paths each occupy their own full-width row. Cancel keeps
+   the draft. Selection does not Check, Save or grant execution authority.
+   Manual absolute paths and direct executable configuration remain available.
 2. Add or remove arguments as individual rows, like schema **Allowed values**.
    Drag the left handle to reorder; with the handle focused, Up/Down arrow keys
    move that argument one position. Empty fields remain empty arguments; spaces
@@ -1922,7 +1961,7 @@ invalid, or incompatible local target is not an execution prerequisite.
    directory; an explicit directory for a bundle recipient is refused before
    launch, not ignored. The exact window title has its own full-width row.
    Supply it when the package leaves it local; a package-required title is read-only.
-3. Leave all input fields blank for capture-only use. To configure future input,
+3. On macOS, leave all input fields blank for capture-only use. To configure future input,
    explicitly select a complete policy. Process-directed input requires a pointer
    mode: Core Graphics permits either focus policy; AppKit background requires
    preserved focus. System input requires an already focused target and no
@@ -1941,10 +1980,16 @@ invalid, or incompatible local target is not an execution prerequisite.
    updates at the same canonical location remain compatible; this is not a
    signed-binary or content check.
 
-The native picker is an asynchronous sheet, available only while Run/OCR is
-idle. While it is open, new Run/OCR and another picker are refused; state polling
-continues. A late selection cannot overwrite a changed draft, another Tab, or a
-closed/reinspected owner. Bundle metadata is reread on every Check/Save:
+An unbound draft uses the host platform. A saved binding from another platform
+is retained without conversion; its native picker is unavailable on this host.
+Windows selection and Check/Save configure filesystem metadata only: they do
+not enable Windows Native Start or running-application discovery.
+
+The native picker uses an asynchronous macOS sheet or a Windows owner-modal
+file dialog, available only while Run/OCR is idle. While it is open, new Run/OCR
+and another picker are refused; state polling continues. A late selection
+cannot overwrite a changed draft, another Tab, or a closed/reinspected owner.
+Bundle metadata is reread on every Check/Save:
 same-process changes to executable names and identifiers do not reuse cached
 values. Participating plists remain bounded to **64 KiB**, **8,192 events**, and
 **32 nesting levels**. Unsupported alternate metadata locations, including
@@ -2510,6 +2555,11 @@ requires checking the entire installed generation. Failure restores the exact
 prior managed bytes and absence, including historical metadata, or keeps Recovery
 and its evidence if publication or cleanup remains unresolved.
 Installed configuration and successful Application reconstruction are separate.
+
+Windows no-replace publication uses extended-length paths, including long
+displaced-preimage names under the restore journal. It resolves relative spelling
+without requiring the destination to exist or resolving links. Existing
+destinations still refuse; there is no overwriting or cross-volume copy fallback.
 
 Before deleting preimages, cleanup publishes a version-3 `.restore-completion`.
 This marker keeps restart admission blocked even after partial journal deletion.

@@ -141,6 +141,7 @@ fn target_view(selected: &Selected, record: TargetRecord) -> TargetView {
             })
     });
     TargetView {
+        platform: std::env::consts::OS,
         context: target_context(selected),
         record,
         compatible,

@@ -466,15 +466,8 @@ pub fn publish_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
-        let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-        let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
-        if from[..from.len() - 1].contains(&0) || to[..to.len() - 1].contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "path contains NUL",
-            ));
-        }
+        let from = windows_publication_path(from)?;
+        let to = windows_publication_path(to)?;
         // SAFETY: both pointers reference live NUL-terminated UTF-16 buffers consumed
         // synchronously. Zero flags omit REPLACE_EXISTING and COPY_ALLOWED.
         #[expect(unsafe_code, reason = "audited Windows atomic no-replace move")]
@@ -495,6 +488,32 @@ pub fn publish_no_replace(from: &Path, to: &Path) -> io::Result<()> {
             "no atomic no-replace publication primitive",
         ))
     }
+}
+
+#[cfg(windows)]
+fn windows_publication_path(path: &Path) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+
+    // Unlike std::fs, a raw Win32 call does not add the extended-length prefix.
+    // Resolve relative paths and normalize separators/dot components first, but
+    // do not canonicalize: publication destinations need not exist, and links
+    // must retain their caller-checked meaning. absolute also rejects NULs.
+    let absolute = std::path::absolute(path)?;
+    let (prefix, skip) = match absolute.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(_) => (r"\\?\", 0),
+            Prefix::UNC(_, _) => (r"\\?\UNC\", 2),
+            // Preserve already-verbatim and device namespace paths.
+            _ => ("", 0),
+        },
+        _ => ("", 0),
+    };
+    Ok(prefix
+        .encode_utf16()
+        .chain(absolute.as_os_str().encode_wide().skip(skip))
+        .chain(Some(0))
+        .collect())
 }
 
 pub(crate) fn digest(bytes: &[u8]) -> String {
@@ -797,6 +816,100 @@ pub(crate) mod tests {
         create_private_directory(&root.0.join("b")).unwrap();
         assert!(publish_no_replace(&root.0.join("a"), &root.0.join("b")).is_err());
         assert!(root.0.join("a").is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_publication_paths_normalize_without_resolving_filesystem_entries() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let wide = |path: &Path| {
+            path.as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect::<Vec<_>>()
+        };
+        for (input, expected) in [
+            (
+                r"C:/absent/./parent/../destination",
+                r"\\?\C:\absent\destination",
+            ),
+            (
+                r"\\server\share/absent/../destination",
+                r"\\?\UNC\server\share\destination",
+            ),
+            (r"\\?\C:\absent\destination", r"\\?\C:\absent\destination"),
+            (
+                r"\\?\UNC\server\share\destination",
+                r"\\?\UNC\server\share\destination",
+            ),
+            (r"\\.\C:\absent\destination", r"\\.\C:\absent\destination"),
+        ] {
+            assert_eq!(
+                windows_publication_path(Path::new(input)).unwrap(),
+                wide(Path::new(expected)),
+                "{input}"
+            );
+        }
+        let relative = Path::new("absent/./parent/../destination");
+        let absolute = std::env::current_dir().unwrap().join("absent/destination");
+        assert_eq!(
+            windows_publication_path(relative).unwrap(),
+            windows_publication_path(&absolute).unwrap()
+        );
+        for path in ["absent\0destination", "\\\\?\\C:\\absent\0destination"] {
+            assert_eq!(
+                windows_publication_path(Path::new(path))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_publication_moves_long_files_and_directories_without_replacement() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let root = Root::new();
+        let long = root.0.join("a".repeat(120)).join("b".repeat(120));
+        crate::storage::private_directory(&long).unwrap();
+        assert!(long.as_os_str().encode_wide().count() > 260);
+        for directory in [false, true] {
+            for (from_parent, to_parent) in [(&root.0, &long), (&long, &root.0), (&long, &long)] {
+                let from = from_parent.join("source");
+                let to = to_parent.join("destination");
+                let (source_bytes, destination_bytes) = if directory {
+                    create_private_directory(&from).unwrap();
+                    (from.join("bytes"), to.join("bytes"))
+                } else {
+                    (from.clone(), to.clone())
+                };
+                write_private(&source_bytes, b"published bytes").unwrap();
+                publish_no_replace(&from, &to).unwrap();
+                assert!(!from.exists());
+                assert_eq!(fs::read(&destination_bytes).unwrap(), b"published bytes");
+
+                if directory {
+                    create_private_directory(&from).unwrap();
+                }
+                write_private(&source_bytes, b"retained source").unwrap();
+                assert_eq!(
+                    publish_no_replace(&from, &to).unwrap_err().kind(),
+                    io::ErrorKind::AlreadyExists
+                );
+                assert_eq!(fs::read(&source_bytes).unwrap(), b"retained source");
+                assert_eq!(fs::read(&destination_bytes).unwrap(), b"published bytes");
+                if directory {
+                    fs::remove_dir_all(&from).unwrap();
+                    fs::remove_dir_all(&to).unwrap();
+                } else {
+                    fs::remove_file(&from).unwrap();
+                    fs::remove_file(&to).unwrap();
+                }
+            }
+        }
     }
 
     #[test]

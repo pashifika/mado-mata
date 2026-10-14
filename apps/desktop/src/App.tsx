@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useReducer, useRef, useState} from 'react';
+import {lazy, useEffect, useMemo, useReducer, useRef, useState} from 'react';
 import type {KeyboardEvent, ReactNode} from 'react';
 import {flushSync} from 'react-dom';
 import {invoke} from '@tauri-apps/api/core';
@@ -9,9 +9,8 @@ import type {Command, Message} from './i18n.ts';
 import {LocaleContext, useLocale} from './locale.tsx';
 import type {CheckTarget, LastCheck} from './settings/EnvironmentPanel.tsx';
 import BootstrapPage from './pages/BootstrapPage.tsx';
-import EditPage from './pages/EditPage.tsx';
+import DeferredView from './components/DeferredView.tsx';
 import type {EditHandlers, PageAuthoring} from './pages/EditPage.tsx';
-import RecognitionPage from './pages/RecognitionPage.tsx';
 import * as recognition from './recognition.ts';
 import GuidancePage from './pages/GuidancePage.tsx';
 import type {ActiveOwner} from './pages/GuidancePage.tsx';
@@ -74,6 +73,10 @@ import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunn
 import type {TargetOperation, TargetPickerField, TargetPickerTicket, TargetState} from './target.ts';
 import type {AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, BootstrapStatus, CatalogEdit, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetApplicationResponse, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
 import type {CaptureCacheReceipt, NativeCapability, NativeSelectionView} from './types.ts';
+
+// Session state and command ownership stay here; authoring views load only when selected.
+const EditPage = lazy(() => import('./pages/EditPage.tsx'));
+const RecognitionPage = lazy(() => import('./pages/RecognitionPage.tsx'));
 
 const idle: ControllerView = {run: null, state: 'idle', operation: 'run', result: null, error: null, progress: [], dropped_logs: 0, workspace_id: null, workspace_revision: null, native_preparation: null, attempts: []};
 const EMPTY_FILTER: LogFilter = {text: '', level: ''};
@@ -2903,13 +2906,20 @@ export default function App() {
         <span className="muted">{ui.bootstrap.actionFailedHelp}</span></div></div>}
     <div className="workspace">
       <main id="workspace-panel" className="content" aria-label={selected ? t.workspaceAria(workspaceLabel(selected, workspaces)) : undefined}>
-        {selected && selected.page === 'edit' && editVisible && authoring && editorCompletion.current !== null && <EditPage key={authoring.owner.token} session={authoring} label={workspaceLabel(selected, workspaces)}
+        {selected && selected.page === 'edit' && editVisible && authoring && editorCompletion.current !== null && <DeferredView key={authoring.owner.token}
+          fallback={<p role="status">{ui.bootstrap.state('loading')}</p>}
+          error={cause => <><FaultMessage title={t.edit} value={fault(cause)}/>
+            <button type="button" disabled={closing || commandReason !== null || (authoring.pending !== null && authoring.pending.kind !== 'recognition_trial' && authoring.pending.kind !== 'validate')}
+              onClick={editHandlers.exit}>{ui.authoring.exit}</button></>}>
+          <EditPage session={authoring} label={workspaceLabel(selected, workspaces)}
           handlers={editHandlers} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
           packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive} recognitionDirty={recognitionDirty}
           recognitionSaveBlock={recognitionSaveReason} exportBlock={active ? ui.authoring.blockedActive : null}
           completionPreferences={editorCompletion.current}
           recognition={authoring.recognition
-            ? <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null}
+            ? <DeferredView key={authoring.owner.token} fallback={<p role="status">{ui.bootstrap.state('loading')}</p>}
+              error={cause => <FaultMessage title={ui.recognition.heading} value={fault(cause)}/>}>
+              <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null}
               leaseLost={leaseLost} trialActive={recognitionActive}
               nativeSelection={nativeSelection && sameAuthoringRef(nativeSelection.owner, authoring.owner) && nativeSelection.revision === authoring.revision ? nativeSelection : null}
               onState={update => {
@@ -2924,10 +2934,10 @@ export default function App() {
                 save: () => void saveRecognition(), copy: (ids, mode) => void copyRecognition(ids, mode),
                 discard: () => void discardRecognition(), capabilities: () => void ownAuthoringWorker(checkRecognitionCapabilities),
                 openPreview: () => void openRecognitionPreview(), reload: () => void readRecognition(),
-              }}/>
+              }}/></DeferredView>
             : <div className="button-row"><span role="status">{t.recognitionUnavailable}</span>
               <button id="recognition-reload" type="button" disabled={authoring.pending !== null || leaseLost || closing}
-                onClick={() => void readRecognition()}>{ui.authoring.refresh}</button></div>}/>}
+                onClick={() => void readRecognition()}>{ui.authoring.refresh}</button></div>}/></DeferredView>}
         {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (isBound(selected)
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id}

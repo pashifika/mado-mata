@@ -170,7 +170,11 @@ pub(crate) fn observe_installed(
         return Err(identity.missing());
     }
     crate::storage::check_directory(&packages).map_err(|cause| {
-        identity.caused("InstalledIntegrity", "installed releases are unavailable", cause)
+        identity.caused(
+            "InstalledIntegrity",
+            "installed releases are unavailable",
+            cause,
+        )
     })?;
     let mut found = false;
     for entry in listing(&packages)? {
@@ -179,11 +183,19 @@ pub(crate) fn observe_installed(
             continue;
         };
         let signer = packages.join(key);
-        if entry.file_type().map_err(|error| io_fault("inspect signer location", &signer, &error))?.is_file() {
+        if entry
+            .file_type()
+            .map_err(|error| io_fault("inspect signer location", &signer, &error))?
+            .is_file()
+        {
             continue;
         }
         crate::storage::check_directory(&signer).map_err(|cause| {
-            identity.caused("InstalledIntegrity", "installed signer location is unsafe", cause)
+            identity.caused(
+                "InstalledIntegrity",
+                "installed signer location is unsafe",
+                cause,
+            )
         })?;
         let package = signer.join(package_id);
         match fs::symlink_metadata(&package) {
@@ -199,14 +211,21 @@ pub(crate) fn observe_installed(
             }
         }
         crate::storage::check_directory(&package).map_err(|cause| {
-            identity.caused("InstalledIntegrity", "installed package location is unsafe", cause)
+            identity.caused(
+                "InstalledIntegrity",
+                "installed package location is unsafe",
+                cause,
+            )
         })?;
         let archive = package.join(identity.file_name());
         if !crate::storage::exists(&archive)? {
             continue;
         }
         if found {
-            return Err(identity.fault("InstalledIntegrity", "installed artifact has ambiguous locations"));
+            return Err(identity.fault(
+                "InstalledIntegrity",
+                "installed artifact has ambiguous locations",
+            ));
         }
         crate::storage::checked_file(&archive, super::MAX_ARCHIVE_BYTES).map_err(|cause| {
             identity.caused("InstalledIntegrity", "installed archive is unsafe", cause)
@@ -770,6 +789,10 @@ fn owned_directory(path: &Path) -> Result<(), Fault> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_fault("inspect installed releases", path, &error)),
     }
+    #[cfg_attr(
+        not(unix),
+        expect(unused_mut, reason = "only Unix sets the private directory mode")
+    )]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {

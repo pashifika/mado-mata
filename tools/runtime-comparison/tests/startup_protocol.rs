@@ -14,6 +14,10 @@ use std::time::{Duration, Instant};
 // The CPU-expiry child must not compete with unrelated startup assertions.
 static SERIAL: Mutex<()> = Mutex::new(());
 
+// Protocol transitions must survive cold debug-executable fingerprinting and
+// JavaScript preparation. Startup expiry has its own shorter-budget case below.
+const NATIVE_HANDSHAKE_STARTUP_MS: u64 = 10_000;
+
 struct OwnedProtocol {
     child: Child,
     input: ChildStdin,
@@ -179,7 +183,7 @@ fn no_request_and_early_ready_settle_cleanly_without_native_resources_on_repeate
             }
             export function workflow() { throw new Error('must not enter Workflow'); }
         ",
-            3_000,
+            NATIVE_HANDSHAKE_STARTUP_MS,
         );
         let (terminal, events) = child.finish();
         assert_eq!(terminal["primary"]["category"], "ReadinessContract");
@@ -206,7 +210,7 @@ fn request_returns_before_resolution_and_only_script_polling_advances_pending() 
         }
         export function workflow() { throw new Error('must not enter Workflow'); }
     ",
-        3_000,
+        NATIVE_HANDSHAKE_STARTUP_MS,
     );
     let mut request = None;
     let mut returned = false;
@@ -247,7 +251,7 @@ fn startup_failure_interrupts_cpu_work_without_waiting_for_another_status_call()
         export function readiness() { host.call('target_start', {}); while (true) {} }
         export function workflow() {}
     ",
-        3_000,
+        NATIVE_HANDSHAKE_STARTUP_MS,
     );
     loop {
         let event = child.next();
@@ -290,7 +294,7 @@ fn stop_and_forged_capture_readiness_cannot_admit_late_native_initialization() {
             }
             export function workflow() {}
         ",
-            3_000,
+            NATIVE_HANDSHAKE_STARTUP_MS,
         );
         loop {
             let event = child.next();
@@ -495,7 +499,7 @@ fn old_attempt_startup_reply_cannot_initialize_a_fresh_child() {
         }
         export function workflow() { throw new Error('must not enter'); }
     ",
-        3_000,
+        NATIVE_HANDSHAKE_STARTUP_MS,
         2,
         true,
     );

@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+- Keep macOS engine-check temporary paths short for Unix socket fixtures,
+  independently of its descriptive build and dependency-cache directory.
+
+- Support native Windows `.exe` selection for separate game and launcher target
+  fields. Preserve Cancel, stale-owner refusal, metadata-only Check, explicit
+  Save and restart readback; reject shortcuts and reparse-point files. Keep
+  saved foreign-platform bindings unchanged and Windows Native Start unavailable.
+
+- Bound the native preflight regression's settlement wait by its admitted
+  operation and containment budgets, without changing production deadlines.
+
+- Assign fresh Windows OMP test fixtures to the exact test user when hosted
+  runners default ownership to a group; retain strict production owner checks.
+
+- Cover PNG encoding failure before capture acceptance: no frame commit or
+  published transfer, with the acquired session still closed exactly once.
+
+- Run the full repository check and model-free engine consumer tests on hosted
+  macOS 26 arm64, including checksum-pinned actionlint and offline local-link
+  validation. Resolve native setup from the pinned SDK checkout; preserve its
+  macOS deployment floor and record the installed OpenCV 4 version. Keep Windows
+  runtime-only, event-specific gate isolation and physical acceptance separate.
+
+- Support native Windows OMP Agent integration with reviewed installation
+  management, bounded Job-owned command trees and private authenticated named
+  pipes. Release adapter `0.1.3`; preserve explicit owner/disclosure checks,
+  unknown outcomes, existing OMP sessions and macOS transport behavior.
+  Pass identity-checked ordinary Windows source paths to OMP's link command,
+  avoiding malformed junctions from duplicated native namespace prefixes.
+  Base actual integration acceptance on the locally installed OMP at test time,
+  recording its version rather than requiring historical-version reproduction.
+- Load application, preview, Edit, Recognition and source-editor code at their
+  actual view boundaries instead of one oversized startup bundle. Preserve
+  session ownership, operation controls and focus while local chunks load.
+- Contain the package library's hidden live status within its list scrollport,
+  preventing large Windows catalogs from scrolling the outer dialog.
+- Support long Windows paths during atomic no-replace configuration publication,
+  including restore displacement and recovery. Keep existing-destination refusal
+  and verify continuation/rollback without shortening the configured data root.
+- Scope intentional Unix-only process limits/outcomes and directory mutability
+  diagnostics to their consumers; remove unused test/import bindings and gate
+  engine-only correspondence methods precisely, retaining global warnings.
+- Preserve the trusted Node executable for Windows JavaScript and TypeScript
+  runs before restricting the native DLL search path. Keep initialization-only
+  environment checks independent of Node and retain parser isolation.
 - Do not start CI when a PR is marked ready for review. Retain opening, head
   updates, reopening, and explicit base-retarget revalidation.
 - Add a read-only Configuration doctor available before Application construction,

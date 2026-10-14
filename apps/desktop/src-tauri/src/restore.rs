@@ -934,7 +934,11 @@ pub(crate) mod tests {
             }
             Ok(())
         };
-        assert!(catch_unwind(AssertUnwindSafe(|| install_with(root, plan, &mut hook))).is_err());
+        let outcome = catch_unwind(AssertUnwindSafe(|| install_with(root, plan, &mut hook)));
+        assert!(
+            outcome.is_err(),
+            "expected injected displacement panic, got {outcome:?}"
+        );
         assert!(pending(root).unwrap());
     }
 
@@ -1062,6 +1066,43 @@ pub(crate) mod tests {
         assert_eq!(capture(&root.0).unwrap(), new);
         assert!(!pending(&root.0).unwrap());
         assert_unrelated(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_long_path_displacement_recovers_both_directions() {
+        use std::os::windows::ffi::OsStrExt;
+
+        for rollback in [false, true] {
+            let home = Root::new();
+            // Keep the selected root shorter than its held-<digest>-<index>
+            // child, reproducing the publication boundary rather than relying
+            // on the machine's temporary-directory length or the process ID.
+            let padding = 200usize
+                .saturating_sub(home.0.as_os_str().encode_wide().count() + 1)
+                .max(1);
+            let root = home.0.join("r".repeat(padding));
+            storage::private_directory(&root).unwrap();
+            let bytes = settings(100);
+            configuration::write_private(&root.join("settings.json"), &bytes).unwrap();
+            let before = capture(&root).unwrap();
+            let after = replacement(200);
+            let held = root
+                .join(JOURNAL)
+                .join(format!("held-{}-0", configuration::digest(&bytes)));
+            assert!(held.as_os_str().encode_wide().count() > 260);
+
+            interrupt_install(&root, after.clone(), &before.generation);
+            assert_eq!(fs::read(&held).unwrap(), bytes);
+            assert!(!root.join("settings.json").exists());
+            assert!(pending(&root).unwrap());
+            recover(&root, rollback).unwrap();
+            assert_eq!(
+                capture(&root).unwrap(),
+                if rollback { before } else { after }
+            );
+            assert!(!pending(&root).unwrap());
+        }
     }
 
     #[test]

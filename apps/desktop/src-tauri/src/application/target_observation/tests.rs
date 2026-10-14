@@ -175,7 +175,7 @@ fn closure_and_shutdown_invalidate_without_waiting_for_the_os_worker() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[test]
 fn picker_admission_excludes_run_and_ocr_until_guard_release() {
     let fixture = Fixture::new();

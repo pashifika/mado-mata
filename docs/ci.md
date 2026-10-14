@@ -39,6 +39,14 @@ Installation needs network access; the local-link check does not contact remote
 sites. Do not replace the installer with an unpinned package-manager download or
 skip integrity verification when a download fails.
 
+When overriding `TEMP`, `TMP` and `TMPDIR` for cache-local verification on Unix,
+use a short absolute directory and create it before starting the check. Socket
+fixtures append their own directory and file names; the complete pathname must
+fit the platform's Unix-domain socket limit. A long checkout or Change name can
+produce `listen EINVAL` or `path must be shorter than SUN_LEN` before the intended
+assertion runs. Shorten the owned scratch path rather than skipping those tests
+or changing socket/privacy checks. Keep the full logs outside that short path.
+
 The full check runs `npm ci --ignore-scripts --no-audit --no-fund` in the
 application-owned compiler and desktop directories inside a temporary
 tracked-file snapshot. It verifies Node's exact version and uses the committed
@@ -76,10 +84,42 @@ The version and integrity sources are:
 | GitHub Actions | Full commit SHAs | [Workflows](#hosted-workflow-and-required-gate) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
-CI uses Python 3.13, `ubuntu-24.04`, `macos-15`, and `windows-2025`. The macOS job
+CI uses Python 3.13, `ubuntu-24.04`, `macos-26`, and `windows-2025`. The macOS job
 prints and requires `arm64`; runtime checks also print their actual host identity.
+Linux and macOS run the full public check, including pinned actionlint and
+offline local-link validation. Windows retains `--runtime-only` because the
+native-tool installer has no Windows assets. Before the full check, macOS also
+runs the model-free `engine` consumer library suite described below. The
+event-specific PR, push and manual workflows use the same platform scope; none
+performs physical-device GUI/game acceptance.
 Update versions, integrity values, workflow references, and this guide together
 through a checked Change. A new installer host needs a verified release asset.
+
+The hosted macOS engine command is:
+
+```sh
+python3 tools/ci/check_engine_macos.py
+```
+
+It requires native arm64 macOS **26.5.2 or newer**, preserves the SDK deployment
+floor, and resolves `tools/setup-native.py` from the exact `mado-pilot` Git
+revision in the consumer manifest and lockfile. No sibling checkout is needed.
+It follows that revision's upstream hosted procedure: install Homebrew
+`opencv@4`, print the actual version, validate native OpenCV/libclang, install the
+locked trusted TypeScript compiler, and run the unfiltered consumer
+`cargo test --locked --features engine --lib` suite. The Homebrew OpenCV **major**
+is constrained to 4; its minor version is intentionally not a qualification pin.
+The resolved version is visible in the job log. npm/Homebrew caches and this
+engine build live under `.cache/engine-consumer`; temporary files use the shorter
+`.cache/et` directory so fixture socket names fit macOS's pathname limit.
+
+These controlled-provider tests include frame commit rejection, discarded OCR
+completion and macOS provider-terminal/process-exit precedence. They need no
+game, model download, native capture permission, input route or manual action.
+They are not real OCR, physical Apple Silicon acceptance, R6 qualification or
+evidence that input had an application effect. The ordinary local
+`check.py` command still does not enable `engine`; the hosted workflow invokes
+this additional command explicitly, and its failure fails the mandatory gate.
 
 Target metadata parsing uses `plist` in-process, with the exactly pinned
 `enable_unstable_features_that_may_break_with_minor_version_bumps` feature for
@@ -158,9 +198,14 @@ The full check has these responsibilities:
 - Run the checkout-owned OMP adapter tests without installing OMP or private
   plugins. These exercise registration/schema compatibility, explicit instance/
   owner selection, cancellation, session teardown, notice continuation and
-  unknown-outcome reconciliation. The compatibility floor is OMP `18.8.7`, not
-  an exact pin or upper bound; simulated API/version cases are not evidence
-  that an installed future release works.
+  unknown-outcome reconciliation. Windows cases use system Windows PowerShell
+  to exercise real private local pipes, ACL/reparse/replacement checks and
+  connected-server identity; Unix-only ownership cases remain platform-specific.
+  The technical compatibility floor is OMP `18.8.7`, not an exact pin or upper
+  bound. Actual integration acceptance separately uses the OMP installed locally
+  at test time and records its executable, exact version, OS and adapter identity;
+  historical-version downloads/reproduction are not required. Simulated
+  API/version cases do not establish that an installed release works.
 - Run the shared SDK catalog unit tests. Runtime `sdk_examples` tests discover
   the public catalog, compile examples with the pinned trusted compiler under
   empty and representative option schemas, and execute applicable behavior on
@@ -184,7 +229,10 @@ The full check has these responsibilities:
   Script-requested startup, no-request cleanup, one-shot/polled preparation,
   typed startup failures, and independent phase deadlines versus explicit Stop.
   Those child fixtures run serially so the CPU-expiry case cannot starve unrelated
-  startup assertions; their phase deadlines and protocol checks remain unchanged.
+  startup assertions. Native handshake cases admit a bounded 10-second startup
+  budget for cold debug-executable fingerprinting and JavaScript preparation;
+  the independent 5-second CPU-expiry case still proves deadline enforcement.
+  Production deadlines and protocol assertions are unchanged.
   Submitted receipts and physical cleanup ownership remain separate outcomes.
 - Install the locked desktop frontend with dependency lifecycle scripts disabled,
   run its state tests (including per-file history, stale saves, source-diagnostic
@@ -315,6 +363,13 @@ python3 tools/ci/check.py --runtime-only
 On Windows, use `python` in place of `python3` and preserve the tracked symlink
 as described in [development guidance](development-guidance.md#claude-symlink).
 Hosted Windows enables Git symlink checkout before fetching the repository.
+When keeping Windows scratch inside the checkout, choose a short writable
+`TEMP`/`TMP`/`TMPDIR`, for example `%CD%\.cache\ci-tmp`, and create it before
+launching the check. The disposable snapshot adds nested Cargo output paths;
+MSVC can fail with `LNK1104` on a long build-script output pathname even when
+application data publication supports extended Windows paths. Shorten the
+toolchain scratch root, not the application-path acceptance scenario.
+
 The two narrower modes are mutually exclusive. Missing tools, invalid input,
 or failing commands remain failures; neither mode substitutes for the full gate.
 These checks do not install remote rulesets or verify live GitHub enforcement.
@@ -401,7 +456,7 @@ npm run build --prefix apps/desktop
 cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib
 ```
 
-On macOS only, after the frontend build:
+On macOS and Windows, after the frontend build:
 
 ```sh
 cargo +1.98.1 build --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --features custom-protocol

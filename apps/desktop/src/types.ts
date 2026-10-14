@@ -181,7 +181,7 @@ export interface TargetCheck {
   game_bundle_id:string|null;
 }
 export interface TargetContext {workspace:WorkspaceRef; internal_name:string; package_id:string; declaration_identity:string|null}
-export interface TargetView {context:TargetContext; record:TargetRecord; compatible:boolean}
+export interface TargetView {platform:string; context:TargetContext; record:TargetRecord; compatible:boolean}
 export interface TargetCheckResponse {context:TargetContext; revision:number; binding_id:string|null; check:TargetCheck}
 export interface TargetSaveResponse {view:TargetView; check:TargetCheck}
 export interface ApplicationObservation {

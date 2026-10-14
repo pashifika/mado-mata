@@ -78,6 +78,7 @@ pub fn acquire(
             authority,
             operation,
             host_checkpoint,
+            images::encode_input,
         ),
         Err(error) => CaptureOutcome {
             primary: Some(sdk_error("open", error)),
@@ -111,13 +112,14 @@ fn admission(
     authority.admit(identity)
 }
 
-fn capture(
+pub(super) fn capture(
     session: mp::Session,
     geometry: CaptureGeometry,
     identity: &CaptureIdentity,
     authority: &CaptureAuthority,
     operation: &mp::OperationContext,
     mut checkpoint: impl FnMut() -> Result<(), Fault>,
+    encode: impl FnOnce(&DecodedImage) -> Result<images::EncodedImage, Fault>,
 ) -> CaptureOutcome {
     let prepared = (|| {
         authority.check(identity)?;
@@ -163,7 +165,7 @@ fn capture(
         }
         let image =
             DecodedImage::from_reserved_rgba(extent.width(), extent.height(), rgba, reservation)?;
-        let png = images::encode_input(&image)?;
+        let png = encode(&image)?;
         let acquired_at_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()

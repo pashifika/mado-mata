@@ -1,8 +1,15 @@
 //! Fixed OMP client operations with finite duration and output. Each run owns a
-//! new process group and ends it before returning.
+//! new Unix process group or Windows Job and ends its tree before returning.
+
+#[cfg(windows)]
+#[path = "windows_process.rs"]
+mod windows;
+#[cfg(windows)]
+pub(super) use windows::run;
 
 use super::payload::NAME;
 use mado_runtime_comparison::model::Fault;
+#[cfg(unix)]
 use serde_json::json;
 use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
@@ -36,6 +43,13 @@ const PIPE_GRACE: Duration = Duration::from_secs(1);
 #[cfg(unix)]
 const TERMINATE: Duration = Duration::from_secs(1);
 
+#[cfg_attr(
+    not(any(unix, windows)),
+    expect(
+        dead_code,
+        reason = "unsupported platforms refuse before using process limits"
+    )
+)]
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
     pub(super) duration: Duration,
@@ -88,11 +102,19 @@ pub(super) struct Output {
 pub(super) enum RunError {
     /// Nothing ran.
     NotStarted(Fault),
-    /// The command started and was ended early; its whole process group is gone
+    /// The command started and was ended early; its whole owned tree is gone
     /// and any effect is unknown.
+    #[cfg_attr(
+        not(any(unix, windows)),
+        expect(dead_code, reason = "unsupported platforms never start a process")
+    )]
     Started(Fault),
-    /// The command started, but its process group could not be confirmed empty.
+    /// The command started, but its owned tree could not be confirmed empty.
     /// Its effects may continue, so the installation stays owned.
+    #[cfg_attr(
+        not(any(unix, windows)),
+        expect(dead_code, reason = "unsupported platforms never own a process tree")
+    )]
     Unsettled(Fault),
 }
 
@@ -115,12 +137,64 @@ pub(super) trait Client: Send + Sync {
 /// The real client: an explicit executable with an argument vector, never a shell.
 pub(super) struct Cli;
 
+/// OMP/Bun's Windows junction creation adds its own NT namespace prefix.
+/// Keep the canonical identity, but pass an ordinary path to that CLI boundary.
+#[cfg(windows)]
+pub(super) fn link_source(source: &Path) -> Result<std::borrow::Cow<'_, Path>, Fault> {
+    use std::borrow::Cow;
+    use std::path::{Component, PathBuf, Prefix};
+
+    let invalid = || {
+        Fault::new(
+            "PluginPayload",
+            "The prepared adapter path cannot be represented safely for the Windows OMP CLI",
+        )
+    };
+    let mut components = source.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Ok(Cow::Borrowed(source));
+    };
+    if !matches!(
+        prefix.kind(),
+        Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _)
+    ) {
+        return Ok(Cow::Borrowed(source));
+    }
+    let mut plain = PathBuf::with_capacity(source.as_os_str().len());
+    match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => {
+            let disk = [drive, b':'];
+            plain.push(std::str::from_utf8(&disk).map_err(|_| invalid())?);
+        }
+        Prefix::VerbatimUNC(server, share) => {
+            plain.push(r"\\");
+            plain.push(server);
+            plain.push(share);
+        }
+        _ => unreachable!("verbatim disk or UNC prefix checked above"),
+    }
+    plain.push(components.as_path());
+    // Ordinary Windows parsing can trim dots/spaces or resolve reserved names.
+    // Refuse a changed meaning rather than register a different directory.
+    match plain.canonicalize() {
+        Ok(canonical) if canonical == source => Ok(Cow::Owned(plain)),
+        _ => Err(invalid()),
+    }
+}
+
 impl Client for Cli {
     fn run(
         &self,
         invocation: &Invocation<'_>,
         operation: Operation<'_>,
     ) -> Result<Output, RunError> {
+        #[cfg(windows)]
+        let source = match operation {
+            Operation::Link(source) => Some(link_source(source).map_err(RunError::NotStarted)?),
+            _ => None,
+        };
+        #[cfg(windows)]
+        let operation = source.as_deref().map_or(operation, Operation::Link);
         let (arguments, limits): (&[&OsStr], Limits) = match operation {
             Operation::Version => (&["--version".as_ref()], PROBE),
             Operation::Help => (&["plugin".as_ref(), "--help".as_ref()], PROBE),
@@ -425,7 +499,7 @@ pub(super) fn run(
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(super) fn run(
     _program: &Path,
     _arguments: &[&OsStr],
@@ -436,6 +510,6 @@ pub(super) fn run(
 ) -> Result<Output, RunError> {
     Err(RunError::NotStarted(Fault::new(
         "PluginPlatform",
-        "Managed OMP installation requires the supported Unix transport",
+        "Managed OMP installation requires a supported native transport",
     )))
 }

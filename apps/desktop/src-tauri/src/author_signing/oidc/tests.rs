@@ -451,7 +451,7 @@ fn foreign_duplicate_incomplete_or_refused_callbacks_fail_the_attempt() {
 
 #[test]
 fn cancellation_deadline_and_stray_requests_end_the_wait() {
-    let (listener, address) = loopback();
+    let (listener, _address) = loopback();
     let cancelled = Arc::new(AtomicBool::new(false));
     let handle = waiting(listener, cancelled.clone(), Duration::from_secs(60));
     thread::sleep(Duration::from_millis(250));

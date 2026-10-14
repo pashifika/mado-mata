@@ -333,12 +333,16 @@ async fn choose_target_application(
     {
         picker::choose(window, guard).await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows_shell::choose_executable(window, guard).await
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (window, guard);
         Err(Fault::new(
             "TargetPlatform",
-            "Application selection requires macOS",
+            "Application selection requires Windows or macOS",
         ))
     }
 }

@@ -20,6 +20,25 @@ const SOCKET_DIRECTORY_PREFIX: &str = "mm-";
 const SOCKET_NAME: &str = "s";
 const NAME_ATTEMPTS: usize = 8;
 
+pub(super) type Stream = UnixStream;
+pub(super) type Listener = UnixListener;
+pub(super) type Wake = UnixStream;
+
+pub(super) fn wake_pair() -> io::Result<(Wake, Wake)> {
+    UnixStream::pair()
+}
+
+pub(super) fn accept(listener: &Listener, wake: &Wake) -> io::Result<Option<Stream>> {
+    match wait_readable(listener, wake)? {
+        Readable::Wake => Ok(None),
+        Readable::Listener => listener.accept().map(|(stream, _)| Some(stream)),
+    }
+}
+
+pub(super) fn same_user(stream: &Stream) -> bool {
+    peer_uid(stream).ok() == Some(effective_uid())
+}
+
 fn fault(message: impl Into<String>) -> Fault {
     Fault::new("CollaborationUnavailable", message)
 }
