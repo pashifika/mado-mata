@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep macOS engine-consumer CI build output in the runtime's normal `target`
+  tree, separate from workspace scratch and dependency caches under `.cache`.
+
 - Keep macOS engine-check temporary paths short for Unix socket fixtures,
   independently of its descriptive build and dependency-cache directory.
 

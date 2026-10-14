@@ -109,9 +109,11 @@ It follows that revision's upstream hosted procedure: install Homebrew
 locked trusted TypeScript compiler, and run the unfiltered consumer
 `cargo test --locked --features engine --lib` suite. The Homebrew OpenCV **major**
 is constrained to 4; its minor version is intentionally not a qualification pin.
-The resolved version is visible in the job log. npm/Homebrew caches and this
-engine build live under `.cache/engine-consumer`; temporary files use the shorter
-`.cache/et` directory so fixture socket names fit macOS's pathname limit.
+The resolved version is visible in the job log. npm/Homebrew caches live under
+`.cache/engine-consumer`; Cargo build output uses the separate
+`tools/runtime-comparison/target/engine-consumer-ci` directory, outside `.cache`
+and distinct from the Desktop engine artifact. Temporary files still use the
+shorter `.cache/et` directory so fixture socket names fit macOS's pathname limit.
 
 These controlled-provider tests include frame commit rejection, discarded OCR
 completion and macOS provider-terminal/process-exit precedence. They need no

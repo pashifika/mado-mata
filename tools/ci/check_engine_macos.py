@@ -61,7 +61,7 @@ def main():
         run(["node", str(RUNTIME_ROOT / "compiler/compile.mjs"), "--self-check"], ROOT)
         run([sys.executable, str(checkout / "tools/setup-native.py"), "--",
              *cargo, "test", "--locked", "--manifest-path", str(manifest), "--features", "engine",
-             "--target-dir", str(scratch / "target"), "--lib"], ROOT)
+             "--target-dir", str(RUNTIME_ROOT / "target/engine-consumer-ci"), "--lib"], ROOT)
         return 0
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"macOS engine check failed: {error}", file=sys.stderr)
