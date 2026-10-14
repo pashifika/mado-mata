@@ -94,6 +94,8 @@
   on Stop without treating cleanup as game cancellation. Share types, EN/JA SDK
   discovery and three usage examples across Edit and OMP; disclose release-on-Stop
   risks in Native review. Controlled/replay checks do not qualify live game input.
+- Reuse intact managed OCR models and runtimes after an engine-pin-only update.
+  Keep acquisition receipts unchanged and continue rejecting corrupt resources.
 
 - Keep the retirement-close regression valid when bounded log shutdown times out;
   still verify retirement, close, and refused new commands without changing

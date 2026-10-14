@@ -2691,8 +2691,12 @@ include [LICENSE](../apps/desktop/src-tauri/resources/ocr-model-LICENSE.txt),
 [NOTICE](../apps/desktop/src-tauri/resources/ocr-model-NOTICE.txt) and a receipt.
 Runtime installs retain the official `LICENSE` and `ThirdPartyNotices.txt`; their
 reviewed provenance is recorded in the [runtime notice](../apps/desktop/src-tauri/resources/ocr-runtime-NOTICE.txt).
-Receipts never replace byte verification. Maintainers can edit transport sources
-and guidance in the catalog, then run the offline resource tests:
+Receipts record the acquisition engine revision, not a reuse restriction. Recheck
+and Download reuse complete installs across engine revisions after the same
+content and license checks. Model notices must remain nonempty; runtime notices
+must match the pinned bytes. Receipts and corrupt files are not replaced.
+Byte verification remains required, and engine compatibility still needs Check.
+Maintainers can edit transport sources and guidance, then run the offline resource tests:
 
 ```sh
 cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib ocr_setup
@@ -2856,8 +2860,8 @@ successful Check is not permission, native qualification, or proof of game effec
    focus, permissions or elevation, substitute a route, or retry uncertain input
    or launch. The launched app can independently present windows or change focus;
    disabling API prompts cannot suppress macOS Gatekeeper UI.
-   Drag approval includes held movement and release. Stop discards the remaining
-   path and attempts owned-button release, which may activate a card;
+   Input approval also covers drags, including held movement and release.
+   Stop discards the remaining path and attempts owned-button release, which may activate a card;
    unresolved release remains a cleanup failure. To cancel a card normally,
    author a return-to-hand path and verify its result on a newer frame.
 7. Preflight validates captured package/profile, static compilation/imports, assets

@@ -313,8 +313,13 @@ pub(super) fn verify_receipt(root: &Path, catalog: &Catalog) -> Result<(), Fault
     }
     let receipt: Receipt = serde_json::from_slice(&read_small(&root.join("receipt.json"), 65_536)?)
         .map_err(|error| fault("receipt", &error.to_string()))?;
+    // The revision records acquisition provenance; current content hashes govern reuse.
     if receipt.schema != 1
-        || receipt.engine_revision != catalog.engine_revision
+        || receipt.engine_revision.len() != 40
+        || !receipt
+            .engine_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
         || receipt.model_set != catalog.installation_name()
         || receipt.assets.len() != catalog.models.assets.len()
         || !catalog.models.assets.iter().all(|asset| {

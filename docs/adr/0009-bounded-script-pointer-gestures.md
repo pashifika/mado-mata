@@ -12,6 +12,11 @@ unchanged-geometry policy and bounded cleanup, with the System pointer-retention
 repair at `453132bcf4128c180dc0699dfccca5fe1f098164`
 ([upstream PR #84](https://github.com/pashifika/mado-pilot/pull/84)).
 
+Keep managed OCR installs content-addressed across engine-pin changes. Receipts
+retain their acquisition revision; reuse checks the current catalog's content,
+platform and required notices without rewriting receipts or replacing files.
+Resource verification does not establish engine initialization compatibility.
+
 A point's optional wait occurs after arrival, with the first wait after press.
 Preserve repeated points and return-to-start paths. Do not add interpolation,
 implicit click holds, cross-call pointer handles or a second scheduler. The
