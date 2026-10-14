@@ -56,7 +56,6 @@ pub(super) fn installed(
         .ok_or_else(|| fault("missing", "download the OCR runtime first"))?;
     verify_installation(
         &owned.join(platform.runtime_installation_name()),
-        catalog,
         platform,
         cancel,
     )
@@ -111,7 +110,7 @@ fn acquire_with(
     match fs::symlink_metadata(&destination) {
         Ok(_) => {
             report(&mut progress, "verifying", 0);
-            let path = verify_installation(&destination, catalog, platform, cancel)?;
+            let path = verify_installation(&destination, platform, cancel)?;
             check_cancel(cancel)?;
             report(&mut progress, "complete", total);
             return Ok(path);
@@ -157,7 +156,7 @@ fn acquire_with(
         let bytes = serde_json::to_vec_pretty(&receipt)
             .map_err(|error| fault("receipt", &error.to_string()))?;
         download::write_new(&staging.join("receipt.json"), &bytes)?;
-        verify_installation(&staging, catalog, platform, cancel)?;
+        verify_installation(&staging, platform, cancel)?;
         report(&mut progress, "publishing", total);
         check_cancel(cancel)?;
         match fs::symlink_metadata(&destination) {
@@ -197,7 +196,6 @@ fn regular(path: &Path) -> Result<(), Fault> {
 
 fn verify_installation(
     root: &Path,
-    catalog: &Catalog,
     platform: &Platform,
     cancel: &AtomicBool,
 ) -> Result<String, Fault> {
@@ -213,8 +211,13 @@ fn verify_installation(
     let receipt: Receipt =
         serde_json::from_slice(&download::read_small(&root.join("receipt.json"), 65_536)?)
             .map_err(|error| fault("receipt", &error.to_string()))?;
+    // The revision records acquisition provenance; current content hashes govern reuse.
     if receipt.schema != 1
-        || receipt.engine_revision != catalog.engine_revision
+        || receipt.engine_revision.len() != 40
+        || !receipt
+            .engine_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
         || receipt.installation != platform.runtime_installation_name()
         || receipt.os != platform.os
         || receipt.arch != platform.arch

@@ -167,6 +167,13 @@ fn limits() -> Limits {
 
 /// Captures an owned package and compiles it with the pinned application compiler.
 fn compiled(schema: &str, source: &str) -> Arc<Inventory> {
+    Arc::new(
+        try_compile(schema, source)
+            .unwrap_or_else(|fault| panic!("pinned compiler refused:\n{source}\n{fault:?}")),
+    )
+}
+
+fn try_compile(schema: &str, source: &str) -> Result<Inventory, Fault> {
     let manifest = json!({
         "version":1,"package_id":"sdk-example","runtime":"typescript","sdk":"mado-host-v1",
         "entry_contract":"ready-string-v1",
@@ -194,16 +201,14 @@ fn compiled(schema: &str, source: &str) -> Arc<Inventory> {
     let inventory = PackageDraft::from_files(files, &limits())
         .and_then(|draft| draft.validate())
         .unwrap_or_else(|fault| panic!("owned package is invalid: {fault:?}"));
-    Arc::new(
-        mado_runtime_comparison::typescript::compile(&inventory, &limits())
-            .unwrap_or_else(|fault| panic!("pinned compiler refused:\n{source}\n{fault:?}")),
-    )
+    mado_runtime_comparison::typescript::compile(&inventory, &limits())
 }
 
 struct Run {
     scenario: String,
     outcome: Result<(), Fault>,
     during: Value,
+    cleanup: Value,
 }
 
 impl Run {
@@ -254,6 +259,16 @@ impl Run {
 
 /// Runs the compiled package on the controlled host and always settles host teardown.
 fn run(compiled: &Arc<Inventory>, scenario: &str) -> Run {
+    execute(compiled, scenario, scenario, false)
+}
+
+/// Runs the success plan and requests Stop once the host reports a drag waiting
+/// in a held dwell, observed through its snapshot rather than elapsed time.
+fn stopped_while_held(compiled: &Arc<Inventory>) -> Run {
+    execute(compiled, "success", "stop-while-held", true)
+}
+
+fn execute(compiled: &Arc<Inventory>, scenario: &str, label: &str, stop_while_held: bool) -> Run {
     let plan = plan("typescript", scenario, "default");
     let options = resolve_options(
         &compiled.schema,
@@ -262,17 +277,38 @@ fn run(compiled: &Arc<Inventory>, scenario: &str) -> Run {
     )
     .unwrap();
     let control = Arc::new(Control::new(&plan.limits));
-    let host = Host::new(plan, options, compiled.assets.clone(), control).unwrap();
+    let host = Host::new(plan, options, compiled.assets.clone(), Arc::clone(&control)).unwrap();
+    let stopper = stop_while_held.then(|| {
+        let host = host.clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while host.snapshot()["pointer_waiting"] != true {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::yield_now();
+            }
+            control.cancel();
+            true
+        })
+    });
     let outcome =
         mado_runtime_comparison::javascript::run(Arc::clone(compiled), host.clone()).map(|_| ());
+    if let Some(stopper) = stopper {
+        assert!(
+            stopper.join().unwrap(),
+            "{label}: no held dwell was observed"
+        );
+    }
     let during = host.snapshot();
     let cleanup = host.finish();
-    assert_eq!(cleanup["clean"], true, "{scenario}: {cleanup}");
-    assert_eq!(host.snapshot()["live_handles"], 0, "{scenario}");
+    assert_eq!(cleanup["clean"], true, "{label}: {cleanup}");
+    assert_eq!(host.snapshot()["live_handles"], 0, "{label}");
     Run {
-        scenario: scenario.to_owned(),
+        scenario: label.to_owned(),
         outcome,
         during,
+        cleanup,
     }
 }
 
@@ -291,6 +327,13 @@ fn exercise(id: &str, compiled: &Arc<Inventory>, baseline: &Run) -> Vec<Run> {
             run(compiled, "postcondition-absent"),
             run(compiled, "partial"),
             run(compiled, "uncertain"),
+        ],
+        "drag-direct-drop" | "drag-lift-target" | "drag-return-to-hand" => vec![
+            run(compiled, "success"),
+            run(compiled, "postcondition-absent"),
+            run(compiled, "partial"),
+            run(compiled, "uncertain"),
+            stopped_while_held(compiled),
         ],
         "native-target-startup" => vec![run(compiled, "success")],
         _ => panic!("SDK example {id} has no behavioral oracle"),
@@ -398,6 +441,115 @@ fn exercise(id: &str, compiled: &Arc<Inventory>, baseline: &Run) -> Vec<Run> {
             assert_eq!(refused.count("target_status"), 0);
             assert_eq!(refused.count("observe"), baseline.count("observe"));
         }
+        "drag-direct-drop" | "drag-lift-target" | "drag-return-to-hand" => {
+            // Path points + press + release + nonzero holds of the example's one drag,
+            // and which of its newer-frame predicates the controlled host satisfies.
+            let (events, visible): (u64, Vec<bool>) = match id {
+                "drag-direct-drop" => (6, vec![true]),
+                "drag-lift-target" => (8, vec![true]),
+                _ => (8, vec![true, false]),
+            };
+            let satisfied = |run: &Run| -> Vec<bool> {
+                run.during["postconditions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|check| check["satisfied"] == true)
+                    .collect()
+            };
+            let success = scenario("success").returned_released();
+            let receipt = &success.during["receipts"][0];
+            assert_eq!(
+                [
+                    &receipt["status"],
+                    &receipt["submitted"],
+                    &receipt["total"],
+                    &receipt["submitted_events"],
+                    &receipt["total_events"],
+                    &receipt["last_submitted_event"],
+                    &receipt["sink"],
+                ],
+                [
+                    &json!("Submitted"),
+                    &json!(1),
+                    &json!(1),
+                    &json!(events),
+                    &json!(events),
+                    &json!(events - 1),
+                    &json!("controlled-non-native"),
+                ],
+                "{id}: {receipt}"
+            );
+            assert_eq!(
+                success.effects() as u64,
+                events,
+                "{id}: every path event runs"
+            );
+            assert_eq!(
+                success.cleanup["release_outcomes"],
+                json!([]),
+                "{id}: the ordinary release leaves nothing to clean up"
+            );
+            assert_eq!(satisfied(success), visible, "{id}");
+            let unobserved = scenario("postcondition-absent").returned_released();
+            assert_eq!(unobserved.during["receipts"][0]["status"], "Submitted");
+            assert_eq!(
+                satisfied(unobserved),
+                vec![false; visible.len()],
+                "{id}: a receipt never proves the effect"
+            );
+            for (name, status) in [("partial", "Partial"), ("uncertain", "Uncertain")] {
+                let incomplete = scenario(name).returned_released();
+                let receipt = &incomplete.during["receipts"][0];
+                assert_eq!(
+                    [
+                        &receipt["status"],
+                        &receipt["submitted"],
+                        &receipt["submitted_events"],
+                        &receipt["total_events"],
+                    ],
+                    [&json!(status), &json!(0), &json!(1), &json!(events)],
+                    "{id} {name}: {receipt}"
+                );
+                assert_eq!(
+                    (
+                        incomplete.count("submit"),
+                        incomplete.count("postcondition")
+                    ),
+                    (1, 0),
+                    "{id} {name}: input is not replayed and claims no effect"
+                );
+            }
+            let stopped = scenario("stop-while-held");
+            assert_eq!(
+                stopped.fault(),
+                Some("Cancelled"),
+                "{id}: {:?}",
+                stopped.outcome
+            );
+            let receipt = &stopped.during["receipts"][0];
+            assert_eq!(
+                (receipt["status"].as_str(), receipt["submitted"].as_u64()),
+                (Some("Partial"), Some(0)),
+                "{id}: a cleanup release never completes the drag: {receipt}"
+            );
+            let delivered = receipt["submitted_events"].as_u64().unwrap();
+            assert!(
+                (2..events).contains(&delivered),
+                "{id}: Stop lands after the press and before the ordinary release: {receipt}"
+            );
+            assert_eq!(receipt["last_submitted_event"], delivered - 1, "{id}");
+            assert_eq!(
+                stopped.cleanup["release_outcomes"],
+                json!([{"button":"left","order":1,"released":true,"sink":"controlled-non-native"}]),
+                "{id}: Stop releases only the sequence-owned button"
+            );
+            assert_eq!(
+                (stopped.count("submit"), stopped.count("postcondition")),
+                (1, 0),
+                "{id}: Stop neither retries the drag nor claims an effect"
+            );
+        }
         _ => unreachable!(),
     }
     runs
@@ -491,6 +643,51 @@ fn declared_stages_and_lanes_match_controlled_admission() {
             probe.effects(),
             0,
             "{method}: readiness never dispatches input"
+        );
+    }
+}
+
+/// The generated declarations refuse drag shape misuse in the trusted compiler.
+/// Each action sits on line 4, and valid key, click and drag shapes compile there.
+#[test]
+fn drag_action_shape_misuse_is_refused_by_the_trusted_compiler() {
+    let source = |actions: &str| {
+        format!(
+            "export function readiness(): MadoReady {{ return \"Ready\"; }}\nexport function workflow(): void {{\n  const observation = host.call(\"observe\", {{}});\n  host.call(\"submit\", {{ observation, actions: [{actions}] }});\n  host.call(\"release\", {{ id: observation.id }});\n}}\n"
+        )
+    };
+    compiled(
+        EMPTY_SCHEMA,
+        &source(
+            r#"{ kind: "key_down", key: "A" }, { kind: "click", x: 1, y: 1, button: "right" }, { kind: "drag", button: "middle", path: [{ x: 1, y: 1, hold_ms: 10 }, { x: 3.5, y: 3 }, { x: 1, y: 1, hold_ms: 0 }] }, { kind: "key_up", key: "A" }"#,
+        ),
+    );
+    for action in [
+        r#"{ kind: "drag", button: "left" }"#,
+        r#"{ kind: "drag", button: "left", path: [] }"#,
+        r#"{ kind: "drag", button: "left", path: [{ x: 1, y: 1 }] }"#,
+        r#"{ kind: "drag", path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }"#,
+        r#"{ kind: "drag", button: "primary", path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }"#,
+        r#"{ kind: "drag", button: "left", x: 1, y: 1, path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }"#,
+        r#"{ kind: "drag", button: "left", key: "A", path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }"#,
+        r#"{ kind: "drag", button: "left", hold_ms: 5, path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }"#,
+        r#"{ kind: "drag", button: "left", path: [{ x: 1 }, { x: 2, y: 2 }] }"#,
+        r#"{ kind: "drag", button: "left", path: [{ x: 1, y: 1, hold: 5 }, { x: 2, y: 2 }] }"#,
+        r#"{ kind: "drag", button: "left", path: [{ x: 1, y: 1, hold_ms: "5" }, { x: 2, y: 2 }] }"#,
+        r#"{ kind: "click", x: 1, y: 1, button: "left", path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }"#,
+        r#"{ kind: "key_down", key: "A", path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }"#,
+    ] {
+        let fault = try_compile(EMPTY_SCHEMA, &source(action))
+            .err()
+            .unwrap_or_else(|| panic!("compiled misuse: {action}"));
+        assert_eq!(fault.category, "TypeScript", "{action}: {fault:?}");
+        assert!(
+            fault.context["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics
+                    .iter()
+                    .any(|item| item["module"] == "main.ts" && item["line"] == 4)),
+            "{action}: {fault:?}"
         );
     }
 }

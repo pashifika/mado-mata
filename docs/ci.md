@@ -335,6 +335,7 @@ the product root:
 npm test --prefix integrations/omp
 node --test tools/runtime-comparison/compiler/sdk.test.mjs
 cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml --test sdk_examples
+cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml --lib
 ```
 
 The full and runtime-only entrypoints include these scopes alongside desktop
@@ -342,6 +343,14 @@ tests. Actual installed-OMP loading and communication with a macOS WebView
 remain separate [local observations](desktop.md#observed-compatibility-boundary),
 not hosted-CI claims. Adapter installation and removal belong to the
 [desktop guide](desktop.md#install-select-and-remove-the-adapter).
+
+The controlled SDK examples cover direct, lifted-target and return-to-hand
+drags, incomplete receipts and held-button Stop. Host tests cover event/time
+bounds, ordered progress and owned cleanup. Native lowering/authority tests
+also require the separately configured `engine`-enabled library suite described
+in [the native guide](runtime-native.md#consumer-publication-regressions); they use public
+testkit input, not a live target. These checks do not qualify a game's drag
+route or establish that a release activated or cancelled a card.
 
 For governance policy and its behavioral tests only, after Python dependency
 setup:

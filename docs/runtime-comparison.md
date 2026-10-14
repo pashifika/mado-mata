@@ -381,11 +381,12 @@ the caller owns only its original observation. More than 256 regions or 256 KiB
 is an error, never truncated success. Engine initialization and machine-specific
 resources remain application-owned; geometry setup grants no native authority.
 
-Input actions retain the `key_down`/`key_up` forms and also accept a `click` with
-capture-pixel `x`, `y`, and `left`/`right`/`middle` button. Native sequences balance
-their keys, charge expanded events against finite authority, and preserve actual
-SDK receipt/cleanup outcomes. The TypeScript SDK describes these action variants
-and optional native receipt facts. See the [native contract](runtime-native.md#native-target-selection-and-finite-authority).
+Input actions support `key_down`, `key_up`, capture-pixel `click`, and bounded
+`drag` paths with `left`/`right`/`middle` buttons. Native sequences balance their
+keys, charge expanded events against finite authority, and preserve actual SDK
+receipt/cleanup outcomes. The TypeScript SDK describes these variants and receipt
+facts. See [drag bounds and Stop semantics](runtime-native.md#script-actions-and-drag-bounds)
+and the [native authority contract](runtime-native.md#native-target-selection-and-finite-authority).
 
 ## Rust source ownership
 

@@ -89,6 +89,14 @@
   a graceful TCP close after oversized-header refusal; retain rejection,
   secret-redaction and callback completion checks. Await the listener-owning
   thread rather than probing a TCP address that can already have a new owner.
+- Add bounded Script mouse drags with ordered capture-pixel paths and optional
+  post-arrival waits. Preserve partial event receipts and owned-button cleanup
+  on Stop without treating cleanup as game cancellation. Share types, EN/JA SDK
+  discovery and three usage examples across Edit and OMP; disclose release-on-Stop
+  risks in Native review. Controlled/replay checks do not qualify live game input.
+- Reuse intact managed OCR models and runtimes after an engine-pin-only update.
+  Keep acquisition receipts unchanged and continue rejecting corrupt resources.
+
 - Keep the retirement-close regression valid when bounded log shutdown times out;
   still verify retirement, close, and refused new commands without changing
   production shutdown behavior.

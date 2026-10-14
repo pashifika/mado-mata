@@ -5,6 +5,8 @@ mod startup;
 
 pub(crate) use admission::{HandleBudget, HandlePermit, Managed};
 pub use options::{option_path, resolve_options};
+#[cfg(feature = "engine")]
+pub(crate) use sequence::{DragEvent, drag_events};
 
 #[cfg(test)]
 mod ocr_scan_tests;
@@ -146,9 +148,22 @@ pub(crate) enum Action {
         y: f64,
         button: PointerButton,
     },
+    Drag {
+        button: PointerButton,
+        path: Vec<DragPoint>,
+    },
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DragPoint {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    #[serde(default)]
+    pub(crate) hold_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PointerButton {
     Left,
@@ -162,6 +177,8 @@ struct Sequence {
     order: u64,
     observation: Value,
     actions: Vec<Action>,
+    event_count: usize,
+    scheduled_wait_ms: Option<u64>,
     permit: HandlePermit,
 }
 
@@ -211,6 +228,11 @@ struct State {
     released_receipts: BTreeSet<String>,
     effects: Vec<Value>,
     held_keys: BTreeMap<String, u64>,
+    held_buttons: BTreeMap<PointerButton, u64>,
+    pointer_position: Option<(f64, f64)>,
+    pointer_waiting: bool,
+    // Set once a drag batch is interrupted after its first event; no later input.
+    input_closed: bool,
     release_outcomes: Vec<Value>,
     postconditions: Vec<Value>,
     observations: u64,
@@ -265,6 +287,9 @@ struct OperationMetrics {
     max_us: AtomicU64,
 }
 
+#[cfg(test)]
+type DragHook = Arc<dyn Fn(usize, bool) + Send + Sync>;
+
 struct Inner {
     plan: Plan,
     options: Value,
@@ -283,6 +308,12 @@ struct Inner {
     held: AtomicBool,
     terminating: AtomicBool,
     metrics: [OperationMetrics; OPERATIONS.len()],
+    #[cfg(test)]
+    drag_hook: Mutex<Option<DragHook>>,
+    #[cfg(test)]
+    before_input_enqueue: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    refuse_button_cleanup: AtomicBool,
     #[cfg(feature = "engine")]
     engine: OnceLock<crate::engine::Engine>,
     startup: Mutex<startup::Startup>,
@@ -388,6 +419,10 @@ impl Host {
                     released_receipts: BTreeSet::new(),
                     effects: Vec::new(),
                     held_keys: BTreeMap::new(),
+                    held_buttons: BTreeMap::new(),
+                    pointer_position: None,
+                    pointer_waiting: false,
+                    input_closed: false,
                     release_outcomes: Vec::new(),
                     postconditions: Vec::new(),
                     observations: 0,
@@ -411,6 +446,12 @@ impl Host {
                 held: AtomicBool::new(held),
                 terminating: AtomicBool::new(false),
                 metrics: std::array::from_fn(|_| OperationMetrics::default()),
+                #[cfg(test)]
+                drag_hook: Mutex::new(None),
+                #[cfg(test)]
+                before_input_enqueue: Mutex::new(None),
+                #[cfg(test)]
+                refuse_button_cleanup: AtomicBool::new(false),
                 #[cfg(feature = "engine")]
                 engine,
                 startup: Mutex::new(startup::Startup::new(attempt)),
@@ -1152,8 +1193,12 @@ impl Host {
         });
         #[cfg(feature = "engine")]
         if let Some(engine) = self.inner.engine.get() {
+            let admitted_actions = state.admitted_actions;
             drop(state);
             let mut account = engine.terminal_accounting()?;
+            if self.inner.plan.lane == "replay" {
+                account["expanded_input_events"] = json!(admitted_actions);
+            }
             account["input_uncertain"] =
                 json!(input_uncertain || account["input_uncertain"] != false);
             account["complete"] = json!(true);
@@ -1179,9 +1224,12 @@ impl Host {
             "postconditions":state.postconditions,"observations":state.observations,"recognitions":state.recognitions,
             "dispatches":state.dispatches,"effects":state.effects,"queue_depth":state.queue.len(),
             "queue_high_water":state.queue_high_water,"queue_rejections":state.queue_rejections,
-            "live_handles":live,"attempt_owners":state.handles.len() + state.queue.len() + usize::from(state.active.is_some()) + state.held_keys.len(),
+            "live_handles":live,"attempt_owners":state.handles.len() + state.queue.len() + usize::from(state.active.is_some()) + state.held_keys.len() + state.held_buttons.len(),
             "in_flight_native":physical,"runner_owners":0,"active_sequence":state.active,
             "held_keys":state.held_keys.keys().collect::<Vec<_>>(),"logs":state.logs,"dropped_logs":state.dropped_logs,
+            "held_buttons":state.held_buttons.keys().collect::<Vec<_>>(),
+            "pointer_position":state.pointer_position.map(|(x,y)| json!({"x":x,"y":y})),
+            "pointer_waiting":state.pointer_waiting,
             "release_outcomes":state.release_outcomes
         });
         if self.inner.plan.lane == "controlled" {
@@ -1355,6 +1403,65 @@ mod tests {
         host.begin_readiness().expect("replay readiness");
         host.begin_workflow().expect("replay workflow");
         host
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn replay_drag_receipt_does_not_manufacture_a_visible_postcondition() {
+        use mado_pilot_testkit::{ControlledOcr, ScriptedOcrCall};
+
+        let mut host = make_host("success", "template-first");
+        let inner = Arc::get_mut(&mut host.inner).expect("unshared replay");
+        inner.plan.lane = "replay".into();
+        inner.engine = OnceLock::from(crate::engine::Engine::replay_with_ocr_for_test(
+            &inner.plan,
+            Arc::clone(&inner.control),
+            &inner.lifetime,
+            inner.attempt,
+            Arc::clone(&inner.handle_budget),
+            Some(Arc::new(
+                ControlledOcr::new(mado_pilot::PixelFormat::Rgba8)
+                    .with_calls(vec![ScriptedOcrCall::new(vec![])]),
+            )),
+        ));
+        host.begin_readiness().expect("replay readiness");
+        host.begin_workflow().expect("replay workflow");
+        let before = observe(&host);
+        let sequence = host
+            .call(
+                "submit",
+                json!({
+                    "observation":before,
+                    "actions":[{"kind":"drag","button":"middle",
+                        "path":[{"x":1,"y":1,"hold_ms":1},{"x":5,"y":5},{"x":1,"y":1}]}]
+                }),
+            )
+            .expect("bounded replay drag");
+        let receipt = host
+            .call("settle", json!({"id":sequence["id"]}))
+            .expect("receipt");
+        assert_eq!(receipt["status"], "Submitted");
+        assert_eq!(receipt["sink"], "controlled-non-native");
+        assert_eq!(receipt["submitted_events"], 6);
+        assert_eq!(receipt["submitted"], 1);
+        assert_eq!(host.snapshot()["held_buttons"], json!([]));
+        let after = observe(&host);
+        let effect = host
+            .call(
+                "postcondition",
+                json!({
+                    "observation":after,"checkpoint":before,"expected":"DONE"
+                }),
+            )
+            .expect("recorded-frame postcondition");
+        assert_eq!(effect["satisfied"], false);
+        assert_eq!(effect["causation_claimed"], false);
+        assert_eq!(host.finish()["clean"], true);
+        assert_eq!(host.snapshot()["attempt_owners"], 0);
+        let accounting = host.terminal_accounting().unwrap();
+        assert_eq!(accounting["complete"], true);
+        assert_eq!(accounting["expanded_input_events"], 6);
+        assert_eq!(accounting["input_uncertain"], false);
     }
 
     #[cfg(feature = "engine")]

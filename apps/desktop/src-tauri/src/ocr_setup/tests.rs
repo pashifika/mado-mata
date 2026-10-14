@@ -281,7 +281,24 @@ fn cancellation_before_publication_removes_staging_but_after_commit_preserves_in
 fn verified_installation_is_reused_without_fetch_and_corrupt_one_is_not_overwritten() {
     for fixture in [Fixture::new(), Fixture::relative()] {
         let catalog = fixture_catalog();
-        install(&fixture, &catalog);
+        let mut previous = catalog.clone();
+        previous.engine_revision = "1".repeat(40);
+        install(&fixture, &previous);
+        let receipt_path = fixture.installed(&catalog).join("receipt.json");
+        let receipt = fs::read(&receipt_path).unwrap();
+        let view = inspect_with(&catalog, &fixture.0, None, None, &AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            view.resolved.model_root,
+            Some(
+                fixture
+                    .installed(&catalog)
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            )
+        );
         download::verify_receipt(&fixture.installed(&catalog), &catalog).unwrap();
         download::acquire_with(
             &fixture.0,
@@ -291,6 +308,7 @@ fn verified_installation_is_reused_without_fetch_and_corrupt_one_is_not_overwrit
             |_, _, _, _| panic!("must reuse verified files"),
         )
         .unwrap();
+        assert_eq!(fs::read(receipt_path).unwrap(), receipt);
         let model = fixture
             .installed(&catalog)
             .join(&catalog.models.assets[0].path);
@@ -599,22 +617,32 @@ fn malformed_receipt_cannot_certify_or_replace_published_files() {
     let catalog = fixture_catalog();
     install(&fixture, &catalog);
     let installed = fixture.installed(&catalog);
-    fs::write(installed.join("receipt.json"), "{\"schema\":").unwrap();
-    assert!(download::verify_receipt(&installed, &catalog).is_err());
-    assert!(
-        download::acquire_with(
-            &fixture.0,
-            &catalog,
-            &AtomicBool::new(false),
-            |_| {},
-            |_, _, _, _| panic!("must not replace publication")
-        )
-        .is_err()
-    );
-    assert_eq!(
-        fs::read(installed.join(&catalog.models.assets[0].path)).unwrap(),
-        CONTENT
-    );
+    let receipt_path = installed.join("receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["engine_revision"] = "z".repeat(40).into();
+    for invalid in [
+        "{\"schema\":".to_owned(),
+        serde_json::to_string(&receipt).unwrap(),
+    ] {
+        fs::write(&receipt_path, &invalid).unwrap();
+        assert!(download::verify_receipt(&installed, &catalog).is_err());
+        assert!(
+            download::acquire_with(
+                &fixture.0,
+                &catalog,
+                &AtomicBool::new(false),
+                |_| {},
+                |_, _, _, _| panic!("must not replace publication")
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&receipt_path).unwrap(), invalid);
+        assert_eq!(
+            fs::read(installed.join(&catalog.models.assets[0].path)).unwrap(),
+            CONTENT
+        );
+    }
 }
 
 #[test]

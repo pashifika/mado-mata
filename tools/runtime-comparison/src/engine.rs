@@ -39,7 +39,9 @@ mod enabled {
     mod publication_tests;
     use super::*;
     use crate::environment::{Configuration, Placement, ReplayConfig, canonical, validate_replay};
-    use crate::host::{Action, HandleBudget, HandlePermit, Managed, PointerButton};
+    use crate::host::{
+        Action, DragEvent, HandleBudget, HandlePermit, Managed, PointerButton, drag_events,
+    };
     use crate::model::Limits;
     use mado_pilot as mp;
     use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -140,6 +142,29 @@ mod enabled {
     }
 
     impl InputAuthority {
+        fn authorize(&self, action: &Action) -> Result<(), Fault> {
+            if self.reviewed_operation.is_some()
+                || self.representative_actions.iter().any(|allowed| {
+                    matches!(
+                        (action, allowed),
+                        (Action::Click { .. }, Action::Click { .. })
+                            | (Action::Drag { .. }, Action::Drag { .. })
+                            | (
+                                Action::KeyDown { .. } | Action::KeyUp { .. },
+                                Action::KeyDown { .. } | Action::KeyUp { .. }
+                            )
+                    )
+                })
+            {
+                Ok(())
+            } else {
+                Err(Fault::new(
+                    "Authority",
+                    "input kind is absent from the approved representative actions",
+                ))
+            }
+        }
+
         fn validate_pointer_options(&self, operating_system: &str) -> Result<(), Fault> {
             if self.click_hold_ms > 1_000 {
                 return Err(blocked(
@@ -646,12 +671,7 @@ mod enabled {
                         .requiring(mp::InputOperationKind::Keyboard, native.route()?);
                 }
                 for action in &native.input.representative_actions {
-                    let kind = match action {
-                        Action::Click { .. } => mp::InputOperationKind::Pointer,
-                        Action::KeyDown { .. } | Action::KeyUp { .. } => {
-                            mp::InputOperationKind::Keyboard
-                        }
-                    };
+                    let kind = native_operation_kind(action);
                     input = input.requiring(kind, native.route()?);
                 }
                 (
@@ -1492,6 +1512,15 @@ mod enabled {
             )
         }
 
+        pub(crate) fn action_wait_ms(&self, action: &Action) -> u64 {
+            native_action_wait_ms(
+                action,
+                self.native
+                    .as_ref()
+                    .map_or(0, |native| native.input.click_hold_ms),
+            )
+        }
+
         pub fn cleanup_limit_ms(&self) -> u64 {
             self.native
                 .as_ref()
@@ -1525,37 +1554,17 @@ mod enabled {
                 return Err(Fault::new("Timeout", "native input authority expired"));
             }
             let observation = self.observation(state, &request.observation)?;
+            for action in &request.actions {
+                native.input.authorize(action)?;
+            }
+            let remaining = self.input_remaining_ms(native);
             let sequence = native_sequence(
                 &request.actions,
                 Some(observation.frame.descriptor().extent()),
-                native.input.max_actions,
+                native.input.max_actions.saturating_sub(state.input_events),
                 native.input.click_hold_ms,
+                Some((self.limits.wait_ms, remaining)),
             )?;
-            if sequence.len() > native.input.max_actions.saturating_sub(state.input_events) {
-                return Err(Fault::new(
-                    "ActionLimit",
-                    "native expanded event authority is exhausted",
-                ));
-            }
-            for action in &request.actions {
-                let authorized = native.input.reviewed_operation.is_some()
-                    || native.input.representative_actions.iter().any(|allowed| {
-                        matches!(
-                            (action, allowed),
-                            (Action::Click { .. }, Action::Click { .. })
-                                | (
-                                    Action::KeyDown { .. } | Action::KeyUp { .. },
-                                    Action::KeyDown { .. } | Action::KeyUp { .. }
-                                )
-                        )
-                    });
-                if !authorized {
-                    return Err(Fault::new(
-                        "Authority",
-                        "input kind is absent from the approved representative actions",
-                    ));
-                }
-            }
             let session = state
                 .session
                 .as_ref()
@@ -1573,6 +1582,21 @@ mod enabled {
                 mp::CleanupBudget::MAX_EVENTS,
                 Duration::from_millis(native.cleanup_ms),
             )))
+        }
+
+        fn input_remaining_ms(&self, native: &NativeConfig) -> u64 {
+            native
+                .input
+                .duration_ms
+                .min(native.capture.duration_ms)
+                .min(self.limits.duration_ms)
+                .saturating_sub(self.control.elapsed_us() / 1_000)
+                .min(
+                    self.control
+                        .deadline()
+                        .saturating_duration_since(Instant::now())
+                        .as_millis() as u64,
+                )
         }
 
         fn dispatch(&self, state: &mut State, request: DispatchRequest) -> Result<Value, Fault> {
@@ -1596,6 +1620,12 @@ mod enabled {
                     "native input admission closed before dispatch",
                 ));
             }
+            validate_native_waits(
+                &request.actions,
+                native_scheduled_wait_ms(&request.actions, native.input.click_hold_ms)?,
+                self.limits.wait_ms,
+                self.input_remaining_ms(native),
+            )?;
             state.input_events += input.sequence().len();
             let _active = self.active();
             let session = state
@@ -2223,9 +2253,63 @@ mod enabled {
         Ok(key)
     }
 
+    fn native_operation_kind(action: &Action) -> mp::InputOperationKind {
+        match action {
+            Action::Click { .. } | Action::Drag { .. } => mp::InputOperationKind::Pointer,
+            Action::KeyDown { .. } | Action::KeyUp { .. } => mp::InputOperationKind::Keyboard,
+        }
+    }
+
     fn native_action_event_count(action: &Action, click_hold_ms: u64) -> usize {
         action.event_count()
             + usize::from(click_hold_ms != 0 && matches!(action, Action::Click { .. }))
+    }
+
+    fn native_action_wait_ms(action: &Action, click_hold_ms: u64) -> u64 {
+        if matches!(action, Action::Click { .. }) {
+            click_hold_ms
+        } else {
+            action.scheduled_wait_ms()
+        }
+    }
+
+    fn native_scheduled_wait_ms(actions: &[Action], click_hold_ms: u64) -> Result<u64, Fault> {
+        actions.iter().try_fold(0u64, |total, action| {
+            total
+                .checked_add(native_action_wait_ms(action, click_hold_ms))
+                .ok_or_else(|| argument("scheduled input wait overflow"))
+        })
+    }
+
+    fn validate_native_waits(
+        actions: &[Action],
+        wait_ms: u64,
+        wait_limit_ms: u64,
+        remaining_ms: u64,
+    ) -> Result<(), Fault> {
+        if actions
+            .iter()
+            .any(|action| matches!(action, Action::Drag { .. }))
+        {
+            if wait_ms > wait_limit_ms {
+                return Err(argument("scheduled input waits exceed wait_ms"));
+            }
+            if remaining_ms == 0 || wait_ms > remaining_ms {
+                return Err(Fault::new(
+                    "Timeout",
+                    "scheduled input waits exceed remaining native execution authority",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn native_button(button: PointerButton) -> mp::PointerButton {
+        match button {
+            PointerButton::Left => mp::PointerButton::Primary,
+            PointerButton::Right => mp::PointerButton::Secondary,
+            PointerButton::Middle => mp::PointerButton::Middle,
+        }
     }
 
     fn native_sequence(
@@ -2233,11 +2317,19 @@ mod enabled {
         extent: Option<mp::PixelExtent>,
         maximum: usize,
         click_hold_ms: u64,
+        wait_authority: Option<(u64, u64)>,
     ) -> Result<mp::InputSequence, Fault> {
+        let extent = extent.map(|extent| (f64::from(extent.width()), f64::from(extent.height())));
+        for action in actions {
+            action.validate(extent)?;
+        }
+        if click_hold_ms > 1_000 {
+            return Err(argument("click_hold_ms must be between 0 and 1000"));
+        }
         let count = actions.iter().try_fold(0usize, |total, action| {
             total
                 .checked_add(native_action_event_count(action, click_hold_ms))
-                .ok_or_else(|| argument("expanded input event count overflow"))
+                .ok_or_else(|| Fault::new("ActionLimit", "expanded input event count overflow"))
         })?;
         if count == 0 || count > maximum || count > mp::SequenceLimits::MAX_EVENTS {
             return Err(Fault::new(
@@ -2245,51 +2337,67 @@ mod enabled {
                 "expanded native sequence exceeds its event authority",
             ));
         }
-        let mut events = Vec::with_capacity(count);
-        let mut held = Vec::new();
-        for action in actions {
+        if let Some((wait_limit_ms, remaining_ms)) = wait_authority {
+            validate_native_waits(
+                actions,
+                native_scheduled_wait_ms(actions, click_hold_ms)?,
+                wait_limit_ms,
+                remaining_ms,
+            )?;
+        }
+        // Cache validated keys on the stack before allocating the expanded sequence.
+        let mut keys = [None; mp::SequenceLimits::MAX_EVENTS];
+        let mut held = [None; mp::SequenceLimits::MAX_EVENTS];
+        let mut held_count = 0usize;
+        for (index, action) in actions.iter().enumerate() {
             match action {
                 Action::KeyDown { key } => {
                     let key = native_key(key)?;
-                    if held.contains(&key) {
+                    if held[..held_count].contains(&Some(key)) {
                         return Err(argument(
                             "a native sequence cannot press an already-held key",
                         ));
                     }
-                    held.push(key);
-                    events.push(mp::InputEvent::KeyPress(key));
+                    held[held_count] = Some(key);
+                    held_count += 1;
+                    keys[index] = Some(key);
                 }
                 Action::KeyUp { key } => {
                     let key = native_key(key)?;
-                    let index =
-                        held.iter()
-                            .position(|pressed| *pressed == key)
-                            .ok_or_else(|| {
-                                argument("a native sequence cannot release a key it did not press")
-                            })?;
-                    held.remove(index);
-                    events.push(mp::InputEvent::KeyRelease(key));
+                    let position = held[..held_count]
+                        .iter()
+                        .position(|pressed| *pressed == Some(key))
+                        .ok_or_else(|| {
+                            argument("a native sequence cannot release a key it did not press")
+                        })?;
+                    held_count -= 1;
+                    held[position] = held[held_count];
+                    keys[index] = Some(key);
+                }
+                _ => {}
+            }
+        }
+        if held_count != 0 {
+            return Err(argument(
+                "native key_down/key_up events must be balanced within one sequence",
+            ));
+        }
+        let mut events = Vec::with_capacity(count);
+        for (index, action) in actions.iter().enumerate() {
+            match action {
+                Action::KeyDown { .. } | Action::KeyUp { .. } => {
+                    let key =
+                        keys[index].ok_or_else(|| internal("validated native key missing"))?;
+                    events.push(if matches!(action, Action::KeyDown { .. }) {
+                        mp::InputEvent::KeyPress(key)
+                    } else {
+                        mp::InputEvent::KeyRelease(key)
+                    });
                 }
                 Action::Click { x, y, button } => {
-                    if !x.is_finite()
-                        || !y.is_finite()
-                        || *x < 0.0
-                        || *y < 0.0
-                        || extent.is_some_and(|extent| {
-                            *x >= f64::from(extent.width()) || *y >= f64::from(extent.height())
-                        })
-                    {
-                        return Err(argument(
-                            "click must lie within the retained capture-pixel extent",
-                        ));
-                    }
                     let point = mp::Point::new(mp::CoordinateSpace::CapturePixels, *x, *y)
                         .map_err(|fault| engine_error("input_point", fault.into()))?;
-                    let button = match button {
-                        PointerButton::Left => mp::PointerButton::Primary,
-                        PointerButton::Right => mp::PointerButton::Secondary,
-                        PointerButton::Middle => mp::PointerButton::Middle,
-                    };
+                    let button = native_button(*button);
                     events.extend([
                         mp::InputEvent::PointerMove(point),
                         mp::InputEvent::PointerPress(button),
@@ -2299,12 +2407,26 @@ mod enabled {
                     }
                     events.push(mp::InputEvent::PointerRelease(button));
                 }
+                Action::Drag { button, path } => {
+                    for event in drag_events(*button, path) {
+                        events.push(match event {
+                            DragEvent::Move { x, y } => mp::InputEvent::PointerMove(
+                                mp::Point::new(mp::CoordinateSpace::CapturePixels, x, y)
+                                    .map_err(|fault| engine_error("input_point", fault.into()))?,
+                            ),
+                            DragEvent::Press { button } => {
+                                mp::InputEvent::PointerPress(native_button(button))
+                            }
+                            DragEvent::Delay { ms } => {
+                                mp::InputEvent::Delay(Duration::from_millis(ms))
+                            }
+                            DragEvent::Release { button } => {
+                                mp::InputEvent::PointerRelease(native_button(button))
+                            }
+                        });
+                    }
+                }
             }
-        }
-        if !held.is_empty() {
-            return Err(argument(
-                "native key_down/key_up events must be balanced within one sequence",
-            ));
         }
         mp::InputSequence::within(events, mp::SequenceLimits::at_most(maximum))
             .map_err(|fault| engine_error("input_sequence", fault.into()))
@@ -2313,6 +2435,490 @@ mod enabled {
     #[cfg(test)]
     mod native_input_tests {
         use super::*;
+        use crate::host::DragPoint;
+        use mado_pilot_core::IdentityIssuer;
+        use mado_pilot_runtime::{InputController, InputProvider};
+        use mado_pilot_testkit::ControlledInput;
+        use mado_pilot_testkit::controlled_input::{Behavior, Cleanup, PROVIDER};
+
+        fn drag(points: &[(f64, f64, u64)]) -> Action {
+            Action::Drag {
+                button: PointerButton::Left,
+                path: points
+                    .iter()
+                    .map(|&(x, y, hold_ms)| DragPoint { x, y, hold_ms })
+                    .collect(),
+            }
+        }
+
+        fn testkit_input(
+            sequence: mp::InputSequence,
+            behavior: Behavior,
+            cleanup: Cleanup,
+        ) -> (ControlledInput, Arc<dyn InputController>, mp::InputRequest) {
+            let target = IdentityIssuer::new()
+                .issue_target(PROVIDER)
+                .expect("target");
+            let provider = ControlledInput::new(target);
+            provider.set_behavior(behavior);
+            provider.set_cleanup(cleanup);
+            let controller = provider
+                .open(
+                    target,
+                    &mp::InputOpenRequest::new(),
+                    &mp::OperationContext::new(),
+                )
+                .expect("controlled controller");
+            let input = mp::InputRequest::new(
+                target,
+                sequence,
+                mp::DeliveryPlan::require(mp::InputDelivery::System),
+            );
+            (provider, controller, input)
+        }
+
+        #[test]
+        fn native_drags_preserve_holds_repeated_points_and_return_path() {
+            for button in [
+                PointerButton::Left,
+                PointerButton::Right,
+                PointerButton::Middle,
+            ] {
+                let mut action = drag(&[
+                    (1.5, 2.5, 25),
+                    (1.5, 2.5, 0),
+                    (10.5, 4.5, 0),
+                    (1.5, 2.5, 75),
+                ]);
+                if let Action::Drag { button: chosen, .. } = &mut action {
+                    *chosen = button;
+                }
+                let point = |x, y| {
+                    mp::InputEvent::PointerMove(
+                        mp::Point::new(mp::CoordinateSpace::CapturePixels, x, y).expect("point"),
+                    )
+                };
+                let sequence = native_sequence(
+                    std::slice::from_ref(&action),
+                    Some(mp::PixelExtent::new(20, 10)),
+                    8,
+                    1_000,
+                    Some((100, 100)),
+                )
+                .expect("exact bounded drag");
+                assert_eq!(
+                    native_operation_kind(&action),
+                    mp::InputOperationKind::Pointer
+                );
+                assert_eq!(native_action_event_count(&action, 1_000), 8);
+                assert_eq!(native_action_wait_ms(&action, 1_000), 100);
+                assert_eq!(
+                    sequence.events(),
+                    &[
+                        point(1.5, 2.5),
+                        mp::InputEvent::PointerPress(native_button(button)),
+                        mp::InputEvent::Delay(Duration::from_millis(25)),
+                        point(1.5, 2.5),
+                        point(10.5, 4.5),
+                        point(1.5, 2.5),
+                        mp::InputEvent::Delay(Duration::from_millis(75)),
+                        mp::InputEvent::PointerRelease(native_button(button)),
+                    ]
+                );
+                for prefix in 2..sequence.len() {
+                    assert_eq!(
+                        sequence.held_after(prefix),
+                        vec![mp::PressedState::Button(native_button(button))]
+                    );
+                }
+                assert!(sequence.held_after(sequence.len()).is_empty());
+            }
+        }
+
+        #[test]
+        fn native_drag_batches_charge_click_holds_and_remaining_event_time_authority() {
+            let gesture = drag(&[(1.0, 2.0, 0), (3.0, 4.0, 0)]);
+            let click = Action::Click {
+                x: 1.0,
+                y: 2.0,
+                button: PointerButton::Left,
+            };
+            let actions = [
+                Action::KeyDown { key: "A".into() },
+                click.clone(),
+                gesture.clone(),
+                Action::KeyUp { key: "A".into() },
+            ];
+            let extent = Some(mp::PixelExtent::new(20, 10));
+            assert_eq!(
+                native_scheduled_wait_ms(&actions, 50).expect("wait sum"),
+                50
+            );
+            assert_eq!(
+                native_sequence(&actions, extent, 10, 50, Some((50, 50)))
+                    .expect("exact event and time fit")
+                    .len(),
+                10
+            );
+            for (maximum, wait_limit, remaining, category) in [
+                (9, 50, 50, "ActionLimit"),
+                (10, 49, 50, "Argument"),
+                (10, 50, 49, "Timeout"),
+                (10, 50, 0, "Timeout"),
+            ] {
+                assert_eq!(
+                    native_sequence(&actions, extent, maximum, 50, Some((wait_limit, remaining)))
+                        .expect_err("bounded admission")
+                        .category,
+                    category
+                );
+            }
+            let mut ceiling = vec![gesture; 64];
+            assert_eq!(
+                native_sequence(&ceiling, extent, 4096, 0, Some((1, 1)))
+                    .expect("256-event ceiling")
+                    .len(),
+                256
+            );
+            ceiling.push(click.clone());
+            assert_eq!(
+                native_sequence(&ceiling, extent, 4096, 0, Some((1, 1)))
+                    .expect_err("no split above ceiling")
+                    .category,
+                "ActionLimit"
+            );
+            native_sequence(&[click.clone()], extent, 4, 50, Some((1, 0)))
+                .expect("no-drag timing admission stays unchanged");
+            assert_eq!(
+                native_scheduled_wait_ms(&[click.clone(), click], u64::MAX)
+                    .expect_err("checked mixed wait accounting")
+                    .category,
+                "Argument"
+            );
+        }
+
+        #[test]
+        fn native_drag_shapes_are_all_validated_before_expansion() {
+            let extent = Some(mp::PixelExtent::new(20, 10));
+            for action in [
+                drag(&[(1.0, 2.0, 0)]),
+                drag(&vec![(1.0, 2.0, 0); 65]),
+                drag(&[(1.0, 2.0, 0), (20.0, 2.0, 0)]),
+                drag(&[(1.0, 2.0, 0), (1.0, f64::NAN, 0)]),
+                drag(&[(1.0, 2.0, 0), (1.0, 2.0, 1001)]),
+                drag(&vec![(1.0, 2.0, 1000); 6]),
+            ] {
+                assert_eq!(
+                    native_sequence(
+                        &[drag(&[(1.0, 2.0, 0), (2.0, 3.0, 0)]), action],
+                        extent,
+                        0,
+                        0,
+                        None,
+                    )
+                    .expect_err("later invalid shape precedes expansion")
+                    .category,
+                    "Argument"
+                );
+            }
+            let maximum_path = drag(&vec![(19.5, 9.5, 0); 64]);
+            assert_eq!(
+                native_sequence(&[maximum_path], extent, 66, 0, None)
+                    .expect("64 fractional points")
+                    .len(),
+                66
+            );
+            let maximum_hold = drag(&vec![(1.0, 2.0, 1000); 5]);
+            native_sequence(
+                &[maximum_hold.clone()],
+                extent,
+                12,
+                1000,
+                Some((5000, 5000)),
+            )
+            .expect("5000ms drag is independent of click_hold_ms");
+            assert_eq!(
+                native_sequence(&[maximum_hold], extent, 12, 0, Some((5000, 4999)))
+                    .expect_err("remaining duration is not shortened")
+                    .category,
+                "Timeout"
+            );
+            assert_eq!(
+                native_sequence(
+                    &[
+                        drag(&[(1.0, 2.0, 0), (2.0, 3.0, 0)]),
+                        Action::KeyDown {
+                            key: "SomeKey".into()
+                        }
+                    ],
+                    extent,
+                    16,
+                    0,
+                    None,
+                )
+                .expect_err("unsupported later native key")
+                .category,
+                "Argument"
+            );
+        }
+
+        #[test]
+        fn native_drag_requires_separate_kind_approval_not_click_capability() {
+            let mut input: InputAuthority =
+                serde_json::from_value(input_authority_json()).expect("click authority");
+            let click = input.representative_actions[0].clone();
+            let gesture = drag(&[(1.0, 2.0, 0), (3.0, 4.0, 0)]);
+            input.authorize(&click).expect("approved click");
+            assert_eq!(
+                input
+                    .authorize(&gesture)
+                    .expect_err("not drag approval")
+                    .category,
+                "Authority"
+            );
+            input.representative_actions = vec![gesture.clone()];
+            input.authorize(&gesture).expect("approved drag kind");
+            assert_eq!(
+                input
+                    .authorize(&click)
+                    .expect_err("not click approval")
+                    .category,
+                "Authority"
+            );
+            input.reviewed_operation = Some("reviewed held-pointer workflow".into());
+            input.authorize(&click).expect("reviewed workflow");
+            input.authorize(&gesture).expect("reviewed workflow drag");
+        }
+
+        #[test]
+        fn interrupted_native_drag_receipts_never_complete_from_cleanup_release() {
+            let actions = [drag(&[(1.0, 2.0, 25), (3.0, 4.0, 0), (1.0, 2.0, 75)])];
+            for (prefix, fault) in [
+                (2, mp::InputFault::Cancelled),
+                (3, mp::InputFault::DeadlineExceeded),
+                (4, mp::InputFault::SubmissionFailed),
+                (6, mp::InputFault::PolicyRefused),
+            ] {
+                for cleanup in [Cleanup::Complete, Cleanup::Fails] {
+                    let sequence = native_sequence(&actions, None, 7, 1000, None).expect("drag");
+                    let expected = sequence.events()[..prefix].to_vec();
+                    let (provider, controller, input) = testkit_input(
+                        sequence,
+                        Behavior::FailAfter {
+                            submitted: prefix,
+                            fault,
+                        },
+                        cleanup,
+                    );
+                    let receipt = controller
+                        .execute(&input, &mp::OperationContext::new())
+                        .expect("partial controlled receipt");
+                    let projected = native_receipt(&receipt, &actions, 1000);
+                    assert_eq!(projected["status"], "Partial");
+                    assert_eq!(projected["submitted"], 0);
+                    assert_eq!(projected["total"], 1);
+                    assert_eq!(projected["submitted_events"], prefix);
+                    assert_eq!(projected["total_events"], 7);
+                    assert_eq!(projected["last_submitted_event"], prefix - 1);
+                    assert_eq!(projected["cleanup"]["owed"], 1);
+                    assert_eq!(
+                        projected["cleanup"]["released"],
+                        usize::from(cleanup == Cleanup::Complete)
+                    );
+                    assert_eq!(
+                        projected["cleanup"]["may_leave_state_held"],
+                        cleanup == Cleanup::Fails
+                    );
+                    assert_eq!(projected["fault"]["status"], fault.status().as_str());
+                    assert_eq!(projected["possible_native_effect"], true);
+                    assert_eq!(projected["used_fallback"], false);
+                    assert_eq!(projected["attempts"].as_array().expect("attempts").len(), 1);
+                    assert_eq!(
+                        provider
+                            .submitted_events()
+                            .into_iter()
+                            .map(|event| event.event)
+                            .collect::<Vec<_>>(),
+                        expected
+                    );
+                    assert_eq!(
+                        provider.released().len(),
+                        usize::from(cleanup == Cleanup::Complete)
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn uncertain_native_drag_move_retains_exact_progress_and_unconfirmed_release() {
+            let actions = [drag(&[(1.0, 2.0, 25), (3.0, 4.0, 0), (1.0, 2.0, 75)])];
+            for (cleanup, exhausted) in [
+                (Cleanup::Complete, false),
+                (Cleanup::Fails, false),
+                (Cleanup::Complete, true),
+            ] {
+                let sequence = native_sequence(&actions, None, 7, 0, None).expect("drag");
+                let (provider, controller, input) = testkit_input(
+                    sequence,
+                    Behavior::FailDuring {
+                        submitted: 3,
+                        fault: mp::InputFault::SubmissionFailed,
+                    },
+                    cleanup,
+                );
+                let input = if exhausted {
+                    input.with_cleanup_budget(mp::CleanupBudget::at_most(
+                        0,
+                        Duration::from_millis(50),
+                    ))
+                } else {
+                    input
+                };
+                let receipt = controller
+                    .execute(&input, &mp::OperationContext::new())
+                    .expect("uncertain move");
+                let projected = native_receipt(&receipt, &actions, 0);
+                assert_eq!(projected["submitted"], 0);
+                assert_eq!(projected["submitted_events"], 3);
+                assert_eq!(projected["last_submitted_event"], 2);
+                assert_eq!(projected["partial_native_effect"], true);
+                assert_eq!(projected["possible_native_effect"], true);
+                assert_eq!(projected["attempts"][0]["partial_native_effect"], true);
+                assert_eq!(projected["cleanup"]["owed"], 1);
+                assert_eq!(
+                    projected["cleanup"]["may_leave_state_held"],
+                    exhausted || cleanup == Cleanup::Fails
+                );
+                assert_eq!(
+                    projected["cleanup"]["state"],
+                    if exhausted {
+                        "exhausted"
+                    } else if cleanup == Cleanup::Fails {
+                        "incomplete"
+                    } else {
+                        "complete"
+                    }
+                );
+                assert_eq!(projected["application_effect_confirmed"], false);
+                assert_eq!(provider.submitted_events().len(), 3);
+                if cleanup == Cleanup::Complete && !exhausted {
+                    assert_eq!(
+                        provider.released(),
+                        vec![mp::PressedState::Button(mp::PointerButton::Primary)]
+                    );
+                } else {
+                    assert_eq!(
+                        projected["cleanup_required"],
+                        json!(["native_input_release_unconfirmed"])
+                    );
+                    assert!(provider.released().is_empty());
+                }
+            }
+        }
+
+        #[test]
+        fn native_drag_dwell_stop_and_deadline_send_no_later_return_movement() {
+            for deadline_wins in [false, true] {
+                let actions = [drag(&[(1.0, 2.0, 1000), (3.0, 4.0, 0), (1.0, 2.0, 0)])];
+                let sequence = native_sequence(&actions, None, 6, 0, None).expect("held dwell");
+                let (provider, controller, input) =
+                    testkit_input(sequence, Behavior::Complete, Cleanup::Complete);
+                let clock = Arc::new(mado_pilot_testkit::ManualClock::new());
+                let token = mp::CancellationToken::new();
+                let operation = mp::OperationContext::new()
+                    .with_clock(clock.clone())
+                    .with_cancellation(token.clone())
+                    .with_timeout(Duration::from_millis(500))
+                    .expect("manual deadline");
+                let receipt = thread::scope(|scope| {
+                    let worker = scope.spawn(|| controller.execute(&input, &operation));
+                    let observation_deadline = Instant::now() + Duration::from_secs(5);
+                    while provider.submitted_events().len() < 2 {
+                        if Instant::now() >= observation_deadline {
+                            token.cancel();
+                            panic!("controlled drag did not reach press");
+                        }
+                        thread::yield_now();
+                    }
+                    if deadline_wins {
+                        clock.advance(Duration::from_millis(500));
+                    } else {
+                        token.cancel();
+                    }
+                    worker
+                        .join()
+                        .expect("controlled input worker")
+                        .expect("interrupted receipt")
+                });
+                let projected = native_receipt(&receipt, &actions, 0);
+                assert_eq!(projected["submitted"], 0);
+                assert_eq!(projected["submitted_events"], 2);
+                assert_eq!(projected["last_submitted_event"], 1);
+                assert_eq!(projected["cleanup"]["released"], 1);
+                assert_eq!(projected["cleanup"]["owed"], 1);
+                assert_eq!(projected["cleanup"]["may_leave_state_held"], false);
+                let expected_status = if deadline_wins {
+                    mp::Status::DeadlineExceeded
+                } else {
+                    mp::Status::Cancelled
+                };
+                assert_eq!(projected["fault"]["status"], expected_status.as_str());
+                assert_eq!(provider.submitted_events().len(), 2);
+                assert_eq!(
+                    provider.released(),
+                    vec![mp::PressedState::Button(mp::PointerButton::Primary)]
+                );
+            }
+        }
+
+        #[test]
+        fn mixed_native_drag_receipts_complete_only_ordinary_event_spans() {
+            let target = IdentityIssuer::new()
+                .issue_target(PROVIDER)
+                .expect("target");
+            let click = Action::Click {
+                x: 1.0,
+                y: 2.0,
+                button: PointerButton::Left,
+            };
+            let actions = [
+                click.clone(),
+                drag(&[(1.0, 2.0, 25), (3.0, 4.0, 0), (1.0, 2.0, 75)]),
+                click,
+            ];
+            for (events, logical) in [(4, 1), (6, 1), (10, 1), (11, 2), (14, 2)] {
+                let sequence =
+                    native_sequence(&actions, None, 15, 50, None).expect("mixed sequence");
+                let (provider, controller, input) = testkit_input(
+                    sequence,
+                    Behavior::FailDuring {
+                        submitted: events,
+                        fault: mp::InputFault::SubmissionFailed,
+                    },
+                    Cleanup::Complete,
+                );
+                let receipt = controller
+                    .execute(&input, &mp::OperationContext::new())
+                    .expect("mixed partial");
+                let projected = native_receipt(&receipt, &actions, 50);
+                assert_eq!(projected["submitted"], logical);
+                assert_eq!(projected["total"], 3);
+                assert_eq!(projected["submitted_events"], events);
+                assert_eq!(projected["total_events"], 15);
+                assert_eq!(projected["partial_native_effect"], true);
+                assert_eq!(provider.submitted_events().len(), events);
+            }
+            let complete = mp::InputReceipt::complete(
+                target,
+                mp::InputDelivery::System,
+                mp::SubmissionEvidence::SystemInputAdmission,
+                15,
+            );
+            let projected = native_receipt(&complete, &actions, 50);
+            assert_eq!(projected["status"], "Submitted");
+            assert_eq!(projected["submitted"], 3);
+            assert_eq!(projected["application_effect_confirmed"], false);
+        }
 
         #[test]
         fn native_open_failure_never_infers_physical_cleanup_from_status_or_prose() {
@@ -2357,13 +2963,14 @@ mod enabled {
                 vec![down.clone(), Action::KeyUp { key: "B".into() }],
             ] {
                 assert_eq!(
-                    native_sequence(&actions, extent, 16, 0)
+                    native_sequence(&actions, extent, 16, 0, None)
                         .expect_err("no sequence may leave or release foreign pressed state")
                         .category,
                     "Argument"
                 );
             }
-            let balanced = native_sequence(&[down, up], extent, 2, 0).expect("balanced sequence");
+            let balanced =
+                native_sequence(&[down, up], extent, 2, 0, None).expect("balanced sequence");
             assert!(balanced.held_after(balanced.len()).is_empty());
             assert_eq!(
                 balanced.possibly_held_after(1, false),
@@ -2380,12 +2987,12 @@ mod enabled {
                 button: PointerButton::Middle,
             };
             assert_eq!(
-                native_sequence(std::slice::from_ref(&click), extent, 2, 0)
+                native_sequence(std::slice::from_ref(&click), extent, 2, 0, None)
                     .expect_err("a click cannot fit in two native events")
                     .category,
                 "ActionLimit"
             );
-            let sequence = native_sequence(&[click], extent, 3, 0).expect("three events fit");
+            let sequence = native_sequence(&[click], extent, 3, 0, None).expect("three events fit");
             assert_eq!(sequence.len(), 3);
             assert_eq!(
                 sequence.held_after(2),
@@ -2402,7 +3009,8 @@ mod enabled {
                         }],
                         extent,
                         3,
-                        0
+                        0,
+                        None,
                     )
                     .expect_err("non-finite or out-of-frame point refused")
                     .category,
@@ -2418,7 +3026,7 @@ mod enabled {
                 86
             ];
             assert_eq!(
-                native_sequence(&oversized, extent, 4096, 0)
+                native_sequence(&oversized, extent, 4096, 0, None)
                     .expect_err("SDK event ceiling also applies")
                     .category,
                 "ActionLimit"
@@ -2434,12 +3042,12 @@ mod enabled {
             };
             let extent = Some(mp::PixelExtent::new(20, 10));
             assert_eq!(
-                native_sequence(std::slice::from_ref(&click), extent, 3, 50)
+                native_sequence(std::slice::from_ref(&click), extent, 3, 50, None)
                     .expect_err("a held click requires four events")
                     .category,
                 "ActionLimit"
             );
-            let sequence = native_sequence(std::slice::from_ref(&click), extent, 4, 50)
+            let sequence = native_sequence(std::slice::from_ref(&click), extent, 4, 50, None)
                 .expect("four-event authority");
             assert_eq!(
                 sequence.events(),
@@ -2460,14 +3068,14 @@ mod enabled {
             assert!(sequence.held_after(4).is_empty());
             let full = vec![click.clone(); mp::SequenceLimits::MAX_EVENTS / 4];
             assert_eq!(
-                native_sequence(&full, extent, 4096, 50)
+                native_sequence(&full, extent, 4096, 50, None)
                     .expect("SDK ceiling")
                     .len(),
                 mp::SequenceLimits::MAX_EVENTS
             );
             let oversized = vec![click; mp::SequenceLimits::MAX_EVENTS / 4 + 1];
             assert_eq!(
-                native_sequence(&oversized, extent, 4096, 50)
+                native_sequence(&oversized, extent, 4096, 50, None)
                     .expect_err("held clicks also obey the SDK ceiling")
                     .category,
                 "ActionLimit"
@@ -2509,6 +3117,7 @@ mod enabled {
                     None,
                     input.max_actions,
                     input.click_hold_ms,
+                    None,
                 )
                 .expect("bounded sequence");
                 let delay = sequence.events().iter().find_map(|event| match event {
@@ -2959,6 +3568,10 @@ mod enabled {
                     None,
                     input.max_actions,
                     input.click_hold_ms,
+                    Some((
+                        plan.limits.wait_ms,
+                        input.duration_ms.min(config.capture.duration_ms),
+                    )),
                 )
                 .map_err(|fault| blocked("input_authority", &fault.message))?;
             }

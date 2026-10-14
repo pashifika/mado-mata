@@ -11,8 +11,8 @@ Models (unmodified Apache-2.0 bytes)
   No affiliation or endorsement by these projects or hosts is implied.
 
 Accepted content authority:
-  https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/docs/adr/0054-g004-model-download-fallback.md
-  https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/.github/workflows/rust.yml
+  https://github.com/pashifika/mado-pilot/blob/453132bcf4128c180dc0699dfccca5fe1f098164/docs/adr/0054-g004-model-download-fallback.md
+  https://github.com/pashifika/mado-pilot/blob/453132bcf4128c180dc0699dfccca5fe1f098164/.github/workflows/rust.yml
 License and attribution provenance:
   https://huggingface.co/SWHL/RapidOCR/blob/1cfba2e90fc938db55889873735088de210cc173/README.md
   https://huggingface.co/DjB314/RapidOCR/blob/04e88d0483f0bfcdd0f29429594244c10bfc2867/README.md

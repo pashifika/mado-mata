@@ -161,7 +161,11 @@ fn both_formats_publish_exact_members_and_reuse_without_fetching() {
         let fixture = Fixture::new();
         let (catalog, index, bytes) = fixture_catalog(os);
         let platform = &catalog.platforms[index];
-        let path = install(&fixture, &catalog, index, &bytes).unwrap();
+        let mut previous = catalog.clone();
+        previous.engine_revision = "1".repeat(40);
+        let path = install(&fixture, &previous, index, &bytes).unwrap();
+        let receipt_path = fixture.destination(platform).join("receipt.json");
+        let receipt = fs::read(&receipt_path).unwrap();
         assert_eq!(
             Path::new(&path),
             fixture
@@ -189,6 +193,7 @@ fn both_formats_publish_exact_members_and_reuse_without_fetching() {
         )
         .unwrap();
         assert_eq!(reused, path);
+        assert_eq!(fs::read(receipt_path).unwrap(), receipt);
         let lease = download::recover(&fixture.0, &catalog).unwrap();
         if platform.os == std::env::consts::OS && platform.arch == std::env::consts::ARCH {
             // Parent inspection already owns the lease: installed must not recursively lock.
@@ -208,6 +213,7 @@ fn selected_files_and_receipt_are_all_required_for_reuse_without_repair() {
         "LICENSE",
         "ThirdPartyNotices.txt",
         "receipt.json",
+        "engine_revision",
     ] {
         let fixture = Fixture::new();
         let (catalog, index, bytes) = fixture_catalog("macos");
@@ -218,8 +224,18 @@ fn selected_files_and_receipt_are_all_required_for_reuse_without_repair() {
         } else {
             name
         };
-        let path = fixture.destination(platform).join(name);
-        fs::write(&path, b"changed publication").unwrap();
+        let (path, content) = if name == "engine_revision" {
+            let path = fixture.destination(platform).join("receipt.json");
+            let mut receipt: Receipt = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            receipt.engine_revision = "z".repeat(40);
+            (path, serde_json::to_vec(&receipt).unwrap())
+        } else {
+            (
+                fixture.destination(platform).join(name),
+                b"changed publication".to_vec(),
+            )
+        };
+        fs::write(&path, &content).unwrap();
         assert!(
             acquire_with(
                 &fixture.0,
@@ -231,7 +247,7 @@ fn selected_files_and_receipt_are_all_required_for_reuse_without_repair() {
             )
             .is_err()
         );
-        assert_eq!(fs::read(path).unwrap(), b"changed publication");
+        assert_eq!(fs::read(path).unwrap(), content);
     }
 }
 
@@ -660,7 +676,6 @@ fn model_and_runtime_publications_coexist_and_recovery_reclaims_both_known_stage
     assert_eq!(
         verify_installation(
             &fixture.destination(&catalog.platforms[index]),
-            &catalog,
             &catalog.platforms[index],
             &AtomicBool::new(false)
         )

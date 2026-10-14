@@ -130,21 +130,29 @@ export const methods = deepFreeze({
       examples: ["visual-query"],
     }],
   submit: ["{ observation: MadoObservation; actions: readonly MadoAction[] }", "{ readonly id: string; readonly order: number }",
-    "Admit a bounded, ordered input sequence against its retained observation and return a sequence id. Admission is not application-effect proof; settle the sequence and independently check the expected effect.",
+    "Admit a bounded, ordered input sequence of keys, clicks or held-button drags against its retained observation and return a sequence id. Admission is not application-effect proof; settle the sequence and independently check the expected effect.",
     {
       purpose: {
-        en: ["press key", "key press", "click", "send input", "keyboard", "mouse", "input sequence"],
-        ja: ["キー入力", "キーを押す", "クリック", "入力送信", "キーボード", "マウス", "入力"],
+        en: ["press key", "key press", "click", "send input", "keyboard", "mouse", "input sequence",
+          "drag", "drag and drop", "drop", "held movement", "hold and move", "return to hand"],
+        ja: ["キー入力", "キーを押す", "クリック", "入力送信", "キーボード", "マウス", "入力",
+          "ドラッグ", "ドラッグアンドドロップ", "ドロップ", "押したまま移動", "手札に戻す"],
       },
       constraints: [
         "Workflow only; module evaluation, readiness and closed admission refuse it.",
-        "Send 1 to the run's action limit of key_down/key_up actions with portable key names (ASCII letters, digits or _, at most 32) or click actions inside the observation's capture-pixel extent.",
+        "Send 1 to the run's action limit of actions: key_down/key_up with a portable key name (ASCII letters, digits or _, at most 32), click at x/y, or drag along a path.",
+        "Coordinates are finite capture pixels of this observation in [0, width) x [0, height); fractions are allowed. They are not preview or screen space: derive points from this observation.",
+        "drag moves to path[0] and presses button, moves to each later point with the button held, then releases at the last point. Paths have 2 to 64 points and are sent as given: no interpolation; repeated and return-to-start points are kept.",
+        "hold_ms is a whole number from 0 to 1000 (omitted means 0), waited after arriving at its point: after the press at the first point, before the release at the last. One drag's holds total at most 5000 ms; the target's click hold does not apply to drag.",
+        "Each action is charged its expanded events: key 1, click 3 (4 with a nonzero native click hold), drag points + 2 + nonzero holds. A batch containing drag is limited to 256 events and the attempt's remaining budget (ActionLimit); its waits must fit the run's wait limit (Argument) and the remaining run time (Timeout).",
+        "The whole batch is validated before any input; malformed fields, points or holds are refused with Argument, never clamped, shortened or split.",
         "The observation must still be retained and current; route, focus and queue capacity are checked at admission.",
-        "Controlled and replay runs use a non-native sink; native runs need separately reviewed input authority.",
+        "Controlled and replay runs use a non-native sink; native runs need separately reviewed input authority, and click authority does not cover drag.",
+        "Stop, faults and deadlines prevent later ordinary points; cleanup attempts button release. Release can activate the held item and is not a game cancel. Check cleanup separately. Return-to-hand requires an ordinary path back before release, not Stop.",
         "Admission is not effect proof: settle the sequence and check an independent postcondition.",
       ],
       availability: { stages: ["workflow"], lanes: ["controlled", "replay", "native"], authority: "input" },
-      examples: ["input-receipt"],
+      examples: ["input-receipt", "drag-direct-drop", "drag-lift-target", "drag-return-to-hand"],
     }],
   settle: ["{ id: string }", "MadoReceipt",
     "Settle an admitted input sequence and return its submission and cleanup receipt. Submitted, Partial and Uncertain do not prove application effect; uncertain input is not automatically replayed.",
@@ -155,7 +163,8 @@ export const methods = deepFreeze({
       },
       constraints: [
         "Returns receipt status Submitted, Partial, Uncertain, Refused or Cancelled; none of them proves the application effect.",
-        "Partial or uncertain input is never replayed automatically; report it instead of retrying.",
+        "submitted counts completed actions; a drag completes only at its ordinary final release, never through a Stop cleanup release. submitted_events, total_events and last_submitted_event report event progress of a drag batch.",
+        "Partial or uncertain input is never replayed automatically. In controlled/replay, a drag batch interrupted after its first event closes input admission: later submissions and queued sequences are refused with AdmissionClosed while log, release and settle remain available. Native interruption can terminate the Script; inspect its terminal receipt and cleanup instead of retrying.",
         "Release the sequence id after reading the receipt. Settling queued input after admission closes reports a refusal instead of dispatching.",
       ],
       availability: { stages: ["workflow", "closed"], lanes: ["controlled", "replay", "native"], authority: "input" },
@@ -239,6 +248,27 @@ const READY_TEXT_SOURCE = `function readyTextVisible(): boolean {
     }
   } finally {
     host.call("release", { id: observation.id });
+  }
+}`;
+
+const DRAG_SOURCE = `// Submit one left-button drag and settle it once. Anything but Submitted is
+// reported, never retried: a partial drag may already have pressed or moved.
+function dragOnce(observation: MadoObservation, path: MadoDragPath): boolean {
+  const sequence = host.call("submit", { observation, actions: [{ kind: "drag", button: "left", path }] });
+  const receipt = settleOnce(sequence.id);
+  if (receipt.status === "Submitted") return true;
+  host.call("log", {
+    message: "input: " + receipt.status + ", events " + receipt.submitted_events + "/" + receipt.total_events,
+  });
+  return false;
+}
+
+function settleOnce(id: string): MadoReceipt {
+  try {
+    return host.call("settle", { id });
+  } finally {
+    // Frees the sequence handle; it does not undo input.
+    host.call("release", { id });
   }
 }`;
 
@@ -415,6 +445,116 @@ function settleOnce(id: string): MadoReceipt {
 }
 `,
   },
+  "drag-direct-drop": {
+    title: "Drag an item and drop it on a target",
+    source: `// Press on an item, move to a target with the button held and release there,
+// then check a strictly newer frame. Points are capture pixels of the observation
+// the drag is submitted against; derive real points from it, such as a recognized region.
+export function readiness(): MadoReady {
+  return "Ready";
+}
+
+export function workflow(): void {
+  const before = host.call("observe", {});
+  try {
+    // 2 points + press + release + 2 holds = 6 events; holds total 150 ms.
+    const released = dragOnce(before, [
+      { x: before.width * 0.5, y: before.height * 0.85, hold_ms: 50 },
+      { x: before.width * 0.5, y: before.height * 0.3, hold_ms: 100 },
+    ]);
+    if (!released) return;
+    const after = host.call("observe", {});
+    try {
+      const check = host.call("postcondition", { observation: after, checkpoint: before, expected: "DONE" });
+      host.call("log", { message: check.satisfied ? "drop: confirmed" : "drop: absent" });
+    } finally {
+      host.call("release", { id: after.id });
+    }
+  } finally {
+    host.call("release", { id: before.id });
+  }
+}
+
+${DRAG_SOURCE}
+`,
+  },
+  "drag-lift-target": {
+    title: "Lift a held item, then aim and release",
+    source: `// Press on an item, pause at a lifted point, then move to a target and release.
+// Points run exactly as listed, with no interpolation. Keep the first hold short:
+// a long stationary press can be a different gesture in the application.
+export function readiness(): MadoReady {
+  return "Ready";
+}
+
+export function workflow(): void {
+  const before = host.call("observe", {});
+  try {
+    const x = before.width * 0.5;
+    // 3 points + press + release + 3 holds = 8 events; holds total 250 ms.
+    const released = dragOnce(before, [
+      { x, y: before.height * 0.85, hold_ms: 50 },
+      { x, y: before.height * 0.6, hold_ms: 100 },
+      { x: before.width * 0.75, y: before.height * 0.25, hold_ms: 100 },
+    ]);
+    if (!released) return;
+    const after = host.call("observe", {});
+    try {
+      const check = host.call("postcondition", { observation: after, checkpoint: before, expected: "DONE" });
+      host.call("log", { message: check.satisfied ? "target: confirmed" : "target: absent" });
+    } finally {
+      host.call("release", { id: after.id });
+    }
+  } finally {
+    host.call("release", { id: before.id });
+  }
+}
+
+${DRAG_SOURCE}
+`,
+  },
+  "drag-return-to-hand": {
+    title: "Lift a held item and return it before release",
+    source: `// Cancel in the application by returning a lifted item to its start before
+// release. Stop only attempts button release, which can activate the item.
+// The receipt is Submitted either way; success is the visible return without activation.
+// Replace these with the package's own predicates; the controlled host shows DONE.
+const RETURNED = "DONE";
+const ACTIVATED = "ACTIVATED";
+
+export function readiness(): MadoReady {
+  return "Ready";
+}
+
+export function workflow(): void {
+  const before = host.call("observe", {});
+  try {
+    const start = { x: before.width * 0.5, y: before.height * 0.85 };
+    // 3 points + press + release + 3 holds = 8 events; holds total 250 ms.
+    const released = dragOnce(before, [
+      { ...start, hold_ms: 50 },
+      { x: start.x, y: before.height * 0.6, hold_ms: 100 },
+      { ...start, hold_ms: 100 },
+    ]);
+    if (!released) return;
+    const after = host.call("observe", {});
+    try {
+      const returned = host.call("postcondition", { observation: after, checkpoint: before, expected: RETURNED });
+      const activated = host.call("postcondition", { observation: after, checkpoint: before, expected: ACTIVATED });
+      host.call("log", {
+        message: activated.satisfied ? "return: activated" : returned.satisfied ? "return: confirmed" : "return: unconfirmed",
+      });
+    } finally {
+      host.call("release", { id: after.id });
+    }
+  } finally {
+    host.call("release", { id: before.id });
+  }
+}
+
+${DRAG_SOURCE}
+`,
+  },
   "bounded-poll": {
     title: "Poll a bounded number of frames during readiness",
     source: `// Poll at most five frames for OCR text before declaring readiness.
@@ -541,9 +681,14 @@ interface MadoOcrZoneScanResult {
     }>;
   }>;
 }
+// Capture pixels of the submitted observation; hold_ms waits after arriving (whole ms, 0 to 1000).
+interface MadoDragPoint { readonly x: number; readonly y: number; readonly hold_ms?: number }
+// 2 to 64 points: press at the first, move held through the rest, release at the last.
+type MadoDragPath = readonly [MadoDragPoint, MadoDragPoint, ...MadoDragPoint[]];
 type MadoAction =
-  | { readonly kind: "key_down" | "key_up"; readonly key: string; readonly x?: never; readonly y?: never; readonly button?: never }
-  | { readonly kind: "click"; readonly x: number; readonly y: number; readonly button: "left" | "right" | "middle"; readonly key?: never };
+  | { readonly kind: "key_down" | "key_up"; readonly key: string; readonly x?: never; readonly y?: never; readonly button?: never; readonly path?: never }
+  | { readonly kind: "click"; readonly x: number; readonly y: number; readonly button: "left" | "right" | "middle"; readonly key?: never; readonly path?: never }
+  | { readonly kind: "drag"; readonly button: "left" | "right" | "middle"; readonly path: MadoDragPath; readonly key?: never; readonly x?: never; readonly y?: never };
 interface MadoReceipt {
   readonly id: string; readonly order: number;
   readonly status: "Submitted" | "Partial" | "Uncertain" | "Refused" | "Cancelled";
