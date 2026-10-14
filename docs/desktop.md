@@ -2828,7 +2828,10 @@ successful Check is not permission, native qualification, or proof of game effec
    events across both attempts, with **1 s** waits and **100 ms** pacing.
    Final cleanup retains its separate **1 s** cleanup and **2 s** containment bounds.
    A click consumes three events, or four with a hold; key press/release each
-   consume one. Producer frames and restricted cleanup releases are not ordinary
+   consume one. A drag with `N` points and `D` positive waits consumes
+   `N + 2 + D`; the same aggregate allowance applies. See the
+   [Script action bounds](runtime-native.md#script-actions-and-drag-bounds).
+   Producer frames and restricted cleanup releases are not ordinary
    acquisition/input budget entries. Any reviewed-tuple change withdraws consent.
    Longer duration grants no extra frames, input, attempts or cleanup time.
    The 900-second ceiling is an admission policy, not proof of useful ten-minute
@@ -2853,6 +2856,10 @@ successful Check is not permission, native qualification, or proof of game effec
    focus, permissions or elevation, substitute a route, or retry uncertain input
    or launch. The launched app can independently present windows or change focus;
    disabling API prompts cannot suppress macOS Gatekeeper UI.
+   Drag approval includes held movement and release. Stop discards the remaining
+   path and attempts owned-button release, which may activate a card;
+   unresolved release remains a cleanup failure. To cancel a card normally,
+   author a return-to-hand path and verify its result on a newer frame.
 7. Preflight validates captured package/profile, static compilation/imports, assets
    and required resources without evaluating package code or acquiring capture/input.
    The existing runner then enters `readiness()` before attaching a target.

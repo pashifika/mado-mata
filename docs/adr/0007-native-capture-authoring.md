@@ -14,9 +14,11 @@ authority in its discovery instance; it cannot transfer it to a replacement chil
 
 ## Decision
 
-Use the public `mado-pilot` revision
+Use the public retained-capture contract introduced at `mado-pilot` revision
 `4b4f3296838a9eecdcb00e9d2bb3121a25cdc240`, including retained window metadata,
 required geometry and image-payload limits, and `Session::commit_frame`.
+The [current dependency pin](../runtime-native.md) advances that baseline for the
+[System cleanup repair](0009-bounded-script-pointer-gestures.md).
 One application-owned child keeps the original Engine and TargetId for the Preview
 lifetime. Discovery is bounded to 5 seconds and 64 matching processes / 64 eligible
 windows. First selection requires no prior Run-page binding. The child must

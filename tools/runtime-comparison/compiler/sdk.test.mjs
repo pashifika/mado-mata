@@ -116,6 +116,8 @@ test("documented English and Japanese purposes find the supported operation", ()
     ["take a screenshot", "observe"],
     ["マウスでクリック", "submit"],
     ["一時停止", "wait"],
+    ["drag a card and drop it", "submit"],
+    ["カードを押したまま移動して手札に戻す", "submit"],
   ]) {
     const [first] = ok(searchSdk(query)).matches;
     assert.equal(first.name, expected, query);
