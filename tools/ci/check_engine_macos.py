@@ -23,7 +23,8 @@ def main():
             raise ValueError("engine CI requires macOS >=26.5.2; do not lower the deployment floor")
         print(f"Engine consumer host: {platform.platform()} {platform.machine()}", flush=True)
         scratch = ROOT / ".cache/engine-consumer"
-        temporary = scratch / "tmp"
+        # Unix socket fixtures append names within macOS's short pathname limit.
+        temporary = ROOT / ".cache/et"
         temporary.mkdir(parents=True, exist_ok=True)
         os.environ.update({
             "TEMP": str(temporary), "TMP": str(temporary), "TMPDIR": str(temporary),

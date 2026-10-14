@@ -39,6 +39,14 @@ Installation needs network access; the local-link check does not contact remote
 sites. Do not replace the installer with an unpinned package-manager download or
 skip integrity verification when a download fails.
 
+When overriding `TEMP`, `TMP` and `TMPDIR` for cache-local verification on Unix,
+use a short absolute directory and create it before starting the check. Socket
+fixtures append their own directory and file names; the complete pathname must
+fit the platform's Unix-domain socket limit. A long checkout or Change name can
+produce `listen EINVAL` or `path must be shorter than SUN_LEN` before the intended
+assertion runs. Shorten the owned scratch path rather than skipping those tests
+or changing socket/privacy checks. Keep the full logs outside that short path.
+
 The full check runs `npm ci --ignore-scripts --no-audit --no-fund` in the
 application-owned compiler and desktop directories inside a temporary
 tracked-file snapshot. It verifies Node's exact version and uses the committed
@@ -101,8 +109,9 @@ It follows that revision's upstream hosted procedure: install Homebrew
 locked trusted TypeScript compiler, and run the unfiltered consumer
 `cargo test --locked --features engine --lib` suite. The Homebrew OpenCV **major**
 is constrained to 4; its minor version is intentionally not a qualification pin.
-The resolved version is visible in the job log. Temporary files, npm/Homebrew
-caches and this engine build live under `.cache/engine-consumer`.
+The resolved version is visible in the job log. npm/Homebrew caches and this
+engine build live under `.cache/engine-consumer`; temporary files use the shorter
+`.cache/et` directory so fixture socket names fit macOS's pathname limit.
 
 These controlled-provider tests include frame commit rejection, discarded OCR
 completion and macOS provider-terminal/process-exit precedence. They need no

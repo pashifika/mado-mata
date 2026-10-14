@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep macOS engine-check temporary paths short for Unix socket fixtures,
+  independently of its descriptive build and dependency-cache directory.
+
 - Support native Windows `.exe` selection for separate game and launcher target
   fields. Preserve Cancel, stale-owner refusal, metadata-only Check, explicit
   Save and restart readback; reject shortcuts and reparse-point files. Keep
