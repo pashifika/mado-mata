@@ -21,7 +21,8 @@ flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backe
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "loader"] }
 mlua = { version = "=0.12.1", default-features = false, features = ["lua54", "vendored", "serde"] }
-mado-pilot = { git = "https://github.com/pashifika/mado-pilot", rev = "453132bcf4128c180dc0699dfccca5fe1f098164", optional = true }
+mado-pilot = { git = "https://github.com/pashifika/mado-pilot", rev = "db939f0905f0bff1a8185bef97e46d84b3571c80", optional = true }
+mado-pilot-ocr = { git = "https://github.com/pashifika/mado-pilot", rev = "db939f0905f0bff1a8185bef97e46d84b3571c80" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
@@ -38,10 +39,10 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = ["
 sha2 = "=0.10.9"
 
 [dev-dependencies]
-mado-pilot-runtime = { git = "https://github.com/pashifika/mado-pilot", rev = "453132bcf4128c180dc0699dfccca5fe1f098164" }
-mado-pilot-capture = { git = "https://github.com/pashifika/mado-pilot", rev = "453132bcf4128c180dc0699dfccca5fe1f098164" }
-mado-pilot-core = { git = "https://github.com/pashifika/mado-pilot", rev = "453132bcf4128c180dc0699dfccca5fe1f098164" }
-mado-pilot-testkit = { git = "https://github.com/pashifika/mado-pilot", rev = "453132bcf4128c180dc0699dfccca5fe1f098164" }
+mado-pilot-runtime = { git = "https://github.com/pashifika/mado-pilot", rev = "db939f0905f0bff1a8185bef97e46d84b3571c80" }
+mado-pilot-capture = { git = "https://github.com/pashifika/mado-pilot", rev = "db939f0905f0bff1a8185bef97e46d84b3571c80" }
+mado-pilot-core = { git = "https://github.com/pashifika/mado-pilot", rev = "db939f0905f0bff1a8185bef97e46d84b3571c80" }
+mado-pilot-testkit = { git = "https://github.com/pashifika/mado-pilot", rev = "db939f0905f0bff1a8185bef97e46d84b3571c80" }
 
 [lints.rust]
 unsafe_code = "warn"

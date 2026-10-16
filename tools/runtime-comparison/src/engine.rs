@@ -469,17 +469,12 @@ mod enabled {
                     (None, Some(native)) => (&native.package_entries, &native.templates),
                     _ => return Err(internal("validated engine configuration changed")),
                 };
-                let profile = match config.ocr.profile.as_str() {
-                    mp::ACCEPTED_G004_PROFILE_ID => mp::OcrProviderProfile::NativeG004,
-                    mp::ACCEPTED_BOUNDED_PROFILE_ID => mp::OcrProviderProfile::BoundedDetector,
-                    _ => return Err(blocked("ocr_unsupported", "unsupported OCR profile")),
-                };
-                let ocr = mp::OcrProviderConfig::new(
-                    profile,
-                    mp::OcrExecutionProviderPolicy::Cpu,
+                let ocr = mp::OcrProfileConfig::from_id(
+                    &config.ocr.profile,
                     &config.ocr.model_root,
                     &config.ocr.runtime.path,
-                );
+                )
+                .map_err(|error| prerequisite_error("ocr_unsupported", error))?;
                 let engine = if let Some(replay) = &config.replay {
                     let request = mp::ReplayEngineRequest::new(replay_source(
                         replay,
@@ -489,7 +484,7 @@ mod enabled {
                     )?);
                     control.check()?;
                     crate::runner::emit_backend_initialization_started(&control);
-                    mp::replay_engine_with_ocr_provider(request, &ocr, &operation)
+                    mp::replay_engine_with_ocr_profile(request, &ocr, &operation)
                         .map_err(|error| prerequisite_error("backend_initialization", error))?
                 } else {
                     native_engine(
@@ -1871,7 +1866,7 @@ mod enabled {
 
     fn native_engine(
         native: &NativeConfig,
-        ocr: &mp::OcrProviderConfig,
+        ocr: &mp::OcrProfileConfig,
         operation: &mp::OperationContext,
         control: &Control,
         initialization_started: Option<&AtomicBool>,
@@ -1903,9 +1898,9 @@ mod enabled {
             }
         }
         #[cfg(target_os = "macos")]
-        let result = mp::macos_engine_with_ocr_provider(request, ocr, operation);
+        let result = mp::macos_engine_with_ocr_profile(request, ocr, operation);
         #[cfg(windows)]
-        let result = mp::windows_engine_with_ocr_provider(request, ocr, operation);
+        let result = mp::windows_engine_with_ocr_profile(request, ocr, operation);
         #[cfg(any(target_os = "macos", windows))]
         {
             result.map_err(|error| prerequisite_error("engine_initialization", error))
@@ -3340,13 +3335,9 @@ mod enabled {
         control: &Control,
     ) -> Result<mp::OcrModelIdentity, Fault> {
         crate::environment::validate_ocr(config, control)?;
-        match config.ocr.profile.as_str() {
-            mp::ACCEPTED_G004_PROFILE_ID => Ok(mp::OcrModelIdentity::accepted_g004()),
-            mp::ACCEPTED_BOUNDED_PROFILE_ID => {
-                Ok(mp::OcrModelIdentity::accepted_bounded_detector())
-            }
-            _ => Err(blocked("ocr_unsupported", "unsupported OCR profile")),
-        }
+        crate::environment::ocr_profile(&config.ocr.profile)?
+            .identity()
+            .map_err(|error| prerequisite_error("ocr_unsupported", error.into()))
     }
 
     fn replay_source(

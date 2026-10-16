@@ -522,7 +522,7 @@
     "active": "別の操作が進行中です。最終結果が記録されるまでお待ちください。",
     "introduction": "このマシン固有の設定です。アプリ設定に保存し、移植可能なプロファイルには含めません。保存は設定の構造を検証します。チェックは保存済み設定と選択した記録済みコーパスを使います。",
     "settingsNotLoaded": "設定未読み込み",
-    "supportedProfile": "対応 OCR プロファイル",
+    "model": "OCRモデル",
     "notConfigured": "未設定",
     "modelRoot": "モデルのルートディレクトリ",
     "modelPlaceholder": "受け入れ対象モデルファイルの絶対パス",
@@ -549,10 +549,46 @@
     "reasonSeparator": "、",
     "wait": "{reason} · このコマンドの完了後にチェックできます。",
     "unsupported": "未対応 · {profile}",
-    "technicalHeading": "プロファイルの技術情報",
-    "profileLabels": {
-      "g-004-rapidocr-ppocrv4-det-v6-rec-small-v1": "標準の日本語文字認識",
-      "phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2": "処理範囲を制限した日本語文字認識"
+    "technicalHeading": "モデルの詳細と記録済みのテスト結果",
+    "preprocessing": "前処理",
+    "modelFiles": "モデルファイル",
+    "evaluationsHelp": "SDK のテストレポートに対象とプロバイダーごとに記録された結果です。測定時のビルドの結果であり、このマシンの確認やモデルの順位ではありません。不合格や未実施の結果があってもモデルは選択できます。このマシンでの初期化は「保存済み環境をチェック」で確認します。",
+    "noEvaluations": "どの対象にも結果は記録されていません。",
+    "evaluationCount": "{passed}/{total} 合格",
+    "variantLabel": "設定",
+    "resultsSummary": "ルール評価",
+    "variants": {
+      "Native G-004": "標準設定",
+      "Bounded detector": "画像サイズ制限",
+      "Maximum detector side 736": "画像の長辺を736 px以下に制限"
+    },
+    "tagsHelp": "タグはこのOS向けの記録済みテスト結果であり、ご利用の画像での性能を保証しません。速度・読み取り・動作上の注意は別々の評価です。全結果はモデルの詳細で確認できます。",
+    "tags": {
+      "fast": {"label": "高速", "help": "SDKベンチマークの全workloadで、処理時間の中央値とp95が基準モデルの80%以下でした。"},
+      "speed_attention": {"label": "速度に注意", "help": "測定した全workloadで処理時間を20%以上短縮する基準は満たしていません。"},
+      "speed_unmeasured": {"label": "速度未評価", "help": "このOS・実行方式での速度比較は記録されていません。"},
+      "speed_incomplete": {"label": "速度未確認", "help": "速度比較の測定情報が不足しているため、速さを判断できません。"},
+      "reading_good": {"label": "読取良好", "help": "検証画像で、文字・件数・位置・誤検出・信頼度・安定性・語彙のチェックをすべて通過しています。"},
+      "reading_attention": {"label": "読取に注意", "help": "検証画像で読み取り品質のチェックに失敗があります。選択前に詳細結果を確認してください。"},
+      "reading_unmeasured": {"label": "読取未評価", "help": "このOS・実行方式での読み取り品質は記録されていません。"},
+      "reading_incomplete": {"label": "読取未確認", "help": "未実施または判定不能の読み取りチェックがあります。一部の成功だけでは品質を確認できません。"},
+      "runtime_attention": {"label": "動作に注意", "help": "入力と結果の対応、停止・終了、処理制限、資源使用量のいずれかのチェックに失敗があります。速度や読み取り品質とは別の注意点です。"},
+      "runtime_incomplete": {"label": "動作未確認", "help": "動作検証の情報が不足しています。速度や読み取りの結果だけでは安定動作を確認できません。"},
+      "not_evaluated": {"label": "未評価", "help": "このOS・実行方式のテスト結果はありません。他の環境の結果では代用しません。"},
+      "unverified": {"label": "結果の確認が必要", "help": "レポートの根拠が不足しているか、このアプリでは評価基準を解釈できません。速度や品質は推測しません。"}
+    },
+    "thisPlatform": "このプラットフォーム・実行方式",
+    "criteria": "判定基準",
+    "report": "レポート",
+    "measuredRevision": "測定したソースのリビジョン",
+    "executionDigest": "実行記述子の SHA-256",
+    "evaluatorRevision": "評価器のリビジョン",
+    "noEvidence": "検証済みの根拠なし",
+    "outcomes": {
+      "passed": "合格",
+      "failed": "不合格",
+      "not_run": "未実施",
+      "incomplete": "判定不能"
     },
     "mismatch": "保存済み環境の組み合わせは、このデスクトップビルドの選択肢にありません（{model} / {language} / {provider} / {runtime}）。保存すると、上に表示した対応済みの組み合わせに置き換えます。"
   },
@@ -603,8 +639,8 @@
     "nextModels": "文字認識ファイルをダウンロードするか、以前に取得済みの完全なファイルを再検査して使ってください。",
     "nextRuntime": "認識エンジンをダウンロードするか、以前に取得済みの完全なファイルを再検査して使ってください。",
     "nextNative": "「詳細」の手順で画像処理ライブラリをインストールし、Homebrew の場所を検出するかインストール先フォルダーを選んでください。",
-    "nextProfile": "下で対応する認識プロファイルを選んでください。既存の非対応プロファイルは変更していません。",
-    "nextBlankProfile": "再検査して既定のプロファイルを選ぶか、下で対応するプロファイルを選んでください。",
+    "nextProfile": "選択できるOCRモデルを選んでください。選択できない既存の設定は変更していません。",
+    "nextBlankProfile": "再検査して既定のOCRモデルを選ぶか、OCRモデルを選んでください。",
     "nextAttention": "確認が必要な項目とエラーの詳細を確認し、インストール先の選択を修正してリソースを再検査してください。",
     "nextUnsupported": "このプラットフォームでは画像処理ライブラリの自動セットアップに対応していません。対応する環境は「詳細」を確認してください。",
     "paths": "下書きで選択したパスを表示",
@@ -617,12 +653,12 @@
     "unknownState": "状態を取得できません",
     "unknownStage": "セットアップの進捗を待機中",
     "itemNames": {
-      "rapidocr-models": "文字認識ファイル",
+      "models": "文字認識ファイル",
       "onnxruntime": "認識エンジン",
       "native-libraries": "画像処理ライブラリ"
     },
     "itemHelp": {
-      "rapidocr-models": "検証済みの文字認識ファイルをダウンロードします。",
+      "models": "選択したOCRモデル用の検証済み文字認識ファイルをダウンロードします。",
       "onnxruntime": "対応する認識エンジンをダウンロードします。",
       "native-libraries": "OpenCV のインストール先を選ぶと、必要なライブラリを自動検出します。"
     },
@@ -693,6 +729,7 @@
     "legacyFault": "取り込みを中断",
     "legacyNone": "なし",
     "sourceEyebrow": "パッケージソース",
+    "directoryPackage": "SRC",
     "sourceDetails": "ソースの詳細",
     "pendingSource": "再検査では、このインストール済みリリースではなくディレクトリ {path} を検査します。インストール済みリリースを再検査するには、「ソースの詳細」でパスを消去してください。",
     "sourceLocation": "保存場所",

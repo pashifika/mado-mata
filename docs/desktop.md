@@ -707,8 +707,12 @@ The [format contract](runtime-comparison.md#signed-mmpkg-format) fixes its bound
 ### Import and explicitly select
 
 On Guidance, choose **Packages…** at the upper right. On Run, choose **Change…**
-inside **Package source**, immediately to the right of **Reinspect**. This region
-separates source identity/status and editing actions from profile settings;
+inside **Package source**, immediately to the right of **Reinspect**.
+Directory sources show a colored **SRC** tag immediately after the **Package
+source** heading, not before the package name. **Edit package** (or **Return to Edit** for its current owner)
+sits to the right, vertically centered on the identity/status and **Package
+directory** label, excluding the full-width path input below. There is no divider
+below the heading. Installed releases have no directory tag or Edit action.
 **Source details** discloses the location, runtime and artifact identity.
 Installed sources also keep directory replacement in those details. A pending
 replacement remains visible outside the collapsed details, so **Reinspect** never
@@ -2606,11 +2610,13 @@ Recovery then offers **Retry** after repair, not transaction controls.
 
 ## Save and check an OCR environment
 
-1. Open **Application → App settings → OCR environment**. Under **Set up text
-   recognition**, choose **Download** for **Text recognition files**. The shared
-   model set is about 26 MB. Exact sizes and SHA-256 values are checked before
-   publication, then its path and an unset default profile are selected in the
-   draft automatically. Missing runtime or native libraries do not block this.
+1. Open **Application → App settings → OCR environment** and choose an **OCR
+   model**. Under **Set up text recognition**, choose **Download** for **Text
+   recognition files**. The selected SDK profile defines the complete set,
+   including any required vocabulary file. Exact sizes and SHA-256 values are
+   checked before publication; its path is then selected in the draft.
+   An unconfigured selection uses the SDK's unchanged explicit default, not list
+   order. Missing runtime or native libraries do not block model-path adoption.
    **Details** includes source, license and hosting-term links before download.
 2. Choose **Download** for **Recognition engine**. MadoMata acquires the fixed
    official ONNX Runtime **1.29.0** archive for the supported platform, verifies
@@ -2646,6 +2652,9 @@ Recovery then offers **Retry** after repair, not transaction controls.
    Managed model recheck and Download reuse also support a relative `--data-dir`
    for an already initialized root. Explicit manual model paths must remain
    absolute; this does not relax Initialize or package-path validation.
+   Switching to a different model set clears the previous model-root hint; it
+   does not borrow those files for the new profile. Profiles sharing the same
+   set retain that hint and reuse the same verified installation.
 5. **Save changes** validates and atomically saves the dialog's editable settings.
    It does not load libraries, models, or a backend. **Clear draft** followed by
    **Save changes** removes the optional environment. Existing settings with no
@@ -2673,6 +2682,27 @@ Recovery then offers **Retry** after repair, not transaction controls.
    intentional. A prerequisite refusal, loader failure, and interrupted
    initialization are different outcomes.
 
+The selector shows the SDK's official model-pair name first, then its configuration
+and independent colored result tags. Multiple tags can appear together: **Fast**
+and **Reading caution** mean the recorded speed criterion passed while reading
+checks failed. Fast requires every recorded workload's p50 and p95 to be at most
+80% of the reference under SDK criteria v1. **Good reads** requires all seven
+reading-quality checks to pass on the recorded images, not on every possible
+image. Untested, incomplete and runtime-caution results remain distinct; missing
+evidence or unfamiliar criteria cannot justify positive tags.
+
+**Model details and recorded test results** retains raw identities, passed-rule
+counts, every Passed, Failed, Not run and Incomplete outcome, criteria, report,
+source revision and evaluator. Results apply only to the displayed target/provider;
+they neither rank choices nor certify local setup. Failed rules do not hide an
+implemented model or change an existing saved selection. Opening settings does
+not run a benchmark; while metadata loads, an untouched saved environment remains
+clean and cannot be saved or checked against an unknown tuple.
+
+Model selection and its details appear before resource setup, so choose the model
+before downloading its files. **This platform / provider** marks matching recorded
+results, not a benchmark performed on this computer.
+
 Downloads are retained under `<data-dir>/ocr-resources/`, outside configuration
 snapshots, packages and profiles. **Cancel setup** requests cancellation; the
 operation remains busy until its worker and staging cleanup settle. Closing
@@ -2684,9 +2714,12 @@ and blocks further setup; restart before retrying after resolving the cause.
 On the next explicit setup action, an OS file lock protects recovery of recognized
 incomplete staging. Unknown files are retained, not recursively removed.
 
-The embedded [OCR catalog](../apps/desktop/src-tauri/resources/ocr-catalog.json)
-owns fixed sources, content identities, platform archives, selected members,
-bounded search locations, display-only guidance and license links. Model installs
+Model profiles, resource identities and fixed acquisition sources come from the
+pinned SDK catalog through the pure metadata crate, not a frontend allowlist or
+sibling checkout. The embedded [desktop acquisition catalog](../apps/desktop/src-tauri/resources/ocr-catalog.json)
+owns the SDK revision constraint and runtime/native prerequisites: platform
+archives, selected members, bounded search locations, guidance and license links.
+Model installs
 include [LICENSE](../apps/desktop/src-tauri/resources/ocr-model-LICENSE.txt),
 [NOTICE](../apps/desktop/src-tauri/resources/ocr-model-NOTICE.txt) and a receipt.
 Runtime installs retain the official `LICENSE` and `ThirdPartyNotices.txt`; their
@@ -2696,16 +2729,19 @@ and Download reuse complete installs across engine revisions after the same
 content and license checks. Model notices must remain nonempty; runtime notices
 must match the pinned bytes. Receipts and corrupt files are not replaced.
 Byte verification remains required, and engine compatibility still needs Check.
-Maintainers can edit transport sources and guidance, then run the offline resource tests:
+To add a model, implement its configuration and scoped rule results in the SDK
+first, then update the application's SDK pin, lockfiles and acquisition-catalog
+revision constraint. No separate frontend model list is required. Run the offline
+resource tests:
 
 ```sh
 cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib ocr_setup
 ```
 
-Review licenses, notices, host terms and exact downloaded bytes before enabling a
-new source. Catalog edits do not extend the engine's accepted model/profile set.
-Automatic acquisition covers the verified model set and reviewed ONNX Runtime
-archives on macOS arm64 and Windows x64. Archive extraction copies only pinned
+Review licenses, notices, host terms and exact bytes before enabling a new source.
+Desktop runtime/native catalog edits cannot extend the SDK's model/profile set.
+Automatic acquisition covers each implemented complete model set and reviewed
+ONNX Runtime archives on macOS arm64 and Windows x64. Extraction copies only pinned
 regular files into app-owned storage; archive links are never created or followed.
 OpenCV installation remains external. No automatic update, custom-model selector,
 global loader change or new native authority is provided. See the

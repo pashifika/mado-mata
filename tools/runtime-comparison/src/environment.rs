@@ -12,28 +12,64 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-pub const G004_PROFILE: &str = "g-004-rapidocr-ppocrv4-det-v6-rec-small-v1";
-pub const BOUNDED_PROFILE: &str = "phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2";
-pub const LANGUAGE: &str = "horizontal-ja-basic-latin-ascii-digits-ui-symbols-v1";
+pub use mado_pilot_ocr::catalog::{
+    ACCEPTED_BOUNDED_PROFILE_ID as BOUNDED_PROFILE, ACCEPTED_G004_LANGUAGE_PROFILE_ID as LANGUAGE,
+    ACCEPTED_G004_PROFILE_ID as G004_PROFILE, DEFAULT_OCR_PROFILE_ID, EvaluationOutcome,
+    OcrProfileDescriptor, ResourceDescriptor,
+};
+pub const OCR_TARGET: &str = env!("COMPARISON_TARGET");
 pub const PROVIDER: &str = "cpu";
 pub const RUNTIME_PROFILE: &str = "onnxruntime-1.29.0-api17-cpu";
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_LIBRARIES: usize = 64;
 const MAX_RESOURCE_BYTES: u64 = 1_073_741_824;
 const MAX_DESCRIPTOR_BYTES: usize = 262_144;
-// Content identities of both accepted profiles at ENGINE_REVISION.
-const MODELS: [(&str, u64, &str); 2] = [
-    (
-        "rapidocr-v3.9.2/ch_PP-OCRv4_det_mobile.onnx",
-        4_745_517,
-        "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
-    ),
-    (
-        "rapidocr-v3.9.2/PP-OCRv6_rec_small.onnx",
-        21_234_383,
-        "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
-    ),
-];
+
+/// CPU configurations implemented by the existing desktop engine policy.
+pub fn ocr_profiles() -> impl Iterator<Item = &'static OcrProfileDescriptor> {
+    mado_pilot_ocr::catalog::ocr_profiles()
+        .iter()
+        .filter(|profile| {
+            profile.applicability.iter().any(|scope| {
+                matches!(scope.target, "aarch64-apple-darwin" | "x86_64-pc-windows-msvc")
+                    && (!matches!(
+                        OCR_TARGET,
+                        "aarch64-apple-darwin" | "x86_64-pc-windows-msvc"
+                    ) || scope.target == OCR_TARGET)
+                    && scope.provider == PROVIDER
+                    && scope.runtime_version == "1.29.0"
+                    && scope.runtime_api == 17
+            })
+        })
+}
+
+pub fn ocr_profile(id: &str) -> Result<&'static OcrProfileDescriptor, Fault> {
+    ocr_profiles()
+        .find(|profile| profile.profile_id == id)
+        .ok_or_else(|| {
+            blocked(
+                "ocr_unsupported",
+                "unsupported OCR profile; no fallback is permitted",
+            )
+        })
+}
+
+pub fn model_resources(
+    profile: &OcrProfileDescriptor,
+) -> impl Iterator<Item = &'static ResourceDescriptor> {
+    [profile.detector, profile.recognizer]
+        .into_iter()
+        .chain(profile.auxiliary)
+}
+
+pub fn digest_hex(digest: &[u8; 32]) -> String {
+    use std::fmt::Write;
+    let mut text = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut text, "{byte:02x}").expect("writing to a String");
+    }
+    text
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -170,7 +206,8 @@ pub fn capture_environment(
     let model_root = PathBuf::from(&environment.model_root)
         .canonicalize()
         .map_err(|error| io_fault("model_root", error))?;
-    validate_models(&model_root, control)?;
+    let profile = ocr_profile(&environment.profile)?;
+    validate_models(&model_root, profile, control)?;
     let runtime_path = Path::new(&environment.runtime_path)
         .canonicalize()
         .map_err(|error| io_fault("runtime_validation", error))?;
@@ -203,7 +240,7 @@ pub fn capture_environment(
     .map_err(|error| Fault::new("Encoding", error.to_string()))?;
     control.check()?;
     Ok(EnvironmentSnapshot {
-        identity: identity(&(ENGINE_REVISION, &configuration, MODELS))?,
+        identity: identity(&(ENGINE_REVISION, &configuration, profile.execution_sha256))?,
         configuration,
     })
 }
@@ -307,9 +344,9 @@ fn validate_tuple(
     provider: &str,
     runtime_profile: &str,
 ) -> Result<(), Fault> {
-    if !matches!(profile, G004_PROFILE | BOUNDED_PROFILE)
-        || model != profile
-        || language != LANGUAGE
+    let descriptor = ocr_profile(profile)?;
+    if model != descriptor.model_id
+        || language != descriptor.language_profile_id
         || provider != PROVIDER
         || runtime_profile != RUNTIME_PROFILE
     {
@@ -330,7 +367,7 @@ pub(crate) fn validate_ocr<N>(config: &Configuration<N>, control: &Control) -> R
         &ocr.provider,
         &ocr.runtime_profile,
     )?;
-    validate_models(&ocr.model_root, control)?;
+    validate_models(&ocr.model_root, ocr_profile(&ocr.profile)?, control)?;
     verify_file(&ocr.runtime, control, "runtime_validation")?;
     if config.native_libraries.is_empty() {
         return Err(blocked(
@@ -344,15 +381,19 @@ pub(crate) fn validate_ocr<N>(config: &Configuration<N>, control: &Control) -> R
     control.check()
 }
 
-fn validate_models(root: &Path, control: &Control) -> Result<(), Fault> {
+fn validate_models(
+    root: &Path,
+    profile: &OcrProfileDescriptor,
+    control: &Control,
+) -> Result<(), Fault> {
     control.check()?;
     canonical(root, true, "model_root")?;
-    for (relative, bytes, sha256) in MODELS {
+    for resource in model_resources(profile) {
         verify_file(
             &Library {
-                path: root.join(relative),
-                sha256: sha256.into(),
-                bytes,
+                path: root.join(resource.relative_path),
+                sha256: digest_hex(&resource.sha256),
+                bytes: resource.byte_len,
             },
             control,
             "model_validation",
@@ -769,6 +810,60 @@ mod tests {
         serde_json::from_str::<Plan>(include_str!("../fixtures/controlled-plan.json"))
             .unwrap()
             .limits
+    }
+
+    #[test]
+    fn catalog_tuples_roundtrip_without_empirical_admission_or_default_migration() {
+        assert_eq!(DEFAULT_OCR_PROFILE_ID, G004_PROFILE);
+        for id in [
+            G004_PROFILE,
+            BOUNDED_PROFILE,
+            "ppocrv6-tiny-det-small-rec-max736-v1",
+        ] {
+            let profile = ocr_profile(id).unwrap();
+            let environment = OcrEnvironment {
+                model: profile.model_id.into(),
+                profile: id.into(),
+                language: profile.language_profile_id.into(),
+                provider: PROVIDER.into(),
+                runtime_profile: RUNTIME_PROFILE.into(),
+                model_root: std::env::temp_dir().join("models").to_str().unwrap().into(),
+                runtime_path: std::env::temp_dir().join("runtime").to_str().unwrap().into(),
+                native_library_paths: vec![
+                    std::env::temp_dir().join("native").to_str().unwrap().into(),
+                ],
+            };
+            environment.validate().unwrap();
+            let encoded = serde_json::to_vec(&environment).unwrap();
+            let decoded: OcrEnvironment = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, environment);
+            decoded.validate().unwrap();
+            for (field, value) in [
+                ("profile", "unknown"),
+                ("model", "unknown"),
+                ("language", "unknown"),
+                ("provider", "cuda"),
+                ("runtime_profile", "unknown"),
+            ] {
+                let mut invalid = serde_json::to_value(&environment).unwrap();
+                invalid[field] = value.into();
+                let invalid: OcrEnvironment = serde_json::from_value(invalid).unwrap();
+                assert_eq!(
+                    invalid.validate().unwrap_err().context["stage"],
+                    "ocr_unsupported"
+                );
+            }
+        }
+        let third = ocr_profile("ppocrv6-tiny-det-small-rec-max736-v1").unwrap();
+        assert!(third.evaluations.iter().any(|summary| {
+            summary
+                .rules
+                .iter()
+                .any(|rule| rule.outcome == EvaluationOutcome::Failed)
+        }));
+        assert_eq!(model_resources(third).count(), 3);
+        assert!(third.identity().unwrap().auxiliary().is_some());
+        assert!(ocr_profile("").is_err());
     }
 
     #[test]

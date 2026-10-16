@@ -70,7 +70,9 @@ function catalog(data: typeof enData) {
       staleHelp: (reasons: string[]) => interpolate(data.environment.staleHelp, {reasons: reasons.join(data.environment.reasonSeparator)}),
       wait: (reason: string) => interpolate(data.environment.wait, {reason}),
       unsupported: (profile: string) => interpolate(data.environment.unsupported, {profile}),
-      profileLabel: (profile: keyof typeof data.environment.profileLabels) => data.environment.profileLabels[profile],
+      evaluationCount: (passed: number, total: number) => interpolate(data.environment.evaluationCount, {passed, total}),
+      variant: (value: string | null) => value === null ? '' : Object.hasOwn(data.environment.variants, value) ? data.environment.variants[value as keyof typeof data.environment.variants] : value,
+      outcome: (value: string) => Object.hasOwn(data.environment.outcomes, value) ? data.environment.outcomes[value as keyof typeof data.environment.outcomes] : value,
       mismatch: (model: string, language: string, provider: string, runtime: string) => interpolate(data.environment.mismatch, {model, language, provider, runtime}),
     },
     ocrSetup: {
