@@ -67,6 +67,30 @@ export function evaluationCount(choice:OcrProfileChoice, target:string):{passed:
   return {passed:rules.filter(rule => rule.outcome === 'passed').length, total:rules.length};
 }
 
+export type EvaluationTag = 'fast' | 'speed_attention' | 'speed_unmeasured' | 'speed_incomplete'
+  | 'reading_good' | 'reading_attention' | 'reading_unmeasured' | 'reading_incomplete'
+  | 'runtime_attention' | 'runtime_incomplete' | 'not_evaluated' | 'unverified';
+
+const READING_RULES = ['text_order', 'region_count', 'geometry', 'unexpected_detection', 'confidence', 'stability', 'vocabulary_coverage'];
+
+// Interpret criteria v1 only: relative_latency passes when every workload's p50/p95 is <= 80% of the reference.
+export function evaluationTags(choice:OcrProfileChoice, target:string):EvaluationTag[] {
+  const summary = choice.evaluations.find(item => item.target === target && item.provider === choice.provider);
+  if (!summary || summary.rules.every(rule => rule.outcome === 'not_run')) return ['not_evaluated'];
+  if (summary.criteria !== 'tools/ocr-models/criteria-v1.json' || summary.evidence === null) return ['unverified'];
+  const outcome = (id:string) => summary.rules.find(rule => rule.rule_id === id)?.outcome ?? 'not_run';
+  const speed = outcome('relative_latency');
+  const tags:EvaluationTag[] = [speed === 'passed' ? 'fast' : speed === 'failed' ? 'speed_attention'
+    : speed === 'incomplete' ? 'speed_incomplete' : 'speed_unmeasured'];
+  const reading = READING_RULES.map(outcome);
+  tags.push(reading.includes('failed') ? 'reading_attention' : reading.every(result => result === 'passed') ? 'reading_good'
+    : reading.every(result => result === 'not_run') ? 'reading_unmeasured' : 'reading_incomplete');
+  const runtime = summary.rules.filter(rule => rule.rule_id !== 'relative_latency' && !READING_RULES.includes(rule.rule_id));
+  if (runtime.some(rule => rule.outcome === 'failed')) tags.push('runtime_attention');
+  else if (runtime.some(rule => rule.outcome === 'incomplete')) tags.push('runtime_incomplete');
+  return tags;
+}
+
 // A model root holds one model set: switching to another set clears it so Recheck or Download selects matching files.
 export function selectProfile(draft:EnvironmentDraft, profile:string, view:SetupView|null):EnvironmentDraft {
   const before = effectiveChoice(view, draft.profile)?.resource_id;

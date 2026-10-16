@@ -7,6 +7,8 @@ export interface SelectOption {
   label: string;
   disabled?: boolean;
   description?: ReactNode;
+  // Noninteractive presentation shared by trigger and popup; label remains the text alternative and typeahead key.
+  content?: ReactNode;
   title?: string;
 }
 
@@ -242,7 +244,7 @@ export default function Select({id, value, options, onChange, disabled = false, 
       aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listId : undefined}
       aria-activedescendant={open && placement && activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
       {...aria} title={title} onKeyDown={keys} onClick={() => {if (!disabled) {if (open) dismiss(true); else show();}}}>
-      <span className="select-label">{selected?.label ?? placeholder ?? value}</span>
+      <span className={selected?.content != null ? 'select-label select-label-rich' : 'select-label'}>{selected?.content ?? selected?.label ?? placeholder ?? value}</span>
       <span className="select-chevron" aria-hidden="true"/>
     </button>
     {open && menu && createPortal(<div ref={popup} className="select-popup"
@@ -256,12 +258,13 @@ export default function Select({id, value, options, onChange, disabled = false, 
         aria-labelledby={listLabel !== undefined || aria['aria-label'] !== undefined ? undefined : aria['aria-labelledby'] ?? id}>
         {options.map((option, index) => <div id={`${listId}-${index}`} key={option.value} className="select-option" role="option"
           aria-selected={option.value === value} aria-disabled={option.disabled || undefined}
+          aria-label={option.content != null ? option.label : undefined}
           data-active={index === activeIndex ? 'true' : undefined} title={option.title}
           onPointerMove={event => {if (!option.disabled && event.pointerType !== 'touch') setActiveValue(option.value);}}
           onClick={() => {if (!option.disabled) commit(option);}}>
-          <span className="select-option-text"><span className="select-option-label">{option.label}</span>
+          <span className="select-option-text">{option.content ?? <><span className="select-option-label">{option.label}</span>
             {option.description != null && <span className="select-option-description">{option.description}</span>}
-          </span>
+          </>}</span>
           {option.value === value && <span className="select-selected-mark" aria-hidden="true"/>}
         </div>)}
       </div>

@@ -6,7 +6,7 @@ import type {ControllerView, OcrEnvironment, WorkspaceRef} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import ResourceSetupPanel from './ResourceSetupPanel.tsx';
-import {evaluationCount, profileChoice, selectProfile} from './ocr-setup.ts';
+import {evaluationCount, evaluationTags, profileChoice, selectProfile} from './ocr-setup.ts';
 import type {OcrProfileChoice} from './ocr-setup.ts';
 import type {OcrSetupControls} from './useOcrSetup.ts';
 
@@ -65,8 +65,6 @@ function CheckCard({check, stale, originLabel}: {check: LastCheck; stale: string
   </div>;
 }
 
-const modelName = (choice: OcrProfileChoice) => choice.variant ? `${choice.display_name} · ${choice.variant}` : choice.display_name;
-
 // Recorded SDK report results; every rule and its provenance stays visible, including failures and missing runs.
 function Evaluations({choice, target}: {choice: OcrProfileChoice; target: string}) {
   const t = messages[useLocale()].ui.environment;
@@ -100,14 +98,19 @@ export default function EnvironmentPanel(props: Props) {
   const savedChoice = saved && view ? profileChoice(view.profiles, saved.profile) : null;
   const fixedMismatch = saved !== null && view !== null && (savedChoice === null || saved.model !== savedChoice.model || saved.language !== savedChoice.language
     || saved.provider !== savedChoice.provider || saved.runtime_profile !== savedChoice.runtime_profile);
-  // Factual counts for this host only; no aggregate score or ranking.
-  function results(choice: OcrProfileChoice, host: string) {
-    const count = evaluationCount(choice, host);
-    return count ? t.environment.evaluationCount(count.passed, count.total) : t.environment.outcome('not_run');
-  }
+  const count = supported && view ? evaluationCount(supported, view.target) : null;
   const choices = view ? view.profiles.map(choice => {
-    const label = `${modelName(choice)} ${results(choice, view.target)}`;
-    return {value: choice.profile, label, title: label};
+    const variant = t.environment.variant(choice.variant);
+    const tags = evaluationTags(choice, view.target);
+    const label = [choice.display_name, variant, ...tags.map(tag => t.environment.tags[tag].label)].filter(Boolean).join(' · ');
+    return {value: choice.profile, label, title: label, content: <span className="ocr-model-choice">
+      <span className="ocr-model-name">{choice.display_name}</span>
+      <span className="ocr-model-secondary"><span className="ocr-model-variant">{variant}</span>
+        <span className="ocr-model-tags">{tags.map(tag => <span key={tag}
+          className={`tag ${tag === 'fast' ? 'ocr-fast' : tag === 'reading_good' ? 'current' : tag.endsWith('_attention') ? 'stale' : ''}`}
+          title={t.environment.tags[tag].help}>{t.environment.tags[tag].label}</span>)}</span>
+      </span>
+    </span>};
   }) : [];
   const checkBlock = !loaded ? t.environment.notLoaded : !saved ? t.environment.saveFirst
     : view === null ? setup.state.error === null ? t.ocrSetup.loading : messages[locale].validation.profilesUnavailable
@@ -126,15 +129,18 @@ export default function EnvironmentPanel(props: Props) {
       <span className={`tag ${dirty ? 'unsaved' : ''}`}>{!loaded ? t.environment.settingsNotLoaded : dirty ? t.common.unsavedChanges : saved ? t.common.saved : t.common.unconfigured}</span></div>
     <ResourceSetupPanel setup={setup} block={setupBlock}/>
     <div className="field"><label htmlFor="ocr-profile">{t.environment.model}</label>
-      <Select id="ocr-profile" className="ocr-model-select" value={draft.profile} disabled={locked || view === null} aria-invalid={Boolean(errors.profile)}
+      <Select id="ocr-profile" value={draft.profile} disabled={locked || view === null} aria-invalid={Boolean(errors.profile)} aria-describedby="ocr-model-tag-help"
         title={choices.find(choice => choice.value === draft.profile)?.title} onChange={value => onDraft(selectProfile(draft, value, view))}
         options={[{value: '', label: t.environment.notConfigured}, ...choices,
           ...(draft.profile && !supported ? [{value: draft.profile, label: view ? t.environment.unsupported(draft.profile) : draft.profile, disabled: true}] : [])]}/>
       {errors.profile && <p className="field-error">{errors.profile}</p>}</div>
+    <p className="field-help" id="ocr-model-tag-help">{t.environment.tagsHelp}</p>
     <details className="ocr-setup-details"><summary>{t.environment.technicalHeading}</summary>
       {supported && view ? <>
         <dl className="fixed-facts">
-          <dt>{t.environment.model}</dt><dd>{modelName(supported)}</dd>
+          <dt>{t.environment.model}</dt><dd>{supported.display_name}</dd>
+          <dt>{t.environment.variantLabel}</dt><dd>{t.environment.variant(supported.variant) || '—'}</dd>
+          <dt>{t.environment.resultsSummary}</dt><dd>{count ? t.environment.evaluationCount(count.passed, count.total) : t.environment.outcome('not_run')}</dd>
           <dt>{t.common.model}</dt><dd>{supported.model}</dd>
           <dt>{t.common.profile}</dt><dd>{supported.profile}</dd>
           <dt>{t.common.language}</dt><dd>{supported.language}</dd>

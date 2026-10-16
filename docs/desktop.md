@@ -2680,14 +2680,22 @@ Recovery then offers **Retry** after repair, not transaction controls.
    intentional. A prerequisite refusal, loader failure, and interrupted
    initialization are different outcomes.
 
-The selector shows the SDK model name/variant and this target/provider's passed
-rule count, or **Not run** when no applicable measured result exists. **Model
-details and recorded test results** retains every Passed, Failed, Not run and
-Incomplete outcome, including criteria, report, source revision and evaluator.
-These results neither rank choices nor certify local setup. Failed rules do not
-hide an implemented model or change an existing saved selection. Opening settings
-does not run a benchmark; while metadata loads, an untouched saved environment
-remains clean and cannot be saved or checked against an unknown tuple.
+The selector shows the SDK's official model-pair name first, then its configuration
+and independent colored result tags. Multiple tags can appear together: **Fast**
+and **Reading caution** mean the recorded speed criterion passed while reading
+checks failed. Fast requires every recorded workload's p50 and p95 to be at most
+80% of the reference under SDK criteria v1. **Good reads** requires all seven
+reading-quality checks to pass on the recorded images, not on every possible
+image. Untested, incomplete and runtime-caution results remain distinct; missing
+evidence or unfamiliar criteria cannot justify positive tags.
+
+**Model details and recorded test results** retains raw identities, passed-rule
+counts, every Passed, Failed, Not run and Incomplete outcome, criteria, report,
+source revision and evaluator. Results apply only to the displayed target/provider;
+they neither rank choices nor certify local setup. Failed rules do not hide an
+implemented model or change an existing saved selection. Opening settings does
+not run a benchmark; while metadata loads, an untouched saved environment remains
+clean and cannot be saved or checked against an unknown tuple.
 
 Downloads are retained under `<data-dir>/ocr-resources/`, outside configuration
 snapshots, packages and profiles. **Cancel setup** requests cancellation; the

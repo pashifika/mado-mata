@@ -17,6 +17,10 @@ CPU targets and a negative-image rule on Windows. Implemented model choices
 remain selectable; scoped rule results describe those limitations without
 changing technical admission or the legacy default.
 
+User feedback rejects opaque profile IDs and passed-rule fractions as primary
+labels. A model can be fast while failing reading checks; one overall rating
+would conceal that distinction.
+
 ## Decision
 
 Consume the pinned SDK's pure `mado-pilot-ocr` descriptors in the existing runtime
@@ -28,13 +32,25 @@ Keep stable profile IDs as saved values. Use the SDK's explicit default only for
 an unconfigured draft; never rank, hide or replace a model because of benchmark
 results. Preserve provider, target, vocabulary and exact resource validation.
 
-Display the SDK model name and readable variant under `OCR model` / `OCRモデル`.
-Append the applicable target/provider's passed-rule count over all declared rules,
-or `Not run` / `未実施` when no applicable measured results exist. This count is
-not a performance ranking or an all-rules-passed claim. Details retain every
-Passed, Failed, NotRun and Incomplete result, criteria, report and source scope.
-Do not borrow another target's results or turn missing evidence into success.
-Local file verification and explicit initialization Check remain separate.
+Extend the shared Select with optional noninteractive item content, used in both
+its trigger and popup. Keep string labels for typeahead and accessible option
+names; ordinary options and Workspace descriptions/actions retain their behavior.
+Under `OCR model` / `OCRモデル`, show the SDK's official model-pair name first,
+then a readable localized variant and multiple colored result tags at the right.
+Names and tags wrap at narrow widths rather than disappearing behind ellipses.
+
+Tags describe independent dimensions, not an overall rating. Interpret an
+attributed criteria-v1 `relative_latency` pass as Fast: every workload's p50 and
+p95 are at most 80% of the reference. Good reads requires all seven reading-quality
+rules to pass. Preserve failed, untested and incomplete states; runtime failures
+or incomplete outcomes add a separate tag. Thus Fast and Reading caution can
+coexist. Unknown criteria or missing evidence cannot justify positive tags.
+
+Use only the current target/provider's results. Details retain raw IDs,
+passed-rule counts, every Passed, Failed, NotRun and Incomplete outcome, criteria,
+report and source scope. Do not borrow another target's results or turn missing
+evidence into success. Recorded tests are not guarantees for the user's images;
+local file verification and explicit initialization Check remain separate.
 
 Derive complete model resource sets from SDK asset descriptors, including any
 required vocabulary sidecar. Preserve shared legacy installations and receipts.
@@ -43,8 +59,9 @@ existing dialog and draft revision. Only Save persists settings.
 
 ## Rejected alternatives
 
-- Reintroduce Reference/Fast/Balanced labels: contradicts the shipped SDK policy
-  and loses failed or unexecuted rule outcomes.
+- Reintroduce an aggregate Reference/Fast/Balanced rating or a lone Fast label
+  from exploratory Python timings: hides failed or unexecuted rules. Independent
+  tags based on attributable SDK criteria do not make that aggregate claim.
 - Hide the new model until every rule passes: conflates user choice with test
   quality and would reopen an already resolved SDK decision.
 - Add a third desktop allowlist entry: retains the duplicated authority and makes

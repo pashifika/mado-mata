@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {acceptController,attemptOutcomes,nativeOutcome,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,packageDestination,portableComponent,DEFAULT_NOTIFICATIONS} from './state.ts';
 import {messages} from './i18n.ts';
-import {OcrSetupSession,evaluationCount,selectProfile,setupEnvironment} from './settings/ocr-setup.ts';
+import {OcrSetupSession,evaluationCount,evaluationTags,selectProfile,setupEnvironment} from './settings/ocr-setup.ts';
 
 const DEFAULT_PROFILE='g-004-rapidocr-ppocrv4-det-v6-rec-small-v1';
 const BOUNDED_PROFILE='phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2';
@@ -320,6 +320,32 @@ test('recorded results count only this host target and the model provider; nothi
   assert.deepEqual(evaluationCount(choice,HOST),{passed:1,total:4});
   assert.equal(evaluationCount(choice,'x86_64-unknown-linux-gnu'),null);
   assert.equal(evaluationCount(PROFILES[2],HOST),null);
+});
+
+function evaluatedChoice(changes={},patch={}) {
+  const ids=['text_order','region_count','geometry','unexpected_detection','confidence','stability','vocabulary_coverage',
+    'source_correlation','lifecycle','execution_bounds','process_budgets','workload_budgets','relative_latency'];
+  return {...PROFILES[0],evaluations:[{target:HOST,provider:'cpu',criteria:'tools/ocr-models/criteria-v1.json',
+    evidence:{report:'test-report.json',measured_source_revision:'measured',execution_sha256:'execution',evaluator_revision:'evaluated'},
+    rules:ids.map(rule_id=>({rule_id,outcome:changes[rule_id]??'passed'})),...patch}]};
+}
+
+const evaluatedOtherTarget=evaluatedChoice({}, {target:'x86_64-pc-windows-msvc'}).evaluations[0];
+const evaluatedOtherProvider=evaluatedChoice({}, {provider:'cuda'}).evaluations[0];
+for (const {scenario,choice,expected} of [
+  {scenario:'a fast model retains its reading caution',choice:evaluatedChoice({text_order:'failed',region_count:'failed'}),expected:['fast','reading_attention']},
+  {scenario:'unmeasured speed does not erase successful reading checks',choice:evaluatedChoice({relative_latency:'not_run'}),expected:['speed_unmeasured','reading_good']},
+  {scenario:'missing vocabulary coverage prevents a positive reading conclusion',choice:evaluatedChoice({vocabulary_coverage:'not_run'}),expected:['fast','reading_incomplete']},
+  {scenario:'failed comparative timing is not presented as fast or as a reading failure',choice:evaluatedChoice({relative_latency:'failed'}),expected:['speed_attention','reading_good']},
+  {scenario:'incomplete timing stays distinct from a measured speed failure',choice:evaluatedChoice({relative_latency:'incomplete'}),expected:['speed_incomplete','reading_good']},
+  {scenario:'a lifecycle failure adds an independent third caution',choice:evaluatedChoice({text_order:'failed',lifecycle:'failed'}),expected:['fast','reading_attention','runtime_attention']},
+  {scenario:'incomplete resource measurements add runtime uncertainty',choice:evaluatedChoice({workload_budgets:'incomplete'}),expected:['fast','reading_good','runtime_incomplete']},
+  {scenario:'an unfamiliar criterion cannot inherit the known fast threshold',choice:evaluatedChoice({}, {criteria:'tools/ocr-models/criteria-v2.json'}),expected:['unverified']},
+  {scenario:'a result without report attribution cannot claim measured performance',choice:evaluatedChoice({}, {evidence:null}),expected:['unverified']},
+  {scenario:'an entirely unmeasured profile stays unevaluated',choice:PROFILES[2],expected:['not_evaluated']},
+  {scenario:'other targets and providers cannot supply this selection with tags',choice:{...PROFILES[0],evaluations:[evaluatedOtherTarget,evaluatedOtherProvider]},expected:['not_evaluated']},
+]) test(`model result tags: ${scenario}`,()=>{
+  assert.deepEqual(evaluationTags(choice,HOST),expected);
 });
 
 test('switching to another model set clears only the model root; a shared or unknown set keeps it',()=>{

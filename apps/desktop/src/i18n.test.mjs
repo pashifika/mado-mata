@@ -53,6 +53,7 @@ const adapterArguments = {
   'ui.environment.truncated': [[1],[2]], 'ui.environment.staleHelp': [[['reason-A','reason-B']]],
   'ui.environment.wait': [['reason-A']], 'ui.environment.unsupported': [['profile-A']],
   'ui.environment.evaluationCount': [[12,13],[0,13]],
+  'ui.environment.variant': [[null],['Native G-004'],['Bounded detector'],['Maximum detector side 736'],['future-variant']],
   'ui.environment.outcome': [['passed'],['failed'],['not_run'],['incomplete'],['future-outcome']],
   'ui.environment.mismatch': [['model-A','language-A','provider-A','runtime-A']],
   'ui.ocrSetup.state': [['missing'],['verified'],['manual'],['unsupported'],['future-state']],
