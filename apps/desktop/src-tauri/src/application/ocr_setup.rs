@@ -75,24 +75,14 @@ impl Application {
     pub fn ocr_setup_start(
         &self,
         resource_id: String,
+        profile: String,
         environment: Option<OcrEnvironment>,
         native_selection: Option<ocr_setup::NativeSelection>,
     ) -> Result<String, Fault> {
         let (_command, mut state) = self.command_state()?;
         self.collect(&mut state);
         state.idle()?;
-        let catalog = ocr_setup::catalog_view()?;
-        if resource_id != "inspect"
-            && !catalog
-                .items
-                .iter()
-                .any(|item| item.id == resource_id && item.downloadable)
-        {
-            return Err(Fault::new(
-                "OcrSetupResource",
-                "Select a downloadable catalog resource",
-            ));
-        }
+        ocr_setup::validate_request(&profile, &resource_id, environment.as_ref())?;
         if resource_id != "inspect" && (environment.is_some() || native_selection.is_some()) {
             return Err(Fault::new(
                 "OcrSetupResource",
@@ -129,14 +119,21 @@ impl Application {
                 let outcome = if resource_id == "inspect" {
                     ocr_setup::inspect(
                         &root,
+                        &profile,
                         environment.as_ref(),
                         native_selection.as_ref(),
                         &worker_cancel,
                     )
                 } else {
-                    ocr_setup::download(&root, &resource_id, &worker_cancel, |progress| {
-                        lock(&worker_view).progress = progress;
-                    })
+                    ocr_setup::download(
+                        &root,
+                        &profile,
+                        &resource_id,
+                        &worker_cancel,
+                        |progress| {
+                            lock(&worker_view).progress = progress;
+                        },
+                    )
                 };
                 let mut view = lock(&worker_view);
                 match outcome {
@@ -370,9 +367,14 @@ mod tests {
             "OcrSetupCleanup"
         );
         assert_eq!(
-            app.ocr_setup_start("inspect".into(), None, None)
-                .unwrap_err()
-                .category,
+            app.ocr_setup_start(
+                "inspect".into(),
+                mado_runtime_comparison::environment::DEFAULT_OCR_PROFILE_ID.into(),
+                None,
+                None,
+            )
+            .unwrap_err()
+            .category,
             "OcrSetupCleanup"
         );
     }
@@ -410,5 +412,28 @@ mod tests {
         release.send(()).unwrap();
         app.shutdown().unwrap();
         assert!(!app.ocr_setup_poll().unwrap().active);
+    }
+
+    #[test]
+    fn invalid_selection_is_refused_before_worker_admission_or_resource_creation() {
+        let fixture = Fixture::new();
+        let app = &fixture.application;
+        let settings = std::fs::read(fixture.root.join("settings.json")).unwrap();
+        for (profile, resource) in [
+            ("", "inspect"),
+            ("unknown", "inspect"),
+            ("ppocrv6-tiny-det-small-rec-max736-v1", "rapidocr-models"),
+        ] {
+            assert!(
+                app.ocr_setup_start(resource.into(), profile.into(), None, None)
+                    .is_err()
+            );
+            assert!(app.ocr_setup_poll().is_none());
+            assert!(!fixture.root.join("ocr-resources").exists());
+            assert_eq!(
+                std::fs::read(fixture.root.join("settings.json")).unwrap(),
+                settings
+            );
+        }
     }
 }

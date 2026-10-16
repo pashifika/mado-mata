@@ -1,11 +1,13 @@
 import {useState} from 'react';
 import Select from '../components/Select.tsx';
-import {DISCLOSURE_LIMIT, ENVIRONMENT_LANGUAGE, ENVIRONMENT_PROVIDER, ENVIRONMENT_RUNTIME_PROFILE, SUPPORTED_PROFILES, boundedText, cleanupLabel, faultSummary, initializationLabel, record, text} from '../state.ts';
+import {DISCLOSURE_LIMIT, boundedText, cleanupLabel, faultSummary, initializationLabel, record, text} from '../state.ts';
 import type {CheckAssociation, EnvironmentDraft} from '../state.ts';
 import type {ControllerView, OcrEnvironment, WorkspaceRef} from '../types.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import ResourceSetupPanel from './ResourceSetupPanel.tsx';
+import {evaluationCount, profileChoice, selectProfile} from './ocr-setup.ts';
+import type {OcrProfileChoice} from './ocr-setup.ts';
 import type {OcrSetupControls} from './useOcrSetup.ts';
 
 export interface LastCheck {association: CheckAssociation; view: ControllerView}
@@ -63,14 +65,52 @@ function CheckCard({check, stale, originLabel}: {check: LastCheck; stale: string
   </div>;
 }
 
+const modelName = (choice: OcrProfileChoice) => choice.variant ? `${choice.display_name} · ${choice.variant}` : choice.display_name;
+
+// Recorded SDK report results; every rule and its provenance stays visible, including failures and missing runs.
+function Evaluations({choice, target}: {choice: OcrProfileChoice; target: string}) {
+  const t = messages[useLocale()].ui.environment;
+  return <div className="ocr-model-evaluations">
+    <p className="field-help">{t.evaluationsHelp}</p>
+    {choice.evaluations.length === 0 && <p className="muted">{t.noEvaluations}</p>}
+    {choice.evaluations.map(summary => <section key={`${summary.target}:${summary.provider}`} className="ocr-model-evaluation">
+      <div className="section-heading"><strong>{summary.target} · {summary.provider}</strong>
+        {summary.target === target && summary.provider === choice.provider && <span className="tag">{t.thisMachine}</span>}</div>
+      <dl className="fixed-facts">
+        <dt>{t.criteria}</dt><dd>{summary.criteria}</dd>
+        <dt>{t.report}</dt><dd>{summary.evidence?.report ?? t.noEvidence}</dd>
+        {summary.evidence && <>
+          <dt>{t.measuredRevision}</dt><dd>{summary.evidence.measured_source_revision}</dd>
+          <dt>{t.executionDigest}</dt><dd>{summary.evidence.execution_sha256}</dd>
+          <dt>{t.evaluatorRevision}</dt><dd>{summary.evidence.evaluator_revision}</dd>
+        </>}
+      </dl>
+      <ul className="ocr-model-rules">{summary.rules.map(rule => <li key={rule.rule_id}><code>{rule.rule_id}</code>
+        <span className={`tag ${rule.outcome === 'passed' ? 'current' : rule.outcome === 'not_run' ? '' : 'stale'}`}>{t.outcome(rule.outcome)}</span></li>)}</ul>
+    </section>)}
+  </div>;
+}
+
 export default function EnvironmentPanel(props: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const {draft, errors, onDraft, saved, loaded, dirty, locked, active, pickerBusy, busyReason, authoringReason, target, onCheck, lastCheck, stale, originLabel, setup} = props;
-  const supported = SUPPORTED_PROFILES.find(item => item.profile === draft.profile);
-  const savedModel = saved ? SUPPORTED_PROFILES.find(item => item.profile === saved.profile)?.model : undefined;
-  const fixedMismatch = saved !== null && (saved.language !== ENVIRONMENT_LANGUAGE || saved.provider !== ENVIRONMENT_PROVIDER || saved.runtime_profile !== ENVIRONMENT_RUNTIME_PROFILE || saved.model !== savedModel);
+  const view = setup.state.view;
+  const supported = view && profileChoice(view.profiles, draft.profile);
+  const savedChoice = saved && view ? profileChoice(view.profiles, saved.profile) : null;
+  const fixedMismatch = saved !== null && view !== null && (savedChoice === null || saved.model !== savedChoice.model || saved.language !== savedChoice.language
+    || saved.provider !== savedChoice.provider || saved.runtime_profile !== savedChoice.runtime_profile);
+  // Factual counts for this host only; no aggregate score or ranking.
+  function results(choice: OcrProfileChoice, host: string) {
+    const count = evaluationCount(choice, host);
+    return count ? t.environment.evaluationCount(count.passed, count.total) : t.environment.outcome('not_run');
+  }
+  const choices = view ? view.profiles.map(choice => {
+    const label = `${modelName(choice)} ${results(choice, view.target)}`;
+    return {value: choice.profile, label, title: label};
+  }) : [];
   const checkBlock = !loaded ? t.environment.notLoaded : !saved ? t.environment.saveFirst
+    : view === null ? setup.state.error === null ? t.ocrSetup.loading : messages[locale].validation.profilesUnavailable
     : dirty ? t.environment.dirty : active ? t.environment.active : setup.busy ? t.ocrSetup.busy
     : authoringReason ?? (pickerBusy ? t.environment.wait(t.target.choosing)
       : busyReason ? t.environment.wait(busyReason) : null);
@@ -85,19 +125,26 @@ export default function EnvironmentPanel(props: Props) {
       <p className="muted">{t.environment.introduction}</p></div>
       <span className={`tag ${dirty ? 'unsaved' : ''}`}>{!loaded ? t.environment.settingsNotLoaded : dirty ? t.common.unsavedChanges : saved ? t.common.saved : t.common.unconfigured}</span></div>
     <ResourceSetupPanel setup={setup} block={setupBlock}/>
-    <div className="field"><label htmlFor="ocr-profile">{t.environment.supportedProfile}</label>
-      <Select id="ocr-profile" value={draft.profile} disabled={locked} aria-invalid={Boolean(errors.profile)} onChange={value => field('profile', value)}
-        options={[{value: '', label: t.environment.notConfigured},
-          ...SUPPORTED_PROFILES.map(item => ({value: item.profile, label: t.environment.profileLabel(item.profile)})),
-          ...(draft.profile && !supported ? [{value: draft.profile, label: t.environment.unsupported(draft.profile), disabled: true}] : [])]}/>
+    <div className="field"><label htmlFor="ocr-profile">{t.environment.model}</label>
+      <Select id="ocr-profile" className="ocr-model-select" value={draft.profile} disabled={locked || view === null} aria-invalid={Boolean(errors.profile)}
+        title={choices.find(choice => choice.value === draft.profile)?.title} onChange={value => onDraft(selectProfile(draft, value, view))}
+        options={[{value: '', label: t.environment.notConfigured}, ...choices,
+          ...(draft.profile && !supported ? [{value: draft.profile, label: view ? t.environment.unsupported(draft.profile) : draft.profile, disabled: true}] : [])]}/>
       {errors.profile && <p className="field-error">{errors.profile}</p>}</div>
     <details className="ocr-setup-details"><summary>{t.environment.technicalHeading}</summary>
-    <dl className="fixed-facts">
-      <dt>{t.common.model}</dt><dd>{supported?.model ?? '—'}</dd>
-      <dt>{t.common.language}</dt><dd>{ENVIRONMENT_LANGUAGE}</dd>
-      <dt>{t.common.provider}</dt><dd>{ENVIRONMENT_PROVIDER}</dd>
-      <dt>{t.common.runtimeProfile}</dt><dd>{ENVIRONMENT_RUNTIME_PROFILE}</dd>
-    </dl>
+      {supported && view ? <>
+        <dl className="fixed-facts">
+          <dt>{t.environment.model}</dt><dd>{modelName(supported)}</dd>
+          <dt>{t.common.model}</dt><dd>{supported.model}</dd>
+          <dt>{t.common.profile}</dt><dd>{supported.profile}</dd>
+          <dt>{t.common.language}</dt><dd>{supported.language}</dd>
+          <dt>{t.common.provider}</dt><dd>{supported.provider}</dd>
+          <dt>{t.common.runtimeProfile}</dt><dd>{supported.runtime_profile}</dd>
+          <dt>{t.environment.preprocessing}</dt><dd>{supported.preprocessing}</dd>
+          <dt>{t.environment.modelFiles}</dt><dd>{supported.resource_id}</dd>
+        </dl>
+        <Evaluations choice={supported} target={view.target}/>
+      </> : <p className="muted">—</p>}
     </details>
     {saved && fixedMismatch && <p className="inline-warning">{t.environment.mismatch(saved.model, saved.language, saved.provider, saved.runtime_profile)}</p>}
     <details className="ocr-manual" open={fixedMismatch || Boolean((draft.model_root.trim() && errors.model_root) || (draft.runtime_path.trim() && errors.runtime_path) || (draft.library_paths.trim() && errors.library_paths))}>
@@ -117,7 +164,7 @@ export default function EnvironmentPanel(props: Props) {
       {errors.library_paths && <p className="field-error">{errors.library_paths}</p>}
       <p className="field-help">{t.environment.librariesHelp}</p></div>
     <div className="button-row">
-      <button type="button" disabled={setupBlock !== null || setup.busy || setup.state.catalogPending} onClick={setup.manual}>{t.environment.checkManual}</button>
+      <button type="button" disabled={setupBlock !== null || setup.busy || setup.state.catalogPending || setup.choice === null} onClick={setup.manual}>{t.environment.checkManual}</button>
       <button id="clear-environment" disabled={locked || blank} onClick={() => onDraft({profile: '', model_root: '', runtime_path: '', library_paths: ''})}>{t.environment.clear}</button>
       <span className="muted">{blank ? t.environment.blank : t.environment.saveHelp}</span>
     </div>

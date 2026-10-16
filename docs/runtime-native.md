@@ -1,7 +1,7 @@
 # Runtime comparison: replay and native prerequisites
 
 The optional `engine` feature consumes the public `mado-pilot` facade at
-`453132bcf4128c180dc0699dfccca5fe1f098164`. The harness uses no sibling path
+`db939f0905f0bff1a8185bef97e46d84b3571c80`. The harness uses no sibling path
 dependency, fake OCR backend, or substitute input route. macOS startup adds
 read-only Foundation/libproc lifetime checks during startup and exact bound-lifetime
 checks during execution; capture and input still use the public facade.
@@ -84,14 +84,15 @@ engine build, acquire the following separately; the harness downloads nothing:
 
 - Rust 1.98.1, the application's locked Git dependency, and a native C++ toolchain.
 - Apple Silicon macOS: Xcode Command Line Tools, OpenCV 4 development files, and
-  libclang. The pinned engine qualifies macOS 26 with deployment minimum 26.5.2;
-  it does not qualify macOS 27 automatically.
+  libclang. The deployment minimum remains 26.5.2. The pinned SDK distinguishes
+  historical macOS 26 evidence from its current macOS 27 CPU OCR cohort;
+  neither replaces this application's separate native capture/input acceptance.
 - Windows x64: an x64 MSVC developer shell, Windows SDK, OpenCV 4.14.0 development
   files/DLLs, and LLVM/libclang 22.1.8.
 - ONNX Runtime **1.29.0**, C API **17**, CPU provider. Supply the canonical regular
   file `libonnxruntime.1.29.0.dylib` on Apple Silicon or `onnxruntime.dll` on Windows.
   No `PATH` search, alternate runtime, accelerator preference, or fallback is used.
-- The accepted detector and recognizer below, under one canonical model root.
+- The chosen profile's complete model set below, including its required vocabulary asset.
 
 JavaScript and TypeScript execution also require the pinned Node.js **24.18.0**
 on an absolute `PATH` entry before launch. On Windows, the supervisor resolves
@@ -100,8 +101,8 @@ selected native-library directories; it does not widen that path for Node.
 Initialization-only environment checks do not compile or evaluate package
 modules and do not require Node.
 
-Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/453132bcf4128c180dc0699dfccca5fe1f098164/CONTRIBUTING.md#native-development-prerequisites)
-and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/453132bcf4128c180dc0699dfccca5fe1f098164/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
+Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/db939f0905f0bff1a8185bef97e46d84b3571c80/CONTRIBUTING.md#native-development-prerequisites)
+and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/db939f0905f0bff1a8185bef97e46d84b3571c80/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
 Its `tools/setup-native.py` configures only the command it launches; it installs
 nothing. A separately obtained, revision-pinned public checkout can provide that
 setup tool without becoming the application's dependency source. From this
@@ -160,33 +161,40 @@ command and do not qualify a native OS/workload.
 
 ### Accepted OCR content
 
-Both supported profiles use these exact Apache-2.0 model bytes. Desktop
-[OCR resource setup](desktop.md#save-and-check-an-ocr-environment) can download
-the shared set and the reviewed ONNX Runtime 1.29.0 archive, retain their required
-notices, and select each verified path in the settings draft independently.
-Manual acquisition through the pinned upstream procedure remains supported; do
-not rename arbitrary models to these paths. OpenCV installation stays external.
-Desktop can resolve its required library closure from explicit Homebrew locations
-or selected folders, but metadata checks do not prove that a particular OpenCV
-build matches the engine runner. Save and run the real engine Check or a
-saved-image Recognition trial for initialization evidence.
+The pinned SDK [model catalog](https://github.com/pashifika/mado-pilot/blob/db939f0905f0bff1a8185bef97e46d84b3571c80/crates/automation/ocr/resources/model-catalog.json)
+owns implemented profiles, exact model/vocabulary bytes, relative paths and
+acquisition sources. Desktop [OCR resource setup](desktop.md#save-and-check-an-ocr-environment)
+downloads the selected complete set and the reviewed ONNX Runtime 1.29.0 archive,
+retains notices, and selects verified paths in the draft independently.
+Manual acquisition remains supported; renaming arbitrary models does not admit
+them. Missing or changed vocabulary files are not a complete model installation.
 
-| Relative path under `model_root` | Bytes | SHA-256 |
-|---|---:|---|
-| `rapidocr-v3.9.2/ch_PP-OCRv4_det_mobile.onnx` | 4745517 | `d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9` |
-| `rapidocr-v3.9.2/PP-OCRv6_rec_small.onnx` | 21234383 | `6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884` |
+At this pin, `model` and `profile` have the same value, chosen from:
 
-Supported `model` and `profile` values must be equal and one of:
-
-- `g-004-rapidocr-ppocrv4-det-v6-rec-small-v1`
+- `g-004-rapidocr-ppocrv4-det-v6-rec-small-v1` (unchanged default)
 - `phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2`
+- `ppocrv6-tiny-det-small-rec-max736-v1`
+
+The two legacy profiles still share `rapidocr-v3.9.2/ch_PP-OCRv4_det_mobile.onnx`
+and `rapidocr-v3.9.2/PP-OCRv6_rec_small.onnx`, with unchanged installation identity.
+The new profile requires all three paths under its model root:
+
+- `huggingface/PaddlePaddle/PP-OCRv6_tiny_det_onnx/inference.onnx`
+- `huggingface/PaddlePaddle/PP-OCRv6_small_rec_onnx/inference.onnx`
+- `huggingface/PaddlePaddle/PP-OCRv6_small_rec_onnx/inference.yml`
 
 `language` is `horizontal-ja-basic-latin-ascii-digits-ui-symbols-v1`, `provider`
-is `cpu`, and `runtime_profile` is `onnxruntime-1.29.0-api17-cpu`. CoreML is not a
-supported alternative here; CUDA requires a different qualified configuration
-and is not enabled by this comparison. Unsupported choices fail rather than fall
-back. The facade validates the complete accepted model tuple and runtime API
-before publishing an engine.
+is `cpu`, and `runtime_profile` is `onnxruntime-1.29.0-api17-cpu`. Other providers
+are not enabled by this comparison. Unsupported tuples fail rather than fall
+back. The facade validates the complete model tuple and runtime API before
+publishing an engine.
+
+Recorded benchmark failures do not hide an implemented choice or change the
+legacy default. The desktop shows scoped per-rule results, not an aggregate
+quality or performance ranking; see [ADR 0011](adr/0011-ocr-model-choices-and-rule-results.md).
+File verification, model results and local initialization are separate facts.
+OpenCV installation stays external. Save and run the real engine Check with a
+recorded corpus or a saved-image Recognition trial for initialization evidence.
 
 ## Saved-image authoring trials
 

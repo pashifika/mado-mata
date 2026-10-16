@@ -522,7 +522,7 @@
     "active": "Another operation is in progress. Wait for its final result.",
     "introduction": "Machine-local, saved in App settings, never in portable profiles. Save validates settings structure; Check uses saved settings and the selected recorded corpus.",
     "settingsNotLoaded": "Settings not loaded",
-    "supportedProfile": "Supported OCR profile",
+    "model": "OCR model",
     "notConfigured": "Not configured",
     "modelRoot": "Model root directory",
     "modelPlaceholder": "Absolute path to the accepted model files",
@@ -549,10 +549,25 @@
     "reasonSeparator": "; ",
     "wait": "{reason} · Check waits until this command settles.",
     "unsupported": "Unsupported · {profile}",
-    "technicalHeading": "Profile technical details",
-    "profileLabels": {
-      "g-004-rapidocr-ppocrv4-det-v6-rec-small-v1": "Standard Japanese text recognition",
-      "phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2": "Bounded Japanese text recognition"
+    "technicalHeading": "Model details and recorded test results",
+    "preprocessing": "Preprocessing",
+    "modelFiles": "Model files",
+    "evaluationsHelp": "Results recorded by the SDK test report for each target and provider. They describe the measured build, not this machine, and do not rank models; failed or missing results never prevent choosing a model. Check saved environment initializes it on this machine.",
+    "noEvaluations": "No results are recorded for any target.",
+    "evaluationCount": "{passed}/{total} passed",
+    "thisMachine": "This machine",
+    "target": "Target",
+    "criteria": "Criteria",
+    "report": "Report",
+    "measuredRevision": "Measured source revision",
+    "executionDigest": "Execution descriptor SHA-256",
+    "evaluatorRevision": "Evaluator revision",
+    "noEvidence": "No verified evidence",
+    "outcomes": {
+      "passed": "Passed",
+      "failed": "Failed",
+      "not_run": "Not run",
+      "incomplete": "Incomplete"
     },
     "mismatch": "This desktop version does not support the saved combination ({model} / {language} / {provider} / {runtime}). Save replaces it with the supported combination shown above."
   },
@@ -603,8 +618,8 @@
     "nextModels": "Download the text recognition files, or Recheck to reuse a complete earlier download.",
     "nextRuntime": "Download the recognition engine, or Recheck to reuse a complete earlier download.",
     "nextNative": "Install the image-processing libraries using the instructions in Details, then find Homebrew or choose their installation folder.",
-    "nextProfile": "Choose a supported recognition profile below. Your existing unsupported profile has not been changed.",
-    "nextBlankProfile": "Recheck resources to select the default profile, or choose a supported profile below.",
+    "nextProfile": "Choose an available OCR model below. Your existing unavailable selection has not been changed.",
+    "nextBlankProfile": "Recheck resources to select the default OCR model, or choose an OCR model below.",
     "nextAttention": "Review the items needing attention and the error details, correct the installation choice, then Recheck resources.",
     "nextUnsupported": "Automatic image-processing setup is not supported on this platform. See Details for the supported platforms.",
     "paths": "View paths selected in the draft",
@@ -617,12 +632,12 @@
     "unknownState": "Status unavailable",
     "unknownStage": "Waiting for setup progress",
     "itemNames": {
-      "rapidocr-models": "Text recognition files",
+      "models": "Text recognition files",
       "onnxruntime": "Recognition engine",
       "native-libraries": "Image-processing libraries"
     },
     "itemHelp": {
-      "rapidocr-models": "Download the verified text recognition files.",
+      "models": "Download the verified text recognition files for the selected OCR model.",
       "onnxruntime": "Download the compatible recognition engine.",
       "native-libraries": "Choose where OpenCV is installed. Required libraries will be found automatically."
     },

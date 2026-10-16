@@ -4,7 +4,7 @@ import {readFile} from 'node:fs/promises';
 import {messages,renderMessage,LocalFault} from './i18n.ts';
 import {interpolate} from './i18n-format.ts';
 import {LANGUAGE_KEY_BYTES,canonicalLanguageKey,languageCandidates,languageKeyValid} from './i18n-language.ts';
-import {readDraft,readSettingsDraft,environmentDraft,DEFAULT_NOTIFICATIONS,SUPPORTED_PROFILES} from './state.ts';
+import {readDraft,readSettingsDraft,environmentDraft,DEFAULT_NOTIFICATIONS} from './state.ts';
 import {applyIfCurrent,bindSelection,editDraft,updateBound,viewLogs,workspaceFromView} from './workspace.ts';
 import {emptyStack,ingestCards,interactCard,tickCards} from './notifications.ts';
 
@@ -52,7 +52,8 @@ const adapterArguments = {
   'ui.settings.logLimitHelp': [[null],[1000]],
   'ui.environment.truncated': [[1],[2]], 'ui.environment.staleHelp': [[['reason-A','reason-B']]],
   'ui.environment.wait': [['reason-A']], 'ui.environment.unsupported': [['profile-A']],
-  'ui.environment.profileLabel': SUPPORTED_PROFILES.map(({profile})=>[profile]),
+  'ui.environment.evaluationCount': [[12,13],[0,13]],
+  'ui.environment.outcome': [['passed'],['failed'],['not_run'],['incomplete'],['future-outcome']],
   'ui.environment.mismatch': [['model-A','language-A','provider-A','runtime-A']],
   'ui.ocrSetup.state': [['missing'],['verified'],['manual'],['unsupported'],['future-state']],
   'ui.ocrSetup.stage': [['downloading'],['verifying'],['complete'],['cancelled'],['future-stage']],
@@ -233,14 +234,14 @@ for (const {scenario,input,value,invalid} of [
 test('draft locale and validation presentation do not implicitly change each other',()=>{
   const draft={locale:'ja',logLimit:'invalid',notifications:{...DEFAULT_NOTIFICATIONS},completionAutomatic:true,completionDelayMs:'100',captureCacheEnabled:false,environment:environmentDraft(null),backupDirectory:'',packagesRoot:''};
   const original=structuredClone(draft);
-  const en=readSettingsDraft(draft,'en');
-  const ja=readSettingsDraft(draft,'ja');
+  const en=readSettingsDraft(draft,null,'en');
+  const ja=readSettingsDraft(draft,null,'ja');
   assert.equal(en.settings,null);
   assert.equal(ja.settings,null);
   assert.deepEqual(Object.keys(ja.errors),['logLimit']);
   assert.notEqual(ja.errors.logLimit,en.errors.logLimit);
   assert.deepEqual(draft,original);
-  const saved=readSettingsDraft({...draft,logLimit:'123'},'en').settings;
+  const saved=readSettingsDraft({...draft,logLimit:'123'},null,'en').settings;
   assert.equal(saved.locale,'ja');
   assert.equal(saved.gui_log_limit,123);
 });
@@ -253,8 +254,8 @@ for (const {scenario,edit,field} of [
     const draft={locale:'ja',logLimit:'1000',notifications:{...DEFAULT_NOTIFICATIONS},completionAutomatic:true,completionDelayMs:'100',
       captureCacheEnabled:false,environment:environmentDraft(null),backupDirectory:'',packagesRoot:'',...edit};
     const original=structuredClone(draft);
-    const en=readSettingsDraft(draft,'en');
-    const ja=readSettingsDraft(draft,'ja');
+    const en=readSettingsDraft(draft,null,'en');
+    const ja=readSettingsDraft(draft,null,'ja');
     assert.equal(en.settings,null);
     assert.equal(ja.settings,null);
     assert.deepEqual(Object.keys(en.errors),[field]);

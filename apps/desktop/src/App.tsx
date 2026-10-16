@@ -41,6 +41,7 @@ import type {StatusItem} from './status.ts';
 import SavedWorkspacesDialog from './components/SavedWorkspacesDialog.tsx';
 import Select from './components/Select.tsx';
 import SettingsDialog from './settings/SettingsDialog.tsx';
+import {useOcrSetup} from './settings/useOcrSetup.ts';
 import PluginsDialog from './plugins/PluginsDialog.tsx';
 import {usePluginManagement} from './plugins/usePluginManagement.ts';
 import WorkspaceSwitcher from './components/WorkspaceSwitcher.tsx';
@@ -49,7 +50,7 @@ import {INITIAL_BOOTSTRAP, PollGate, initialSettings, reconstructed, recoveryBlo
 import type {Admission, BootstrapAction} from './bootstrap.ts';
 import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards} from './notifications.ts';
 import type {Card, CardStack} from './notifications.ts';
-import {DEFAULT_NOTIFICATIONS, acceptController, faultSummary, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, settingsDraftAfterSave, settingsDraftFrom, staleReasons, text} from './state.ts';
+import {DEFAULT_NOTIFICATIONS, acceptController, environmentDraft, faultSummary, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, settingsDraftAfterSave, settingsDraftFrom, staleReasons, text} from './state.ts';
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
 import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
@@ -2162,9 +2163,18 @@ export default function App() {
     };
   }
 
-  const envParsed = useMemo(() => readEnvironment(settingsDraft.environment, locale), [settingsDraft.environment, locale]);
-  const envDirty = Object.keys(envParsed.errors).length > 0 || !sameEnvironment(envParsed.environment, savedEnvironment);
-  const parsedSettings = useMemo(() => readSettingsDraft(settingsDraft, locale), [settingsDraft, locale]);
+  function editSettingsDraft(next: SettingsDraft) {
+    setSettingsDraft(next);
+    setSaveNotice(null);
+  }
+  // The dialog's setup session also supplies the SDK catalog that validates the environment draft.
+  const ocrSetup = useOcrSetup(dialogOpen, settingsDraft, editSettingsDraft);
+  const ocrProfiles = ocrSetup.state.view?.profiles ?? null;
+  const envParsed = useMemo(() => readEnvironment(settingsDraft.environment, ocrProfiles, locale), [settingsDraft.environment, ocrProfiles, locale]);
+  const envDirty = envParsed.pending
+    ? JSON.stringify(settingsDraft.environment) !== JSON.stringify(environmentDraft(savedEnvironment))
+    : Object.keys(envParsed.errors).length > 0 || !sameEnvironment(envParsed.environment, savedEnvironment);
+  const parsedSettings = useMemo(() => readSettingsDraft(settingsDraft, ocrProfiles, locale), [settingsDraft, ocrProfiles, locale]);
   const dialogDirty = settings === null || settingsDraft.locale !== settings.locale || settingsDraft.logLimit.trim() !== String(settings.gui_log_limit)
     || !sameNotifications(settingsDraft.notifications, settings.notifications) || settingsDraft.captureCacheEnabled !== settings.capture_cache_enabled
     || settingsDraft.completionAutomatic !== settings.editor_completion.automatic
@@ -2181,7 +2191,7 @@ export default function App() {
 
   // Check reads saved settings only; the association records exactly what the backend will read.
   async function checkEnvironment() {
-    if (hostCommand.current !== null || pickerRequest.current !== null || active || closing || envDirty || appBusy || leaseOwnerNow() !== null) return;
+    if (hostCommand.current !== null || pickerRequest.current !== null || active || closing || envDirty || envParsed.pending || appBusy || leaseOwnerNow() !== null) return;
     if (selected?.bound && derived[selected.id].descriptorError) {
       setDialogError({kind: 'check', value: new LocalFault({key: 'descriptorLimit', args: [DESCRIPTOR_LIMIT]})});
       return;
@@ -2995,7 +3005,7 @@ export default function App() {
       openCount={workspaces.length} savedCount={savedCount} onRefresh={() => void refreshSaved()} onReopen={name => void reopenWorkspace(name)} reopening={reopening} reopenError={reopenError}
       busyReason={appBusy === 'reopeningWorkspace' ? null : commandReason} strip={ordinaryStrip('saved')}
       authoring={compactAuthoring(() => {if (reopening === null) {setSavedOpen(false); returnToEdit();}}, true, reopening !== null)}/>
-    <SettingsDialog open={dialogOpen} onCancel={() => setDialogOpen(false)} settings={settings} draft={settingsDraft} onDraft={next => {setSettingsDraft(next); setSaveNotice(null);}}
+    <SettingsDialog open={dialogOpen} onCancel={() => setDialogOpen(false)} settings={settings} draft={settingsDraft} onDraft={editSettingsDraft} setup={ocrSetup}
       defaultPackagesRoot={defaultPackagesRoot}
       parsed={parsedSettings} dirty={dialogDirty} saving={appBusy === 'savingSettings'} busyReason={commandReason} saveError={dialogError?.kind === 'save' ? dialogError.value : null} saveNotice={renderMessage(locale, saveNotice)} onSave={() => void saveSettings()}
       envDirty={envDirty} active={active} pickerBusy={pickerBusy} target={checkTarget} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale} originLabel={labelOf}

@@ -117,17 +117,12 @@ pub(crate) fn execute(
             DURATION_MS.saturating_sub(control.elapsed_us() / 1000),
         )?;
         validate_ocr(&config, &control)?;
-        let profile = match config.ocr.profile.as_str() {
-            mp::ACCEPTED_G004_PROFILE_ID => mp::OcrProviderProfile::NativeG004,
-            mp::ACCEPTED_BOUNDED_PROFILE_ID => mp::OcrProviderProfile::BoundedDetector,
-            _ => return Err(blocked("ocr_unsupported", "unsupported OCR profile")),
-        };
-        let provider = mp::OcrProviderConfig::new(
-            profile,
-            mp::OcrExecutionProviderPolicy::Cpu,
+        let profile = mp::OcrProfileConfig::from_id(
+            &config.ocr.profile,
             &config.ocr.model_root,
             &config.ocr.runtime.path,
-        );
+        )
+        .map_err(|error| fault("ocr_unsupported", error))?;
         let descriptor = mp::FrameDescriptor::packed(
             mp::PixelExtent::new(request.width, request.height),
             mp::PixelFormat::Rgba8,
@@ -146,9 +141,9 @@ pub(crate) fn execute(
         let source = mp::replay::ReplaySource::from_targets(vec![target])
             .map_err(|error| fault("saved_frame", error.into()))?;
         engine = Some(
-            mp::replay_engine_with_ocr_provider(
+            mp::replay_engine_with_ocr_profile(
                 mp::ReplayEngineRequest::new(source),
-                &provider,
+                &profile,
                 &operation,
             )
             .map_err(|error| fault("backend_initialization", error))?,

@@ -1,5 +1,6 @@
 use super::*;
 use catalog::Asset;
+use mado_runtime_comparison::environment::{BOUNDED_PROFILE, G004_PROFILE};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Write};
@@ -8,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const CONTENT: &[u8] = b"deterministic model transfer fixture";
+const THIRD_PROFILE: &str = "ppocrv6-tiny-det-small-rec-max736-v1";
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -48,7 +50,11 @@ impl Drop for Fixture {
 }
 
 fn fixture_catalog() -> Catalog {
-    let mut catalog = Catalog::load().unwrap();
+    fixture_profile(DEFAULT_OCR_PROFILE_ID)
+}
+
+fn fixture_profile(profile: &str) -> Catalog {
+    let mut catalog = Catalog::for_profile(profile).unwrap();
     for asset in &mut catalog.models.assets {
         asset.bytes = CONTENT.len() as u64;
         asset.sha256 = format!("{:x}", Sha256::digest(CONTENT));
@@ -83,15 +89,16 @@ fn guidance_rejects_caller_selected_resources() {
 }
 
 #[test]
-fn catalog_transport_and_guidance_can_change_without_new_model_installations() {
+fn catalog_presentation_changes_do_not_create_new_model_installations() {
     let original = Catalog::load().unwrap();
     let mut changed = original.clone();
-    changed.models.assets[0].url = "https://example.com/reviewed-fixed-model.onnx".into();
     changed.platforms[0].native.commands = vec!["brew info opencv@4".into()];
     changed.models.name.en = "Updated model title".into();
     changed.validate().unwrap();
     assert_eq!(changed.installation_name(), original.installation_name());
     assert_eq!(changed.items()[0].name.en, "Updated model title");
+    changed.models.assets[0].url = "https://example.com/unreviewed-model.onnx".into();
+    assert!(changed.validate().is_err());
 }
 
 #[test]
@@ -103,9 +110,7 @@ fn catalog_refuses_unsupported_content_and_dependency_mapping() {
     catalog = original.clone();
     catalog.models.assets[1] = catalog.models.assets[0].clone();
     assert!(catalog.validate().is_err());
-    catalog = original.clone();
-    catalog.profiles[0] = "arbitrary-profile".into();
-    assert!(catalog.validate().is_err());
+    assert!(Catalog::for_profile("arbitrary-profile").is_err());
     catalog = original.clone();
     catalog.platforms[0].arch = "x86_64".into();
     assert!(catalog.validate().is_err());
@@ -113,7 +118,7 @@ fn catalog_refuses_unsupported_content_and_dependency_mapping() {
     catalog.platforms[0].native.required_modules.clear();
     assert!(catalog.validate().is_err());
     catalog = original;
-    catalog.models.license.clear();
+    catalog.models.assets[0].url.clear();
     assert!(catalog.validate().is_err());
 }
 
@@ -143,30 +148,312 @@ fn catalog_rejects_unsafe_destinations_and_non_https_sources() {
 
 #[test]
 fn partial_hints_keep_supported_profile_and_reject_nonblank_unsupported_tuple() {
-    let mut hints = proposed_tuple(None).unwrap();
-    hints.profile = BOUNDED_PROFILE.into();
-    hints.model = BOUNDED_PROFILE.into();
+    let mut hints = proposed_tuple(BOUNDED_PROFILE, None).unwrap();
     hints.model_root = "/missing-models".into();
     assert_eq!(
-        proposed_tuple(Some(&hints)).unwrap().profile,
+        proposed_tuple(BOUNDED_PROFILE, Some(&hints)).unwrap().profile,
         BOUNDED_PROFILE
     );
     hints.provider = "cuda".into();
-    assert!(proposed_tuple(Some(&hints)).is_err());
+    assert!(proposed_tuple(BOUNDED_PROFILE, Some(&hints)).is_err());
     hints.provider.clear();
     hints.profile = "custom-model".into();
-    assert!(proposed_tuple(Some(&hints)).is_err());
+    assert!(proposed_tuple(BOUNDED_PROFILE, Some(&hints)).is_err());
+    hints.profile.clear();
+    assert_eq!(proposed_tuple(BOUNDED_PROFILE, Some(&hints)).unwrap().profile, BOUNDED_PROFILE);
+    assert!(proposed_tuple("", None).is_err());
+    assert!(proposed_tuple("custom-model", None).is_err());
+}
+
+#[test]
+fn choices_preserve_failed_rules_and_their_target_scoped_evidence() {
+    let view = catalog_view().unwrap();
+    assert_eq!(view.default_profile, G004_PROFILE);
+    assert_eq!(view.profile, G004_PROFILE);
+    assert_eq!(view.target, OCR_TARGET);
+    for choice in &view.profiles {
+        assert!(view.items.iter().any(|item| item.id == choice.resource_id));
+        validate_request(choice.profile, &choice.resource_id, None).unwrap();
+    }
+    let third = view
+        .profiles
+        .iter()
+        .find(|choice| choice.profile == THIRD_PROFILE)
+        .unwrap();
+    let summary = |target| {
+        third.evaluations.iter().find(|entry| entry.target == target).unwrap()
+    };
+    let apple = summary("aarch64-apple-darwin");
+    let windows = summary("x86_64-pc-windows-msvc");
+    assert_eq!(apple.provider, PROVIDER);
+    assert_eq!(windows.provider, PROVIDER);
+    assert_eq!(apple.rules.len(), 13);
+    assert_eq!(windows.rules.len(), 13);
+    assert!(
+        apple.rules.iter().any(|rule| rule.rule_id == "text_order" && rule.outcome == "failed")
+    );
+    assert!(apple.rules.iter().any(|rule| {
+        rule.rule_id == "unexpected_detection" && rule.outcome == "passed"
+    }));
+    assert!(windows.rules.iter().any(|rule| {
+        rule.rule_id == "unexpected_detection" && rule.outcome == "failed"
+    }));
+    for scope in [apple, windows] {
+        let evidence = scope.evidence.as_ref().unwrap();
+        assert_eq!(scope.criteria, "tools/ocr-models/criteria-v1.json");
+        assert_eq!(
+            evidence.report,
+            "docs/benchmarks/ocr-models/cf2763a-evaluation-v1.json"
+        );
+        assert_eq!(
+            evidence.measured_source_revision,
+            "cf2763a41929ad89366dd77ee1b6a57503a8f6bc"
+        );
+        assert_eq!(
+            evidence.execution_sha256,
+            digest_hex(&ocr_profile(THIRD_PROFILE).unwrap().execution_sha256)
+        );
+        assert!(!evidence.evaluator_revision.is_empty());
+    }
+    let encoded = serde_json::to_value(third).unwrap();
+    assert_eq!(encoded["evaluations"][0]["rules"][0]["outcome"], "failed");
+    assert_eq!(
+        encoded["evaluations"][0]["evidence"]["execution_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+}
+
+#[test]
+fn released_profiles_share_the_original_installation_and_previous_receipt() {
+    let legacy = Catalog::for_profile(G004_PROFILE).unwrap();
+    let bounded = Catalog::for_profile(BOUNDED_PROFILE).unwrap();
+    assert_eq!(legacy.models.id, "rapidocr-models");
+    assert_eq!(bounded.models.id, legacy.models.id);
+    assert_eq!(
+        legacy.installation_name(),
+        "models-f0f4a0cd3d9469fa91038612e9da6813f7e2bb82bc0ba29cc7894280d019c4cb"
+    );
+    assert_eq!(bounded.installation_name(), legacy.installation_name());
+    assert_ne!(
+        Catalog::for_profile(THIRD_PROFILE).unwrap().installation_name(),
+        legacy.installation_name()
+    );
+
+    let fixture = Fixture::new();
+    let mut previous = fixture_profile(G004_PROFILE);
+    previous.engine_revision = "453132bcf4128c180dc0699dfccca5fe1f098164".into();
+    install(&fixture, &previous);
+    let path = fixture.installed(&previous).join("receipt.json");
+    let receipt = fs::read(&path).unwrap();
+    let bounded = fixture_profile(BOUNDED_PROFILE);
+    download::acquire_with(
+        &fixture.0,
+        &bounded,
+        &AtomicBool::new(false),
+        |_| {},
+        |_, _, _, _| panic!("shared models must not be fetched again"),
+    )
+    .unwrap();
+    assert_eq!(fs::read(path).unwrap(), receipt);
+    let view = inspect_with(&bounded, &fixture.0, None, None, &AtomicBool::new(false)).unwrap();
+    assert_eq!(view.profile, BOUNDED_PROFILE);
+    assert_eq!(view.resource_id, "rapidocr-models");
+    assert_eq!(
+        view.resolved.model_root.as_deref(),
+        fixture.installed(&bounded).to_str()
+    );
+}
+
+#[test]
+fn selected_profile_and_resource_must_agree_before_any_filesystem_action() {
+    let fixture = Fixture::new();
+    let third = Catalog::for_profile(THIRD_PROFILE).unwrap();
+    for (profile, resource) in [
+        ("", "rapidocr-models"),
+        ("unknown", "rapidocr-models"),
+        (THIRD_PROFILE, "rapidocr-models"),
+        (G004_PROFILE, third.models.id.as_str()),
+    ] {
+        assert!(
+            download(&fixture.0, profile, resource, &AtomicBool::new(false), |_| {}).is_err()
+        );
+        assert!(!fixture.0.join("ocr-resources").exists());
+    }
+    let hints = proposed_tuple(G004_PROFILE, None).unwrap();
+    assert!(
+        inspect(&fixture.0, THIRD_PROFILE, Some(&hints), None, &AtomicBool::new(false)).is_err()
+    );
+    assert!(!fixture.0.join("ocr-resources").exists());
+}
+
+#[test]
+fn auxiliary_failure_never_publishes_a_partial_set_or_changes_an_existing_set() {
+    let fixture = Fixture::new();
+    let legacy = fixture_catalog();
+    install(&fixture, &legacy);
+    let receipt = fs::read(fixture.installed(&legacy).join("receipt.json")).unwrap();
+    let third = fixture_profile(THIRD_PROFILE);
+    let auxiliary = third.profile.auxiliary.unwrap().relative_path;
+    let mut fetched = 0;
+    let error = download::acquire_with(
+        &fixture.0,
+        &third,
+        &AtomicBool::new(false),
+        |_| {},
+        |asset, output, cancel, report| {
+            fetched += 1;
+            if asset.path == auxiliary {
+                return Err(fault("download", "vocabulary transfer failed"));
+            }
+            fetch_fixture(asset, output, cancel, report)
+        },
+    )
+    .unwrap_err();
+    assert_eq!(fetched, 3);
+    assert_eq!(error.message, "vocabulary transfer failed");
+    assert!(!fixture.installed(&third).exists());
+    assert!(!fixture.staging().exists());
+    assert_eq!(
+        fs::read(fixture.installed(&legacy).join("receipt.json")).unwrap(),
+        receipt
+    );
+    files::models(&fixture.installed(&legacy), &legacy, &AtomicBool::new(false)).unwrap();
+}
+
+#[test]
+fn missing_or_tampered_auxiliary_refuses_reuse_and_manual_inspection_without_replacement() {
+    for missing in [true, false] {
+        let fixture = Fixture::new();
+        let catalog = fixture_profile(THIRD_PROFILE);
+        install(&fixture, &catalog);
+        let installed = fixture.installed(&catalog);
+        let sidecar = installed.join(catalog.profile.auxiliary.unwrap().relative_path);
+        let receipt = fs::read(installed.join("receipt.json")).unwrap();
+        if missing {
+            fs::remove_file(&sidecar).unwrap();
+        } else {
+            fs::write(&sidecar, vec![b'x'; CONTENT.len()]).unwrap();
+        }
+        let view = inspect_with(&catalog, &fixture.0, None, None, &AtomicBool::new(false)).unwrap();
+        assert_eq!(view.profile, THIRD_PROFILE);
+        assert_eq!(view.resource_id, catalog.models.id);
+        assert_eq!(
+            view.items[0].state,
+            if missing { "missing" } else { "incompatible" }
+        );
+        assert!(view.resolved.model_root.is_none());
+        assert!(view.environment.is_none());
+        assert!(
+            download::acquire_with(
+                &fixture.0,
+                &catalog,
+                &AtomicBool::new(false),
+                |_| {},
+                |_, _, _, _| panic!("invalid published resources must never be replaced"),
+            )
+            .is_err()
+        );
+        let mut hints = proposed_tuple(THIRD_PROFILE, None).unwrap();
+        hints.model_root = installed.to_str().unwrap().into();
+        let manual = inspect_with(
+            &catalog,
+            &fixture.0,
+            Some(&hints),
+            None,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(manual.resolved.model_root.is_none());
+        assert_eq!(fs::read(installed.join("receipt.json")).unwrap(), receipt);
+        if missing {
+            assert!(!sidecar.exists());
+        } else {
+            assert_eq!(fs::read(sidecar).unwrap(), vec![b'x'; CONTENT.len()]);
+        }
+    }
+}
+
+#[test]
+fn changed_staged_auxiliary_is_reverified_before_complete_set_publication() {
+    let fixture = Fixture::new();
+    let catalog = fixture_profile(THIRD_PROFILE);
+    let sidecar = fixture
+        .staging()
+        .join(catalog.profile.auxiliary.unwrap().relative_path);
+    let error = download::acquire_with(
+        &fixture.0,
+        &catalog,
+        &AtomicBool::new(false),
+        |progress| {
+            if progress.stage == "verifying" {
+                fs::write(&sidecar, vec![b'x'; CONTENT.len()]).unwrap();
+            }
+        },
+        fetch_fixture,
+    )
+    .unwrap_err();
+    assert_eq!(error.context["stage"], "integrity");
+    assert!(!fixture.installed(&catalog).exists());
+    assert!(!fixture.staging().exists());
+}
+
+#[test]
+fn explicit_profile_switch_recovers_only_known_interrupted_resources() {
+    let fixture = Fixture::new();
+    let legacy = fixture_catalog();
+    install(&fixture, &legacy);
+    let third = Catalog::for_profile(THIRD_PROFILE).unwrap();
+    let sidecar = fixture
+        .staging()
+        .join(third.profile.auxiliary.unwrap().relative_path);
+    fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+    fs::write(sidecar, b"incomplete vocabulary").unwrap();
+    drop(download::recover(&fixture.0, &legacy).unwrap());
+    assert!(!fixture.staging().exists());
+    files::models(&fixture.installed(&legacy), &legacy, &AtomicBool::new(false)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn exact_auxiliary_bytes_outside_the_model_root_are_not_adopted_through_a_symlink() {
+    let fixture = Fixture::new();
+    let catalog = fixture_profile(THIRD_PROFILE);
+    install(&fixture, &catalog);
+    let installed = fixture.installed(&catalog);
+    let sidecar = installed.join(catalog.profile.auxiliary.unwrap().relative_path);
+    let external = fixture.0.join("external-vocabulary.yml");
+    fs::write(&external, CONTENT).unwrap();
+    fs::remove_file(&sidecar).unwrap();
+    std::os::unix::fs::symlink(&external, &sidecar).unwrap();
+    let mut hints = proposed_tuple(THIRD_PROFILE, None).unwrap();
+    hints.model_root = installed.to_str().unwrap().into();
+    let view = inspect_with(
+        &catalog,
+        &fixture.0,
+        Some(&hints),
+        None,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(view.resolved.model_root.is_none());
+    assert_eq!(view.items[0].state, "incompatible");
+    assert_eq!(fs::read(external).unwrap(), CONTENT);
+    assert!(fs::symlink_metadata(sidecar).unwrap().file_type().is_symlink());
 }
 
 #[test]
 fn absent_resources_do_not_create_directories_or_propose_environment() {
     for fixture in [Fixture::new(), Fixture::relative()] {
-        let view = inspect(&fixture.0, None, None, &AtomicBool::new(false)).unwrap();
+        let view = inspect(&fixture.0, DEFAULT_OCR_PROFILE_ID, None, None, &AtomicBool::new(false)).unwrap();
         assert!(view.environment.is_none());
         assert_eq!(view.items[0].state, "missing");
         assert!(!fixture.0.join("ocr-resources").exists());
         let error = download(
             &fixture.0,
+            DEFAULT_OCR_PROFILE_ID,
             "https://caller.example/model",
             &AtomicBool::new(false),
             |_| {},
@@ -251,9 +538,11 @@ fn interrupted_network_and_write_errors_remain_primary_and_cleanup_staging() {
 
 #[test]
 fn cancellation_before_publication_removes_staging_but_after_commit_preserves_installation() {
-    for stage in ["downloading", "publishing", "complete"] {
+    for (profile, stage) in [G004_PROFILE, THIRD_PROFILE].into_iter().flat_map(|profile| {
+        ["downloading", "publishing", "complete"].map(|stage| (profile, stage))
+    }) {
         let fixture = Fixture::new();
-        let catalog = fixture_catalog();
+        let catalog = fixture_profile(profile);
         let cancel = AtomicBool::new(false);
         let result = download::acquire_with(
             &fixture.0,
@@ -269,6 +558,10 @@ fn cancellation_before_publication_removes_staging_but_after_commit_preserves_in
         if stage == "complete" {
             result.unwrap();
             assert!(fixture.installed(&catalog).is_dir());
+            let view = inspect_with(&catalog, &fixture.0, None, None, &AtomicBool::new(false)).unwrap();
+            assert_eq!(view.profile, profile);
+            assert_eq!(view.resource_id, catalog.models.id);
+            assert_eq!(view.resolved.model_root.as_deref(), fixture.installed(&catalog).to_str());
         } else {
             assert_eq!(result.unwrap_err().category, "OcrSetupCancelled");
             assert!(!fixture.installed(&catalog).exists());
@@ -527,7 +820,7 @@ fn native_recheck_refuses_missing_modules_and_wrong_cpu_without_loading() {
 #[test]
 fn recheck_returns_complete_draft_only_after_all_resources_resolve() {
     let fixture = Fixture::new();
-    let mut catalog = fixture_catalog();
+    let mut catalog = fixture_profile(BOUNDED_PROFILE);
     install(&fixture, &catalog);
     let platform = catalog
         .platforms
@@ -539,9 +832,7 @@ fn recheck_returns_complete_draft_only_after_all_resources_resolve() {
     fs::write(&runtime, &bytes).unwrap();
     platform.runtime.bytes = bytes.len() as u64;
     platform.runtime.sha256 = format!("{:x}", Sha256::digest(&bytes));
-    let mut hints = proposed_tuple(None).unwrap();
-    hints.profile = BOUNDED_PROFILE.into();
-    hints.model = BOUNDED_PROFILE.into();
+    let mut hints = proposed_tuple(BOUNDED_PROFILE, None).unwrap();
     hints.runtime_path = runtime.to_str().unwrap().into();
     for module in &platform.native.required_modules {
         let name = if platform.os == "macos" {
@@ -581,8 +872,8 @@ fn recheck_returns_complete_draft_only_after_all_resources_resolve() {
     .unwrap();
     assert!(result.environment.is_none());
     assert_eq!(result.items[0].state, "verified");
-    assert_eq!(result.items[1].state, "incompatible");
-    assert_eq!(result.items[2].state, "verified");
+    assert_eq!(result.items.iter().find(|item| item.id == "onnxruntime").unwrap().state, "incompatible");
+    assert_eq!(result.items.iter().find(|item| item.id == "native-libraries").unwrap().state, "verified");
 }
 
 #[test]
@@ -650,7 +941,7 @@ fn partial_hints_use_managed_models_but_never_override_an_explicit_model_root() 
     let fixture = Fixture::new();
     let catalog = fixture_catalog();
     install(&fixture, &catalog);
-    let mut hints = proposed_tuple(None).unwrap();
+    let mut hints = proposed_tuple(DEFAULT_OCR_PROFILE_ID, None).unwrap();
     let view = inspect_with(
         &catalog,
         &fixture.0,
@@ -703,7 +994,7 @@ fn relative_configuration_root_rechecks_managed_models_but_refuses_relative_manu
     assert!(view.resolved.runtime_path.is_none());
     assert!(view.resolved.native_library_paths.is_none());
 
-    let mut hints = proposed_tuple(None).unwrap();
+    let mut hints = proposed_tuple(DEFAULT_OCR_PROFILE_ID, None).unwrap();
     hints.model_root = fixture.installed(&catalog).to_str().unwrap().into();
     let view = inspect_with(&catalog, &fixture.0, Some(&hints), None, &cancel).unwrap();
     assert_eq!(view.items[0].state, "incompatible");
