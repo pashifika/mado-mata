@@ -116,9 +116,9 @@ export default function RunPage({workspace, label, derived, run, locked, active,
   ];
   // A directory source relocates through this path. An installed source reinspects by its saved identity, so the
   // path (which can still inspect another directory instead) stays among its collapsed details.
-  const pathField = <div className="field"><div className="field-heading"><label htmlFor="package-path">{t.guidance.packageDirectory}</label><HelpTrigger title={t.guidance.packageDirectory} hint={t.run.packageDirectoryHint}>{t.run.reinspectHelp}</HelpTrigger></div>
-    <input id="package-path" type="text" value={workspace.inspectPath} disabled={locked} spellCheck={false} placeholder={t.guidance.packagePlaceholder}
-      onChange={event => handlers.inspectPath(event.target.value)}/></div>;
+  const pathHeading = <div className="field-heading"><label htmlFor="package-path">{t.guidance.packageDirectory}</label><HelpTrigger title={t.guidance.packageDirectory} hint={t.run.packageDirectoryHint}>{t.run.reinspectHelp}</HelpTrigger></div>;
+  const pathInput = <input id="package-path" type="text" value={workspace.inspectPath} disabled={locked} spellCheck={false} placeholder={t.guidance.packagePlaceholder}
+    onChange={event => handlers.inspectPath(event.target.value)}/>;
   return <>
     <div className="page-heading"><div><span className="eyebrow">{t.run.heading(label)}</span><h1>{heading}<HelpTrigger title={t.run.heading(label)} hint={t.run.introductionHint}>{t.run.introduction}</HelpTrigger></h1></div></div>
     <div id="error">
@@ -153,25 +153,32 @@ export default function RunPage({workspace, label, derived, run, locked, active,
         <div className="panel-heading"><h2 id="config-heading">{t.run.configuration}</h2><span className="tag">{dirty ? t.common.unsavedChanges : t.run.savedValues}</span></div>
         <div className="panel-body">
           <section className="package-source" aria-labelledby="package-source-heading">
-            <div className="package-source-heading"><span id="package-source-heading" className="eyebrow">{t.run.sourceEyebrow}</span>
+            <div className="package-source-heading"><div className="package-source-title">
+              <span id="package-source-heading" className="eyebrow">{t.run.sourceEyebrow}</span>
+              {installed === null && <span className="tag package-source-kind">{t.run.directoryPackage}</span>}
+            </div>
               <div className="package-source-controls">
                 <div className="package-source-reinspect">{!confirmReinspect && <ButtonHint hint={t.run.reinspectHint}><button id="reinspect" ref={reinspectButton} disabled={locked || editOwner || starting || (run.live && busy(view.state)) || !reinspectable}
                   aria-describedby={pendingPath !== null ? 'package-source-pending' : undefined}
                   title={editOwner ? a.inspectBlocked : run.live && busy(view.state) ? t.run.reinspectBlocked : undefined} onClick={confirmedReinspect}>{t.run.reinspect}</button></ButtonHint>}</div>
                 <div className="package-source-change">{packageAction}</div>
-                {(editOwner || (installed === null && !confirmEdit)) && <div className="package-source-edit">
-                  {editOwner
-                    ? <button id="edit-package-return" type="button" onClick={authoring.onReturn}>{a.returnToEdit}</button>
-                    : <button id="edit-package" type="button" disabled={authoring.block !== null} title={authoring.block ?? undefined} onClick={confirmedEdit}>{a.editPackage}</button>}
-                </div>}
               </div></div>
-            <div className="package-source-facts">
-              <div className="package-source-identity">
-                <strong>{installed ? release ? t.packageLibrary.currentInstalled(release.name, release.release_version) : t.distribution.installedSource(bound.package.package_id)
-                  : t.reopen.directory(bound.package.package_id)}</strong>
-                <span className="tag">{t.run.inspected(workspace.revision)}</span></div>
-              {pendingPath !== null && <p id="package-source-pending" className="inline-warning">{t.run.pendingSource(pendingPath)}</p>}
-              {installed === null && pathField}
+            <div className="package-source-body">
+              <div className="package-source-facts">
+                <div className="package-source-identity">
+                  {installed
+                    ? <strong>{release ? t.packageLibrary.currentInstalled(release.name, release.release_version) : t.distribution.installedSource(bound.package.package_id)}</strong>
+                    : <strong>{bound.package.package_id}</strong>}
+                  <span className="tag">{t.run.inspected(workspace.revision)}</span></div>
+                {pendingPath !== null && <p id="package-source-pending" className="inline-warning">{t.run.pendingSource(pendingPath)}</p>}
+                {installed === null && <div className="field">{pathHeading}</div>}
+              </div>
+              {(editOwner || (installed === null && !confirmEdit)) && <div className="package-source-edit">
+                {editOwner
+                  ? <button id="edit-package-return" type="button" onClick={authoring.onReturn}>{a.returnToEdit}</button>
+                  : <button id="edit-package" type="button" disabled={authoring.block !== null} title={authoring.block ?? undefined} onClick={confirmedEdit}>{a.editPackage}</button>}
+              </div>}
+              {installed === null && <div className="package-source-path field">{pathInput}</div>}
             </div>
             {(confirmReinspect || confirmEdit) && <div className="package-source-actions">
               {confirmReinspect && <div ref={confirmRow} className="confirm-row" role="alertdialog" aria-labelledby="confirm-reinspect-text">
@@ -189,7 +196,7 @@ export default function RunPage({workspace, label, derived, run, locked, active,
                 <dt>{t.distribution.runtime}</dt><dd className="mono">{bound.package.runtime}</dd>
                 <dt>{t.run.sourceLocation}</dt><dd className="mono">{bound.packagePath}</dd>
                 {installed && <><dt>{t.distribution.artifact}</dt><dd id="run-installed-source" className="mono">{installed.artifact_id}</dd></>}</dl>
-              {installed !== null && pathField}
+              {installed !== null && <div className="field">{pathHeading}{pathInput}</div>}
             </details>
           </section>
           {bound.profilesError && <><FaultMessage title={t.run.profilesError} value={bound.profilesError}/>

@@ -73,7 +73,7 @@ function Evaluations({choice, target}: {choice: OcrProfileChoice; target: string
     {choice.evaluations.length === 0 && <p className="muted">{t.noEvaluations}</p>}
     {choice.evaluations.map(summary => <section key={`${summary.target}:${summary.provider}`} className="ocr-model-evaluation">
       <div className="section-heading"><strong>{summary.target} · {summary.provider}</strong>
-        {summary.target === target && summary.provider === choice.provider && <span className="tag">{t.thisMachine}</span>}</div>
+        {summary.target === target && summary.provider === choice.provider && <span className="tag">{t.thisPlatform}</span>}</div>
       <dl className="fixed-facts">
         <dt>{t.criteria}</dt><dd>{summary.criteria}</dd>
         <dt>{t.report}</dt><dd>{summary.evidence?.report ?? t.noEvidence}</dd>
@@ -127,7 +127,6 @@ export default function EnvironmentPanel(props: Props) {
     <div className="section-heading"><div><h3 id="environment-heading">{t.common.environment}</h3>
       <p className="muted">{t.environment.introduction}</p></div>
       <span className={`tag ${dirty ? 'unsaved' : ''}`}>{!loaded ? t.environment.settingsNotLoaded : dirty ? t.common.unsavedChanges : saved ? t.common.saved : t.common.unconfigured}</span></div>
-    <ResourceSetupPanel setup={setup} block={setupBlock}/>
     <div className="field"><label htmlFor="ocr-profile">{t.environment.model}</label>
       <Select id="ocr-profile" value={draft.profile} disabled={locked || view === null} aria-invalid={Boolean(errors.profile)} aria-describedby="ocr-model-tag-help"
         title={choices.find(choice => choice.value === draft.profile)?.title} onChange={value => onDraft(selectProfile(draft, value, view))}
@@ -152,6 +151,7 @@ export default function EnvironmentPanel(props: Props) {
         <Evaluations choice={supported} target={view.target}/>
       </> : <p className="muted">—</p>}
     </details>
+    <ResourceSetupPanel setup={setup} block={setupBlock}/>
     {saved && fixedMismatch && <p className="inline-warning">{t.environment.mismatch(saved.model, saved.language, saved.provider, saved.runtime_profile)}</p>}
     <details className="ocr-manual" open={fixedMismatch || Boolean((draft.model_root.trim() && errors.model_root) || (draft.runtime_path.trim() && errors.runtime_path) || (draft.library_paths.trim() && errors.library_paths))}>
       <summary>{t.environment.manualHeading}</summary>

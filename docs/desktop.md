@@ -708,9 +708,11 @@ The [format contract](runtime-comparison.md#signed-mmpkg-format) fixes its bound
 
 On Guidance, choose **Packages…** at the upper right. On Run, choose **Change…**
 inside **Package source**, immediately to the right of **Reinspect**.
-**Edit package** (or **Return to Edit** for its current owner) sits directly below
-**Change…**. The directory identity/status and **Package directory** field occupy
-a separate facts region; installed releases have no Edit action.
+Directory sources show a colored **SRC** tag immediately after the **Package
+source** heading, not before the package name. **Edit package** (or **Return to Edit** for its current owner)
+sits to the right, vertically centered on the identity/status and **Package
+directory** label, excluding the full-width path input below. There is no divider
+below the heading. Installed releases have no directory tag or Edit action.
 **Source details** discloses the location, runtime and artifact identity.
 Installed sources also keep directory replacement in those details. A pending
 replacement remains visible outside the collapsed details, so **Reinspect** never
@@ -2696,6 +2698,10 @@ they neither rank choices nor certify local setup. Failed rules do not hide an
 implemented model or change an existing saved selection. Opening settings does
 not run a benchmark; while metadata loads, an untouched saved environment remains
 clean and cannot be saved or checked against an unknown tuple.
+
+Model selection and its details appear before resource setup, so choose the model
+before downloading its files. **This platform / provider** marks matching recorded
+results, not a benchmark performed on this computer.
 
 Downloads are retained under `<data-dir>/ocr-resources/`, outside configuration
 snapshots, packages and profiles. **Cancel setup** requests cancellation; the
