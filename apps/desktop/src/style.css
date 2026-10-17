@@ -549,7 +549,7 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .package-validation > button { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .package-validation-collapsed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .package-validation-collapsed .package-validation { padding: 0; border: 0; }
-/* Script execution Setup: a compact single-column dialog; full setup lives in Run. */
+/* Script execution Run…: one compact column for routine execution and Native review; advanced setup lives in Run. */
 .trial-dialog { width: min(560px, calc(100vw - 30px)); }
 .trial-dialog-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .trial-dialog-title h2 { min-width: 0; overflow-wrap: anywhere; }
@@ -557,6 +557,23 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .trial-dialog .run-identity { margin-bottom: 8px; }
 .trial-links .link { padding: 0; }
 .trial-signature { margin: 8px 0 0; overflow-wrap: anywhere; font-size: 11px; }
+/* Arguments stay one summary line unless needed; the summary shows the current JSON without wrapping. */
+.trial-arguments { margin: -6px 0 12px; }
+.trial-arguments > summary { font-size: 11px; color: var(--text-muted); }
+.trial-arguments > summary code { display: inline-block; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; color: var(--text); }
+.trial-arguments .field { margin: 4px 0 0; }
+/* A missing prerequisite and its direct action share one row. */
+.trial-prerequisite { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
+.trial-prerequisite > span { flex: 1 1 220px; min-width: 0; }
+.trial-prerequisite button { flex-shrink: 0; margin: 0; }
+.trial-native-options { margin: 14px 0 8px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 11px; }
+.trial-native-options > summary { color: var(--text-muted); }
+.trial-native-options > summary .tag { margin-left: 6px; color: var(--warn); background: var(--warn-soft); }
+.trial-native-options .run-identity { margin-bottom: 8px; }
+#trial-confirmation h3 { margin: 0 0 12px; }
+#trial-confirmation details { margin: 8px 0; }
+#trial-confirmation pre { max-height: 180px; overflow: auto; }
+#trial-confirm-run { white-space: normal; }
 .execution-options { min-width: 0; margin: 0; padding: 0; border: 0; }
 .rail-missing { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
 .rail-missing h3 { margin: 4px 6px 2px; font-size: 11px; }

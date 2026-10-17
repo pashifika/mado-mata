@@ -1,16 +1,17 @@
 import type {AuthoringController, ExportTicket} from './authoring-controller.ts';
 import {draftList, sameAuthoringRef} from './authoring.ts';
 import type {AuthoringSession, SourceLocation} from './authoring.ts';
-import {defaultDraft, record} from './state.ts';
-import {clearNativeApproval} from './workspace.ts';
+import {record} from './state.ts';
+import {clearNativeApproval, deriveBound, newDraft} from './workspace.ts';
 import type {Bound} from './workspace.ts';
 import {readTarget, targetReadFailed, targetState} from './target.ts';
 import {mutatedRecovery, recoveryState, sameRecoveryContext, upsertOutcomes} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
-import type {AuthoringTrialContext, Fault, FunctionCandidate, Json, ProfileRecoveryOutcome, RecoveryMutation} from './types.ts';
+import type {AuthoringTrialContext, Fault, FunctionCandidate, Json, NativeCapability, OcrEnvironment, ProfileRecoveryOutcome, RecoveryMutation, StartRequest, TargetBinding} from './types.ts';
 
 export interface EditTrialState {
   context:AuthoringTrialContext; bound:Bound; unit:'package'|'function'; selected:string|null; arguments:string;
+  // Source binding for optional whole-package launch/recovery, never capture/input authority.
   profileChoice:string; review:ExportTicket|null;
   recovery:RecoveryState|null; recoveryOutcomes:ProfileRecoveryOutcome[];
 }
@@ -26,11 +27,12 @@ export function trialContext(context:AuthoringTrialContext, session:AuthoringSes
     profiles:context.profiles, profiles_error:context.profiles_error, package_path:session.packagePath,
     source:{kind:'directory' as const, path:session.packagePath}};
   const old = same ? previous.bound : null;
+  const preset = Object.hasOwn(context.package.profiles, 'default') ? 'default' : '';
   const base:Bound = old ? {...clearNativeApproval(old), package:context.package, profiles:context.profiles, profilesError:context.profiles_error}
-    : {packagePath:session.packagePath, package:context.package, profiles:context.profiles, profilesError:context.profiles_error,
-      selectedId:null, name:'', preset:'', draft:defaultDraft(context.package.schema), draftRevision:0,
-      lane:'controlled', scenario:'workflow', descriptorPath:'', touched:false, target:targetState(selection),
-      native:{operation:'', postcondition:'', workflowSeconds:null, capture:false, input:false, launch:false, recovery:false, key:null}};
+    : {...newDraft({packagePath:session.packagePath, package:context.package, profiles:context.profiles, profilesError:context.profiles_error,
+      selectedId:null, name:'', preset:'', draft:{}, draftRevision:0,
+      lane:context.package.target === null ? 'controlled' : 'native', scenario:'workflow', descriptorPath:'', touched:false, target:targetState(selection),
+      native:{operation:'', postcondition:'', workflowSeconds:null, capture:false, input:false, launch:false, recovery:false, key:null}}, preset), touched:false};
   const target = old && old.target.context.declaration_identity === context.package.target_identity ? old.target : targetState(selection);
   base.target = context.target ? readTarget(target, context.target)
     : context.target_error ? targetReadFailed(target, context.target_error) : target;
@@ -39,7 +41,7 @@ export function trialContext(context:AuthoringTrialContext, session:AuthoringSes
   const reviewCurrent = same && previous.context.revision === context.revision
     && previous.context.package.inventory_identity === context.package.inventory_identity;
   if (old && reviewCurrent) base.native = old.native;
-  let profileChoice = same ? previous.profileChoice : '';
+  let profileChoice = same ? previous.profileChoice : preset ? 'preset:default' : 'values';
   if (profileChoice.startsWith('profile:') && !context.profiles.some(profile => profile.id === profileChoice.slice(8))) profileChoice = '';
   if (profileChoice.startsWith('preset:') && !Object.hasOwn(context.package.profiles, profileChoice.slice(7))) profileChoice = '';
   return {context, bound:base, unit:same ? previous.unit : 'package', selected, arguments:same ? previous.arguments : '[]',
@@ -98,6 +100,99 @@ export function trialSourceTicket(controller:AuthoringController):ExportTicket|n
 export function currentTrialSource(controller:AuthoringController, ticket:ExportTicket):boolean {
   const session = controller.current();
   return session !== null && trialSourceBlock(session, false, true) === null && controller.exportCurrent(ticket);
+}
+
+export function trialRequest(state:EditTrialState, source:ExportTicket, environment:OcrEnvironment|null, capability:NativeCapability|null):{request:StartRequest; profileName:string}|null {
+  if (!sameAuthoringRef(state.context.owner, source.owner) || state.context.revision !== source.revision) return null;
+  const bound = state.bound;
+  const facts = deriveBound(bound, environment, 'en', capability, 'script');
+  const candidate = state.context.functions.find(item => functionKey(item) === state.selected);
+  const args = trialArguments(state.arguments, candidate?.required_arguments);
+  if (!state.profileChoice || !facts.bound || facts.numericErrors || facts.startBlock || facts.descriptorError
+    || (state.unit === 'function' && (!candidate || args.error))) return null;
+  const native = bound.lane === 'native' ? facts.native?.intent ?? null : null;
+  if (bound.lane === 'native' && native === null) return null;
+  const profile = facts.selectedProfile;
+  return {profileName:profile && !facts.valuesDirty ? profile.name : bound.name, request:{
+    package_path:bound.packagePath, inventory_identity:state.context.package.inventory_identity,
+    package_id:profile?.package_id ?? bound.package.package_id, schema_identity:profile?.schema_identity ?? bound.package.schema_identity,
+    profile_id:profile && !facts.valuesDirty ? profile.id : 'draft', values:facts.parsed.values,
+    lane:bound.lane, scenario:'workflow', replay_descriptor_path:bound.lane === 'replay' ? bound.descriptorPath.trim() || null : null,
+    native_intent:native && state.unit === 'function' ? {...native, launch_approved:false, max_exit_recoveries:0} : native,
+    function:state.unit === 'function' && candidate && args.values ? {module:candidate.module, function:candidate.function, arguments:args.values} : null,
+  }};
+}
+
+export interface TrialConfirmation {
+  source:ExportTicket; request:StartRequest; profileName:string; target:TargetBinding; environment:OcrEnvironment;
+}
+interface ConfirmationContext {
+  controller:AuthoringController; state:EditTrialState|null; environment:OcrEnvironment|null; capability:NativeCapability|null; generation:number;
+}
+
+function confirmationKey(state:EditTrialState, request:StartRequest, context:ConfirmationContext):string {
+  const bound = state.bound;
+  return JSON.stringify([context.generation, request, context.environment, context.capability, state.context.owner, state.context.revision,
+    state.unit, state.selected, state.arguments, state.profileChoice, state.context.functions,
+    bound.draftRevision, bound.draft, bound.name, bound.preset, bound.profiles.find(profile => profile.id === bound.selectedId),
+    bound.target.context, bound.target.draftRevision, bound.target.view?.record, bound.native.workflowSeconds,
+    bound.native.launch, bound.native.recovery, bound.native.key]);
+}
+
+// One displayed capture, one confirmation attempt, one final admission after the saved context reread.
+// A refreshed target can invalidate this capture; it can never replace what the operator confirmed.
+export class TrialConfirmationGate {
+  #pending:{capture:TrialConfirmation; key:string}|null = null;
+  #preparing:{capture:TrialConfirmation; key:string}|null = null;
+
+  open(context:ConfirmationContext):TrialConfirmation|null {
+    this.cancel();
+    const {state, controller, environment, capability} = context;
+    const source = trialSourceTicket(controller);
+    if (!state || !source || state.bound.lane !== 'native' || !environment
+      || ((state.bound.native.launch || state.bound.native.recovery) && (!state.review || !currentTrialSource(controller, state.review)))) return null;
+    const prepared = trialRequest(state, source, environment, capability);
+    const target = state.bound.target.view?.record.binding;
+    if (!prepared || !target) return null;
+    // Detach all display and request data from mutable drafts and later host replies.
+    const capture = structuredClone({...prepared, source, target, environment});
+    this.#pending = {capture, key:confirmationKey(state, prepared.request, context)};
+    return capture;
+  }
+
+  current(capture:TrialConfirmation, context:ConfirmationContext):boolean {
+    return this.#pending?.capture === capture && this.#matches(this.#pending, context);
+  }
+
+  consume(capture:TrialConfirmation, context:ConfirmationContext):boolean {
+    const pending = this.#pending;
+    this.#pending = null;
+    if (!pending || pending.capture !== capture || !this.#matches(pending, context)) return false;
+    this.#preparing = pending;
+    return true;
+  }
+
+  dispatch(capture:TrialConfirmation, context:ConfirmationContext):StartRequest|null {
+    const preparing = this.#preparing;
+    this.#preparing = null;
+    if (!preparing || preparing.capture !== capture || !this.#matches(preparing, context)) return null;
+    const request = structuredClone(preparing.capture.request);
+    if (!request.native_intent || request.native_intent.review.kind !== 'script') return null;
+    request.native_intent.capture_approved = true;
+    request.native_intent.input_approved = true;
+    return request;
+  }
+
+  cancel():void {
+    this.#pending = null;
+    this.#preparing = null;
+  }
+
+  #matches(review:{capture:TrialConfirmation; key:string}, context:ConfirmationContext):boolean {
+    if (!context.state || !currentTrialSource(context.controller, review.capture.source)) return false;
+    const prepared = trialRequest(context.state, review.capture.source, context.environment, context.capability);
+    return prepared !== null && review.key === confirmationKey(context.state, prepared.request, context);
+  }
 }
 
 // Match saved validation's compiler envelope, retaining only source facts for navigation.

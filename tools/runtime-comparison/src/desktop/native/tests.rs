@@ -16,9 +16,65 @@ fn intent() -> NativeIntent {
         input_approved: true,
         launch_approved: false,
         max_exit_recoveries: 0,
-        operation: "Submit the reviewed package action once".into(),
-        visible_postcondition: "The selected result is visible".into(),
+        review: NativeReview::Operation {
+            operation: "Submit the reviewed package action once".into(),
+            visible_postcondition: "The selected result is visible".into(),
+        },
         limits: native_limits(),
+    }
+}
+
+#[test]
+fn native_review_wire_requires_one_explicit_mode_without_legacy_prose() {
+    let mut raw = serde_json::to_value(intent()).unwrap();
+    assert_eq!(raw["review"]["kind"], "operation");
+    assert!(raw.get("operation").is_none());
+    assert!(raw.get("visible_postcondition").is_none());
+    raw["review"] = json!({"kind":"script"});
+    let selected: NativeIntent = serde_json::from_value(raw.clone()).unwrap();
+    assert!(matches!(selected.review, NativeReview::Script {}));
+    validate_intent(&selected).unwrap();
+    assert_eq!(serde_json::to_value(selected).unwrap(), raw);
+    for invalid in [
+        Value::Null,
+        json!({}),
+        json!({"kind":"unknown"}),
+        json!({"kind":"operation","operation":"Click once"}),
+        json!({"kind":"script","operation":"Click once"}),
+        json!({"kind":"script","visible_postcondition":"A label changes"}),
+    ] {
+        let mut changed = raw.clone();
+        changed["review"] = invalid;
+        assert!(serde_json::from_value::<NativeIntent>(changed).is_err());
+    }
+    raw.as_object_mut().unwrap().remove("review");
+    assert!(serde_json::from_value::<NativeIntent>(raw.clone()).is_err());
+    raw["operation"] = json!("Click once");
+    raw["visible_postcondition"] = json!("A label changes");
+    assert!(serde_json::from_value::<NativeIntent>(raw).is_err());
+}
+
+#[test]
+fn saved_script_review_does_not_replace_target_permissions_or_finite_limits() {
+    let mut selected = intent();
+    selected.review = NativeReview::Script {};
+    validate_intent(&selected).unwrap();
+    for (pointer, invalid) in [
+        ("/target_revision", json!(0)),
+        ("/target_binding_id", json!("")),
+        ("/target_declaration_identity", json!("")),
+        ("/capture_approved", json!(false)),
+        ("/input_approved", json!(false)),
+        ("/limits/workflow_ms", json!(0)),
+        ("/limits/max_actions", json!(0)),
+    ] {
+        let mut raw = serde_json::to_value(&selected).unwrap();
+        *raw.pointer_mut(pointer).unwrap() = invalid;
+        let invalid = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            validate_intent(&invalid).unwrap_err().category,
+            "NativeRefused"
+        );
     }
 }
 
@@ -90,18 +146,18 @@ fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
         assert_eq!(fault.category, "NativeRefused");
         assert!(controller.poll().run.is_none());
     };
-    for (field, invalid) in [
-        ("target_revision", json!(0)),
-        ("target_binding_id", json!("")),
-        ("target_declaration_identity", json!("\n")),
-        ("capture_approved", json!(false)),
-        ("input_approved", json!(false)),
-        ("operation", json!("  ")),
-        ("operation", json!("x".repeat(4097))),
-        ("visible_postcondition", json!("line\nbreak")),
+    for (pointer, invalid) in [
+        ("/target_revision", json!(0)),
+        ("/target_binding_id", json!("")),
+        ("/target_declaration_identity", json!("\n")),
+        ("/capture_approved", json!(false)),
+        ("/input_approved", json!(false)),
+        ("/review/operation", json!("  ")),
+        ("/review/operation", json!("x".repeat(4097))),
+        ("/review/visible_postcondition", json!("line\nbreak")),
     ] {
         let mut raw = serde_json::to_value(intent()).unwrap();
-        raw[field] = invalid;
+        *raw.pointer_mut(pointer).unwrap() = invalid;
         let invalid = serde_json::from_value(raw).unwrap();
         refused_before_effects(invalid);
     }
@@ -164,7 +220,12 @@ fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
 fn native_ipc_rejects_authority_injection_at_every_typed_level() {
     let mut request = request(&fixture());
     request.native_intent = Some(intent());
-    for parent in ["", "/native_intent", "/native_intent/limits"] {
+    for parent in [
+        "",
+        "/native_intent",
+        "/native_intent/review",
+        "/native_intent/limits",
+    ] {
         for field in [
             "executable",
             "process_id",
@@ -312,8 +373,14 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
         })
     );
     let inventory = authored_inventory();
-    for (workflow_ms, total_ms) in [(30_000, 120_000), (900_000, 990_000)] {
+    for (workflow_ms, total_ms, review) in [
+        (30_000, 120_000, intent().review),
+        (900_000, 990_000, intent().review),
+        (30_000, 120_000, NativeReview::Script {}),
+        (900_000, 990_000, NativeReview::Script {}),
+    ] {
         let mut selected = intent();
+        selected.review = review;
         selected.limits = capability.default_limits.clone();
         selected.limits.workflow_ms = workflow_ms;
         let mut request = request(&inventory);
@@ -362,9 +429,12 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
         );
         assert_eq!(native["input"]["click_hold_ms"], 50);
         assert_eq!(
-            native["input"]["reviewed_operation"],
-            request.native_intent.as_ref().unwrap().operation
+            native["review"],
+            serde_json::to_value(&request.native_intent.as_ref().unwrap().review).unwrap()
         );
+        assert_eq!(native["input"]["package_approved"], true);
+        assert!(native["input"].get("reviewed_operation").is_none());
+        assert!(native.get("visible_postcondition").is_none());
         assert!(native["input"].get("representative_actions").is_none());
         assert!(native["geometry"].is_null());
         assert_eq!(
@@ -401,6 +471,7 @@ fn native_admission_reserves_selected_duration_before_preparation() {
         let mut request = request(&fixture());
         request.lane = "native".into();
         let mut selected = intent();
+        selected.review = NativeReview::Script {};
         selected.limits.workflow_ms = workflow_ms;
         selected.max_exit_recoveries = recoveries;
         selected.launch_approved = recoveries == 1;
@@ -544,6 +615,7 @@ fn function_requests_reject_launch_recovery_and_controlled_scenarios() {
     request.lane = "native".into();
     for (launch_approved, max_exit_recoveries) in [(true, 0), (true, 1), (false, 1)] {
         let mut review = intent();
+        review.review = NativeReview::Script {};
         review.launch_approved = launch_approved;
         review.max_exit_recoveries = max_exit_recoveries;
         request.native_intent = Some(review);

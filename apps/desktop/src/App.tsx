@@ -34,8 +34,8 @@ import ResultPanel, {FaultMessage, fault} from './components/ResultPanel.tsx';
 import EditTrial from './components/EditTrial.tsx';
 import EditExecutionSetup from './components/EditExecutionSetup.tsx';
 import type {EditTrialHandlers} from './components/EditTrial.tsx';
-import {applyTrialRecovery, currentTrialSource, functionKey, trialArguments, trialContext, trialDiagnosticLocation, trialSourceBlock, trialSourceTicket} from './edit-trial.ts';
-import type {EditTrialState} from './edit-trial.ts';
+import {applyTrialRecovery, currentTrialSource, trialContext, trialDiagnosticLocation, trialRequest, trialSourceBlock, trialSourceTicket, TrialConfirmationGate} from './edit-trial.ts';
+import type {EditTrialState, TrialConfirmation} from './edit-trial.ts';
 import RunPage from './pages/RunPage.tsx';
 import type {RunHandlers} from './pages/RunPage.tsx';
 import ExecutionPage from './pages/ExecutionPage.tsx';
@@ -147,6 +147,8 @@ export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   // One host read of the platform's Native policy; until it answers Native stays unavailable.
   const [nativeCapability, setNativeCapability] = useState<{policy: NativeCapability | null; error: Fault | null}>({policy: null, error: null});
+  const knownNativeCapability = useRef<NativeCapability|null>(null);
+  knownNativeCapability.current = nativeCapability.policy;
   // Saved settings win once loaded; before that the temporary bootstrap presentation applies and persists nothing.
   const locale = settings?.locale ?? bootstrap.presentation;
   const t = messages[locale].app;
@@ -186,8 +188,13 @@ export default function App() {
   const [authoring, setAuthoring] = useState<AuthoringSession | null>(null);
   const [authoringController] = useState(() => new AuthoringController(setAuthoring));
   const [editTrial, setEditTrial] = useState<EditTrialState|null>(null);
+  const [trialDialogOwner, setTrialDialogOwner] = useState<string|null>(null);
+  const trialSettingsOwner = useRef<string|null>(null);
+  const [settingsInitialCategory, setSettingsInitialCategory] = useState<'environment'|undefined>();
   const editTrialRef = useRef<EditTrialState|null>(null);
   const trialGeneration = useRef(0);
+  const [trialConfirmationGate] = useState(() => new TrialConfirmationGate());
+  const [trialConfirmation, setTrialConfirmation] = useState<TrialConfirmation|null>(null);
   const [trialError, setTrialError] = useState<{fault:Fault; owner:AuthoringRef; revision:string; source:ExportTicket|null}|null>(null);
   const [trialNotice, setTrialNotice] = useState<'changed'|'selectAgain'|'savedReview'|null>(null);
   const [collaboration] = useState(() => new CollaborationBridge({invoke, listen}));
@@ -346,6 +353,7 @@ export default function App() {
       authoringController.update(session => session?.recognition
         ? {...session, recognition: recognition.invalidateConfiguration(session.recognition)} : session);
       // A Native approval covered the environment it was given for, even if an identical one returns later.
+      cancelTrialConfirmation();
       setWorkspaces(list => list.map(item => updateBound(item, clearNativeApproval)));
       if (editTrialRef.current) publishTrial({...editTrialRef.current, bound:clearNativeApproval(editTrialRef.current.bound), review:null});
     }
@@ -566,7 +574,10 @@ export default function App() {
   }, [menuOpen]);
 
   function go(next: Nav) {
-    if (nav.kind === 'workspace' && (next.kind !== 'workspace' || next.id !== nav.id)) invalidateOwnerTarget(nav.id);
+    if (nav.kind === 'workspace' && (next.kind !== 'workspace' || next.id !== nav.id)) {
+      dismissTrialConfirmation();
+      invalidateOwnerTarget(nav.id);
+    }
     setReveal(null);
     setPendingClose(null);
     setClosedDisclosed(false);
@@ -1061,6 +1072,23 @@ export default function App() {
     go({kind: 'workspace', id});
   }
 
+  function trialConfirmationContext() {
+    return {controller:authoringController, state:editTrialRef.current, environment:knownOcrEnvironment.current,
+      capability:knownNativeCapability.current, generation:trialGeneration.current};
+  }
+
+  function cancelTrialConfirmation() {
+    trialConfirmationGate.cancel();
+    setTrialConfirmation(null);
+    trialGeneration.current += 1;
+  }
+
+  function dismissTrialConfirmation() {
+    cancelTrialConfirmation();
+    const current = editTrialRef.current;
+    if (current) publishTrial({...current, bound:clearNativeApproval(current.bound), review:null});
+  }
+
   function publishTrial(next:EditTrialState|null) {
     editTrialRef.current = next;
     setEditTrial(next);
@@ -1070,7 +1098,7 @@ export default function App() {
     const current = editTrialRef.current;
     if (!current || active || closing || hostCommand.current !== null) return;
     const next = update(current);
-    trialGeneration.current += 1;
+    cancelTrialConfirmation();
     publishTrial({...next, bound:clearNativeApproval(next.bound), review:null});
     setTrialNotice(null);
     setTrialError(null);
@@ -1105,10 +1133,27 @@ export default function App() {
   }
 
   useEffect(() => {
+    cancelTrialConfirmation();
     publishTrial(null);
     setTrialError(null);
     setTrialNotice(null);
+    setTrialDialogOwner(null);
+    trialSettingsOwner.current = null;
   }, [authoring?.owner.token]);
+
+  useEffect(() => {
+    if (trialDialogOwner !== null && (selected?.page !== 'edit' || selected.id !== authoring?.owner.workspace.workspace_id || dialogOpen)) {
+      dismissTrialConfirmation();
+      setTrialDialogOwner(null);
+    }
+  }, [selected?.id, selected?.page, dialogOpen, authoring?.owner.token, trialDialogOwner]);
+
+  useEffect(() => {
+    if (trialConfirmation && (leaseLost || !trialConfirmationGate.current(trialConfirmation, trialConfirmationContext()))) {
+      cancelTrialConfirmation();
+      setTrialNotice('changed');
+    }
+  }, [authoring, leaseLost, editTrial, savedEnvironment, nativeCapability.policy, trialConfirmation]);
 
   useEffect(() => {
     const current = editTrialRef.current;
@@ -1117,7 +1162,7 @@ export default function App() {
     }
   }, [authoring, leaseLost]);
 
-  async function startTrial() {
+  async function startTrial(confirmation:TrialConfirmation|null = null) {
     let session = authoringController.current();
     const initial = editTrialRef.current;
     if (!session || !initial || !sameAuthoringRef(session.owner, initial.context.owner) || active || closing || leaseLost
@@ -1127,6 +1172,14 @@ export default function App() {
     if (trialSourceBlock(session, false) !== null) return;
     setTrialNotice(null);
     setTrialError(null);
+    // Capture exactly what Run displayed, before any host reread can refresh its target or saved setup.
+    if (!confirmation && !dirty && initial.bound.lane === 'native') {
+      const capture = trialConfirmationGate.open(trialConfirmationContext());
+      setTrialConfirmation(capture);
+      if (!capture) setTrialNotice('changed');
+      return;
+    }
+    if (confirmation && dirty) {setTrialNotice('changed'); return;}
     if (dirty) {
       const saved = await saveAll();
       if (saved.failure !== null || saved.remaining.length > 0) return;
@@ -1136,7 +1189,7 @@ export default function App() {
         if (draft.text !== null && current.drafts.get(path)?.revision !== draft.revision) {setTrialNotice('changed'); return;}
       }
     }
-    const source = trialSourceTicket(authoringController);
+    const source = confirmation?.source ?? trialSourceTicket(authoringController);
     if (!source || generation !== trialGeneration.current) {setTrialNotice('changed'); return;}
     const setup = await readTrialContext();
     if (!setup) return;
@@ -1145,42 +1198,32 @@ export default function App() {
     if (!session) return;
     if (setup.unit === 'function' && setup.selected === null) {setTrialNotice('selectAgain'); return;}
     if (dirty && setup.bound.lane === 'native') {setTrialNotice('savedReview'); return;}
-    const facts = deriveBound(setup.bound, knownOcrEnvironment.current, locale, nativeCapability.policy);
-    const candidate = setup.context.functions.find(item => functionKey(item) === setup.selected);
-    const argumentsResult = trialArguments(setup.arguments, candidate?.required_arguments);
-    if (!setup.profileChoice || !facts.bound || facts.numericErrors || facts.startBlock || facts.descriptorError
-      || (setup.unit === 'function' && (!candidate || argumentsResult.error))) return;
-    const native = setup.bound.lane === 'native' ? facts.native?.intent ?? null : null;
-    if (setup.bound.lane === 'native' && (!native || !setup.review || !currentTrialSource(authoringController, setup.review))) {
-      setTrialNotice('savedReview'); return;
-    }
-    const profile = facts.selectedProfile;
-    const functionInvocation = setup.unit === 'function' && candidate && argumentsResult.values
-      ? {module:candidate.module, function:candidate.function, arguments:argumentsResult.values} : null;
-    const request:StartRequest = {
-      package_path:session.packagePath, inventory_identity:setup.context.package.inventory_identity,
-      package_id:profile?.package_id ?? session.packageId, schema_identity:profile?.schema_identity ?? setup.context.package.schema_identity,
-      profile_id:profile && !facts.valuesDirty ? profile.id : 'draft', values:facts.parsed.values,
-      lane:setup.bound.lane, scenario:'workflow', replay_descriptor_path:setup.bound.lane === 'replay' ? setup.bound.descriptorPath.trim() || null : null,
-      native_intent:native && setup.unit === 'function' ? {...native, launch_approved:false, max_exit_recoveries:0} : native,
-      function:functionInvocation,
-    };
-    if (!currentTrialSource(authoringController, source) || generation !== trialGeneration.current) {setTrialNotice('changed'); return;}
+    const prepared = trialRequest(setup, source, knownOcrEnvironment.current, knownNativeCapability.current);
+    if (!prepared) {if (confirmation) setTrialNotice('changed'); return;}
+    const request = confirmation ? trialConfirmationGate.dispatch(confirmation, trialConfirmationContext()) : prepared.request;
+    if (!request || (request.lane === 'native' && !confirmation)) {setTrialNotice('changed'); return;}
+    if (!currentTrialSource(authoringController, source) || generation !== trialGeneration.current || resolvingAuthoring.current
+      || (hostAuthoringRef.current !== undefined && !sameAuthoringRef(hostAuthoringRef.current, source.owner))
+      || nativeSelectionRef.current?.occupied || nativeSelectionRef.current?.busy) {setTrialNotice('changed'); return;}
     const owner = session.owner;
+    const profileName = confirmation?.profileName ?? prepared.profileName;
     publishTrial({...setup, bound:clearNativeApproval(setup.bound), review:null});
     authoringController.update(current => current && sameAuthoringRef(current.owner, owner) ? beginPending(current, {kind:'script_trial'}) : current);
     startInFlight.current = true;
     epoch.current += 1;
-    setStarting({workspaceId:owner.workspace.workspace_id, kind:'run'});
-    setStripMessage(null);
+    // Close only after final authority validation; Stop then moves from the dialog to the main window.
+    flushSync(() => {
+      setTrialDialogOwner(null);
+      setStarting({workspaceId:owner.workspace.workspace_id, kind:'run'});
+      setStripMessage(null);
+    });
     try {
       const run = await authoringCall('admittingRun', () => invoke<string>('authoring_trial_start', {owner, revision:source.revision, request}));
       if (!sameAuthoringRef(authoringController.current()?.owner, owner)) return;
       expectedRun.current = run;
       setOperation({run, kind:'run', workspace:owner.workspace, snapshot:{kind:'run', run, lane:request.lane,
-        packageId:request.package_id, profileName:profile && !facts.valuesDirty ? profile.name : setup.bound.name,
-        profileId:request.profile_id, scenario:request.scenario, descriptorPath:request.replay_descriptor_path,
-        values:request.values, native:request.native_intent, trial:{source, invocation:functionInvocation}}});
+        packageId:request.package_id, profileName, profileId:request.profile_id, scenario:request.scenario, descriptorPath:request.replay_descriptor_path,
+        values:request.values, native:request.native_intent, trial:{source, invocation:request.function}}});
       setView({...idle, run, state:'preparing', operation:'authoring_trial', workspace_id:owner.workspace.workspace_id, workspace_revision:owner.workspace.revision});
     } catch (cause) {
       if (sameAuthoringRef(authoringController.current()?.owner, owner)) setTrialError({fault:fault(cause), owner, revision:source.revision, source});
@@ -1196,6 +1239,7 @@ export default function App() {
   function updateTrialTarget(owner:AuthoringRef, update:(state:TargetState)=>TargetState) {
     const current = editTrialRef.current;
     if (!current || !sameAuthoringRef(current.context.owner, owner)) return;
+    cancelTrialConfirmation();
     publishTrial({...current, bound:clearNativeApproval({...current.bound, target:update(current.bound.target)}), review:null});
   }
 
@@ -1337,16 +1381,42 @@ export default function App() {
     };
   }
 
+  function returnToTrial() {
+    const owner = authoringController.current()?.owner;
+    if (!owner) return;
+    returnToEdit();
+    setTrialDialogOwner(owner.token);
+  }
+
   const trialHandlers:EditTrialHandlers = {
     change:editTrialSetup,
     bound:update => editTrialSetup(state => ({...state, bound:update(state.bound)})),
-    reload:() => {void ownAuthoringWorker(readTrialContext);},
+    reload:() => {dismissTrialConfirmation(); void ownAuthoringWorker(readTrialContext);},
     run:() => {void ownAuthoringWorker(startTrial);},
-    setup:() => {
+    confirm:capture => {
+      const approved = trialConfirmationGate.consume(capture, trialConfirmationContext());
+      setTrialConfirmation(null);
+      if (!approved || authoringWorker.current !== null) {
+        dismissTrialConfirmation();
+        setTrialNotice('changed');
+        return;
+      }
+      void ownAuthoringWorker(() => startTrial(capture)).finally(dismissTrialConfirmation);
+    },
+    cancelConfirmation:dismissTrialConfirmation,
+    setup:section => {
       const owner = authoringController.current()?.owner.workspace.workspace_id;
       if (!owner) return;
       change(owner, item => ({...item, page:'run'}));
-      requestAnimationFrame(() => document.getElementById('edit-execution-setup-heading')?.focus());
+      requestAnimationFrame(() => document.getElementById(section === 'target' ? 'target-heading'
+        : section === 'values' ? 'trial-profile' : 'edit-execution-setup-heading')?.focus());
+    },
+    environment:() => {
+      const owner = authoringController.current()?.owner;
+      if (!owner || settings === null || !normalReady) return;
+      openSettings();
+      trialSettingsOwner.current = owner.token;
+      setSettingsInitialCategory('environment');
     },
     results:() => {
       const owner = authoringController.current()?.owner.workspace.workspace_id;
@@ -1357,12 +1427,13 @@ export default function App() {
       if (owner) change(owner, item => ({...item, page:'logs'}));
     },
     native:{
-      edit:(field, value) => editTrialSetup(state => ({...state, bound:editNativeReview(state.bound, field, value)})),
+      edit:value => editTrialSetup(state => ({...state, bound:editNativeReview(state.bound, 'workflowSeconds', value)})),
       approve:(field, value) => {
         const current = editTrialRef.current;
         const source = trialSourceTicket(authoringController);
         if (!current || !source || active || closing || hostCommand.current !== null || current.context.revision !== source.revision
-          || (current.unit === 'function' && (field === 'launch' || field === 'recovery'))) return;
+          || current.unit === 'function') return;
+        cancelTrialConfirmation();
         publishTrial({...current, bound:approveNative(current.bound, field, value, knownOcrEnvironment.current, nativeCapability.policy), review:source});
       },
     },
@@ -1942,6 +2013,7 @@ export default function App() {
   async function stopValidation(): Promise<boolean | null> {
     const owner = authoringController.current()?.owner ?? hostAuthoringRef.current;
     if (!owner) return null;
+    dismissTrialConfirmation();
     const token = owner.token;
     setStopping(true);
     try {
@@ -2568,12 +2640,23 @@ export default function App() {
 
   function openSettings() {
     if (settings === null || !normalReady) return;
+    trialSettingsOwner.current = null;
+    setSettingsInitialCategory(undefined);
     menuButton.current?.focus();
     setMenuOpen(false);
     setSettingsDraft(settingsDraftFrom(settings));
     setDialogError(null);
     setSaveNotice(null);
     setDialogOpen(true);
+  }
+
+  function closeSettings() {
+    const owner = trialSettingsOwner.current;
+    trialSettingsOwner.current = null;
+    setDialogOpen(false);
+    if (owner) requestAnimationFrame(() => {
+      if (authoringController.current()?.owner.token === owner) returnToTrial();
+    });
   }
 
   // Available without a workspace; before the application is ready the dialog explains why nothing is read or changed.
@@ -3168,13 +3251,14 @@ export default function App() {
   const trialSourceReason = selectedAuthoring ? trialSourceBlock(selectedAuthoring, false) : null;
   const trialSetup = editTrial && selectedAuthoring && sameAuthoringRef(editTrial.context.owner, selectedAuthoring.owner) ? editTrial : null;
   const scriptTrialActive = starting !== null || (busy(view.state) && view.operation === 'authoring_trial');
-  const trialFacts = trialSetup ? deriveBound(trialSetup.bound, savedEnvironment, locale, nativeCapability.policy) : null;
+  const trialFacts = trialSetup ? deriveBound(trialSetup.bound, savedEnvironment, locale, nativeCapability.policy, 'script') : null;
   const trialLocked = commandReason !== null || closing || active || leaseLost || pickerBusy;
   const trialLoadBlocked = leaseLost || trialSourceReason === 'pending' || trialSourceReason === 'refresh';
   const trialLoading = selectedAuthoring?.pending?.kind === 'script_trial' && !scriptTrialActive;
+  const trialStale = trialSetup?.bound.lane === 'native' && trialSetup.context.revision !== selectedAuthoring?.revision;
   const trialBlock = leaseLost ? ui.authoring.leaseLostShort : nativeOccupied ? ui.scriptTrial.release
     : trialSourceReason ? ui.scriptTrial.blocks[trialSourceReason]
-    : trialSetup?.bound.lane === 'native' && trialSetup.context.revision !== selectedAuthoring?.revision ? ui.scriptTrial.refresh
+    : trialStale ? ui.scriptTrial.refresh
     : recognitionSaveReason ?? null;
   const trialProfileRepair = selected && selectedAuthoring && trialSetup
     ? <ProfileRecovery idPrefix="trial-recovery" label={workspaceLabel(selected, workspaces)}
@@ -3208,7 +3292,7 @@ export default function App() {
       recognitionDirty={selectedAuthoring !== null && recognitionDirty} validating={selectedAuthoring !== null && validationActive}
       authoring={compactAuthoring(returnToEdit, !editVisible)}
       validation={savedValidation}
-      onNavigate={page => {if (selected) {if (page === 'edit') returnToEdit(); else change(selected.id, item => ({...item, page}));}}}
+      onNavigate={page => {if (selected) {if (page !== selected.page) dismissTrialConfirmation(); if (page === 'edit') returnToEdit(); else change(selected.id, item => ({...item, page}));}}}
       onDiagnostic={diagnostic => {
         const current = authoringController.current();
         if (!selectedAuthoring || !current || selected?.id !== current.owner.workspace.workspace_id) return;
@@ -3296,7 +3380,10 @@ export default function App() {
           packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive} recognitionDirty={recognitionDirty}
           recognitionSaveBlock={recognitionSaveReason} exportBlock={active ? ui.authoring.block('pending') : null}
           completionPreferences={editorCompletion.current}
-          trial={<EditTrial state={trialSetup} facts={trialFacts}
+          trial={<EditTrial state={trialSetup} facts={trialFacts} confirmation={trialConfirmation} stale={trialStale}
+            open={trialDialogOwner === authoring.owner.token && !dialogOpen}
+            onOpenChange={open => {dismissTrialConfirmation(); setTrialDialogOwner(open ? authoring.owner.token : null);}}
+            nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error} environment={savedEnvironment}
             handlers={trialHandlers} locked={trialLocked} loadBlocked={trialLoadBlocked} loading={trialLoading}
             validation={savedValidation?.state ?? 'none'} block={trialBlock}
             dirty={unsavedCount > 0} error={trialError?.fault ?? null} errorSource={trialErrorSource}
@@ -3329,11 +3416,8 @@ export default function App() {
           ? <EditExecutionSetup key={selectedAuthoring.owner.token} state={trialSetup} facts={trialFacts}
             handlers={trialHandlers} locked={trialLocked} loadBlocked={trialLoadBlocked} loading={trialLoading}
             block={trialBlock} dirty={unsavedCount > 0} error={trialError?.fault ?? null}
-            nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error} environment={savedEnvironment}
-            profileRepair={trialProfileRepair} onReturn={() => {
-              returnToEdit();
-              requestAnimationFrame(() => document.getElementById('trial-setup-open')?.focus());
-            }}/>
+            nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error}
+            profileRepair={trialProfileRepair} onReturn={returnToTrial}/>
           : isBound(selected)
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id}
@@ -3392,14 +3476,14 @@ export default function App() {
       openCount={workspaces.length} savedCount={savedCount} onRefresh={() => void refreshSaved()} onReopen={name => void reopenWorkspace(name)} reopening={reopening} reopenError={reopenError}
       busyReason={appBusy === 'reopeningWorkspace' ? null : commandReason} strip={ordinaryStrip('saved')}
       authoring={compactAuthoring(() => {if (reopening === null) {setSavedOpen(false); returnToEdit();}}, true, reopening !== null)}/>
-    <SettingsDialog open={dialogOpen} onCancel={() => setDialogOpen(false)} settings={settings} draft={settingsDraft} onDraft={editSettingsDraft} setup={ocrSetup}
+    <SettingsDialog open={dialogOpen} initialCategory={settingsInitialCategory} onCancel={closeSettings} settings={settings} draft={settingsDraft} onDraft={editSettingsDraft} setup={ocrSetup}
       defaultPackagesRoot={defaultPackagesRoot}
       parsed={parsedSettings} dirty={dialogDirty} saving={appBusy === 'savingSettings'} busyReason={commandReason} saveError={dialogError?.kind === 'save' ? dialogError.value : null} saveNotice={renderMessage(locale, saveNotice)} onSave={() => void saveSettings()}
       envDirty={envDirty} active={active} pickerBusy={pickerBusy} target={checkTarget} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale} originLabel={labelOf}
       checkError={dialogError?.kind === 'check' ? dialogError.value : null} authoringReason={authoringReason}
       retained={logs.items.length} evicted={logs.evicted}
       onSnapshot={() => void snapshot(null)} snapshotPending={bootstrap.snapshotPending} snapshotOutcome={bootstrap.snapshotOutcome} strip={ordinaryStrip('dialog')}
-      authoring={compactAuthoring(() => {if (appBusy !== 'savingSettings') {setDialogOpen(false); returnToEdit();}}, true, appBusy === 'savingSettings')}/>
+      authoring={compactAuthoring(() => {if (appBusy !== 'savingSettings') {closeSettings(); returnToEdit();}}, true, appBusy === 'savingSettings')}/>
     <PluginsDialog open={pluginsOpen} onClose={closePlugins} plugins={plugins}
       unavailable={closing ? t.applicationClosing : normalReady ? null : ui.plugins.unavailable} strip={ordinaryStrip('plugins')}
       authoring={compactAuthoring(() => {closePlugins(); returnToEdit();}, true)}/>

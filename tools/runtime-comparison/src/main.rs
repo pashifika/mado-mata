@@ -70,8 +70,17 @@ fn read_external_plan(path: &Path) -> Result<Plan, Fault> {
         || plan
             .native_config
             .as_ref()
-            .and_then(|configuration| configuration.pointer("/native/input/reviewed_operation"))
-            .is_some_and(|operation| !operation.is_null())
+            .and_then(|configuration| configuration.get("native"))
+            .is_some_and(|native| {
+                native
+                    .pointer("/input/package_approved")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                    || native
+                        .pointer("/review/kind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("script")
+            })
     {
         return Err(Fault::new(
             "NativeRefused",

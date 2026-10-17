@@ -3,7 +3,7 @@ use crate::desktop::test_support::settled;
 #[cfg(target_os = "macos")]
 use crate::desktop::test_support::{request, settled_with_timeout};
 #[cfg(target_os = "macos")]
-use crate::desktop::{NativeIntent, native_limits};
+use crate::desktop::{NativeIntent, NativeReview, native_limits};
 use crate::inventory::PackageDraft;
 use std::fs;
 #[cfg(target_os = "macos")]
@@ -47,8 +47,10 @@ impl Package {
             input_approved: true,
             launch_approved: true,
             max_exit_recoveries: 0,
-            operation: "One reviewed workflow".into(),
-            visible_postcondition: "Reviewed result".into(),
+            review: NativeReview::Operation {
+                operation: "One reviewed workflow".into(),
+                visible_postcondition: "Reviewed result".into(),
+            },
             limits: native_limits(),
         });
         request

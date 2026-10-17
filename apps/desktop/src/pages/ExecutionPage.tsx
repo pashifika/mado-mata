@@ -69,8 +69,10 @@ export default function ExecutionPage({label, revision, run, snapshot, starting,
               <dt>{t.run.nativeLaunchRequest}</dt><dd id="native-launch">{t.run.launchDispositions[view.native_preparation.launch]}</dd></>}
             {captured?.kind === 'run' && <><dt>{t.run.capturedProfile}</dt><dd>{captured.profileName || t.run.untitled} · {captured.profileId}</dd><dt>{t.run.packageScenario}</dt><dd>{captured.packageId} / {captured.scenario}</dd>
               {captured.lane === 'replay' && <><dt>{t.common.descriptor}</dt><dd>{captured.descriptorPath}</dd></>}
-              {captured.native && <><dt>{t.run.nativeOperation}</dt><dd>{captured.native.operation}</dd>
-                <dt>{t.run.nativePostcondition}</dt><dd>{captured.native.visible_postcondition}</dd>
+              {captured.native && <>{captured.native.review.kind === 'operation'
+                ? <><dt>{t.run.nativeOperation}</dt><dd>{captured.native.review.operation}</dd>
+                  <dt>{t.run.nativePostcondition}</dt><dd>{captured.native.review.visible_postcondition}</dd></>
+                : <><dt>{t.scriptTrial.confirmedScript}</dt><dd>{t.scriptTrial.scriptApproval}</dd></>}
                 <dt>{t.run.nativeBinding}</dt><dd><code>{captured.native.target_binding_id}</code> · {t.target.revision(captured.native.target_revision)}</dd>
                 <dt>{t.run.nativeLaunchApproval}</dt><dd>{captured.native.launch_approved ? t.run.nativeLaunchApproved : t.run.nativeLaunchNotApproved}</dd>
                 <dt>{t.run.nativeRecoveryApproval}</dt><dd id="captured-native-recoveries">{captured.native.max_exit_recoveries}</dd>

@@ -1,4 +1,4 @@
-use super::{NativeIntent, NativeTarget, StartRequest, native_limits};
+use super::{NativeIntent, NativeReview, NativeTarget, StartRequest, native_limits};
 use crate::inventory::Inventory;
 use crate::model::{Fault, Limits, Plan};
 use serde_json::{Value, json};
@@ -11,6 +11,22 @@ fn refused(message: &str) -> Fault {
 
 fn text(value: &str, bound: usize) -> bool {
     !value.trim().is_empty() && value.len() <= bound && !value.chars().any(char::is_control)
+}
+
+impl NativeReview {
+    pub(crate) fn validate(&self) -> Result<(), Fault> {
+        if let Self::Operation {
+            operation,
+            visible_postcondition,
+        } = self
+            && (!text(operation, 4096) || !text(visible_postcondition, 4096))
+        {
+            return Err(refused(
+                "Operation review requires bounded one-line operation and visible postcondition",
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
@@ -26,13 +42,12 @@ pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
         || !text(&intent.target_declaration_identity, 256)
         || !intent.capture_approved
         || !intent.input_approved
-        || !text(&intent.operation, 4096)
-        || !text(&intent.visible_postcondition, 4096)
     {
         return Err(refused(
-            "Native requires current target expectations, separate capture/input approval and reviewed operation/postcondition",
+            "Native requires current target expectations and explicit capture/input approval",
         ));
     }
+    intent.review.validate()?;
     let limits = &intent.limits;
     limits.budgets().total_ms()?;
     let ceiling = native_limits();
@@ -176,9 +191,9 @@ pub(super) fn project(
         "input":{"approved":true,"duration_ms":limits.budgets().total_ms()?,"max_actions":limits.max_actions,
             "route":target.input.route,"focus":target.input.focus,
             "macos_process_pointer_mode":target.input.pointer_mode.as_deref().unwrap_or("core_graphics"),
-            "click_hold_ms":target.input.click_hold_ms,"reviewed_operation":intent.operation},
+            "click_hold_ms":target.input.click_hold_ms,"package_approved":true},
         "geometry":null,"recognition_language":configuration["ocr"]["language"],
-        "visible_postcondition":intent.visible_postcondition,
+        "review":intent.review,
         "cleanup_ms":limits.cleanup_ms,"containment_ms":limits.containment_ms,
         "package_entries":package_entries,"templates":templates
     });

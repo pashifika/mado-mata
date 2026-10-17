@@ -38,6 +38,7 @@ mod enabled {
     #[cfg(test)]
     mod publication_tests;
     use super::*;
+    use crate::desktop::NativeReview;
     use crate::environment::{Configuration, Placement, ReplayConfig, canonical, validate_replay};
     use crate::host::{
         Action, DragEvent, HandleBudget, HandlePermit, Managed, PointerButton, drag_events,
@@ -67,7 +68,7 @@ mod enabled {
         input: InputAuthority,
         geometry: Option<Placement>,
         recognition_language: String,
-        visible_postcondition: String,
+        review: NativeReview,
         cleanup_ms: u64,
         containment_ms: u64,
         #[serde(default)]
@@ -123,9 +124,9 @@ mod enabled {
         focus: String,
         #[serde(default)]
         representative_actions: Vec<Action>,
-        /// Desktop reviews trusted package intent, not a fabricated input sequence.
+        /// Package review authorizes bounded Script input, not a fabricated action sequence.
         #[serde(default)]
-        reviewed_operation: Option<String>,
+        package_approved: bool,
         #[serde(default)]
         macos_process_pointer_mode: MacosProcessPointerMode,
         #[serde(default)]
@@ -143,7 +144,7 @@ mod enabled {
 
     impl InputAuthority {
         fn authorize(&self, action: &Action) -> Result<(), Fault> {
-            if self.reviewed_operation.is_some()
+            if self.package_approved
                 || self.representative_actions.iter().any(|allowed| {
                     matches!(
                         (action, allowed),
@@ -660,7 +661,7 @@ mod enabled {
                 control.check()?;
                 let mut input =
                     mp::InputOpenRequest::new().with_requirement(mp::InputRequirement::Required);
-                if native.input.reviewed_operation.is_some() {
+                if native.input.package_approved {
                     input = input
                         .requiring(mp::InputOperationKind::Pointer, native.route()?)
                         .requiring(mp::InputOperationKind::Keyboard, native.route()?);
@@ -2680,7 +2681,7 @@ mod enabled {
                     .category,
                 "Authority"
             );
-            input.reviewed_operation = Some("reviewed held-pointer workflow".into());
+            input.package_approved = true;
             input.authorize(&click).expect("reviewed workflow");
             input.authorize(&gesture).expect("reviewed workflow drag");
         }
@@ -2944,6 +2945,88 @@ mod enabled {
             );
             assert_eq!(replay.category, "Cancelled");
             assert!(replay.context.get("native_cleanup").is_none());
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn native_script_review_validates_without_claiming_an_expected_effect() {
+            let plan: Plan = serde_json::from_str(include_str!("../fixtures/manual-plan.json"))
+                .expect("finite manual plan");
+            let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+            let raw = json!({
+                "executable_or_bundle":executable,"process_id":42,
+                "process_lifetime":"0123456789abcdef","window_rule":"Selected window",
+                "operating_system":"macos","hardware":std::env::consts::ARCH,
+                "permission_executable":executable,
+                "capture":{"approved":true,"duration_ms":5000,"max_frames":10,
+                    "wait_ms":500,"interval_ms":50},
+                "input":{"approved":true,"duration_ms":5000,"max_actions":10,
+                    "route":"process_directed","focus":"preserve","package_approved":true,
+                    "representative_actions":[]},
+                "geometry":null,"recognition_language":crate::environment::LANGUAGE,
+                "review":{"kind":"script"},"cleanup_ms":1000,"containment_ms":2000
+            });
+            let config: NativeConfig = serde_json::from_value(raw.clone()).unwrap();
+            validate_native(Some(&config), &plan).unwrap();
+            assert_eq!(
+                serde_json::to_value(&config).unwrap()["review"],
+                json!({"kind":"script"})
+            );
+            for (pointer, invalid, stage) in [
+                ("/capture/approved", json!(false), "capture_authority"),
+                ("/input/approved", json!(false), "input_authority"),
+                ("/input/package_approved", json!(false), "input_authority"),
+                ("/input/max_actions", json!(0), "input_authority"),
+                ("/capture/duration_ms", json!(10001), "capture_authority"),
+                ("/cleanup_ms", json!(0), "cleanup_authority"),
+                (
+                    "/input/representative_actions",
+                    json!([
+                        {"kind":"click","x":1,"y":2,"button":"left"}
+                    ]),
+                    "input_authority",
+                ),
+                (
+                    "/review",
+                    json!({"kind":"operation","operation":" ",
+                    "visible_postcondition":"A label changes"}),
+                    "native_review",
+                ),
+                (
+                    "/review",
+                    json!({"kind":"operation","operation":"Click once",
+                    "visible_postcondition":"line\nbreak"}),
+                    "native_review",
+                ),
+            ] {
+                let mut invalid_config = raw.clone();
+                *invalid_config.pointer_mut(pointer).unwrap() = invalid;
+                let config = serde_json::from_value(invalid_config).unwrap();
+                let fault = validate_native(Some(&config), &plan).unwrap_err();
+                assert_eq!(fault.context["stage"], stage, "{pointer}");
+                assert!(fault.context.get("native_cleanup").is_none());
+            }
+
+            let mut manual = raw;
+            manual["review"] = json!({"kind":"operation","operation":"Click once",
+                "visible_postcondition":"The selected label changes"});
+            let config = serde_json::from_value(manual.clone()).unwrap();
+            validate_native(Some(&config), &plan).unwrap();
+            manual["input"]["package_approved"] = json!(false);
+            manual["input"]["representative_actions"] = json!([
+                {"kind":"click","x":1,"y":2,"button":"left"}
+            ]);
+            manual["geometry"] = json!({
+                "desktop_origin":[0,0],"logical_size":[8,8],"scale":[1,1]
+            });
+            let config = serde_json::from_value(manual.clone()).unwrap();
+            validate_native(Some(&config), &plan).unwrap();
+            manual["review"] = json!({"kind":"script"});
+            let config = serde_json::from_value(manual).unwrap();
+            assert_eq!(
+                validate_native(Some(&config), &plan).unwrap_err().context["stage"],
+                "input_authority"
+            );
         }
 
         #[test]
@@ -3407,6 +3490,10 @@ mod enabled {
     fn validate_native(config: Option<&NativeConfig>, plan: &Plan) -> Result<(), Fault> {
         let config = config.ok_or_else(|| blocked("native_authority_unset", "native requires an operator-approved target and separate finite capture/input authority"))?;
         config
+            .review
+            .validate()
+            .map_err(|fault| blocked("native_review", &fault.message))?;
+        config
             .input
             .validate_pointer_options(&config.operating_system)?;
         if !config.executable_or_bundle.is_absolute()
@@ -3420,11 +3507,10 @@ mod enabled {
             || config.window_rule.is_empty()
             || config.hardware.is_empty()
             || config.recognition_language.is_empty()
-            || config.visible_postcondition.is_empty()
         {
             return Err(blocked(
                 "native_authority_validation",
-                "target path, lifetime, window rule, hardware, permission executable, recognition language and visible postcondition are required",
+                "target path, lifetime, window rule, hardware, permission executable and recognition language are required",
             ));
         }
         if config.operating_system != std::env::consts::OS
@@ -3504,7 +3590,7 @@ mod enabled {
             || input.duration_ms > plan.limits.duration_ms
             || input.max_actions == 0
             || input.max_actions > plan.limits.max_actions
-            || (input.representative_actions.is_empty() && input.reviewed_operation.is_none())
+            || (input.representative_actions.is_empty() && !input.package_approved)
             || input.representative_actions.len() > input.max_actions
         {
             return Err(blocked(
@@ -3532,40 +3618,40 @@ mod enabled {
                 "cleanup must fit the plan and containment must equal the supervisor's finite bound",
             ));
         }
-        match &input.reviewed_operation {
-            Some(operation) => {
-                if operation.trim().is_empty()
-                    || operation.len() > 4096
-                    || operation.chars().any(char::is_control)
-                    || !input.representative_actions.is_empty()
-                    || config.geometry.is_some()
-                    || config.operating_system != "macos"
-                {
-                    return Err(blocked(
-                        "input_authority",
-                        "reviewed package intent is exclusive of manual geometry/actions and requires macOS",
-                    ));
-                }
+        if input.package_approved {
+            if !input.representative_actions.is_empty()
+                || config.geometry.is_some()
+                || config.operating_system != "macos"
+            {
+                return Err(blocked(
+                    "input_authority",
+                    "reviewed package input is exclusive of manual geometry/actions and requires macOS",
+                ));
             }
-            None => {
-                placement(config.geometry.as_ref().ok_or_else(|| {
-                    blocked(
-                        "geometry",
-                        "manual native authority requires explicit placement",
-                    )
-                })?)?;
-                native_sequence(
-                    &input.representative_actions,
-                    None,
-                    input.max_actions,
-                    input.click_hold_ms,
-                    Some((
-                        plan.limits.wait_ms,
-                        input.duration_ms.min(config.capture.duration_ms),
-                    )),
+        } else {
+            if matches!(config.review, NativeReview::Script {}) {
+                return Err(blocked(
+                    "input_authority",
+                    "saved Script review requires explicit package input approval",
+                ));
+            }
+            placement(config.geometry.as_ref().ok_or_else(|| {
+                blocked(
+                    "geometry",
+                    "manual native authority requires explicit placement",
                 )
-                .map_err(|fault| blocked("input_authority", &fault.message))?;
-            }
+            })?)?;
+            native_sequence(
+                &input.representative_actions,
+                None,
+                input.max_actions,
+                input.click_hold_ms,
+                Some((
+                    plan.limits.wait_ms,
+                    input.duration_ms.min(config.capture.duration_ms),
+                )),
+            )
+            .map_err(|fault| blocked("input_authority", &fault.message))?;
         }
         config.route()?;
         config.focus()?;

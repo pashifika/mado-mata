@@ -320,16 +320,24 @@ fn missing_replay_environment_retains_a_blocked_cli_record_without_a_child() {
 
 #[test]
 fn external_cli_plans_cannot_claim_desktop_reviewed_authority() {
-    for form in ["reviewed_operation", "native_budgets"] {
+    for form in ["package_approved", "script_review", "native_budgets"] {
         let mut plan: Plan =
             serde_json::from_str(include_str!("../fixtures/controlled-plan.json")).unwrap();
         plan.lane = "native".into();
         plan.scenario = "workflow".into();
-        if form == "reviewed_operation" {
+        if form != "native_budgets" {
             plan.native_config = Some(serde_json::json!({
-                "native": {"geometry":null,"input":{
-                    "reviewed_operation":"Press the reviewed key","representative_actions":[]
-                }}
+                "native": {
+                    "review": if form == "script_review" {
+                        serde_json::json!({"kind":"script"})
+                    } else {
+                        serde_json::json!({"kind":"operation","operation":"Press the reviewed key",
+                            "visible_postcondition":"The reviewed label changes"})
+                    },
+                    "geometry":{"desktop_origin":[0,0],"logical_size":[8,8],"scale":[1,1]},
+                    "input":{"package_approved":form == "package_approved",
+                        "representative_actions":[{"kind":"click","x":1,"y":2,"button":"left"}]}
+                }
             }));
         } else {
             let budgets = mado_runtime_comparison::model::NativeBudgets {

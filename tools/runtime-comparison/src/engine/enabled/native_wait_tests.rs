@@ -13,8 +13,8 @@ fn config() -> NativeConfig {
         "permission_executable":executable,
         "capture":{"approved":true,"duration_ms":5000,"max_frames":10,"wait_ms":500,"interval_ms":50},
         "input":{"approved":true,"duration_ms":5000,"max_actions":10,
-            "route":"process_directed","focus":"preserve","reviewed_operation":"test"},
-        "geometry":null,"recognition_language":"test","visible_postcondition":"test",
+            "route":"process_directed","focus":"preserve","package_approved":true},
+        "geometry":null,"recognition_language":"test","review":{"kind":"script"},
         "cleanup_ms":1000,"containment_ms":2000
     }))
     .unwrap()

@@ -318,8 +318,10 @@ fn owned_recovery_loop_settles_past_workflow_without_renewing_run_authority() {
                         input_approved: true,
                         launch_approved: true,
                         max_exit_recoveries: 1,
-                        operation: "Controlled owner-loop regression".into(),
-                        visible_postcondition: "Fresh attempt completes".into(),
+                        review: crate::desktop::NativeReview::Operation {
+                            operation: "Controlled owner-loop regression".into(),
+                            visible_postcondition: "Fresh attempt completes".into(),
+                        },
                         limits,
                     });
                     plan.native_budgets = Some(budgets);
@@ -543,8 +545,10 @@ fn repeated_exit_and_recovered_stage_stop_keep_run_boundaries() {
                             input_approved: true,
                             launch_approved: true,
                             max_exit_recoveries: 1,
-                            operation: "Controlled recovery boundary regression".into(),
-                            visible_postcondition: "Owned attempts settle before reuse".into(),
+                            review: crate::desktop::NativeReview::Operation {
+                                operation: "Controlled recovery boundary regression".into(),
+                                visible_postcondition: "Owned attempts settle before reuse".into(),
+                            },
                             limits,
                         });
                         let initial =

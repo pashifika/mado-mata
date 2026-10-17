@@ -3,7 +3,7 @@ use crate::application::test_support::{Fixture, inspect_named, request, view_ref
 #[cfg(unix)]
 use crate::application::test_support::{declare_target, target_configuration, target_expectation};
 use crate::application::{AuthoringView, Poll};
-use mado_runtime_comparison::desktop::FunctionInvocation;
+use mado_runtime_comparison::desktop::{FunctionInvocation, NativeIntent, native_limits};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -65,6 +65,20 @@ fn trial_request(context: &TrialContext, function: Option<FunctionInvocation>) -
         replay_descriptor_path: None,
         native_intent: None,
         function,
+    }
+}
+
+fn script_intent() -> NativeIntent {
+    NativeIntent {
+        target_revision: 1,
+        target_binding_id: "saved-target".into(),
+        target_declaration_identity: "saved-declaration".into(),
+        capture_approved: true,
+        input_approved: true,
+        launch_approved: false,
+        max_exit_recoveries: 0,
+        review: NativeReview::Script {},
+        limits: native_limits(),
     }
 }
 
@@ -438,6 +452,79 @@ fn trials_refuse_changed_saved_source_stale_setup_and_unknown_profiles() {
 }
 
 #[test]
+fn native_trials_require_script_review_and_both_permissions_before_reservation() {
+    let trial = Trial::new();
+    let app = trial.app();
+    let context = trial.context();
+    for function in [None, Some(decide(&json!({})))] {
+        let mut native = trial_request(&context, function);
+        native.lane = "native".into();
+        let mut operation = script_intent();
+        operation.review = NativeReview::Operation {
+            operation: "Click the selected button once".into(),
+            visible_postcondition: "The selected label changes".into(),
+        };
+        let mut no_capture = script_intent();
+        no_capture.capture_approved = false;
+        let mut no_input = script_intent();
+        no_input.input_approved = false;
+        for intent in [None, Some(operation), Some(no_capture), Some(no_input)] {
+            native.native_intent = intent;
+            assert_eq!(
+                app.authoring_trial_start(
+                    &trial.editor.owner,
+                    &trial.editor.revision,
+                    native.clone(),
+                )
+                .unwrap_err()
+                .category,
+                "NativeRefused"
+            );
+            assert!(app.poll().controller["run"].is_null());
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn script_review_cannot_authorize_changed_saved_source_or_another_owner() {
+    let trial = Trial::new();
+    let app = trial.app();
+    let context = trial.context();
+    let mut native = trial_request(&context, None);
+    native.lane = "native".into();
+    native.native_intent = Some(script_intent());
+    let mut foreign = trial.editor.owner.clone();
+    foreign.token.push_str("-foreign");
+    assert_eq!(
+        app.authoring_trial_start(&foreign, &trial.editor.revision, native.clone())
+            .unwrap_err()
+            .category,
+        "StaleAuthoring"
+    );
+    assert_eq!(
+        app.authoring_trial_start(&trial.editor.owner, "old-revision", native.clone())
+            .unwrap_err()
+            .category,
+        "AuthoringConflict"
+    );
+    let decisions = trial.package.join("decisions.js");
+    let mut changed = fs::read_to_string(&decisions).unwrap();
+    changed.push_str("\nexport function changedAfterReview() { return 1; }\n");
+    fs::write(&decisions, changed).unwrap();
+    let run = app
+        .authoring_trial_start(&trial.editor.owner, &trial.editor.revision, native)
+        .unwrap();
+    let poll = terminal(app, &run);
+    assert_eq!(poll.controller["error"]["category"], "AuthoringConflict");
+    assert_eq!(
+        poll.controller["error"]["context"]["cleanup"],
+        json!({"clean":true,"child_started":false})
+    );
+    assert_eq!(poll.authoring.as_ref(), Some(&trial.editor.owner));
+}
+
+#[test]
 fn native_trials_and_ordinary_native_runs_share_the_reconciliation_gate() {
     let trial = Trial::new();
     let app = trial.app();
@@ -476,14 +563,25 @@ fn trial_containment_distinguishes_child_ownership_and_native_cleanup() {
         "observations":{"child_reaped":true}},"error":null});
     assert!(containment(&reaped, false).is_none());
     let trial = Trial::new();
-    lock(&trial.app().workspaces).authoring.as_mut().unwrap().settle_trial(&reaped, true);
+    lock(&trial.app().workspaces)
+        .authoring
+        .as_mut()
+        .unwrap()
+        .settle_trial(&reaped, true);
     assert_eq!(
-        trial.app().authoring_trial_context(&trial.editor.owner, &trial.editor.revision).unwrap_err().category,
+        trial
+            .app()
+            .authoring_trial_context(&trial.editor.owner, &trial.editor.revision)
+            .unwrap_err()
+            .category,
         "TrialCleanup"
     );
     let unreaped = json!({"result":{"cleanup":{"clean":false},"primary":null,
         "observations":{}},"error":null});
-    assert_eq!(containment(&unreaped, false).unwrap().category, "TrialCleanup");
+    assert_eq!(
+        containment(&unreaped, false).unwrap().category,
+        "TrialCleanup"
+    );
     let contained = json!({"result":{"cleanup":{"clean":true},
         "primary":{"category":"Containment"},"observations":{"child_reaped":true}},"error":null});
     assert!(containment(&contained, false).is_some());

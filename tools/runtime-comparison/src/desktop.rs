@@ -64,9 +64,19 @@ pub struct NativeIntent {
     pub launch_approved: bool,
     #[serde(default)]
     pub max_exit_recoveries: u8,
-    pub operation: String,
-    pub visible_postcondition: String,
+    pub review: NativeReview,
     pub limits: NativeLimits,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeReview {
+    Operation {
+        operation: String,
+        visible_postcondition: String,
+    },
+    // A unit variant would silently discard unknown fields during deserialization.
+    Script {},
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

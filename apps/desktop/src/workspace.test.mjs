@@ -1696,7 +1696,7 @@ test('a Native intent names the current saved binding only after both separate c
   const facts=deriveBound(approved,nativeEnvironment,'en',nativeCapability);
   assert.equal(facts.startBlock,null);
   assert.deepEqual(facts.native.intent,{target_revision:1,target_binding_id:'binding-1',target_declaration_identity:'declaration-1',
-    capture_approved:true,input_approved:true,launch_approved:false,max_exit_recoveries:0,operation:'Press Confirm once',visible_postcondition:'Result dialog is shown',limits:nativeLimits});
+    capture_approved:true,input_approved:true,launch_approved:false,max_exit_recoveries:0,review:{kind:'operation',operation:'Press Confirm once',visible_postcondition:'Result dialog is shown'},limits:nativeLimits});
   // Consent given for an older request does not combine with consent given after an edit.
   const edited=approveNative(editDraft(captureOnly,{count:2}),'input',true,nativeEnvironment,nativeCapability);
   assert.equal(nativeOf(edited).capture,false);

@@ -119,11 +119,12 @@ export interface NativeLimits {
 }
 // `native_run_limits` returns this host policy, or null when this platform/build offers no Native lane.
 export interface NativeCapability {default_limits:NativeLimits; max_workflow_ms:number}
+export type NativeReview = {kind:'operation'; operation:string; visible_postcondition:string} | {kind:'script'};
 // Bounded per-Start operator intent. It names the reviewed saved target and carries no executable, process or plan.
 // `launch_approved` separately permits one launch of the saved recipe when the game is confirmed absent.
 export interface NativeIntent {
   target_revision:number; target_binding_id:string; target_declaration_identity:string;
-  capture_approved:boolean; input_approved:boolean; launch_approved:boolean; operation:string; visible_postcondition:string; limits:NativeLimits;
+  capture_approved:boolean; input_approved:boolean; launch_approved:boolean; review:NativeReview; limits:NativeLimits;
   max_exit_recoveries:0|1;
 }
 export interface FunctionInvocation {module:string; function:string; arguments:Json[]}

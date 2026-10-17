@@ -14,7 +14,7 @@ use crate::application::{
     serialize_shared,
 };
 use crate::storage::Profile;
-use mado_runtime_comparison::desktop::{PackageInfo, StartPreparation, StartRequest};
+use mado_runtime_comparison::desktop::{NativeReview, PackageInfo, StartPreparation, StartRequest};
 use mado_runtime_comparison::inventory::TargetDeclaration;
 use mado_runtime_comparison::model::{Control, Fault, identity};
 use mado_runtime_comparison::typescript::{FunctionCandidate, function_candidates};
@@ -40,7 +40,11 @@ pub struct TrialContext {
 
 impl Lease {
     /// Settles a trial in the `collect` critical section that ends its ownership.
-    pub(in crate::application) fn settle_trial(&mut self, controller: &Value, native_reconciliation: bool) {
+    pub(in crate::application) fn settle_trial(
+        &mut self,
+        controller: &Value,
+        native_reconciliation: bool,
+    ) {
         if self.containment.is_none() {
             self.containment = containment(controller, native_reconciliation);
         }
@@ -65,7 +69,8 @@ fn containment(controller: &Value, native_reconciliation: bool) -> Option<Fault>
             result["observations"]["child_reaped"] == true,
         )
     };
-    let contained = native_reconciliation || (cleanup["clean"] != true && !released)
+    let contained = native_reconciliation
+        || (cleanup["clean"] != true && !released)
         || *primary == "Containment"
         || *primary == "Controller";
     contained.then(|| {
@@ -124,7 +129,10 @@ impl Application {
             let retained_recovery = lease.recovery.clone();
             let recovery_token = if retained_recovery.is_none() {
                 if lease.next_recovery > MAX_SESSION_COUNTER {
-                    return Err(Fault::new("RecoveryLimit", "Recovery context counter exhausted"));
+                    return Err(Fault::new(
+                        "RecoveryLimit",
+                        "Recovery context counter exhausted",
+                    ));
                 }
                 let token = format!("recovery-{}-{}", owner.token, lease.next_recovery);
                 lease.next_recovery += 1;
@@ -260,6 +268,15 @@ impl Application {
             if native {
                 state.native_ready()?;
                 state.native_capture_released(owner)?;
+                if !matches!(
+                    request.native_intent.as_ref().map(|intent| &intent.review),
+                    Some(NativeReview::Script {})
+                ) {
+                    return Err(Fault::new(
+                        "NativeRefused",
+                        "Edit Native requires explicit approval of the selected saved Script",
+                    ));
+                }
             }
             if request.package_id != candidate.package_id() {
                 return Err(Fault::new(

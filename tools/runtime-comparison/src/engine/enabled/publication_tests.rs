@@ -378,9 +378,9 @@ fn native_policy() -> NativeConfig {
         "operating_system":"macos","hardware":"test","permission_executable":"/unused-engine",
         "capture":{"approved":true,"duration_ms":10000,"max_frames":3,"wait_ms":1000,"interval_ms":1},
         "input":{"approved":true,"duration_ms":10000,"max_actions":4,"route":"system",
-            "focus":"preserve","click_hold_ms":50,"reviewed_operation":"Click once"},
+            "focus":"preserve","click_hold_ms":50,"package_approved":true},
         "geometry":null,"recognition_language":crate::environment::LANGUAGE,
-        "visible_postcondition":"visible","cleanup_ms":500,"containment_ms":2000
+        "review":{"kind":"script"},"cleanup_ms":500,"containment_ms":2000
     })).unwrap()
 }
 

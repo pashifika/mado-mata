@@ -2,11 +2,12 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {AuthoringController} from './authoring-controller.ts';
 import {applySave, beginComposition, beginPending, endComposition, openSession, replaceFile, saveTicket, selectFile, undoFile} from './authoring.ts';
-import {applyTrialRecovery, currentTrialSource, functionKey, trialArguments, trialContext, trialDiagnosticLocation, trialDiagnostics, trialSourceTicket} from './edit-trial.ts';
-import {deriveBound, editDraft, selectProfile} from './workspace.ts';
+import {applyTrialRecovery, currentTrialSource, functionKey, trialArguments, trialContext, trialDiagnosticLocation, trialDiagnostics, trialRequest, trialSourceTicket, TrialConfirmationGate} from './edit-trial.ts';
+import {approveNative, chooseLane, commandValues, deriveBound, editDraft, editNativeReview, newDraft, selectProfile} from './workspace.ts';
 import {nativeOutcome} from './state.ts';
 import {authoringActivity} from './status.ts';
 import {editRecovery, recoveryTicket} from './recovery.ts';
+import {editTarget, readTarget, targetReadFailed} from './target.ts';
 
 const owner={workspace:{workspace_id:'trial-owner',revision:3},token:'trial-lease'};
 const source='function battle(turn: number) { return turn; }\n';
@@ -28,6 +29,121 @@ function controller(){
 function context(revision='saved-1',extra={}){
   return {owner,revision,package:packageInfo,profiles:[profile],profiles_error:null,target:null,target_error:null,functions:[candidate],recovery:null,...extra};
 }
+
+test('the packaged default preset is usable immediately and wins over schema defaults and saved profiles',()=>{
+  const packaged={...packageInfo,schema:{type:'object',properties:{
+    speed:{type:'integer',default:1},settings:{type:'object',properties:{retries:{type:'integer'}},default:{retries:1}},
+    schemaOnly:{type:'integer',default:9},
+  }},profiles:{...packageInfo.profiles,default:{options:{speed:2,settings:{retries:4}}}}};
+  const initial=trialContext(context('saved-1',{package:packaged}),openSession(view()),'fixture',null);
+  const facts=deriveBound(initial.bound,null);
+  assert.equal(initial.profileChoice,'preset:default');
+  assert.equal(initial.bound.selectedId,null);
+  assert.equal(initial.bound.preset,'default');
+  assert.equal(initial.bound.touched,false);
+  assert.equal(initial.bound.lane,'controlled');
+  assert.equal(facts.bound,true);
+  assert.equal(facts.numericErrors,false);
+  assert.equal(facts.startBlock,null);
+  assert.deepEqual(commandValues({bound:initial.bound},facts),{speed:2,settings:{retries:4}});
+  assert.notEqual(initial.bound.draft,packaged.profiles.default.options);
+  assert.notEqual(initial.bound.draft.settings,packaged.profiles.default.options.settings);
+  initial.bound.draft.settings.retries=8;
+  assert.equal(packaged.profiles.default.options.settings.retries,4);
+  assert.deepEqual(packaged.schema.properties.settings.default,{retries:1});
+  assert.deepEqual(profile.values,{speed:3});
+});
+
+for(const {scenario,profiles} of [
+  {scenario:'no packaged default preset',profiles:packageInfo.profiles},
+  {scenario:'an inherited rather than package-owned default preset',profiles:Object.assign(Object.create({default:{options:{speed:8}}}),packageInfo.profiles)},
+]) test(`schema defaults are usable immediately with ${scenario}`,()=>{
+  const initial=trialContext(context('saved-1',{package:{...packageInfo,profiles}}),openSession(view()),'fixture',null);
+  const facts=deriveBound(initial.bound,null);
+  assert.equal(initial.profileChoice,'values');
+  assert.equal(initial.bound.selectedId,null);
+  assert.equal(initial.bound.preset,'');
+  assert.equal(initial.bound.touched,false);
+  assert.equal(facts.bound,true);
+  assert.equal(facts.numericErrors,false);
+  assert.equal(facts.startBlock,null);
+  assert.deepEqual(commandValues({bound:initial.bound},facts),{speed:1});
+});
+
+test('an invalid packaged default remains invalid instead of falling back to schema or saved profile values',()=>{
+  const packaged={...packageInfo,profiles:{...packageInfo.profiles,default:{options:{speed:'not-a-number'}}}};
+  const initial=trialContext(context('saved-1',{package:packaged}),openSession(view()),'fixture',null);
+  const facts=deriveBound(initial.bound,null);
+  assert.equal(initial.profileChoice,'preset:default');
+  assert.deepEqual(facts.parsed.values,{speed:'not-a-number'});
+  assert.equal(facts.numericErrors,true);
+  assert.ok(facts.parsed.errors['$.speed']);
+  assert.throws(()=>commandValues({bound:initial.bound},facts),error=>error.presentation.key==='numericFields');
+});
+
+test('schema defaults do not invent a required value when no default is declared',()=>{
+  const packaged={...packageInfo,schema:{type:'object',required:['speed'],properties:{speed:{type:'integer'}}},effective_defaults:{}};
+  const initial=trialContext(context('saved-1',{package:packaged}),openSession(view()),'fixture',null);
+  assert.equal(initial.profileChoice,'values');
+  assert.equal(initial.bound.selectedId,null);
+  assert.deepEqual(initial.bound.draft,{});
+  assert.deepEqual(deriveBound(initial.bound,null).parsed.values,{});
+  assert.equal(Object.hasOwn(initial.bound.draft,'speed'),false);
+  assert.deepEqual(initial.context.package.schema.required,['speed']);
+});
+
+test('a declared target chooses Native without inventing intent, consent or a supported-host fallback',()=>{
+  const packaged={...packageInfo,target:{id:'game',window_title:'Exact title'},target_identity:'target-1'};
+  const initial=trialContext(context('saved-1',{package:packaged}),openSession(view()),'fixture',null);
+  const facts=deriveBound(initial.bound,null,'en',null);
+  assert.equal(initial.bound.lane,'native');
+  assert.equal(initial.profileChoice,'values');
+  assert.equal(initial.review,null);
+  assert.deepEqual(initial.bound.native,{operation:'',postcondition:'',workflowSeconds:null,capture:false,input:false,launch:false,recovery:false,key:null});
+  assert.equal(facts.native.block,'nativeUnavailable');
+  assert.equal(facts.native.intent,null);
+  assert.ok(facts.startBlock);
+  assert.equal(initial.bound.target.declaration,packaged.target);
+});
+
+test('same-owner reload retains explicitly edited invalid values and the chosen lane instead of new defaults',()=>{
+  const session=openSession(view());
+  const initial=trialContext(context(),session,'fixture',null);
+  const configured={...initial,profileChoice:'values',bound:chooseLane(editDraft(initial.bound,{speed:'unfinished'}),'controlled')};
+  const packaged={...packageInfo,profiles:{default:{options:{speed:7}}},target:{id:'game',window_title:'Exact title'},target_identity:'target-1'};
+  const next=trialContext(context('saved-2',{package:packaged}),{...session,revision:'saved-2'},'fixture',configured);
+  const facts=deriveBound(next.bound,null);
+  assert.equal(next.profileChoice,'values');
+  assert.equal(next.bound.draft,configured.bound.draft);
+  assert.equal(next.bound.draftRevision,configured.bound.draftRevision);
+  assert.equal(next.bound.lane,'controlled');
+  assert.equal(facts.numericErrors,true);
+  assert.deepEqual(facts.parsed.values,{speed:'unfinished'});
+  assert.throws(()=>commandValues({bound:next.bound},facts),error=>error.presentation.key==='numericFields');
+});
+
+test('another Edit owner receives independent package defaults and no previous Native review',()=>{
+  const drafts=controller();
+  const initial=trialContext(context(),drafts.current(),'fixture',null);
+  const configured={...initial,unit:'function',selected:functionKey(candidate),arguments:'[8]',profileChoice:'profile:profile-one',
+    review:trialSourceTicket(drafts),bound:{...selectProfile(initial.bound,profile.id),lane:'replay',descriptorPath:'/fixture/replay',
+      native:{operation:'Press once',postcondition:'Dialog is shown',workflowSeconds:'60',capture:true,input:true,launch:true,recovery:true,key:'previous-review'}}};
+  const otherOwner={...owner,token:'another-edit-lease'};
+  const packaged={...packageInfo,profiles:{default:{options:{speed:6}}},target:{id:'game',window_title:'Other title'},target_identity:'target-2'};
+  const next=trialContext(context('saved-1',{owner:otherOwner,package:packaged}),openSession(view('saved-1',otherOwner)),'fixture',configured);
+  assert.equal(next.profileChoice,'preset:default');
+  assert.equal(next.bound.selectedId,null);
+  assert.deepEqual(deriveBound(next.bound,null).parsed.values,{speed:6});
+  assert.notEqual(next.bound.draft,configured.bound.draft);
+  assert.equal(next.bound.lane,'native');
+  assert.equal(next.bound.descriptorPath,'');
+  assert.equal(next.unit,'package');
+  assert.equal(next.selected,null);
+  assert.equal(next.arguments,'[]');
+  assert.equal(next.review,null);
+  assert.deepEqual(next.bound.native,{operation:'',postcondition:'',workflowSeconds:null,capture:false,input:false,launch:false,recovery:false,key:null});
+  assert.equal(deriveBound(next.bound,null).native.intent,null);
+});
 
 for(const {scenario,input,required,error} of [
   {scenario:'expression arguments are not evaluated',input:'[(() => 1)()]',required:0,error:'json'},
@@ -114,7 +230,7 @@ test('rerun resolves the same declaration on current saved source and refuses a 
   const session=openSession(view());
   const initial=trialContext(context(),session,'fixture',null);
   const configured={...initial,unit:'function',selected:functionKey(candidate),arguments:'[8]',profileChoice:'profile:profile-one',
-    bound:editDraft(selectProfile(initial.bound,profile.id),{speed:'4'})};
+    bound:{...chooseLane(editDraft(selectProfile(initial.bound,profile.id),{speed:'4'}),'replay'),descriptorPath:'/fixture/replay'}};
   const moved={...candidate,line:12,column:7,signature:'battle(turn: number, optional?: string): number'};
   const refreshed=trialContext(context('saved-2',{functions:[moved],package:{...packageInfo,inventory_identity:'inventory-2'}}),
     {...session,revision:'saved-2'},'fixture',configured);
@@ -122,12 +238,52 @@ test('rerun resolves the same declaration on current saved source and refuses a 
   assert.equal(refreshed.arguments,'[8]');
   assert.deepEqual(refreshed.bound.draft,{speed:'4'});
   assert.equal(refreshed.bound.selectedId,profile.id);
+  assert.equal(refreshed.profileChoice,'profile:profile-one');
+  assert.equal(refreshed.unit,'function');
+  assert.equal(refreshed.bound.lane,'replay');
+  assert.equal(refreshed.bound.descriptorPath,'/fixture/replay');
+  assert.equal(refreshed.bound.draftRevision,configured.bound.draftRevision);
+  assert.deepEqual(deriveBound(refreshed.bound,null).parsed.values,{speed:4});
   assert.equal(refreshed.review,null);
   const renamed=trialContext(context('saved-3',{functions:[{...candidate,function:'newBattle'}]}),{...session,revision:'saved-3'},'fixture',refreshed);
   assert.equal(renamed.unit,'function');
   assert.equal(renamed.selected,null);
   assert.equal(renamed.arguments,'[8]');
   assert.equal(trialContext({...context(),owner:{...owner,token:'foreign'}},session,'fixture',configured),null);
+});
+
+test('same-owner reload retains the chosen preset values and lane when package defaults change',()=>{
+  const session=openSession(view());
+  const initial=trialContext(context(),session,'fixture',null);
+  const selected={...initial,profileChoice:'preset:fast',bound:chooseLane(newDraft(initial.bound,'fast'),'controlled')};
+  const packaged={...packageInfo,profiles:{fast:{options:{speed:9}},default:{options:{speed:7}}},
+    target:{id:'game',window_title:'Exact title'},target_identity:'target-1'};
+  const next=trialContext(context('saved-2',{package:packaged}),{...session,revision:'saved-2'},'fixture',selected);
+  assert.equal(next.profileChoice,'preset:fast');
+  assert.equal(next.bound.preset,'fast');
+  assert.equal(next.bound.selectedId,null);
+  assert.equal(next.bound.draft,selected.bound.draft);
+  assert.equal(next.bound.lane,'controlled');
+  const facts=deriveBound(next.bound,null);
+  assert.equal(facts.numericErrors,false);
+  assert.equal(facts.startBlock,null);
+  assert.deepEqual(commandValues({bound:next.bound},facts),{speed:2});
+});
+
+test('a disappeared preset stays unselected across later reloads instead of adopting the packaged default',()=>{
+  const session=openSession(view());
+  const initial=trialContext(context(),session,'fixture',null);
+  const selected={...initial,profileChoice:'preset:fast',bound:newDraft(initial.bound,'fast')};
+  const packaged={...packageInfo,profiles:{default:{options:{speed:7}}}};
+  const next=trialContext(context('saved-2',{package:packaged}),{...session,revision:'saved-2'},'fixture',selected);
+  assert.equal(next.profileChoice,'');
+  assert.equal(next.bound.preset,'fast');
+  assert.equal(next.bound.draft,selected.bound.draft);
+  assert.deepEqual(deriveBound(next.bound,null).parsed.values,{speed:2});
+  const reloaded=trialContext(context('saved-3',{package:packaged}),{...session,revision:'saved-3'},'fixture',next);
+  assert.equal(reloaded.profileChoice,'');
+  assert.equal(reloaded.bound.draft,selected.bound.draft);
+  assert.deepEqual(deriveBound(reloaded.bound,null).parsed.values,{speed:2});
 });
 
 test('schema changes preserve incompatible profile values for correction rather than inventing defaults',()=>{
@@ -145,12 +301,17 @@ test('a removed or rejected saved profile requires a deliberate new values choic
   const session=openSession(view());
   const initial=trialContext(context(),session,'fixture',null);
   const selected={...initial,bound:selectProfile(initial.bound,profile.id),profileChoice:'profile:profile-one'};
-  const next=trialContext(context('saved-2',{profiles:[],profiles_error:{category:'ProfileRejected',message:'schema changed',context:null}}),
+  const packaged={...packageInfo,profiles:{default:{options:{speed:7}}}};
+  const next=trialContext(context('saved-2',{package:packaged,profiles:[],profiles_error:{category:'ProfileRejected',message:'schema changed',context:null}}),
     {...session,revision:'saved-2'},'fixture',selected);
   assert.equal(next.profileChoice,'');
   assert.equal(next.bound.selectedId,profile.id);
   assert.deepEqual(next.bound.draft,{speed:3});
   assert.equal(next.bound.profilesError.category,'ProfileRejected');
+  const reloaded=trialContext(context('saved-3',{package:packaged,profiles:[]}),{...session,revision:'saved-3'},'fixture',next);
+  assert.equal(reloaded.profileChoice,'');
+  assert.equal(reloaded.bound.selectedId,profile.id);
+  assert.deepEqual(reloaded.bound.draft,{speed:3});
 });
 
 function rejectedProfileView(token='repair-one'){
@@ -192,18 +353,19 @@ test('an earlier repair receipt cannot replace the current context or profile ca
   assert.deepEqual(next.bound.profiles,[profile]);
 });
 
-test('an unchanged saved-context read retains review, while a newer saved revision consumes it',()=>{
+test('an unchanged saved-context read retains optional launch review, while a newer saved revision consumes it',()=>{
   const drafts=controller();
   const initial=trialContext(context(),drafts.current(),'fixture',null);
   const sourceTicket=trialSourceTicket(drafts);
-  const reviewed={...initial,review:sourceTicket,bound:{...initial.bound,native:{...initial.bound.native,capture:true,input:true,key:'reviewed'}}};
+  const reviewed={...initial,review:sourceTicket,bound:{...initial.bound,native:{...initial.bound.native,launch:true,recovery:true,key:'reviewed'}}};
   const same=trialContext(context(),drafts.current(),'fixture',reviewed);
   assert.equal(same.review,sourceTicket);
-  assert.equal(same.bound.native.capture,true);
+  assert.equal(same.bound.native.launch,true);
+  assert.equal(same.bound.native.capture,false);
   const newer=trialContext(context('saved-2'),{...drafts.current(),revision:'saved-2'},'fixture',reviewed);
   assert.equal(newer.review,null);
-  assert.equal(newer.bound.native.capture,false);
-  assert.equal(newer.bound.native.input,false);
+  assert.equal(newer.bound.native.launch,false);
+  assert.equal(newer.bound.native.recovery,false);
 });
 
 test('Script preparation and stopping retain the real Edit owner and shared cancellation',()=>{
@@ -317,4 +479,257 @@ for(const phase of ['host_attachment','instantiation','function']) test(`${phase
     error:{category:'Script',message:'failed',context:null},result:null});
   assert.equal(result.failure,phase);
   assert.equal(result.launch,null);
+});
+
+const trialLimits={startup_ms:60000,readiness_ms:30000,workflow_ms:30000,max_frames:300,wait_ms:1000,interval_ms:100,max_actions:64,cleanup_ms:1000,containment_ms:2000};
+const trialCapability={default_limits:trialLimits,max_workflow_ms:900000};
+const trialEnvironment={profile:'fixture',model:'fixture-model',language:'en',provider:'cpu',runtime_profile:'fixture-runtime',
+  model_root:'/fixture/models',runtime_path:'/fixture/runtime',native_library_paths:[]};
+
+function nativeConfirmationContext(){
+  const drafts=controller();
+  const packaged={...packageInfo,target:{id:'game',window_title:'Exact window'},target_identity:'target-declaration'};
+  const initial=trialContext(context('saved-1',{package:packaged}),drafts.current(),'fixture',null);
+  const configuration={platform:'macos',game:{kind:'bundle',path:'/fixture/Game.app'},launcher:null,arguments:['--fixture'],
+    working_directory:null,window_title:'Exact window',input:{route:'process_directed',focus:'preserve',pointer_mode:'appkit_background',click_hold_ms:50}};
+  const target={platform:'macos',context:initial.bound.target.context,compatible:true,
+    record:{version:1,internal_name:'fixture',package_id:packageInfo.package_id,revision:1,binding:{
+      id:'saved-target',package_id:packageInfo.package_id,target_id:'game',declaration_identity:'target-declaration',
+      configuration,resolution:{game:{path:'/fixture/Game.app',executable:'/fixture/Game.app/Contents/MacOS/Game'},launcher:null,working_directory:null},
+    }}};
+  const state=trialContext({...initial.context,target},drafts.current(),'fixture',initial);
+  return {controller:drafts,state,environment:structuredClone(trialEnvironment),capability:structuredClone(trialCapability),generation:0};
+}
+
+test('configured Script Native is ready without prose or checkboxes, while ordinary Run still requires operation review',()=>{
+  const input=nativeConfirmationContext();
+  const facts=deriveBound(input.state.bound,input.environment,'en',input.capability,'script');
+  assert.equal(facts.startBlock,null);
+  assert.equal(facts.native.block,null);
+  assert.deepEqual(facts.native.intent.review,{kind:'script'});
+  assert.equal(facts.native.intent.capture_approved,false);
+  assert.equal(facts.native.intent.input_approved,false);
+  assert.equal(facts.native.intent.launch_approved,false);
+  assert.equal(facts.native.intent.max_exit_recoveries,0);
+  assert.equal(deriveBound(input.state.bound,input.environment,'en',input.capability).native.block,'nativeText');
+  assert.equal(deriveBound(input.state.bound,input.environment,'en',input.capability).native.intent,null);
+});
+
+for(const {scenario,change,block} of [
+  {scenario:'missing OCR environment',change:input=>({...input,environment:null}),block:'nativeEnvironment'},
+  {scenario:'unsupported Native capability',change:input=>({...input,capability:null}),block:'nativeUnavailable'},
+  {scenario:'invalid duration',change:input=>({...input,state:{...input.state,bound:editNativeReview(input.state.bound,'workflowSeconds','0')}}),block:'nativeWorkflow'},
+  {scenario:'unreadable saved target',change:input=>({...input,state:{...input.state,bound:{...input.state.bound,
+    target:targetReadFailed(input.state.bound.target,{category:'Storage',message:'Unavailable',context:null})}}}),block:'nativeTarget'},
+  {scenario:'dirty target configuration',change:input=>({...input,state:{...input.state,bound:{...input.state.bound,
+    target:editTarget(input.state.bound.target,{...input.state.bound.target.draft,windowTitle:'Unsaved title'})}}}),block:'nativeTargetDirty'},
+]) test(`Script confirmation keeps ${scenario} blocked`,()=>{
+  const input=change(nativeConfirmationContext());
+  assert.equal(deriveBound(input.state.bound,input.environment,'en',input.capability,'script').native.block,block);
+  assert.equal(new TrialConfirmationGate().open(input),null);
+});
+
+test('opening and cancelling confirmation grant no capture/input authority and an old callback cannot use a reopened capture',()=>{
+  const input=nativeConfirmationContext();
+  const gate=new TrialConfirmationGate();
+  const capture=gate.open(input);
+  assert.ok(capture);
+  assert.equal(gate.current(capture,input),true);
+  assert.equal(capture.request.native_intent.capture_approved,false);
+  assert.equal(capture.request.native_intent.input_approved,false);
+  assert.equal(gate.dispatch(capture,input),null);
+  gate.cancel();
+  assert.equal(gate.consume(capture,input),false);
+  assert.equal(gate.dispatch(capture,input),null);
+  const reopened=gate.open(input);
+  assert.ok(reopened);
+  assert.notEqual(reopened,capture);
+  assert.equal(gate.consume(capture,input),false);
+  assert.equal(gate.dispatch(reopened,input),null);
+});
+
+test('explicit confirm submits the captured function, arguments, profile and target once after an unchanged reread',()=>{
+  const input=nativeConfirmationContext();
+  input.state={...input.state,unit:'function',selected:functionKey(candidate),arguments:'[8, {"nested":[1]}]',
+    profileChoice:'profile:profile-one',bound:selectProfile(input.state.bound,profile.id)};
+  const gate=new TrialConfirmationGate();
+  const capture=gate.open(input);
+  assert.ok(capture);
+  assert.equal(capture.source.revision,'saved-1');
+  assert.equal(gate.consume(capture,input),true);
+  input.state=trialContext(input.state.context,input.controller.current(),'fixture',input.state);
+  const request=gate.dispatch(capture,input);
+  assert.ok(request);
+  assert.deepEqual(request.function,{module:'battle.ts',function:'battle',arguments:[8,{nested:[1]}]});
+  assert.deepEqual(request.values,{speed:3});
+  assert.equal(request.profile_id,'profile-one');
+  assert.deepEqual(request.native_intent,{target_revision:1,target_binding_id:'saved-target',target_declaration_identity:'target-declaration',
+    capture_approved:true,input_approved:true,launch_approved:false,max_exit_recoveries:0,review:{kind:'script'},limits:trialLimits});
+  assert.equal(capture.request.native_intent.capture_approved,false);
+  assert.equal(capture.request.native_intent.input_approved,false);
+  assert.equal(gate.consume(capture,input),false);
+  assert.equal(gate.dispatch(capture,input),null);
+});
+
+const confirmationChanges=[
+  {scenario:'execution unit',change:input=>({...input,state:{...input.state,unit:'function',selected:functionKey(candidate),arguments:'[7]'}})},
+  {scenario:'function selection',change:input=>({...input,state:{...input.state,selected:'another function'}})},
+  {scenario:'arguments',change:input=>({...input,state:{...input.state,arguments:'[9]'}})},
+  {scenario:'explicit values',change:input=>({...input,state:{...input.state,bound:editDraft(input.state.bound,{speed:9})}})},
+  {scenario:'values edited back',change:input=>({...input,state:{...input.state,bound:editDraft(editDraft(input.state.bound,{speed:9}),{speed:1})}})},
+  {scenario:'profile choice',change:input=>({...input,state:{...input.state,profileChoice:'profile:profile-one',bound:selectProfile(input.state.bound,profile.id)}})},
+  {scenario:'package inventory',change:input=>({...input,state:{...input.state,context:{...input.state.context,package:{...input.state.context.package,inventory_identity:'new-inventory'}}}})},
+  {scenario:'saved revision',change:input=>({...input,state:{...input.state,context:{...input.state.context,revision:'saved-2'}}})},
+  {scenario:'Edit owner',change:input=>({...input,state:{...input.state,context:{...input.state.context,owner:{...owner,token:'other-owner'}}}})},
+  {scenario:'OCR environment',change:input=>({...input,environment:{...input.environment,model:'another-model'}})},
+  {scenario:'duration',change:input=>({...input,state:{...input.state,bound:editNativeReview(input.state.bound,'workflowSeconds','60')}})},
+  {scenario:'host limits',change:input=>({...input,capability:{...input.capability,default_limits:{...input.capability.default_limits,max_actions:32}}})},
+  {scenario:'intervening environment or setup change restored to identical values',change:input=>({...input,generation:input.generation+1})},
+  {scenario:'saved target revision',change:input=>{
+    const target=input.state.bound.target;
+    return {...input,state:{...input.state,bound:{...input.state.bound,target:readTarget(target,{...target.view,record:{...target.view.record,revision:2}})}}};
+  }},
+  {scenario:'target configuration even under an unchanged binding ID',change:input=>{
+    const target=input.state.bound.target, binding=target.view.record.binding;
+    return {...input,state:{...input.state,bound:{...input.state.bound,target:readTarget(target,{...target.view,
+      record:{...target.view.record,binding:{...binding,configuration:{...binding.configuration,window_title:'Other window'}}}})}}};
+  }},
+];
+for(const {scenario,change} of confirmationChanges) test(`${scenario} invalidates both displayed and preparing confirmation without approving the newest data`,()=>{
+  const input=nativeConfirmationContext();
+  const gate=new TrialConfirmationGate();
+  const capture=gate.open(input);
+  assert.ok(capture);
+  const changed=change(input);
+  assert.equal(gate.consume(capture,changed),false);
+  assert.equal(gate.consume(capture,input),false);
+  assert.equal(gate.dispatch(capture,input),null);
+  const next=gate.open(input);
+  assert.equal(gate.consume(next,input),true);
+  assert.equal(gate.dispatch(next,changed),null);
+  assert.equal(gate.dispatch(next,input),null);
+  assert.equal(next.request.native_intent.capture_approved,false);
+});
+
+test('a target refreshed during final context preparation never replaces the target displayed in confirmation',()=>{
+  const input=nativeConfirmationContext();
+  const gate=new TrialConfirmationGate();
+  const capture=gate.open(input);
+  assert.equal(gate.consume(capture,input),true);
+  const original=input.state.context.target;
+  const binding=original.record.binding;
+  const contextAfter={...input.state.context,target:{...original,record:{...original.record,revision:2,
+    binding:{...binding,id:'replacement-target',configuration:{...binding.configuration,window_title:'Replacement window'}}}}};
+  input.state=trialContext(contextAfter,input.controller.current(),'fixture',input.state);
+  assert.equal(input.state.bound.target.view.record.binding.id,'replacement-target');
+  assert.equal(capture.target.configuration.window_title,'Exact window');
+  assert.equal(capture.request.native_intent.target_binding_id,'saved-target');
+  assert.equal(gate.dispatch(capture,input),null);
+  assert.equal(gate.consume(capture,input),false);
+});
+
+test('source edits and Undo keep confirmation stale while non-mutating source navigation does not',()=>{
+  const input=nativeConfirmationContext();
+  const gate=new TrialConfirmationGate();
+  const capture=gate.open(input);
+  input.controller.update(state=>selectFile(state,'other.ts',null));
+  assert.equal(gate.current(capture,input),true);
+  assert.equal(gate.consume(capture,input),true);
+  input.controller.update(state=>replaceFile(state,'battle.ts',source+'// changed\n'));
+  input.controller.update(state=>undoFile(state,'battle.ts'));
+  assert.equal(input.controller.current().drafts.get('battle.ts').text,source);
+  assert.equal(gate.dispatch(capture,input),null);
+  assert.equal(gate.consume(capture,input),false);
+});
+
+test('Cancel or Stop during preparation withdraws a consumed confirmation without changing source or Undo history',()=>{
+  const input=nativeConfirmationContext();
+  const session=input.controller.current();
+  const gate=new TrialConfirmationGate();
+  const capture=gate.open(input);
+  assert.equal(gate.consume(capture,input),true);
+  gate.cancel();
+  assert.equal(gate.dispatch(capture,input),null);
+  assert.equal(input.controller.current(),session);
+  assert.equal(gate.consume(capture,input),false);
+});
+
+test('dirty Native cannot capture authority; saving only enables a new explicit confirmation for the saved revision',()=>{
+  const input=nativeConfirmationContext();
+  const gate=new TrialConfirmationGate();
+  input.controller.update(state=>replaceFile(state,'battle.ts',source+'// saved later\n'));
+  assert.equal(gate.open(input),null);
+  const ticket=saveTicket(input.controller.current(),'battle.ts');
+  const saved=view('saved-2');
+  saved.files[0].text=ticket.text;
+  input.controller.update(state=>applySave(state,ticket,{owner,committed_revision:'saved-2',view:saved,refresh_error:null}));
+  assert.equal(gate.open(input),null);
+  input.state=trialContext({...input.state.context,revision:'saved-2'},input.controller.current(),'fixture',input.state);
+  const capture=gate.open(input);
+  assert.ok(capture);
+  assert.equal(capture.source.revision,'saved-2');
+  assert.equal(capture.request.native_intent.capture_approved,false);
+  assert.equal(gate.dispatch(capture,input),null);
+});
+
+test('whole-package launch/recovery remain separate explicit choices and Function never borrows them',()=>{
+  const input=nativeConfirmationContext();
+  input.state={...input.state,review:trialSourceTicket(input.controller),bound:
+    approveNative(approveNative(input.state.bound,'launch',true,input.environment,input.capability),'recovery',true,input.environment,input.capability)};
+  const gate=new TrialConfirmationGate();
+  const whole=gate.open(input);
+  assert.ok(whole);
+  assert.equal(whole.request.native_intent.launch_approved,true);
+  assert.equal(whole.request.native_intent.max_exit_recoveries,1);
+  assert.equal(whole.request.native_intent.capture_approved,false);
+  assert.equal(gate.consume(whole,input),true);
+  assert.equal(gate.dispatch(whole,input).native_intent.max_exit_recoveries,1);
+  input.state={...input.state,unit:'function',selected:functionKey(candidate),arguments:'[1]'};
+  const fn=gate.open(input);
+  assert.ok(fn);
+  assert.equal(fn.request.native_intent.launch_approved,false);
+  assert.equal(fn.request.native_intent.max_exit_recoveries,0);
+  assert.equal(gate.consume(fn,input),true);
+  assert.equal(gate.dispatch(fn,input).native_intent.launch_approved,false);
+});
+
+test('Controlled and replay requests retain their values and invocation without acquiring Native confirmation',()=>{
+  const input=nativeConfirmationContext();
+  input.state={...input.state,unit:'function',selected:functionKey(candidate),arguments:'[4]',bound:chooseLane(input.state.bound,'controlled')};
+  const source=trialSourceTicket(input.controller);
+  const controlled=trialRequest(input.state,source,null,null);
+  assert.ok(controlled);
+  assert.equal(controlled.request.native_intent,null);
+  assert.deepEqual(controlled.request.function,{module:'battle.ts',function:'battle',arguments:[4]});
+  assert.equal(new TrialConfirmationGate().open(input),null);
+  const replay=trialRequest({...input.state,bound:{...input.state.bound,lane:'replay',descriptorPath:'/fixture/corpus.json'}},source,input.environment,null);
+  assert.equal(replay.request.replay_descriptor_path,'/fixture/corpus.json');
+  assert.equal(replay.request.native_intent,null);
+});
+
+test('confirmation detaches target, values and environment from later mutable host or draft objects',()=>{
+  const input=nativeConfirmationContext();
+  const gate=new TrialConfirmationGate();
+  const capture=gate.open(input);
+  input.environment.model='changed-in-place';
+  input.state.bound.draft.speed=9;
+  input.state.bound.target.view.record.binding.configuration.arguments.push('--changed');
+  assert.equal(capture.environment.model,'fixture-model');
+  assert.deepEqual(capture.request.values,{speed:1});
+  assert.deepEqual(capture.target.configuration.arguments,['--fixture']);
+  assert.equal(gate.consume(capture,input),false);
+  assert.equal(gate.dispatch(capture,input),null);
+});
+
+test('a selected saved profile changed under the same ID invalidates confirmation even when draft values are unchanged',()=>{
+  const input=nativeConfirmationContext();
+  input.state={...input.state,profileChoice:'profile:profile-one',bound:selectProfile(input.state.bound,profile.id)};
+  const gate=new TrialConfirmationGate();
+  const capture=gate.open(input);
+  assert.equal(gate.consume(capture,input),true);
+  input.state={...input.state,bound:{...input.state.bound,profiles:[{...profile,name:'Changed profile',values:{speed:7}}]}};
+  assert.deepEqual(input.state.bound.draft,{speed:3});
+  assert.equal(gate.dispatch(capture,input),null);
+  assert.equal(capture.profileName,'Reviewed');
+  assert.deepEqual(capture.request.values,{speed:3});
 });

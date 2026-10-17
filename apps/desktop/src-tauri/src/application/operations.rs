@@ -6,7 +6,7 @@ use super::{
 };
 use crate::distribution::InstalledIdentity;
 use crate::logging::LogStatus;
-use mado_runtime_comparison::desktop::{StartPreparation, StartRequest};
+use mado_runtime_comparison::desktop::{NativeReview, StartPreparation, StartRequest};
 use mado_runtime_comparison::inventory::Inventory;
 use mado_runtime_comparison::model::Fault;
 use serde_json::{Value, json};
@@ -250,6 +250,15 @@ impl Application {
             let native = request.lane == "native";
             if native {
                 state.native_ready()?;
+                if !matches!(
+                    request.native_intent.as_ref().map(|intent| &intent.review),
+                    Some(NativeReview::Operation { .. })
+                ) {
+                    return Err(Fault::new(
+                        "NativeRefused",
+                        "Ordinary Start requires operation and visible postcondition review",
+                    ));
+                }
             }
             let selected = state.resolve(workspace)?;
             if request.inventory_identity != selected.inventory.identity

@@ -1,22 +1,21 @@
 import type {ReactNode} from 'react';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
-import {functionKey, trialArguments} from '../edit-trial.ts';
+import {functionKey} from '../edit-trial.ts';
 import type {EditTrialState} from '../edit-trial.ts';
 import {newDraft, selectProfile} from '../workspace.ts';
 import type {Derived} from '../workspace.ts';
-import type {Fault, NativeCapability, OcrEnvironment} from '../types.ts';
+import type {Fault, NativeCapability} from '../types.ts';
 import type {EditTrialHandlers} from './EditTrial.tsx';
 import ExecutionFields from './ExecutionFields.tsx';
-import NativeReview from './NativeReview.tsx';
 import {FaultMessage} from './ResultPanel.tsx';
 import Select from './Select.tsx';
 import TargetPanel from './TargetPanel.tsx';
 
-export default function EditExecutionSetup({state, facts, handlers, locked, loadBlocked, loading, block, dirty, error, nativeCapability, nativeError, environment, profileRepair, onReturn}: {
+export default function EditExecutionSetup({state, facts, handlers, locked, loadBlocked, loading, block, dirty, error, nativeCapability, nativeError, profileRepair, onReturn}: {
   state:EditTrialState|null; facts:Derived|null; handlers:EditTrialHandlers;
   locked:boolean; loadBlocked:boolean; loading:boolean; block:string|null; dirty:boolean; error:Fault|null;
-  nativeCapability:NativeCapability|null; nativeError:Fault|null; environment:OcrEnvironment|null;
+  nativeCapability:NativeCapability|null; nativeError:Fault|null;
   profileRepair:ReactNode; onReturn:()=>void;
 }) {
   const locale = useLocale();
@@ -24,21 +23,17 @@ export default function EditExecutionSetup({state, facts, handlers, locked, load
   const s = t.scriptTrial;
   const bound = state?.bound;
   const candidate = state?.context.functions.find(item => functionKey(item) === state.selected);
-  const args = state?.unit === 'function' ? trialArguments(state.arguments, candidate?.required_arguments) : null;
-  const setupBlock = !state || !facts ? s.load : !state.profileChoice ? s.profileRequired
-    : state.unit === 'function' && !candidate ? state.context.functions.length === 0 ? s.noFunctions : s.chooseFunction
-    : args?.error ? s.argumentErrors[args.error]
+  const reason = block ?? (!state || !facts ? s.load : !state.profileChoice ? s.profileRequired
     : !facts.bound ? t.run.staleSchema : facts.numericErrors ? messages[locale].app.invalidFields
-    : facts.descriptorError ?? facts.startBlock;
-  const reason = block ?? (dirty && bound?.lane === 'native' && setupBlock === messages[locale].app.nativeApproval ? null : setupBlock);
+    : facts.descriptorError);
   const fieldsLocked = locked || loading;
   return <>
     <div className="page-heading"><div>
       <span className="eyebrow">{s.heading}</span>
-      <h1 id="edit-execution-setup-heading" tabIndex={-1}>{s.setup}</h1>
+      <h1 id="edit-execution-setup-heading" tabIndex={-1}>{s.advancedSetup}</h1>
       <p>{s.setupHelp}</p>
     </div><div className="actions">
-      <button id="trial-return-edit" type="button" onClick={onReturn}>{s.returnToEdit}</button>
+      <button id="trial-return-edit" type="button" onClick={onReturn}>{s.returnToExecution}</button>
     </div></div>
     <div className="button-row">
       <button id={state ? 'trial-reload' : 'trial-load'} type="button" disabled={fieldsLocked || loadBlocked} onClick={handlers.reload}>
@@ -78,10 +73,8 @@ export default function EditExecutionSetup({state, facts, handlers, locked, load
             {!facts.bound && <p className="inline-warning">{t.run.staleSchema}</p>}
             <ExecutionFields bound={bound} facts={facts} locked={fieldsLocked} nativeCapability={nativeCapability} change={handlers.bound} trial>
               {nativeError && <FaultMessage title={t.run.nativeCapabilityError} value={nativeError}/>}
-              {facts.native && <NativeReview bound={bound} native={facts.native} selectedProfile={facts.selectedProfile} valuesDirty={facts.valuesDirty}
-                locked={fieldsLocked} nativeCapability={nativeCapability} environment={environment} attachOnly={state.unit === 'function'}
-                reviewBlocked={dirty || block !== null || !state.profileChoice || !facts.bound || facts.numericErrors
-                  || (state.unit === 'function' && (!candidate || args?.error !== null))} handlers={handlers}/>}
+              {facts.native && <p className="field-help">{s.reviewInExecution}{' '}
+                <button type="button" className="link" onClick={onReturn}>{s.returnToExecution}</button></p>}
             </ExecutionFields>
           </div>
         </section>

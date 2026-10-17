@@ -243,11 +243,31 @@ fn native_request(selection: &crate::application::Selection) -> StartRequest {
         input_approved: true,
         launch_approved: false,
         max_exit_recoveries: 0,
-        operation: "One reviewed click".into(),
-        visible_postcondition: "The reviewed label changes".into(),
+        review: NativeReview::Operation {
+            operation: "One reviewed click".into(),
+            visible_postcondition: "The reviewed label changes".into(),
+        },
         limits: mado_runtime_comparison::desktop::native_limits(),
     });
     request
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn ordinary_native_start_refuses_saved_script_review_before_reservation() {
+    let fixture = Fixture::new();
+    let application = &fixture.application;
+    let package = fixture.package_at("native-review-boundary");
+    declare_target(&package, Some("native-target"));
+    let selection = inspect_named(application, "Main", &package).unwrap();
+    let workspace = workspace_ref(&selection);
+    let mut request = native_request(&selection);
+    request.native_intent.as_mut().unwrap().review = NativeReview::Script {};
+    assert_eq!(
+        application.start(&workspace, request).unwrap_err().category,
+        "NativeRefused"
+    );
+    assert!(application.runner.poll().run.is_none());
 }
 
 #[cfg(target_os = "macos")]

@@ -444,7 +444,7 @@ export function chooseLane(bound:Bound, lane:string):Bound {
   return clearNativeApproval({...bound, lane});
 }
 
-export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capability:NativeCapability|null):NativeFacts {
+export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capability:NativeCapability|null, reviewKind:'operation'|'script' = 'operation'):NativeFacts {
   const target = bound.target;
   const binding = nativeBinding(target);
   const recipe = binding && nativeRecipe(binding);
@@ -452,12 +452,13 @@ export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capabi
   const {workflowSeconds, limits} = nativeDuration(review, capability);
   const workflowError = capability !== null && limits === null;
   const current = limits !== null && review.key !== null && review.key === nativeKey(bound, environment, limits);
-  const capture = current && review.capture;
-  const input = current && review.input;
+  // Script readiness grants no capture/input authority; only Edit's one-shot confirmation may do that.
+  const capture = reviewKind === 'operation' && current && review.capture;
+  const input = reviewKind === 'operation' && current && review.input;
   const launch = current && review.launch;
   const recovery = current && launch && review.recovery;
-  const operationError = nativeTextError(review.operation);
-  const postconditionError = nativeTextError(review.postcondition);
+  const operationError = reviewKind === 'operation' ? nativeTextError(review.operation) : null;
+  const postconditionError = reviewKind === 'operation' ? nativeTextError(review.postcondition) : null;
   const block:NativeBlock|null = capability === null ? 'nativeUnavailable'
     : workflowError ? 'nativeWorkflow'
     : targetExpectation(target) === null || target.operation !== null || target.review !== null ? 'nativeTarget'
@@ -465,18 +466,18 @@ export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capabi
     : targetDirty(target) ? 'nativeTargetDirty'
     : environment === null ? 'nativeEnvironment'
     : operationError !== null || postconditionError !== null ? 'nativeText'
-    : !capture || !input ? 'nativeApproval' : null;
+    : reviewKind === 'operation' && (!capture || !input) ? 'nativeApproval' : null;
   const declaration = target.context.declaration_identity;
-  const intent = block === null && binding && limits && target.view && declaration !== null ? {
+  const intent:NativeIntent|null = block === null && binding && limits && target.view && declaration !== null ? {
     target_revision: target.view.record.revision, target_binding_id: binding.id, target_declaration_identity: declaration,
     capture_approved: capture, input_approved: input, launch_approved: launch,
     max_exit_recoveries: recovery ? 1 as const : 0 as const,
-    operation: review.operation, visible_postcondition: review.postcondition, limits,
+    review:reviewKind === 'script' ? {kind:'script'} : {kind:'operation', operation:review.operation, visible_postcondition:review.postcondition}, limits,
   } : null;
   return {binding, recipe, capture, input, launch, recovery, operationError, postconditionError, workflowSeconds, workflowError, limits, block, intent};
 }
 
-export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en', nativeCapability:NativeCapability|null = null):Derived {
+export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en', nativeCapability:NativeCapability|null = null, reviewKind:'operation'|'script' = 'operation'):Derived {
   const t = messages[locale].app;
   const parsed = readDraft(bound.package.schema, bound.draft, locale);
   const numericErrors = Object.keys(parsed.errors).length > 0;
@@ -485,7 +486,7 @@ export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, l
   const dirty = valuesDirty || bound.name !== selectedProfile?.name;
   const profileBound = !selectedProfile || (selectedProfile.package_id === bound.package.package_id && selectedProfile.schema_identity === bound.package.schema_identity);
   const descriptor = bound.descriptorPath.trim();
-  const native = bound.lane === 'native' ? nativeFacts(bound, savedEnvironment, nativeCapability) : null;
+  const native = bound.lane === 'native' ? nativeFacts(bound, savedEnvironment, nativeCapability, reviewKind) : null;
   const startBlock = bound.lane === 'replay' && !descriptor ? t.replayDescriptor
     : bound.lane === 'replay' && !savedEnvironment ? t.replayEnvironment
     : native?.block ? t[native.block] : null;

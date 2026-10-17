@@ -4,7 +4,7 @@ use crate::target::{
     TargetResolution,
 };
 use mado_runtime_comparison::desktop::{
-    FunctionInvocation, NativeIntent, PackageInfo, native_limits,
+    FunctionInvocation, NativeIntent, NativeReview, PackageInfo, native_limits,
 };
 use mado_runtime_comparison::model::{Plan, identity};
 use serde_json::json;
@@ -84,8 +84,10 @@ fn inputs() -> (StartRequest, PackageInfo, TargetRecord) {
             input_approved: true,
             launch_approved: false,
             max_exit_recoveries: 0,
-            operation: "Click the declared button once".into(),
-            visible_postcondition: "The declared label changes".into(),
+            review: NativeReview::Operation {
+                operation: "Click the declared button once".into(),
+                visible_postcondition: "The declared label changes".into(),
+            },
             limits: native_limits(),
         }),
     };
@@ -171,6 +173,44 @@ fn stale_review_cannot_select_changed_binding_or_declaration() {
 }
 
 #[test]
+fn script_review_keeps_exact_saved_target_authority() {
+    let (mut request, package, record) = inputs();
+    request.native_intent.as_mut().unwrap().review = NativeReview::Script {};
+    capture(&request, &package, record.clone()).unwrap();
+    for changed in ["revision", "binding", "missing_binding", "declaration"] {
+        let mut selected = record.clone();
+        let mut reviewed = request.clone();
+        match changed {
+            "revision" => selected.revision += 1,
+            "binding" => selected.binding.as_mut().unwrap().id.push_str("-changed"),
+            "missing_binding" => selected.binding = None,
+            "declaration" => {
+                reviewed
+                    .native_intent
+                    .as_mut()
+                    .unwrap()
+                    .target_declaration_identity = "changed-declaration".into();
+            }
+            _ => unreachable!(),
+        }
+        let fault = capture(&reviewed, &package, selected).unwrap_err();
+        assert_eq!(
+            fault.category,
+            if changed == "declaration" {
+                "StaleIdentity"
+            } else {
+                "TargetConflict"
+            }
+        );
+    }
+    request.native_intent = None;
+    assert_eq!(
+        capture(&request, &package, record).unwrap_err().category,
+        "NativeRefused"
+    );
+}
+
+#[test]
 fn configuration_without_native_scope_cannot_be_projected() {
     let (request, package, mut record) = inputs();
     record.binding.as_mut().unwrap().configuration.game.kind = "executable".into();
@@ -206,6 +246,7 @@ fn a_function_review_only_attaches_to_an_already_running_target() {
         let (mut request, package, record) = inputs();
         request.function = Some(function());
         let intent = request.native_intent.as_mut().unwrap();
+        intent.review = NativeReview::Script {};
         intent.launch_approved = launch_approved;
         intent.max_exit_recoveries = max_exit_recoveries;
         assert_eq!(
@@ -216,6 +257,7 @@ fn a_function_review_only_attaches_to_an_already_running_target() {
 
     let (mut request, package, record) = inputs();
     request.function = Some(function());
+    request.native_intent.as_mut().unwrap().review = NativeReview::Script {};
     let mut platform = ScriptedPreparation::new([Ok(NativeDiscovery::Absent)]);
     let fault = capture(&request, &package, record)
         .unwrap()
@@ -230,6 +272,7 @@ fn a_function_review_only_attaches_to_an_already_running_target() {
 
     let (mut request, package, record) = inputs();
     request.function = Some(function());
+    request.native_intent.as_mut().unwrap().review = NativeReview::Script {};
     let mut platform = ScriptedPreparation::new([unique(7)]);
     let target = capture(&request, &package, record)
         .unwrap()
