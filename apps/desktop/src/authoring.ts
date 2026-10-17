@@ -565,6 +565,9 @@ export function utf8Bytes(text:string, start = 0, end = text.length):number {
   return bytes;
 }
 
+// Draft updates replace identity; weak keys do not retain closed sessions.
+const draftByteCounts = new WeakMap<FileDraft, number>();
+
 // Present disk-file drafts only; host Save/Validate additionally count the trusted dependency closure.
 export function otherNonImageBytes(session:AuthoringSession, path:string):number {
   const images = new Set<string>();
@@ -586,7 +589,12 @@ export function otherNonImageBytes(session:AuthoringSession, path:string):number
   let bytes = 0;
   for (const draft of session.drafts.values()) {
     if (draft.path === path || draft.missing || (draft.kind === 'asset' && images.has(draft.path))) continue;
-    bytes += draft.text === null ? draft.bytes : utf8Bytes(draft.text);
+    let size = draftByteCounts.get(draft);
+    if (size === undefined) {
+      size = draft.text === null ? draft.bytes : utf8Bytes(draft.text);
+      draftByteCounts.set(draft, size);
+    }
+    bytes += size;
   }
   return bytes;
 }

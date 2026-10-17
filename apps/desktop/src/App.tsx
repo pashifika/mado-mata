@@ -529,13 +529,15 @@ export default function App() {
         // An Edit command settled during this poll decides the lease itself; this answer may predate it.
         if (pollAuthoring === authoringEpoch.current) {
           publishHostAuthoring(incoming.authoring ?? null);
-          setNativeSelection(incoming.native_selection ?? null);
+          const selection = incoming.native_selection ?? null;
+          setNativeSelection(current => recognition.sameJson(current, selection) ? current : selection);
         }
         if (pollEpoch === epoch.current && !startInFlight.current) {
           const next = {...idle, ...incoming.controller};
           setView(current => {
             if (pollEpoch !== epoch.current || startInFlight.current) return current;
-            return acceptController(current, next, expectedRun.current);
+            const accepted = acceptController(current, next, expectedRun.current);
+            return recognition.sameJson(current, accepted) ? current : accepted;
           });
         }
       } catch (cause) {
