@@ -26,6 +26,8 @@
 - Bound native input delivery by remaining execution authority, not the scheduled
   hold limit. A drag at that limit no longer loses its final events to delivery
   overhead; cancellation, phase deadlines and cleanup remain enforced.
+- Shorten native launch/recovery explanations without changing consent, cleanup
+  requirements or execution limits.
 
 - Keep macOS engine-check temporary paths short for Unix socket fixtures,
   independently of its descriptive build and dependency-cache directory.
