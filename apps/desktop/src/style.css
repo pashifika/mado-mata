@@ -549,18 +549,15 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .package-validation > button { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .package-validation-collapsed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .package-validation-collapsed .package-validation { padding: 0; border: 0; }
-.script-trial { min-width: 0; margin: 12px 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
-.trial-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
-.trial-strip h2 { margin: 0; font-size: 13px; }
-.trial-strip .select { min-width: 0; max-width: 100%; }
-.trial-strip .trial-function-select { flex: 1 1 220px; min-width: 0; max-width: 100%; }
+/* Script execution Setup: a compact single-column dialog; full setup lives in Run. */
+.trial-dialog { width: min(560px, calc(100vw - 30px)); }
+.trial-dialog-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.trial-dialog-title h2 { min-width: 0; overflow-wrap: anywhere; }
+.trial-dialog textarea { min-height: 72px; max-height: 30vh; resize: vertical; font-family: var(--mono); }
+.trial-dialog .run-identity { margin-bottom: 8px; }
+.trial-links .link { padding: 0; }
 .trial-signature { margin: 8px 0 0; overflow-wrap: anywhere; font-size: 11px; }
-.trial-setup, .trial-result { margin-top: 8px; }
-.trial-setup > summary, .trial-result > summary { cursor: pointer; padding: 4px 0; }
-.trial-setup .run-grid { margin-top: 10px; }
-.trial-setup fieldset { min-width: 0; margin: 12px 0; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
-.trial-setup textarea { width: 100%; min-height: 72px; resize: vertical; font-family: var(--font-mono, monospace); }
-.trial-result > .panel { margin-top: 8px; }
+.execution-options { min-width: 0; margin: 0; padding: 0; border: 0; }
 .rail-missing { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
 .rail-missing h3 { margin: 4px 6px 2px; font-size: 11px; }
 .rail-missing .field-help { margin: 0 6px 6px; font-size: 10px; }

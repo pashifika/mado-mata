@@ -14,8 +14,6 @@ import PresetEditor from '../components/PresetEditor.tsx';
 import {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import SchemaEditor from '../components/SchemaEditor.tsx';
 import DeferredView from '../components/DeferredView.tsx';
-import {ValidationStatusIcon} from '../components/StatusSurface.tsx';
-import {packageValidation} from '../status.ts';
 import type {SourceEditorHandle} from '../editor/SourceEditor.tsx';
 import {CompletionClient} from '../editor/completion-client.ts';
 import type {CompletionContext, CompletionKey, CompletionStatus} from '../editor/completion-types.ts';
@@ -88,6 +86,7 @@ export interface PageAuthoring {
 interface Props {
   session: AuthoringSession; label: string; handlers: EditHandlers;
   recognition: ReactNode; recognitionDirty: boolean;
+  // Script execution Setup trigger and dialog beside Validate; the trigger carries the saved-package validation icon.
   trial: ReactNode;
   // Why the dirty recognition draft cannot be saved as it is; Save all still saves file drafts first.
   recognitionSaveBlock: string | null;
@@ -373,15 +372,10 @@ export default function EditPage({session, label, handlers, recognition, trial, 
   const current = validationCurrent(session);
   // A publication or a validation that reached disk capture can report an interrupted save that needs recovery.
   const recoveryFault = session.error?.category === AUTHORING_RECOVERY || (current && validation?.diagnostics.some(item => item.category === AUTHORING_RECOVERY) === true);
-  const savedValidation = packageValidation(session, validating);
   const validationControls = <div className="package-validation" aria-label={a.savedValidationHeading}>
     <ButtonHint hint={a.validationHelp}><button id="authoring-validate" type="button"
       disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button></ButtonHint>
-    <button id="authoring-validation-details" type="button" title={t.status.details}
-      onClick={() => document.getElementById('status-details')?.click()}>
-      <ValidationStatusIcon id="package-validation-status" label={t.status.savedPackage} state={savedValidation.state}/>
-      {savedValidation.state === 'running' ? a.validating : t.status[savedValidation.state]}
-    </button>
+    {trial}
   </div>;
 
   const railButton = <button ref={railToggle} id="authoring-tree-toggle" type="button" className="icon-button" aria-controls="authoring-rail" aria-expanded={railOpen}
@@ -517,7 +511,6 @@ export default function EditPage({session, label, handlers, recognition, trial, 
         <div><dt>{a.revision}</dt><dd id="authoring-revision" className="mono" title={session.revision}>{shortRevision(session.revision)}</dd></div>
       </dl>
     </div>
-    {trial}
     {!railOpen && <div className="package-validation-collapsed"><span>{a.railHeading}</span>{validationControls}</div>}
     <div className={railOpen ? 'repo' : 'repo rail-closed'}>
       <aside id="authoring-rail" className="panel repo-rail" aria-labelledby="authoring-rail-heading" hidden={!railOpen} onContextMenu={event => event.preventDefault()}>

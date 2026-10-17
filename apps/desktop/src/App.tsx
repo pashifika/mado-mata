@@ -32,6 +32,7 @@ import ProfileRecovery from './components/ProfileRecovery.tsx';
 import type {RecoveryHandlers} from './components/ProfileRecovery.tsx';
 import ResultPanel, {FaultMessage, fault} from './components/ResultPanel.tsx';
 import EditTrial from './components/EditTrial.tsx';
+import EditExecutionSetup from './components/EditExecutionSetup.tsx';
 import type {EditTrialHandlers} from './components/EditTrial.tsx';
 import {applyTrialRecovery, currentTrialSource, functionKey, trialArguments, trialContext, trialDiagnosticLocation, trialSourceBlock, trialSourceTicket} from './edit-trial.ts';
 import type {EditTrialState} from './edit-trial.ts';
@@ -1341,6 +1342,16 @@ export default function App() {
     bound:update => editTrialSetup(state => ({...state, bound:update(state.bound)})),
     reload:() => {void ownAuthoringWorker(readTrialContext);},
     run:() => {void ownAuthoringWorker(startTrial);},
+    setup:() => {
+      const owner = authoringController.current()?.owner.workspace.workspace_id;
+      if (!owner) return;
+      change(owner, item => ({...item, page:'run'}));
+      requestAnimationFrame(() => document.getElementById('edit-execution-setup-heading')?.focus());
+    },
+    results:() => {
+      const owner = authoringController.current()?.owner.workspace.workspace_id;
+      if (owner) change(owner, item => ({...item, page:'execution'}));
+    },
     logs:() => {
       const owner = authoringController.current()?.owner.workspace.workspace_id;
       if (owner) change(owner, item => ({...item, page:'logs'}));
@@ -3152,14 +3163,24 @@ export default function App() {
   const trialErrorSource = trialError && selectedAuthoring && sameAuthoringRef(trialError.owner, selectedAuthoring.owner)
     ? {revision:trialError.revision, stale:!trialError.source || !currentTrialSource(authoringController, trialError.source),
       paths:[...selectedAuthoring.drafts].filter(([, draft]) => !draft.missing).map(([path]) => path)} : null;
-  const trialResult = selected && selectedRun && trialSnapshot && selectedAuthoring && sameAuthoringRef(trialSnapshot.trial?.source.owner, selectedAuthoring.owner)
-    ? <ExecutionPage compact label={workspaceLabel(selected, workspaces)} revision={selected.revision} run={selectedRun} snapshot={trialSnapshot}
-      starting={starting?.workspaceId === selected.id} sourceCurrent={trialSourceCurrent} onSource={openTrialSource}
-      disclosed={selectedRun.view.run !== null && selected.disclosedRun === selectedRun.view.run}
-      onDisclose={next => change(selected.id, item => ({...item, disclosedRun:next ? selectedRun.view.run : null}))}/> : null;
+  const hasTrialResult = Boolean(selected && selectedRun && trialSnapshot && selectedAuthoring
+    && sameAuthoringRef(trialSnapshot.trial?.source.owner, selectedAuthoring.owner));
   const trialSourceReason = selectedAuthoring ? trialSourceBlock(selectedAuthoring, false) : null;
   const trialSetup = editTrial && selectedAuthoring && sameAuthoringRef(editTrial.context.owner, selectedAuthoring.owner) ? editTrial : null;
   const scriptTrialActive = starting !== null || (busy(view.state) && view.operation === 'authoring_trial');
+  const trialFacts = trialSetup ? deriveBound(trialSetup.bound, savedEnvironment, locale, nativeCapability.policy) : null;
+  const trialLocked = commandReason !== null || closing || active || leaseLost || pickerBusy;
+  const trialLoadBlocked = leaseLost || trialSourceReason === 'pending' || trialSourceReason === 'refresh';
+  const trialLoading = selectedAuthoring?.pending?.kind === 'script_trial' && !scriptTrialActive;
+  const trialBlock = leaseLost ? ui.authoring.leaseLostShort : nativeOccupied ? ui.scriptTrial.release
+    : trialSourceReason ? ui.scriptTrial.blocks[trialSourceReason]
+    : trialSetup?.bound.lane === 'native' && trialSetup.context.revision !== selectedAuthoring?.revision ? ui.scriptTrial.refresh
+    : recognitionSaveReason ?? null;
+  const trialProfileRepair = selected && selectedAuthoring && trialSetup
+    ? <ProfileRecovery idPrefix="trial-recovery" label={workspaceLabel(selected, workspaces)}
+      help={ui.scriptTrial.profileRecoveryHelp}
+      state={trialSetup.recovery} outcomes={trialSetup.recoveryOutcomes} handlers={trialRecoveryHandlers()}
+      locked={trialLocked || trialSetup.context.revision !== selectedAuthoring.revision}/> : null;
   const applicationPending = closing ? t.closing : appBusy ? t[appBusy] : bootstrap.pending ? t[bootstrap.pending]
     : bootstrap.snapshotPending ? ui.bootstrap.snapshotting : null;
   const statusItems: StatusItem[] = selected
@@ -3168,11 +3189,11 @@ export default function App() {
   if (pollError) statusItems.unshift({id: 'poll', severity: 'error', text: `${t.application} · ${pollError.category}`, action: null});
   const currentPage = selected?.page === 'edit' && !editVisible ? 'run' : selected?.page;
   const pageTitle = currentPage === 'execution' ? ui.status.execution : currentPage === 'logs' ? t.logs
-    : currentPage === 'edit' ? t.edit : selected ? isBound(selected) ? t.runControl : t.guidance
+    : currentPage === 'edit' ? t.edit : selected ? selectedAuthoring || isBound(selected) ? t.runControl : t.guidance
     : nav.kind === 'closed' ? t.closedDiagnostics : t.application;
   const pageHelp = currentPage === 'execution' ? ui.status.executionHelp : currentPage === 'logs' ? t.workspaceLogHelp
     : currentPage === 'edit' ? ui.authoring.authority
-    : selected ? isBound(selected) ? ui.run.introduction : ui.status.inspectionRequired
+    : selected ? selectedAuthoring ? ui.scriptTrial.setupHelp : isBound(selected) ? ui.run.introduction : ui.status.inspectionRequired
     : nav.kind === 'closed' ? `${t.closedHelp} ${t.closedLogHelp}` : t.appLogHelp;
   const statusPhase = selected
     ? starting?.workspaceId === selected.id || selected.busy ? 'preparing' : selectedRun!.view.state
@@ -3183,7 +3204,7 @@ export default function App() {
   return <LocaleContext value={locale}><div className="app">
     <StatusSurface scopeKey={statusScope} scopeLabel={selected ? workspaceLabel(selected, workspaces) : nav.kind === 'closed' ? t.closedLabel(closedSelected?.label ?? nav.id) : t.application}
       scopePhase={statusPhase}
-      pageTitle={pageTitle} pageHelp={<p>{pageHelp}</p>} runLabel={selected && isBound(selected) ? t.runControl : t.guidance} items={statusItems} session={selectedAuthoring}
+      pageTitle={pageTitle} pageHelp={<p>{pageHelp}</p>} runLabel={selected && (selectedAuthoring || isBound(selected)) ? t.runControl : t.guidance} items={statusItems} session={selectedAuthoring}
       recognitionDirty={selectedAuthoring !== null && recognitionDirty} validating={selectedAuthoring !== null && validationActive}
       authoring={compactAuthoring(returnToEdit, !editVisible)}
       validation={savedValidation}
@@ -3233,7 +3254,7 @@ export default function App() {
       <nav className="workspace-pages" aria-label={selected ? t.selectedPages : t.currentScope}>
         {selected && <>
           <button id="page-run" type="button" className="nav-item" aria-current={selected.page === 'run' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'run'}));}}>
-            {isBound(selected) ? t.runControl : t.guidance}
+            {selectedAuthoring || isBound(selected) ? t.runControl : t.guidance}
           </button>
           <button id="page-execution" type="button" className="nav-item" aria-current={selected.page === 'execution' ? 'page' : undefined}
             onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'execution'}));}}>{ui.status.execution}{needsAttention(runView(selected).view) && <span className="execution-attention" aria-label={t.attention(t.unresolved)}>!</span>}</button>
@@ -3275,19 +3296,13 @@ export default function App() {
           packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive} recognitionDirty={recognitionDirty}
           recognitionSaveBlock={recognitionSaveReason} exportBlock={active ? ui.authoring.block('pending') : null}
           completionPreferences={editorCompletion.current}
-          trial={<EditTrial state={trialSetup} facts={trialSetup ? deriveBound(trialSetup.bound, savedEnvironment, locale, nativeCapability.policy) : null}
-            handlers={trialHandlers} locked={commandReason !== null || closing || active || leaseLost || pickerBusy}
-            loadBlocked={leaseLost || trialSourceReason === 'pending' || trialSourceReason === 'refresh'}
-            block={leaseLost ? ui.authoring.leaseLostShort : nativeOccupied ? ui.scriptTrial.release : trialSourceReason ? ui.scriptTrial.blocks[trialSourceReason]
-              : trialSetup?.bound.lane === 'native' && trialSetup.context.revision !== authoring.revision ? ui.scriptTrial.refresh : recognitionSaveReason ?? null}
+          trial={<EditTrial state={trialSetup} facts={trialFacts}
+            handlers={trialHandlers} locked={trialLocked} loadBlocked={trialLoadBlocked} loading={trialLoading}
+            validation={savedValidation?.state ?? 'none'} block={trialBlock}
             dirty={unsavedCount > 0} error={trialError?.fault ?? null} errorSource={trialErrorSource}
             onDiagnostic={diagnostic => openTrialDiagnostic(diagnostic, trialError)}
-            notice={trialNotice ? ui.scriptTrial[trialNotice] : null}
-            nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error} environment={savedEnvironment} result={trialResult}
-            profileRepair={trialSetup && <ProfileRecovery idPrefix="trial-recovery" label={workspaceLabel(selected, workspaces)}
-              help={ui.scriptTrial.profileRecoveryHelp}
-              state={trialSetup.recovery} outcomes={trialSetup.recoveryOutcomes} handlers={trialRecoveryHandlers()}
-              locked={commandReason !== null || closing || active || leaseLost || pickerBusy || trialSetup.context.revision !== authoring.revision}/>}/>}
+            notice={trialNotice ? ui.scriptTrial[trialNotice] : null} hasResult={hasTrialResult}
+            strip={ordinaryStrip('trial')} authoring={leave => compactAuthoring(() => leave(returnToEdit), true)}/>}
           recognition={authoring.recognition
             ? <DeferredView key={authoring.owner.token} fallback={<p role="status">{ui.bootstrap.state('loading')}</p>}
               error={cause => <FaultMessage title={ui.recognition.heading} value={fault(cause)}/>}>
@@ -3310,7 +3325,16 @@ export default function App() {
             : <div className="button-row"><span role="status">{t.recognitionUnavailable}</span>
               <button id="recognition-reload" type="button" disabled={authoring.pending !== null || leaseLost || closing}
                 onClick={() => void readRecognition()}>{ui.authoring.refresh}</button></div>}/></DeferredView>}
-        {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (isBound(selected)
+        {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (selectedAuthoring
+          ? <EditExecutionSetup key={selectedAuthoring.owner.token} state={trialSetup} facts={trialFacts}
+            handlers={trialHandlers} locked={trialLocked} loadBlocked={trialLoadBlocked} loading={trialLoading}
+            block={trialBlock} dirty={unsavedCount > 0} error={trialError?.fault ?? null}
+            nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error} environment={savedEnvironment}
+            profileRepair={trialProfileRepair} onReturn={() => {
+              returnToEdit();
+              requestAnimationFrame(() => document.getElementById('trial-setup-open')?.focus());
+            }}/>
+          : isBound(selected)
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id}
             handlers={handlers(selected)} authoring={pageAuthoring(selected)} environment={savedEnvironment}

@@ -354,11 +354,11 @@ Settings, New workspace, Saved workspaces and unsaved-change confirmation use
 the same compact Edit control in their own footer, without an adjacent information
 icon or upper owner strip. Stop acknowledgement is not worker settlement.
 
-**Package contents** carries the saved-package validation indicator and details
-action. Shape and color distinguish unchecked (dash), valid (check), invalid
-(cross), stale (clock) and running (hourglass). Its localized hint identifies
-the saved revision's state; **Status details** retains diagnostics. Workspace
-tabs navigate without duplicate validation icons.
+**Package contents** carries **Validate** and **Setup**. Setup inherits the
+saved-package validation icon: unchecked (dash), valid (check), invalid (cross),
+stale (clock) and running (hourglass). Its localized hint identifies that saved
+revision's validation state, not execution readiness or Native approval.
+**Status details** retains diagnostics. Workspace tabs have no validation icons.
 The footer does not repeat these indicators and stays on one row at supported
 widths, including 760 CSS px. Narrow widths truncate the message with an ellipsis;
 full text remains in its tooltip and Status details.
@@ -502,10 +502,10 @@ Neither action inspects, binds, or runs the package.
   count; their content remains scrollable at constrained window heights.
 - **Validate** in **Package contents** checks one saved revision through the
   existing inventory and trusted compiler without evaluating package code.
-  Unsaved text is excluded. Its adjacent indicator and details distinguish
-  unchecked, running, valid, invalid and earlier-revision results. The collapsed
-  navigation retains access to validation. **Status details** keeps the revision,
-  diagnostic count and source locations; a location returns to the owning Edit
+  Unsaved text is excluded. The adjacent **Setup** icon distinguishes unchecked,
+  running, valid, invalid and earlier-revision results. Collapsed navigation
+  retains both controls. **Status details** keeps the revision, diagnostic count
+  and source locations; a location returns to the owning Edit
   session without losing drafts. Later saves make the old result stale; unsaved
   changes remain independently identified. The finite validation child occupies
   the existing operation slot. Shared **Stop** retains ownership until settlement.
@@ -539,25 +539,30 @@ Neither action inspects, binds, or runs the package.
 
 ### Execute Scripts in Edit
 
-The Script trial strip runs **Whole package** or an existing **Function** while
-keeping the Edit owner, selected source and Undo history.
+Open **Setup** beside **Validate** in **Package contents** to run **Whole package**
+or an existing **Function**. The compact dialog keeps invocation controls out of
+the editor's permanent layout.
 
-- **Load execution setup** reads the saved schema and eligible functions without
-  running package code. Use **Reload saved setup and functions** to refresh it.
-  Opening Edit, saving and OMP draft operations never start this discovery.
+- First opening Setup reads the saved schema and eligible functions without
+  running package code. Use **Reload saved setup and functions** to refresh it;
+  failed discovery waits for an explicit retry. Opening Edit, saving and OMP
+  draft operations never start this discovery.
 - **Whole package** uses normal readiness followed by workflow. **Function**
   calls the selected file-level declaration only. Exported and file-local
   functions, function/arrow bindings and async functions are eligible. Nested
   closures, receiver-dependent methods and generators are unavailable.
   The list shows the original signature and location without executing modules.
-- Expand setup for positional JSON arguments, compatible local profiles or
-  packaged presets, explicit option values and the execution lane. Values are
-  checked against the current authoring schema, not an older Run-page selection.
-  Arguments default to `[]`; limits are 64 KiB UTF-8, depth 32 and 32 arguments.
-  Known missing required arguments fail before invocation.
-  Rejected saved profiles use the existing explicit repair and confirmed Reset
-  controls inside Edit. Setup reads do not migrate or save profiles; repeated
-  reads of the same saved revision preserve the repair draft.
+- Choose the function and positional JSON arguments in the dialog. Arguments
+  default to `[]`; limits are 64 KiB UTF-8, depth 32 and 32 arguments. Known
+  missing required arguments fail before invocation.
+- **Execution setup → Run** opens profile/preset, option values, execution lane,
+  Target, Native review and profile repair under the same Edit owner.
+  **Return to Edit** preserves source drafts, selection, Undo, function and
+  arguments. This is the Edit trial's setup, not an ordinary Run profile draft;
+  ordinary Start remains unavailable during Edit.
+  Values use the current authoring schema. Rejected profiles retain explicit
+  repair and confirmed Reset. Discovery does not migrate or save profiles;
+  same-revision reads preserve the repair draft.
 - **Run** captures clean saved content. **Save all and run** explicitly publishes
   source, metadata and Recognition drafts through the same ordered Save flow.
   Partial Save, refresh failure, composition, external conflict or a newer edit
@@ -580,6 +585,9 @@ keeping the Edit owner, selected source and Undo history.
   summaries; objects and other nonprimitive values remain opaque. Private
   native/replay details stay behind disclosure. A returned function or submitted
   input is not proof of game effect or physical cleanup.
+  **Execution results** opens the shared Run details page, not a second inline
+  result panel. Run and navigation close the Setup dialog first. Setup discovery
+  keeps its owner-bound Stop inside the dialog; Escape returns focus to Setup.
   Compiler diagnostics also retain their checked saved revision. If the editor
   has changed, a diagnostic opens the file without claiming an exact new
   position; its unsaved text and history remain intact.

@@ -1,7 +1,7 @@
 # ADR 0011: Edit-owned Script execution
 
 - Status: Accepted for implementation; native acceptance remains separate
-- Scope: Whole package and existing-function execution without leaving Edit
+- Scope: Whole package and existing-function execution without ending Edit
 
 ## Decision
 
@@ -16,7 +16,7 @@ controller. Partial publication, failed refresh, composition or a later edit
 blocks admission. After capture, editing affects only the next invocation.
 Rerun retains setup, not executable bytes, approvals, VM state or live handles.
 
-Setup discovery runs only for explicit Load/Reload or Run preparation. An early
+Setup discovery runs only for explicit Setup opening, Load/Reload or Run preparation. An early
 implementation also ran it after Save; real Edit inspection and review showed
 that its reservation interrupted subsequent Save/Validate and OMP commands.
 Removing that automatic work preserves the ordinary editing contract.
@@ -33,6 +33,23 @@ catalogue refresh.
 Diagnostic owner/revision attribution is independent of a clean execution
 ticket. Dirty source can open an obsolete diagnostic's file, but cannot gain
 execution authority or an exact-position claim from that diagnostic.
+
+## Setup placement
+
+Replace the Package contents validation-details button with **Setup**, retaining
+its saved-package validation icon. The icon never asserts execution readiness;
+diagnostics remain in shared Status details.
+
+An initial inline trial strip and expandable configuration consumed editor space.
+Use a compact invocation dialog instead, with full configuration on the Run tab.
+During Edit, that tab operates on the same owner-bound trial state, not ordinary
+Run's independent profile draft. Reuse option/lane fields and existing Target,
+Native review and repair controls. Do not end the lease or enable ordinary Start.
+
+Actual WKWebView checks at 760 CSS px showed that placing the Run-settings link
+after function arguments hid the route below the initial viewport. Place it
+before invocation fields. Close the dialog before execution/navigation, and use
+the existing dialog footer for setup-discovery Stop and retained capture Release.
 
 ## Function selection and invocation
 

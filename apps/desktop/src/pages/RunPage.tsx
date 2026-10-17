@@ -2,7 +2,7 @@ import {useEffect, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
 import ProfileRecovery from '../components/ProfileRecovery.tsx';
 import type {RecoveryHandlers} from '../components/ProfileRecovery.tsx';
-import SchemaForm from '../components/SchemaForm.tsx';
+import ExecutionFields from '../components/ExecutionFields.tsx';
 import Select from '../components/Select.tsx';
 import TargetPanel from '../components/TargetPanel.tsx';
 import type {TargetHandlers} from '../components/TargetPanel.tsx';
@@ -10,7 +10,7 @@ import NativeReview from '../components/NativeReview.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
 import {ButtonHint, HelpTrigger} from '../components/ContextualHelp.tsx';
 import type {RunView} from './ExecutionPage.tsx';
-import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, busy, chooseLane, editDraft, hasWorkspaceEdits} from '../workspace.ts';
+import {UNSUPPORTED_SOURCE, busy, hasWorkspaceEdits} from '../workspace.ts';
 import type {ReleaseFacts} from '../distribution.ts';
 import type {Bound, BoundWorkspace, Derived, NativeConsent} from '../workspace.ts';
 import {AUTHORING_RECOVERY, recoveryPath} from '../authoring.ts';
@@ -51,7 +51,7 @@ export default function RunPage({workspace, label, derived, run, locked, active,
   const locale = useLocale();
   const t = messages[locale].ui;
   const bound = workspace.bound;
-  const {parsed, numericErrors, valuesDirty, dirty, bound: profileBound, selectedProfile, startBlock, descriptorError} = derived;
+  const {numericErrors, valuesDirty, dirty, bound: profileBound, selectedProfile, startBlock, descriptorError} = derived;
   const [confirmReinspect, setConfirmReinspect] = useState(false);
   const [confirmEdit, setConfirmEdit] = useState(false);
   const a = t.authoring;
@@ -213,27 +213,11 @@ export default function RunPage({workspace, label, derived, run, locked, active,
               <dt>{t.run.legacyUnchanged}</dt><dd>{legacy.unchanged.length ? legacy.unchanged.join(', ') : t.run.legacyNone}</dd></dl>}
             {legacy?.fault && <FaultMessage title={t.run.legacyFault} value={legacy.fault}/>}
           </details>
-          <h3>{t.run.options}<HelpTrigger title={t.run.options} hint={t.run.optionsHint}>{t.run.optionsHelp}</HelpTrigger></h3>
-          <SchemaForm schema={bound.package.schema} value={bound.draft} onChange={draft => handlers.change(item => editDraft(item, draft))} errors={parsed.errors}/>
-          <h3>{t.run.executionMode}</h3>
-          <div className="two-col">
-            <div className="field"><label htmlFor="lane">{t.run.executionMode}</label>
-              <Select id="lane" value={bound.lane} disabled={locked} onChange={lane => handlers.change(item => chooseLane(item, lane))}
-                options={[{value: 'controlled', label: t.run.controlled},
-                  {value: 'replay', label: t.run.replay},
-                  {value: 'native', label: nativeCapability ? t.run.native : t.run.nativeUnavailable, disabled: nativeCapability === null}]}/></div>
-            <div className="field"><label htmlFor="scenario">{t.run.scenario}</label>
-              <Select id="scenario" value={bound.lane === 'controlled' ? bound.scenario : 'workflow'} disabled={locked || bound.lane !== 'controlled'}
-                onChange={scenario => handlers.change(item => ({...item, scenario}))}
-                options={[{value: 'workflow', label: t.run.workflow}, {value: 'held-work', label: t.run.heldWork}, {value: 'no-match', label: t.run.noMatch}]}/></div>
-          </div>
-          {nativeError && <FaultMessage title={t.run.nativeCapabilityError} value={nativeError}/>}
-          {native && <NativeReview bound={bound} native={native} selectedProfile={selectedProfile} valuesDirty={valuesDirty}
-            locked={locked} nativeCapability={nativeCapability} environment={environment} handlers={handlers}/>}
-          <div className="field"><div className="field-heading"><label htmlFor="descriptor-path">{t.run.descriptor}</label><HelpTrigger title={t.run.descriptor} hint={t.run.descriptorHint}>{t.run.descriptorHelp(DESCRIPTOR_LIMIT)}</HelpTrigger></div>
-            <input id="descriptor-path" type="text" value={bound.descriptorPath} disabled={locked} spellCheck={false} aria-invalid={descriptorError !== null}
-              placeholder={t.run.descriptorPlaceholder} onChange={event => handlers.change(item => ({...item, descriptorPath: event.target.value}))}/>
-            {descriptorError && <p className="field-error">{descriptorError}</p>}</div>
+          <ExecutionFields bound={bound} facts={derived} locked={locked} nativeCapability={nativeCapability} change={handlers.change}>
+            {nativeError && <FaultMessage title={t.run.nativeCapabilityError} value={nativeError}/>}
+            {native && <NativeReview bound={bound} native={native} selectedProfile={selectedProfile} valuesDirty={valuesDirty}
+              locked={locked} nativeCapability={nativeCapability} environment={environment} handlers={handlers}/>}
+          </ExecutionFields>
           {startBlock && <p className="inline-warning" id="start-block">{startBlock}</p>}
         </div>
       </section>

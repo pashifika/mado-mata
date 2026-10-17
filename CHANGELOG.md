@@ -7,7 +7,10 @@
   rerun current source with fresh VM state while preserving the game's state.
   Native Function is separately reviewed and attach-only, without launch,
   recovery or a hidden readiness call. Keep shared Stop and independent cleanup.
-- Move saved-package Validate, its state and diagnostics into Package contents.
+- Put saved-package Validate and an icon-bearing Setup entry in Package contents.
+  Keep function/arguments and Run/Rerun in a compact dialog; open full execution
+  settings on Run without ending Edit or losing source drafts and Undo.
+  The icon reports package validation only; Status details retains diagnostics.
   Remove Run's separate profile Validate action while retaining inline errors
   and mandatory Start/Save validation.
 
