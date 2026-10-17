@@ -30,6 +30,8 @@
   requirements or execution limits.
 - Avoid idle desktop rerenders for unchanged poll snapshots. Reuse UTF-8 byte
   counts for unchanged file drafts without retaining closed editing sessions.
+- Hide idle Edit controls in dialog footers when no work, capture, pending Stop
+  or attention is present. Keep active Stop, capture release and diagnostic controls.
 
 - Keep macOS engine-check temporary paths short for Unix socket fixtures,
   independently of its descriptive build and dependency-cache directory.

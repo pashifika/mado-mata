@@ -80,6 +80,7 @@ export function AuthoringFooterStatus({idPrefix, activity, ownerLabel, returnDis
       element.style.removeProperty('--authoring-details-max-height');
     };
   }, [attention]);
+  if (!worker && !capture && !attention && !activity.stopRequested) return null;
   const phase = activity.stopRequested ? 'stopping' : worker?.phase ?? (capture?.busy ? 'running' : 'idle');
   const stateLabel = activity.stopRequested ? a.stopPending : worker ? ui.phase(worker.phase) : capture ? ui.nativeCapture.status[capture.status] : ui.phase('idle');
   return <div ref={authoring} id={`${idPrefix}-status`} className="footer-authoring">

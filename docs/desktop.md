@@ -1920,8 +1920,10 @@ outcome for each open workspace independently of log retention.
 
 Persistent notices stay with their scope: the application strip identifies the
 Edit or operation owner, while action-specific refusals and faults remain beside
-the relevant controls or panel. Dialogs provide their own **Stop** and
-**Return to Edit** controls because the background is inert. Dismissing a
+the relevant controls or panel. Dialogs show Edit controls only for ongoing work,
+retained capture, pending Stop or unresolved problems. Their **Stop**, capture
+release and **Return to Edit** controls remain local because the background is
+inert. The main-window status bar is unchanged. Dismissing a
 notification or closable notice changes presentation only: it does not release
 Edit ownership, enable a refused command, erase a retained failure, or prove
 cleanup.
