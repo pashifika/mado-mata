@@ -1,4 +1,6 @@
 use super::endpoint::DIRECTORY;
+#[cfg(windows)]
+use super::endpoint::Stream as LocalStream;
 use super::transport::Settings;
 use super::{Collaboration, FRAME_BYTES, lock};
 use serde_json::{Value, json};
@@ -8,8 +10,6 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as LocalStream;
-#[cfg(windows)]
-use super::endpoint::Stream as LocalStream;
 #[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -213,17 +213,17 @@ fn private_endpoint_relays_requests_through_main_window_tickets() {
     let (path, descriptor) = fixture.ready();
     #[cfg(unix)]
     {
-    let uid = fs::metadata(&fixture.root).unwrap().uid();
+        let uid = fs::metadata(&fixture.root).unwrap().uid();
 
-    let file = fs::symlink_metadata(&path).unwrap();
-    assert!(file.file_type().is_file());
-    assert_eq!(
-        (file.uid(), file.mode() & 0o777, file.nlink()),
-        (uid, 0o600, 1)
-    );
-    assert!(file.len() <= 4096);
-    let directory = fs::symlink_metadata(fixture.collaboration_directory()).unwrap();
-    assert_eq!((directory.uid(), directory.mode() & 0o777), (uid, 0o700));
+        let file = fs::symlink_metadata(&path).unwrap();
+        assert!(file.file_type().is_file());
+        assert_eq!(
+            (file.uid(), file.mode() & 0o777, file.nlink()),
+            (uid, 0o600, 1)
+        );
+        assert!(file.len() <= 4096);
+        let directory = fs::symlink_metadata(fixture.collaboration_directory()).unwrap();
+        assert_eq!((directory.uid(), directory.mode() & 0o777), (uid, 0o700));
     }
     let mut fields: Vec<_> = descriptor.as_object().unwrap().keys().cloned().collect();
     fields.sort();
@@ -242,26 +242,33 @@ fn private_endpoint_relays_requests_through_main_window_tickets() {
     );
     #[cfg(unix)]
     {
-    let uid = fs::metadata(&fixture.root).unwrap().uid();
-    let socket = Path::new(descriptor["socket"].as_str().unwrap());
-    assert!(socket.as_os_str().len() <= 100);
-    assert_eq!(socket.canonicalize().unwrap(), socket);
-    let socket_file = fs::symlink_metadata(socket).unwrap();
-    assert!(socket_file.file_type().is_socket());
-    assert_eq!(
-        (socket_file.uid(), socket_file.mode() & 0o777),
-        (uid, 0o600)
-    );
-    let socket_directory = fs::symlink_metadata(socket.parent().unwrap()).unwrap();
-    assert_eq!(
-        (socket_directory.uid(), socket_directory.mode() & 0o777),
-        (uid, 0o700)
-    );
+        let uid = fs::metadata(&fixture.root).unwrap().uid();
+        let socket = Path::new(descriptor["socket"].as_str().unwrap());
+        assert!(socket.as_os_str().len() <= 100);
+        assert_eq!(socket.canonicalize().unwrap(), socket);
+        let socket_file = fs::symlink_metadata(socket).unwrap();
+        assert!(socket_file.file_type().is_socket());
+        assert_eq!(
+            (socket_file.uid(), socket_file.mode() & 0o777),
+            (uid, 0o600)
+        );
+        let socket_directory = fs::symlink_metadata(socket.parent().unwrap()).unwrap();
+        assert_eq!(
+            (socket_directory.uid(), socket_directory.mode() & 0o777),
+            (uid, 0o700)
+        );
     }
     #[cfg(windows)]
     {
         assert!(path.exists());
-        assert_eq!(descriptor["socket"], format!("{}{}", super::endpoint::PIPE_PREFIX, descriptor["instance"].as_str().unwrap()));
+        assert_eq!(
+            descriptor["socket"],
+            format!(
+                "{}{}",
+                super::endpoint::PIPE_PREFIX,
+                descriptor["instance"].as_str().unwrap()
+            )
+        );
     }
     // Attaching again keeps the same endpoint.
     assert_eq!(
