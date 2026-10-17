@@ -499,6 +499,26 @@ test('aggregate non-image preflight includes current metadata and binary JSON as
   assert.equal(otherNonImageBytes(state,'main.ts'),new TextEncoder().encode(editedManifest).length+3+7+4+11);
 });
 
+test('byte accounting follows edited, undone and refreshed drafts without crossing sessions',()=>{
+  const inventory=[file('main.ts','source','x'),file('helper.ts','source','日')];
+  const original=openSession(packageView('rev-1',inventory));
+  assert.equal(otherNonImageBytes(original,'main.ts'),3);
+  let state=type(original,'helper.ts','😀');
+  assert.equal(otherNonImageBytes(state,'main.ts'),7);
+  assert.equal(otherNonImageBytes(original,'main.ts'),3);
+  state=undoFile(state,'helper.ts');
+  assert.equal(otherNonImageBytes(state,'main.ts'),3);
+  state=redoFile(state,'helper.ts');
+  assert.equal(otherNonImageBytes(state,'main.ts'),7);
+  state=discardFile(state,'helper.ts');
+  assert.equal(otherNonImageBytes(state,'main.ts'),3);
+  state=applyRefresh(state,packageView('rev-2',withText('helper.ts','\ud800X',inventory)),true);
+  assert.equal(otherNonImageBytes(state,'main.ts'),4);
+  const other=openSession(packageView('rev-1',withText('helper.ts','',inventory),'lease-2'));
+  assert.equal(otherNonImageBytes(other,'main.ts'),0);
+  assert.equal(otherNonImageBytes(state,'helper.ts'),1);
+});
+
 test('UTF-16 search and diagnostic positions support CRLF, lone CR and LF without normalizing source',()=>{
   const original='一😀\r\nA😀\rB\nC';
   let state=openSession(packageView('rev-1',withText('main.ts',original)));

@@ -2,9 +2,10 @@ use super::profiles::{
     check_webview_value, desktop_options, normalize_editor_numbers, validated_profiles,
 };
 use super::{
-    Application, InspectionKind, InspectionOutcome, MAX_SESSION_COUNTER, ProfileCatalog,
-    ProfileRecoveryOutcome, RecoverableProfile, RecoveryMutation, RecoveryRef, RecoveryStatus,
-    RecoveryView, Selected, Workspace, WorkspaceRef, WorkspaceView, Workspaces, lock,
+    Application, AuthoringRef, InspectionKind, InspectionOutcome, MAX_SESSION_COUNTER,
+    ProfileCatalog, ProfileRecoveryOutcome, RecoverableProfile, RecoveryMutation, RecoveryRef,
+    RecoveryStatus, RecoveryView, Selected, Workspace, WorkspaceRef, WorkspaceView, Workspaces,
+    lock,
 };
 use crate::distribution::{self, InstalledIdentity};
 use crate::storage::{
@@ -24,6 +25,7 @@ struct RecoveryEntry {
 pub(super) struct RecoveryContext {
     reference: RecoveryRef,
     selected: Selected,
+    authoring: Option<(AuthoringRef, String)>,
     source_reference: Option<PackageReference>,
     selected_package_id: Option<String>,
     relocation: bool,
@@ -34,6 +36,43 @@ pub(super) struct RecoveryContext {
 }
 
 impl RecoveryContext {
+    /// Capture repair authority only; Edit discovery never reconciles or binds.
+    pub(super) fn for_authoring(
+        store: &Store,
+        selected: Selected,
+        owner: &AuthoringRef,
+        revision: &str,
+        token: String,
+    ) -> Result<Option<Self>, Fault> {
+        let tab = store.tab(&selected.internal_name)?;
+        let source_reference = tab
+            .packages
+            .into_iter()
+            .find(|reference| reference.package_id == selected.inventory.package_id);
+        if source_reference.is_none() {
+            return Ok(None);
+        }
+        let profiles =
+            store.profile_store(&selected.internal_name, &selected.inventory.package_id)?;
+        let mut context = Self {
+            reference: RecoveryRef {
+                workspace: owner.workspace.clone(),
+                token,
+            },
+            selected,
+            authoring: Some((owner.clone(), revision.to_owned())),
+            source_reference,
+            selected_package_id: tab.selected_package_id,
+            relocation: false,
+            binding_required: false,
+            entries: Vec::new(),
+            profiles_error: None,
+            outcomes: Vec::new(),
+        };
+        reconcile(&profiles, &mut context);
+        Ok((!context.entries.is_empty() || context.profiles_error.is_some()).then_some(context))
+    }
+
     pub(super) fn package_path(&self) -> &Path {
         &self.selected.path
     }
@@ -83,6 +122,14 @@ impl RecoveryContext {
 
 impl Workspaces {
     fn resolve_recovery(&self, reference: &RecoveryRef) -> Result<Arc<RecoveryContext>, Fault> {
+        if let Some(context) = self
+            .authoring
+            .as_ref()
+            .and_then(|lease| lease.recovery.as_ref())
+            .filter(|context| context.reference == *reference)
+        {
+            return Ok(context.clone());
+        }
         self.resolve_workspace(&reference.workspace)?
             .recovery
             .as_ref()
@@ -216,6 +263,7 @@ fn check_signer(
     Ok(())
 }
 
+// Ordinary inspection may reconcile; Edit only captures originals for explicit repair.
 fn reconcile(store: &ProfileStore, context: &mut RecoveryContext) {
     let records = match store.recovery_records() {
         Ok(records) => records,
@@ -228,12 +276,14 @@ fn reconcile(store: &ProfileStore, context: &mut RecoveryContext) {
         let profile = &original.profile;
         // Unsafe originals never gain reset authority or cross the WebView boundary.
         if let Err(error) = check_webview_value(&profile.values, "$") {
-            context.outcomes.push(ProfileRecoveryOutcome {
-                profile_id: profile.id.clone(),
-                name: profile.name.clone(),
-                status: RecoveryStatus::StorageFailed,
-                issue: Some(error.clone()),
-            });
+            if context.authoring.is_none() {
+                context.outcomes.push(ProfileRecoveryOutcome {
+                    profile_id: profile.id.clone(),
+                    name: profile.name.clone(),
+                    status: RecoveryStatus::StorageFailed,
+                    issue: Some(error.clone()),
+                });
+            }
             context.profiles_error = Some(error);
             continue;
         }
@@ -244,6 +294,13 @@ fn reconcile(store: &ProfileStore, context: &mut RecoveryContext) {
             continue;
         }
         let (status, issue) = match candidate {
+            Ok(_) if context.authoring.is_some() => (
+                RecoveryStatus::RepairRequired,
+                Some(Fault::new(
+                    "ProfileIdentity",
+                    "Saved profile names an earlier schema; review and explicitly save its values",
+                )),
+            ),
             Ok(values) => {
                 match store.replace_recovery(&context.selected.inventory, &original, values) {
                     Ok(_) => (RecoveryStatus::Saved, None),
@@ -252,12 +309,14 @@ fn reconcile(store: &ProfileStore, context: &mut RecoveryContext) {
             }
             Err(error) => (RecoveryStatus::RepairRequired, Some(error)),
         };
-        context.outcomes.push(ProfileRecoveryOutcome {
-            profile_id: profile.id.clone(),
-            name: profile.name.clone(),
-            status,
-            issue: issue.clone(),
-        });
+        if context.authoring.is_none() {
+            context.outcomes.push(ProfileRecoveryOutcome {
+                profile_id: profile.id.clone(),
+                name: profile.name.clone(),
+                status,
+                issue: issue.clone(),
+            });
+        }
         if let Some(issue) = issue {
             context
                 .entries
@@ -339,6 +398,7 @@ impl Application {
                     workspace: reference,
                 },
                 selected,
+                authoring: None,
                 source_reference: None,
                 selected_package_id: None,
                 relocation: false,
@@ -469,6 +529,18 @@ impl Application {
     }
 
     fn check_recovery_inventory(&self, context: &RecoveryContext) -> Result<(), Fault> {
+        if let Some((_, revision)) = &context.authoring {
+            let current = self.publisher.open(&context.selected.path)?;
+            if current.revision() != revision
+                || current.package_id() != context.selected.inventory.package_id
+            {
+                return Err(Fault::new(
+                    "AuthoringConflict",
+                    "Recovery source changed; refresh Edit trial setup before continuing",
+                ));
+            }
+            return Ok(());
+        }
         let current = self.reinspect(&context.selected)?;
         if current.inventory_identity != context.selected.inventory.identity {
             return Err(Fault::new(
@@ -514,7 +586,12 @@ impl Application {
             let (_command, mut state) = self.command_state()?;
             let context = state.resolve_recovery(reference)?;
             self.collect(&mut state);
-            state.idle()?;
+            if let Some((owner, revision)) = &context.authoring {
+                state.authoring_revision(owner, revision)?;
+                state.work_idle()?;
+            } else {
+                state.idle()?;
+            }
             drop(state);
             self.check_recovery_inventory(&context)?;
             let store = lock(&self.store);
@@ -593,14 +670,22 @@ impl Application {
                 }
             }
             let mut state = lock(&self.workspaces);
-            let workspace = state
-                .open
-                .iter_mut()
-                .find(|workspace| workspace.workspace == reference.workspace)
-                .expect("command admission retains the recovery workspace");
-            // Keep the bounded context until explicit close/reinspect so late replies cannot erase newer drafts.
+            // Keep the bounded context so late replies cannot erase newer drafts.
             response.recovery = Some(updated.view());
-            workspace.recovery = Some(Arc::new(updated));
+            if updated.authoring.is_some() {
+                state
+                    .authoring
+                    .as_mut()
+                    .expect("command admission retains the authoring lease")
+                    .recovery = Some(Arc::new(updated));
+            } else {
+                let workspace = state
+                    .open
+                    .iter_mut()
+                    .find(|workspace| workspace.workspace == reference.workspace)
+                    .expect("command admission retains the recovery workspace");
+                workspace.recovery = Some(Arc::new(updated));
+            }
             Ok(response)
         })();
         let action = if reset {
@@ -674,8 +759,20 @@ impl Application {
     pub fn discard_recovery(&self, reference: &RecoveryRef) -> Result<WorkspaceView, Fault> {
         let result = (|| {
             let (_command, mut state) = self.command_state()?;
-            state.resolve_recovery(reference)?;
+            let context = state.resolve_recovery(reference)?;
             self.collect(&mut state);
+            if let Some((owner, revision)) = &context.authoring {
+                state.authoring_revision(owner, revision)?;
+                state.work_idle()?;
+                let workspace = state.resolve_workspace(&reference.workspace)?.clone();
+                state
+                    .authoring
+                    .as_mut()
+                    .expect("command admission retains the authoring lease")
+                    .recovery = None;
+                drop(state);
+                return Ok(self.workspace_view(&workspace));
+            }
             state.idle()?;
             let mut workspace = state.resolve_workspace(&reference.workspace)?.clone();
             if workspace.selected.is_none() {

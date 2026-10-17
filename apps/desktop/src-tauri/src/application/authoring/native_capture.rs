@@ -242,6 +242,10 @@ impl NativeState {
     pub(crate) fn operation_active(&self) -> bool {
         self.active || self.picker || (self.occupied() && self.cancelled.load(Ordering::Acquire))
     }
+    /// A saved binding changed under this lease; recheck it before reporting a saved target.
+    pub(crate) fn invalidate_target(&mut self) {
+        self.target_checked_revision = None;
+    }
     pub(crate) fn view(&self, owner: &AuthoringRef, revision: &str) -> NativeSelectionView {
         let cancelling = self.occupied() && self.cancelled.load(Ordering::Acquire);
         NativeSelectionView {

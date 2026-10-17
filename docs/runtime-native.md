@@ -64,6 +64,10 @@ At the default, the outer allowances are 120/243 s without/with recovery; at the
 per-call waits 1 s and pacing 100 ms. More duration grants no additional resource
 credits. The pinned SDK's monotonic timeout accepts this finite allowance; its
 separate 2 s maximum for an individual macOS native wait is unchanged.
+Native input dispatch uses the remaining input, capture, attempt and phase
+authority, not the scheduled-wait limit. This leaves time for SDK delivery around
+an allowed hold without enlarging Script waits or event budgets; Stop still
+cancels the in-flight operation.
 The larger ceiling does not qualify useful long-running Native work, late Stop,
 long-duration recovery or leak freedom; actual workload evidence remains separate.
 Typed attempt summaries retain the original exit, final Script result and cleanup;
@@ -72,8 +76,10 @@ outranks a later process exit. Window/permission/provider failure is not confirm
 exit, and launch/capture availability is not a Script-observed usable screen.
 
 The independent CLI retains explicit `native_config` and its existing preparation
-contract. External `run`/`manual` plans cannot select Desktop-only `native_budgets`
-or `input.reviewed_operation`; the new startup calls do not grant CLI authority.
+contract. External `run`/`manual` plans cannot select Desktop-only `native_budgets`,
+`native_config.native.input.package_approved: true`,
+`native_config.native.confirm_process_exit: true` or
+`native_config.native.review.kind: "script"`. Startup calls do not grant CLI authority.
 See [ADR 0008](adr/0008-macos-native-run-admission.md) for recipe semantics,
 deadline/ownership rules, first-frame placement and result commitment.
 
@@ -400,6 +406,8 @@ the required prospective `native_config.native` record:
 - `process_id`: the nonzero native PID. `process_lifetime`: exactly 16 lowercase
   hexadecimal digits of the provider's opaque `TargetProcessIdentity::lifetime`.
   This is not a portable timestamp or a value to compare across providers.
+  Only internal Desktop Script requests may omit this pair and let the SDK bind
+  the saved executable/window; external CLI and ordinary operation review may not.
 - `window_rule`: the complete, exact window name, not a pattern.
 - `operating_system`: `windows` or `macos`, matching the host; `hardware` records
   the operator's selected machine.
@@ -407,10 +415,18 @@ the required prospective `native_config.native` record:
 - `input`: independent `approved`, `duration_ms`, `max_actions`, `route`, `focus`,
   and nonempty `representative_actions`.
   Optional `macos_process_pointer_mode` and `click_hold_ms` are described below.
-- `geometry`: the placement object above; `recognition_language`,
-  `visible_postcondition`, `cleanup_ms`, and `containment_ms`.
+- `review`: `kind: "operation"` with explicit nonempty `operation` and
+  `visible_postcondition` text.
+- `geometry`: the placement object above; `recognition_language`, `cleanup_ms`,
+  and `containment_ms`.
 - Optional `package_entries` and `templates` use the same captured-asset mapping
   as replay. Omit both for OCR-only execution.
+
+Omit `input.package_approved` and `confirm_process_exit` or set them to `false`.
+Desktop-only authority and `review.kind: "script"` are rejected before
+package/output I/O; they cannot replace the CLI's explicit operation review,
+geometry or representative actions. Desktop uses exit confirmation only for
+approved recovery after SDK target loss, not as a duplicate capture/input guard.
 
 All authorities must be positive, finite, and within the plan's enclosing bounds.
 The native and enclosing `containment_ms` must be equal; the supervisor cannot

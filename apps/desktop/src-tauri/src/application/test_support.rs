@@ -156,6 +156,7 @@ pub(super) fn request(selection: &Selection) -> StartRequest {
         scenario: "workflow".into(),
         replay_descriptor_path: None,
         native_intent: None,
+        function: None,
     }
 }
 

@@ -12,13 +12,15 @@ impl DesktopController {
         self.check_open()?;
         let limits = manual_plan()?.limits;
         let inventory = Inventory::capture(package, &limits)?;
-        inspect_captured(inventory, &limits)
+        inspect_captured(inventory, &limits, &Arc::new(Control::new(&limits)))
     }
 
-    /// Statically validate an inventory captured elsewhere without rereading its
-    /// source or evaluating package code. Desktop capture bounds are required so
-    /// the identity agrees with path-based inspection of the same bytes.
-    pub fn inspect_inventory(&self, inventory: Inventory) -> Result<PackageInfo, Fault> {
+    /// Inspect captured bytes; an owning operation supplies its Stop/deadline.
+    pub fn inspect_inventory(
+        &self,
+        inventory: Inventory,
+        control: Option<&Arc<Control>>,
+    ) -> Result<PackageInfo, Fault> {
         self.check_open()?;
         let limits = manual_plan()?.limits;
         let bounds = json!({"files": limits.snapshot_files, "bytes": limits.snapshot_bytes});
@@ -29,7 +31,14 @@ impl DesktopController {
             ));
         }
         inventory.validate()?;
-        inspect_captured(inventory, &limits)
+        let owned_control;
+        let control = if let Some(control) = control {
+            control
+        } else {
+            owned_control = Arc::new(Control::new(&limits));
+            &owned_control
+        };
+        inspect_captured(inventory, &limits, control)
     }
 
     fn check_open(&self) -> Result<(), Fault> {
@@ -43,14 +52,19 @@ impl DesktopController {
     }
 }
 
-fn inspect_captured(inventory: Inventory, limits: &Limits) -> Result<PackageInfo, Fault> {
+fn inspect_captured(
+    inventory: Inventory,
+    limits: &Limits,
+    control: &Arc<Control>,
+) -> Result<PackageInfo, Fault> {
+    control.check()?;
     let runtime = runtime(&inventory)?;
     let inventory = match runtime.as_str() {
         "typescript" => {
-            crate::typescript::compile(&inventory, limits)?;
+            crate::typescript::compile_with_control(&inventory, limits, control)?;
             inventory
         }
-        "javascript" => inspect_javascript(inventory, limits)?,
+        "javascript" => inspect_javascript(inventory, limits, control)?,
         _ => unreachable!("runtime() admits only QuickJS languages"),
     };
     let defaults = profile(&inventory.package_id, &inventory.schema, json!({}));
@@ -76,10 +90,13 @@ fn inspect_captured(inventory: Inventory, limits: &Limits) -> Result<PackageInfo
     Ok(info)
 }
 
-fn inspect_javascript(inventory: Inventory, limits: &Limits) -> Result<Inventory, Fault> {
+fn inspect_javascript(
+    inventory: Inventory,
+    limits: &Limits,
+    control: &Arc<Control>,
+) -> Result<Inventory, Fault> {
     let inventory = Arc::new(inventory);
-    let control = Arc::new(Control::new(limits));
-    crate::typescript::validate_javascript_modules(&inventory, limits, &control)?;
+    crate::typescript::validate_javascript_modules(&inventory, limits, control)?;
     Arc::try_unwrap(inventory)
         .map_err(|_| Fault::new("Runtime", "inspection retained the captured inventory"))
 }

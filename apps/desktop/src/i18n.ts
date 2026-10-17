@@ -5,7 +5,7 @@ import {interpolate} from './i18n-format.ts';
 
 export type Locale = 'en' | 'ja';
 export type Command = "initializing" | "retrying" | "importingRoot" | "restoring" | "recovering" | "refreshingStatus"
-  | "creatingWorkspace" | "reopeningWorkspace" | "inspectingPackage" | "validatingDraft" | "savingProfile" | "renamingProfile"
+  | "creatingWorkspace" | "reopeningWorkspace" | "inspectingPackage" | "readingTrial" | "savingProfile" | "renamingProfile"
   | "deletingProfile" | "importingProfiles" | "reinspectingPackage" | "admittingRun" | "admittingCheck" | "savingSettings" | "closingWorkspace"
   | "readingTarget" | "checkingTarget" | "savingTarget" | "removingTarget"
   | "repairingProfile" | "resettingProfile" | "retryingBinding" | "discardingRecovery"

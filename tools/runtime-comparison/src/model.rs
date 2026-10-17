@@ -788,6 +788,8 @@ pub struct RuntimeMetrics {
     pub vm_bytes: Option<usize>,
     pub jobs_executed: u64,
     pub source_diagnostic: Option<Value>,
+    #[serde(default)]
+    pub return_summary: Option<Value>,
 }
 
 pub fn identity<T: Serialize>(value: &T) -> Result<String, Fault> {

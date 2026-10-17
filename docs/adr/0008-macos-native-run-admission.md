@@ -11,12 +11,15 @@ Controlled and recorded replay retain their non-native input sink. Authoring
 Capture remains a separate input-free owner; neither its historical frames nor
 Target Check authorize a Script run.
 
-The trusted Run page submits current package/profile/target expectations, separate
-launch-if-absent/capture/input/recovery consent, reviewed operation/postcondition text, and finite limits.
+The ordinary Run page submits current package/profile/target expectations,
+separate launch-if-absent/capture/input/recovery consent, reviewed
+operation/postcondition text, and finite limits.
 Approval is transient and spent on every Start. Relevant edits, including a target
 draft changed back to its saved value, invalidate it. The text describes the
-operator's review, not a hostile-script sandbox. IPC cannot supply a Plan, process
-identity, executable, environment override, or native configuration.
+operator's review, not a hostile-script sandbox. Edit uses explicit Script Run
+as described in [ADR 0011](0011-edit-script-execution.md); ordinary
+Run's review is unchanged. IPC cannot supply a Plan, process identity, executable,
+environment override, or native configuration.
 
 Reserve Preparing before slow work. Capture saved profile, target record and App
 environment under existing serialization, then release command/Store locks.
@@ -26,7 +29,7 @@ evaluating package code or acquiring native capture/input. Then run the existing
 `readiness()` in the existing supervised QuickJS runner, before target attachment.
 Reuse those captured inputs throughout the operation.
 
-Typed discovery separates confirmed absence, a unique verified process,
+For ordinary operation review, typed discovery separates confirmed absence, a unique verified process,
 ambiguity, unverifiable candidates and OS failure. Only approved absence permits
 one submission after recipe preparation/revalidation, a captured-resource
 checkpoint and the final correspondence recheck, in that order. A newly appearing
@@ -53,9 +56,9 @@ identity: explicit process absence, a verified reused PID or the bound zombie
 lifetime produces typed `TargetExited` evidence. Failed/partial lookups,
 unverifiable metadata, window loss, permission/provider errors and launcher exit
 do not prove game exit. No error message or Script log is parsed for eligibility.
-Generic facade target loss is refined only by an independent positive lifetime
-proof. The public facade's first capture fault wins over a later process exit;
-capture, recognition and input remain facade-owned.
+After the SDK reports TargetLost, approved recovery refines that fault only by
+independent positive lifetime proof. Other SDK faults retain precedence;
+capture, recognition and input remain SDK-owned, without duplicate host-call checks.
 
 Keep one reservation, immutable snapshot and irreversible outer Stop owner.
 Before admitting attempt 2, require clean native/input settlement, child reap,
@@ -76,9 +79,10 @@ recovery, including Workspace navigation.
 
 ## Script-requested startup
 
-Only Desktop Native Readiness can call `host.call("target_start", {})` and
-`host.call("target_status", {})`. Both require an exact empty object; neither
-accepts a path, target, recipe, process, input policy or authority override.
+For Whole package, Desktop Native Readiness alone can call
+`host.call("target_start", {})` and `host.call("target_status", {})`.
+Both require an exact empty object; neither accepts a path, target, recipe,
+process, input policy or authority override.
 No request means no target acquisition or launch. One start request returns
 `pending` promptly without waiting for a process/window; duplicates refuse.
 Status polling drives bounded work, with at most one preparation step in flight,
@@ -96,6 +100,24 @@ after Readiness explicitly returns `"Ready"`.
 Module evaluation, Workflow, Controlled and Replay cannot use these calls.
 The independent M0 CLI keeps its explicitly supplied `native_config`; it cannot
 select Desktop-only phase budgets or acquire this preparation authority.
+
+## Edit-owned Script attachment
+
+[ADR 0011](0011-edit-script-execution.md) maps the saved APP to its actual runtime
+executable, then gives that path and exact window title to SDK selection.
+Matching paths use metadata only; relocated paths require existing signed
+correspondence. The SDK binds and retains the process/window without duplicate
+host-call liveness checks. Each explicit Run executes current source without a
+second review screen. Launch requires separately approved confirmed absence;
+recovery requires positive exit evidence after SDK target loss.
+
+Function attaches to an already-running target, instantiates the selected module
+under restricted admission and invokes its callable. It never calls readiness,
+synthesizes `"Ready"`, launches or recovers. Existing finite phase budgets and
+the immutable outer deadline still apply. Whole package retains Script-requested
+startup; capture availability, function return, input receipts and physical
+cleanup remain distinct facts.
+
 
 ## Launch library and OS semantics
 
@@ -133,10 +155,12 @@ Replay remain unable to launch a game.
 Desktop has no operator-entered physical placement. Latch the first accepted
 frame's authoritative target placement and refuse later origin/size/scale changes;
 missing placement is not guessed. Copied recognition bases keep their existing
-frame/content checks. External CLI plans still require explicit geometry and
-representative input kinds; `run` and `manual` reject Desktop-only
-`reviewed_operation` before package/output I/O. Internal child transport retains
-the host-projected form without inventing representative input actions.
+frame/content checks. External CLI plans still require explicit geometry,
+representative input kinds and `review.kind: "operation"` with operation and
+visible-postcondition text. `run` and `manual` reject Desktop-only
+`input.package_approved: true` and `review.kind: "script"` before package/output
+I/O. Internal child transport retains the host-projected form without inventing
+representative input actions.
 
 At public SDK revision `4b4f3296838a9eecdcb00e9d2bb3121a25cdc240`,
 [`Session::commit_frame`](https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/crates/automation/runtime/src/session.rs#L323-L344)

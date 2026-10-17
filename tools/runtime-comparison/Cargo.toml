@@ -50,3 +50,7 @@ unsafe_code = "warn"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+# Keep resource-integrity checks fast in checkout builds.
+[profile.dev.package.sha2]
+opt-level = 3

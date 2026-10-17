@@ -229,13 +229,12 @@ for (const {scenario,localName,expectedName} of [
   test(`a selected profile changed on disk keeps the local draft as a draft and ${scenario}`,()=>{
     let tab=sameSourceTabs()[0];
     tab=updateBound(tab,bound=>({...selectProfile(bound,'P'),name:localName}));
-    tab=updateBound(tab,bound=>({...editDraft(bound,{count:'8'}),validation:{draftRevision:bound.draftRevision+1,values:{count:8}}}));
+    tab=updateBound(tab,bound=>editDraft(bound,{count:'8'}));
     const before=tab.bound;
     const after=applyCatalog(tab,{profiles:[profile('P','Reviewed again',{count:7},'shared')],profiles_error:null});
     assert.equal(after.bound.selectedId,'P');
     assert.deepEqual(after.bound.draft,{count:'8'});
     assert.equal(after.bound.draftRevision,before.draftRevision);
-    assert.deepEqual(after.bound.validation,{draftRevision:before.draftRevision,values:{count:8}});
     assert.equal(after.bound.name,expectedName);
     assert.deepEqual(after.bound.profiles[0].values,{count:7});
     assert.equal(after.notice.key,'updatedElsewhere');
@@ -287,7 +286,7 @@ test('an unchanged catalog or an unbound Tab is left as it is',()=>{
 });
 
 for (const {scenario,update} of [
-  {scenario:'validation',update:item=>updateBound(item,bound=>({...bound,validation:{draftRevision:bound.draftRevision,values:{count:5}}}))},
+  {scenario:'a profile rename',update:item=>updateBound(item,bound=>({...bound,name:'Renamed profile'}))},
   {scenario:'a failed profile mutation',update:item=>({...item,error:unreadable})},
 ]) {
   test(`${scenario} in one Tab cannot roll back another Tab after a successful write whose refresh failed`,()=>{
@@ -326,10 +325,10 @@ test('two Tabs keep independent drafts and switching never touches the other',()
 
 test('a completion for a closed, rebound, stale or reopened workspace is discarded without touching another Tab',()=>{
   const open=[bindSelection(workspaceFromView(view('a')),selection('a',1)),bindSelection(workspaceFromView(view('b')),selection('b',1))];
-  const update=item=>updateBound(item,bound=>({...bound,validation:{draftRevision:bound.draftRevision,values:{count:1}}}));
+  const update=item=>updateBound(item,bound=>({...bound,name:'Completed profile save'}));
   const afterClose=applyIfCurrent(closeWorkspace(open,'a'),{id:'a',revision:1},update);
   assert.equal(afterClose.length,1);
-  assert.equal(afterClose[0].bound.validation,null);
+  assert.equal(afterClose[0].bound.name,'');
   const rebound=[bindSelection(open[0],selection('a',2)),open[1]];
   assert.equal(applyIfCurrent(rebound,{id:'a',revision:1},update),rebound);
   const staleDraft=applyIfCurrent(open,{id:'a',revision:1,draftRevision:open[0].bound.draftRevision+1},update);
@@ -338,7 +337,7 @@ test('a completion for a closed, rebound, stale or reopened workspace is discard
   const reopened=[open[1],workspaceFromView(view('a2',{internal:'a',display:'Tab a'}))];
   assert.equal(applyIfCurrent(reopened,{id:'a',revision:1},update),reopened);
   const applied=applyIfCurrent(open,{id:'a',revision:1,draftRevision:open[0].bound.draftRevision},update);
-  assert.deepEqual(applied[0].bound.validation,{draftRevision:open[0].bound.draftRevision,values:{count:1}});
+  assert.equal(applied[0].bound.name,'Completed profile save');
   assert.equal(applied[1],open[1]);
 });
 
@@ -1697,7 +1696,7 @@ test('a Native intent names the current saved binding only after both separate c
   const facts=deriveBound(approved,nativeEnvironment,'en',nativeCapability);
   assert.equal(facts.startBlock,null);
   assert.deepEqual(facts.native.intent,{target_revision:1,target_binding_id:'binding-1',target_declaration_identity:'declaration-1',
-    capture_approved:true,input_approved:true,launch_approved:false,max_exit_recoveries:0,operation:'Press Confirm once',visible_postcondition:'Result dialog is shown',limits:nativeLimits});
+    capture_approved:true,input_approved:true,launch_approved:false,max_exit_recoveries:0,review:{kind:'operation',operation:'Press Confirm once',visible_postcondition:'Result dialog is shown'},limits:nativeLimits});
   // Consent given for an older request does not combine with consent given after an edit.
   const edited=approveNative(editDraft(captureOnly,{count:2}),'input',true,nativeEnvironment,nativeCapability);
   assert.equal(nativeOf(edited).capture,false);
@@ -1949,7 +1948,7 @@ test('selected workspace status does not borrow a foreign late notice, validatio
   const authoring={owner:{workspace:{workspace_id:'a'},token:'owner-a'},notice:{key:'authoringOpened'}};
   assert.equal(scopedAuthoring(b,authoring),null);
   assert.equal(scopedAuthoring(undefined,authoring),null);
-  const late=applyIfCurrent([a,b],{id:'a',revision:0},item=>({...item,notice:{key:'validated'}}));
+  const late=applyIfCurrent([a,b],{id:'a',revision:0},item=>({...item,notice:{key:'authoringOpened'}}));
   const shown=workspaceStatus(late[1],deriveBound(b.bound,null),terminal('a-run',{error:unreadable}),authoring,'en');
   assert.deepEqual(shown,[]);
   assert.equal(workspaceStatus(late[0],undefined,null,null,'en').at(-1).id,'notice');
@@ -1963,17 +1962,4 @@ test('execution disclosure remains possible when package selection retires and r
   workspace={...workspace,disclosedRun:'old'};
   assert.equal(workspace.bound,null);
   assert.equal(bindSelection(workspace,selection('a',3)).disclosedRun,null);
-});
-
-test('profile validation retains its checked revision across value edits and unrelated notices',()=>{
-  let tab=bindSelection(workspaceFromView(view('a')),selection('a',1));
-  const checked=tab.bound.draftRevision;
-  tab=updateBound(tab,bound=>({...bound,validation:{draftRevision:checked,values:{count:1}}}));
-  tab=updateBound({...tab,notice:null},bound=>({...editDraft(bound,{count:2}),name:'Another name'}));
-  assert.equal(tab.bound.validation.draftRevision,checked);
-  assert.notEqual(tab.bound.validation.draftRevision,tab.bound.draftRevision);
-  assert.deepEqual(tab.bound.validation.values,{count:1});
-  assert.equal(newDraft(tab.bound).validation,null);
-  assert.equal(selectProfile(tab.bound,'prof-a').validation,null);
-  assert.equal(bindSelection(tab,selection('a',2)).bound.validation,null);
 });

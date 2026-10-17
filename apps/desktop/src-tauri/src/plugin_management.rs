@@ -1005,7 +1005,9 @@ fn registered(
     #[cfg(not(windows))]
     let listed_registration = entry.path.as_deref() == Some(display(registration).as_str());
     #[cfg(windows)]
-    let listed_registration = entry.path.as_deref()
+    let listed_registration = entry
+        .path
+        .as_deref()
         .is_some_and(|listed| windows_target::same_registration(listed, registration));
     if !listed_registration {
         return Ok((

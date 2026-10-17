@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use rquickjs::function::Args;
 use rquickjs::loader::{ImportAttributes, Loader, Resolver};
 use rquickjs::promise::PromiseHookType;
 use rquickjs::{Context, Ctx, Exception, Function, Module, Object, Persistent, Runtime, Value};
@@ -353,6 +354,72 @@ fn callable<'js>(
     })
 }
 
+fn return_summary<'js>(ctx: &Ctx<'js>, value: &Value<'js>, slice: &Function<'js>) -> Json {
+    const LIMIT: usize = 65_536;
+    if value.is_undefined() {
+        return json!({"kind":"undefined"});
+    }
+    if value.is_null() {
+        return json!({"kind":"null", "value":null});
+    }
+    if let Some(value) = value.as_bool() {
+        return json!({"kind":"boolean", "value":value});
+    }
+    if let Some(value) = value.as_number() {
+        let number = if value.is_nan() {
+            json!("NaN")
+        } else if value == f64::INFINITY {
+            json!("Infinity")
+        } else if value == f64::NEG_INFINITY {
+            json!("-Infinity")
+        } else if value == 0.0 && value.is_sign_negative() {
+            json!("-0")
+        } else {
+            json!(value)
+        };
+        return json!({"kind":"number", "value":number});
+    }
+    if value.is_string() {
+        let prefix = slice.call::<_, rquickjs::String>((value.clone(), 0, LIMIT))
+            .and_then(|text| text.to_string())
+            .or_else(|error| {
+                // The UTF-16 bound may split a pair beyond the displayed byte budget.
+                if matches!(&error, rquickjs::Error::Utf8(error) if error.valid_up_to() >= LIMIT - 128) {
+                    slice.call::<_, rquickjs::String>((value.clone(), 0, LIMIT - 1))
+                        .and_then(|text| text.to_string())
+                } else {
+                    Err(error)
+                }
+            });
+        match prefix {
+            Ok(text) => {
+                let mut bytes = 0;
+                let mut end = 0;
+                for (offset, character) in text.char_indices() {
+                    let size = match character {
+                        '"' | '\\' | '\n' | '\r' | '\t' | '\u{08}' | '\u{0c}' => 2,
+                        '\0'..='\u{1f}' => 6,
+                        _ => character.len_utf8(),
+                    };
+                    if bytes + size > LIMIT - 128 {
+                        break;
+                    }
+                    bytes += size;
+                    end = offset + character.len_utf8();
+                }
+                return json!({"kind":"string", "value": &text[..end], "truncated":end < text.len()});
+            }
+            Err(_) => {
+                if ctx.has_exception() {
+                    let _ = ctx.catch();
+                }
+                return json!({"kind":"unavailable", "reason":"string projection failed"});
+            }
+        }
+    }
+    json!({"kind":"unavailable", "reason":"nonprimitive return"})
+}
+
 fn host_call<'js>(
     ctx: Ctx<'js>,
     host: Host,
@@ -412,7 +479,7 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
                 host.fail(fault.clone());
                 fault
             })?;
-    run_with_parser(inventory, host, parser)
+    run_with_parser(inventory, host, parser, None)
 }
 
 pub(crate) fn run_prepared(
@@ -422,13 +489,24 @@ pub(crate) fn run_prepared(
 ) -> Result<RuntimeMetrics, Fault> {
     inventory.validate()?;
     let parser = prepared.parser(&inventory)?.clone();
-    run_with_parser(inventory, host, parser)
+    run_with_parser(inventory, host, parser, prepared.function.as_ref()).map_err(|mut fault| {
+        if let Some(function) = &prepared.function {
+            if !fault.context.is_object() {
+                fault.context = json!({"cause":fault.context});
+            }
+            fault.context["selected_function"] = json!({
+                "module":function.invocation.module, "function":function.invocation.function,
+            });
+        }
+        fault
+    })
 }
 
 fn run_with_parser(
     inventory: Arc<Inventory>,
     host: Host,
     parser: serde_json::Value,
+    function: Option<&crate::typescript::PreparedFunction>,
 ) -> Result<RuntimeMetrics, Fault> {
     let limits = host.limits();
     if limits.vm_bytes == 0 || limits.max_actions == 0 {
@@ -436,6 +514,10 @@ fn run_with_parser(
             "ResourceLimit",
             "VM memory and job limits must be positive",
         ));
+    }
+    if let Some(function) = function {
+        function.invocation.validate()?;
+        host.attach_function()?;
     }
     let runtime = Runtime::new().map_err(|error| Fault::new("Runtime", error.to_string()))?;
     // Requires the default QuickJS allocator, not rquickjs's rust-alloc feature.
@@ -525,6 +607,8 @@ fn run_with_parser(
         Context::full(&runtime).map_err(|error| Fault::new("Runtime", error.to_string()))?;
     let mut jobs = 0;
     let result = context.with(|ctx| {
+        let slice: Function = ctx.eval("Function.call.bind(String.prototype.slice)")
+            .map_err(|error| exception_fault(&ctx, error, &inventory, "<host>", "setup"))?;
         let call = host_call(ctx.clone(), host.clone(), inventory.clone(), halted.clone())
             .map_err(|error| exception_fault(&ctx, error, &inventory, "<host>", "setup"))?;
         let host_object = Object::new(ctx.clone()).map_err(|error| exception_fault(&ctx, error, &inventory, "<host>", "setup"))?;
@@ -566,7 +650,9 @@ fn run_with_parser(
         // Only an actual hook reached while package code runs proves VM entry.
         vm_hook.store(true, Ordering::Release);
         let mut entries = Vec::new();
-        for entry in [&inventory.entries.readiness, &inventory.entries.workflow] {
+        let selected = function.map(|function| &function.entry);
+        let requested = [selected.unwrap_or(&inventory.entries.readiness), &inventory.entries.workflow];
+        for entry in &requested[..if selected.is_some() { 1 } else { 2 }] {
             let promise = Module::import(&ctx, entry.module.as_str())
                 .map_err(|error| exception_fault(&ctx, error, &inventory, &entry.module, "instantiation"))?;
             let namespace = settle(&ctx, promise.into_value(), &host, &deadline, &mut jobs).map_err(|fault| {
@@ -576,23 +662,40 @@ fn run_with_parser(
             entries.push(callable(&ctx, &namespace, entry, &inventory)?);
         }
         check(&host, &deadline)?;
-        host.begin_readiness()?;
-        if !host.script_startup() {
-            deadline.store(host.control().elapsed_us().saturating_add(limits.readiness_ms.saturating_mul(1000)), Ordering::Release);
-        }
-        let ready: Value = entries[0].call(()).map_err(|error| exception_fault(&ctx, error, &inventory, &inventory.entries.readiness.module, "readiness"))?;
-        let ready = settle(&ctx, ready, &host, &deadline, &mut jobs).map_err(|fault| {
-            if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &inventory.entries.readiness.module, "readiness") } else { fault }
-        })?;
-        if ready.as_string().and_then(|value| value.to_string().ok()).as_deref() != Some("Ready") {
-            return Err(Fault::new("ReadinessContract", "Readiness must return the literal string Ready"));
-        }
-        check(&host, &deadline)?;
-        host.begin_workflow()?;
+        let (entry, callable) = if let Some(function) = function {
+            host.begin_function()?;
+            (&function.entry, &entries[0])
+        } else {
+            host.begin_readiness()?;
+            if !host.script_startup() {
+                deadline.store(host.control().elapsed_us().saturating_add(limits.readiness_ms.saturating_mul(1000)), Ordering::Release);
+            }
+            let ready: Value = entries[0].call(()).map_err(|error| exception_fault(&ctx, error, &inventory, &inventory.entries.readiness.module, "readiness"))?;
+            let ready = settle(&ctx, ready, &host, &deadline, &mut jobs).map_err(|fault| {
+                if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &inventory.entries.readiness.module, "readiness") } else { fault }
+            })?;
+            if ready.as_string().and_then(|value| value.to_string().ok()).as_deref() != Some("Ready") {
+                return Err(Fault::new("ReadinessContract", "Readiness must return the literal string Ready"));
+            }
+            check(&host, &deadline)?;
+            host.begin_workflow()?;
+            (&inventory.entries.workflow, &entries[1])
+        };
         deadline.store(limits.duration_ms.saturating_mul(1000), Ordering::Release);
-        let value: Value = entries[1].call(()).map_err(|error| exception_fault(&ctx, error, &inventory, &inventory.entries.workflow.module, "workflow"))?;
-        settle(&ctx, value, &host, &deadline, &mut jobs).map_err(|fault| {
-            if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &inventory.entries.workflow.module, "workflow") } else { fault }
+        let stage = if function.is_some() { "function" } else { "workflow" };
+        let mut arguments = Args::new(ctx.clone(), function.map_or(0, |function| function.invocation.arguments.len()));
+        if let Some(function) = function {
+            for argument in &function.invocation.arguments {
+                let value = ctx.json_parse(argument.to_string())
+                    .map_err(|error| exception_fault(&ctx, error, &inventory, &entry.module, stage))?;
+                arguments.push_arg(value)
+                    .map_err(|error| exception_fault(&ctx, error, &inventory, &entry.module, stage))?;
+            }
+        }
+        let value: Value = callable.call_arg(arguments)
+            .map_err(|error| exception_fault(&ctx, error, &inventory, &entry.module, stage))?;
+        let value = settle(&ctx, value, &host, &deadline, &mut jobs).map_err(|fault| {
+            if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &entry.module, stage) } else { fault }
         })?;
         // Entry settlement, not draining the job queue, ends ordinary authority.
         host.control().admission.store(false, Ordering::Release);
@@ -600,7 +703,7 @@ fn run_with_parser(
         if let Some((_, fault)) = rejections.borrow().first() {
             return Err(fault.clone());
         }
-        Ok(())
+        Ok(function.map(|_| return_summary(&ctx, &value, &slice)))
     });
     runtime.set_host_promise_rejection_tracker(None);
     rejections.borrow_mut().clear();
@@ -612,10 +715,11 @@ fn run_with_parser(
     if host.control().elapsed_us() >= deadline.load(Ordering::Acquire) {
         return Err(Fault::new("Timeout", "Runtime stage deadline expired"));
     }
-    result?;
+    let return_summary = result?;
     Ok(RuntimeMetrics {
         vm_bytes: usize::try_from(runtime.memory_usage().memory_used_size).ok(),
         jobs_executed: jobs,
+        return_summary,
         source_diagnostic: Some(
             json!({"runtime":"rquickjs 0.14.0", "import_parser":parser, "cycles":"ECMAScript live bindings", "detached_jobs":"discarded at entry settlement", "promise_limit":limits.max_actions, "job_limit":limits.max_actions}),
         ),

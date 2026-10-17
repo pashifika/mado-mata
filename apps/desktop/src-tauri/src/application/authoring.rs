@@ -2,7 +2,7 @@ use super::{
     Application, MAX_SESSION_COUNTER, OperationOwner, WorkspaceRef, WorkspaceView, Workspaces, lock,
 };
 use crate::authoring::{AuthoringFile, Candidate, CatalogEdit, Edit};
-use mado_runtime_comparison::model::Fault;
+use mado_runtime_comparison::model::{Control, Fault};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -22,6 +22,9 @@ pub use recognition::{
     RecognitionCopy, RecognitionFrame, RecognitionPickerGuard, RecognitionPixel, RecognitionSaved,
     RecognitionTrial, RecognitionView,
 };
+
+mod trial;
+pub use trial::TrialContext;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +65,10 @@ pub(super) struct Lease {
     pub containment: Option<Fault>,
     recognition: recognition::RecognitionState,
     pub(super) native: native_capture::NativeState,
+    // Trial function discovery reserves the lease without holding command admission.
+    discovery: bool,
+    pub(super) recovery: Option<Arc<super::recovery::RecoveryContext>>,
+    next_recovery: u64,
     // Duplicate changes the lease source; every previously edited source still
     // needs explicit reinspection when the session exits.
     roots: BTreeSet<PathBuf>,
@@ -71,6 +78,8 @@ pub(super) struct StopOwner {
     owner: AuthoringRef,
     run: Option<String>,
     native: Option<native_capture::NativeControl>,
+    // Non-executing trial context discovery, cancelled like owned work.
+    context: Option<Arc<Control>>,
 }
 
 impl Lease {
@@ -85,6 +94,10 @@ impl Lease {
     /// A settled recognition cleanup failure that its command has not returned.
     pub(super) fn unreturned_recognition_cleanup(&self) -> Option<Fault> {
         self.recognition.unreturned_cleanup()
+    }
+
+    pub(super) fn discovering(&self) -> bool {
+        self.discovery
     }
 }
 
@@ -115,6 +128,17 @@ impl Workspaces {
             .with_context(json!({"expected_revision":revision,"revision":lease.revision})));
         }
         Ok(lease.candidate.clone())
+    }
+
+    /// A retained capture worker owns native resources until explicit Release settles it.
+    pub(super) fn native_capture_released(&self, owner: &AuthoringRef) -> Result<(), Fault> {
+        if self.authoring(owner)?.native.occupied() {
+            return Err(Fault::new(
+                "NativeCaptureRetained",
+                "Release the retained native capture session before this operation",
+            ));
+        }
+        Ok(())
     }
 
     fn next_authoring_owner(&self, workspace: &WorkspaceRef) -> Result<AuthoringRef, Fault> {
@@ -186,12 +210,16 @@ impl Application {
             containment: None,
             recognition: recognition::RecognitionState::default(),
             native: native_capture::NativeState::default(),
+            discovery: false,
+            recovery: None,
+            next_recovery: 1,
             roots,
         });
         *lock(&self.authoring_stop) = Some(StopOwner {
             owner,
             run: None,
             native: None,
+            context: None,
         });
         Ok(result)
     }
@@ -232,10 +260,12 @@ impl Application {
         lease.candidate = Arc::new(candidate);
         lease.recognition = recognition::RecognitionState::default();
         lease.native = native_capture::NativeState::default();
+        lease.recovery = None;
         *lock(&self.authoring_stop) = Some(StopOwner {
             owner: next,
             run: None,
             native: None,
+            context: None,
         });
         Ok(result)
     }
@@ -288,6 +318,7 @@ impl Application {
             .as_mut()
             .expect("command retains authoring lease");
         lease.revision = committed.committed_revision.clone();
+        lease.recovery = None;
         if let Some(candidate) = committed.candidate {
             lease.candidate = Arc::new(candidate);
         }
@@ -320,6 +351,7 @@ impl Application {
             .expect("command retains authoring lease");
         lease.revision = candidate.revision().to_owned();
         lease.candidate = Arc::new(candidate);
+        lease.recovery = None;
         Ok(result)
     }
 
@@ -359,6 +391,7 @@ impl Application {
             workspace: Some(owner.workspace.clone()),
             check: None,
             native: false,
+            trial: None,
             terminal: false,
         });
         cancellation
@@ -429,8 +462,12 @@ impl Application {
             control.cancel();
             true
         });
+        let context = owned.context.as_ref().is_some_and(|control| {
+            control.cancel();
+            true
+        });
         let Some(run) = &owned.run else {
-            return Ok(native);
+            return Ok(native || context);
         };
         self.runner.stop(run)?;
         Ok(true)

@@ -23,7 +23,7 @@ static NATIVE_LAUNCH: AtomicU8 = AtomicU8::new(0);
 const NATIVE_EVENT_LIMIT: u8 = 10;
 const LIFECYCLE_RECORD_LIMIT: usize = 26;
 
-const NATIVE_PHASES: [NativePhase; 8] = [
+const NATIVE_PHASES: [NativePhase; 11] = [
     NativePhase::Preflight,
     NativePhase::TargetDiscovery,
     NativePhase::LaunchSubmission,
@@ -32,6 +32,9 @@ const NATIVE_PHASES: [NativePhase; 8] = [
     NativePhase::NativeInitialization,
     NativePhase::Readiness,
     NativePhase::Workflow,
+    NativePhase::HostAttachment,
+    NativePhase::Instantiation,
+    NativePhase::Function,
 ];
 
 struct ScriptStream {

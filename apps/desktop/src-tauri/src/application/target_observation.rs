@@ -1,5 +1,5 @@
-use super::targets::target_context;
-use super::{Application, Selected, TargetContext, WorkspaceRef, lock};
+use super::targets::{TargetAccess, TargetOwner, TargetScope, target_context};
+use super::{Application, AuthoringRef, TargetContext, WorkspaceRef, lock};
 use crate::target::{self, ApplicationObservation, TargetExpectation};
 use mado_runtime_comparison::model::Fault;
 use serde::Serialize;
@@ -87,7 +87,8 @@ impl Drop for WorkerFinished {
 }
 
 struct PendingObservation {
-    selected: Selected,
+    owner: TargetOwner,
+    scope: TargetScope,
     expected: TargetExpectation,
     request_id: String,
     cancelled: Arc<AtomicBool>,
@@ -101,6 +102,30 @@ impl Application {
         workspace: &WorkspaceRef,
         request_id: &str,
     ) -> Result<(), Fault> {
+        self.reserve_running_application_for(&TargetOwner::Workspace(workspace.clone()), request_id)
+    }
+
+    pub fn authoring_reserve_running_application(
+        &self,
+        owner: &AuthoringRef,
+        revision: &str,
+        request_id: &str,
+    ) -> Result<(), Fault> {
+        self.reserve_running_application_for(
+            &TargetOwner::Authoring {
+                owner: owner.clone(),
+                revision: revision.to_owned(),
+            },
+            request_id,
+        )
+    }
+
+    fn reserve_running_application_for(
+        &self,
+        owner: &TargetOwner,
+        request_id: &str,
+    ) -> Result<(), Fault> {
+        let workspace = owner.workspace();
         let result = (|| {
             if request_id.is_empty()
                 || request_id.len() > 64
@@ -114,9 +139,8 @@ impl Application {
                 ));
             }
             let (_command, mut state) = self.command_state()?;
-            state.resolve(workspace)?;
             self.collect(&mut state);
-            state.idle()?;
+            state.target_owner(owner, TargetAccess::Use)?;
             if !cfg!(target_os = "macos") {
                 return Err(Fault::new(
                     "TargetPlatform",
@@ -149,40 +173,65 @@ impl Application {
         expected: &TargetExpectation,
         request_id: &str,
     ) -> Result<TargetApplicationResponse, Fault> {
+        self.check_running_application_for(
+            TargetOwner::Workspace(workspace.clone()),
+            expected,
+            request_id,
+        )
+    }
+
+    pub fn authoring_check_running_application(
+        &self,
+        owner: &AuthoringRef,
+        revision: &str,
+        expected: &TargetExpectation,
+        request_id: &str,
+    ) -> Result<TargetApplicationResponse, Fault> {
+        self.check_running_application_for(
+            TargetOwner::Authoring {
+                owner: owner.clone(),
+                revision: revision.to_owned(),
+            },
+            expected,
+            request_id,
+        )
+    }
+
+    fn check_running_application_for(
+        &self,
+        owner: TargetOwner,
+        expected: &TargetExpectation,
+        request_id: &str,
+    ) -> Result<TargetApplicationResponse, Fault> {
+        let workspace = owner.workspace().clone();
         let pending = self
-            .begin_running_application(workspace, expected, request_id)
+            .begin_running_application(owner, expected, request_id)
             .inspect_err(|error| {
-                self.record_application_check(workspace, "admission", Err(error));
+                self.record_application_check(&workspace, "admission", Err(error));
             })?;
         self.finish_running_application(pending)
     }
 
     fn begin_running_application(
         &self,
-        workspace: &WorkspaceRef,
+        owner: TargetOwner,
         expected: &TargetExpectation,
         request_id: &str,
     ) -> Result<PendingObservation, Fault> {
         let (_command, mut state) = self.command_state()?;
-        let selected = state.resolve(workspace)?.clone();
         self.collect(&mut state);
-        state.idle()?;
+        let resolved = state.target_owner(&owner, TargetAccess::Use)?;
+        let workspace = owner.workspace();
         lock(&self.target_observation).reserved(workspace, request_id)?;
-        let declaration =
-            selected.package.target.clone().ok_or_else(|| {
-                Fault::new("TargetUndeclared", "Package has no target declaration")
-            })?;
-        let record = lock(&self.store)
-            .read_target(&selected.internal_name, &selected.inventory.package_id)?;
+        drop(state);
+        let scope = resolved.scope()?;
+        let declaration = scope.declared()?.clone();
+        let record = lock(&self.store).read_target(&scope.internal_name, &scope.package_id)?;
         record.compare(expected)?;
         let binding = record
             .binding
             .ok_or_else(|| Fault::new("TargetUnbound", "Save a target binding first"))?;
-        if !binding.compatible(
-            &selected.inventory.package_id,
-            &declaration.id,
-            &declaration.identity()?,
-        ) {
+        if !binding.compatible(&scope.package_id, &declaration.id, &declaration.identity()?) {
             return Err(Fault::new(
                 "TargetIncompatible",
                 "Saved target declaration changed",
@@ -230,7 +279,8 @@ impl Application {
                 )
             })?;
         Ok(PendingObservation {
-            selected,
+            owner,
+            scope,
             expected: expected.clone(),
             request_id: request_id.to_owned(),
             cancelled,
@@ -243,7 +293,7 @@ impl Application {
         &self,
         pending: PendingObservation,
     ) -> Result<TargetApplicationResponse, Fault> {
-        let workspace = &pending.selected.workspace;
+        let workspace = pending.owner.workspace();
         let mut stage = "observation";
         let result = (|| {
             let remaining = pending.deadline.saturating_duration_since(Instant::now());
@@ -277,8 +327,7 @@ impl Application {
             stage = "publication";
             // Publication holds ownership only for the final record comparison, never for OS reads.
             let (_command, state) = self.command_state()?;
-            let selected = state.resolve(&pending.selected.workspace)?;
-            if selected.package.target_identity != pending.selected.package.target_identity {
+            if !state.target_current(&pending.owner, &pending.scope)? {
                 return Err(cancelled());
             }
             let store = match self.store.try_lock() {
@@ -292,7 +341,7 @@ impl Application {
                 }
             };
             let record =
-                store.read_target(&selected.internal_name, &selected.inventory.package_id)?;
+                store.read_target(&pending.scope.internal_name, &pending.scope.package_id)?;
             record.compare(&pending.expected)?;
             if pending.cancelled.load(Ordering::Acquire) {
                 return Err(cancelled());
@@ -304,7 +353,7 @@ impl Application {
                 ));
             }
             Ok(TargetApplicationResponse {
-                context: target_context(selected),
+                context: target_context(&pending.scope),
                 revision: pending.expected.revision,
                 binding_id: pending.expected.binding_id,
                 request_id: pending.request_id,
@@ -384,33 +433,50 @@ impl Application {
         self: &Arc<Self>,
         workspace: &WorkspaceRef,
     ) -> Result<TargetPickerGuard, Fault> {
+        self.begin_target_picker_for(TargetOwner::Workspace(workspace.clone()))
+    }
+
+    pub fn authoring_begin_target_picker(
+        self: &Arc<Self>,
+        owner: &AuthoringRef,
+        revision: &str,
+    ) -> Result<TargetPickerGuard, Fault> {
+        self.begin_target_picker_for(TargetOwner::Authoring {
+            owner: owner.clone(),
+            revision: revision.to_owned(),
+        })
+    }
+
+    fn begin_target_picker_for(
+        self: &Arc<Self>,
+        owner: TargetOwner,
+    ) -> Result<TargetPickerGuard, Fault> {
         let (_command, mut state) = self.command_state()?;
-        state.resolve(workspace)?;
         self.collect(&mut state);
-        state.idle()?;
+        state.target_owner(&owner, TargetAccess::Use)?;
         if !cfg!(any(target_os = "macos", windows)) {
             return Err(Fault::new(
                 "TargetPlatform",
                 "Application selection requires Windows or macOS",
             ));
         }
-        state.target_picker = Some(workspace.clone());
+        state.target_picker = Some(owner.workspace().clone());
         Ok(TargetPickerGuard {
             application: self.clone(),
-            workspace: workspace.clone(),
+            owner,
         })
     }
 }
 
 pub struct TargetPickerGuard {
     application: Arc<Application>,
-    workspace: WorkspaceRef,
+    owner: TargetOwner,
 }
 
 impl TargetPickerGuard {
     pub fn validate(&self) -> Result<(), Fault> {
         let (_command, state) = self.application.command_state()?;
-        state.resolve(&self.workspace)?;
+        state.target_owner(&self.owner, TargetAccess::Read)?;
         Ok(())
     }
 }
@@ -418,7 +484,7 @@ impl TargetPickerGuard {
 impl Drop for TargetPickerGuard {
     fn drop(&mut self) {
         let mut state = lock(&self.application.workspaces);
-        if state.target_picker.as_ref() == Some(&self.workspace) {
+        if state.target_picker.as_ref() == Some(self.owner.workspace()) {
             state.target_picker = None;
         }
     }

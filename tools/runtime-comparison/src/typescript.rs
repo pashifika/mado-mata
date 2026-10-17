@@ -1,4 +1,4 @@
-use crate::inventory::Inventory;
+use crate::inventory::{Entry, Inventory};
 use crate::model::{Control, Fault, Limits};
 use crate::owned_child::{ChildStdio, Environment, OwnedChild};
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,237 @@ use std::time::{Duration, Instant};
 
 const MAX_COMPILER_BYTES: usize = 64 * 1024 * 1024;
 const COMPILER_HEAP_MIB: usize = 256;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FunctionCandidate {
+    pub module: String,
+    pub function: String,
+    pub signature: String,
+    pub line: u64,
+    pub column: u64,
+    pub required_arguments: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FunctionInvocation {
+    pub module: String,
+    pub function: String,
+    pub arguments: Vec<Value>,
+}
+
+struct ArgumentBudget(usize);
+
+impl Write for ArgumentBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_sub(bytes.len())
+            .ok_or_else(|| std::io::Error::other("arguments exceed 64 KiB"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_arguments<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Value>, D::Error> {
+    use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+    struct Seed<'a> {
+        depth: usize,
+        budget: &'a mut ArgumentBudget,
+    }
+    impl Seed<'_> {
+        fn scalar<E: serde::de::Error>(self, value: Value) -> Result<Value, E> {
+            serde_json::to_writer(self.budget, &value).map_err(E::custom)?;
+            Ok(value)
+        }
+        fn punctuation<E: serde::de::Error>(&mut self, byte: u8) -> Result<(), E> {
+            self.budget.write_all(&[byte]).map_err(E::custom)
+        }
+    }
+    impl<'de> DeserializeSeed<'de> for Seed<'_> {
+        type Value = Value;
+        fn deserialize<D: serde::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<Value, D::Error> {
+            if self.depth > 32 {
+                return Err(serde::de::Error::custom("argument nesting exceeds 32"));
+            }
+            deserializer.deserialize_any(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Seed<'_> {
+        type Value = Value;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("bounded JSON arguments")
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Value, E> {
+            self.scalar(Value::Null)
+        }
+        fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Value, E> {
+            self.scalar(value.into())
+        }
+        fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Value, E> {
+            self.scalar(value.into())
+        }
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Value, E> {
+            self.scalar(value.into())
+        }
+        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Value, E> {
+            let number = serde_json::Number::from_f64(value)
+                .ok_or_else(|| E::custom("nonfinite JSON number"))?;
+            self.scalar(Value::Number(number))
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Value, E> {
+            serde_json::to_writer(self.budget, value).map_err(E::custom)?;
+            Ok(Value::String(value.into()))
+        }
+        fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Value, E> {
+            self.scalar(Value::String(value))
+        }
+        fn visit_seq<A: SeqAccess<'de>>(mut self, mut sequence: A) -> Result<Value, A::Error> {
+            self.punctuation(b'[')?;
+            let mut values = Vec::new();
+            while let Some(value) = sequence.next_element_seed(Seed {
+                depth: self.depth + 1,
+                budget: &mut *self.budget,
+            })? {
+                if self.depth == 0 && values.len() == 32 {
+                    return Err(serde::de::Error::custom("at most 32 arguments are allowed"));
+                }
+                if !values.is_empty() {
+                    self.punctuation(b',')?;
+                }
+                values.push(value);
+            }
+            self.punctuation(b']')?;
+            Ok(Value::Array(values))
+        }
+        fn visit_map<A: MapAccess<'de>>(mut self, mut map: A) -> Result<Value, A::Error> {
+            self.punctuation(b'{')?;
+            let mut values = serde_json::Map::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !values.is_empty() {
+                    self.punctuation(b',')?;
+                }
+                serde_json::to_writer(&mut *self.budget, &key).map_err(serde::de::Error::custom)?;
+                self.punctuation(b':')?;
+                let value = map.next_value_seed(Seed {
+                    depth: self.depth + 1,
+                    budget: &mut *self.budget,
+                })?;
+                values.insert(key, value);
+            }
+            self.punctuation(b'}')?;
+            Ok(Value::Object(values))
+        }
+    }
+    let value = deserializer.deserialize_seq(Seed {
+        depth: 0,
+        budget: &mut ArgumentBudget(64 * 1024),
+    })?;
+    match value {
+        Value::Array(values) => Ok(values),
+        _ => Err(serde::de::Error::custom("arguments must be a JSON array")),
+    }
+}
+
+impl<'de> Deserialize<'de> for FunctionInvocation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            module: String,
+            function: String,
+            #[serde(default, deserialize_with = "bounded_arguments")]
+            arguments: Vec<Value>,
+        }
+        struct InvocationVisitor;
+        impl<'de> serde::de::Visitor<'de> for InvocationVisitor {
+            type Value = Fields;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a function invocation object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Fields, A::Error> {
+                Fields::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+            }
+        }
+        let fields = deserializer.deserialize_map(InvocationVisitor)?;
+        let invocation = Self {
+            module: fields.module,
+            function: fields.function,
+            arguments: fields.arguments,
+        };
+        invocation.validate().map_err(serde::de::Error::custom)?;
+        Ok(invocation)
+    }
+}
+
+impl FunctionInvocation {
+    pub fn validate(&self) -> Result<(), Fault> {
+        fn depth(value: &Value, level: usize) -> bool {
+            level <= 32
+                && match value {
+                    Value::Array(values) => values.iter().all(|value| depth(value, level + 1)),
+                    Value::Object(values) => values.values().all(|value| depth(value, level + 1)),
+                    _ => true,
+                }
+        }
+        if self.module.is_empty()
+            || self.module.len() > 4096
+            || self.function.is_empty()
+            || self.function.len() > 4096
+            || self.arguments.len() > 32
+            || !self.arguments.iter().all(|value| depth(value, 1))
+        {
+            return Err(Fault::new(
+                "FunctionArguments",
+                "Function identity or arguments exceed their bounds",
+            ));
+        }
+        serde_json::to_writer(&mut ArgumentBudget(64 * 1024), &self.arguments)
+            .map_err(|_| Fault::new("FunctionArguments", "Arguments exceed 64 KiB of JSON"))?;
+        Ok(())
+    }
+}
+
+pub fn function_candidates(
+    inventory: &Inventory,
+    control: &Control,
+) -> Result<Vec<FunctionCandidate>, Fault> {
+    control.check()?;
+    inventory.validate()?;
+    if !matches!(
+        inventory.metadata["runtime"].as_str(),
+        Some("typescript" | "javascript")
+    ) {
+        return Err(Fault::new(
+            "FunctionEntry",
+            "Function execution requires TypeScript or JavaScript",
+        ));
+    }
+    let result = serde_json::from_value(transport(
+        &json!({"operation":"function-candidates", "sources":inventory.sources}),
+        MAX_COMPILER_BYTES,
+        control.deadline(),
+        Some(control),
+    )?)
+    .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
+    control.check()?;
+    Ok(result)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedFunction {
+    pub invocation: FunctionInvocation,
+    pub entry: Entry,
+}
 
 #[derive(Deserialize)]
 struct Import {
@@ -33,6 +264,7 @@ struct Compilation {
     sources: BTreeMap<String, String>,
     source_maps: BTreeMap<String, String>,
     compiler: Value,
+    entry: Option<Entry>,
 }
 
 #[derive(Deserialize)]
@@ -322,6 +554,7 @@ pub(crate) fn node_from_path() -> Result<std::path::PathBuf, Fault> {
 pub(crate) struct PreparedModules {
     inventory_identity: String,
     parser: Value,
+    pub(crate) function: Option<PreparedFunction>,
 }
 
 impl PreparedModules {
@@ -334,7 +567,55 @@ impl PreparedModules {
         Ok(Self {
             inventory_identity: inventory.identity.clone(),
             parser,
+            function: None,
         })
+    }
+
+    pub(crate) fn capture_function(
+        inventory: &Inventory,
+        invocation: &FunctionInvocation,
+        limits: &Limits,
+        control: &Arc<Control>,
+    ) -> Result<(Inventory, Self), Fault> {
+        invocation.validate()?;
+        inventory.validate()?;
+        let (compiled, entry) = match inventory.metadata["runtime"].as_str() {
+            Some("typescript") => compile_invocation(inventory, limits, control, Some(invocation))?,
+            Some("javascript") => {
+                #[derive(Deserialize)]
+                struct Bridge {
+                    source: String,
+                    entry: Entry,
+                }
+                let bridge: Bridge = serde_json::from_value(transport(
+                    &json!({"operation":"bridge-javascript", "sources":inventory.sources, "function":invocation}),
+                    MAX_COMPILER_BYTES, control.deadline(), Some(control),
+                )?).map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
+                let mut compiled = inventory.clone();
+                compiled.metadata["original_inventory"] = json!(inventory.identity);
+                compiled
+                    .sources
+                    .insert(invocation.module.clone(), bridge.source);
+                compiled.refresh_identity()?;
+                (compiled, Some(bridge.entry))
+            }
+            _ => {
+                return Err(Fault::new(
+                    "FunctionEntry",
+                    "Function execution requires TypeScript or JavaScript",
+                ));
+            }
+        };
+        let compiled = Arc::new(compiled);
+        let mut modules = Self::capture(&compiled, limits, control)?;
+        modules.function = Some(PreparedFunction {
+            invocation: invocation.clone(),
+            entry: entry
+                .ok_or_else(|| Fault::new("CompilerProtocol", "Missing function bridge"))?,
+        });
+        let compiled = Arc::try_unwrap(compiled)
+            .map_err(|_| Fault::new("Runtime", "Function preflight retained inventory"))?;
+        Ok((compiled, modules))
     }
 
     pub(crate) fn parser(&self, inventory: &Inventory) -> Result<&Value, Fault> {
@@ -387,6 +668,7 @@ fn inspect_javascript(
     let mut request = json!({
         "operation": "inspect-javascript", "sources": inventory.sources,
         "include_declaration_modules": link,
+        "entries": inventory.entries,
     });
     let inspection: Inspection =
         serde_json::from_value(transport(&request, limit, deadline, Some(control))?)
@@ -477,6 +759,15 @@ pub(crate) fn compile_with_control(
     limits: &Limits,
     control: &Control,
 ) -> Result<Inventory, Fault> {
+    compile_invocation(inventory, limits, control, None).map(|(inventory, _)| inventory)
+}
+
+fn compile_invocation(
+    inventory: &Inventory,
+    limits: &Limits,
+    control: &Control,
+    function: Option<&FunctionInvocation>,
+) -> Result<(Inventory, Option<Entry>), Fault> {
     control.check()?;
     inventory.validate()?;
     limits.validate()?;
@@ -490,6 +781,7 @@ pub(crate) fn compile_with_control(
         "operation": "inspect", "sources": inventory.sources,
         "schema": inventory.schema, "metadata": inventory.metadata,
     });
+    request["function"] = json!(function);
     let attribute = |mut fault: Fault| {
         if !fault.context.is_object() {
             fault.context = json!({"cause": fault.context});
@@ -559,7 +851,7 @@ pub(crate) fn compile_with_control(
     }
     control.check()?;
     compiled.refresh_identity()?;
-    Ok(compiled)
+    Ok((compiled, compilation.entry))
 }
 
 fn vlq(segment: &str) -> Option<Vec<i64>> {
@@ -793,3 +1085,6 @@ mod tests {
         assert_eq!(control.admit_launch().unwrap_err().category, "Cancelled");
     }
 }
+
+#[cfg(test)]
+mod function_tests;
