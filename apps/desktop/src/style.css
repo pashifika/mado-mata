@@ -153,12 +153,6 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .dropdown [role="menuitem"][aria-current="page"] { font-weight: 600; }
 .menu-description { margin: 4px 0 0; padding: 9px 10px 4px; border-top: 1px solid #e6ebf1; font-size: 11px; color: var(--text-muted); }
 .count { margin-left: auto; font-size: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
-.validation-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 18px; height: 18px; padding: 1px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text-muted); }
-.validation-icon svg { width: 14px; height: 14px; }
-.validation-valid { color: var(--ok); }
-.validation-invalid { color: var(--danger); }
-.validation-stale { color: var(--warn); }
-.validation-running { color: var(--accent); }
 
 /* Workspace state and local pages share one compact navigation row. */
 .workspace-bar { display: flex; align-items: center; gap: 16px; padding: 7px var(--space-5); background: #e4e9ef; border-bottom: 1px solid #cfd8e2; }

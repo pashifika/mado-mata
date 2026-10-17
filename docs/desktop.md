@@ -504,10 +504,10 @@ Neither action inspects, binds, or runs the package.
   count; their content remains scrollable at constrained window heights.
 - **Validate** in **Package contents** checks one saved revision through the
   existing inventory and trusted compiler without evaluating package code.
-  Unsaved text is excluded. The adjacent **Setup…** icon distinguishes unchecked,
-  running, valid, invalid and earlier-revision results. Collapsed navigation
-  retains Validate, Setup and Run. **Status details** keeps the revision, diagnostic count
-  and source locations; a location returns to the owning Edit
+  Unsaved text is excluded. Setup has no validation icon. Collapsed navigation
+  retains Validate, Setup and Run. **Status details** distinguishes unchecked,
+  running, valid, invalid and earlier-revision results, with the revision,
+  diagnostic count and source locations; a location returns to the owning Edit
   session without losing drafts. Later saves make the old result stale; unsaved
   changes remain independently identified. The finite validation child occupies
   the existing operation slot. Shared **Stop** retains ownership until settlement.
@@ -551,6 +551,9 @@ step or visit to the Run tab.
   stale. **Reload**, to the left of **Done**, refreshes them explicitly.
   Selecting, completing or closing Setup never executes. Opening Edit, saving
   and OMP draft operations do not start discovery.
+  Advanced settings identifies stale setup and disables target actions until
+  Reload; returning to Setup also refreshes missing or stale context without
+  executing or discarding invocation inputs.
 - Initial values come from the package's `default` preset, otherwise its schema
   defaults. The chosen source is shown below Destination. Invalid values or a
   missing previously selected profile remain errors; defaults never hide them.
@@ -591,8 +594,9 @@ step or visit to the Run tab.
   initialization. There is no additional Allow screen, handwritten
   operation/postcondition text or per-source approval.
 - Native Setup selects the application. Run resolves its current executable;
-  matching paths need metadata only, while relocated APPs use existing signed
-  correspondence. The SDK then owns exact window binding, target lifetime,
+  matching paths need metadata and a unique process, while relocated APPs use
+  existing signed correspondence. A single matching window does not disambiguate
+  multiple matching APP processes. The SDK then owns exact window binding, target lifetime,
   capture and input checks. No duplicate SDK checks run on each host call;
   failures use shared results, logs and cleanup.
   Function attaches only to an already-running target; it cannot launch,

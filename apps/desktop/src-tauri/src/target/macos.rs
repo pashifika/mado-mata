@@ -623,7 +623,8 @@ pub(super) fn script_executable(
                 relocated |= guard.call(|| url_path(&url))?? != resolution.game.executable;
             }
             if !relocated {
-                return Ok(Some(PathBuf::from(&resolution.game.executable)));
+                return unique_script_executable(&resolution.game.executable, applications.len())
+                    .map(Some);
             }
             // SDK path matching cannot map App Translocation or a signed relocated copy.
             // Reuse established correspondence only when the runtime path differs.
@@ -651,6 +652,16 @@ pub(super) fn script_executable(
     }));
     guard.check()?;
     result.map_err(|_| unavailable("platform_exception"))?
+}
+
+fn unique_script_executable(executable: &str, candidate_count: usize) -> Result<PathBuf, Fault> {
+    if candidate_count != 1 {
+        return Err(Fault::new(
+            "NativeTargetAmbiguous",
+            "Multiple running applications match the saved installation",
+        ));
+    }
+    Ok(PathBuf::from(executable))
 }
 
 pub(super) fn discover_native(
@@ -1029,6 +1040,22 @@ mod tests {
     use super::*;
     use crate::target::tests::MetadataFixture;
     use std::cell::Cell;
+
+    #[test]
+    fn same_path_script_mapping_requires_one_process_before_window_selection() {
+        let executable = "/Applications/Example.app/Contents/MacOS/Example";
+        assert_eq!(
+            unique_script_executable(executable, 1).unwrap(),
+            PathBuf::from(executable)
+        );
+        // One matching window cannot disambiguate two processes from the same APP.
+        assert_eq!(
+            unique_script_executable(executable, 2)
+                .unwrap_err()
+                .category,
+            "NativeTargetAmbiguous"
+        );
+    }
 
     #[test]
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]

@@ -12,9 +12,9 @@ import {FaultMessage} from './ResultPanel.tsx';
 import Select from './Select.tsx';
 import TargetPanel from './TargetPanel.tsx';
 
-export default function EditExecutionSetup({state, facts, handlers, locked, loadBlocked, loading, block, dirty, error, nativeCapability, nativeError, profileRepair, onReturn}: {
+export default function EditExecutionSetup({state, facts, handlers, locked, loadBlocked, loading, stale, block, dirty, error, nativeCapability, nativeError, profileRepair, onReturn}: {
   state:EditTrialState|null; facts:Derived|null; handlers:EditTrialHandlers;
-  locked:boolean; loadBlocked:boolean; loading:boolean; block:string|null; dirty:boolean; error:Fault|null;
+  locked:boolean; loadBlocked:boolean; loading:boolean; stale:boolean; block:string|null; dirty:boolean; error:Fault|null;
   nativeCapability:NativeCapability|null; nativeError:Fault|null;
   profileRepair:ReactNode; onReturn:()=>void;
 }) {
@@ -23,7 +23,7 @@ export default function EditExecutionSetup({state, facts, handlers, locked, load
   const s = t.scriptTrial;
   const bound = state?.bound;
   const candidate = state?.context.functions.find(item => functionKey(item) === state.selected);
-  const reason = block ?? (!state || !facts ? s.load : !state.profileChoice ? s.profileRequired
+  const reason = block ?? (stale ? s.setupStale : !state || !facts ? s.load : !state.profileChoice ? s.profileRequired
     : !facts.bound ? t.run.staleSchema : facts.numericErrors ? messages[locale].app.invalidFields
     : facts.descriptorError);
   const fieldsLocked = locked || loading;
@@ -78,7 +78,7 @@ export default function EditExecutionSetup({state, facts, handlers, locked, load
             </ExecutionFields>
           </div>
         </section>
-        <TargetPanel state={bound.target} handlers={handlers.target} locked={fieldsLocked} active={fieldsLocked} pickerBusy={bound.target.picker !== null}/>
+        <TargetPanel state={bound.target} handlers={handlers.target} locked={fieldsLocked || stale} active={fieldsLocked} pickerBusy={bound.target.picker !== null}/>
       </div>
       {profileRepair}
     </>}

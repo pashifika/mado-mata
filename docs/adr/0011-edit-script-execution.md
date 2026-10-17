@@ -106,7 +106,8 @@ only to an already-running target; it does not call readiness, launch, recover,
 activate or prepare a scene.
 
 Edit resolves the saved APP to its running executable before public SDK selection.
-Same-bundle candidates at the saved path need only bounded metadata inspection.
+Same-bundle candidates at the saved path need bounded metadata inspection and
+exactly one process; filtering to one visible window does not prove APP uniqueness.
 If a runtime path differs, reuse existing signed-application correspondence;
 unverifiable or ambiguous mapping refuses execution. Pass that executable and
 the exact window title, without a preselected PID/lifetime. Do not cache this

@@ -1347,10 +1347,14 @@ export default function App() {
   }
 
   function returnToTrial() {
-    const owner = authoringController.current()?.owner;
-    if (!owner) return;
+    const session = authoringController.current();
+    if (!session) return;
     returnToEdit();
-    setTrialDialogOwner(owner.token);
+    setTrialDialogOwner(session.owner.token);
+    const setup = editTrialRef.current;
+    if (!setup || !sameAuthoringRef(setup.context.owner, session.owner) || setup.context.revision !== session.revision) {
+      void ownAuthoringWorker(readTrialContext);
+    }
   }
 
   const trialHandlers:EditTrialHandlers = {
@@ -3372,7 +3376,7 @@ export default function App() {
         {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (selectedAuthoring
           ? <EditExecutionSetup key={selectedAuthoring.owner.token} state={trialSetup} facts={trialFacts}
             handlers={trialHandlers} locked={trialLocked} loadBlocked={trialLoadBlocked} loading={trialLoading}
-            block={trialBlock} dirty={unsavedCount > 0} error={trialSetupError}
+            stale={trialStale} block={trialBlock} dirty={unsavedCount > 0} error={trialSetupError}
             nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error}
             profileRepair={trialProfileRepair} onReturn={returnToTrial}/>
           : isBound(selected)
