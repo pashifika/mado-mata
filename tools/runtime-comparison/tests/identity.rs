@@ -24,7 +24,8 @@ impl PlanFile {
             .expect("clock")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "mado-identity-{}-{nonce}-{sequence}.json", std::process::id()
+            "mado-identity-{}-{nonce}-{sequence}.json",
+            std::process::id()
         ));
         let file = File::create_new(&path).expect("create private controlled plan");
         let owner = Self(path);
@@ -267,6 +268,7 @@ fn inspected_package_starts_controlled_without_requiring_an_engine() {
                 scenario: "workflow".into(),
                 replay_descriptor_path: None,
                 native_intent: None,
+                function: None,
             },
             None,
         )

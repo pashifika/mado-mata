@@ -82,6 +82,7 @@ fn controlled_start_ignores_unavailable_environment_settings() {
                 scenario: "workflow".into(),
                 replay_descriptor_path: None,
                 native_intent: None,
+                function: None,
             },
         )
         .unwrap();

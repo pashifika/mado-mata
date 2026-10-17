@@ -34,6 +34,7 @@ const READINESS_REFUSALS:Record<string, true> = {Script:true, ReadinessContract:
 
 function nativeFailure({phase, status}:NativeProgress, category:string|null):NativeFailure {
   if (phase === 'preflight') return phase;
+  if (phase === 'host_attachment' || phase === 'instantiation' || phase === 'function') return phase;
   if (phase === 'settling' || phase === 'recovering') return phase;
   if (status === 'not_requested') return 'unrequested';
   if (status === 'pending' && category !== null && Object.hasOwn(READINESS_REFUSALS, category)) return 'readinessPending';

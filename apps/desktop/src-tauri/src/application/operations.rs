@@ -1,7 +1,5 @@
 use super::native_run::NativeBinding;
-use super::profiles::{
-    checked_profile, desktop_options, normalize_editor_numbers, same_json_values,
-};
+use super::profiles::{check_selected_profile, desktop_options, normalize_editor_numbers};
 use super::{
     Application, CheckInputs, OperationOwner, Poll, RetainedCheck, WorkspaceRef, WorkspaceResult,
     Workspaces, lock,
@@ -18,7 +16,7 @@ use std::sync::{Arc, OnceLock, atomic::Ordering, mpsc};
 use std::time::Duration;
 
 impl Workspaces {
-    fn native_ready(&self) -> Result<(), Fault> {
+    pub(super) fn native_ready(&self) -> Result<(), Fault> {
         if self.native_cleanup_required {
             return Err(Fault::new(
                 "NativeCleanupRequired",
@@ -70,7 +68,16 @@ impl Workspaces {
         {
             return Err(fault.clone());
         }
-        if self.owner.as_ref().is_some_and(|owner| !owner.terminal) {
+        if self
+            .authoring
+            .as_ref()
+            .is_some_and(super::authoring::Lease::discovering)
+        {
+            Err(Fault::new(
+                "TrialContextBusy",
+                "Wait for function discovery to finish",
+            ))
+        } else if self.owner.as_ref().is_some_and(|owner| !owner.terminal) {
             Err(Fault::new(
                 "RunActive",
                 "Previous operation has not settled and been reaped",
@@ -112,6 +119,9 @@ impl Application {
         let mut value = serde_json::to_value(view).expect("serializable controller view");
         value["workspace_id"] = json!(workspace_id);
         value["workspace_revision"] = json!(workspace.map(|value| value.revision));
+        if owner.trial.is_some() {
+            value["operation"] = json!("authoring_trial");
+        }
         if state.controller["run"] != value["run"] || state.controller["state"] != value["state"] {
             self.logger.emit(
                 "Rust",
@@ -131,10 +141,12 @@ impl Application {
                 .is_some_and(|operation| operation.starts_with("recognition_"));
             let authoring_operation =
                 recognition_operation || controller["operation"] == "authoring_validate";
+            let mut native_reconciliation = false;
             if !authoring_operation {
                 let outcome = TerminalOutcome::from_view(&controller);
                 let (level, message) = outcome.notice();
-                if owner.native && outcome.requires_native_reconciliation() {
+                native_reconciliation = owner.native && outcome.requires_native_reconciliation();
+                if native_reconciliation {
                     state.native_cleanup_required = true;
                 }
                 self.logger.emit(
@@ -175,6 +187,17 @@ impl Application {
                     lease.settle_recognition(&owner.run, &controller);
                 }
             }
+            if let Some(trial) = &owner.trial {
+                // Physical reconciliation and child ownership both contain the Edit lease.
+                if let Some(lease) = state
+                    .authoring
+                    .as_mut()
+                    .filter(|lease| lease.owner == *trial)
+                {
+                    lease.settle_trial(&controller, native_reconciliation);
+                }
+                self.release_trial_stop(trial, &owner.run);
+            }
             owner.terminal = true;
         }
         state.controller = controller;
@@ -214,6 +237,13 @@ impl Application {
         mut request: StartRequest,
     ) -> Result<String, Fault> {
         let result = (|| {
+            // A selected function is admitted only through the current Edit owner.
+            if request.function.is_some() {
+                return Err(Fault::new(
+                    "Authority",
+                    "Function execution requires the current Edit owner",
+                ));
+            }
             let (_command, mut state) = self.command_state()?;
             self.collect(&mut state);
             state.idle()?;
@@ -258,26 +288,20 @@ impl Application {
                             None
                         };
                         let profiles = store.profile_store(&internal_name, &request.package_id)?;
-                        if request.profile_id != "draft" {
-                            let profile = checked_profile(
-                                &profiles,
-                                &request.package_id,
-                                &request.schema_identity,
-                                &request.profile_id,
-                            )?;
-                            if !same_json_values(&profile.values, &request.values) {
-                                return Err(Fault::new(
-                                    "ProfileIdentity",
-                                    "Saved profile values changed; select it again",
-                                )
-                                .with_context(json!({"profile_id":profile.id})));
-                            }
-                        }
+                        check_selected_profile(&profiles, request)?;
                         let binding = native_package
                             .map(|package| {
                                 let record =
                                     store.read_target(&internal_name, &request.package_id)?;
-                                NativeBinding::capture(request, &package, record)
+                                NativeBinding::capture(
+                                    request,
+                                    &package.package_id,
+                                    package
+                                        .target
+                                        .as_ref()
+                                        .zip(package.target_identity.as_deref()),
+                                    record,
+                                )
                             })
                             .transpose()?;
                         (environment, binding)
@@ -295,19 +319,7 @@ impl Application {
                         inventory,
                     })
                 },
-                |captured, attempt| {
-                    let mut binding = captured
-                        .as_ref()
-                        .map(|binding| binding.for_attempt(attempt));
-                    move |control: &mado_runtime_comparison::model::Control,
-                          report: &dyn Fn(mado_runtime_comparison::desktop::NativeProgress),
-                          verify_resources: &dyn Fn() -> Result<(), Fault>| {
-                        match binding.as_mut() {
-                            Some(binding) => binding.resolve(control, report, verify_resources),
-                            None => Ok(None),
-                        }
-                    }
-                },
+                NativeBinding::resolver,
             )?;
             state.owner = Some(OperationOwner {
                 run: run.clone(),
@@ -315,6 +327,7 @@ impl Application {
                 check: None,
                 terminal: false,
                 native,
+                trial: None,
             });
             self.collect(&mut state);
             drop(_command);
@@ -405,6 +418,7 @@ impl Application {
                 workspace: workspace.cloned(),
                 check: Some(check),
                 native: false,
+                trial: None,
                 terminal: false,
             });
             self.collect(&mut state);
@@ -449,6 +463,7 @@ impl Application {
                 self.closing.store(true, Ordering::Release);
                 self.invalidate_target_observation(None);
                 self.cancel_native();
+                self.cancel_trial_context();
                 self.cancel_setup();
                 self.cancel_distribution();
                 let mut outcome = self.runner.shutdown();
@@ -466,6 +481,17 @@ impl Application {
                                 drop(_command);
                                 if std::time::Instant::now() >= deadline {
                                     outcome = Err(Fault::new("NativeCaptureCleanup", "Native picker cleanup has not settled"));
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                                continue;
+                            }
+                            // Cancelled discovery still owns its compiler child until it returns.
+                            if state.authoring.as_ref().is_some_and(super::authoring::Lease::discovering) {
+                                drop(state);
+                                drop(_command);
+                                if std::time::Instant::now() >= deadline {
+                                    outcome = Err(Fault::new("TrialContextCleanup", "Function discovery has not settled"));
                                     break;
                                 }
                                 std::thread::sleep(Duration::from_millis(5));

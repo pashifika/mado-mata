@@ -532,3 +532,42 @@ fn native_scenarios_and_replay_descriptors_cannot_change_the_admitted_workflow()
         assert_eq!(normal.unwrap_err().category, "NativeRefused");
     }
 }
+
+#[test]
+fn function_requests_reject_launch_recovery_and_controlled_scenarios() {
+    let mut request = request(&fixture());
+    request.function = Some(crate::typescript::FunctionInvocation {
+        module: "main.ts".into(),
+        function: "workflow".into(),
+        arguments: Vec::new(),
+    });
+    request.lane = "native".into();
+    for (launch_approved, max_exit_recoveries) in [(true, 0), (true, 1), (false, 1)] {
+        let mut review = intent();
+        review.launch_approved = launch_approved;
+        review.max_exit_recoveries = max_exit_recoveries;
+        request.native_intent = Some(review);
+        assert_eq!(
+            crate::desktop::operation::requested_plan(&request)
+                .unwrap_err()
+                .category,
+            "NativeRefused"
+        );
+    }
+    request.lane = "controlled".into();
+    request.native_intent = None;
+    request.scenario = "partial".into();
+    assert_eq!(
+        crate::desktop::operation::requested_plan(&request)
+            .unwrap_err()
+            .category,
+        "FunctionEntry"
+    );
+    request.scenario = "workflow".into();
+    let controller = DesktopController::new("must-not-start".into(), "must-not-start".into());
+    assert_eq!(
+        controller.start(request, None).unwrap_err().category,
+        "Authority"
+    );
+    assert!(controller.poll().run.is_none());
+}

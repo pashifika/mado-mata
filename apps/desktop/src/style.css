@@ -312,7 +312,6 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 :where(.app, .bootstrap-page) .dismissible-fault { padding-inline-end: 46px; }
 :where(.app, .bootstrap-page) .inline-warning button { font-size: 11px; }
 :where(.app, .bootstrap-page) .operation-status:empty { min-height: 0; padding: 0; margin: 0; border: 0; background: transparent; }
-.validated > summary { color: var(--ok); }
 .open-form { margin-top: 4px; }
 .open-form h2 { margin-top: 18px; }
 .open-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
@@ -546,6 +545,22 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .rail-heading { display: flex; align-items: center; gap: 4px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--border); }
 .rail-heading h2 { flex: 1; min-width: 0; margin: 0; font-size: 13px; }
 .rail-body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 6px; }
+.package-validation { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.package-validation > button { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.package-validation-collapsed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.package-validation-collapsed .package-validation { padding: 0; border: 0; }
+.script-trial { min-width: 0; margin: 12px 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.trial-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.trial-strip h2 { margin: 0; font-size: 13px; }
+.trial-strip .select { min-width: 0; max-width: 100%; }
+.trial-strip .trial-function-select { flex: 1 1 220px; min-width: 0; max-width: 100%; }
+.trial-signature { margin: 8px 0 0; overflow-wrap: anywhere; font-size: 11px; }
+.trial-setup, .trial-result { margin-top: 8px; }
+.trial-setup > summary, .trial-result > summary { cursor: pointer; padding: 4px 0; }
+.trial-setup .run-grid { margin-top: 10px; }
+.trial-setup fieldset { min-width: 0; margin: 12px 0; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
+.trial-setup textarea { width: 100%; min-height: 72px; resize: vertical; font-family: var(--font-mono, monospace); }
+.trial-result > .panel { margin-top: 8px; }
 .rail-missing { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
 .rail-missing h3 { margin: 4px 6px 2px; font-size: 11px; }
 .rail-missing .field-help { margin: 0 6px 6px; font-size: 10px; }

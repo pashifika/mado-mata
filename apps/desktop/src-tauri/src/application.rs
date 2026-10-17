@@ -24,7 +24,7 @@ pub use authoring::{
     NativeCaptureArea, NativeCaptureBounds, NativeCaptureResult, NativeCoordinateUnit,
     NativePickerCandidate, NativePickerSnapshot, NativeSelectionView, RecognitionCopy,
     RecognitionFrame, RecognitionPickerGuard, RecognitionPixel, RecognitionSaved, RecognitionTrial,
-    RecognitionView,
+    RecognitionView, TrialContext,
 };
 mod distribution;
 pub use distribution::{DistributionPickerGuard, DistributionReview};
@@ -282,6 +282,8 @@ struct OperationOwner {
     workspace: Option<WorkspaceRef>,
     check: Option<CheckInputs>,
     native: bool,
+    /// The Edit owner of a Script trial; its outcome also settles that lease.
+    trial: Option<AuthoringRef>,
     terminal: bool,
 }
 

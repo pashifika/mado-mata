@@ -11,12 +11,13 @@ Both execution lanes retain the **controlled, non-native input sink**.
 Recognition has a separate explicit, read-only native window acquisition path.
 It requires an authorized target and the fixed engine child; opening the editor
 does not capture, initialize OCR, or request permissions. Separately reviewed
-macOS **Native** Start runs the authored `readiness()` before target attachment.
-Its explicit startup request can attach to a verified saved application through
-the fixed engine child, or submit its saved recipe once when absence is confirmed
-and launch is separately approved. A separate default-off review can admit one
-fresh attempt after confirmed Workflow process exit and complete settlement.
-Activation, game termination, arbitrary retries and Windows Native Start remain refused.
+macOS **Native** Whole package execution runs the authored `readiness()` before
+target attachment. Its explicit startup request can attach to a verified saved
+application, or launch its saved recipe once when absence and separate approval
+permit it. Optional reviewed exit recovery remains available for Whole package.
+Edit's **Function** mode instead attaches to an already-running target and calls
+the selected function without package readiness, launch or recovery. Neither
+mode authorizes activation, game termination or Windows Native execution.
 
 The checkout includes macOS and Windows shells; Linux checks the frontend and
 shell-independent core. Windows interactive authoring and both-OS native
@@ -309,9 +310,9 @@ change persisted formats, filesystem protections, or runtime authority.
 ## Workspace navigation, status and Help
 
 **Run** prepares the next operation. Its summary groups Status,
-Profile · next run, Execution mode, and separate **Validate** / **Start** actions.
-Validate checks the profile draft; it is not a Start token or saved-package
-validation. Start revalidates each submitted request and does not navigate away.
+Profile · next run, Execution mode and **Start**. Profile errors appear inline;
+there is no separate Validate action. Start and profile Save independently
+validate submitted values. Start does not navigate away.
 Configuration and **Target** appear side by side when space permits, then stack
 in that order. Execution mode is distinct from Target's native Input route.
 The line below the summary identifies the next-run profile or draft; Replay also
@@ -342,7 +343,7 @@ earlier-draft attribution; an unresolved saved-record conflict still requires re
 
 During Edit, the bottom bar groups **Edit · state**, a concise current-scope
 message and direct **Stop** / retained capture **Release** / **Return to Edit**
-controls. Validation indicators live on the associated tabs. The full Edit owner
+controls. Saved-package validation lives in **Package contents**. The full Edit owner
 is available through the information hint, status details and action descriptions,
 including when another workspace is selected. The hint identifies only the owner.
 General Edit restrictions live in page Help; the header Help introduces package
@@ -353,11 +354,11 @@ Settings, New workspace, Saved workspaces and unsaved-change confirmation use
 the same compact Edit control in their own footer, without an adjacent information
 icon or upper owner strip. Stop acknowledgement is not worker settlement.
 
-**Run** carries a profile-draft validation icon; **Edit** carries a
-saved-package validation icon. Shape and color distinguish unchecked (dash),
-valid (check), invalid (cross), stale (clock), and running (hourglass) as applicable.
-Hover for the localized scope/state description. Activating a tab still navigates;
-**Status details** contains saved-revision and diagnostic details.
+**Package contents** carries the saved-package validation indicator and details
+action. Shape and color distinguish unchecked (dash), valid (check), invalid
+(cross), stale (clock) and running (hourglass). Its localized hint identifies
+the saved revision's state; **Status details** retains diagnostics. Workspace
+tabs navigate without duplicate validation icons.
 The footer does not repeat these indicators and stays on one row at supported
 widths, including 760 CSS px. Narrow widths truncate the message with an ellipsis;
 full text remains in its tooltip and Status details.
@@ -499,22 +500,22 @@ Neither action inspects, binds, or runs the package.
   or Application's status.
   Settings and confirmation dialogs reserve room below them for that single
   count; their content remains scrollable at constrained window heights.
-- **Validate** checks one saved revision through the existing inventory and
-  trusted compiler without evaluating package code. Unsaved text is excluded.
-  The **Edit** tab's saved-package icon shows not checked, running, valid, invalid
-  or earlier-revision state. **Status details** retains the revision, diagnostic
-  count and source locations; selecting an available location returns to the
-  owning Edit session without losing drafts. Later saves make the old result
-  stale; unsaved changes remain independently identified. Details are available
-  from the owner's other pages until Edit exits. The finite validation child
-  occupies the existing operation slot; the shared **Stop** requests cancellation
-  even with details closed and retains ownership until the worker settles.
-- One Edit session owns the application. Ordinary **Start**, independent OCR
-  **Check**, a second editor, and configuration reconstruction are refused.
-  The bottom Edit summary retains its actual owner across navigation.
-  Its main-window information circle explains exclusion and Save/Inspect on
-  hover, focus or click. Owner-bound Recognition OCR/template trials remain
-  allowed. Unavailable Start/Check actions retain their current reasons.
+- **Validate** in **Package contents** checks one saved revision through the
+  existing inventory and trusted compiler without evaluating package code.
+  Unsaved text is excluded. Its adjacent indicator and details distinguish
+  unchecked, running, valid, invalid and earlier-revision results. The collapsed
+  navigation retains access to validation. **Status details** keeps the revision,
+  diagnostic count and source locations; a location returns to the owning Edit
+  session without losing drafts. Later saves make the old result stale; unsaved
+  changes remain independently identified. The finite validation child occupies
+  the existing operation slot. Shared **Stop** retains ownership until settlement.
+- One Edit session owns the application. Ordinary Run-page **Start**, independent
+  OCR **Check**, a second editor and configuration reconstruction are refused.
+  Owner-bound Script execution and Recognition OCR/template trials share the
+  existing operation slot; neither can overlap validation or retained native
+  capture. The bottom Edit summary keeps its actual owner across navigation.
+  Its information circle explains exclusion on hover, focus or click.
+  Unavailable Start/Check actions retain their current reasons.
   Idle Edit has no timed runner. **Return to Edit** preserves the session across
   workspaces and dialogs.
 - Guidance **Open/Create**, like Run-page Edit, asks before leaving unsaved
@@ -529,12 +530,62 @@ Neither action inspects, binds, or runs the package.
   dirty files before Recognition and stops at the first failure. Confirmed
   application close uses bounded shutdown and preserves incomplete containment
   outcomes; closing is not proof of successful cleanup.
-- **Exit Edit**, then explicitly **Inspect/Reinspect** before Start. Selections
-  for every workspace sharing an edited source are invalidated. A normal exit
-  returns to unbound guidance, not an inspection-failure error. Affected recovery
+- To use ordinary Run-page **Start**, **Exit Edit** and explicitly
+  **Inspect/Reinspect**. Every workspace sharing an edited source is invalidated.
+  A normal exit returns to unbound guidance, not an inspection-failure error. Affected recovery
   contexts also expire; other Tabs disclose that any unsaved repair draft was
   cleared. Saved references and local profiles remain untouched; inspection
   uses the existing [profile reconciliation and repair flow](#recover-profiles-after-a-schema-change).
+
+### Execute Scripts in Edit
+
+The Script trial strip runs **Whole package** or an existing **Function** while
+keeping the Edit owner, selected source and Undo history.
+
+- **Load execution setup** reads the saved schema and eligible functions without
+  running package code. Use **Reload saved setup and functions** to refresh it.
+  Opening Edit, saving and OMP draft operations never start this discovery.
+- **Whole package** uses normal readiness followed by workflow. **Function**
+  calls the selected file-level declaration only. Exported and file-local
+  functions, function/arrow bindings and async functions are eligible. Nested
+  closures, receiver-dependent methods and generators are unavailable.
+  The list shows the original signature and location without executing modules.
+- Expand setup for positional JSON arguments, compatible local profiles or
+  packaged presets, explicit option values and the execution lane. Values are
+  checked against the current authoring schema, not an older Run-page selection.
+  Arguments default to `[]`; limits are 64 KiB UTF-8, depth 32 and 32 arguments.
+  Known missing required arguments fail before invocation.
+  Rejected saved profiles use the existing explicit repair and confirmed Reset
+  controls inside Edit. Setup reads do not migrate or save profiles; repeated
+  reads of the same saved revision preserve the repair draft.
+- **Run** captures clean saved content. **Save all and run** explicitly publishes
+  source, metadata and Recognition drafts through the same ordered Save flow.
+  Partial Save, refresh failure, composition, external conflict or a newer edit
+  stops execution; committed saves are not repeated automatically.
+- **Rerun** retains setup but resolves current saved content again. Every
+  invocation gets a fresh VM, module state and host handles. It does not reset
+  the game: existing battle logic sees the game's current state. A renamed or
+  ineligible function requires selection again. Imports and top-level
+  initialization still run under restricted loading rules.
+- Controlled uses the non-native sink. Replay additionally needs a compatible
+  recorded descriptor and saved OCR environment. Native requires explicit
+  target setup and fresh per-submission capture/input review. Saving dirty
+  content withdraws Native consent: review the final saved revision before Run.
+  Function Native attaches only to an already-running target; it cannot launch,
+  recover, reset a scene or call readiness-only startup methods. Release and
+  settle retained native capture first.
+- Editing after capture affects the next run only. Results identify the executed
+  revision separately from newer source, retain original-source diagnostics and
+  use shared **Stop**, logs and run details. Primitive returns have bounded
+  summaries; objects and other nonprimitive values remain opaque. Private
+  native/replay details stay behind disclosure. A returned function or submitted
+  input is not proof of game effect or physical cleanup.
+  Compiler diagnostics also retain their checked saved revision. If the editor
+  has changed, a diagnostic opens the file without claiming an exact new
+  position; its unsaved text and history remain intact.
+
+See [ADR 0011](adr/0011-edit-script-execution.md) for the shared execution boundary.
+
 
 ### Script editing and completion
 
@@ -613,9 +664,10 @@ without changing drafts or blocking Save, navigation or Stop. Only a fresh
 session does not grant restart authority. These are payload and deadline bounds,
 not a total WebView memory guarantee.
 
-Suggestions only edit drafts. Continue through **Save → Validate → Exit Edit →
-Inspect/Reinspect → Start**; neither highlighting nor completion validates or
-authorizes execution.
+Suggestions only edit drafts. Use explicit **Save all and run** for an Edit
+trial, or **Save → Exit Edit → Inspect/Reinspect → Start** for ordinary Run.
+**Package contents → Validate** remains a separate saved-source check.
+Highlighting and completion do not validate or authorize execution.
 
 Session transitions are an independent behavioral adaptation of the supplied MIT
 VS Code 1.140.0 snapshot's `suggestModel.ts`, `suggestController.ts` and
@@ -1716,9 +1768,9 @@ prove application effects, or replace Windows and runtime-comparison evidence.
    closing Preview with **Done** also returns to the main window. Paste the setup
    once before the request blocks, preserve their handle releases, and explicitly
    use their results in the workflow/helper. Copy never synchronizes source.
-6. **Save all**, **Validate**, explicitly **Exit Edit**, then **Inspect** the saved
-   package and choose its saved profile. Select **Replay**, not Controlled, for
-   real recognition with the non-native sink. Use a genuine recorded descriptor
+6. **Save all**, then select **Whole package** and its profile in Edit's trial
+   setup. Choose **Replay**, not Controlled, for real recognition with the
+   non-native sink. Use a genuine recorded descriptor
    compatible with the authored geometry and generated template maps. Budget
    frames for the host's initial readiness observation, any package readiness
    observations and every copied request block; an exhausted corpus fails
@@ -1729,8 +1781,8 @@ prove application effects, or replace Windows and runtime-comparison evidence.
    Compare a declared negative case without fabricating recognition results.
 8. In the disposable copy, save a syntax error, follow its diagnostic and repair
    it. Separately run a valid revision with a deliberate helper exception,
-   inspect its original cause/location, repair it and repeat Save/Validate/
-   Exit/Inspect before the successful rerun. Dismissing a notice must not erase
+   inspect its original cause/location, repair it and explicitly save and rerun.
+   Dismissing a notice must not erase
    the immutable operation result.
 9. Stop an outstanding owned operation. Check cancellation, cleanup and worker
    settlement independently; Start stays unavailable until ownership settles.
@@ -2113,10 +2165,10 @@ both-OS qualification and R6 remain unresolved.
    application profiles. The form covers supported scalar, enum, nested-object,
    and ordered-array options. Unsupported schema features are errors, not hidden
    controls.
-3. Edit the draft and choose **Validate** to view backend validation. Missing
-   top-level options may use schema defaults. An explicitly present object or
-   array replaces its top-level default; missing nested fields are not filled by
-   recursive merging. Validation does not save or replace the raw draft.
+3. Edit the draft and review inline profile errors. Start and profile Save also
+   validate on the backend. Missing top-level options may use schema defaults.
+   An explicitly present object or array replaces its top-level default;
+   missing nested fields are not filled by recursive merging.
 4. Use **Save new profile** or **Update profile** to persist valid values. Reopen
    a saved profile to restore its values and order. **Rename** preserves its
    stable ID; **Delete profile** removes only that selected app-local profile.
@@ -2149,7 +2201,7 @@ with declared defaults are added. Optional options without defaults stay absent.
 Present nested objects and arrays are complete replacements: recovery does not
 recursively fill them, coerce types, guess renamed fields, remove unknown fields,
 or execute package-provided migration code. Already-compatible profiles are not
-rewritten. Startup, catalog reads, Validate, and Start do not perform recovery
+rewritten. Startup, catalog reads, validation and Start do not perform recovery
 writes.
 
 Each successful replacement preserves the profile's ID, name, package ID, and
@@ -3244,6 +3296,13 @@ local paths, and compiler/run records outside public commits.
    quotes at an unterminated literal's end. Dismiss before the delay or worker
    response, type an unmatched prefix, and verify that stale rows cannot return
    or insert text. Separate opening-delay measurements from provider latency.
+10. In Edit, run Whole package in Controlled, then select an existing file-local
+    function with JSON arguments. Check its return and original-source diagnostic,
+    modify it and explicitly rerun. Confirm current and executed revisions remain
+    distinct, package readiness is not a hidden Function prelude, and selection
+    and Undo survive. Stop active work and retain cleanup separately from return.
+    Repeat validation access with Package contents collapsed; Run must show
+    inline profile errors without a separate Validate action.
 
 ### Saved-image Recognition acceptance
 
@@ -3557,7 +3616,7 @@ Keep package presets valid when changing the schema; do not edit tracked fixture
    In an isolated store, preserve one owner's profile before making it unreadable.
    Reinspect that Tab, restore the original bytes, then save through that Tab.
    Confirm its catalog recovers without changing another Tab's catalog or draft,
-   even when both inspect the same source. Validate must not republish stale lists.
+   even when both inspect the same source. Late responses must not republish stale lists.
 7. In App settings, change notification count/duration/success visibility and
    GUI retention. Exercise Save, Cancel, Escape, focus restoration, invalid-value
    refusal, immediate trimming, and restart persistence. Verify card overflow,

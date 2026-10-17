@@ -20,11 +20,12 @@ interface Props {
   // Tab label naming the owner in the Reset confirmation.
   label:string;
   state:RecoveryState|null; outcomes:ProfileRecoveryOutcome[];
+  help?:string;
   locked:boolean; handlers:RecoveryHandlers;
 }
 
 // Shared by the Run page and the missing-source guidance; a recovery context is never a Selection or run authority.
-export default function ProfileRecovery({idPrefix, label, state, outcomes, locked, handlers}: Props) {
+export default function ProfileRecovery({idPrefix, label, state, outcomes, locked, handlers, help:helpText}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui.recovery;
   // Confirmation belongs to one draft of one context: another Tab's context, a selection change or an edit under it
@@ -58,7 +59,7 @@ export default function ProfileRecovery({idPrefix, label, state, outcomes, locke
   // Binding is owed after a recovery-required or failed binding; a relocation is the strict same-package candidate case.
   const pending = view.binding_required;
   const heading = view.relocation ? t.relocationHeading : pending ? t.bindingHeading : t.heading;
-  const help = view.relocation ? t.relocationHelp : pending ? t.bindingHelp : t.help;
+  const help = helpText ?? (view.relocation ? t.relocationHelp : pending ? t.bindingHelp : t.help);
   function closeConfirm(reset:boolean) {
     refocus.current = confirmRow.current?.contains(document.activeElement) ?? false;
     setConfirm(null);

@@ -209,7 +209,7 @@ fn complete_distribution_round_trips_through_draft_inventory_and_compiler_inspec
     let controller = controller();
     let by_path = controller.inspect(&tree.package()).unwrap();
     let captured = controller
-        .inspect_inventory(draft.validate().unwrap())
+        .inspect_inventory(draft.validate().unwrap(), None)
         .unwrap();
     assert_eq!(by_path.inventory_identity, inventory.identity);
     assert_eq!(captured.inventory_identity, inventory.identity);
@@ -255,7 +255,7 @@ fn field_and_aggregate_maxima_are_accepted_together() {
     let inventory = tree.capture().unwrap();
     assert_eq!(inventory.metadata["manifest"]["distribution"], maximal);
     controller()
-        .inspect_inventory(draft.validate().unwrap())
+        .inspect_inventory(draft.validate().unwrap(), None)
         .unwrap();
 }
 
@@ -501,7 +501,7 @@ fn inventory_metadata_cannot_bypass_distribution_validation() {
         assert_eq!(changed.validate().unwrap_err().category, "Inventory");
         assert_eq!(
             controller
-                .inspect_inventory(changed.clone())
+                .inspect_inventory(changed.clone(), None)
                 .unwrap_err()
                 .category,
             "Inventory"
@@ -604,7 +604,7 @@ fn inspect_inventory_validates_the_captured_bytes_without_rereading_source() {
 
     std::fs::remove_dir_all(tree.package()).unwrap();
     assert!(controller.inspect(&tree.package()).is_err());
-    let captured = controller.inspect_inventory(inventory.clone()).unwrap();
+    let captured = controller.inspect_inventory(inventory.clone(), None).unwrap();
     assert_eq!(captured.inventory_identity, by_path.inventory_identity);
     assert_eq!(captured.schema_identity, by_path.schema_identity);
     assert_eq!(captured.profiles, by_path.profiles);
@@ -617,7 +617,7 @@ fn inspect_inventory_validates_the_captured_bytes_without_rereading_source() {
         .unwrap()
         .push_str("\nexport const tampered = true;\n");
     assert_eq!(
-        controller.inspect_inventory(tampered).unwrap_err().category,
+        controller.inspect_inventory(tampered, None).unwrap_err().category,
         "Inventory"
     );
 
@@ -629,14 +629,14 @@ fn inspect_inventory_validates_the_captured_bytes_without_rereading_source() {
         .validate()
         .unwrap();
     assert_eq!(
-        controller.inspect_inventory(other).unwrap_err().category,
+        controller.inspect_inventory(other, None).unwrap_err().category,
         "Inventory"
     );
 
     controller.shutdown().unwrap();
     assert_eq!(
         controller
-            .inspect_inventory(inventory)
+            .inspect_inventory(inventory, None)
             .unwrap_err()
             .category,
         "ControllerClosed"

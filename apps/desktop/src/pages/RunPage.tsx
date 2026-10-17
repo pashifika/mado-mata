@@ -1,4 +1,4 @@
-import {Fragment, useEffect, useRef, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
 import ProfileRecovery from '../components/ProfileRecovery.tsx';
 import type {RecoveryHandlers} from '../components/ProfileRecovery.tsx';
@@ -6,6 +6,7 @@ import SchemaForm from '../components/SchemaForm.tsx';
 import Select from '../components/Select.tsx';
 import TargetPanel from '../components/TargetPanel.tsx';
 import type {TargetHandlers} from '../components/TargetPanel.tsx';
+import NativeReview from '../components/NativeReview.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
 import {ButtonHint, HelpTrigger} from '../components/ContextualHelp.tsx';
 import type {RunView} from './ExecutionPage.tsx';
@@ -22,7 +23,7 @@ import './run-control.css';
 export interface RunHandlers {
   // Draft-affecting edits clear the transient notice.
   change: (update: (bound: Bound) => Bound) => void;
-  validate: () => void; saveProfile: () => void; renameProfile: () => void; deleteProfile: () => void;
+  saveProfile: () => void; renameProfile: () => void; deleteProfile: () => void;
   newDraft: (preset?: string) => void; selectProfile: (id: string) => void;
   reinspect: () => void; inspectPath: (value: string) => void; importLegacy: () => void; start: () => void;
   // Native review text edits withdraw consent; consent binds to the request as it is now.
@@ -96,24 +97,6 @@ export default function RunPage({workspace, label, derived, run, locked, active,
   const heading = selectedProfile && !valuesDirty ? selectedProfile.name : bound.name || t.run.untitled;
   const legacy = workspace.legacyImport;
   const native = derived.native;
-  const nativeBinding = native?.binding ?? null;
-  const nativeInput = nativeBinding?.configuration.input ?? null;
-  const recipe = native?.recipe ?? null;
-  // Launch recipe validity is conditional on host-confirmed absence, not a gate on attaching.
-  const approvalOpen = native !== null && (native.block === null || native.block === 'nativeApproval') && !locked;
-  // Invalid Workflow text has no effective duration; never display a clamped or fallback budget.
-  const nativeLimits = nativeCapability?.default_limits ?? null;
-  const selectedLimits = native?.limits ?? null;
-  const nativeBudgetRows = nativeLimits && [
-    [t.run.nativeStartup, nativeLimits.startup_ms], [t.run.nativeReadiness, nativeLimits.readiness_ms], [t.run.nativeWorkflow, selectedLimits?.workflow_ms ?? null],
-  ] as const;
-  const nativeDuration = selectedLimits ? (1 + (native?.recovery ? 1 : 0)) * (selectedLimits.startup_ms + selectedLimits.readiness_ms + selectedLimits.workflow_ms) + (native?.recovery ? 3000 : 0) : null;
-  const nativeLimitRows = nativeLimits && [
-    [t.run.nativeFrames, String(nativeLimits.max_frames)],
-    [t.run.nativeWait, `${nativeLimits.wait_ms} ms`], [t.run.nativeInterval, `${nativeLimits.interval_ms} ms`],
-    [t.run.nativeActions, String(nativeLimits.max_actions)], [t.run.nativeCleanup, `${nativeLimits.cleanup_ms} ms`],
-    [t.run.nativeContainment, `${nativeLimits.containment_ms} ms`],
-  ];
   // A directory source relocates through this path. An installed source reinspects by its saved identity, so the
   // path (which can still inspect another directory instead) stays among its collapsed details.
   const pathHeading = <div className="field-heading"><label htmlFor="package-path">{t.guidance.packageDirectory}</label><HelpTrigger title={t.guidance.packageDirectory} hint={t.run.packageDirectoryHint}>{t.run.reinspectHelp}</HelpTrigger></div>;
@@ -140,7 +123,6 @@ export default function RunPage({workspace, label, derived, run, locked, active,
         {bound.lane === 'replay' ? t.run.replaySummary : bound.lane === 'native' ? t.run.nativeSummary : t.run.controlledSummary}
       </HelpTrigger></span><div className="summary-value">{t.lane(bound.lane)}</div></div>
       <div className="actions run-summary-actions">
-        <ButtonHint hint={t.run.validateHint}><button id="validate" disabled={locked || numericErrors || !profileBound} onClick={handlers.validate}>{t.run.validate}</button></ButtonHint>
         <ButtonHint hint={startReason ?? t.run.startHint}><button id="start" className="primary" disabled={!canStart}
           aria-describedby={['run-start-uses', authoring.role !== null ? 'start-edit-block' : startBlock ? 'start-block' : null].filter(Boolean).join(' ')}
           onClick={handlers.start}>{t.run.start}</button></ButtonHint>
@@ -233,7 +215,6 @@ export default function RunPage({workspace, label, derived, run, locked, active,
           </details>
           <h3>{t.run.options}<HelpTrigger title={t.run.options} hint={t.run.optionsHint}>{t.run.optionsHelp}</HelpTrigger></h3>
           <SchemaForm schema={bound.package.schema} value={bound.draft} onChange={draft => handlers.change(item => editDraft(item, draft))} errors={parsed.errors}/>
-          {bound.validation?.draftRevision === bound.draftRevision && <details className="validated"><summary>{t.run.valid}</summary><pre>{JSON.stringify(bound.validation.values, null, 2)}</pre></details>}
           <h3>{t.run.executionMode}</h3>
           <div className="two-col">
             <div className="field"><label htmlFor="lane">{t.run.executionMode}</label>
@@ -247,65 +228,8 @@ export default function RunPage({workspace, label, derived, run, locked, active,
                 options={[{value: 'workflow', label: t.run.workflow}, {value: 'held-work', label: t.run.heldWork}, {value: 'no-match', label: t.run.noMatch}]}/></div>
           </div>
           {nativeError && <FaultMessage title={t.run.nativeCapabilityError} value={nativeError}/>}
-          {native && <div id="native-review">
-            <h3>{t.run.nativeHeading}</h3>
-            <p className="field-help">{t.run.nativeHelp}</p>
-            <dl className="run-identity" id="native-target">
-              <dt>{t.run.nativePackage}</dt><dd>{bound.package.package_id} / {selectedProfile && !valuesDirty ? `${selectedProfile.name} · ${selectedProfile.id}` : t.run.profileDraft}</dd>
-              <dt>{t.run.nativeApplication}</dt><dd className="mono">{nativeBinding?.configuration.game.path ?? t.common.none}</dd>
-              <dt>{t.target.windowTitle}</dt><dd>{nativeBinding?.configuration.window_title ?? t.common.none}</dd>
-              <dt>{t.target.route}</dt><dd id="native-route">{nativeInput ? nativeInput.route === 'system' ? t.target.system : t.target.processDirected : t.common.none}</dd>
-              <dt>{t.target.focus}</dt><dd id="native-focus">{nativeInput ? nativeInput.focus === 'preserve' ? t.target.preserve : t.target.requireFocused : t.common.none}</dd>
-              <dt>{t.target.pointerMode}</dt><dd id="native-pointer">{nativeInput?.pointer_mode === 'core_graphics' ? t.target.coreGraphics : nativeInput?.pointer_mode === 'appkit_background' ? t.target.appkitBackground : t.common.none}</dd>
-              <dt>{t.target.clickHold}</dt><dd>{nativeInput ? `${nativeInput.click_hold_ms} ms` : t.common.none}</dd>
-              <dt>{t.run.nativeBinding}</dt><dd>{nativeBinding && bound.target.view ? <><code>{nativeBinding.id}</code> · {t.target.revision(bound.target.view.record.revision)}</> : t.common.none}</dd>
-            </dl>
-            {recipe && <><span className="eyebrow">{t.run.nativeRecipe}</span>
-              <dl className="run-identity" id="native-recipe">
-                <dt>{t.run.nativeRecipient}</dt><dd id="native-recipient">{recipe.recipient === 'game' ? t.run.nativeRecipientGame
-                  : <>{t.run.nativeRecipientLauncher} · {recipe.location.kind === 'bundle' ? t.target.bundle : t.target.executable} · <span className="mono">{recipe.location.path}</span></>}</dd>
-                <dt>{t.run.nativeArguments}</dt><dd>{recipe.arguments.length === 0 ? t.run.nativeNoArguments
-                  : <ol id="native-arguments" className="native-arguments">{recipe.arguments.map((value, index) => <li key={index}><code>{JSON.stringify(value)}</code></li>)}</ol>}</dd>
-                <dt>{t.run.nativeDirectory}</dt><dd id="native-directory" className={recipe.directory === 'refused' ? 'field-error' : undefined}>
-                  {recipe.workingDirectory !== null && <><code>{recipe.workingDirectory}</code> · </>}{t.run.nativeDirectories[recipe.directory]}</dd>
-              </dl>
-              {recipe.recipient === 'launcher' && <p className="field-help">{t.run.nativeForwarding}</p>}</>}
-            {nativeCapability && <div className="field"><label htmlFor="native-workflow-seconds">{t.run.nativeWorkflowSeconds}</label>
-              <input id="native-workflow-seconds" type="text" inputMode="numeric" value={native.workflowSeconds} disabled={locked} spellCheck={false}
-                aria-invalid={native.workflowError} aria-describedby={`native-workflow-help${native.workflowError ? ' native-workflow-error' : ''}`}
-                onChange={event => handlers.native.edit('workflowSeconds', event.target.value)}/>
-              {native.workflowError && <p className="field-error" id="native-workflow-error">{t.run.nativeWorkflowError(nativeCapability.max_workflow_ms / 1000)}</p>}
-              <p className="field-help" id="native-workflow-help">{t.run.nativeWorkflowHelp(nativeCapability.default_limits.workflow_ms / 1000, nativeCapability.max_workflow_ms / 1000)}</p></div>}
-            {nativeBudgetRows && <><span className="eyebrow">{t.run.nativeBudgets}<HelpTrigger title={t.run.nativeBudgets} hint={t.run.nativeBudgetHint}>
-              <p>{t.run.nativeBudgetHelp}</p><p>{t.run.nativeStartupHelp}</p>
-            </HelpTrigger></span>
-              <dl className="run-identity" id="native-budgets">{nativeBudgetRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value === null ? t.common.none : `${value} ms`}</dd></Fragment>)}</dl>
-              <dl className="run-identity"><dt>{t.run.nativeDuration}</dt><dd id="native-duration">{nativeDuration === null ? t.common.none : t.run.nativeEnvelope(nativeDuration)}</dd></dl></>}
-            {nativeLimitRows && <><span className="eyebrow">{t.run.nativeLimits}</span>
-              <dl className="run-identity" id="native-limits">{nativeLimitRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value}</dd></Fragment>)}</dl></>}
-            <div className="field"><label htmlFor="native-operation">{t.run.nativeOperation}</label>
-              <input id="native-operation" type="text" value={bound.native.operation} disabled={locked} spellCheck={false} aria-invalid={bound.native.operation !== '' && native.operationError !== null}
-                onChange={event => handlers.native.edit('operation', event.target.value)}/>
-              {bound.native.operation !== '' && native.operationError && <p className="field-error">{t.run.nativeTextErrors[native.operationError]}</p>}
-              <p className="field-help">{t.run.nativeOperationHelp}</p></div>
-            <div className="field"><label htmlFor="native-postcondition">{t.run.nativePostcondition}</label>
-              <input id="native-postcondition" type="text" value={bound.native.postcondition} disabled={locked} spellCheck={false} aria-invalid={bound.native.postcondition !== '' && native.postconditionError !== null}
-                onChange={event => handlers.native.edit('postcondition', event.target.value)}/>
-              {bound.native.postcondition !== '' && native.postconditionError && <p className="field-error">{t.run.nativeTextErrors[native.postconditionError]}</p>}
-              <p className="field-help">{t.run.nativePostconditionHelp}</p></div>
-            <div className="field">
-              <label className="checkbox-label"><input id="native-capture-consent" type="checkbox" checked={native.capture} disabled={!approvalOpen}
-                onChange={event => handlers.native.approve('capture', event.target.checked)}/>{t.run.nativeCapture}</label>
-              <label className="checkbox-label"><input id="native-input-consent" type="checkbox" checked={native.input} disabled={!approvalOpen}
-                onChange={event => handlers.native.approve('input', event.target.checked)}/>{t.run.nativeInput}</label>
-              <label className="checkbox-label"><input id="native-launch-consent" type="checkbox" checked={native.launch} disabled={!approvalOpen}
-                onChange={event => handlers.native.approve('launch', event.target.checked)}/>{t.run.nativeLaunch}</label>
-              <p className="field-help" id="native-launch-help">{t.run.nativeLaunchHelp}</p>
-              <label className="checkbox-label"><input id="native-recovery-consent" type="checkbox" checked={native.recovery} disabled={!approvalOpen || !native.launch}
-                aria-describedby="native-recovery-help" onChange={event => handlers.native.approve('recovery', event.target.checked)}/>{t.run.nativeRecovery}</label>
-              <p className="field-help" id="native-recovery-help">{t.run.nativeRecoveryHelp}</p>
-              <p className="field-help">{t.run.nativeApprovalHelp}</p></div>
-          </div>}
+          {native && <NativeReview bound={bound} native={native} selectedProfile={selectedProfile} valuesDirty={valuesDirty}
+            locked={locked} nativeCapability={nativeCapability} environment={environment} handlers={handlers}/>}
           <div className="field"><div className="field-heading"><label htmlFor="descriptor-path">{t.run.descriptor}</label><HelpTrigger title={t.run.descriptor} hint={t.run.descriptorHint}>{t.run.descriptorHelp(DESCRIPTOR_LIMIT)}</HelpTrigger></div>
             <input id="descriptor-path" type="text" value={bound.descriptorPath} disabled={locked} spellCheck={false} aria-invalid={descriptorError !== null}
               placeholder={t.run.descriptorPlaceholder} onChange={event => handlers.change(item => ({...item, descriptorPath: event.target.value}))}/>

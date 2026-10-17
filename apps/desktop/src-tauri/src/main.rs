@@ -1,7 +1,7 @@
 use mado_mata_desktop::application::{
     AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, InspectionOutcome, Poll,
     ProfileCatalog, RecoveryMutation, RecoveryRef, TargetApplicationResponse, TargetCheckResponse,
-    TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView,
+    TargetSaveResponse, TargetView, TrialContext, WorkspaceCatalog, WorkspaceRef, WorkspaceView,
 };
 use mado_mata_desktop::authoring::CatalogEdit;
 use mado_mata_desktop::backup::SnapshotReceipt;
@@ -382,6 +382,120 @@ fn cancel_running_application(
 }
 
 #[tauri::command]
+async fn authoring_trial_read_target(
+    owner: AuthoringRef,
+    revision: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_read_target(&owner, &revision)).await
+}
+
+#[tauri::command]
+async fn authoring_trial_check_target(
+    owner: AuthoringRef,
+    revision: String,
+    expected: TargetExpectation,
+    configuration: TargetConfiguration,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetCheckResponse, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || {
+        application.authoring_check_target(&owner, &revision, &expected, &configuration)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn authoring_trial_save_target(
+    owner: AuthoringRef,
+    revision: String,
+    expected: TargetExpectation,
+    configuration: TargetConfiguration,
+    reviewed_resolution: Option<TargetResolution>,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetSaveResponse, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || {
+        application.authoring_save_target(
+            &owner,
+            &revision,
+            &expected,
+            configuration,
+            reviewed_resolution.as_ref(),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn authoring_trial_remove_target(
+    owner: AuthoringRef,
+    revision: String,
+    expected: TargetExpectation,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetView, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_remove_target(&owner, &revision, &expected)).await
+}
+
+#[tauri::command]
+async fn authoring_trial_choose_target_application(
+    owner: AuthoringRef,
+    revision: String,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Backend>,
+) -> Result<Option<String>, Fault> {
+    let application = state.bootstrap.application()?;
+    let guard =
+        background(move || application.authoring_begin_target_picker(&owner, &revision)).await?;
+    #[cfg(target_os = "macos")]
+    {
+        picker::choose(window, guard).await
+    }
+    #[cfg(windows)]
+    {
+        windows_shell::choose_executable(window, guard).await
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (window, guard);
+        Err(Fault::new(
+            "TargetPlatform",
+            "Application selection requires Windows or macOS",
+        ))
+    }
+}
+
+#[tauri::command]
+fn authoring_trial_reserve_running_application(
+    owner: AuthoringRef,
+    revision: String,
+    request_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), Fault> {
+    state
+        .bootstrap
+        .application()?
+        .authoring_reserve_running_application(&owner, &revision, &request_id)
+}
+
+#[tauri::command]
+async fn authoring_trial_check_running_application(
+    owner: AuthoringRef,
+    revision: String,
+    expected: TargetExpectation,
+    request_id: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<TargetApplicationResponse, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || {
+        application.authoring_check_running_application(&owner, &revision, &expected, &request_id)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn import_legacy_profiles(
     workspace: WorkspaceRef,
     state: tauri::State<'_, Backend>,
@@ -531,6 +645,27 @@ async fn authoring_validate(
 ) -> Result<AuthoringValidation, Fault> {
     let application = state.bootstrap.application()?;
     background(move || application.authoring_validate(&owner, &revision)).await
+}
+
+#[tauri::command]
+async fn authoring_trial_context(
+    owner: AuthoringRef,
+    revision: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<TrialContext, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_trial_context(&owner, &revision)).await
+}
+
+#[tauri::command]
+async fn authoring_trial_start(
+    owner: AuthoringRef,
+    revision: String,
+    request: StartRequest,
+    state: tauri::State<'_, Backend>,
+) -> Result<String, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.authoring_trial_start(&owner, &revision, request)).await
 }
 
 #[tauri::command]
@@ -768,6 +903,15 @@ fn main() {
             authoring_catalog,
             authoring_refresh,
             authoring_validate,
+            authoring_trial_context,
+            authoring_trial_start,
+            authoring_trial_read_target,
+            authoring_trial_check_target,
+            authoring_trial_save_target,
+            authoring_trial_remove_target,
+            authoring_trial_choose_target_application,
+            authoring_trial_reserve_running_application,
+            authoring_trial_check_running_application,
             authoring_stop,
             authoring_exit,
             authoring_recover,

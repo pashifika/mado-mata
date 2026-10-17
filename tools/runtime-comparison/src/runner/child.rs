@@ -129,6 +129,21 @@ pub fn child() -> Result<bool, Fault> {
     }
     if let Some(modules) = &invocation.prepared_modules {
         modules.parser(&invocation.inventory)?;
+        if modules.function.is_some()
+            && (invocation.operation != Operation::Run
+                || !matches!(
+                    invocation.plan.candidate.as_str(),
+                    "javascript" | "typescript"
+                )
+                || invocation.plan.scenario != "success"
+                || invocation.attempt != 1
+                || (invocation.plan.lane == "native" && !invocation.prepare_target))
+        {
+            return Err(Fault::new(
+                "Authority",
+                "Function invocation has incompatible operation authority",
+            ));
+        }
     }
     // The supervisor's deadline is absolute on the shared clock: spawn, payload
     // transfer and validation above are already charged, and no Host or native

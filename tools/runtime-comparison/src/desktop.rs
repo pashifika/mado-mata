@@ -18,6 +18,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::JoinHandle;
 
+pub use crate::typescript::FunctionInvocation;
+
 const LOG_CAPACITY: usize = 64;
 const PROGRESS_CAPACITY: usize = 32;
 const REQUEST_BYTES: usize = 65_536;
@@ -42,6 +44,8 @@ pub struct StartRequest {
     pub replay_descriptor_path: Option<String>,
     #[serde(default)]
     pub native_intent: Option<NativeIntent>,
+    #[serde(default)]
+    pub function: Option<FunctionInvocation>,
 }
 
 fn workflow() -> String {
@@ -156,6 +160,9 @@ pub enum NativePhase {
     WaitingForWindow,
     NativeInitialization,
     Readiness,
+    HostAttachment,
+    Instantiation,
+    Function,
     Workflow,
     Settling,
     Recovering,

@@ -76,9 +76,10 @@ recovery, including Workspace navigation.
 
 ## Script-requested startup
 
-Only Desktop Native Readiness can call `host.call("target_start", {})` and
-`host.call("target_status", {})`. Both require an exact empty object; neither
-accepts a path, target, recipe, process, input policy or authority override.
+For Whole package, Desktop Native Readiness alone can call
+`host.call("target_start", {})` and `host.call("target_status", {})`.
+Both require an exact empty object; neither accepts a path, target, recipe,
+process, input policy or authority override.
 No request means no target acquisition or launch. One start request returns
 `pending` promptly without waiting for a process/window; duplicates refuse.
 Status polling drives bounded work, with at most one preparation step in flight,
@@ -96,6 +97,20 @@ after Readiness explicitly returns `"Ready"`.
 Module evaluation, Workflow, Controlled and Replay cannot use these calls.
 The independent M0 CLI keeps its explicitly supplied `native_config`; it cannot
 select Desktop-only phase budgets or acquire this preparation authority.
+
+## Edit-owned Function attachment
+
+[ADR 0011](0011-edit-script-execution.md) adds a narrow caller of the same target
+correspondence and initialization machinery. A freshly reviewed Function trial
+attaches only to an already-running target, then instantiates the selected module
+under restricted admission and invokes its callable. It does not call package
+readiness, synthesize `"Ready"`, submit a launch or admit exit recovery.
+Preparation, instantiation and function execution remain bounded by the existing
+phase budgets and immutable outer deadline. Readiness-only SDK calls refuse.
+Whole package retains the Script-requested startup contract above; capture
+availability, function return, input receipts and physical cleanup remain
+distinct facts.
+
 
 ## Launch library and OS semantics
 

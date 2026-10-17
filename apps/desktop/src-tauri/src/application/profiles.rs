@@ -1,5 +1,6 @@
 use super::{Application, ProfileCatalog, WorkspaceRef, lock};
 use crate::storage::{LegacyImport, Profile, ProfileStore};
+use mado_runtime_comparison::desktop::StartRequest;
 use mado_runtime_comparison::host::{option_path, resolve_options};
 use mado_runtime_comparison::inventory::Inventory;
 use mado_runtime_comparison::model::Fault;
@@ -245,6 +246,31 @@ pub(super) fn checked_profile(
         .with_context(json!({"profile_id":profile.id,"cause":error}))
     })?;
     Ok(profile)
+}
+
+/// A saved profile selection must still hold exactly the submitted values; an explicit
+/// `draft` is checked against the schema separately and is never persisted.
+pub(super) fn check_selected_profile(
+    profiles: &ProfileStore,
+    request: &StartRequest,
+) -> Result<(), Fault> {
+    if request.profile_id == "draft" {
+        return Ok(());
+    }
+    let profile = checked_profile(
+        profiles,
+        &request.package_id,
+        &request.schema_identity,
+        &request.profile_id,
+    )?;
+    if !same_json_values(&profile.values, &request.values) {
+        return Err(Fault::new(
+            "ProfileIdentity",
+            "Saved profile values changed; select it again",
+        )
+        .with_context(json!({"profile_id":profile.id})));
+    }
+    Ok(())
 }
 
 // JSON normalizes 1.0 to 1 in the WebView, but must never equate rounded integers.

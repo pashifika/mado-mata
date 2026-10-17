@@ -3,7 +3,9 @@ use crate::target::{
     AuthoringProcess, ResolvedLocation, TargetConfiguration, TargetInputPolicy, TargetLocation,
     TargetResolution,
 };
-use mado_runtime_comparison::desktop::{NativeIntent, native_limits};
+use mado_runtime_comparison::desktop::{
+    FunctionInvocation, NativeIntent, PackageInfo, native_limits,
+};
 use mado_runtime_comparison::model::{Plan, identity};
 use serde_json::json;
 use std::time::Duration;
@@ -73,6 +75,7 @@ fn inputs() -> (StartRequest, PackageInfo, TargetRecord) {
         lane: "native".into(),
         scenario: "workflow".into(),
         replay_descriptor_path: None,
+        function: None,
         native_intent: Some(NativeIntent {
             target_revision: record.revision,
             target_binding_id: record.binding.as_ref().unwrap().id.clone(),
@@ -87,6 +90,26 @@ fn inputs() -> (StartRequest, PackageInfo, TargetRecord) {
         }),
     };
     (request, package, record)
+}
+
+fn capture(
+    request: &StartRequest,
+    package: &PackageInfo,
+    record: TargetRecord,
+) -> Result<NativeBinding, Fault> {
+    let target = package
+        .target
+        .as_ref()
+        .zip(package.target_identity.as_deref());
+    NativeBinding::capture(request, &package.package_id, target, record)
+}
+
+fn function() -> FunctionInvocation {
+    FunctionInvocation {
+        module: "main.js".into(),
+        function: "battle".into(),
+        arguments: Vec::new(),
+    }
 }
 
 #[test]
@@ -121,36 +144,28 @@ fn stale_review_cannot_select_changed_binding_or_declaration() {
     let (request, package, mut record) = inputs();
     record.revision += 1;
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "TargetConflict"
     );
 
     let (request, package, mut record) = inputs();
     record.binding.as_mut().unwrap().id = "bbbbbbbbbbbbbbbbbbbb".into();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "TargetConflict"
     );
 
     let (request, mut package, record) = inputs();
     package.target_identity = Some("changed-declaration".into());
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "StaleIdentity"
     );
 
     let (request, package, mut record) = inputs();
     record.binding.as_mut().unwrap().package_id = "another.package".into();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "TargetConflict"
     );
 }
@@ -160,18 +175,14 @@ fn configuration_without_native_scope_cannot_be_projected() {
     let (request, package, mut record) = inputs();
     record.binding.as_mut().unwrap().configuration.game.kind = "executable".into();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "NativeTargetUnsupported"
     );
 
     let (request, package, mut record) = inputs();
     record.binding.as_mut().unwrap().configuration.input = None;
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "NativeTargetUnset"
     );
 
@@ -184,11 +195,49 @@ fn configuration_without_native_scope_cannot_be_projected() {
         .window_title
         .clear();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "NativeTargetUnset"
     );
+}
+
+#[test]
+fn a_function_review_only_attaches_to_an_already_running_target() {
+    for (launch_approved, max_exit_recoveries) in [(true, 0), (false, 1)] {
+        let (mut request, package, record) = inputs();
+        request.function = Some(function());
+        let intent = request.native_intent.as_mut().unwrap();
+        intent.launch_approved = launch_approved;
+        intent.max_exit_recoveries = max_exit_recoveries;
+        assert_eq!(
+            capture(&request, &package, record).unwrap_err().category,
+            "NativeRefused"
+        );
+    }
+
+    let (mut request, package, record) = inputs();
+    request.function = Some(function());
+    let mut platform = ScriptedPreparation::new([Ok(NativeDiscovery::Absent)]);
+    let fault = capture(&request, &package, record)
+        .unwrap()
+        .resolve_with(&control(), &|_| {}, &|| Ok(()), &mut platform)
+        .unwrap_err();
+    assert_eq!(fault.category, "NativeTargetMissing");
+    assert_eq!((platform.recipes, platform.launches), (0, 0));
+    assert_eq!(
+        fault.context["native_preparation"]["launch"],
+        "not_requested"
+    );
+
+    let (mut request, package, record) = inputs();
+    request.function = Some(function());
+    let mut platform = ScriptedPreparation::new([unique(7)]);
+    let target = capture(&request, &package, record)
+        .unwrap()
+        .resolve_with(&control(), &|_| {}, &|| Ok(()), &mut platform)
+        .unwrap()
+        .unwrap();
+    assert_eq!(target.process_id, 7);
+    assert_eq!((platform.recipes, platform.launches), (0, 0));
 }
 
 fn process(pid: u32) -> AuthoringProcess {
@@ -208,7 +257,7 @@ fn only_unique_fresh_correspondence_selects_the_runtime_copy() {
         (vec![process(1), process(2)], "NativeTargetAmbiguous"),
     ] {
         let (request, package, record) = inputs();
-        let mut binding = NativeBinding::capture(&request, &package, record).unwrap();
+        let mut binding = capture(&request, &package, record).unwrap();
         let proof = AuthoringApplication {
             processes,
             installation: "verified".into(),
@@ -216,7 +265,7 @@ fn only_unique_fresh_correspondence_selects_the_runtime_copy() {
         assert_eq!(binding.project(proof).unwrap_err().category, category);
     }
     let (request, package, record) = inputs();
-    let mut binding = NativeBinding::capture(&request, &package, record).unwrap();
+    let mut binding = capture(&request, &package, record).unwrap();
     let target = binding
         .project(AuthoringApplication {
             processes: vec![process(7)],
@@ -242,7 +291,7 @@ fn cancellation_and_deadline_refuse_before_any_os_correspondence() {
     control.cancel();
     let (request, package, record) = inputs();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
+        capture(&request, &package, record)
             .unwrap()
             .resolve(&control, &|_| {}, &|| Ok(()))
             .unwrap_err()
@@ -254,7 +303,7 @@ fn cancellation_and_deadline_refuse_before_any_os_correspondence() {
     let control = Control::new(&plan.limits);
     let (request, package, record) = inputs();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
+        capture(&request, &package, record)
             .unwrap()
             .resolve(&control, &|_| {}, &|| Ok(()))
             .unwrap_err()
@@ -340,7 +389,7 @@ fn control() -> Control {
 fn binding(launch_approved: bool) -> NativeBinding {
     let (mut request, package, record) = inputs();
     request.native_intent.as_mut().unwrap().launch_approved = launch_approved;
-    NativeBinding::capture(&request, &package, record).unwrap()
+    capture(&request, &package, record).unwrap()
 }
 
 fn unique(pid: u32) -> Result<NativeDiscovery, Fault> {
@@ -355,7 +404,7 @@ fn fresh_attempts_recreate_the_one_shot_resolver_from_the_original_capture() {
     let (mut request, package, mut record) = inputs();
     request.native_intent.as_mut().unwrap().launch_approved = true;
     let original = record.binding.clone().unwrap();
-    let captured = NativeBinding::capture(&request, &package, record.clone()).unwrap();
+    let captured = capture(&request, &package, record.clone()).unwrap();
     record.binding.as_mut().unwrap().configuration.window_title = "Edited later".into();
     record.binding.as_mut().unwrap().configuration.input = None;
     record

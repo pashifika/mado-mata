@@ -4,7 +4,7 @@ use crate::target::{
 };
 use mado_runtime_comparison::desktop::{
     LaunchDisposition, NativeInputPolicy, NativePhase, NativeProgress, NativeTarget,
-    NativeTargetStatus, PackageInfo, StartRequest,
+    NativeTargetStatus, StartRequest,
 };
 use mado_runtime_comparison::inventory::TargetDeclaration;
 use mado_runtime_comparison::model::{Control, Fault};
@@ -19,9 +19,12 @@ pub(super) struct NativeBinding {
 }
 
 impl NativeBinding {
+    /// `target` is the captured declaration with its identity. A Function trial only
+    /// attaches: launch and exit recovery are refused here, whatever the caller sent.
     pub(super) fn capture(
         request: &StartRequest,
-        package: &PackageInfo,
+        package_id: &str,
+        target: Option<(&TargetDeclaration, &str)>,
         record: TargetRecord,
     ) -> Result<Self, Fault> {
         let intent = request.native_intent.as_ref().ok_or_else(|| {
@@ -30,11 +33,16 @@ impl NativeBinding {
                 "Review and approve this native operation before Start",
             )
         })?;
-        let declaration = package
-            .target
-            .as_ref()
+        if request.function.is_some() && (intent.launch_approved || intent.max_exit_recoveries != 0)
+        {
+            return Err(Fault::new(
+                "NativeRefused",
+                "A Function trial attaches to a running application; launch and recovery are unavailable",
+            ));
+        }
+        let (declaration, declaration_identity) = target
             .ok_or_else(|| Fault::new("TargetUndeclared", "Package has no target declaration"))?;
-        if package.target_identity.as_deref() != Some(&intent.target_declaration_identity) {
+        if declaration_identity != intent.target_declaration_identity {
             return Err(Fault::new(
                 "StaleIdentity",
                 "The reviewed target declaration changed",
@@ -51,7 +59,7 @@ impl NativeBinding {
             )
         })?;
         if !binding.compatible(
-            &package.package_id,
+            package_id,
             &declaration.id,
             &intent.target_declaration_identity,
         ) {
@@ -97,6 +105,31 @@ impl NativeBinding {
         };
         binding.finished = false;
         binding
+    }
+
+    /// A fresh one-shot resolver per admitted attempt, built from the immutable capture;
+    /// non-native operations have no capture and resolve no target.
+    pub(super) fn resolver(
+        captured: &Option<Self>,
+        attempt: u64,
+    ) -> impl FnMut(
+        &Control,
+        &dyn Fn(NativeProgress),
+        &dyn Fn() -> Result<(), Fault>,
+    ) -> Result<Option<NativeTarget>, Fault>
+    + Send
+    + use<> {
+        let mut binding = captured
+            .as_ref()
+            .map(|binding| binding.for_attempt(attempt));
+        move |control: &Control,
+              report: &dyn Fn(NativeProgress),
+              verify_resources: &dyn Fn() -> Result<(), Fault>| {
+            match binding.as_mut() {
+                Some(binding) => binding.resolve(control, report, verify_resources),
+                None => Ok(None),
+            }
+        }
     }
 
     pub(super) fn resolve(

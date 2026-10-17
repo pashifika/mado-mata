@@ -6,6 +6,12 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, mpsc};
 
 fn native_host() -> (Host, Arc<StartupLink>, mpsc::Receiver<u64>) {
+    native_host_with_deadline(None)
+}
+
+fn native_host_with_deadline(
+    deadline: Option<std::time::Instant>,
+) -> (Host, Arc<StartupLink>, mpsc::Receiver<u64>) {
     let mut plan: Plan =
         serde_json::from_str(include_str!("../../../fixtures/manual-plan.json")).unwrap();
     let budgets = NativeBudgets {
@@ -18,7 +24,7 @@ fn native_host() -> (Host, Arc<StartupLink>, mpsc::Receiver<u64>) {
     plan.limits.duration_ms = budgets.total_ms().unwrap();
     plan.limits.readiness_ms = budgets.readiness_ms;
     let control = Arc::new(Control::new(&plan.limits));
-    control.start_native(budgets, None).unwrap();
+    control.start_native(budgets, deadline).unwrap();
     let host = Host::new(plan, json!({}), BTreeMap::new(), control).unwrap();
     let (link, requests) = StartupLink::new();
     host.connect_startup(Arc::clone(&link)).unwrap();
@@ -335,6 +341,113 @@ fn initializer_refused_before_sdk_entry_does_not_claim_sdk_admission() {
     let worker = lock(&host.inner.startup).worker.take().unwrap();
     worker.join().unwrap();
     assert_eq!(host.failure().unwrap().category, "Blocked");
+    assert_eq!(host.snapshot()["native_initialization_started"], false);
+    assert_eq!(host.finish()["clean"], true);
+}
+
+#[test]
+fn function_attachment_stays_in_instantiation_and_stop_prevents_late_admission() {
+    let (host, link, requests) = native_host();
+    let attaching = host.clone();
+    let worker = thread::spawn(move || attaching.attach_function());
+    let sequence = requests
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(lock(&host.inner.state).phase == Phase::Instantiating);
+    assert!(!host.control().admission.load(Ordering::Acquire));
+    host.control().cancel();
+    link.receive(
+        sequence,
+        StartupReply {
+            progress: NativeProgress {
+                attempt: 1,
+                status: NativeTargetStatus::Pending,
+                phase: NativePhase::TargetDiscovery,
+                launch: LaunchDisposition::NotRequested,
+            },
+            configuration: None,
+            fault: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(worker.join().unwrap().unwrap_err().category, "Cancelled");
+    assert_eq!(host.begin_function().unwrap_err().category, "Cancelled");
+    assert!(requests.try_recv().is_err());
+    assert_eq!(host.snapshot()["native_initialization_started"], false);
+    assert_eq!(host.finish()["clean"], true);
+}
+
+#[test]
+fn function_attachment_missing_target_is_a_failure_not_a_replacement_or_launch() {
+    let (host, link, requests) = native_host();
+    let attaching = host.clone();
+    let worker = thread::spawn(move || attaching.attach_function());
+    let sequence = requests
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    link.receive(
+        sequence,
+        StartupReply {
+            progress: NativeProgress {
+                attempt: 1,
+                status: NativeTargetStatus::Pending,
+                phase: NativePhase::TargetDiscovery,
+                launch: LaunchDisposition::NotRequested,
+            },
+            configuration: None,
+            fault: Some(Fault::new(
+                "NativeTargetMissing",
+                "reviewed target is absent",
+            )),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        worker.join().unwrap().unwrap_err().category,
+        "NativeTargetMissing"
+    );
+    assert!(requests.try_recv().is_err());
+    assert!(!host.workflow_entered());
+    assert_eq!(host.snapshot()["native_launch"], "not_requested");
+    assert_eq!(host.finish()["clean"], true);
+}
+
+#[test]
+fn stopped_function_attachment_never_requests_a_target() {
+    let (host, _, requests) = native_host();
+    host.control().cancel();
+    assert_eq!(host.attach_function().unwrap_err().category, "Cancelled");
+    assert!(requests.try_recv().is_err());
+    assert_eq!(host.finish()["clean"], true);
+}
+
+#[test]
+fn function_phase_requires_capture_readiness_and_cannot_reopen_script_startup() {
+    let (host, _, requests) = native_host();
+    assert_eq!(
+        host.begin_function().unwrap_err().category,
+        "ReadinessContract"
+    );
+    host.control().native_transition(1, None).unwrap();
+    lock(&host.inner.startup).progress.status = NativeTargetStatus::CaptureReady;
+    host.begin_function().unwrap();
+    assert_eq!(host.snapshot()["native_phase"], "function");
+    for method in ["target_start", "target_status"] {
+        assert_eq!(
+            host.call(method, json!({})).unwrap_err().category,
+            "Authority"
+        );
+    }
+    assert!(requests.try_recv().is_err());
+    assert_eq!(host.finish()["clean"], true);
+}
+
+#[test]
+fn expired_function_startup_budget_never_requests_or_rebinds_a_target() {
+    let (host, _, requests) = native_host_with_deadline(Some(std::time::Instant::now()));
+    assert_eq!(host.attach_function().unwrap_err().category, "Timeout");
+    assert!(requests.try_recv().is_err());
+    assert_eq!(host.begin_function().unwrap_err().category, "Timeout");
     assert_eq!(host.snapshot()["native_initialization_started"], false);
     assert_eq!(host.finish()["clean"], true);
 }

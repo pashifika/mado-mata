@@ -84,7 +84,7 @@ export interface BootstrapStatus {
 }
 export interface SnapshotReceipt {path:string; generation:string; files:number; bytes:number}
 // Typed Native preparation state; the values mirror the host's snake_case enums.
-export type NativePhase = 'preflight'|'target_discovery'|'launch_submission'|'waiting_for_process'|'waiting_for_window'|'native_initialization'|'readiness'|'workflow'|'settling'|'recovering';
+export type NativePhase = 'preflight'|'target_discovery'|'launch_submission'|'waiting_for_process'|'waiting_for_window'|'native_initialization'|'readiness'|'workflow'|'settling'|'recovering'|'host_attachment'|'instantiation'|'function';
 export type LaunchDisposition = 'not_requested'|'accepted'|'rejected'|'uncertain';
 // Whether the Script has requested startup and whether capture is available. `capture_ready` is not game readiness.
 export type NativeTargetStatus = 'not_requested'|'pending'|'capture_ready';
@@ -126,9 +126,16 @@ export interface NativeIntent {
   capture_approved:boolean; input_approved:boolean; launch_approved:boolean; operation:string; visible_postcondition:string; limits:NativeLimits;
   max_exit_recoveries:0|1;
 }
+export interface FunctionInvocation {module:string; function:string; arguments:Json[]}
+export interface FunctionCandidate {module:string; function:string; signature:string; line:number; column:number; required_arguments:number}
+export interface AuthoringTrialContext extends ProfileCatalog {
+  owner:AuthoringRef; revision:string; package:PackageInfo; target:TargetView|null; target_error:Fault|null;
+  functions:FunctionCandidate[]; recovery:RecoveryView|null;
+}
 export interface StartRequest {
   package_path:string; inventory_identity:string; package_id:string; schema_identity:string; profile_id:string;
   values:Record<string,Json>; lane:string; scenario:string; replay_descriptor_path:string|null; native_intent:NativeIntent|null;
+  function:FunctionInvocation|null;
 }
 
 // Host-issued Edit lease: the token is bound to one application generation, Workspace session and package source.

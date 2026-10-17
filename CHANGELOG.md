@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Execute a whole package or an existing file-level function directly in Edit.
+  Reuse explicit Save all, immutable source capture and the supervised runner;
+  rerun current source with fresh VM state while preserving the game's state.
+  Native Function is separately reviewed and attach-only, without launch,
+  recovery or a hidden readiness call. Keep shared Stop and independent cleanup.
+- Move saved-package Validate, its state and diagnostics into Package contents.
+  Remove Run's separate profile Validate action while retaining inline errors
+  and mandatory Start/Save validation.
+
 - Keep macOS engine-check temporary paths short for Unix socket fixtures,
   independently of its descriptive build and dependency-cache directory.
 

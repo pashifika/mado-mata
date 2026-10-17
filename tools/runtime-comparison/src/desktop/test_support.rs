@@ -25,6 +25,7 @@ pub(super) fn request(inventory: &Inventory) -> StartRequest {
         scenario: workflow(),
         replay_descriptor_path: None,
         native_intent: None,
+        function: None,
     }
 }
 

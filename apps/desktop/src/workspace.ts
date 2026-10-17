@@ -37,8 +37,8 @@ export interface Bound {
   // Last readable catalog of this Tab/package store and its current listing fault.
   profiles:Profile[]; profilesError:Fault|null;
   selectedId:string|null; name:string; preset:string; draft:Record<string,Json>;
-  // Local edit counter: a validation or save that raced a later edit must not overwrite it.
-  draftRevision:number; validation:{draftRevision:number;values:Record<string,Json>}|null;
+  // Local edit counter: a save that raced a later edit must not overwrite it.
+  draftRevision:number;
   lane:string; scenario:string; descriptorPath:string;
   // True once the operator changed profile/draft state; a pristine default draft closes without confirmation.
   touched:boolean;
@@ -118,7 +118,7 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
     packagePath: selection.package_path, package: selection.package,
     profiles: selection.profiles, profilesError: selection.profiles_error,
     selectedId: null, name: '', preset: '', draft: defaultDraft(selection.package.schema),
-    draftRevision: (previous?.draftRevision ?? 0) + 1, validation: null,
+    draftRevision: (previous?.draftRevision ?? 0) + 1,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
     touched: false, target: targetState(selection),
     native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', workflowSeconds: null, capture: false, input: false, launch: false, recovery: false, key: null},
@@ -513,7 +513,7 @@ export function editDraft(bound:Bound, draft:Record<string,Json>):Bound {
 
 export function newDraft(bound:Bound, presetName = ''):Bound {
   const preset = presetName ? bound.package.profiles[presetName] : undefined;
-  return editDraft({...bound, selectedId: null, name: presetName, preset: presetName, validation: null},
+  return editDraft({...bound, selectedId: null, name: presetName, preset: presetName},
     preset ? structuredClone(preset.options) : defaultDraft(bound.package.schema));
 }
 
@@ -521,7 +521,7 @@ export function selectProfile(bound:Bound, id:string):Bound {
   if (!id) return newDraft(bound);
   const profile = bound.profiles.find(item => item.id === id);
   if (!profile) return bound;
-  return editDraft({...bound, selectedId: profile.id, name: profile.name, preset: '', validation: null}, structuredClone(profile.values));
+  return editDraft({...bound, selectedId: profile.id, name: profile.name, preset: ''}, structuredClone(profile.values));
 }
 
 export function workspaceRef(workspace:Pick<Workspace,'id'|'revision'>):WorkspaceRef {

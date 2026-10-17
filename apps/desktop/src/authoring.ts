@@ -44,7 +44,7 @@ export interface FileDraft {
   typed:TypedText[];
 }
 
-export type AuthoringPending = {kind:'save'; path:string} | {kind:'catalog'} | {kind:'refresh'} | {kind:'validate'} | {kind:'recognition'} | {kind:'recognition_trial'} | {kind:'exit'} | {kind:'duplicate'};
+export type AuthoringPending = {kind:'save'; path:string} | {kind:'catalog'} | {kind:'refresh'} | {kind:'validate'} | {kind:'recognition'} | {kind:'recognition_trial'} | {kind:'script_trial'} | {kind:'exit'} | {kind:'duplicate'};
 export interface ValidationState {revision:string; valid:boolean; diagnostics:Fault[]}
 
 // The frontend half of one host-issued Edit lease. `revision` is the source revision every draft is based on and

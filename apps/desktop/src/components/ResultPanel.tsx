@@ -41,6 +41,7 @@ export default function ResultPanel({view, disclosed, onDisclose}: {view: Contro
   const observations = record(result?.observations);
   const build = record(result?.build);
   const check = view.operation === 'environment_check';
+  const returnSummary = record(record(result?.metrics).runtime).return_summary;
   const lane = text(result?.lane) ?? text(source.lane);
   // Replay observations and script decisions can carry recognized text: private until disclosed.
   const privateDetail = !check && (view.native_preparation != null || (lane !== null && lane !== 'controlled'));
@@ -56,6 +57,7 @@ export default function ResultPanel({view, disclosed, onDisclose}: {view: Contro
     <dl className="run-identity identity-facts" id="identity-facts">
       <dt>{t.common.stage}</dt><dd>{text(source.stage) ?? (view.state === 'idle' ? t.common.noOperation : t.common.unobserved)}</dd>
       <dt>{t.common.completed}</dt><dd>{completed.length ? completed.join(' → ') : t.common.noneRecorded}</dd>
+      {source.package_readiness === 'not_invoked' && <><dt>{t.scriptTrial.packageReadiness}</dt><dd>{t.scriptTrial.notInvoked}</dd></>}
       <dt>{t.common.environment}</dt><dd><code>{text(source.environment_identity) ?? t.common.notDerived}</code></dd>
       <dt>{t.common.corpus}</dt><dd><code>{text(source.corpus_identity) ?? t.common.notDerived}</code></dd>
       {check && <><dt>{t.common.selection}</dt><dd><code>{text(source.selection_identity) ?? t.common.unobserved}</code></dd><dt>{t.common.initialization}</dt><dd id="initialization">{initializationLabel(view.progress, locale)}</dd></>}
@@ -88,6 +90,9 @@ export default function ResultPanel({view, disclosed, onDisclose}: {view: Contro
     </div>}
     {result && !check && <div className="outcome-details">
       {(!privateDetail || disclosed) && <>
+          {returnSummary !== undefined && returnSummary !== null && <section className="entry-return">
+            <h3>{t.scriptTrial.returnValue}</h3><BoundedRecord value={returnSummary}/>
+          </section>}
           <h3>{t.result.decisions}</h3>
           {Array.isArray(observations.logs) && observations.logs.length > 0
             ? <ul className="decision-list">{observations.logs.map((item, index) => <li key={index}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>)}</ul>
