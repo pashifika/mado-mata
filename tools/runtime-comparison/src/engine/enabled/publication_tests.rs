@@ -72,6 +72,84 @@ fn controlled(backend: Arc<ControlledOcr>) -> (Engine, Arc<ControlledCapture>) {
 }
 
 #[test]
+fn native_drag_at_wait_limit_completes_within_execution_authority() {
+    let mut engine = replay(Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8)));
+    let issuer = Arc::new(mado_pilot_core::IdentityIssuer::new());
+    let capture = Arc::new(
+        ControlledCapture::new(
+            issuer.clone(),
+            mp::PixelExtent::new(8, 8),
+            mp::PixelFormat::Rgba8,
+        )
+        .unwrap(),
+    );
+    let input = Arc::new(mado_pilot_testkit::ControlledInput::new(capture.target()));
+    let facade = mp::Engine::new(EngineWiring {
+        engine: issuer.engine(),
+        capture: capture.clone(),
+        matcher: Matcher::new(Arc::new(ControlledMatcher::new(mp::PixelFormat::Rgba8))),
+        loader: PackageLoader::new(),
+        ocr: None,
+        input: Some(input.clone()),
+        permission: None,
+    })
+    .unwrap();
+    let operation = mp::OperationContext::new();
+    let session = facade
+        .open_session(
+            capture.target(),
+            &mp::SessionRequest::new()
+                .capturing(mp::OpenRequest::new())
+                .requesting_input(
+                    mp::InputOpenRequest::new()
+                        .with_requirement(mp::InputRequirement::Required)
+                        .requiring(mp::InputOperationKind::Pointer, mp::InputDelivery::System),
+                ),
+            &operation,
+        )
+        .unwrap();
+    {
+        let mut state = engine.lock().unwrap();
+        state.session.take().unwrap().close(&operation).unwrap();
+        state.session = Some(session);
+    }
+    Arc::get_mut(&mut engine.resources).unwrap().engine = facade;
+    capture.publish(0, mp::Continuity::Continuous).unwrap();
+    let observation = engine.call("observe", json!({})).unwrap();
+    engine.native = Some(
+        serde_json::from_value(json!({
+            "executable_or_bundle":"controlled-input","process_id":null,
+            "process_lifetime":null,"window_rule":"controlled-input",
+            "operating_system":"test","hardware":"test","permission_executable":"test",
+            "capture":{"approved":true,"duration_ms":5000,"max_frames":10,"wait_ms":100,"interval_ms":50},
+            "input":{"approved":true,"duration_ms":5000,"max_actions":10,
+                "route":"system","focus":"preserve","package_approved":true},
+            "geometry":null,"recognition_language":"test","review":{"kind":"script"},
+            "cleanup_ms":1000,"containment_ms":2000
+        }))
+        .unwrap(),
+    );
+    engine.limits.wait_ms = 100;
+    engine.control.admission.store(true, Ordering::Release);
+    let actions = json!([{"kind":"drag","button":"left","path":[
+        {"x":1,"y":2,"hold_ms":50},{"x":3,"y":4,"hold_ms":50},{"x":1,"y":2}
+    ]}]);
+    let receipt = engine
+        .call(
+            "dispatch",
+            json!({"observation":observation,"actions":actions}),
+        )
+        .unwrap();
+    assert_eq!(receipt["status"], "Submitted", "{receipt}");
+    assert_eq!(receipt["submitted_events"], 7);
+    assert_eq!(input.submitted_events().len(), 7);
+    engine
+        .call("release", json!({"id":observation["id"]}))
+        .unwrap();
+    assert_eq!(engine.finish()["clean"], true);
+}
+
+#[test]
 fn terminal_accounting_requires_settlement_and_retains_consumed_frames() {
     let (engine, capture) = controlled(Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8)));
     assert_eq!(

@@ -23,6 +23,9 @@
   Preserve launch absence and recovery exit evidence. Ordinary Run keeps its review.
 - Keep the action named Run after completion; dirty source uses Save all and run.
   Optimize SHA-256 in checkout builds without skipping resource-integrity checks.
+- Bound native input delivery by remaining execution authority, not the scheduled
+  hold limit. A drag at that limit no longer loses its final events to delivery
+  overhead; cancellation, phase deadlines and cleanup remain enforced.
 
 - Keep macOS engine-check temporary paths short for Unix socket fixtures,
   independently of its descriptive build and dependency-cache directory.

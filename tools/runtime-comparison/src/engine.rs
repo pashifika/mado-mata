@@ -1608,7 +1608,7 @@ mod enabled {
             if remaining == 0 {
                 return Err(Fault::new("Timeout", "native input authority expired"));
             }
-            let operation = self.operation(self.limits.wait_ms.min(remaining))?;
+            let operation = self.operation(remaining)?;
             self.check_session(state)?;
             if !self.control.admission.load(Ordering::Acquire) {
                 return Err(Fault::new(

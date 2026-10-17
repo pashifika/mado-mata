@@ -64,6 +64,10 @@ At the default, the outer allowances are 120/243 s without/with recovery; at the
 per-call waits 1 s and pacing 100 ms. More duration grants no additional resource
 credits. The pinned SDK's monotonic timeout accepts this finite allowance; its
 separate 2 s maximum for an individual macOS native wait is unchanged.
+Native input dispatch uses the remaining input, capture, attempt and phase
+authority, not the scheduled-wait limit. This leaves time for SDK delivery around
+an allowed hold without enlarging Script waits or event budgets; Stop still
+cancels the in-flight operation.
 The larger ceiling does not qualify useful long-running Native work, late Stop,
 long-duration recovery or leak freedom; actual workload evidence remains separate.
 Typed attempt summaries retain the original exit, final Script result and cleanup;
