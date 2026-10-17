@@ -4,7 +4,6 @@ import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import {functionKey, trialArguments, trialDiagnosticLocation, trialDiagnostics} from '../edit-trial.ts';
 import type {EditTrialState} from '../edit-trial.ts';
-import type {PackageValidation} from '../status.ts';
 import {chooseLane} from '../workspace.ts';
 import type {Bound, Derived} from '../workspace.ts';
 import type {Fault, NativeCapability, OcrEnvironment} from '../types.ts';
@@ -12,7 +11,7 @@ import {InfoHint} from './ContextualHelp.tsx';
 import Modal from './Modal.tsx';
 import {FaultMessage} from './ResultPanel.tsx';
 import Select from './Select.tsx';
-import {AuthoringFooterStatus, ValidationStatusIcon} from './StatusSurface.tsx';
+import {AuthoringFooterStatus} from './StatusSurface.tsx';
 import type {AuthoringStatusProps} from './StatusSurface.tsx';
 import type {TargetHandlers} from './TargetPanel.tsx';
 
@@ -28,10 +27,8 @@ export interface EditTrialHandlers {
   setup:(section?:'target'|'values')=>void; environment:()=>void; results:()=>void;
 }
 
-// Edit's Script execution entry beside Validate: a Setup… trigger for one settings-only dialog over the trial state, and
-// an adjacent Run that executes the latest saved Script with that setup, repeatedly, without reopening it. Selecting,
-// completing or closing Setup never executes. Advanced setup lives in Run.
-export default function EditTrial({state, facts, stale, open, onOpenChange, nativeCapability, nativeError, environment, handlers, locked, loadBlocked, loading, block, dirty, validation, error, notice, hasResult, strip, authoring}: {
+// Run executes the saved Script; its adjoining Setup only configures it.
+export default function EditTrial({state, facts, stale, open, onOpenChange, nativeCapability, nativeError, environment, handlers, locked, loadBlocked, loading, block, dirty, error, notice, hasResult, strip, authoring}: {
   state:EditTrialState|null; facts:Derived|null;
   // The setup was read before the latest save; opening Setup rereads its functions and saved target.
   stale:boolean;
@@ -39,8 +36,6 @@ export default function EditTrial({state, facts, stale, open, onOpenChange, nati
   open:boolean; onOpenChange:(open:boolean)=>void;
   nativeCapability:NativeCapability|null; nativeError:Fault|null; environment:OcrEnvironment|null;
   handlers:EditTrialHandlers; locked:boolean; loadBlocked:boolean; loading:boolean; block:string|null; dirty:boolean;
-  // Saved-package validation only; it never states that execution is ready.
-  validation:PackageValidation['state'];
   // A failed setup read or profile repair. Run failures are reported on the Edit page instead.
   error:Fault|null;
   notice:string|null; hasResult:boolean;
@@ -84,7 +79,6 @@ export default function EditTrial({state, facts, stale, open, onOpenChange, nati
     : args?.error ? s.argumentErrors[args.error]
     : valuesBlock ?? facts.descriptorError ?? facts.startBlock;
   const reason = block ?? setupBlock;
-  const status = `${t.status.savedPackage} · ${validation === 'running' ? t.authoring.validating : t.status[validation]}`;
   const choice = state?.profileChoice ?? '';
   const profile = choice === '' ? s.chooseProfile : choice === 'values' ? s.explicitValues
     : choice.startsWith('profile:') ? bound?.profiles.find(item => item.id === choice.slice(8))?.name ?? choice.slice(8)
@@ -112,12 +106,14 @@ export default function EditTrial({state, facts, stale, open, onOpenChange, nati
     state.unit === 'function' ? candidate ? `${candidate.module} · ${candidate.function}` : s.chooseFunction : s.package, ...startup].join(' · ') : null;
   const runReason = loading ? s.loading : !state || !facts ? s.setupFirst : reason;
   return <>
-    <button id="trial-setup-open" type="button" aria-haspopup="dialog" aria-label={s.openSetup} aria-describedby="package-validation-status"
-      title={`${s.setup} · ${status}`} onClick={show}>
-      <ValidationStatusIcon id="package-validation-status" label={t.status.savedPackage} state={validation}/>{s.openSetup}
-    </button>
-    <button id="trial-run" type="button" disabled={locked || runReason !== null} aria-describedby="trial-run-summary"
-      onClick={handlers.run}>{dirty ? s.saveRun : s.run}</button>
+    <div className="trial-run-control" role="group" aria-label={s.heading}>
+      <button id="trial-run" type="button" className="trial-run-main" disabled={locked || runReason !== null} aria-describedby="trial-run-summary"
+        onClick={handlers.run}>{dirty ? s.saveRun : s.run}</button>
+      <button id="trial-setup-open" type="button" className="trial-run-setup" aria-haspopup="dialog" aria-expanded={open}
+        aria-controls="trial-setup-dialog" aria-label={s.openSetup} title={s.openSetup} onClick={show}>
+        <span className="select-chevron" aria-hidden="true"/>
+      </button>
+    </div>
     <span id="trial-run-summary" className={runReason === null ? 'trial-run-summary' : 'trial-run-summary muted'}
       title={runReason ?? intent ?? undefined}>{runReason ?? intent}</span>
     <Modal id="trial-setup-dialog" className="trial-dialog" open={open} onCancel={() => onOpenChange(false)} labelledBy="trial-setup-heading"
@@ -222,7 +218,6 @@ export default function EditTrial({state, facts, stale, open, onOpenChange, nati
             <button id="trial-results" type="button" className="link" onClick={() => leave(handlers.results)}>{s.openResults}</button>
             <button id="trial-logs" type="button" className="link" onClick={() => leave(handlers.logs)}>{s.logs}</button>
           </>}
-          {state && <button id="trial-reload" type="button" disabled={locked || loadBlocked} onClick={handlers.reload}>{s.refresh}</button>}
         </div>
         {state && dirty && <p className="field-help">{s.saveHelp}</p>}
         {notice && <p role="status" className="inline-warning">{notice}</p>}
@@ -231,6 +226,7 @@ export default function EditTrial({state, facts, stale, open, onOpenChange, nati
       <div className="dialog-footer">
         <span id="trial-block" role="status">{loading ? s.loading : state ? reason ?? '' : block ?? ''}</span>
         {activity && <AuthoringFooterStatus key={activity.activity.owner.token} {...activity} idPrefix="trial-authoring"/>}
+        {state && <button id="trial-reload" type="button" disabled={locked || loadBlocked} onClick={handlers.reload}>{s.refresh}</button>}
         {/* Completing setup only closes it; Run beside Setup is the separate explicit execution. */}
         {state
           ? <button id="trial-setup-done" type="button" className="primary" onClick={() => onOpenChange(false)}>{s.done}</button>

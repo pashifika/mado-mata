@@ -86,8 +86,7 @@ export interface PageAuthoring {
 interface Props {
   session: AuthoringSession; label: string; handlers: EditHandlers;
   recognition: ReactNode; recognitionDirty: boolean;
-  // Script execution Setup trigger, its settings dialog and the adjacent Run beside Validate; the Setup trigger carries
-  // the saved-package validation icon.
+  // Script Run/Setup split control and its settings-only dialog beside Validate.
   trial: ReactNode;
   // Notices and failures of the latest explicit Run before admission, shown with this page's other errors.
   trialFeedback: ReactNode;

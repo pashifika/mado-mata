@@ -7,14 +7,14 @@
   rerun current source with fresh VM state while preserving the game's state.
   Native Function is attach-only, without launch, recovery or hidden readiness.
   Keep shared Stop and independent cleanup.
-- Put Validate, icon-bearing Setup… and a separate Run in Package contents.
+- Put Validate and a right-aligned Run/Setup split button in Package contents.
   Setup selects the unit and destination without executing. Run uses current
   Script; dirty Save all and run continues directly, including Real application.
   Remove the additional Allow screen and source-change reapproval. Preserve
   optional whole-package launch/recovery choices across Script edits.
   Use package defaults; missing prerequisites link to settings and back.
-  Advanced configuration preserves source drafts and Undo. Setup's icon reports
-  package validation, while Status details retains diagnostics.
+  Advanced configuration preserves source drafts and Undo. Remove Setup's
+  validation icon; Status details retains saved-validation state and diagnostics.
   Remove Run's separate profile Validate action while retaining inline errors
   and mandatory Start/Save validation.
 - Resolve Edit's saved APP to its actual runtime executable before SDK selection,

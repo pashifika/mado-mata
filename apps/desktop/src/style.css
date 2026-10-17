@@ -548,9 +548,16 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .package-validation { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .package-validation > button { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .package-validation-collapsed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
-.package-validation-collapsed .package-validation { padding: 0; border: 0; }
-/* Script execution: Setup… opens one compact settings-only column; the adjacent Run executes it from the main window. */
-.trial-run-summary { flex: 1 1 120px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.package-validation-collapsed .package-validation { flex: 1; min-width: 0; padding: 0; border: 0; }
+/* Run and its settings-only Setup share a connected control, even when Run is unavailable. */
+.trial-run-control { display: inline-flex; align-items: stretch; flex: 0 1 auto; min-width: 0; max-width: 100%; margin-inline-start: auto; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); }
+.trial-run-control > button { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; border: 0; border-radius: 0; background: transparent; color: #fff; }
+.trial-run-control > button:hover:not(:disabled) { background: var(--accent-hover); }
+.trial-run-control > button:focus-visible { position: relative; z-index: 1; }
+.trial-run-control > .trial-run-main { flex: 1; min-width: 0; padding: 7px 12px; border-radius: 5px 0 0 5px; overflow-wrap: anywhere; }
+.trial-run-control > .trial-run-setup { flex: 0 0 32px; width: 32px; padding: 4px 7px; border-inline-start: 1px solid #ffffff40; border-radius: 0 5px 5px 0; }
+.trial-run-setup .select-chevron { margin-inline: 0; color: inherit; }
+.trial-run-summary { flex: 1 1 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .trial-feedback .diagnostic-list { max-height: 30vh; overflow: auto; }
 .trial-dialog { width: min(560px, calc(100vw - 30px)); }
 .trial-dialog-title { display: flex; align-items: center; gap: 6px; min-width: 0; }

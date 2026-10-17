@@ -357,12 +357,11 @@ Settings, New workspace, Saved workspaces and unsaved-change confirmation use
 the same compact Edit control in their own footer, without an adjacent information
 icon or upper owner strip. Stop acknowledgement is not worker settlement.
 
-**Package contents** carries **Validate**, **Setup…** and **Run**. Setup retains the
-saved-package validation icon: unchecked (dash), valid (check), invalid (cross),
-stale (clock) and running (hourglass). Its localized hint identifies that saved
-revision's validation state, not execution readiness or Native approval.
-**Status details** retains diagnostics. Workspace tabs have no validation icons.
-The footer does not repeat these indicators and stays on one row at supported
+**Package contents** carries **Validate** and a right-aligned **Run** split button.
+Its adjoining arrow opens **Setup…** without executing. Setup has no validation status icon.
+**Status details** retains saved-package validation state and diagnostics;
+neither those results nor Setup imply execution readiness or Native approval.
+Workspace tabs have no validation icons. The footer stays on one row at supported
 widths, including 760 CSS px. Narrow widths truncate the message with an ellipsis;
 full text remains in its tooltip and Status details.
 
@@ -542,13 +541,14 @@ Neither action inspects, binds, or runs the package.
 
 ### Execute Scripts in Edit
 
-Open **Setup…** beside **Validate** in **Package contents**. Select **Whole package**
-or an existing function and its **Destination**, then choose **Done**. Use the
-separate **Run** button beside Setup whenever you want to execute current source.
-Valid package defaults need no profile-selection step or visit to the Run tab.
+Open **Setup…** using the arrow adjoining **Run** in **Package contents**.
+Select **Whole package** or an existing function and its **Destination**, then
+choose **Done**. The main **Run** action executes current source; opening or
+closing Setup never executes. Valid package defaults need no profile-selection
+step or visit to the Run tab.
 
 - Opening Setup reads the saved schema and eligible functions when missing or
-  stale. **Reload saved setup and functions** refreshes them explicitly.
+  stale. **Reload**, to the left of **Done**, refreshes them explicitly.
   Selecting, completing or closing Setup never executes. Opening Edit, saving
   and OMP draft operations do not start discovery.
 - Initial values come from the package's `default` preset, otherwise its schema
@@ -569,7 +569,7 @@ Valid package defaults need no profile-selection step or visit to the Run tab.
 - Missing target or OCR configuration provides a direct **Set up target
   application** or **OCR environment settings** action. Return from advanced
   settings, or close OCR settings, to reopen the same execution dialog.
-- **Advanced execution settings** opens profiles, option values, lanes, Target
+- **Advanced settings** opens profiles, option values, lanes, Target
   and profile repair on Run under the same Edit owner. **Return to setup**
   preserves source drafts, selection, Undo, function and arguments. Ordinary
   Start remains unavailable during Edit. Rejected profiles retain explicit

@@ -3337,7 +3337,7 @@ export default function App() {
             onOpenChange={open => setTrialDialogOwner(open ? authoring.owner.token : null)}
             nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error} environment={savedEnvironment}
             handlers={trialHandlers} locked={trialLocked} loadBlocked={trialLoadBlocked} loading={trialLoading}
-            validation={savedValidation?.state ?? 'none'} block={trialBlock}
+            block={trialBlock}
             dirty={unsavedCount > 0} error={trialSetupError}
             notice={trialNotice ? ui.scriptTrial[trialNotice] : null} hasResult={hasTrialResult}
             strip={ordinaryStrip('trial')} authoring={leave => compactAuthoring(() => leave(returnToEdit), true)}/>}

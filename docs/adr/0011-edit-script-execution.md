@@ -37,9 +37,10 @@ execution authority or an exact-position claim from that diagnostic.
 
 ## Execution entry and defaults
 
-Keep **Setup…** and a separate **Run** beside Validate in Package contents.
-Setup retains the saved-package validation icon; it never asserts execution
-readiness. Diagnostics remain in shared Status details.
+Keep a **Run** split button beside Validate in Package contents. The main action
+executes; the adjoining arrow opens **Setup…**, including when Run is unavailable.
+Remove Setup's validation icon; saved-validation state and diagnostics remain in
+shared Status details. Each action retains its own accessible name and focus.
 
 The initial inline strip consumed editor space. Its compact Setup replacement
 still forced a profile choice and a Run-tab round trip. The operator could not
