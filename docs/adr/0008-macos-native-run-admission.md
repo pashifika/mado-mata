@@ -11,12 +11,15 @@ Controlled and recorded replay retain their non-native input sink. Authoring
 Capture remains a separate input-free owner; neither its historical frames nor
 Target Check authorize a Script run.
 
-The trusted Run page submits current package/profile/target expectations, separate
-launch-if-absent/capture/input/recovery consent, reviewed operation/postcondition text, and finite limits.
+The ordinary Run page submits current package/profile/target expectations,
+separate launch-if-absent/capture/input/recovery consent, reviewed
+operation/postcondition text, and finite limits.
 Approval is transient and spent on every Start. Relevant edits, including a target
 draft changed back to its saved value, invalidate it. The text describes the
-operator's review, not a hostile-script sandbox. IPC cannot supply a Plan, process
-identity, executable, environment override, or native configuration.
+operator's review, not a hostile-script sandbox. Edit uses the one-shot captured
+Script confirmation in [ADR 0011](0011-edit-script-execution.md) instead; ordinary
+Run's review is unchanged. IPC cannot supply a Plan, process identity, executable,
+environment override, or native configuration.
 
 Reserve Preparing before slow work. Capture saved profile, target record and App
 environment under existing serialization, then release command/Store locks.
@@ -148,10 +151,12 @@ Replay remain unable to launch a game.
 Desktop has no operator-entered physical placement. Latch the first accepted
 frame's authoritative target placement and refuse later origin/size/scale changes;
 missing placement is not guessed. Copied recognition bases keep their existing
-frame/content checks. External CLI plans still require explicit geometry and
-representative input kinds; `run` and `manual` reject Desktop-only
-`reviewed_operation` before package/output I/O. Internal child transport retains
-the host-projected form without inventing representative input actions.
+frame/content checks. External CLI plans still require explicit geometry,
+representative input kinds and `review.kind: "operation"` with operation and
+visible-postcondition text. `run` and `manual` reject Desktop-only
+`input.package_approved: true` and `review.kind: "script"` before package/output
+I/O. Internal child transport retains the host-projected form without inventing
+representative input actions.
 
 At public SDK revision `4b4f3296838a9eecdcb00e9d2bb3121a25cdc240`,
 [`Session::commit_frame`](https://github.com/pashifika/mado-pilot/blob/4b4f3296838a9eecdcb00e9d2bb3121a25cdc240/crates/automation/runtime/src/session.rs#L323-L344)

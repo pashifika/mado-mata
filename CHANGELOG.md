@@ -7,9 +7,15 @@
   rerun current source with fresh VM state while preserving the game's state.
   Native Function is separately reviewed and attach-only, without launch,
   recovery or a hidden readiness call. Keep shared Stop and independent cleanup.
-- Put saved-package Validate and an icon-bearing Setup entry in Package contents.
-  Keep function/arguments and Run/Rerun in a compact dialog; open full execution
-  settings on Run without ending Edit or losing source drafts and Undo.
+- Put saved-package Validate and an icon-bearing Run… entry in Package contents.
+  Select the whole package or a function and its application/test destination
+  in one dialog. Use package defaults and collapse optional arguments. Native
+  Run opens a captured Script/target review; Allow grants capture/input once,
+  without handwritten operation/postcondition text or capture/input checkboxes.
+  Cancel and stale review grant nothing; dirty Save all and review stops before
+  confirmation. Ordinary Run retains its operation review. Missing prerequisites
+  link to their settings and back; advanced configuration on Run preserves
+  source drafts and Undo.
   The icon reports package validation only; Status details retains diagnostics.
   Remove Run's separate profile Validate action while retaining inline errors
   and mandatory Start/Save validation.

@@ -11,12 +11,13 @@ Ordinary Start remains unavailable during Edit and refuses a function invocation
 The owner-bound trial command validates the current saved revision and profile,
 then supplies the immutable inventory to the existing preparation path.
 
-Dirty content requires explicit **Save all and run** through the shared draft
-controller. Partial publication, failed refresh, composition or a later edit
-blocks admission. After capture, editing affects only the next invocation.
-Rerun retains setup, not executable bytes, approvals, VM state or live handles.
+Dirty content requires explicit **Save all and run** for non-native execution,
+or **Save all and review** for Native, through the shared draft controller.
+Partial publication, failed refresh, composition or a later edit blocks admission.
+After admission, editing affects only the next invocation. Rerun retains setup,
+not executable bytes, approvals, VM state or live handles.
 
-Setup discovery runs only for explicit Setup opening, Load/Reload or Run preparation. An early
+Setup discovery runs only for explicit Run… opening, Load/Reload or Run preparation. An early
 implementation also ran it after Save; real Edit inspection and review showed
 that its reservation interrupted subsequent Save/Validate and OMP commands.
 Removing that automatic work preserves the ordinary editing contract.
@@ -34,22 +35,46 @@ Diagnostic owner/revision attribution is independent of a clean execution
 ticket. Dirty source can open an obsolete diagnostic's file, but cannot gain
 execution authority or an exact-position claim from that diagnostic.
 
-## Setup placement
+## Execution entry and defaults
 
-Replace the Package contents validation-details button with **Setup**, retaining
-its saved-package validation icon. The icon never asserts execution readiness;
-diagnostics remain in shared Status details.
+Keep **Run…** beside Validate in Package contents, retaining the saved-package
+validation icon. The icon never asserts execution readiness; diagnostics remain
+in shared Status details.
 
-An initial inline trial strip and expandable configuration consumed editor space.
-Use a compact invocation dialog instead, with full configuration on the Run tab.
-During Edit, that tab operates on the same owner-bound trial state, not ordinary
-Run's independent profile draft. Reuse option/lane fields and existing Target,
-Native review and repair controls. Do not end the lease or enable ordinary Start.
+The initial inline strip consumed editor space. Its compact Setup replacement
+still forced a profile choice and a Run-tab round trip. The operator could not
+complete that workflow. A reference editor instead selects a ready destination
+beside Run/Stop and prepares the current package on explicit Run.
 
-Actual WKWebView checks at 760 CSS px showed that placing the Run-settings link
-after function arguments hid the route below the initial viewport. Place it
-before invocation fields. Close the dialog before execution/navigation, and use
-the existing dialog footer for setup-discovery Stop and retained capture Release.
+Use one whole-package/function selector and an explicit application/test
+destination. Initialize from the actual packaged `default` preset, otherwise
+schema defaults; never replace an invalid or disappeared explicit selection.
+A declared target selects Native without consent, otherwise non-native Test.
+Unsupported Native remains refused. Zero-argument functions need no JSON edit.
+
+Configured target and OCR settings were valid during actual Edit inspection,
+but `nativeText` still blocked Run on handwritten operation/postcondition prose.
+The operator chose one explicit captured-Script confirmation instead of that
+extra description and separate capture/input checkboxes.
+
+Keep Native review in the execution dialog. Run captures the saved source, entry,
+arguments, values, target, environment and finite limits without granting consent.
+Show that captured Script/target review in the same dialog; **Allow** grants live
+capture and keyboard/pointer input for that execution only. Preserve visible
+target, route and focus. Keep limits and optional whole-package launch/recovery
+in disclosure; launch/recovery remain separately approved. Do not invent
+game-effect text or treat approval as evidence of an application outcome.
+Missing prerequisites link directly to Target or OCR settings and return here.
+Advanced profiles/options remain on Run, sharing the Edit state without ending
+the lease or enabling ordinary Start.
+
+Dirty Native offers **Save all and review**, not execution or confirmation.
+Saving and rereading remain in the dialog; the next explicit Run opens review
+of the final revision. Back, cancellation, closing and Escape grant no authority.
+Intervening changes invalidate review; a stale target discovered on reread
+refuses submission instead of replacing the captured target. Each Allow is
+consumed once, including on refusal. Close before execution/navigation so shared
+Stop stays reachable. Setup discovery retains Stop/Release in the dialog footer.
 
 ## Function selection and invocation
 
@@ -85,11 +110,17 @@ package readiness or claim that capture availability means the game is ready.
 Launch, recovery, activation and scene preparation are unavailable in this mode.
 
 Every Native submission needs fresh review of the saved source, entry, arguments,
-profile, target, environment and finite limits. Existing Recognition capture is
-not an execution session; release and settle it first. One operation retains
-ownership through physical settlement. Incomplete cleanup fences both the Edit
-lease and subsequent Native work. Entry return and input submission do not prove
-application effect or completed cleanup.
+profile, target, environment and finite limits. Edit submits
+`NativeIntent.review = {"kind":"script"}` only with one-shot confirmation.
+Ordinary Run retains `review.kind: "operation"` with `operation` and
+`visible_postcondition` text and separate capture/input consent. The internal
+engine projection uses `input.package_approved`; external CLI plans cannot claim
+that authority or Script review.
+
+Existing Recognition capture is not an execution session; release and settle it
+first. One operation retains ownership through physical settlement. Incomplete
+cleanup fences both the Edit lease and subsequent Native work. Entry return and
+input submission do not prove application effect or completed cleanup.
 
 ## Evidence and limits
 
@@ -106,6 +137,16 @@ active-child Stop. The function returned 11, then 111 after an explicit saved
 edit; each invocation logged fresh module state. Readiness and workflow were
 deliberately throwing but were not invoked by Function. Stop retained a
 Cancelled primary outcome separately from clean controlled cleanup.
+
+The simplified flow ran a zero-argument function with package defaults and
+returned `42` without visiting Run. A required-argument function returned `111`.
+Earlier English/Japanese WKWebView checks at 760 CSS px verified prerequisite
+links, return focus, preserved draft/Undo and disabled unapproved Native execution.
+Dirty Native saved and reread in place without submitting Native execution.
+The captured-Script confirmation supersedes that disabled-Run review placement:
+configured Run opens review without prose, and only Allow grants capture/input.
+UI smoke observed confirmation, Back/Escape focus and stale-target refusal;
+full integrated verification remains pending.
 
 These are controlled, non-native results. Separately authorized native
 attachment, input, game effect and physical settlement remain independent

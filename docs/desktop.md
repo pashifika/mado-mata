@@ -354,7 +354,7 @@ Settings, New workspace, Saved workspaces and unsaved-change confirmation use
 the same compact Edit control in their own footer, without an adjacent information
 icon or upper owner strip. Stop acknowledgement is not worker settlement.
 
-**Package contents** carries **Validate** and **Setup**. Setup inherits the
+**Package contents** carries **Validate** and **Run…**. Run… retains the
 saved-package validation icon: unchecked (dash), valid (check), invalid (cross),
 stale (clock) and running (hourglass). Its localized hint identifies that saved
 revision's validation state, not execution readiness or Native approval.
@@ -502,7 +502,7 @@ Neither action inspects, binds, or runs the package.
   count; their content remains scrollable at constrained window heights.
 - **Validate** in **Package contents** checks one saved revision through the
   existing inventory and trusted compiler without evaluating package code.
-  Unsaved text is excluded. The adjacent **Setup** icon distinguishes unchecked,
+  Unsaved text is excluded. The adjacent **Run…** icon distinguishes unchecked,
   running, valid, invalid and earlier-revision results. Collapsed navigation
   retains both controls. **Status details** keeps the revision, diagnostic count
   and source locations; a location returns to the owning Edit
@@ -539,55 +539,79 @@ Neither action inspects, binds, or runs the package.
 
 ### Execute Scripts in Edit
 
-Open **Setup** beside **Validate** in **Package contents** to run **Whole package**
-or an existing **Function**. The compact dialog keeps invocation controls out of
-the editor's permanent layout.
+Open **Run…** beside **Validate** in **Package contents**. Select **Whole package**
+or an existing function, check **Destination**, then run. Valid package defaults
+need no profile-selection step or visit to the Run tab.
 
-- First opening Setup reads the saved schema and eligible functions without
-  running package code. Use **Reload saved setup and functions** to refresh it;
+- First opening Run… reads the saved schema and eligible functions without
+  running package code. **Reload saved setup and functions** refreshes them;
   failed discovery waits for an explicit retry. Opening Edit, saving and OMP
-  draft operations never start this discovery.
+  draft operations never start discovery.
+- Initial values come from the package's `default` preset, otherwise its schema
+  defaults. The chosen source is shown below Destination. Invalid values or a
+  missing previously selected profile remain errors; defaults never hide them.
+- A declared target initially selects **Real application**, without granting
+  consent. A package without a target starts with **Test**, which does not operate
+  the application. Unsupported Native execution never falls back to Test.
 - **Whole package** uses normal readiness followed by workflow. **Function**
   calls the selected file-level declaration only. Exported and file-local
   functions, function/arrow bindings and async functions are eligible. Nested
   closures, receiver-dependent methods and generators are unavailable.
   The list shows the original signature and location without executing modules.
-- Choose the function and positional JSON arguments in the dialog. Arguments
-  default to `[]`; limits are 64 KiB UTF-8, depth 32 and 32 arguments. Known
-  missing required arguments fail before invocation.
-- **Execution setup → Run** opens profile/preset, option values, execution lane,
-  Target, Native review and profile repair under the same Edit owner.
-  **Return to Edit** preserves source drafts, selection, Undo, function and
-  arguments. This is the Edit trial's setup, not an ordinary Run profile draft;
-  ordinary Start remains unavailable during Edit.
-  Values use the current authoring schema. Rejected profiles retain explicit
-  repair and confirmed Reset. Discovery does not migrate or save profiles;
-  same-revision reads preserve the repair draft.
-- **Run** captures clean saved content. **Save all and run** explicitly publishes
-  source, metadata and Recognition drafts through the same ordered Save flow.
-  Partial Save, refresh failure, composition, external conflict or a newer edit
-  stops execution; committed saves are not repeated automatically.
+- Arguments default to `[]` and stay collapsed for zero-argument functions.
+  Required, nonempty or invalid arguments expand the positional JSON field.
+  Limits are 64 KiB UTF-8, depth 32 and 32 arguments; missing required positions
+  fail before invocation.
+- Missing target or OCR configuration provides a direct **Set up target
+  application** or **OCR environment settings** action. Return from advanced
+  settings, or close OCR settings, to reopen the same execution dialog.
+- **Advanced execution settings** opens profiles, option values, lanes, Target
+  and profile repair on Run under the same Edit owner. **Return to execution**
+  preserves source drafts, selection, Undo, function and arguments. Ordinary
+  Start remains unavailable during Edit. Rejected profiles retain explicit
+  repair and confirmed Reset; discovery does not migrate or save profiles.
+- **Run** captures clean saved content. For Test and Recorded playback,
+  **Save all and run** explicitly publishes source, metadata and Recognition
+  drafts through the same ordered Save flow. Partial Save, refresh failure,
+  composition, external conflict or a newer edit stops execution; committed
+  saves are not repeated automatically.
 - **Rerun** retains setup but resolves current saved content again. Every
   invocation gets a fresh VM, module state and host handles. It does not reset
   the game: existing battle logic sees the game's current state. A renamed or
   ineligible function requires selection again. Imports and top-level
   initialization still run under restricted loading rules.
-- Controlled uses the non-native sink. Replay additionally needs a compatible
-  recorded descriptor and saved OCR environment. Native requires explicit
-  target setup and fresh per-submission capture/input review. Saving dirty
-  content withdraws Native consent: review the final saved revision before Run.
+- **Recorded playback** uses the non-native sink and needs a compatible recorded
+  descriptor and saved OCR environment. **Real application** uses Native and
+  requires a saved target, OCR environment and fresh review in this dialog.
+  **Run** opens a captured Script/target confirmation; it grants no permission.
+  Review the saved revision, entry, arguments, values, target, route, focus,
+  OCR environment and finite limits, then choose **Allow** for one execution.
+  This permits live capture and real keyboard/pointer input by that Script,
+  including its imports and module initialization; it does not assert a game
+  outcome. Edit requires neither handwritten operation/postcondition text nor
+  separate capture/input checkboxes. Optional whole-package launch/recovery
+  remain separately approved under **Limits and optional launch/recovery**.
+- **Back**, cancellation, closing or Escape grants no capture/input permission.
+  Any intervening source, setup, target or environment change invalidates the
+  confirmation. A changed target found during the final reread refuses execution
+  rather than replacing the displayed target. Allow is consumed once, including
+  on refusal; Rerun requires a new confirmation. Ordinary Run-page **Start**
+  retains its operation/postcondition review and separate capture/input consent.
+- Dirty Native content offers **Save all and review**. It saves and rereads
+  without executing or opening confirmation, and stays in the dialog. Choose
+  **Run** again to review the final saved revision, then **Allow**.
   Function Native attaches only to an already-running target; it cannot launch,
-  recover, reset a scene or call readiness-only startup methods. Release and
-  settle retained native capture first.
-- Editing after capture affects the next run only. Results identify the executed
+  recover, reset a scene or call readiness-only startup methods.
+  Release and settle retained native capture first.
+- Editing after admission affects the next run only. Results identify the executed
   revision separately from newer source, retain original-source diagnostics and
   use shared **Stop**, logs and run details. Primitive returns have bounded
   summaries; objects and other nonprimitive values remain opaque. Private
   native/replay details stay behind disclosure. A returned function or submitted
   input is not proof of game effect or physical cleanup.
   **Execution results** opens the shared Run details page, not a second inline
-  result panel. Run and navigation close the Setup dialog first. Setup discovery
-  keeps its owner-bound Stop inside the dialog; Escape returns focus to Setup.
+  result panel. Execution and navigation close the dialog first. Setup discovery
+  keeps owner-bound Stop inside it; Escape returns focus to Run….
   Compiler diagnostics also retain their checked saved revision. If the editor
   has changed, a diagnostic opens the file without claiming an exact new
   position; its unsaved text and history remain intact.

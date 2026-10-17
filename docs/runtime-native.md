@@ -72,8 +72,10 @@ outranks a later process exit. Window/permission/provider failure is not confirm
 exit, and launch/capture availability is not a Script-observed usable screen.
 
 The independent CLI retains explicit `native_config` and its existing preparation
-contract. External `run`/`manual` plans cannot select Desktop-only `native_budgets`
-or `input.reviewed_operation`; the new startup calls do not grant CLI authority.
+contract. External `run`/`manual` plans cannot select Desktop-only `native_budgets`,
+`native_config.native.input.package_approved: true` or
+`native_config.native.review.kind: "script"`. The new startup calls do not grant
+CLI authority.
 See [ADR 0008](adr/0008-macos-native-run-admission.md) for recipe semantics,
 deadline/ownership rules, first-frame placement and result commitment.
 
@@ -407,10 +409,16 @@ the required prospective `native_config.native` record:
 - `input`: independent `approved`, `duration_ms`, `max_actions`, `route`, `focus`,
   and nonempty `representative_actions`.
   Optional `macos_process_pointer_mode` and `click_hold_ms` are described below.
-- `geometry`: the placement object above; `recognition_language`,
-  `visible_postcondition`, `cleanup_ms`, and `containment_ms`.
+- `review`: `kind: "operation"` with explicit nonempty `operation` and
+  `visible_postcondition` text.
+- `geometry`: the placement object above; `recognition_language`, `cleanup_ms`,
+  and `containment_ms`.
 - Optional `package_entries` and `templates` use the same captured-asset mapping
   as replay. Omit both for OCR-only execution.
+
+Omit `input.package_approved` or set it to `false`. Desktop-only package approval
+and `review.kind: "script"` are rejected before package/output I/O; they cannot
+replace the CLI's explicit operation review, geometry or representative actions.
 
 All authorities must be positive, finite, and within the plan's enclosing bounds.
 The native and enclosing `containment_ms` must be equal; the supervisor cannot
