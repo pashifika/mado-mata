@@ -16,8 +16,8 @@ separate launch-if-absent/capture/input/recovery consent, reviewed
 operation/postcondition text, and finite limits.
 Approval is transient and spent on every Start. Relevant edits, including a target
 draft changed back to its saved value, invalidate it. The text describes the
-operator's review, not a hostile-script sandbox. Edit uses the one-shot captured
-Script confirmation in [ADR 0011](0011-edit-script-execution.md) instead; ordinary
+operator's review, not a hostile-script sandbox. Edit uses explicit Script Run
+as described in [ADR 0011](0011-edit-script-execution.md); ordinary
 Run's review is unchanged. IPC cannot supply a Plan, process identity, executable,
 environment override, or native configuration.
 
@@ -29,7 +29,7 @@ evaluating package code or acquiring native capture/input. Then run the existing
 `readiness()` in the existing supervised QuickJS runner, before target attachment.
 Reuse those captured inputs throughout the operation.
 
-Typed discovery separates confirmed absence, a unique verified process,
+For ordinary operation review, typed discovery separates confirmed absence, a unique verified process,
 ambiguity, unverifiable candidates and OS failure. Only approved absence permits
 one submission after recipe preparation/revalidation, a captured-resource
 checkpoint and the final correspondence recheck, in that order. A newly appearing
@@ -56,9 +56,9 @@ identity: explicit process absence, a verified reused PID or the bound zombie
 lifetime produces typed `TargetExited` evidence. Failed/partial lookups,
 unverifiable metadata, window loss, permission/provider errors and launcher exit
 do not prove game exit. No error message or Script log is parsed for eligibility.
-Generic facade target loss is refined only by an independent positive lifetime
-proof. The public facade's first capture fault wins over a later process exit;
-capture, recognition and input remain facade-owned.
+After the SDK reports TargetLost, approved recovery refines that fault only by
+independent positive lifetime proof. Other SDK faults retain precedence;
+capture, recognition and input remain SDK-owned, without duplicate host-call checks.
 
 Keep one reservation, immutable snapshot and irreversible outer Stop owner.
 Before admitting attempt 2, require clean native/input settlement, child reap,
@@ -101,18 +101,22 @@ Module evaluation, Workflow, Controlled and Replay cannot use these calls.
 The independent M0 CLI keeps its explicitly supplied `native_config`; it cannot
 select Desktop-only phase budgets or acquire this preparation authority.
 
-## Edit-owned Function attachment
+## Edit-owned Script attachment
 
-[ADR 0011](0011-edit-script-execution.md) adds a narrow caller of the same target
-correspondence and initialization machinery. A freshly reviewed Function trial
-attaches only to an already-running target, then instantiates the selected module
-under restricted admission and invokes its callable. It does not call package
-readiness, synthesize `"Ready"`, submit a launch or admit exit recovery.
-Preparation, instantiation and function execution remain bounded by the existing
-phase budgets and immutable outer deadline. Readiness-only SDK calls refuse.
-Whole package retains the Script-requested startup contract above; capture
-availability, function return, input receipts and physical cleanup remain
-distinct facts.
+[ADR 0011](0011-edit-script-execution.md) maps the saved APP to its actual runtime
+executable, then gives that path and exact window title to SDK selection.
+Matching paths use metadata only; relocated paths require existing signed
+correspondence. The SDK binds and retains the process/window without duplicate
+host-call liveness checks. Each explicit Run executes current source without a
+second review screen. Launch requires separately approved confirmed absence;
+recovery requires positive exit evidence after SDK target loss.
+
+Function attaches to an already-running target, instantiates the selected module
+under restricted admission and invokes its callable. It never calls readiness,
+synthesizes `"Ready"`, launches or recovers. Existing finite phase budgets and
+the immutable outer deadline still apply. Whole package retains Script-requested
+startup; capture availability, function return, input receipts and physical
+cleanup remain distinct facts.
 
 
 ## Launch library and OS semantics

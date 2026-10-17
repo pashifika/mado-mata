@@ -320,7 +320,12 @@ fn missing_replay_environment_retains_a_blocked_cli_record_without_a_child() {
 
 #[test]
 fn external_cli_plans_cannot_claim_desktop_reviewed_authority() {
-    for form in ["package_approved", "script_review", "native_budgets"] {
+    for form in [
+        "package_approved",
+        "script_review",
+        "native_budgets",
+        "confirm_process_exit",
+    ] {
         let mut plan: Plan =
             serde_json::from_str(include_str!("../fixtures/controlled-plan.json")).unwrap();
         plan.lane = "native".into();
@@ -328,6 +333,7 @@ fn external_cli_plans_cannot_claim_desktop_reviewed_authority() {
         if form != "native_budgets" {
             plan.native_config = Some(serde_json::json!({
                 "native": {
+                    "confirm_process_exit": form == "confirm_process_exit",
                     "review": if form == "script_review" {
                         serde_json::json!({"kind":"script"})
                     } else {

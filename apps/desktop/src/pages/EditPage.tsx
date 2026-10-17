@@ -86,8 +86,11 @@ export interface PageAuthoring {
 interface Props {
   session: AuthoringSession; label: string; handlers: EditHandlers;
   recognition: ReactNode; recognitionDirty: boolean;
-  // Script execution Setup trigger and dialog beside Validate; the trigger carries the saved-package validation icon.
+  // Script execution Setup trigger, its settings dialog and the adjacent Run beside Validate; the Setup trigger carries
+  // the saved-package validation icon.
   trial: ReactNode;
+  // Notices and failures of the latest explicit Run before admission, shown with this page's other errors.
+  trialFeedback: ReactNode;
   // Why the dirty recognition draft cannot be saved as it is; Save all still saves file drafts first.
   recognitionSaveBlock: string | null;
   // The effective packages root (the sources folder) the host resolves Duplicate destinations in; shown as a preview only.
@@ -103,7 +106,7 @@ interface Props {
   exportBlock: string | null;
 }
 
-export default function EditPage({session, label, handlers, recognition, trial, recognitionDirty, recognitionSaveBlock, packagesRoot, completionPreferences, locked, lockReason, leaseLost, validationActive, exportBlock}: Props) {
+export default function EditPage({session, label, handlers, recognition, trial, trialFeedback, recognitionDirty, recognitionSaveBlock, packagesRoot, completionPreferences, locked, lockReason, leaseLost, validationActive, exportBlock}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const a = t.authoring;
@@ -498,6 +501,7 @@ export default function EditPage({session, label, handlers, recognition, trial, 
     </div>
     {leaseLost && <p id="authoring-lease-lost" className="inline-warning" role="alert">{a.leaseLost}</p>}
     {session.error && <div id="authoring-error"><FaultMessage title={a.actionFailed} value={session.error}/></div>}
+    {trialFeedback}
     {recoveryFault && <div className="button-row"><button id="authoring-recover" type="button" disabled={locked} onClick={handlers.recover}>{a.recover}</button>
       <span className="muted">{a.recoverHelp}</span></div>}
     {session.conflict && <section id="authoring-conflict" className="inline-warning" role="alert"><strong>{a.conflictHeading}</strong> {a.conflictHelp}

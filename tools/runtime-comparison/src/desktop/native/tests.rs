@@ -104,8 +104,7 @@ fn recovery_is_default_zero_and_requires_separate_launch_approval() {
 fn target() -> NativeTarget {
     NativeTarget {
         executable: std::env::current_exe().unwrap().canonicalize().unwrap(),
-        process_id: 17,
-        process_lifetime: "0123456789abcdef".into(),
+        process: Some((17, "0123456789abcdef".into())),
         window_title: "Exact reviewed window".into(),
         input: NativeInputPolicy {
             route: "process_directed".into(),
@@ -299,7 +298,7 @@ fn native_target_policy_has_no_route_focus_or_pointer_fallback() {
     }
     for lifetime in ["", "0123456789abcdeF", "0123456789abcdef0"] {
         let mut target = target();
-        target.process_lifetime = lifetime.into();
+        target.process.as_mut().unwrap().1 = lifetime.into();
         assert_eq!(
             validate_target(Some(&target)).err().unwrap().category,
             "NativeRefused"
@@ -421,7 +420,10 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
         assert_eq!(native["cleanup_ms"], 1_000);
         assert_eq!(native["containment_ms"], 2_000);
         assert_eq!(native["executable_or_bundle"], json!(target.executable));
-        assert_eq!(native["process_lifetime"], target.process_lifetime);
+        assert_eq!(
+            native["process_lifetime"],
+            target.process.as_ref().unwrap().1
+        );
         assert_eq!(native["input"]["route"], "process_directed");
         assert_eq!(
             native["input"]["macos_process_pointer_mode"],
@@ -642,4 +644,57 @@ fn function_requests_reject_launch_recovery_and_controlled_scenarios() {
         "Authority"
     );
     assert!(controller.poll().run.is_none());
+}
+
+#[test]
+fn only_script_projection_defers_process_selection_to_the_sdk() {
+    let inventory = fixture();
+    let engine = std::env::current_exe().unwrap().canonicalize().unwrap();
+    for recoveries in [0, 1] {
+        let mut request = request(&inventory);
+        request.lane = "native".into();
+        let mut selected = intent();
+        selected.launch_approved = recoveries != 0;
+        selected.max_exit_recoveries = recoveries;
+        request.native_intent = Some(selected);
+        let mut target = target();
+        target.process = None;
+        target.executable = engine.clone();
+        let mut plan = crate::desktop::manual_plan().unwrap();
+        let budgets = request.native_intent.as_ref().unwrap().limits.budgets();
+        plan.lane = "native".into();
+        plan.native_budgets = Some(budgets);
+        plan.limits.duration_ms = budgets.total_ms().unwrap();
+        plan.limits.readiness_ms = budgets.readiness_ms;
+        let templates = prepare_templates(&inventory, &plan.limits).unwrap();
+        let environment = json!({"version":1,"ocr":{"language":crate::environment::LANGUAGE},"native_libraries":[],"replay":null,"native":null});
+        assert_eq!(
+            project(
+                &mut plan,
+                &request,
+                &target,
+                &engine,
+                &templates,
+                environment.clone()
+            )
+            .unwrap_err()
+            .category,
+            "NativeRefused"
+        );
+        request.native_intent.as_mut().unwrap().review = NativeReview::Script {};
+        project(
+            &mut plan,
+            &request,
+            &target,
+            &engine,
+            &templates,
+            environment,
+        )
+        .unwrap();
+        let native = &plan.native_config.as_ref().unwrap()["native"];
+        assert_eq!(native["executable_or_bundle"], json!(target.executable));
+        assert!(native["process_id"].is_null());
+        assert!(native["process_lifetime"].is_null());
+        assert_eq!(native["confirm_process_exit"], recoveries != 0);
+    }
 }

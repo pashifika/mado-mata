@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {AuthoringController} from './authoring-controller.ts';
 import {applySave, beginComposition, beginPending, endComposition, openSession, replaceFile, saveTicket, selectFile, undoFile} from './authoring.ts';
-import {applyTrialRecovery, currentTrialSource, functionKey, trialArguments, trialContext, trialDiagnosticLocation, trialDiagnostics, trialRequest, trialSourceTicket, TrialConfirmationGate} from './edit-trial.ts';
+import {applyTrialRecovery, currentTrialSource, functionKey, trialArguments, trialContext, trialDiagnosticLocation, trialDiagnostics, trialRunIntent, trialRunRequest, trialSourceTicket} from './edit-trial.ts';
 import {approveNative, chooseLane, commandValues, deriveBound, editDraft, editNativeReview, newDraft, selectProfile} from './workspace.ts';
 import {nativeOutcome} from './state.ts';
 import {authoringActivity} from './status.ts';
@@ -98,7 +98,6 @@ test('a declared target chooses Native without inventing intent, consent or a su
   const facts=deriveBound(initial.bound,null,'en',null);
   assert.equal(initial.bound.lane,'native');
   assert.equal(initial.profileChoice,'values');
-  assert.equal(initial.review,null);
   assert.deepEqual(initial.bound.native,{operation:'',postcondition:'',workflowSeconds:null,capture:false,input:false,launch:false,recovery:false,key:null});
   assert.equal(facts.native.block,'nativeUnavailable');
   assert.equal(facts.native.intent,null);
@@ -122,11 +121,11 @@ test('same-owner reload retains explicitly edited invalid values and the chosen 
   assert.throws(()=>commandValues({bound:next.bound},facts),error=>error.presentation.key==='numericFields');
 });
 
-test('another Edit owner receives independent package defaults and no previous Native review',()=>{
+test('another Edit owner receives independent package defaults and no previous Native choices',()=>{
   const drafts=controller();
   const initial=trialContext(context(),drafts.current(),'fixture',null);
   const configured={...initial,unit:'function',selected:functionKey(candidate),arguments:'[8]',profileChoice:'profile:profile-one',
-    review:trialSourceTicket(drafts),bound:{...selectProfile(initial.bound,profile.id),lane:'replay',descriptorPath:'/fixture/replay',
+    bound:{...selectProfile(initial.bound,profile.id),lane:'replay',descriptorPath:'/fixture/replay',
       native:{operation:'Press once',postcondition:'Dialog is shown',workflowSeconds:'60',capture:true,input:true,launch:true,recovery:true,key:'previous-review'}}};
   const otherOwner={...owner,token:'another-edit-lease'};
   const packaged={...packageInfo,profiles:{default:{options:{speed:6}}},target:{id:'game',window_title:'Other title'},target_identity:'target-2'};
@@ -140,7 +139,6 @@ test('another Edit owner receives independent package defaults and no previous N
   assert.equal(next.unit,'package');
   assert.equal(next.selected,null);
   assert.equal(next.arguments,'[]');
-  assert.equal(next.review,null);
   assert.deepEqual(next.bound.native,{operation:'',postcondition:'',workflowSeconds:null,capture:false,input:false,launch:false,recovery:false,key:null});
   assert.equal(deriveBound(next.bound,null).native.intent,null);
 });
@@ -163,7 +161,7 @@ test('JSON arguments preserve positional data, empty optional arguments and lite
   assert.equal(result.values[1].text,'host.input()');
 });
 
-test('a captured source review survives navigation and non-mutating work, but not composition',()=>{
+test('a captured Run source survives navigation and non-mutating work, but not composition',()=>{
   const drafts=controller();
   const ticket=trialSourceTicket(drafts);
   assert.ok(ticket);
@@ -244,7 +242,6 @@ test('rerun resolves the same declaration on current saved source and refuses a 
   assert.equal(refreshed.bound.descriptorPath,'/fixture/replay');
   assert.equal(refreshed.bound.draftRevision,configured.bound.draftRevision);
   assert.deepEqual(deriveBound(refreshed.bound,null).parsed.values,{speed:4});
-  assert.equal(refreshed.review,null);
   const renamed=trialContext(context('saved-3',{functions:[{...candidate,function:'newBattle'}]}),{...session,revision:'saved-3'},'fixture',refreshed);
   assert.equal(renamed.unit,'function');
   assert.equal(renamed.selected,null);
@@ -351,21 +348,6 @@ test('an earlier repair receipt cannot replace the current context or profile ca
   assert.equal(next.bound,current.bound);
   assert.equal(next.recoveryOutcomes[0].status,'saved');
   assert.deepEqual(next.bound.profiles,[profile]);
-});
-
-test('an unchanged saved-context read retains optional launch review, while a newer saved revision consumes it',()=>{
-  const drafts=controller();
-  const initial=trialContext(context(),drafts.current(),'fixture',null);
-  const sourceTicket=trialSourceTicket(drafts);
-  const reviewed={...initial,review:sourceTicket,bound:{...initial.bound,native:{...initial.bound.native,launch:true,recovery:true,key:'reviewed'}}};
-  const same=trialContext(context(),drafts.current(),'fixture',reviewed);
-  assert.equal(same.review,sourceTicket);
-  assert.equal(same.bound.native.launch,true);
-  assert.equal(same.bound.native.capture,false);
-  const newer=trialContext(context('saved-2'),{...drafts.current(),revision:'saved-2'},'fixture',reviewed);
-  assert.equal(newer.review,null);
-  assert.equal(newer.bound.native.launch,false);
-  assert.equal(newer.bound.native.recovery,false);
 });
 
 test('Script preparation and stopping retain the real Edit owner and shared cancellation',()=>{
@@ -486,7 +468,7 @@ const trialCapability={default_limits:trialLimits,max_workflow_ms:900000};
 const trialEnvironment={profile:'fixture',model:'fixture-model',language:'en',provider:'cpu',runtime_profile:'fixture-runtime',
   model_root:'/fixture/models',runtime_path:'/fixture/runtime',native_library_paths:[]};
 
-function nativeConfirmationContext(){
+function nativeRunContext(){
   const drafts=controller();
   const packaged={...packageInfo,target:{id:'game',window_title:'Exact window'},target_identity:'target-declaration'};
   const initial=trialContext(context('saved-1',{package:packaged}),drafts.current(),'fixture',null);
@@ -498,11 +480,21 @@ function nativeConfirmationContext(){
       configuration,resolution:{game:{path:'/fixture/Game.app',executable:'/fixture/Game.app/Contents/MacOS/Game'},launcher:null,working_directory:null},
     }}};
   const state=trialContext({...initial.context,target},drafts.current(),'fixture',initial);
-  return {controller:drafts,state,environment:structuredClone(trialEnvironment),capability:structuredClone(trialCapability),generation:0};
+  return {controller:drafts,state,environment:structuredClone(trialEnvironment),capability:structuredClone(trialCapability)};
+}
+
+// The final request one explicit Run submits after rereading `state` for the current saved source.
+function runRequest(input,state=input.state,intent=trialRunIntent(input.state,input.environment,input.capability)){
+  return trialRunRequest(intent,state,trialSourceTicket(input.controller),input.environment,input.capability);
+}
+
+function chooseStartup(input){
+  const launch=approveNative(input.state.bound,'launch',true,input.environment,input.capability,'script');
+  return {...input.state,bound:approveNative(launch,'recovery',true,input.environment,input.capability,'script')};
 }
 
 test('configured Script Native is ready without prose or checkboxes, while ordinary Run still requires operation review',()=>{
-  const input=nativeConfirmationContext();
+  const input=nativeRunContext();
   const facts=deriveBound(input.state.bound,input.environment,'en',input.capability,'script');
   assert.equal(facts.startBlock,null);
   assert.equal(facts.native.block,null);
@@ -523,213 +515,145 @@ for(const {scenario,change,block} of [
     target:targetReadFailed(input.state.bound.target,{category:'Storage',message:'Unavailable',context:null})}}}),block:'nativeTarget'},
   {scenario:'dirty target configuration',change:input=>({...input,state:{...input.state,bound:{...input.state.bound,
     target:editTarget(input.state.bound.target,{...input.state.bound.target.draft,windowTitle:'Unsaved title'})}}}),block:'nativeTargetDirty'},
-]) test(`Script confirmation keeps ${scenario} blocked`,()=>{
-  const input=change(nativeConfirmationContext());
+]) test(`Script Run with ${scenario} submits nothing`,()=>{
+  const input=change(nativeRunContext());
   assert.equal(deriveBound(input.state.bound,input.environment,'en',input.capability,'script').native.block,block);
-  assert.equal(new TrialConfirmationGate().open(input),null);
+  assert.equal(runRequest(input),'setupIncomplete');
 });
 
-test('opening and cancelling confirmation grant no capture/input authority and an old callback cannot use a reopened capture',()=>{
-  const input=nativeConfirmationContext();
-  const gate=new TrialConfirmationGate();
-  const capture=gate.open(input);
-  assert.ok(capture);
-  assert.equal(gate.current(capture,input),true);
-  assert.equal(capture.request.native_intent.capture_approved,false);
-  assert.equal(capture.request.native_intent.input_approved,false);
-  assert.equal(gate.dispatch(capture,input),null);
-  gate.cancel();
-  assert.equal(gate.consume(capture,input),false);
-  assert.equal(gate.dispatch(capture,input),null);
-  const reopened=gate.open(input);
-  assert.ok(reopened);
-  assert.notEqual(reopened,capture);
-  assert.equal(gate.consume(capture,input),false);
-  assert.equal(gate.dispatch(reopened,input),null);
+test('setup and its rereads grant no capture/input authority; only the request of one explicit Run carries it',()=>{
+  const input=nativeRunContext();
+  const prepared=runRequest(input);
+  assert.deepEqual(prepared.request.native_intent,{target_revision:1,target_binding_id:'saved-target',target_declaration_identity:'target-declaration',
+    capture_approved:true,input_approved:true,launch_approved:false,max_exit_recoveries:0,review:{kind:'script'},limits:trialLimits});
+  assert.deepEqual([input.state.bound.native.capture,input.state.bound.native.input],[false,false]);
+  const reread=trialContext(input.state.context,input.controller.current(),'fixture',input.state);
+  assert.equal(deriveBound(reread.bound,input.environment,'en',input.capability,'script').native.intent.capture_approved,false);
+  // A repeated Run needs no reopened setup and builds its own request instead of reusing the previous one.
+  const repeated=runRequest(input,reread);
+  assert.notEqual(repeated.request.native_intent,prepared.request.native_intent);
+  assert.deepEqual(repeated.request,prepared.request);
 });
 
-test('explicit confirm submits the captured function, arguments, profile and target once after an unchanged reread',()=>{
-  const input=nativeConfirmationContext();
+test('explicit Run submits the selected function, arguments, profile and target after an unchanged reread',()=>{
+  const input=nativeRunContext();
   input.state={...input.state,unit:'function',selected:functionKey(candidate),arguments:'[8, {"nested":[1]}]',
     profileChoice:'profile:profile-one',bound:selectProfile(input.state.bound,profile.id)};
-  const gate=new TrialConfirmationGate();
-  const capture=gate.open(input);
-  assert.ok(capture);
-  assert.equal(capture.source.revision,'saved-1');
-  assert.equal(gate.consume(capture,input),true);
-  input.state=trialContext(input.state.context,input.controller.current(),'fixture',input.state);
-  const request=gate.dispatch(capture,input);
-  assert.ok(request);
-  assert.deepEqual(request.function,{module:'battle.ts',function:'battle',arguments:[8,{nested:[1]}]});
-  assert.deepEqual(request.values,{speed:3});
-  assert.equal(request.profile_id,'profile-one');
-  assert.deepEqual(request.native_intent,{target_revision:1,target_binding_id:'saved-target',target_declaration_identity:'target-declaration',
-    capture_approved:true,input_approved:true,launch_approved:false,max_exit_recoveries:0,review:{kind:'script'},limits:trialLimits});
-  assert.equal(capture.request.native_intent.capture_approved,false);
-  assert.equal(capture.request.native_intent.input_approved,false);
-  assert.equal(gate.consume(capture,input),false);
-  assert.equal(gate.dispatch(capture,input),null);
+  const reread=trialContext(input.state.context,input.controller.current(),'fixture',input.state);
+  const prepared=runRequest(input,reread);
+  assert.equal(prepared.profileName,'Reviewed');
+  assert.deepEqual(prepared.request.function,{module:'battle.ts',function:'battle',arguments:[8,{nested:[1]}]});
+  assert.deepEqual(prepared.request.values,{speed:3});
+  assert.equal(prepared.request.profile_id,'profile-one');
+  assert.equal(prepared.request.native_intent.target_binding_id,'saved-target');
+  assert.deepEqual([prepared.request.native_intent.launch_approved,prepared.request.native_intent.max_exit_recoveries],[false,0]);
 });
 
-const confirmationChanges=[
-  {scenario:'execution unit',change:input=>({...input,state:{...input.state,unit:'function',selected:functionKey(candidate),arguments:'[7]'}})},
-  {scenario:'function selection',change:input=>({...input,state:{...input.state,selected:'another function'}})},
-  {scenario:'arguments',change:input=>({...input,state:{...input.state,arguments:'[9]'}})},
-  {scenario:'explicit values',change:input=>({...input,state:{...input.state,bound:editDraft(input.state.bound,{speed:9})}})},
-  {scenario:'values edited back',change:input=>({...input,state:{...input.state,bound:editDraft(editDraft(input.state.bound,{speed:9}),{speed:1})}})},
-  {scenario:'profile choice',change:input=>({...input,state:{...input.state,profileChoice:'profile:profile-one',bound:selectProfile(input.state.bound,profile.id)}})},
-  {scenario:'package inventory',change:input=>({...input,state:{...input.state,context:{...input.state.context,package:{...input.state.context.package,inventory_identity:'new-inventory'}}}})},
-  {scenario:'saved revision',change:input=>({...input,state:{...input.state,context:{...input.state.context,revision:'saved-2'}}})},
-  {scenario:'Edit owner',change:input=>({...input,state:{...input.state,context:{...input.state.context,owner:{...owner,token:'other-owner'}}}})},
-  {scenario:'OCR environment',change:input=>({...input,environment:{...input.environment,model:'another-model'}})},
-  {scenario:'duration',change:input=>({...input,state:{...input.state,bound:editNativeReview(input.state.bound,'workflowSeconds','60')}})},
-  {scenario:'host limits',change:input=>({...input,capability:{...input.capability,default_limits:{...input.capability.default_limits,max_actions:32}}})},
-  {scenario:'intervening environment or setup change restored to identical values',change:input=>({...input,generation:input.generation+1})},
-  {scenario:'saved target revision',change:input=>{
-    const target=input.state.bound.target;
-    return {...input,state:{...input.state,bound:{...input.state.bound,target:readTarget(target,{...target.view,record:{...target.view.record,revision:2}})}}};
+for(const {scenario,change} of [
+  {scenario:'another Edit owner',change:state=>({...state,context:{...state.context,owner:{...owner,token:'other-owner'}}})},
+  {scenario:'another execution unit',change:state=>({...state,unit:'function',selected:functionKey(candidate),arguments:'[7]'})},
+  {scenario:'another destination',change:state=>({...state,bound:chooseLane(state.bound,'controlled')})},
+  {scenario:'a saved revision other than the captured source',change:state=>({...state,context:{...state.context,revision:'saved-2'}})},
+  {scenario:'a newer saved target revision under the same binding ID',change:state=>{
+    const target=state.bound.target;
+    return {...state,bound:{...state.bound,target:readTarget(target,{...target.view,record:{...target.view.record,revision:2}})}};
   }},
-  {scenario:'target configuration even under an unchanged binding ID',change:input=>{
-    const target=input.state.bound.target, binding=target.view.record.binding;
-    return {...input,state:{...input.state,bound:{...input.state.bound,target:readTarget(target,{...target.view,
-      record:{...target.view.record,binding:{...binding,configuration:{...binding.configuration,window_title:'Other window'}}}})}}};
-  }},
-];
-for(const {scenario,change} of confirmationChanges) test(`${scenario} invalidates both displayed and preparing confirmation without approving the newest data`,()=>{
-  const input=nativeConfirmationContext();
-  const gate=new TrialConfirmationGate();
-  const capture=gate.open(input);
-  assert.ok(capture);
-  const changed=change(input);
-  assert.equal(gate.consume(capture,changed),false);
-  assert.equal(gate.consume(capture,input),false);
-  assert.equal(gate.dispatch(capture,input),null);
-  const next=gate.open(input);
-  assert.equal(gate.consume(next,input),true);
-  assert.equal(gate.dispatch(next,changed),null);
-  assert.equal(gate.dispatch(next,input),null);
-  assert.equal(next.request.native_intent.capture_approved,false);
+]) test(`a reread with ${scenario} refuses the Run instead of submitting newer data`,()=>{
+  const input=nativeRunContext();
+  assert.equal(runRequest(input,change(input.state)),'changed');
 });
 
-test('a target refreshed during final context preparation never replaces the target displayed in confirmation',()=>{
-  const input=nativeConfirmationContext();
-  const gate=new TrialConfirmationGate();
-  const capture=gate.open(input);
-  assert.equal(gate.consume(capture,input),true);
+test('a target replaced during Run preparation is refused rather than replacing the target shown at Run',()=>{
+  const input=nativeRunContext();
+  const intent=trialRunIntent(input.state,input.environment,input.capability);
+  assert.deepEqual(intent.target,{id:'saved-target',revision:1});
   const original=input.state.context.target;
   const binding=original.record.binding;
-  const contextAfter={...input.state.context,target:{...original,record:{...original.record,revision:2,
-    binding:{...binding,id:'replacement-target',configuration:{...binding.configuration,window_title:'Replacement window'}}}}};
-  input.state=trialContext(contextAfter,input.controller.current(),'fixture',input.state);
-  assert.equal(input.state.bound.target.view.record.binding.id,'replacement-target');
-  assert.equal(capture.target.configuration.window_title,'Exact window');
-  assert.equal(capture.request.native_intent.target_binding_id,'saved-target');
-  assert.equal(gate.dispatch(capture,input),null);
-  assert.equal(gate.consume(capture,input),false);
+  const reread=trialContext({...input.state.context,target:{...original,record:{...original.record,revision:2,
+    binding:{...binding,id:'replacement-target',configuration:{...binding.configuration,window_title:'Replacement window'}}}}},
+    input.controller.current(),'fixture',input.state);
+  assert.equal(reread.bound.target.view.record.binding.id,'replacement-target');
+  assert.equal(runRequest(input,reread,intent),'changed');
+  // The next explicit Run names the replacement before it may submit it.
+  assert.equal(runRequest(input,reread,trialRunIntent(reread,input.environment,input.capability)).request.native_intent.target_binding_id,'replacement-target');
 });
 
-test('source edits and Undo keep confirmation stale while non-mutating source navigation does not',()=>{
-  const input=nativeConfirmationContext();
-  const gate=new TrialConfirmationGate();
-  const capture=gate.open(input);
-  input.controller.update(state=>selectFile(state,'other.ts',null));
-  assert.equal(gate.current(capture,input),true);
-  assert.equal(gate.consume(capture,input),true);
-  input.controller.update(state=>replaceFile(state,'battle.ts',source+'// changed\n'));
-  input.controller.update(state=>undoFile(state,'battle.ts'));
-  assert.equal(input.controller.current().drafts.get('battle.ts').text,source);
-  assert.equal(gate.dispatch(capture,input),null);
-  assert.equal(gate.consume(capture,input),false);
+test('a function missing from the newer saved source asks for a new selection and is never substituted',()=>{
+  const input=nativeRunContext();
+  const other={...candidate,function:'other',line:5};
+  input.state={...input.state,context:{...input.state.context,functions:[candidate,other]},unit:'function',selected:functionKey(candidate),arguments:'[1]'};
+  const intent=trialRunIntent(input.state,input.environment,input.capability);
+  const reread=trialContext({...input.state.context,functions:[other]},input.controller.current(),'fixture',input.state);
+  assert.equal(reread.selected,null);
+  assert.equal(runRequest(input,reread,intent),'selectAgain');
+  assert.equal(runRequest(input,{...input.state,selected:functionKey(other)},intent),'changed');
 });
 
-test('Cancel or Stop during preparation withdraws a consumed confirmation without changing source or Undo history',()=>{
-  const input=nativeConfirmationContext();
-  const session=input.controller.current();
-  const gate=new TrialConfirmationGate();
-  const capture=gate.open(input);
-  assert.equal(gate.consume(capture,input),true);
-  gate.cancel();
-  assert.equal(gate.dispatch(capture,input),null);
-  assert.equal(input.controller.current(),session);
-  assert.equal(gate.consume(capture,input),false);
-});
-
-test('dirty Native cannot capture authority; saving only enables a new explicit confirmation for the saved revision',()=>{
-  const input=nativeConfirmationContext();
-  const gate=new TrialConfirmationGate();
+test('dirty Native Save all and run continues to the newly saved revision with the same setup and no review step',()=>{
+  const input=nativeRunContext();
+  input.state={...chooseStartup(input),unit:'package'};
+  const intent=trialRunIntent(input.state,input.environment,input.capability);
   input.controller.update(state=>replaceFile(state,'battle.ts',source+'// saved later\n'));
-  assert.equal(gate.open(input),null);
+  assert.equal(trialSourceTicket(input.controller),null);
   const ticket=saveTicket(input.controller.current(),'battle.ts');
   const saved=view('saved-2');
   saved.files[0].text=ticket.text;
   input.controller.update(state=>applySave(state,ticket,{owner,committed_revision:'saved-2',view:saved,refresh_error:null}));
-  assert.equal(gate.open(input),null);
-  input.state=trialContext({...input.state.context,revision:'saved-2'},input.controller.current(),'fixture',input.state);
-  const capture=gate.open(input);
-  assert.ok(capture);
-  assert.equal(capture.source.revision,'saved-2');
-  assert.equal(capture.request.native_intent.capture_approved,false);
-  assert.equal(gate.dispatch(capture,input),null);
+  const current=trialSourceTicket(input.controller);
+  assert.equal(current.revision,'saved-2');
+  // The setup read for the earlier revision cannot run the newer source; its reread does, with the same choices.
+  assert.equal(runRequest(input),'changed');
+  const reread=trialContext({...input.state.context,revision:'saved-2',package:{...input.state.context.package,inventory_identity:'inventory-2'}},
+    input.controller.current(),'fixture',input.state);
+  const prepared=runRequest(input,reread,intent);
+  assert.equal(prepared.request.inventory_identity,'inventory-2');
+  assert.equal(prepared.request.function,null);
+  assert.deepEqual([prepared.request.native_intent.capture_approved,prepared.request.native_intent.input_approved],[true,true]);
+  assert.deepEqual([prepared.request.native_intent.launch_approved,prepared.request.native_intent.max_exit_recoveries],[true,1]);
 });
 
-test('whole-package launch/recovery remain separate explicit choices and Function never borrows them',()=>{
-  const input=nativeConfirmationContext();
-  input.state={...input.state,review:trialSourceTicket(input.controller),bound:
-    approveNative(approveNative(input.state.bound,'launch',true,input.environment,input.capability),'recovery',true,input.environment,input.capability)};
-  const gate=new TrialConfirmationGate();
-  const whole=gate.open(input);
-  assert.ok(whole);
-  assert.equal(whole.request.native_intent.launch_approved,true);
-  assert.equal(whole.request.native_intent.max_exit_recoveries,1);
-  assert.equal(whole.request.native_intent.capture_approved,false);
-  assert.equal(gate.consume(whole,input),true);
-  assert.equal(gate.dispatch(whole,input).native_intent.max_exit_recoveries,1);
-  input.state={...input.state,unit:'function',selected:functionKey(candidate),arguments:'[1]'};
-  const fn=gate.open(input);
-  assert.ok(fn);
-  assert.equal(fn.request.native_intent.launch_approved,false);
-  assert.equal(fn.request.native_intent.max_exit_recoveries,0);
-  assert.equal(gate.consume(fn,input),true);
-  assert.equal(gate.dispatch(fn,input).native_intent.launch_approved,false);
+test('whole-package launch/recovery remain separate choices, Function never borrows them and a new target withdraws them',()=>{
+  const input=nativeRunContext();
+  input.state=chooseStartup(input);
+  const whole=runRequest(input);
+  assert.deepEqual([whole.request.native_intent.launch_approved,whole.request.native_intent.max_exit_recoveries],[true,1]);
+  const fn=runRequest(input,{...input.state,unit:'function',selected:functionKey(candidate),arguments:'[1]'},
+    trialRunIntent({...input.state,unit:'function',selected:functionKey(candidate)},input.environment,input.capability));
+  assert.deepEqual([fn.request.native_intent.launch_approved,fn.request.native_intent.max_exit_recoveries],[false,0]);
+  assert.deepEqual([fn.request.native_intent.capture_approved,fn.request.native_intent.input_approved],[true,true]);
+  const target=input.state.bound.target;
+  const retargeted={...input.state,bound:{...input.state.bound,target:readTarget(target,{...target.view,record:{...target.view.record,revision:2}})}};
+  const native=deriveBound(retargeted.bound,input.environment,'en',input.capability,'script').native;
+  assert.deepEqual([native.launch,native.recovery,native.intent.launch_approved],[false,false,false]);
 });
 
-test('Controlled and replay requests retain their values and invocation without acquiring Native confirmation',()=>{
-  const input=nativeConfirmationContext();
+test('a schema reread cannot silently drop the startup choices named by Run',()=>{
+  const input=nativeRunContext();
+  input.state=chooseStartup(input);
+  const intent=trialRunIntent(input.state,input.environment,input.capability);
+  const reread=trialContext({...input.state.context,package:{...input.state.context.package,schema_identity:'schema-2'}},
+    input.controller.current(),'fixture',input.state);
+  assert.equal(runRequest(input,reread,intent),'changed');
+});
+
+test('Controlled and replay Runs keep their values and invocation without Native authority',()=>{
+  const input=nativeRunContext();
   input.state={...input.state,unit:'function',selected:functionKey(candidate),arguments:'[4]',bound:chooseLane(input.state.bound,'controlled')};
-  const source=trialSourceTicket(input.controller);
-  const controlled=trialRequest(input.state,source,null,null);
-  assert.ok(controlled);
+  const controlled=runRequest({...input,environment:null,capability:null});
   assert.equal(controlled.request.native_intent,null);
   assert.deepEqual(controlled.request.function,{module:'battle.ts',function:'battle',arguments:[4]});
-  assert.equal(new TrialConfirmationGate().open(input),null);
-  const replay=trialRequest({...input.state,bound:{...input.state.bound,lane:'replay',descriptorPath:'/fixture/corpus.json'}},source,input.environment,null);
-  assert.equal(replay.request.replay_descriptor_path,'/fixture/corpus.json');
-  assert.equal(replay.request.native_intent,null);
+  const replay={...input.state,bound:{...input.state.bound,lane:'replay',descriptorPath:'/fixture/corpus.json'}};
+  const prepared=runRequest({...input,state:replay,capability:null});
+  assert.equal(prepared.request.replay_descriptor_path,'/fixture/corpus.json');
+  assert.equal(prepared.request.native_intent,null);
 });
 
-test('confirmation detaches target, values and environment from later mutable host or draft objects',()=>{
-  const input=nativeConfirmationContext();
-  const gate=new TrialConfirmationGate();
-  const capture=gate.open(input);
-  input.environment.model='changed-in-place';
-  input.state.bound.draft.speed=9;
-  input.state.bound.target.view.record.binding.configuration.arguments.push('--changed');
-  assert.equal(capture.environment.model,'fixture-model');
-  assert.deepEqual(capture.request.values,{speed:1});
-  assert.deepEqual(capture.target.configuration.arguments,['--fixture']);
-  assert.equal(gate.consume(capture,input),false);
-  assert.equal(gate.dispatch(capture,input),null);
-});
-
-test('a selected saved profile changed under the same ID invalidates confirmation even when draft values are unchanged',()=>{
-  const input=nativeConfirmationContext();
+test('a saved profile changed under the same ID before Run submits the selected values as a draft, not that profile identity',()=>{
+  const input=nativeRunContext();
   input.state={...input.state,profileChoice:'profile:profile-one',bound:selectProfile(input.state.bound,profile.id)};
-  const gate=new TrialConfirmationGate();
-  const capture=gate.open(input);
-  assert.equal(gate.consume(capture,input),true);
-  input.state={...input.state,bound:{...input.state.bound,profiles:[{...profile,name:'Changed profile',values:{speed:7}}]}};
-  assert.deepEqual(input.state.bound.draft,{speed:3});
-  assert.equal(gate.dispatch(capture,input),null);
-  assert.equal(capture.profileName,'Reviewed');
-  assert.deepEqual(capture.request.values,{speed:3});
+  const reread=trialContext({...input.state.context,profiles:[{...profile,name:'Changed profile',values:{speed:7}}]},
+    input.controller.current(),'fixture',input.state);
+  const prepared=runRequest(input,reread);
+  assert.deepEqual(prepared.request.values,{speed:3});
+  assert.equal(prepared.request.profile_id,'draft');
 });

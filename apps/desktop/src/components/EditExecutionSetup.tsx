@@ -33,7 +33,7 @@ export default function EditExecutionSetup({state, facts, handlers, locked, load
       <h1 id="edit-execution-setup-heading" tabIndex={-1}>{s.advancedSetup}</h1>
       <p>{s.setupHelp}</p>
     </div><div className="actions">
-      <button id="trial-return-edit" type="button" onClick={onReturn}>{s.returnToExecution}</button>
+      <button id="trial-return-edit" type="button" onClick={onReturn}>{s.returnToSetup}</button>
     </div></div>
     <div className="button-row">
       <button id={state ? 'trial-reload' : 'trial-load'} type="button" disabled={fieldsLocked || loadBlocked} onClick={handlers.reload}>
@@ -44,7 +44,7 @@ export default function EditExecutionSetup({state, facts, handlers, locked, load
     {loading && <p role="status" className="muted">{s.loading}</p>}
     {error && <FaultMessage title={s.setup} value={error}/>}
     {reason && <p id="trial-setup-block" className="inline-warning">{reason}</p>}
-    {dirty && <p className="field-help">{s.saveHelp}{bound?.lane === 'native' && <> {s.nativeSaveHelp}</>}</p>}
+    {dirty && <p className="field-help">{s.saveHelp}</p>}
     {state && bound && facts && <>
       <div className="run-grid">
         <section className="panel" aria-labelledby="trial-configuration-heading">
@@ -73,8 +73,8 @@ export default function EditExecutionSetup({state, facts, handlers, locked, load
             {!facts.bound && <p className="inline-warning">{t.run.staleSchema}</p>}
             <ExecutionFields bound={bound} facts={facts} locked={fieldsLocked} nativeCapability={nativeCapability} change={handlers.bound} trial>
               {nativeError && <FaultMessage title={t.run.nativeCapabilityError} value={nativeError}/>}
-              {facts.native && <p className="field-help">{s.reviewInExecution}{' '}
-                <button type="button" className="link" onClick={onReturn}>{s.returnToExecution}</button></p>}
+              {facts.native && <p className="field-help">{s.runInEdit}{' '}
+                <button type="button" className="link" onClick={onReturn}>{s.returnToSetup}</button></p>}
             </ExecutionFields>
           </div>
         </section>

@@ -5,20 +5,24 @@
 - Execute a whole package or an existing file-level function directly in Edit.
   Reuse explicit Save all, immutable source capture and the supervised runner;
   rerun current source with fresh VM state while preserving the game's state.
-  Native Function is separately reviewed and attach-only, without launch,
-  recovery or a hidden readiness call. Keep shared Stop and independent cleanup.
-- Put saved-package Validate and an icon-bearing Run… entry in Package contents.
-  Select the whole package or a function and its application/test destination
-  in one dialog. Use package defaults and collapse optional arguments. Native
-  Run opens a captured Script/target review; Allow grants capture/input once,
-  without handwritten operation/postcondition text or capture/input checkboxes.
-  Cancel and stale review grant nothing; dirty Save all and review stops before
-  confirmation. Ordinary Run retains its operation review. Missing prerequisites
-  link to their settings and back; advanced configuration on Run preserves
-  source drafts and Undo.
-  The icon reports package validation only; Status details retains diagnostics.
+  Native Function is attach-only, without launch, recovery or hidden readiness.
+  Keep shared Stop and independent cleanup.
+- Put Validate, icon-bearing Setup… and a separate Run in Package contents.
+  Setup selects the unit and destination without executing. Run uses current
+  Script; dirty Save all and run continues directly, including Real application.
+  Remove the additional Allow screen and source-change reapproval. Preserve
+  optional whole-package launch/recovery choices across Script edits.
+  Use package defaults; missing prerequisites link to settings and back.
+  Advanced configuration preserves source drafts and Undo. Setup's icon reports
+  package validation, while Status details retains diagnostics.
   Remove Run's separate profile Validate action while retaining inline errors
   and mandatory Start/Save validation.
+- Resolve Edit's saved APP to its actual runtime executable before SDK selection,
+  including macOS App Translocation. Use existing signed correspondence only
+  when paths differ; keep runtime lifetime/capture/input checks in the SDK.
+  Preserve launch absence and recovery exit evidence. Ordinary Run keeps its review.
+- Keep the action named Run after completion; dirty source uses Save all and run.
+  Optimize SHA-256 in checkout builds without skipping resource-integrity checks.
 
 - Keep macOS engine-check temporary paths short for Unix socket fixtures,
   independently of its descriptive build and dependency-cache directory.

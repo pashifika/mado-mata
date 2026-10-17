@@ -80,6 +80,10 @@ fn read_external_plan(path: &Path) -> Result<Plan, Fault> {
                         .pointer("/review/kind")
                         .and_then(serde_json::Value::as_str)
                         == Some("script")
+                    || native
+                        .get("confirm_process_exit")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
             })
     {
         return Err(Fault::new(

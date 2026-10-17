@@ -31,11 +31,11 @@ import NavigationHeader from './components/NavigationHeader.tsx';
 import ProfileRecovery from './components/ProfileRecovery.tsx';
 import type {RecoveryHandlers} from './components/ProfileRecovery.tsx';
 import ResultPanel, {FaultMessage, fault} from './components/ResultPanel.tsx';
-import EditTrial from './components/EditTrial.tsx';
+import EditTrial, {EditTrialFeedback} from './components/EditTrial.tsx';
 import EditExecutionSetup from './components/EditExecutionSetup.tsx';
 import type {EditTrialHandlers} from './components/EditTrial.tsx';
-import {applyTrialRecovery, currentTrialSource, trialContext, trialDiagnosticLocation, trialRequest, trialSourceBlock, trialSourceTicket, TrialConfirmationGate} from './edit-trial.ts';
-import type {EditTrialState, TrialConfirmation} from './edit-trial.ts';
+import {applyTrialRecovery, currentTrialSource, trialContext, trialDiagnosticLocation, trialRunIntent, trialRunRequest, trialSourceBlock, trialSourceTicket} from './edit-trial.ts';
+import type {EditTrialState, TrialRunRefusal} from './edit-trial.ts';
 import RunPage from './pages/RunPage.tsx';
 import type {RunHandlers} from './pages/RunPage.tsx';
 import ExecutionPage from './pages/ExecutionPage.tsx';
@@ -193,10 +193,10 @@ export default function App() {
   const [settingsInitialCategory, setSettingsInitialCategory] = useState<'environment'|undefined>();
   const editTrialRef = useRef<EditTrialState|null>(null);
   const trialGeneration = useRef(0);
-  const [trialConfirmationGate] = useState(() => new TrialConfirmationGate());
-  const [trialConfirmation, setTrialConfirmation] = useState<TrialConfirmation|null>(null);
+  // Setup reads report in the setup surfaces; Run preparation and admission report on the Edit page beside Run.
   const [trialError, setTrialError] = useState<{fault:Fault; owner:AuthoringRef; revision:string; source:ExportTicket|null}|null>(null);
-  const [trialNotice, setTrialNotice] = useState<'changed'|'selectAgain'|'savedReview'|null>(null);
+  const [trialSetupError, setTrialSetupError] = useState<Fault|null>(null);
+  const [trialNotice, setTrialNotice] = useState<TrialRunRefusal|null>(null);
   const [collaboration] = useState(() => new CollaborationBridge({invoke, listen}));
   // The host's lease as last polled; undefined until the first poll of this session answers.
   const hostAuthoringRef = useRef<AuthoringRef | null | undefined>(undefined);
@@ -352,10 +352,10 @@ export default function App() {
       recognitionConfigurationDirty.current = true;
       authoringController.update(session => session?.recognition
         ? {...session, recognition: recognition.invalidateConfiguration(session.recognition)} : session);
-      // A Native approval covered the environment it was given for, even if an identical one returns later.
-      cancelTrialConfirmation();
+      // A Native choice covered the environment it was given for, even if an identical one returns later.
+      invalidateTrialRun();
       setWorkspaces(list => list.map(item => updateBound(item, clearNativeApproval)));
-      if (editTrialRef.current) publishTrial({...editTrialRef.current, bound:clearNativeApproval(editTrialRef.current.bound), review:null});
+      if (editTrialRef.current) publishTrial({...editTrialRef.current, bound:clearNativeApproval(editTrialRef.current.bound)});
     }
     knownOcrEnvironment.current = saved.ocr_environment;
     setSettings(saved);
@@ -574,10 +574,7 @@ export default function App() {
   }, [menuOpen]);
 
   function go(next: Nav) {
-    if (nav.kind === 'workspace' && (next.kind !== 'workspace' || next.id !== nav.id)) {
-      dismissTrialConfirmation();
-      invalidateOwnerTarget(nav.id);
-    }
+    if (nav.kind === 'workspace' && (next.kind !== 'workspace' || next.id !== nav.id)) invalidateOwnerTarget(nav.id);
     setReveal(null);
     setPendingClose(null);
     setClosedDisclosed(false);
@@ -1072,21 +1069,9 @@ export default function App() {
     go({kind: 'workspace', id});
   }
 
-  function trialConfirmationContext() {
-    return {controller:authoringController, state:editTrialRef.current, environment:knownOcrEnvironment.current,
-      capability:knownNativeCapability.current, generation:trialGeneration.current};
-  }
-
-  function cancelTrialConfirmation() {
-    trialConfirmationGate.cancel();
-    setTrialConfirmation(null);
+  // A setup, environment, owner or Stop change while a Run prepares cancels it before admission.
+  function invalidateTrialRun() {
     trialGeneration.current += 1;
-  }
-
-  function dismissTrialConfirmation() {
-    cancelTrialConfirmation();
-    const current = editTrialRef.current;
-    if (current) publishTrial({...current, bound:clearNativeApproval(current.bound), review:null});
   }
 
   function publishTrial(next:EditTrialState|null) {
@@ -1098,13 +1083,13 @@ export default function App() {
     const current = editTrialRef.current;
     if (!current || active || closing || hostCommand.current !== null) return;
     const next = update(current);
-    cancelTrialConfirmation();
-    publishTrial({...next, bound:clearNativeApproval(next.bound), review:null});
+    invalidateTrialRun();
+    publishTrial({...next, bound:clearNativeApproval(next.bound)});
     setTrialNotice(null);
-    setTrialError(null);
+    setTrialSetupError(null);
   }
 
-  async function readTrialContext():Promise<EditTrialState|null> {
+  async function readTrialContext(phase:'setup'|'run' = 'setup'):Promise<EditTrialState|null> {
     const session = authoringController.current();
     if (!session || leaseLost || active || session.pending !== null || hostCommand.current !== null) return null;
     const generation = trialGeneration.current;
@@ -1120,11 +1105,15 @@ export default function App() {
       const next = trialContext(context, current, workspace.internalName, previous);
       if (!next) return null;
       publishTrial(next);
-      setTrialError(null);
-      if (previous?.selected && !next.selected) setTrialNotice('selectAgain');
+      setTrialSetupError(null);
+      if (phase === 'run') setTrialError(null);
+      if (previous?.selected && !next.selected && next.unit === 'function') setTrialNotice('selectAgain');
       return next;
     } catch (cause) {
-      if (sameAuthoringRef(authoringController.current()?.owner, session.owner)) setTrialError({fault:fault(cause), owner:session.owner, revision:session.revision, source});
+      if (sameAuthoringRef(authoringController.current()?.owner, session.owner)) {
+        if (phase === 'setup') setTrialSetupError(fault(cause));
+        else setTrialError({fault:fault(cause), owner:session.owner, revision:session.revision, source});
+      }
       return null;
     } finally {
       authoringController.update(current => current && sameAuthoringRef(current.owner, session.owner) && current.pending?.kind === 'script_trial'
@@ -1133,9 +1122,10 @@ export default function App() {
   }
 
   useEffect(() => {
-    cancelTrialConfirmation();
+    invalidateTrialRun();
     publishTrial(null);
     setTrialError(null);
+    setTrialSetupError(null);
     setTrialNotice(null);
     setTrialDialogOwner(null);
     trialSettingsOwner.current = null;
@@ -1143,43 +1133,23 @@ export default function App() {
 
   useEffect(() => {
     if (trialDialogOwner !== null && (selected?.page !== 'edit' || selected.id !== authoring?.owner.workspace.workspace_id || dialogOpen)) {
-      dismissTrialConfirmation();
       setTrialDialogOwner(null);
     }
   }, [selected?.id, selected?.page, dialogOpen, authoring?.owner.token, trialDialogOwner]);
 
-  useEffect(() => {
-    if (trialConfirmation && (leaseLost || !trialConfirmationGate.current(trialConfirmation, trialConfirmationContext()))) {
-      cancelTrialConfirmation();
-      setTrialNotice('changed');
-    }
-  }, [authoring, leaseLost, editTrial, savedEnvironment, nativeCapability.policy, trialConfirmation]);
-
-  useEffect(() => {
-    const current = editTrialRef.current;
-    if (current?.review && (leaseLost || !currentTrialSource(authoringController, current.review))) {
-      publishTrial({...current, bound:clearNativeApproval(current.bound), review:null});
-    }
-  }, [authoring, leaseLost]);
-
-  async function startTrial(confirmation:TrialConfirmation|null = null) {
+  // One explicit Run: Save all when drafts are dirty, reread the latest saved setup and submit what Run selected.
+  // A source, setup, target, environment or owner change meanwhile refuses the attempt before admission.
+  async function startTrial() {
     let session = authoringController.current();
     const initial = editTrialRef.current;
     if (!session || !initial || !sameAuthoringRef(session.owner, initial.context.owner) || active || closing || leaseLost
       || hostCommand.current !== null || nativeSelectionRef.current?.occupied || nativeSelectionRef.current?.busy) return;
-    const generation = trialGeneration.current;
-    const dirty = authoringController.describe().resources.some(resource => resource.dirty && (resource.role === undefined || resource.role === 'context'));
     if (trialSourceBlock(session, false) !== null) return;
+    const generation = trialGeneration.current;
+    const intent = trialRunIntent(initial, knownOcrEnvironment.current, knownNativeCapability.current);
+    const dirty = authoringController.describe().resources.some(resource => resource.dirty && (resource.role === undefined || resource.role === 'context'));
     setTrialNotice(null);
     setTrialError(null);
-    // Capture exactly what Run displayed, before any host reread can refresh its target or saved setup.
-    if (!confirmation && !dirty && initial.bound.lane === 'native') {
-      const capture = trialConfirmationGate.open(trialConfirmationContext());
-      setTrialConfirmation(capture);
-      if (!capture) setTrialNotice('changed');
-      return;
-    }
-    if (confirmation && dirty) {setTrialNotice('changed'); return;}
     if (dirty) {
       const saved = await saveAll();
       if (saved.failure !== null || saved.remaining.length > 0) return;
@@ -1189,31 +1159,24 @@ export default function App() {
         if (draft.text !== null && current.drafts.get(path)?.revision !== draft.revision) {setTrialNotice('changed'); return;}
       }
     }
-    const source = confirmation?.source ?? trialSourceTicket(authoringController);
+    const source = trialSourceTicket(authoringController);
     if (!source || generation !== trialGeneration.current) {setTrialNotice('changed'); return;}
-    const setup = await readTrialContext();
+    const setup = await readTrialContext('run');
     if (!setup) return;
     if (!currentTrialSource(authoringController, source) || generation !== trialGeneration.current) {setTrialNotice('changed'); return;}
     session = authoringController.current();
     if (!session) return;
-    if (setup.unit === 'function' && setup.selected === null) {setTrialNotice('selectAgain'); return;}
-    if (dirty && setup.bound.lane === 'native') {setTrialNotice('savedReview'); return;}
-    const prepared = trialRequest(setup, source, knownOcrEnvironment.current, knownNativeCapability.current);
-    if (!prepared) {if (confirmation) setTrialNotice('changed'); return;}
-    const request = confirmation ? trialConfirmationGate.dispatch(confirmation, trialConfirmationContext()) : prepared.request;
-    if (!request || (request.lane === 'native' && !confirmation)) {setTrialNotice('changed'); return;}
+    const prepared = trialRunRequest(intent, setup, source, knownOcrEnvironment.current, knownNativeCapability.current);
+    if (typeof prepared === 'string') {setTrialNotice(prepared); return;}
     if (!currentTrialSource(authoringController, source) || generation !== trialGeneration.current || resolvingAuthoring.current
       || (hostAuthoringRef.current !== undefined && !sameAuthoringRef(hostAuthoringRef.current, source.owner))
       || nativeSelectionRef.current?.occupied || nativeSelectionRef.current?.busy) {setTrialNotice('changed'); return;}
     const owner = session.owner;
-    const profileName = confirmation?.profileName ?? prepared.profileName;
-    publishTrial({...setup, bound:clearNativeApproval(setup.bound), review:null});
+    const {request, profileName} = prepared;
     authoringController.update(current => current && sameAuthoringRef(current.owner, owner) ? beginPending(current, {kind:'script_trial'}) : current);
     startInFlight.current = true;
     epoch.current += 1;
-    // Close only after final authority validation; Stop then moves from the dialog to the main window.
     flushSync(() => {
-      setTrialDialogOwner(null);
       setStarting({workspaceId:owner.workspace.workspace_id, kind:'run'});
       setStripMessage(null);
     });
@@ -1239,8 +1202,8 @@ export default function App() {
   function updateTrialTarget(owner:AuthoringRef, update:(state:TargetState)=>TargetState) {
     const current = editTrialRef.current;
     if (!current || !sameAuthoringRef(current.context.owner, owner)) return;
-    cancelTrialConfirmation();
-    publishTrial({...current, bound:clearNativeApproval({...current.bound, target:update(current.bound.target)}), review:null});
+    invalidateTrialRun();
+    publishTrial({...current, bound:clearNativeApproval({...current.bound, target:update(current.bound.target)})});
   }
 
   async function trialTargetCommand(operation:TargetOperation, reviewedResolution?:TargetResolution) {
@@ -1347,8 +1310,8 @@ export default function App() {
       if (!ticket) return;
       const parsed = readRecoveryDraft(state.recovery, locale);
       if (!reset && Object.keys(parsed.errors).length > 0) return;
-      trialGeneration.current += 1;
-      publishTrial({...state, bound:clearNativeApproval(state.bound), review:null});
+      invalidateTrialRun();
+      publishTrial({...state, bound:clearNativeApproval(state.bound)});
       try {
         const mutation = await authoringCall(reset ? 'resettingProfile' : 'repairingProfile', () => invoke<RecoveryMutation>(
           reset ? 'reset_profile' : 'repair_profile', reset ? {context:ticket.context, id:ticket.profileId, confirm:true}
@@ -1356,7 +1319,7 @@ export default function App() {
         const current = editTrialRef.current;
         if (current && sameAuthoringRef(current.context.owner, state.context.owner)) publishTrial(applyTrialRecovery(current, ticket, mutation));
       } catch (cause) {
-        if (sameAuthoringRef(authoringController.current()?.owner, state.context.owner)) setTrialError({fault:fault(cause), owner:state.context.owner, revision:state.context.revision, source:null});
+        if (sameAuthoringRef(authoringController.current()?.owner, state.context.owner)) setTrialSetupError(fault(cause));
       }
     }
     async function discard() {
@@ -1368,7 +1331,7 @@ export default function App() {
         if (current?.recovery && sameAuthoringRef(current.context.owner, state.context.owner)
           && sameRecoveryContext(current.recovery.view.context, context)) publishTrial({...current, recovery:null});
       } catch (cause) {
-        if (sameAuthoringRef(authoringController.current()?.owner, state.context.owner)) setTrialError({fault:fault(cause), owner:state.context.owner, revision:state.context.revision, source:null});
+        if (sameAuthoringRef(authoringController.current()?.owner, state.context.owner)) setTrialSetupError(fault(cause));
       }
     }
     return {
@@ -1391,19 +1354,8 @@ export default function App() {
   const trialHandlers:EditTrialHandlers = {
     change:editTrialSetup,
     bound:update => editTrialSetup(state => ({...state, bound:update(state.bound)})),
-    reload:() => {dismissTrialConfirmation(); void ownAuthoringWorker(readTrialContext);},
+    reload:() => {void ownAuthoringWorker(readTrialContext);},
     run:() => {void ownAuthoringWorker(startTrial);},
-    confirm:capture => {
-      const approved = trialConfirmationGate.consume(capture, trialConfirmationContext());
-      setTrialConfirmation(null);
-      if (!approved || authoringWorker.current !== null) {
-        dismissTrialConfirmation();
-        setTrialNotice('changed');
-        return;
-      }
-      void ownAuthoringWorker(() => startTrial(capture)).finally(dismissTrialConfirmation);
-    },
-    cancelConfirmation:dismissTrialConfirmation,
     setup:section => {
       const owner = authoringController.current()?.owner.workspace.workspace_id;
       if (!owner) return;
@@ -1428,13 +1380,12 @@ export default function App() {
     },
     native:{
       edit:value => editTrialSetup(state => ({...state, bound:editNativeReview(state.bound, 'workflowSeconds', value)})),
+      // Optional whole-package choices for later explicit Runs; they never depend on a Script revision.
       approve:(field, value) => {
         const current = editTrialRef.current;
-        const source = trialSourceTicket(authoringController);
-        if (!current || !source || active || closing || hostCommand.current !== null || current.context.revision !== source.revision
-          || current.unit === 'function') return;
-        cancelTrialConfirmation();
-        publishTrial({...current, bound:approveNative(current.bound, field, value, knownOcrEnvironment.current, nativeCapability.policy), review:source});
+        if (!current || active || closing || hostCommand.current !== null || current.unit === 'function') return;
+        invalidateTrialRun();
+        publishTrial({...current, bound:approveNative(current.bound, field, value, knownOcrEnvironment.current, nativeCapability.policy, 'script')});
       },
     },
     target:{
@@ -2013,7 +1964,7 @@ export default function App() {
   async function stopValidation(): Promise<boolean | null> {
     const owner = authoringController.current()?.owner ?? hostAuthoringRef.current;
     if (!owner) return null;
-    dismissTrialConfirmation();
+    invalidateTrialRun();
     const token = owner.token;
     setStopping(true);
     try {
@@ -3243,8 +3194,9 @@ export default function App() {
   }
   const executedSource = trialSnapshot?.trial?.source ?? null;
   const openTrialSource = trialSourceAvailable && executedSource ? (diagnostic:Fault) => openTrialDiagnostic(diagnostic, {owner:executedSource.owner, source:executedSource}) : undefined;
-  const trialErrorSource = trialError && selectedAuthoring && sameAuthoringRef(trialError.owner, selectedAuthoring.owner)
-    ? {revision:trialError.revision, stale:!trialError.source || !currentTrialSource(authoringController, trialError.source),
+  const trialRunError = trialError;
+  const trialErrorSource = trialRunError && selectedAuthoring && sameAuthoringRef(trialRunError.owner, selectedAuthoring.owner)
+    ? {revision:trialRunError.revision, stale:!trialRunError.source || !currentTrialSource(authoringController, trialRunError.source),
       paths:[...selectedAuthoring.drafts].filter(([, draft]) => !draft.missing).map(([path]) => path)} : null;
   const hasTrialResult = Boolean(selected && selectedRun && trialSnapshot && selectedAuthoring
     && sameAuthoringRef(trialSnapshot.trial?.source.owner, selectedAuthoring.owner));
@@ -3255,10 +3207,10 @@ export default function App() {
   const trialLocked = commandReason !== null || closing || active || leaseLost || pickerBusy;
   const trialLoadBlocked = leaseLost || trialSourceReason === 'pending' || trialSourceReason === 'refresh';
   const trialLoading = selectedAuthoring?.pending?.kind === 'script_trial' && !scriptTrialActive;
-  const trialStale = trialSetup?.bound.lane === 'native' && trialSetup.context.revision !== selectedAuthoring?.revision;
+  // Setup read before the latest save: opening Setup rereads its functions and saved target. Run always rereads.
+  const trialStale = trialSetup !== null && trialSetup.context.revision !== selectedAuthoring?.revision;
   const trialBlock = leaseLost ? ui.authoring.leaseLostShort : nativeOccupied ? ui.scriptTrial.release
     : trialSourceReason ? ui.scriptTrial.blocks[trialSourceReason]
-    : trialStale ? ui.scriptTrial.refresh
     : recognitionSaveReason ?? null;
   const trialProfileRepair = selected && selectedAuthoring && trialSetup
     ? <ProfileRecovery idPrefix="trial-recovery" label={workspaceLabel(selected, workspaces)}
@@ -3292,7 +3244,7 @@ export default function App() {
       recognitionDirty={selectedAuthoring !== null && recognitionDirty} validating={selectedAuthoring !== null && validationActive}
       authoring={compactAuthoring(returnToEdit, !editVisible)}
       validation={savedValidation}
-      onNavigate={page => {if (selected) {if (page !== selected.page) dismissTrialConfirmation(); if (page === 'edit') returnToEdit(); else change(selected.id, item => ({...item, page}));}}}
+      onNavigate={page => {if (selected) {if (page === 'edit') returnToEdit(); else change(selected.id, item => ({...item, page}));}}}
       onDiagnostic={diagnostic => {
         const current = authoringController.current();
         if (!selectedAuthoring || !current || selected?.id !== current.owner.workspace.workspace_id) return;
@@ -3380,16 +3332,19 @@ export default function App() {
           packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive} recognitionDirty={recognitionDirty}
           recognitionSaveBlock={recognitionSaveReason} exportBlock={active ? ui.authoring.block('pending') : null}
           completionPreferences={editorCompletion.current}
-          trial={<EditTrial state={trialSetup} facts={trialFacts} confirmation={trialConfirmation} stale={trialStale}
+          trial={<EditTrial state={trialSetup} facts={trialFacts} stale={trialStale}
             open={trialDialogOwner === authoring.owner.token && !dialogOpen}
-            onOpenChange={open => {dismissTrialConfirmation(); setTrialDialogOwner(open ? authoring.owner.token : null);}}
+            onOpenChange={open => setTrialDialogOwner(open ? authoring.owner.token : null)}
             nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error} environment={savedEnvironment}
             handlers={trialHandlers} locked={trialLocked} loadBlocked={trialLoadBlocked} loading={trialLoading}
             validation={savedValidation?.state ?? 'none'} block={trialBlock}
-            dirty={unsavedCount > 0} error={trialError?.fault ?? null} errorSource={trialErrorSource}
-            onDiagnostic={diagnostic => openTrialDiagnostic(diagnostic, trialError)}
+            dirty={unsavedCount > 0} error={trialSetupError}
             notice={trialNotice ? ui.scriptTrial[trialNotice] : null} hasResult={hasTrialResult}
             strip={ordinaryStrip('trial')} authoring={leave => compactAuthoring(() => leave(returnToEdit), true)}/>}
+          trialFeedback={<EditTrialFeedback notice={trialNotice ? ui.scriptTrial[trialNotice] : null}
+            error={trialRunError?.fault ?? null} errorSource={trialErrorSource}
+            onDiagnostic={diagnostic => openTrialDiagnostic(diagnostic, trialRunError)}
+            onDismiss={() => {setTrialNotice(null); setTrialError(null);}}/>}
           recognition={authoring.recognition
             ? <DeferredView key={authoring.owner.token} fallback={<p role="status">{ui.bootstrap.state('loading')}</p>}
               error={cause => <FaultMessage title={ui.recognition.heading} value={fault(cause)}/>}>
@@ -3415,7 +3370,7 @@ export default function App() {
         {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (selectedAuthoring
           ? <EditExecutionSetup key={selectedAuthoring.owner.token} state={trialSetup} facts={trialFacts}
             handlers={trialHandlers} locked={trialLocked} loadBlocked={trialLoadBlocked} loading={trialLoading}
-            block={trialBlock} dirty={unsavedCount > 0} error={trialError?.fault ?? null}
+            block={trialBlock} dirty={unsavedCount > 0} error={trialSetupError}
             nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error}
             profileRepair={trialProfileRepair} onReturn={returnToTrial}/>
           : isBound(selected)

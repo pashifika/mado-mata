@@ -7,12 +7,12 @@ import type {Bound} from './workspace.ts';
 import {readTarget, targetReadFailed, targetState} from './target.ts';
 import {mutatedRecovery, recoveryState, sameRecoveryContext, upsertOutcomes} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
-import type {AuthoringTrialContext, Fault, FunctionCandidate, Json, NativeCapability, OcrEnvironment, ProfileRecoveryOutcome, RecoveryMutation, StartRequest, TargetBinding} from './types.ts';
+import type {AuthoringRef, AuthoringTrialContext, Fault, FunctionCandidate, Json, NativeCapability, OcrEnvironment, ProfileRecoveryOutcome, RecoveryMutation, StartRequest} from './types.ts';
 
+// Execution setup only: what an explicit Run executes against the latest saved Script, never a source approval.
 export interface EditTrialState {
   context:AuthoringTrialContext; bound:Bound; unit:'package'|'function'; selected:string|null; arguments:string;
-  // Source binding for optional whole-package launch/recovery, never capture/input authority.
-  profileChoice:string; review:ExportTicket|null;
+  profileChoice:string;
   recovery:RecoveryState|null; recoveryOutcomes:ProfileRecoveryOutcome[];
 }
 
@@ -28,7 +28,9 @@ export function trialContext(context:AuthoringTrialContext, session:AuthoringSes
     source:{kind:'directory' as const, path:session.packagePath}};
   const old = same ? previous.bound : null;
   const preset = Object.hasOwn(context.package.profiles, 'default') ? 'default' : '';
-  const base:Bound = old ? {...clearNativeApproval(old), package:context.package, profiles:context.profiles, profilesError:context.profiles_error}
+  // Saved-source revisions keep the whole setup, including optional launch/recovery choices; their key covers target,
+  // values, environment and limits, never the Script revision.
+  const base:Bound = old ? {...old, package:context.package, profiles:context.profiles, profilesError:context.profiles_error}
     : {...newDraft({packagePath:session.packagePath, package:context.package, profiles:context.profiles, profilesError:context.profiles_error,
       selectedId:null, name:'', preset:'', draft:{}, draftRevision:0,
       lane:context.package.target === null ? 'controlled' : 'native', scenario:'workflow', descriptorPath:'', touched:false, target:targetState(selection),
@@ -38,14 +40,11 @@ export function trialContext(context:AuthoringTrialContext, session:AuthoringSes
     : context.target_error ? targetReadFailed(target, context.target_error) : target;
   const selected = same && previous.selected !== null && context.functions.some(candidate => functionKey(candidate) === previous.selected)
     ? previous.selected : null;
-  const reviewCurrent = same && previous.context.revision === context.revision
-    && previous.context.package.inventory_identity === context.package.inventory_identity;
-  if (old && reviewCurrent) base.native = old.native;
   let profileChoice = same ? previous.profileChoice : preset ? 'preset:default' : 'values';
   if (profileChoice.startsWith('profile:') && !context.profiles.some(profile => profile.id === profileChoice.slice(8))) profileChoice = '';
   if (profileChoice.startsWith('preset:') && !Object.hasOwn(context.package.profiles, profileChoice.slice(7))) profileChoice = '';
   return {context, bound:base, unit:same ? previous.unit : 'package', selected, arguments:same ? previous.arguments : '[]',
-    profileChoice, review:reviewCurrent ? previous.review : null,
+    profileChoice,
     recovery:context.recovery ? recoveryState(context.recovery, same ? previous.recovery : null) : null,
     recoveryOutcomes:same ? previous.recoveryOutcomes : []};
 }
@@ -62,7 +61,7 @@ export function applyTrialRecovery(state:EditTrialState, ticket:RecoveryTicket, 
     bound = {...bound, profiles:[...bound.profiles.filter(profile => profile.id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name))};
   }
   const profileChoice = state.profileChoice.startsWith('profile:') && !bound.profiles.some(profile => profile.id === state.profileChoice.slice(8)) ? '' : state.profileChoice;
-  return {...state, bound, profileChoice, review:null, recovery:mutatedRecovery(state.recovery, ticket, mutation), recoveryOutcomes};
+  return {...state, bound, profileChoice, recovery:mutatedRecovery(state.recovery, ticket, mutation), recoveryOutcomes};
 }
 
 export type ArgumentError = 'json'|'array'|'bytes'|'depth'|'count'|'required';
@@ -102,8 +101,8 @@ export function currentTrialSource(controller:AuthoringController, ticket:Export
   return session !== null && trialSourceBlock(session, false, true) === null && controller.exportCurrent(ticket);
 }
 
-export function trialRequest(state:EditTrialState, source:ExportTicket, environment:OcrEnvironment|null, capability:NativeCapability|null):{request:StartRequest; profileName:string}|null {
-  if (!sameAuthoringRef(state.context.owner, source.owner) || state.context.revision !== source.revision) return null;
+// The request a ready setup describes for its own saved source; it carries no capture/input authority.
+function trialRequest(state:EditTrialState, environment:OcrEnvironment|null, capability:NativeCapability|null):{request:StartRequest; profileName:string}|null {
   const bound = state.bound;
   const facts = deriveBound(bound, environment, 'en', capability, 'script');
   const candidate = state.context.functions.find(item => functionKey(item) === state.selected);
@@ -123,76 +122,40 @@ export function trialRequest(state:EditTrialState, source:ExportTicket, environm
   }};
 }
 
-export interface TrialConfirmation {
-  source:ExportTicket; request:StartRequest; profileName:string; target:TargetBinding; environment:OcrEnvironment;
-}
-interface ConfirmationContext {
-  controller:AuthoringController; state:EditTrialState|null; environment:OcrEnvironment|null; capability:NativeCapability|null; generation:number;
-}
-
-function confirmationKey(state:EditTrialState, request:StartRequest, context:ConfirmationContext):string {
-  const bound = state.bound;
-  return JSON.stringify([context.generation, request, context.environment, context.capability, state.context.owner, state.context.revision,
-    state.unit, state.selected, state.arguments, state.profileChoice, state.context.functions,
-    bound.draftRevision, bound.draft, bound.name, bound.preset, bound.profiles.find(profile => profile.id === bound.selectedId),
-    bound.target.context, bound.target.draftRevision, bound.target.view?.record, bound.native.workflowSeconds,
-    bound.native.launch, bound.native.recovery, bound.native.key]);
+// What one explicit Run selected. Saved source and host facts are reread before dispatch; the setup itself is not.
+export interface TrialRunIntent {
+  owner:AuthoringRef; unit:EditTrialState['unit']; selected:string|null; lane:string;
+  // The saved Native target shown when Run was pressed: a reread may refuse it, never replace it.
+  target:{id:string; revision:number}|null;
+  startup:{launch:boolean; recoveries:number};
 }
 
-// One displayed capture, one confirmation attempt, one final admission after the saved context reread.
-// A refreshed target can invalidate this capture; it can never replace what the operator confirmed.
-export class TrialConfirmationGate {
-  #pending:{capture:TrialConfirmation; key:string}|null = null;
-  #preparing:{capture:TrialConfirmation; key:string}|null = null;
+export function trialRunIntent(state:EditTrialState, environment:OcrEnvironment|null, capability:NativeCapability|null):TrialRunIntent {
+  const saved = state.bound.target.view?.record;
+  const native = state.unit === 'package' && state.bound.lane === 'native'
+    ? deriveBound(state.bound, environment, 'en', capability, 'script').native?.intent : null;
+  return {owner:state.context.owner, unit:state.unit, selected:state.unit === 'function' ? state.selected : null, lane:state.bound.lane,
+    target:saved?.binding ? {id:saved.binding.id, revision:saved.revision} : null,
+    startup:{launch:native?.launch_approved ?? false, recoveries:native?.max_exit_recoveries ?? 0}};
+}
 
-  open(context:ConfirmationContext):TrialConfirmation|null {
-    this.cancel();
-    const {state, controller, environment, capability} = context;
-    const source = trialSourceTicket(controller);
-    if (!state || !source || state.bound.lane !== 'native' || !environment
-      || ((state.bound.native.launch || state.bound.native.recovery) && (!state.review || !currentTrialSource(controller, state.review)))) return null;
-    const prepared = trialRequest(state, source, environment, capability);
-    const target = state.bound.target.view?.record.binding;
-    if (!prepared || !target) return null;
-    // Detach all display and request data from mutable drafts and later host replies.
-    const capture = structuredClone({...prepared, source, target, environment});
-    this.#pending = {capture, key:confirmationKey(state, prepared.request, context)};
-    return capture;
-  }
+export type TrialRunRefusal = 'changed'|'selectAgain'|'setupIncomplete';
 
-  current(capture:TrialConfirmation, context:ConfirmationContext):boolean {
-    return this.#pending?.capture === capture && this.#matches(this.#pending, context);
-  }
-
-  consume(capture:TrialConfirmation, context:ConfirmationContext):boolean {
-    const pending = this.#pending;
-    this.#pending = null;
-    if (!pending || pending.capture !== capture || !this.#matches(pending, context)) return false;
-    this.#preparing = pending;
-    return true;
-  }
-
-  dispatch(capture:TrialConfirmation, context:ConfirmationContext):StartRequest|null {
-    const preparing = this.#preparing;
-    this.#preparing = null;
-    if (!preparing || preparing.capture !== capture || !this.#matches(preparing, context)) return null;
-    const request = structuredClone(preparing.capture.request);
-    if (!request.native_intent || request.native_intent.review.kind !== 'script') return null;
-    request.native_intent.capture_approved = true;
-    request.native_intent.input_approved = true;
-    return request;
-  }
-
-  cancel():void {
-    this.#pending = null;
-    this.#preparing = null;
-  }
-
-  #matches(review:{capture:TrialConfirmation; key:string}, context:ConfirmationContext):boolean {
-    if (!context.state || !currentTrialSource(context.controller, review.capture.source)) return false;
-    const prepared = trialRequest(context.state, review.capture.source, context.environment, context.capability);
-    return prepared !== null && review.key === confirmationKey(context.state, prepared.request, context);
-  }
+// The final request for one explicit Run, after the latest saved source and setup were reread. That Run is this one
+// request's capture/input authority: nothing persists it, and selecting, saving or closing setup never grants it.
+export function trialRunRequest(intent:TrialRunIntent, state:EditTrialState, source:ExportTicket, environment:OcrEnvironment|null,
+  capability:NativeCapability|null):{request:StartRequest; profileName:string}|TrialRunRefusal {
+  if (!sameAuthoringRef(intent.owner, state.context.owner) || !sameAuthoringRef(state.context.owner, source.owner)
+    || state.context.revision !== source.revision || intent.unit !== state.unit || intent.lane !== state.bound.lane) return 'changed';
+  if (state.unit === 'function' && state.selected === null) return 'selectAgain';
+  if (state.unit === 'function' && state.selected !== intent.selected) return 'changed';
+  const prepared = trialRequest(state, environment, capability);
+  if (!prepared) return 'setupIncomplete';
+  const native = prepared.request.native_intent;
+  if (!native) return prepared;
+  if (!intent.target || native.target_binding_id !== intent.target.id || native.target_revision !== intent.target.revision) return 'changed';
+  if (native.launch_approved !== intent.startup.launch || native.max_exit_recoveries !== intent.startup.recoveries) return 'changed';
+  return {...prepared, request:{...prepared.request, native_intent:{...native, capture_approved:true, input_approved:true}}};
 }
 
 // Match saved validation's compiler envelope, retaining only source facts for navigation.

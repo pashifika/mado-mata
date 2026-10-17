@@ -72,7 +72,7 @@ export default function ExecutionPage({label, revision, run, snapshot, starting,
               {captured.native && <>{captured.native.review.kind === 'operation'
                 ? <><dt>{t.run.nativeOperation}</dt><dd>{captured.native.review.operation}</dd>
                   <dt>{t.run.nativePostcondition}</dt><dd>{captured.native.review.visible_postcondition}</dd></>
-                : <><dt>{t.scriptTrial.confirmedScript}</dt><dd>{t.scriptTrial.scriptApproval}</dd></>}
+                : <><dt>{t.scriptTrial.heading}</dt><dd>{t.scriptTrial.runAuthority}</dd></>}
                 <dt>{t.run.nativeBinding}</dt><dd><code>{captured.native.target_binding_id}</code> · {t.target.revision(captured.native.target_revision)}</dd>
                 <dt>{t.run.nativeLaunchApproval}</dt><dd>{captured.native.launch_approved ? t.run.nativeLaunchApproved : t.run.nativeLaunchNotApproved}</dd>
                 <dt>{t.run.nativeRecoveryApproval}</dt><dd id="captured-native-recoveries">{captured.native.max_exit_recoveries}</dd>

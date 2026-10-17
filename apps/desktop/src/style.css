@@ -549,7 +549,9 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .package-validation > button { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .package-validation-collapsed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .package-validation-collapsed .package-validation { padding: 0; border: 0; }
-/* Script execution Run…: one compact column for routine execution and Native review; advanced setup lives in Run. */
+/* Script execution: Setup… opens one compact settings-only column; the adjacent Run executes it from the main window. */
+.trial-run-summary { flex: 1 1 120px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.trial-feedback .diagnostic-list { max-height: 30vh; overflow: auto; }
 .trial-dialog { width: min(560px, calc(100vw - 30px)); }
 .trial-dialog-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .trial-dialog-title h2 { min-width: 0; overflow-wrap: anywhere; }
@@ -570,10 +572,6 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .trial-native-options > summary { color: var(--text-muted); }
 .trial-native-options > summary .tag { margin-left: 6px; color: var(--warn); background: var(--warn-soft); }
 .trial-native-options .run-identity { margin-bottom: 8px; }
-#trial-confirmation h3 { margin: 0 0 12px; }
-#trial-confirmation details { margin: 8px 0; }
-#trial-confirmation pre { max-height: 180px; overflow: auto; }
-#trial-confirm-run { white-space: normal; }
 .execution-options { min-width: 0; margin: 0; padding: 0; border: 0; }
 .rail-missing { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
 .rail-missing h3 { margin: 4px 6px 2px; font-size: 11px; }

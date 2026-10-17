@@ -3,7 +3,7 @@ import type {ReactNode} from 'react';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 import {functionKey, trialArguments, trialDiagnosticLocation, trialDiagnostics} from '../edit-trial.ts';
-import type {EditTrialState, TrialConfirmation} from '../edit-trial.ts';
+import type {EditTrialState} from '../edit-trial.ts';
 import type {PackageValidation} from '../status.ts';
 import {chooseLane} from '../workspace.ts';
 import type {Bound, Derived} from '../workspace.ts';
@@ -20,7 +20,6 @@ export interface EditTrialHandlers {
   change:(update:(state:EditTrialState)=>EditTrialState)=>void;
   bound:(update:(bound:Bound)=>Bound)=>void;
   reload:()=>void; run:()=>void;
-  confirm:(capture:TrialConfirmation)=>void; cancelConfirmation:()=>void;
   native:{edit:(value:string)=>void; approve:(field:'launch'|'recovery', value:boolean)=>void};
   target:TargetHandlers;
   logs:()=>void;
@@ -29,17 +28,21 @@ export interface EditTrialHandlers {
   setup:(section?:'target'|'values')=>void; environment:()=>void; results:()=>void;
 }
 
-// Edit's Script execution entry: a Run… trigger beside Validate and one dialog over the same trial state. Routine
-// execution, prerequisites and Native review finish here; Run holds only optional advanced setup.
-export default function EditTrial({state, facts, confirmation, stale, open, onOpenChange, nativeCapability, nativeError, environment, handlers, locked, loadBlocked, loading, block, dirty, validation, error, errorSource, onDiagnostic, notice, hasResult, strip, authoring}: {
-  state:EditTrialState|null; facts:Derived|null; confirmation:TrialConfirmation|null; stale:boolean;
+// Edit's Script execution entry beside Validate: a Setup… trigger for one settings-only dialog over the trial state, and
+// an adjacent Run that executes the latest saved Script with that setup, repeatedly, without reopening it. Selecting,
+// completing or closing Setup never executes. Advanced setup lives in Run.
+export default function EditTrial({state, facts, stale, open, onOpenChange, nativeCapability, nativeError, environment, handlers, locked, loadBlocked, loading, block, dirty, validation, error, notice, hasResult, strip, authoring}: {
+  state:EditTrialState|null; facts:Derived|null;
+  // The setup was read before the latest save; opening Setup rereads its functions and saved target.
+  stale:boolean;
   // Owner-bound visibility: the parent reopens the dialog when advanced setup or OCR environment settings return.
   open:boolean; onOpenChange:(open:boolean)=>void;
   nativeCapability:NativeCapability|null; nativeError:Fault|null; environment:OcrEnvironment|null;
   handlers:EditTrialHandlers; locked:boolean; loadBlocked:boolean; loading:boolean; block:string|null; dirty:boolean;
   // Saved-package validation only; it never states that execution is ready.
   validation:PackageValidation['state'];
-  error:Fault|null; errorSource?:{revision:string; stale:boolean; paths:readonly string[]}|null; onDiagnostic?:(diagnostic:Fault)=>void;
+  // A failed setup read or profile repair. Run failures are reported on the Edit page instead.
+  error:Fault|null;
   notice:string|null; hasResult:boolean;
   // Shared activity controls belong inside the dialog: the modal makes the main window's footer inert.
   // `leave` closes the dialog before the given navigation runs.
@@ -51,20 +54,14 @@ export default function EditTrial({state, facts, confirmation, stale, open, onOp
   const s = t.scriptTrial;
   // The function whose arguments the operator expanded; another selection starts collapsed again.
   const [argumentsOpen, setArgumentsOpen] = useState<string|null>(null);
-  // Navigation waits for focus restoration. Execution keeps Stop in this dialog until final admission.
+  // Navigation waits for focus restoration.
   const then = useRef<(()=>void)|null>(null);
-  const confirmationWasOpen = useRef(false);
   useEffect(() => {
     if (open) return;
     const action = then.current;
     then.current = null;
     action?.();
   }, [open]);
-  useEffect(() => {
-    if (confirmation) document.getElementById('trial-confirm-heading')?.focus();
-    else if (confirmationWasOpen.current) document.getElementById(loading ? 'trial-setup-heading' : 'trial-run')?.focus();
-    confirmationWasOpen.current = confirmation !== null;
-  }, [confirmation]);
   function leave(action:()=>void) {
     if (!open) {action(); return;}
     then.current = action;
@@ -72,24 +69,21 @@ export default function EditTrial({state, facts, confirmation, stale, open, onOp
   }
   function show() {
     onOpenChange(true);
-    // Opening is the explicit request to read the saved setup; a failure waits for an explicit Load.
-    if (!state && !locked && !loadBlocked && !loading) handlers.reload();
+    // Opening is the explicit request to read the saved setup; a failure waits for an explicit Load or Reload.
+    if ((!state || stale) && !locked && !loadBlocked && !loading) handlers.reload();
   }
   const bound = state?.bound;
   const lane = bound?.lane;
   const native = facts?.native ?? null;
   const candidate = state?.unit === 'function' ? state.context.functions.find(item => functionKey(item) === state.selected) : undefined;
   const args = state?.unit === 'function' ? trialArguments(state.arguments, candidate?.required_arguments) : null;
-  const diagnostics = error ? trialDiagnostics(error) : [];
   const valuesBlock = !state || !facts ? null : !state.profileChoice ? s.profileRequired
     : !facts.bound ? t.run.staleSchema : facts.numericErrors ? app.invalidFields : null;
   const setupBlock = !state || !facts ? s.load : !state.profileChoice ? s.profileRequired
     : state.unit === 'function' && !candidate ? state.context.functions.length === 0 ? s.noFunctions : s.chooseFunction
     : args?.error ? s.argumentErrors[args.error]
     : valuesBlock ?? facts.descriptorError ?? facts.startBlock;
-  // Dirty Native only saves and rereads; execution prerequisites are checked on the subsequent explicit Run.
-  const prepare = state !== null && dirty && lane === 'native';
-  const reason = (prepare && stale ? null : block) ?? (prepare ? null : setupBlock);
+  const reason = block ?? setupBlock;
   const status = `${t.status.savedPackage} · ${validation === 'running' ? t.authoring.validating : t.status[validation]}`;
   const choice = state?.profileChoice ?? '';
   const profile = choice === '' ? s.chooseProfile : choice === 'values' ? s.explicitValues
@@ -108,69 +102,33 @@ export default function EditTrial({state, facts, confirmation, stale, open, onOp
   const argumentsKey = state?.selected ?? '';
   const argumentsWanted = candidate !== undefined && (candidate.required_arguments > 0 || args?.error != null || (args?.values?.length ?? 0) > 0);
   const activity = open ? authoring(leave) : null;
-  const confirmedIntent = confirmation?.request.native_intent;
-  const confirmedInput = confirmation?.target.configuration.input;
-  const optionsLocked = locked || loading || dirty || block !== null || setupBlock !== null;
+  const optionsLocked = locked || loading || block !== null || setupBlock !== null;
+  // Run states its unit, destination and optional startup choices so the explicit action names what it operates.
+  const destination = lane === 'native' ? application ? `${s.destinations.native} · ${application}` : s.destinations.native
+    : lane === 'replay' ? s.destinations.replay : s.destinations.controlled;
+  const startup = lane === 'native' && state?.unit === 'package' && native?.launch
+    ? [t.run.nativeLaunchApproval, ...(native.recovery ? [`${t.run.nativeRecoveryApproval} · 1`] : [])] : [];
+  const intent = state ? [destination,
+    state.unit === 'function' ? candidate ? `${candidate.module} · ${candidate.function}` : s.chooseFunction : s.package, ...startup].join(' · ') : null;
+  const runReason = loading ? s.loading : !state || !facts ? s.setupFirst : reason;
   return <>
-    <button id="trial-setup-open" type="button" aria-haspopup="dialog" aria-label={s.openRun} aria-describedby="package-validation-status"
-      title={status} onClick={show}>
-      <ValidationStatusIcon id="package-validation-status" label={t.status.savedPackage} state={validation}/>{s.openRun}
+    <button id="trial-setup-open" type="button" aria-haspopup="dialog" aria-label={s.openSetup} aria-describedby="package-validation-status"
+      title={`${s.setup} · ${status}`} onClick={show}>
+      <ValidationStatusIcon id="package-validation-status" label={t.status.savedPackage} state={validation}/>{s.openSetup}
     </button>
+    <button id="trial-run" type="button" disabled={locked || runReason !== null} aria-describedby="trial-run-summary"
+      onClick={handlers.run}>{dirty ? s.saveRun : s.run}</button>
+    <span id="trial-run-summary" className={runReason === null ? 'trial-run-summary' : 'trial-run-summary muted'}
+      title={runReason ?? intent ?? undefined}>{runReason ?? intent}</span>
     <Modal id="trial-setup-dialog" className="trial-dialog" open={open} onCancel={() => onOpenChange(false)} labelledBy="trial-setup-heading"
       initialFocus="#trial-setup-heading" returnFocus={() => document.getElementById('trial-setup-open')}>
       <div className="dialog-header">
-        <div className="trial-dialog-title"><h2 id="trial-setup-heading" tabIndex={-1}>{s.heading}</h2>
-          <InfoHint id="trial-help" label={`${t.recognition.previewHelpButton} · ${s.heading}`} hint={s.help}/></div>
+        <div className="trial-dialog-title"><h2 id="trial-setup-heading" tabIndex={-1}>{s.setup}</h2>
+          <InfoHint id="trial-help" label={`${t.recognition.previewHelpButton} · ${s.setup}`} hint={s.help}/></div>
         <button id="trial-setup-close" type="button" className="icon" aria-label={t.common.close} title={t.common.close} onClick={() => onOpenChange(false)}>×</button>
       </div>
       {strip}
       <div className="dialog-body">
-        {confirmation && confirmedIntent ? <section id="trial-confirmation" aria-labelledby="trial-confirm-heading">
-          <h3 id="trial-confirm-heading" tabIndex={-1}>{s.confirmHeading}</h3>
-          <p id="trial-native-warning" className="inline-warning">{s.nativeWarning}</p>
-          <dl className="run-identity">
-            <dt>{s.confirmedScript}</dt><dd id="trial-confirm-script">{confirmation.request.package_id} · {confirmation.request.function
-              ? `${confirmation.request.function.module} · ${confirmation.request.function.function}` : s.package}</dd>
-            <dt>{t.authoring.revision}</dt><dd id="trial-confirm-revision"><code>{confirmation.source.revision}</code></dd>
-            <dt>{t.run.nativeApplication}</dt><dd id="trial-confirm-application" className="mono">{confirmation.target.configuration.game.path}</dd>
-            <dt>{t.target.windowTitle}</dt><dd id="trial-confirm-window">{confirmation.target.configuration.window_title}</dd>
-            <dt>{t.target.route}</dt><dd id="trial-confirm-route">{confirmedInput?.route === 'system' ? t.target.system : t.target.processDirected}</dd>
-            <dt>{t.target.focus}</dt><dd id="trial-confirm-focus">{confirmedInput?.focus === 'preserve' ? t.target.preserve : t.target.requireFocused}</dd>
-            <dt>{t.target.pointerMode}</dt><dd>{confirmedInput?.pointer_mode === 'core_graphics' ? t.target.coreGraphics : confirmedInput?.pointer_mode === 'appkit_background' ? t.target.appkitBackground : t.common.none}</dd>
-            <dt>{t.target.clickHold}</dt><dd>{confirmedInput?.click_hold_ms} ms</dd>
-            <dt>{t.run.nativeBinding}</dt><dd><code>{confirmedIntent.target_binding_id}</code> · {t.target.revision(confirmedIntent.target_revision)}</dd>
-            <dt>{t.run.nextRunProfile}</dt><dd>{confirmation.profileName || t.run.profileDraft} · {confirmation.request.profile_id}</dd>
-            <dt>{t.common.environment}</dt><dd>{confirmation.environment.profile} · {confirmation.environment.model} · {confirmation.environment.language} · {confirmation.environment.provider} · {confirmation.environment.runtime_profile}</dd>
-            <dt>{t.run.nativeLaunchApproval}</dt><dd id="trial-confirm-launch">{confirmedIntent.launch_approved ? t.run.nativeLaunchApproved : t.run.nativeLaunchNotApproved}</dd>
-            <dt>{t.run.nativeRecoveryApproval}</dt><dd id="trial-confirm-recovery">{confirmedIntent.max_exit_recoveries}</dd>
-            <dt>{t.run.capturedBudgets}</dt><dd>{confirmation.request.function ? t.run.nativePhases.host_attachment : t.run.nativeStartup} {confirmedIntent.limits.startup_ms} ms · {confirmation.request.function ? t.run.nativePhases.instantiation : t.run.nativeReadiness} {confirmedIntent.limits.readiness_ms} ms · {confirmation.request.function ? s.function : t.run.nativeWorkflow} {confirmedIntent.limits.workflow_ms} ms</dd>
-            <dt>{t.run.nativeDuration}</dt><dd>{t.run.nativeEnvelope((1 + confirmedIntent.max_exit_recoveries)
-              * (confirmedIntent.limits.startup_ms + confirmedIntent.limits.readiness_ms + confirmedIntent.limits.workflow_ms)
-              + confirmedIntent.max_exit_recoveries * 3000)}</dd>
-          </dl>
-          {confirmation.request.function && <><p className="field-help">{s.attachOnly}</p>
-            <details><summary>{s.arguments}</summary><pre>{JSON.stringify(confirmation.request.function.arguments, null, 2)}</pre></details></>}
-          <p className="field-help">{s.confirmHelp}</p>
-          <p className="field-help">{t.run.nativeApprovalHelp}</p>
-          {confirmedIntent.launch_approved && <div id="trial-confirm-recipe">
-            <p className="field-help">{t.run.nativeLaunchHelp}</p>
-            <dl className="run-identity">
-              <dt>{t.run.nativeRecipient}</dt><dd className="mono">{(confirmation.target.configuration.launcher ?? confirmation.target.configuration.game).path}</dd>
-              <dt>{t.run.nativeArguments}</dt><dd><code>{JSON.stringify(confirmation.target.configuration.arguments)}</code></dd>
-              <dt>{t.run.nativeDirectory}</dt><dd>
-                {confirmation.target.configuration.working_directory && <><code>{confirmation.target.configuration.working_directory}</code> · </>}
-                {t.run.nativeDirectories[(confirmation.target.configuration.launcher ?? confirmation.target.configuration.game).kind === 'bundle'
-                  ? confirmation.target.configuration.working_directory === null ? 'os' : 'refused'
-                  : confirmation.target.configuration.working_directory === null ? 'parent' : 'explicit']}
-              </dd>
-            </dl>
-            {confirmation.target.configuration.launcher && <p className="field-help">{t.run.nativeForwarding}</p>}
-          </div>}
-          {confirmedIntent.max_exit_recoveries > 0 && <p className="field-help">{t.run.nativeRecoveryHelp}</p>}
-          <details><summary>{t.run.capturedOptions}</summary><pre>{JSON.stringify(confirmation.request.values, null, 2)}</pre></details>
-          <details><summary>{t.run.capturedLimits}</summary><pre>{JSON.stringify(confirmedIntent.limits, null, 2)}</pre></details>
-          <details><summary>{t.run.capturedEnvironment}</summary><pre>{JSON.stringify(confirmation.environment, null, 2)}</pre></details>
-        </section> : <>
         {state && bound && facts && <>
           <div className="field"><label htmlFor="trial-entry">{s.unit}</label>
             <Select id="trial-entry" value={entry} disabled={locked} aria-describedby={candidate ? 'trial-signature' : undefined}
@@ -264,51 +222,56 @@ export default function EditTrial({state, facts, confirmation, stale, open, onOp
             <button id="trial-results" type="button" className="link" onClick={() => leave(handlers.results)}>{s.openResults}</button>
             <button id="trial-logs" type="button" className="link" onClick={() => leave(handlers.logs)}>{s.logs}</button>
           </>}
-          {state && !(stale && !dirty) && <button id="trial-reload" type="button" disabled={locked || loadBlocked} onClick={handlers.reload}>{s.refresh}</button>}
+          {state && <button id="trial-reload" type="button" disabled={locked || loadBlocked} onClick={handlers.reload}>{s.refresh}</button>}
         </div>
-        {state && dirty && <p className="field-help">{s.saveHelp}{lane === 'native' && <> {s.nativeSaveHelp}</>}</p>}
-        </>}
+        {state && dirty && <p className="field-help">{s.saveHelp}</p>}
         {notice && <p role="status" className="inline-warning">{notice}</p>}
-        {error && <FaultMessage title={s.heading} value={diagnostics.length ? {...error, context:null} : error}/>}
-        {diagnostics.length > 0 && <section aria-label={s.diagnostics}>
-          {errorSource && <p className="field-help">{s.diagnosticRevision} <code>{errorSource.revision}</code></p>}
-          {errorSource?.stale && <p className="inline-warning">{s.sourceNewer}</p>}
-          <p className="field-help">{s.diagnosticLimit}</p>
-          <ol id="trial-diagnostics" className="diagnostic-list">{diagnostics.map((item, index) => {
-            const location = trialDiagnosticLocation(item);
-            const where = location ? t.authoring.location(location.path, location.line, location.column) : null;
-            const available = location && errorSource?.paths.includes(location.path) && onDiagnostic;
-            return <li key={index}>
-              {where && available
-                ? <button type="button" className="link diagnostic-location" data-path={location.path}
-                  aria-label={`${t.authoring.goTo(where)}${errorSource?.stale ? ` · ${s.diagnosticObsolete}` : ''}`}
-                  onClick={() => leave(() => onDiagnostic?.(item))}>{where}</button>
-                : <span className="muted">{where === null ? t.authoring.unlocated : t.authoring.diagnosticUnavailable(where)}</span>}
-              {where && errorSource?.stale && <span className="tag stale"> {s.diagnosticObsolete}</span>}
-              <strong> {item.category}</strong> <span>{item.message}</span>
-            </li>;
-          })}</ol>
-        </section>}
+        {error && <FaultMessage title={s.setup} value={error}/>}
       </div>
       <div className="dialog-footer">
         <span id="trial-block" role="status">{loading ? s.loading : state ? reason ?? '' : block ?? ''}</span>
         {activity && <AuthoringFooterStatus key={activity.activity.owner.token} {...activity} idPrefix="trial-authoring"/>}
-        {confirmation
-          ? <><button id="trial-confirm-back" type="button" onClick={handlers.cancelConfirmation}>{s.confirmBack}</button>
-            <button id="trial-confirm-run" type="button" className="primary" disabled={locked || loading}
-              aria-describedby="trial-native-warning" onClick={() => handlers.confirm(confirmation)}>{s.allowRun}</button></>
-          : !state
-          ? <button id="trial-load" type="button" className="primary" disabled={locked || loadBlocked || loading} onClick={handlers.reload}>{s.load}</button>
-          : stale && !dirty
-          // A clean Native setup read before the latest save rereads it here; consent never carries across revisions.
-          ? <button id="trial-review-current" type="button" className="primary" disabled={locked || loadBlocked || loading} onClick={handlers.reload}>{s.reviewCurrent}</button>
-          : prepare
-          // Saving and rereading stay inside the dialog; startTrial stops before admission and asks for fresh review.
-          ? <button id="trial-save-review" type="button" className="primary" disabled={locked || reason !== null} title={reason ?? undefined}
-            onClick={handlers.run}>{s.saveReview}</button>
-          : <button id="trial-run" type="button" className="primary" disabled={locked || reason !== null} title={reason ?? undefined}
-            onClick={handlers.run}>{hasResult ? dirty ? s.saveRerun : s.rerun : dirty ? s.saveRun : s.run}</button>}
+        {/* Completing setup only closes it; Run beside Setup is the separate explicit execution. */}
+        {state
+          ? <button id="trial-setup-done" type="button" className="primary" onClick={() => onOpenChange(false)}>{s.done}</button>
+          : <button id="trial-load" type="button" className="primary" disabled={locked || loadBlocked || loading} onClick={handlers.reload}>{s.load}</button>}
       </div>
     </Modal>
   </>;
+}
+
+// Notices and failures of the latest explicit Run before admission, on the Edit page with the source they locate.
+export function EditTrialFeedback({notice, error, errorSource, onDiagnostic, onDismiss}: {
+  notice:string|null; error:Fault|null;
+  errorSource:{revision:string; stale:boolean; paths:readonly string[]}|null;
+  onDiagnostic:(diagnostic:Fault)=>void; onDismiss:()=>void;
+}) {
+  const locale = useLocale();
+  const t = messages[locale].ui;
+  const s = t.scriptTrial;
+  if (!notice && !error) return null;
+  const diagnostics = error ? trialDiagnostics(error) : [];
+  return <section id="trial-feedback" className="trial-feedback" aria-label={s.heading}>
+    {notice && <p role="status" className="inline-warning">{notice}</p>}
+    {error && <FaultMessage title={s.heading} value={diagnostics.length ? {...error, context:null} : error} onDismiss={onDismiss}/>}
+    {diagnostics.length > 0 && <section aria-label={s.diagnostics}>
+      {errorSource && <p className="field-help">{s.diagnosticRevision} <code>{errorSource.revision}</code></p>}
+      {errorSource?.stale && <p className="inline-warning">{s.sourceNewer}</p>}
+      <p className="field-help">{s.diagnosticLimit}</p>
+      <ol id="trial-diagnostics" className="diagnostic-list">{diagnostics.map((item, index) => {
+        const location = trialDiagnosticLocation(item);
+        const where = location ? t.authoring.location(location.path, location.line, location.column) : null;
+        const available = location && errorSource?.paths.includes(location.path);
+        return <li key={index}>
+          {where && available
+            ? <button type="button" className="link diagnostic-location" data-path={location.path}
+              aria-label={`${t.authoring.goTo(where)}${errorSource?.stale ? ` · ${s.diagnosticObsolete}` : ''}`}
+              onClick={() => onDiagnostic(item)}>{where}</button>
+            : <span className="muted">{where === null ? t.authoring.unlocated : t.authoring.diagnosticUnavailable(where)}</span>}
+          {where && errorSource?.stale && <span className="tag stale"> {s.diagnosticObsolete}</span>}
+          <strong> {item.category}</strong> <span>{item.message}</span>
+        </li>;
+      })}</ol>
+    </section>}
+  </section>;
 }

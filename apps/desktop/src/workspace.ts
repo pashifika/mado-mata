@@ -411,19 +411,21 @@ function nativeDuration(review:NativeReview, capability:NativeCapability|null):{
 }
 
 // Everything the consent covers. Revisions are monotonic, so an edited-back draft or reissued selection stays stale.
-function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null):string {
+// Script launch/recovery choices omit the package inventory: each explicit Run executes the latest saved Script.
+function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null, reviewKind:'operation'|'script'):string {
   const target = bound.target;
   return JSON.stringify([target.context, target.draftRevision, target.view?.record.revision ?? null, target.view?.record.binding ?? null,
-    bound.packagePath, bound.package.inventory_identity, bound.package.schema_identity, bound.lane, bound.draftRevision,
+    bound.packagePath, reviewKind === 'script' ? null : bound.package.inventory_identity, bound.package.schema_identity, bound.lane, bound.draftRevision,
     bound.profiles.find(profile => profile.id === bound.selectedId) ?? null, environment, limits,
     bound.native.operation, bound.native.postcondition]);
 }
 
 // Consent given for another request starts over rather than carrying the other consent forward.
-export function approveNative(bound:Bound, field:NativeConsent, value:boolean, environment:OcrEnvironment|null, capability:NativeCapability|null):Bound {
+export function approveNative(bound:Bound, field:NativeConsent, value:boolean, environment:OcrEnvironment|null, capability:NativeCapability|null,
+  reviewKind:'operation'|'script' = 'operation'):Bound {
   const {limits} = nativeDuration(bound.native, capability);
   if (limits === null) return clearNativeApproval(bound);
-  const key = nativeKey(bound, environment, limits);
+  const key = nativeKey(bound, environment, limits, reviewKind);
   const review = bound.native.key === key ? bound.native : {...bound.native, capture: false, input: false, launch: false, recovery: false};
   if (field === 'recovery' && value && !review.launch) return bound;
   return {...bound, native: {...review, [field]: value, recovery: field === 'launch' && !value ? false : field === 'recovery' ? value : review.recovery, key}};
@@ -451,8 +453,8 @@ export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capabi
   const review = bound.native;
   const {workflowSeconds, limits} = nativeDuration(review, capability);
   const workflowError = capability !== null && limits === null;
-  const current = limits !== null && review.key !== null && review.key === nativeKey(bound, environment, limits);
-  // Script readiness grants no capture/input authority; only Edit's one-shot confirmation may do that.
+  const current = limits !== null && review.key !== null && review.key === nativeKey(bound, environment, limits, reviewKind);
+  // Script setup grants no capture/input authority; only an explicit Edit Run grants it, for that one request.
   const capture = reviewKind === 'operation' && current && review.capture;
   const input = reviewKind === 'operation' && current && review.input;
   const launch = current && review.launch;

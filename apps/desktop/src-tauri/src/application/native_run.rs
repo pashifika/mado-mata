@@ -3,7 +3,7 @@ use crate::target::{
     TargetBinding, TargetExpectation, TargetRecord,
 };
 use mado_runtime_comparison::desktop::{
-    LaunchDisposition, NativeInputPolicy, NativePhase, NativeProgress, NativeTarget,
+    LaunchDisposition, NativeInputPolicy, NativePhase, NativeProgress, NativeReview, NativeTarget,
     NativeTargetStatus, StartRequest,
 };
 use mado_runtime_comparison::inventory::TargetDeclaration;
@@ -14,6 +14,7 @@ pub(super) struct NativeBinding {
     binding: TargetBinding,
     declaration: TargetDeclaration,
     launch_approved: bool,
+    script: bool,
     progress: NativeProgress,
     finished: bool,
 }
@@ -85,6 +86,7 @@ impl NativeBinding {
             binding,
             declaration: declaration.clone(),
             launch_approved: intent.launch_approved,
+            script: matches!(intent.review, NativeReview::Script {}),
             progress: NativeProgress {
                 phase: NativePhase::TargetDiscovery,
                 attempt: 1,
@@ -158,10 +160,10 @@ impl NativeBinding {
                 ));
             }
             report(progress);
-            let first = platform.discover(self, control);
+            let first = self.discover(control, platform);
             control.check()?;
-            let proof = match verified(first?)? {
-                Some(proof) => proof,
+            let target = match first? {
+                Some(target) => target,
                 None if progress.launch == LaunchDisposition::Accepted => return Ok(None),
                 None => {
                     if !self.launch_approved {
@@ -177,10 +179,10 @@ impl NativeBinding {
                     let prepared = prepared?;
                     verify_resources()?;
                     control.check()?;
-                    let final_check = platform.discover(self, control);
+                    let final_check = self.discover(control, platform);
                     control.check()?;
-                    match verified(final_check?)? {
-                        Some(proof) => proof,
+                    match final_check? {
+                        Some(target) => target,
                         None => {
                             progress.phase = NativePhase::LaunchSubmission;
                             report(progress);
@@ -211,7 +213,6 @@ impl NativeBinding {
                 }
             };
             control.check()?;
-            let target = self.project(proof)?;
             progress.phase = NativePhase::WaitingForWindow;
             report(progress);
             control.check()?;
@@ -228,29 +229,46 @@ impl NativeBinding {
         })
     }
 
-    fn project(&mut self, mut proof: AuthoringApplication) -> Result<NativeTarget, Fault> {
-        if proof.processes.len() > 1 {
-            return Err(Fault::new(
-                "NativeTargetAmbiguous",
-                "Multiple running applications match the saved installation",
-            ));
-        }
-        let process = proof.processes.pop().ok_or_else(|| {
-            Fault::new(
-                "NativeTargetMissing",
-                "No verified running application matches the saved installation",
+    fn discover(
+        &mut self,
+        control: &Control,
+        platform: &mut impl PreparationPlatform,
+    ) -> Result<Option<NativeTarget>, Fault> {
+        let (executable, process) = if self.script {
+            let Some(executable) = platform.script_executable(self, control)? else {
+                return Ok(None);
+            };
+            (executable, None)
+        } else {
+            let Some(mut proof) = verified(platform.discover(self, control)?)? else {
+                return Ok(None);
+            };
+            if proof.processes.len() > 1 {
+                return Err(Fault::new(
+                    "NativeTargetAmbiguous",
+                    "Multiple running applications match the saved installation",
+                ));
+            }
+            let process = proof.processes.pop().ok_or_else(|| {
+                Fault::new(
+                    "NativeTargetMissing",
+                    "No verified running application matches the saved installation",
+                )
+            })?;
+            (
+                process.executable,
+                Some((process.pid, format!("{:016x}", process.lifetime))),
             )
-        })?;
+        };
         let input = self
             .binding
             .configuration
             .input
             .take()
             .ok_or_else(|| Fault::new("NativeTargetUnset", "Native input policy is missing"))?;
-        Ok(NativeTarget {
-            executable: process.executable,
-            process_id: process.pid,
-            process_lifetime: format!("{:016x}", process.lifetime),
+        Ok(Some(NativeTarget {
+            executable,
+            process,
             window_title: std::mem::take(&mut self.binding.configuration.window_title),
             input: NativeInputPolicy {
                 route: input.route,
@@ -258,7 +276,7 @@ impl NativeBinding {
                 pointer_mode: input.pointer_mode,
                 click_hold_ms: input.click_hold_ms,
             },
-        })
+        }))
     }
 }
 
@@ -281,6 +299,11 @@ trait PreparationPlatform {
     type Recipe;
     type Prepared;
 
+    fn script_executable(
+        &mut self,
+        binding: &NativeBinding,
+        control: &Control,
+    ) -> Result<Option<std::path::PathBuf>, Fault>;
     fn discover(
         &mut self,
         binding: &NativeBinding,
@@ -297,6 +320,20 @@ struct MacosPreparation;
 impl PreparationPlatform for MacosPreparation {
     type Recipe = LaunchRecipe;
     type Prepared = PreparedLaunch;
+
+    fn script_executable(
+        &mut self,
+        binding: &NativeBinding,
+        control: &Control,
+    ) -> Result<Option<std::path::PathBuf>, Fault> {
+        target::script_executable(
+            &binding.binding.configuration,
+            &binding.declaration,
+            &binding.binding.resolution,
+            &control.cancelled,
+            control.deadline(),
+        )
+    }
 
     fn discover(
         &mut self,
