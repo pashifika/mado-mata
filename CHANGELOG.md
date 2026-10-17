@@ -35,6 +35,8 @@
 - Refuse ambiguous same-path APP processes before Script Native window selection.
   Show stale advanced setup explicitly and reload it when returning to Setup;
   preserve invocation inputs and keep target actions disabled until refreshed.
+- Give missing-target Function trials manual app-start guidance instead of
+  unavailable launch approval; retain Whole package guidance.
 
 - Keep macOS engine-check temporary paths short for Unix socket fixtures,
   independently of its descriptive build and dependency-cache directory.

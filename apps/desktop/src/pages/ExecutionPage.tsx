@@ -34,6 +34,7 @@ export default function ExecutionPage({label, revision, run, snapshot, starting,
   const privatePrimary = !check && lane !== 'controlled';
   const outcome = nativeOutcome(view);
   const trial = captured?.kind === 'run' ? captured.trial : undefined;
+  const functionRun = Boolean(trial?.invocation ?? view.result?.function);
   const location = primary ? trialDiagnosticLocation(primary) : null;
   return <>
     {!compact && <div className="page-heading"><div><span className="eyebrow">{t.common.revision(label, revision)}</span><h1 id="run-heading">{t.common.execution}</h1></div></div>}
@@ -57,7 +58,9 @@ export default function ExecutionPage({label, revision, run, snapshot, starting,
           ? <section className="fault" role="alert"><strong>{check ? t.run.checkError : t.run.runError} · {faultSummary(primary, !privatePrimary)}</strong>
               <p>{t.run.diagnosticHelp}</p></section>
           : <FaultMessage title={t.run.runError} value={primary}/>)}
-        {outcome?.failure && <p className="fault" id="native-failure">{outcome.cause ? t.run.nativeCauses[outcome.cause] : t.run.nativeFailures[outcome.failure]}</p>}
+        {outcome?.failure && <p className="fault" id="native-failure">{outcome.cause === 'missing' && functionRun
+          ? t.run.nativeFunctionMissing
+          : outcome.cause ? t.run.nativeCauses[outcome.cause] : t.run.nativeFailures[outcome.failure]}</p>}
         {outcome?.launch && <p className="inline-warning" id="native-launch-outcome">{t.run.nativeLaunchOutcomes[outcome.launch]}</p>}
         {view.run === null ? <p className="muted" role="status">{starting ? t.run.submitted : t.run.noOperations}</p> : <>
           <p className="authority-note">{t.run.authority}</p>

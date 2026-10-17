@@ -949,6 +949,7 @@
       "ambiguous": "More than one running copy matches the saved installation, so none was chosen. Close the extra copies, then review and Start again.",
       "unverifiable": "A running copy could not be verified against the saved installation, so it was not attached. Check the saved installation or restart the game, then review and Start again."
     },
+    "nativeFunctionMissing": "The target application is not running. Start it and open the screen you want to use, then press Run again. Function execution does not launch the application or prepare its screen.",
     "nativeLaunchOutcomes": {
       "accepted": "macOS accepted this Start's launch request. The game may still be opening or running; this failure did not close it and nothing was launched again.",
       "acceptedStopped": "macOS accepted the launch request before Stop took effect. The game may still finish opening; Stop ended automation only and did not close it.",
