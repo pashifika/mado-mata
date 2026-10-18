@@ -80,11 +80,8 @@ outranks a later process exit. Window/permission/provider failure is not confirm
 exit, and launch/capture availability is not a Script-observed usable screen.
 
 The [Windows Desktop Native lane](desktop.md#windows-attach-only-native-start)
-uses the same fixed engine child and ordinary/Edit Script paths, but only attaches
-to an already-running executable. Launch/recovery intent refuses before activity.
-Its saved policy is `system` / `require_focused` or `window_message` / `preserve`,
-without a macOS pointer mode. No automatic activation or route fallback is allowed.
-Legacy and foreign saved policy remains intact until explicit correction.
+uses the same fixed engine child in attach-only mode. See the Desktop guide for
+setup, supported input policies and operator acceptance.
 
 Windows package input retains the exact native frame acquired through the
 production observation path and accepted by `Session::commit_frame`. Placement

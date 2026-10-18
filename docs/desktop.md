@@ -2943,7 +2943,8 @@ controlled checks do not qualify actual game input.
 2. Use ordinary Run's Native review, or Edit's explicit Whole package/Function
    Run. Whole package must request startup from `readiness()` and observe its own
    usable-screen condition before returning `"Ready"`. Function attaches directly
-   and never invokes package readiness.
+   and calls the selected function without an automatic Readiness phase;
+   `target_start` and `target_status` are unavailable in Function mode.
 3. Windows refuses launch approval and nonzero exit recovery, including crafted
    requests. Stored launcher/arguments remain configuration data, not execution
    authority. Confirmed process absence requires an independent game start and

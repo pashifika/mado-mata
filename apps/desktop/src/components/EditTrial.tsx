@@ -180,7 +180,7 @@ export default function EditTrial({state, facts, stale, open, onOpenChange, nati
             <button id="trial-environment-action" type="button" onClick={() => leave(handlers.environment)}>{s.setupEnvironment}</button></div>}
           {nativeReady && <>
             {state.unit === 'function' && <p className="field-help">{s.attachOnly}</p>}
-            {windows && <p id="trial-windows-attach-only" className="field-help">{s.windowsAttachOnly}</p>}
+            {windows && state.unit === 'package' && <p id="trial-windows-attach-only" className="field-help">{s.windowsAttachOnly}</p>}
             <details id="trial-native-options" className="trial-native-options" open={native.workflowError || undefined}>
               <summary>{s.nativeOptions}
                 {native.launch && state.unit === 'package' && <span className="tag">{t.run.nativeLaunchApproval} · {t.run.nativeLaunchApproved}</span>}
