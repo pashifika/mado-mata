@@ -1,4 +1,4 @@
-# ADR 0011: Edit-owned Script execution
+# ADR 0013: Edit-owned Script execution
 
 - Status: Accepted for implementation; native acceptance remains separate
 - Scope: Whole package and existing-function execution without ending Edit

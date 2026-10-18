@@ -17,7 +17,7 @@ operation/postcondition text, and finite limits.
 Approval is transient and spent on every Start. Relevant edits, including a target
 draft changed back to its saved value, invalidate it. The text describes the
 operator's review, not a hostile-script sandbox. Edit uses explicit Script Run
-as described in [ADR 0011](0011-edit-script-execution.md); ordinary
+as described in [ADR 0013](0013-edit-script-execution.md); ordinary
 Run's review is unchanged. IPC cannot supply a Plan, process identity, executable,
 environment override, or native configuration.
 
@@ -103,7 +103,7 @@ select Desktop-only phase budgets or acquire this preparation authority.
 
 ## Edit-owned Script attachment
 
-[ADR 0011](0011-edit-script-execution.md) maps the saved APP to its actual runtime
+[ADR 0013](0013-edit-script-execution.md) maps the saved APP to its actual runtime
 executable, then gives that path and exact window title to SDK selection.
 Matching paths use metadata only; relocated paths require existing signed
 correspondence. The SDK binds and retains the process/window without duplicate

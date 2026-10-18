@@ -625,7 +625,7 @@ step or visit to the Run tab.
   has changed, a diagnostic opens the file without claiming an exact new
   position; its unsaved text and history remain intact.
 
-See [ADR 0011](adr/0011-edit-script-execution.md) for the shared execution boundary.
+See [ADR 0013](adr/0013-edit-script-execution.md) for the shared execution boundary.
 
 
 ### Script editing and completion
