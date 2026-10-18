@@ -252,6 +252,9 @@ The full check has these responsibilities:
   geometry/Undo, grouped selection, stale trial/Copy state, and per-Start Native
   consent invalidation), and
   type-check/build its trusted UI and bundled language worker.
+  Completion-session tests share a controlled clock with CodeMirror's parser so
+  CPU contention cannot change the tested syntax context. Production parse limits
+  remain unchanged.
   Shared-authoring tests also cover versioned unsaved reads, original-UTF-16
   batch edits, ABA/IME refusal, structured-field provenance, chronological
   Undo, snippet dependencies, publication prefixes and lifecycle resolution.
