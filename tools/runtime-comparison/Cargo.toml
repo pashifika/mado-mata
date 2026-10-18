@@ -21,8 +21,8 @@ flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backe
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "loader"] }
 mlua = { version = "=0.12.1", default-features = false, features = ["lua54", "vendored", "serde"] }
-mado-pilot = { git = "https://github.com/pashifika/mado-pilot", rev = "26760ce5d0ea5954287a0f31c88ab9923c38c6ee", optional = true }
-mado-pilot-ocr = { git = "https://github.com/pashifika/mado-pilot", rev = "26760ce5d0ea5954287a0f31c88ab9923c38c6ee" }
+mado-pilot = { git = "https://github.com/pashifika/mado-pilot", rev = "c1c6fd3f0d8400649c018ddef29075aee6e37fe4", optional = true }
+mado-pilot-ocr = { git = "https://github.com/pashifika/mado-pilot", rev = "c1c6fd3f0d8400649c018ddef29075aee6e37fe4" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
@@ -39,10 +39,10 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = ["
 sha2 = "=0.10.9"
 
 [dev-dependencies]
-mado-pilot-runtime = { git = "https://github.com/pashifika/mado-pilot", rev = "26760ce5d0ea5954287a0f31c88ab9923c38c6ee" }
-mado-pilot-capture = { git = "https://github.com/pashifika/mado-pilot", rev = "26760ce5d0ea5954287a0f31c88ab9923c38c6ee" }
-mado-pilot-core = { git = "https://github.com/pashifika/mado-pilot", rev = "26760ce5d0ea5954287a0f31c88ab9923c38c6ee" }
-mado-pilot-testkit = { git = "https://github.com/pashifika/mado-pilot", rev = "26760ce5d0ea5954287a0f31c88ab9923c38c6ee" }
+mado-pilot-runtime = { git = "https://github.com/pashifika/mado-pilot", rev = "c1c6fd3f0d8400649c018ddef29075aee6e37fe4" }
+mado-pilot-capture = { git = "https://github.com/pashifika/mado-pilot", rev = "c1c6fd3f0d8400649c018ddef29075aee6e37fe4" }
+mado-pilot-core = { git = "https://github.com/pashifika/mado-pilot", rev = "c1c6fd3f0d8400649c018ddef29075aee6e37fe4" }
+mado-pilot-testkit = { git = "https://github.com/pashifika/mado-pilot", rev = "c1c6fd3f0d8400649c018ddef29075aee6e37fe4" }
 
 [lints.rust]
 unsafe_code = "warn"

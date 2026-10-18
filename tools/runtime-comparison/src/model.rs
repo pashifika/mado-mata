@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-pub const ENGINE_REVISION: &str = "26760ce5d0ea5954287a0f31c88ab9923c38c6ee";
+pub const ENGINE_REVISION: &str = "c1c6fd3f0d8400649c018ddef29075aee6e37fe4";
 pub const MAX_TRANSPORT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "engine_revision": "26760ce5d0ea5954287a0f31c88ab9923c38c6ee",
+  "engine_revision": "c1c6fd3f0d8400649c018ddef29075aee6e37fe4",
   "platforms": [
     {
       "os": "macos",
@@ -49,7 +49,7 @@
         "license": "Apache-2.0; dependencies retain their own licenses",
         "license_url": "https://github.com/opencv/opencv/blob/4.14.0/LICENSE",
         "links": [
-          {"label": {"en": "Pinned native prerequisites", "ja": "固定リビジョンのネイティブ前提条件"}, "url": "https://github.com/pashifika/mado-pilot/blob/26760ce5d0ea5954287a0f31c88ab9923c38c6ee/CONTRIBUTING.md#native-development-prerequisites"},
+          {"label": {"en": "Pinned native prerequisites", "ja": "固定リビジョンのネイティブ前提条件"}, "url": "https://github.com/pashifika/mado-pilot/blob/c1c6fd3f0d8400649c018ddef29075aee6e37fe4/CONTRIBUTING.md#native-development-prerequisites"},
           {"label": {"en": "Homebrew opencv@4 (version can change)", "ja": "Homebrew opencv@4（バージョンは変更され得ます）"}, "url": "https://formulae.brew.sh/formula/opencv@4"}
         ],
         "commands": ["brew install opencv@4"],
@@ -106,7 +106,7 @@
         "license_url": "https://github.com/opencv/opencv/blob/4.14.0/LICENSE",
         "links": [
           {"label": {"en": "Official OpenCV 4.14.0 Windows release", "ja": "公式OpenCV 4.14.0 Windowsリリース"}, "url": "https://github.com/opencv/opencv/releases/tag/4.14.0"},
-          {"label": {"en": "Pinned native prerequisites", "ja": "固定リビジョンのネイティブ前提条件"}, "url": "https://github.com/pashifika/mado-pilot/blob/26760ce5d0ea5954287a0f31c88ab9923c38c6ee/CONTRIBUTING.md#native-development-prerequisites"}
+          {"label": {"en": "Pinned native prerequisites", "ja": "固定リビジョンのネイティブ前提条件"}, "url": "https://github.com/pashifika/mado-pilot/blob/c1c6fd3f0d8400649c018ddef29075aee6e37fe4/CONTRIBUTING.md#native-development-prerequisites"}
         ],
         "commands": [],
         "required_modules": ["opencv_world4140.dll"],

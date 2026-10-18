@@ -2299,7 +2299,7 @@ dependencies = [
 [[package]]
 name = "mado-pilot-capture"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=26760ce5d0ea5954287a0f31c88ab9923c38c6ee#26760ce5d0ea5954287a0f31c88ab9923c38c6ee"
+source = "git+https://github.com/pashifika/mado-pilot?rev=c1c6fd3f0d8400649c018ddef29075aee6e37fe4#c1c6fd3f0d8400649c018ddef29075aee6e37fe4"
 dependencies = [
  "mado-pilot-core",
 ]
@@ -2307,12 +2307,12 @@ dependencies = [
 [[package]]
 name = "mado-pilot-core"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=26760ce5d0ea5954287a0f31c88ab9923c38c6ee#26760ce5d0ea5954287a0f31c88ab9923c38c6ee"
+source = "git+https://github.com/pashifika/mado-pilot?rev=c1c6fd3f0d8400649c018ddef29075aee6e37fe4#c1c6fd3f0d8400649c018ddef29075aee6e37fe4"
 
 [[package]]
 name = "mado-pilot-ocr"
 version = "0.4.0"
-source = "git+https://github.com/pashifika/mado-pilot?rev=26760ce5d0ea5954287a0f31c88ab9923c38c6ee#26760ce5d0ea5954287a0f31c88ab9923c38c6ee"
+source = "git+https://github.com/pashifika/mado-pilot?rev=c1c6fd3f0d8400649c018ddef29075aee6e37fe4#c1c6fd3f0d8400649c018ddef29075aee6e37fe4"
 dependencies = [
  "mado-pilot-capture",
  "mado-pilot-core",

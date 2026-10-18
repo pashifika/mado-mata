@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Update the pinned MadoPilot detector to accept measured one-ULP CPU sigmoid
-  roundoff without changing tensors, OCR text or other numeric validation.
+- Consume MadoPilot's one-ULP detector-roundoff repair and Windows commit-time
+  target-loss check. Keep tensor values and input routes unchanged.
 
 - Execute a whole package or an existing file-level function directly in Edit.
   Reuse explicit Save all, immutable source capture and the supervised runner;
