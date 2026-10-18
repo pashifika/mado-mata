@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Update the pinned MadoPilot detector to accept measured one-ULP CPU sigmoid
+  roundoff without changing tensors, OCR text or other numeric validation.
+
 - Execute a whole package or an existing file-level function directly in Edit.
   Reuse explicit Save all, immutable source capture and the supervised runner;
   rerun current source with fresh VM state while preserving the game's state.
