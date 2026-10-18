@@ -443,3 +443,81 @@ fn script_selection_uses_the_resolved_executable_independently_of_wrapped_bundle
             .is_none()
     );
 }
+
+#[test]
+fn windows_script_requires_the_selected_process_and_never_recovery_evidence() {
+    let mut selected = config();
+    selected.operating_system = "windows".into();
+    validate_process_selection(&selected, true).unwrap();
+    selected.confirm_process_exit = true;
+    assert!(validate_process_selection(&selected, true).is_err());
+    selected.confirm_process_exit = false;
+    selected.process_id = None;
+    selected.process_lifetime = None;
+    assert!(validate_process_selection(&selected, true).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_package_authority_requires_exact_route_focus_and_no_pointer_mode() {
+    let plan: Plan =
+        serde_json::from_str(include_str!("../../../fixtures/manual-plan.json")).unwrap();
+    let mut selected = config();
+    selected.operating_system = "windows".into();
+    selected.recognition_language = crate::environment::LANGUAGE.into();
+    for (route, focus) in [("system", "require_focused"), ("window_message", "preserve")] {
+        selected.input.route = route.into();
+        selected.input.focus = focus.into();
+        validate_native(Some(&selected), &plan).unwrap();
+        selected.input.macos_process_pointer_mode = Some(MacosProcessPointerMode::CoreGraphics);
+        assert_eq!(
+            validate_native(Some(&selected), &plan).unwrap_err().context["stage"],
+            "input_route_unsupported"
+        );
+        selected.input.macos_process_pointer_mode = None;
+    }
+    for (route, focus) in [
+        ("system", "preserve"),
+        ("window_message", "require_focused"),
+        ("process_directed", "preserve"),
+    ] {
+        selected.input.route = route.into();
+        selected.input.focus = focus.into();
+        assert_eq!(
+            validate_native(Some(&selected), &plan).unwrap_err().context["stage"],
+            "input_route_unsupported"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn single_link_requirement_does_not_change_standalone_cli_selection() {
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let root = std::env::temp_dir().join(format!("mado-native-cli-links-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let root = Directory(root);
+    let path = root.0.join("selected");
+    std::fs::write(&path, b"metadata-only fixture").unwrap();
+    std::fs::hard_link(&path, root.0.join("alias")).unwrap();
+    let mut selected = config();
+    selected.operating_system = "windows".into();
+    selected.executable_or_bundle = path.canonicalize().unwrap();
+    selected.input.package_approved = false;
+    let target = window(&IdentityIssuer::new(), &selected, Some((42, 7)));
+    let candidates = [target];
+    assert_eq!(
+        select_native_target(&candidates, &selected, Some(7)).unwrap().unwrap().id(),
+        candidates[0].id(),
+    );
+    selected.input.package_approved = true;
+    assert_eq!(
+        select_native_target(&candidates, &selected, Some(7)).unwrap_err().context["stage"],
+        "target_identity_unavailable",
+    );
+}

@@ -539,7 +539,8 @@ async fn delete_profile(
 
 #[tauri::command]
 fn native_run_limits() -> Option<NativeCapability> {
-    cfg!(target_os = "macos").then(mado_runtime_comparison::desktop::native_capability)
+    cfg!(any(target_os = "macos", windows))
+        .then(mado_runtime_comparison::desktop::native_capability)
 }
 
 #[tauri::command]

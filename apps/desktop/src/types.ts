@@ -121,7 +121,7 @@ export interface NativeLimits {
 export interface NativeCapability {default_limits:NativeLimits; max_workflow_ms:number}
 export type NativeReview = {kind:'operation'; operation:string; visible_postcondition:string} | {kind:'script'};
 // Bounded per-Start operator intent. It names the reviewed saved target and carries no executable, process or plan.
-// `launch_approved` separately permits one launch of the saved recipe when the game is confirmed absent.
+// On macOS, `launch_approved` permits one saved-recipe launch when the game is confirmed absent; Windows is attach-only.
 export interface NativeIntent {
   target_revision:number; target_binding_id:string; target_declaration_identity:string;
   capture_approved:boolean; input_approved:boolean; launch_approved:boolean; review:NativeReview; limits:NativeLimits;
@@ -169,7 +169,7 @@ export type CatalogEdit =
 export interface TargetDeclaration {id:string; window_title:string|null; macos?:{bundle_id:string}}
 export interface TargetLocation {kind:'executable'|'bundle'; path:string}
 export interface TargetInputPolicy {
-  route:'process_directed'|'system'; focus:'preserve'|'require_focused';
+  route:'process_directed'|'system'|'window_message'; focus:'preserve'|'require_focused';
   pointer_mode:'core_graphics'|'appkit_background'|null; click_hold_ms:number;
 }
 export interface TargetConfiguration {

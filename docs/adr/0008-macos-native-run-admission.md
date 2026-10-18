@@ -1,8 +1,8 @@
-# ADR 0008: Reviewed macOS Native Run admission
+# ADR 0008: Reviewed Native Run admission
 
 - Status: Accepted for the development checkout; native acceptance remains separate
 - Date: 2026-09-30
-- Scope: One saved macOS application bundle, attach or approved launch, optional one-time exit recovery
+- Scope: macOS attach/approved launch and one-time exit recovery; Windows attach-only
 
 ## Decision
 
@@ -41,6 +41,62 @@ status probes drive bounded preparation for the first exact eligible window.
 Read-only Foundation/libproc checks retain the selected lifetime while windowless;
 the public SDK independently binds its window. Process loss/replacement refuses
 the attempt, not a new target selection.
+
+## Windows attach-only extension
+
+Windows ordinary Run, Edit Whole package and Function use the same reservation,
+captured inputs, supervisor and fixed engine child. The saved target must be a
+Windows executable with `system` / `require_focused` or `window_message` /
+`preserve`, no macOS pointer mode and a 0–1000 ms hold. Legacy Windows and foreign
+bindings remain readable and byte-preserved; Check/Save and Native admission
+require explicitly corrected policy. No storage migration or implicit consent.
+
+Windows refuses launch approval and nonzero recovery. Recipe metadata is retained
+but never submitted. Whole package requests attachment from Readiness; Function
+attaches before direct invocation without hidden readiness. Missing processes
+require an independent start and fresh Run, not an in-operation retry.
+
+Process correspondence uses a finite 4096-entry ToolHelp snapshot. Every queryable
+image is compared by `FILE_ID_INFO`, regardless of basename. Inaccessible rows
+are excluded only by complete, unequal Windows-ordinal long/short executable
+names; plausible or incomplete rows, snapshot failure, overflow and multiple
+matches refuse. Retain the selected process handle and existing executable-file
+guards through the preparation owner. Recheck canonical resolution, file identity
+and process lifetime before publication.
+
+The pinned SDK's
+[`RetainedWindowAuthority`](https://github.com/pashifika/mado-pilot/blob/db939f0905f0bff1a8185bef97e46d84b3571c80/crates/platform/windows/src/window_authority.rs)
+uses raw creation `FILETIME` for `TargetProcessIdentity::lifetime`. The host uses
+that exact domain, not PID alone or a guessed token. SDK discovery must yield one
+exact-title window with matching process provenance; revalidate the retained
+`TargetId` before opening. Windowless waiting stays tied to the original process
+and Startup deadline. After attachment the SDK owns liveness checks.
+
+**Evidence-backed restriction:** the saved executable must have one live file
+link, rechecked in preparation and Desktop child admission. An inaccessible
+hardlink alias cannot be excluded using the saved basename. Enumerating arbitrary
+aliases adds machinery without establishing useful execution authority; refusing
+multi-link executables keeps the candidate policy bounded and conservative.
+[`FILE_LINK_INFORMATION`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_link_information)
+does not require particular file access rights, so read-sharing guards are not
+claimed to prevent new links. Real-file regressions check alias identity and
+refusal if a link is added during retention. This restriction does not change
+authoring capture or standalone CLI canonical-path matching. Disk correspondence
+is not publisher authentication or proof of previously mapped executable bytes.
+
+The Windows observation path retains the real acquired frame only after terminal
+commit. Fresh input re-commits that exact frame and uses its SDK placement.
+Both routes share logical event accounting; OS message expansion is not charged
+twice. No route fallback, guessed coordinates or test-injected native frame.
+Windows acceptance remains separate: actual ordinary/Whole/Function execution,
+recognition, newer-frame effect, both-route outcomes, Stop and fresh rerun.
+
+The MSVC engine executable embeds a Per-Monitor V2 manifest. Native input combines
+DWM frame placement with desktop metrics; a DPI-unaware child can mix physical
+and virtualized coordinates and refuse valid points on scaled, negative-origin
+monitors. A Desktop-only manifest does not configure its child. Keep the fix in
+the runtime executable, not Script coordinates or input policy. A launched-child
+regression checks DPI awareness without capture or input.
 
 ## One-time confirmed-exit recovery
 
@@ -125,8 +181,8 @@ cleanup remain distinct facts.
 recipient-specific cwd semantics, submission disposition and request settlement.
 Its consuming Interface has no Desktop, runner, game-identity or approval
 dependency. The Desktop Adapter derives the recipe from the saved binding,
-revalidates it and fences submission against Stop. This permits a future Windows
-Adapter without a second Desktop launch flow; Windows Native remains out of scope.
+revalidates it and fences submission against Stop. A future Windows launch
+Adapter is separate work; Windows Native currently refuses all launch intent.
 
 For an application bundle, the library calls Apple's
 [`NSWorkspace.openApplication`](https://developer.apple.com/documentation/appkit/nsworkspace/openapplication(at:configuration:completionhandler:))
@@ -146,7 +202,7 @@ nor readiness, and its continued lifetime does not retain the automation slot.
 Owned direct-child handles have independent non-terminating reaping ownership.
 The library rejects Windows `.bat`/`.cmd` recipients rather than allowing Rust's
 [`Command` batch-shell path](https://doc.rust-lang.org/std/process/index.html#windows-argument-splitting).
-This preserves its no-implicit-shell contract; it does not enable Windows Native.
+This preserves its no-implicit-shell contract; it does not enable Windows launch.
 Configuration Check/Save, manual running-app Check, authoring, Controlled and
 Replay remain unable to launch a game.
 
@@ -251,9 +307,9 @@ Portable admission/snapshot/CLI/supervisor regressions, launch-library checks an
 public-facade controlled replay establish consumer behavior, not live game effect.
 Actual WebView review/refusal and controlled Stop/rerun are distinct from the
 separately authorized authored native workflow, newer-frame visible effect,
-normal Stop and clean rerun. Useful acceptance covers both already-running and
-initially absent games, plus an authorized installed separate-launcher recipe.
-OS acceptance alone is insufficient. Recovery acceptance additionally requires
+normal Stop and clean rerun. macOS launch acceptance covers both already-running
+and initially absent games, plus an authorized installed separate-launcher recipe.
+OS acceptance alone is insufficient. macOS recovery acceptance additionally requires
 the initial Script to remain active through a separately authorized normal game
 close, then the same Script in a fresh attempt to establish its own usable-screen
 postcondition. A newer compatible image after any reviewed startup click, complete
@@ -275,7 +331,7 @@ Stop evidence do not complete these later-stage Native cases.
 
 Deterministic recognition corpora must exercise the authored predicates, not a
 Ready echo. Missing current authority, geometry/images, stage interception or a
-supported launcher recipe remains explicitly incomplete. Windows Native Desktop,
+supported launcher recipe remains explicitly incomplete. Windows launch/recovery,
 requested activation, arbitrary retries, the broader M0/R6 matrix and release
 qualification remain out of scope. See the
 [general Desktop procedure](../desktop.md#reviewed-macos-native-start),

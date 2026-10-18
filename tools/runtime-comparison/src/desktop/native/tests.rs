@@ -4,6 +4,7 @@ use crate::desktop::test_support::{fixture, request, settled};
 use crate::desktop::{DesktopController, NativeInputPolicy, NativeLimits};
 use crate::images::{DecodedImage, PayloadBytes, encode_crop};
 use crate::model::Control;
+#[cfg(any(target_os = "macos", windows))]
 use crate::model::identity;
 use crate::recognition::{self, RecognitionDocument};
 
@@ -78,6 +79,42 @@ fn saved_script_review_does_not_replace_target_permissions_or_finite_limits() {
     }
 }
 
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn four_event_native_projection_bootstraps_typescript_without_widening_input() {
+    let inventory = fixture();
+    let mut request = request(&inventory);
+    request.lane = "native".into();
+    let mut selected = intent();
+    selected.limits.max_actions = 4;
+    request.native_intent = Some(selected);
+    let mut plan = crate::desktop::operation::requested_plan(&request).unwrap();
+    assert_eq!(plan.limits.max_actions, 4);
+    assert_eq!(
+        plan.limits.vm_bytes,
+        crate::desktop::manual_plan().unwrap().limits.vm_bytes
+    );
+    // Exercise the projected limits on real QuickJS, never a native input sink.
+    plan.lane = "controlled".into();
+    plan.native_budgets = None;
+    plan.profile = "template-first".into();
+    let compiled = crate::typescript::compile(&inventory, &plan.limits).unwrap();
+    let options = crate::host::resolve_options(
+        &compiled.schema,
+        &compiled.profiles[&plan.profile],
+        &compiled.package_id,
+    )
+    .unwrap();
+    let control = std::sync::Arc::new(Control::new(&plan.limits));
+    let host = crate::host::Host::new(plan, options, compiled.assets.clone(), control).unwrap();
+    let result = crate::javascript::run(std::sync::Arc::new(compiled), host.clone());
+    let cleanup = host.finish();
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(host.limits().max_actions, 4);
+    assert_eq!(host.snapshot()["effects"].as_array().unwrap().len(), 2);
+    assert_eq!(cleanup["clean"], true);
+}
+
 #[test]
 fn recovery_is_default_zero_and_requires_separate_launch_approval() {
     let mut raw = serde_json::to_value(intent()).unwrap();
@@ -92,7 +129,12 @@ fn recovery_is_default_zero_and_requires_separate_launch_approval() {
     }
     raw["max_exit_recoveries"] = json!(1);
     raw["launch_approved"] = json!(true);
-    validate_intent(&serde_json::from_value(raw.clone()).unwrap()).unwrap();
+    let approved = validate_intent(&serde_json::from_value(raw.clone()).unwrap());
+    if cfg!(windows) {
+        assert_eq!(approved.unwrap_err().category, "NativeRefused");
+    } else {
+        approved.unwrap();
+    }
     raw["max_exit_recoveries"] = json!(2);
     assert!(validate_intent(&serde_json::from_value(raw.clone()).unwrap()).is_err());
     for invalid in [json!(-1), json!(256), json!(0.5), json!(true)] {
@@ -107,9 +149,14 @@ fn target() -> NativeTarget {
         process: Some((17, "0123456789abcdef".into())),
         window_title: "Exact reviewed window".into(),
         input: NativeInputPolicy {
-            route: "process_directed".into(),
+            route: if cfg!(windows) {
+                "window_message"
+            } else {
+                "process_directed"
+            }
+            .into(),
             focus: "preserve".into(),
-            pointer_mode: Some("appkit_background".into()),
+            pointer_mode: (!cfg!(windows)).then(|| "appkit_background".into()),
             click_hold_ms: 50,
         },
     }
@@ -272,7 +319,7 @@ fn native_approval_cannot_enter_other_lanes_or_bypass_host_correspondence() {
 #[test]
 fn native_target_policy_has_no_route_focus_or_pointer_fallback() {
     for (route, focus, pointer, hold) in [
-        ("window_message", "preserve", None, 0),
+        ("unknown", "preserve", None, 0),
         ("system", "activate", None, 0),
         ("system", "preserve", Some("appkit_background"), 0),
         (
@@ -295,6 +342,32 @@ fn native_target_policy_has_no_route_focus_or_pointer_fallback() {
             validate_target(Some(&target)).err().unwrap().category,
             "NativeRefused"
         );
+    }
+    if cfg!(windows) {
+        for (route, focus, pointer) in [
+            ("system", "preserve", None),
+            ("window_message", "require_focused", None),
+            ("process_directed", "preserve", None),
+            ("system", "require_focused", Some("core_graphics")),
+        ] {
+            let mut selected = target();
+            selected.input.route = route.into();
+            selected.input.focus = focus.into();
+            selected.input.pointer_mode = pointer.map(str::to_owned);
+            assert!(validate_target(Some(&selected)).is_err());
+        }
+        let mut selected = target();
+        selected.input.route = "system".into();
+        selected.input.focus = "require_focused".into();
+        validate_target(Some(&selected)).unwrap();
+        selected.process = None;
+        assert!(validate_target(Some(&selected)).is_err());
+    }
+    if cfg!(target_os = "macos") {
+        let mut selected = target();
+        selected.input.route = "window_message".into();
+        selected.input.pointer_mode = None;
+        assert!(validate_target(Some(&selected)).is_err());
     }
     for lifetime in ["", "0123456789abcdeF", "0123456789abcdef0"] {
         let mut target = target();
@@ -356,6 +429,7 @@ fn authored_inventory() -> Inventory {
     inventory
 }
 
+#[cfg(any(target_os = "macos", windows))]
 #[test]
 fn native_projection_freezes_exact_host_target_review_and_declared_template_assets() {
     let capability = crate::desktop::native_capability();
@@ -386,18 +460,7 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
         request.lane = "native".into();
         request.native_intent = Some(selected);
         let mut target = target();
-        let mut plan = if cfg!(target_os = "macos") {
-            crate::desktop::operation::requested_plan(&request).unwrap()
-        } else {
-            // Non-macOS admission remains unavailable; test pure projection only.
-            let mut plan = crate::desktop::manual_plan().unwrap();
-            let limits = &request.native_intent.as_ref().unwrap().limits;
-            plan.lane = "native".into();
-            plan.native_budgets = Some(limits.budgets());
-            plan.limits.duration_ms = limits.budgets().total_ms().unwrap();
-            plan.limits.readiness_ms = limits.readiness_ms;
-            plan
-        };
+        let mut plan = crate::desktop::operation::requested_plan(&request).unwrap();
         assert_eq!(plan.limits.duration_ms, total_ms);
         assert_eq!(plan.native_budgets.unwrap().workflow_ms, workflow_ms);
         let environment = json!({"version":1,"ocr":{"language":crate::environment::LANGUAGE},"native_libraries":[],"replay":null,"native":null});
@@ -424,11 +487,17 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
             native["process_lifetime"],
             target.process.as_ref().unwrap().1
         );
-        assert_eq!(native["input"]["route"], "process_directed");
-        assert_eq!(
-            native["input"]["macos_process_pointer_mode"],
-            "appkit_background"
-        );
+        assert_eq!(native["operating_system"], std::env::consts::OS);
+        assert_eq!(native["permission_executable"], json!(target.executable));
+        assert_eq!(native["input"]["route"], target.input.route);
+        if cfg!(windows) {
+            assert!(native["input"].get("macos_process_pointer_mode").is_none());
+        } else {
+            assert_eq!(
+                native["input"]["macos_process_pointer_mode"],
+                "appkit_background"
+            );
+        }
         assert_eq!(native["input"]["click_hold_ms"], 50);
         assert_eq!(
             native["review"],
@@ -455,7 +524,7 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[test]
 fn native_admission_reserves_selected_duration_before_preparation() {
     use std::time::{Duration, Instant};
@@ -466,6 +535,9 @@ fn native_admission_reserves_selected_duration_before_preparation() {
         (900_000, 0, 990_000),
         (900_000, 1, 1_983_000),
     ] {
+        if cfg!(windows) && recoveries != 0 {
+            continue;
+        }
         let controller = DesktopController::new(
             "must-not-launch-controlled".into(),
             "must-not-launch-engine".into(),
@@ -526,7 +598,7 @@ fn native_projection_rejects_invalid_saved_maps_before_child_activity() {
     assert_eq!(error.category, "RecognitionMetadata");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[test]
 fn native_stop_during_host_preparation_retains_the_slot_and_prevents_child_launch() {
     use std::sync::mpsc;
@@ -583,7 +655,7 @@ fn native_scenarios_and_replay_descriptors_cannot_change_the_admitted_workflow()
     request.lane = "native".into();
     request.native_intent = Some(intent());
     let normal = crate::desktop::operation::requested_plan(&request);
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", windows)) {
         let plan = normal.unwrap();
         assert_eq!(plan.lane, "native");
         request.scenario = "partial".into();
@@ -646,6 +718,7 @@ fn function_requests_reject_launch_recovery_and_controlled_scenarios() {
     assert!(controller.poll().run.is_none());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn only_script_projection_defers_process_selection_to_the_sdk() {
     let inventory = fixture();
@@ -696,5 +769,41 @@ fn only_script_projection_defers_process_selection_to_the_sdk() {
         assert!(native["process_id"].is_null());
         assert!(native["process_lifetime"].is_null());
         assert_eq!(native["confirm_process_exit"], recoveries != 0);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_launch_and_recovery_refuse_before_reservation_or_preparation() {
+    for (launch_approved, max_exit_recoveries) in [(true, 0), (true, 1), (false, 1)] {
+        for review in [intent().review, NativeReview::Script {}] {
+            let controller =
+                DesktopController::new("unused-controlled".into(), "unused-engine".into());
+            let mut request = request(&fixture());
+            request.lane = "native".into();
+            let mut selected = intent();
+            selected.launch_approved = launch_approved;
+            selected.max_exit_recoveries = max_exit_recoveries;
+            selected.review = review;
+            request.native_intent = Some(selected);
+            let fault = controller
+                .start_with_preparation(
+                    request,
+                    |_, _| -> Result<StartPreparation, Fault> {
+                        panic!("unsupported Windows intent reached preparation")
+                    },
+                    |_, _| {
+                        |_: &Control,
+                         _: &dyn Fn(crate::desktop::NativeProgress),
+                         _: &dyn Fn() -> Result<(), Fault>|
+                         -> Result<Option<NativeTarget>, Fault> {
+                            panic!("unsupported Windows intent reached target resolution")
+                        }
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(fault.category, "NativeRefused");
+            assert!(controller.poll().run.is_none());
+        }
     }
 }

@@ -45,6 +45,7 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
     focusArgument.current = null;
   }, [state.draft.arguments]);
   const draft = state.draft;
+  const windows = draft.platform === 'windows';
   const parsed = readTargetDraft(draft);
   const expectation = targetExpectation(state);
   const disabled = locked || active || pickerBusy || expectation === null || state.operation !== null;
@@ -68,7 +69,7 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
   const errorContext = record(state.issue?.fault.context);
   const field = text(errorContext.field);
   const hostFields:Record<string,TargetField> = {
-    game:'gamePath', 'game.path':'gamePath', 'game.kind':'gameKind', launcher:'launcherPath', 'launcher.path':'launcherPath',
+    platform:'platform', game:'gamePath', 'game.path':'gamePath', 'game.kind':'gameKind', launcher:'launcherPath', 'launcher.path':'launcherPath',
     'launcher.kind':'launcherKind', working_directory:'workingDirectory', arguments:'arguments', window_title:'windowTitle',
     'input.route':'route', 'input.focus':'focus', 'input.pointer_mode':'pointerMode', 'input.click_hold_ms':'clickHold',
   };
@@ -103,7 +104,18 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
       </button>
     </div>);
   }
-  const kinds = [{value:'', label:t.choose}, {value:'executable', label:t.executable}, {value:'bundle', label:t.bundle}];
+  const kinds = [{value:'', label:t.choose}, {value:'executable', label:t.executable},
+    ...(!windows || draft.gameKind === 'bundle' || draft.launcherKind === 'bundle' ? [{value:'bundle', label:t.bundle, disabled:windows}] : [])];
+  const routes = windows
+    ? [{value:'', label:t.choose}, {value:'system', label:t.system}, {value:'window_message', label:t.windowMessage},
+      ...(draft.route === 'process_directed' ? [{value: draft.route, label:t.processDirected, disabled:true}] : [])]
+    : [{value:'', label:t.choose}, {value:'process_directed', label:t.processDirected}, {value:'system', label:t.system},
+      ...(draft.route === 'window_message' ? [{value:draft.route, label:t.windowMessage, disabled:true}] : [])];
+  const requiredFocus = draft.route === 'system' ? 'require_focused' : draft.route === 'window_message' ? 'preserve' : '';
+  const focus = [{value:'', label:t.choose},
+    ...[{value:'preserve', label:t.preserve}, {value:'require_focused', label:t.requireFocused}]
+      .filter(option => !windows || option.value === draft.focus || option.value === requiredFocus)
+      .map(option => ({...option, disabled:windows && option.value !== requiredFocus}))];
   const status = currentIssue ? t.failed : review ? t.changed : currentObservation ? t.passed : targetDirty(state) ? t.modified
     : binding ? state.view?.compatible ? t.unchecked : state.declaration ? t.incompatibleStatus : t.undeclaredStatus : t.noBinding;
   function moveArgument(index:number, to:number, handle = false) {
@@ -162,7 +174,15 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
         <p className="authority-note">{t.privacy}</p>
         <fieldset className="target-fields" aria-describedby="target-required-fields">
           <legend>{t.configuration}</legend>
-          <p id="target-required-fields" className="field-help">{t.requiredFields}</p>
+          <p id="target-required-fields" className="field-help">{windows ? t.windowsRequiredFields : t.requiredFields}</p>
+          {windows && <p id="target-windows-attach-only" className="field-help">{t.windowsAttachOnly}</p>}
+          {state.view && state.view.platform !== draft.platform && fieldBox('platform', 'target-platform', t.platform,
+            <Select id="target-platform" value={draft.platform} disabled={editingDisabled} {...attributes('platform', 'target-platform')}
+              options={[{value:'macos', label:'macOS'}, {value:'windows', label:'Windows'}]
+                .filter(option => option.value === draft.platform || option.value === state.view?.platform)
+                .map(option => ({...option, disabled:option.value !== state.view?.platform}))}
+              onChange={value => handlers.edit({...draft, platform:value as TargetDraft['platform']})}/>, t.platformHelp)}
+          {state.view && state.view.platform !== draft.platform && <p id="target-foreign-platform" className="inline-warning">{t.platformHelp}</p>}
           <h3>{t.game}</h3>
           <div className="target-field-stack">
             {fieldBox('gameKind', 'target-game-kind', t.gameKind,
@@ -170,7 +190,7 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
                 onChange={value => handlers.edit({...draft, gameKind:value as TargetDraft['gameKind']})}/>)}
             {applicationPath('game')}
           </div>
-          <h3>{t.launcher}<HelpTrigger title={t.launcher} hint={t.launcherHelp}>{t.launcherHelp}</HelpTrigger></h3>
+          <h3>{t.launcher}<HelpTrigger title={t.launcher} hint={t.launcherHelp}>{windows ? t.windowsAttachOnly : t.launcherHelp}</HelpTrigger></h3>
           <label className="checkbox-label"><input id="target-separate-launcher" type="checkbox" checked={draft.separateLauncher} disabled={editingDisabled}
             onChange={event => handlers.edit({...draft, separateLauncher:event.target.checked})}/>{t.separateLauncher}</label>
           {draft.separateLauncher && <div className="target-field-stack">
@@ -234,21 +254,28 @@ export default function TargetPanel({state, handlers, locked, active, pickerBusy
               handlers.edit({...draft, arguments:[...draft.arguments, '']});
             }}>{t.addArgument}</button>
           </fieldset>
-          <div className="target-field-stack">{input('workingDirectory', 'target-working-directory', t.workingDirectory)}{input('windowTitle', 'target-window-title', t.windowTitle, state.declaration.window_title !== null)}</div>
-          {draft.platform === 'macos' && <><h3>{t.policy}<HelpTrigger title={t.policy} hint={t.policyHint}>{t.policyHelp}</HelpTrigger></h3>
+          <div className="target-field-stack">{input('workingDirectory', 'target-working-directory', t.workingDirectory)}</div>
+          <div className="target-field-stack">{input('windowTitle', 'target-window-title', t.windowTitle, state.declaration.window_title !== null)}</div>
+          <h3>{t.policy}<HelpTrigger title={t.policy} hint={t.policyHint}>{windows ? t.windowsPolicyHelp : t.policyHelp}</HelpTrigger></h3>
+          {windows && (parsed.errors.route === 'policy' || parsed.errors.focus === 'policy' || parsed.errors.pointerMode === 'policy')
+            && <p id="target-policy-correction" className="inline-warning">{t.windowsPolicyCorrection}</p>}
           <div className="two-col">
             {fieldBox('route', 'target-route', t.route, <Select id="target-route" value={draft.route} disabled={editingDisabled} {...attributes('route', 'target-route')}
-              options={[{value:'', label:t.choose}, {value:'process_directed', label:t.processDirected}, {value:'system', label:t.system}]}
+              options={routes}
               onChange={value => handlers.edit({...draft, route:value as TargetDraft['route']})}/>)}
             {fieldBox('focus', 'target-focus', t.focus, <Select id="target-focus" value={draft.focus} disabled={editingDisabled} {...attributes('focus', 'target-focus')}
-              options={[{value:'', label:t.choose}, {value:'preserve', label:t.preserve}, {value:'require_focused', label:t.requireFocused}]}
+              options={focus}
               onChange={value => handlers.edit({...draft, focus:value as TargetDraft['focus']})}/>)}
-            {draft.route === 'process_directed' && fieldBox('pointerMode', 'target-pointer-mode', t.pointerMode,
+            {!windows && draft.route === 'process_directed' && fieldBox('pointerMode', 'target-pointer-mode', t.pointerMode,
               <Select id="target-pointer-mode" value={draft.pointerMode} disabled={editingDisabled} {...attributes('pointerMode', 'target-pointer-mode')}
                 options={[{value:'', label:t.choose}, {value:'core_graphics', label:t.coreGraphics}, {value:'appkit_background', label:t.appkitBackground}]}
                 onChange={value => handlers.edit({...draft, pointerMode:value as TargetDraft['pointerMode']})}/>)}
+            {windows && draft.pointerMode !== '' && fieldBox('pointerMode', 'target-pointer-mode', t.pointerMode,
+              <Select id="target-pointer-mode" value={draft.pointerMode} disabled={editingDisabled} {...attributes('pointerMode', 'target-pointer-mode')}
+                options={[{value:'', label:t.noPointerMode}, {value:draft.pointerMode, label:draft.pointerMode === 'core_graphics' ? t.coreGraphics : t.appkitBackground, disabled:true}]}
+                onChange={() => handlers.edit({...draft, pointerMode:''})}/>)}
             {input('clickHold', 'target-click-hold', t.clickHold)}
-          </div></>}
+          </div>
         </fieldset>
         <div className="button-row">
           <ButtonHint hint={t.saveHint}><button id="target-save" type="button" className="primary" disabled={disabled || !parsed.configuration || review !== null} onClick={() => handlers.save()}>{binding && !state.view?.compatible ? t.replace : t.save}</button></ButtonHint>

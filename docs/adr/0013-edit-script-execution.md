@@ -169,5 +169,7 @@ Native execution or whole-run latency improvement is claimed by this evidence.
 
 These are controlled, non-native results. Separately authorized native
 attachment, input, game effect and physical settlement remain independent
-acceptance obligations. The implementation grants no Windows Native support
-and no execution capability to the OMP adapter.
+acceptance obligations. Windows attach-only admission is defined in
+[ADR 0008](0008-macos-native-run-admission.md#windows-attach-only-extension);
+these historical macOS results do not qualify it. The OMP adapter has no
+execution capability.

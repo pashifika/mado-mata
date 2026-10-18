@@ -130,6 +130,15 @@ metadata. They also check the current test process's kernel architecture and
 invalid-PID refusal without launching an application. Non-macOS bundle resolution
 is explicitly unsupported; portable declaration, record, restore, and
 observation-policy checks remain cross-platform.
+Windows core checks also cover attach-only policy/admission, bounded candidate
+classification, cancellation and real-file executable identity/hardlink refusal.
+Portable record tests preserve legacy/foreign target intent across restart and
+snapshot restore. These checks do not discover a live game or send native input.
+The model-free `engine` suite covers real acquisition/terminal commitment through
+controlled providers, route receipts and incomplete cleanup. Run that suite on
+Windows with the pinned native setup and fixed engine target directory from
+[the desktop guide](desktop.md#build-and-run-from-the-checkout); the ordinary
+Windows hosted `--runtime-only` job does not enable `engine`.
 Apple framework dependencies are macOS-target-scoped. Native selection uses
 host-owned AppKit sheets for application bundles or saved PNGs, not a general
 dialog/filesystem plugin capability. Recognition Copy uses `NSPasteboard` only

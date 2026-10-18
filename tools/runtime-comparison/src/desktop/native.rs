@@ -30,6 +30,11 @@ impl NativeReview {
 }
 
 pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
+    if cfg!(windows) && (intent.launch_approved || intent.max_exit_recoveries != 0) {
+        return Err(refused(
+            "Windows Native is attach-only and rejects launch and recovery",
+        ));
+    }
     if intent.max_exit_recoveries > 1
         || (intent.max_exit_recoveries == 1 && !intent.launch_approved)
     {
@@ -97,16 +102,23 @@ pub(super) fn validate_target(target: Option<&NativeTarget>) -> Result<&NativeTa
         ));
     }
     let policy = &target.input;
-    if !matches!(policy.route.as_str(), "system" | "process_directed")
-        || !matches!(policy.focus.as_str(), "preserve" | "require_focused")
-        || policy.click_hold_ms > 1_000
-        || !matches!(
-            policy.pointer_mode.as_deref(),
-            None | Some("core_graphics" | "appkit_background")
-        )
-        || (policy.pointer_mode.as_deref() == Some("appkit_background")
-            && (policy.route != "process_directed" || policy.focus != "preserve"))
-    {
+    let supported = if cfg!(windows) {
+        matches!(
+            (policy.route.as_str(), policy.focus.as_str()),
+            ("system", "require_focused") | ("window_message", "preserve")
+        ) && policy.pointer_mode.is_none()
+            && target.process.is_some()
+    } else {
+        matches!(policy.route.as_str(), "system" | "process_directed")
+            && matches!(policy.focus.as_str(), "preserve" | "require_focused")
+            && matches!(
+                policy.pointer_mode.as_deref(),
+                None | Some("core_graphics" | "appkit_background")
+            )
+            && (policy.pointer_mode.as_deref() != Some("appkit_background")
+                || (policy.route == "process_directed" && policy.focus == "preserve"))
+    };
+    if !supported || policy.click_hold_ms > 1_000 {
         return Err(refused(
             "Native requires the exact supported saved route, focus and pointer policy",
         ));
@@ -154,6 +166,9 @@ pub(super) fn project(
     templates: &Templates,
     mut configuration: Value,
 ) -> Result<(), Fault> {
+    if !cfg!(any(target_os = "macos", windows)) {
+        return Err(refused("Desktop Native requires macOS or Windows"));
+    }
     let intent = request
         .native_intent
         .as_ref()
@@ -192,7 +207,7 @@ pub(super) fn project(
         "process_id":target.process.as_ref().map(|(pid, _)| pid),
         "process_lifetime":target.process.as_ref().map(|(_, lifetime)| lifetime),
         "confirm_process_exit":intent.max_exit_recoveries != 0,
-        "window_rule":target.window_title,"operating_system":"macos",
+        "window_rule":target.window_title,"operating_system":std::env::consts::OS,
         "hardware":std::env::consts::ARCH,"permission_executable":permission_executable,
         "capture":{"approved":true,"duration_ms":limits.budgets().total_ms()?,
             "max_frames":limits.max_frames,"wait_ms":limits.wait_ms,"interval_ms":limits.interval_ms},
@@ -205,6 +220,12 @@ pub(super) fn project(
         "cleanup_ms":limits.cleanup_ms,"containment_ms":limits.containment_ms,
         "package_entries":package_entries,"templates":templates
     });
+    if cfg!(windows) {
+        configuration["native"]["input"]
+            .as_object_mut()
+            .expect("projected input object")
+            .remove("macos_process_pointer_mode");
+    }
     plan.native_config = Some(configuration);
     plan.validate()?;
     Ok(())

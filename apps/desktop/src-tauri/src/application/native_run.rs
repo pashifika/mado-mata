@@ -1,6 +1,6 @@
 use crate::target::{
-    self, AuthoringApplication, LaunchFailure, LaunchRecipe, NativeDiscovery, PreparedLaunch,
-    TargetBinding, TargetExpectation, TargetRecord,
+    self, LaunchFailure, LaunchRecipe, NativeDiscovery, PreparedLaunch, TargetBinding,
+    TargetExpectation, TargetRecord,
 };
 use mado_runtime_comparison::desktop::{
     LaunchDisposition, NativeInputPolicy, NativePhase, NativeProgress, NativeReview, NativeTarget,
@@ -8,6 +8,9 @@ use mado_runtime_comparison::desktop::{
 };
 use mado_runtime_comparison::inventory::TargetDeclaration;
 use mado_runtime_comparison::model::{Control, Fault};
+
+#[cfg(any(windows, test))]
+mod windows;
 
 #[derive(Clone, Debug)]
 pub(super) struct NativeBinding {
@@ -17,6 +20,8 @@ pub(super) struct NativeBinding {
     script: bool,
     progress: NativeProgress,
     finished: bool,
+    #[cfg(windows)]
+    retained_windows: Option<std::sync::Arc<windows::RetainedTarget>>,
 }
 
 impl NativeBinding {
@@ -27,6 +32,16 @@ impl NativeBinding {
         package_id: &str,
         target: Option<(&TargetDeclaration, &str)>,
         record: TargetRecord,
+    ) -> Result<Self, Fault> {
+        Self::capture_for_platform(request, package_id, target, record, std::env::consts::OS)
+    }
+
+    fn capture_for_platform(
+        request: &StartRequest,
+        package_id: &str,
+        target: Option<(&TargetDeclaration, &str)>,
+        record: TargetRecord,
+        platform: &str,
     ) -> Result<Self, Fault> {
         let intent = request.native_intent.as_ref().ok_or_else(|| {
             Fault::new(
@@ -69,11 +84,21 @@ impl NativeBinding {
                 "Saved target does not match the reviewed package declaration",
             ));
         }
-        if binding.configuration.platform != "macos" || binding.configuration.game.kind != "bundle"
+        if binding.configuration.platform != platform
+            || !matches!(
+                (platform, binding.configuration.game.kind.as_str()),
+                ("macos", "bundle") | ("windows", "executable")
+            )
         {
             return Err(Fault::new(
                 "NativeTargetUnsupported",
-                "Native Start requires a saved macOS application bundle",
+                "Native Start requires a saved application target for this supported host",
+            ));
+        }
+        if platform == "windows" && (intent.launch_approved || intent.max_exit_recoveries != 0) {
+            return Err(Fault::new(
+                "NativeRefused",
+                "Windows Native attaches only; start the game independently and disable launch and recovery",
             ));
         }
         if binding.configuration.window_title.is_empty() || binding.configuration.input.is_none() {
@@ -82,6 +107,13 @@ impl NativeBinding {
                 "Save an exact window title and input policy before Native Start",
             ));
         }
+        binding
+            .configuration
+            .input
+            .as_ref()
+            .expect("checked input")
+            .validate_for_platform(platform)?;
+        binding.configuration.validate_declaration(declaration)?;
         Ok(Self {
             binding,
             declaration: declaration.clone(),
@@ -94,6 +126,8 @@ impl NativeBinding {
                 status: NativeTargetStatus::Pending,
             },
             finished: false,
+            #[cfg(windows)]
+            retained_windows: None,
         })
     }
 
@@ -106,6 +140,10 @@ impl NativeBinding {
             status: NativeTargetStatus::Pending,
         };
         binding.finished = false;
+        #[cfg(windows)]
+        {
+            binding.retained_windows = None;
+        }
         binding
     }
 
@@ -140,6 +178,15 @@ impl NativeBinding {
         report: &dyn Fn(NativeProgress),
         verify_resources: &dyn Fn() -> Result<(), Fault>,
     ) -> Result<Option<NativeTarget>, Fault> {
+        #[cfg(windows)]
+        if self.binding.configuration.platform == "windows" {
+            let mut platform = windows::WindowsPreparation {
+                retained: self.retained_windows.take(),
+            };
+            let result = self.resolve_with(control, report, verify_resources, &mut platform);
+            self.retained_windows = platform.retained;
+            return result;
+        }
         self.resolve_with(control, report, verify_resources, &mut MacosPreparation)
     }
 
@@ -169,7 +216,7 @@ impl NativeBinding {
                     if !self.launch_approved {
                         return Err(Fault::new(
                             "NativeTargetMissing",
-                            "No verified running application; launch was not approved",
+                            "No verified running application; start the game independently and run again",
                         ));
                     }
                     let recipe = platform.recipe(self)?;
@@ -212,6 +259,7 @@ impl NativeBinding {
                     }
                 }
             };
+            platform.revalidate(control)?;
             control.check()?;
             progress.phase = NativePhase::WaitingForWindow;
             report(progress);
@@ -234,27 +282,15 @@ impl NativeBinding {
         control: &Control,
         platform: &mut impl PreparationPlatform,
     ) -> Result<Option<NativeTarget>, Fault> {
-        let (executable, process) = if self.script {
+        let (executable, process) = if self.script && self.binding.configuration.platform != "windows" {
             let Some(executable) = platform.script_executable(self, control)? else {
                 return Ok(None);
             };
             (executable, None)
         } else {
-            let Some(mut proof) = verified(platform.discover(self, control)?)? else {
+            let Some(process) = platform.discover(self, control)? else {
                 return Ok(None);
             };
-            if proof.processes.len() > 1 {
-                return Err(Fault::new(
-                    "NativeTargetAmbiguous",
-                    "Multiple running applications match the saved installation",
-                ));
-            }
-            let process = proof.processes.pop().ok_or_else(|| {
-                Fault::new(
-                    "NativeTargetMissing",
-                    "No verified running application matches the saved installation",
-                )
-            })?;
             (
                 process.executable,
                 Some((process.pid, format!("{:016x}", process.lifetime))),
@@ -280,10 +316,34 @@ impl NativeBinding {
     }
 }
 
-fn verified(discovery: NativeDiscovery) -> Result<Option<AuthoringApplication>, Fault> {
+struct PreparedProcess {
+    pid: u32,
+    lifetime: u64,
+    executable: std::path::PathBuf,
+}
+
+fn verified(discovery: NativeDiscovery) -> Result<Option<PreparedProcess>, Fault> {
     match discovery {
         NativeDiscovery::Absent => Ok(None),
-        NativeDiscovery::Unique(proof) => Ok(Some(proof)),
+        NativeDiscovery::Unique(mut proof) => {
+            if proof.processes.len() > 1 {
+                return Err(Fault::new(
+                    "NativeTargetAmbiguous",
+                    "Multiple running applications match the saved installation",
+                ));
+            }
+            let process = proof.processes.pop().ok_or_else(|| {
+                Fault::new(
+                    "NativeTargetMissing",
+                    "No verified running application matches the saved installation",
+                )
+            })?;
+            Ok(Some(PreparedProcess {
+                pid: process.pid,
+                lifetime: process.lifetime,
+                executable: process.executable,
+            }))
+        }
         NativeDiscovery::Ambiguous => Err(Fault::new(
             "NativeTargetAmbiguous",
             "Multiple running applications match the saved installation",
@@ -308,11 +368,14 @@ trait PreparationPlatform {
         &mut self,
         binding: &NativeBinding,
         control: &Control,
-    ) -> Result<NativeDiscovery, Fault>;
+    ) -> Result<Option<PreparedProcess>, Fault>;
     fn recipe(&mut self, binding: &NativeBinding) -> Result<Self::Recipe, Fault>;
     fn prepare(&mut self, recipe: Self::Recipe, control: &Control)
     -> Result<Self::Prepared, Fault>;
     fn submit(&mut self, prepared: Self::Prepared) -> Result<LaunchDisposition, LaunchFailure>;
+    fn revalidate(&mut self, _control: &Control) -> Result<(), Fault> {
+        Ok(())
+    }
 }
 
 struct MacosPreparation;
@@ -339,14 +402,14 @@ impl PreparationPlatform for MacosPreparation {
         &mut self,
         binding: &NativeBinding,
         control: &Control,
-    ) -> Result<NativeDiscovery, Fault> {
-        target::discover_native(
+    ) -> Result<Option<PreparedProcess>, Fault> {
+        verified(target::discover_native(
             &binding.binding.configuration,
             &binding.declaration,
             &binding.binding.resolution,
             &control.cancelled,
             control.deadline(),
-        )
+        )?)
     }
 
     fn recipe(&mut self, binding: &NativeBinding) -> Result<LaunchRecipe, Fault> {

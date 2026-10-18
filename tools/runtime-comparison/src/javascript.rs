@@ -1,8 +1,8 @@
 //! QuickJS ES modules: native cycles/live bindings, attempt-local instances.
 //! ECMAScript basics (including eval/Function) have the same inventory resolver.
 //! No filesystem, network, Node, native loaders or timers are installed.
-//! Options are recursively frozen; strict-mode mutation throws. max_actions also
-//! bounds promise creation and executed jobs; detached jobs die with the VM.
+//! Options are recursively frozen; strict-mode mutation throws. VM work is
+//! bounded independently of input events; detached jobs die with the VM.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -19,6 +19,15 @@ use serde_json::{Value as Json, json};
 use crate::host::Host;
 use crate::inventory::{Entry, Inventory};
 use crate::model::{Control, Fault, Limits, RuntimeMetrics};
+
+// One work allowance per KiB of configured VM memory, not an allocation-size
+// estimate: 16 MiB permits 16,384 creations/jobs; the validated 256 MiB ceiling
+// permits 262,144. Counts span module loading and entries, even after GC.
+// Input authority (max_actions), allocator limits and deadlines stay separate.
+const VM_WORK_BYTES: usize = 1024;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone)]
 enum ModuleFaults {
@@ -296,6 +305,7 @@ fn settle<'js>(
     host: &Host,
     deadline: &AtomicU64,
     jobs: &mut u64,
+    work_limit: usize,
 ) -> Result<Value<'js>, Fault> {
     loop {
         check(host, deadline)?;
@@ -306,7 +316,7 @@ fn settle<'js>(
             value = result.map_err(|error| Fault::new("Script", error.to_string()))?;
             continue;
         }
-        if *jobs >= host.limits().max_actions as u64 {
+        if *jobs >= work_limit as u64 {
             return Err(Fault::new(
                 "ResourceLimit",
                 "JavaScript job execution limit exceeded",
@@ -509,7 +519,8 @@ fn run_with_parser(
     function: Option<&crate::typescript::PreparedFunction>,
 ) -> Result<RuntimeMetrics, Fault> {
     let limits = host.limits();
-    if limits.vm_bytes == 0 || limits.max_actions == 0 {
+    let work_limit = limits.vm_bytes / VM_WORK_BYTES;
+    if work_limit == 0 {
         return Err(Fault::new(
             "ResourceLimit",
             "VM memory and job limits must be positive",
@@ -552,9 +563,7 @@ fn run_with_parser(
     let promise_host = host.clone();
     let promise_halted = halted.clone();
     runtime.set_promise_hook(Some(Box::new(move |_, event, _, _| {
-        if event == PromiseHookType::Init
-            && count.fetch_add(1, Ordering::Relaxed) >= limits.max_actions
-        {
+        if event == PromiseHookType::Init && count.fetch_add(1, Ordering::Relaxed) >= work_limit {
             promise_halted.store(true, Ordering::Release);
             promise_host.fail(Fault::new(
                 "ResourceLimit",
@@ -577,7 +586,7 @@ fn run_with_parser(
                 rejected
                     .borrow_mut()
                     .retain(|(identity, _)| identity != &promise);
-            } else if rejected.borrow().len() < limits.max_actions {
+            } else if rejected.borrow().len() < work_limit {
                 let (message, stack) = reason
                     .as_exception()
                     .map(|e| {
@@ -655,7 +664,7 @@ fn run_with_parser(
         for entry in &requested[..if selected.is_some() { 1 } else { 2 }] {
             let promise = Module::import(&ctx, entry.module.as_str())
                 .map_err(|error| exception_fault(&ctx, error, &inventory, &entry.module, "instantiation"))?;
-            let namespace = settle(&ctx, promise.into_value(), &host, &deadline, &mut jobs).map_err(|fault| {
+            let namespace = settle(&ctx, promise.into_value(), &host, &deadline, &mut jobs, work_limit).map_err(|fault| {
                 if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &entry.module, "instantiation") } else { fault }
             })?;
             let namespace = namespace.into_object().ok_or_else(|| Fault::new("Entry", "Entry module has no namespace"))?;
@@ -671,7 +680,7 @@ fn run_with_parser(
                 deadline.store(host.control().elapsed_us().saturating_add(limits.readiness_ms.saturating_mul(1000)), Ordering::Release);
             }
             let ready: Value = entries[0].call(()).map_err(|error| exception_fault(&ctx, error, &inventory, &inventory.entries.readiness.module, "readiness"))?;
-            let ready = settle(&ctx, ready, &host, &deadline, &mut jobs).map_err(|fault| {
+            let ready = settle(&ctx, ready, &host, &deadline, &mut jobs, work_limit).map_err(|fault| {
                 if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &inventory.entries.readiness.module, "readiness") } else { fault }
             })?;
             if ready.as_string().and_then(|value| value.to_string().ok()).as_deref() != Some("Ready") {
@@ -694,7 +703,7 @@ fn run_with_parser(
         }
         let value: Value = callable.call_arg(arguments)
             .map_err(|error| exception_fault(&ctx, error, &inventory, &entry.module, stage))?;
-        let value = settle(&ctx, value, &host, &deadline, &mut jobs).map_err(|fault| {
+        let value = settle(&ctx, value, &host, &deadline, &mut jobs, work_limit).map_err(|fault| {
             if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &entry.module, stage) } else { fault }
         })?;
         // Entry settlement, not draining the job queue, ends ordinary authority.
@@ -721,7 +730,7 @@ fn run_with_parser(
         jobs_executed: jobs,
         return_summary,
         source_diagnostic: Some(
-            json!({"runtime":"rquickjs 0.14.0", "import_parser":parser, "cycles":"ECMAScript live bindings", "detached_jobs":"discarded at entry settlement", "promise_limit":limits.max_actions, "job_limit":limits.max_actions}),
+            json!({"runtime":"rquickjs 0.14.0", "import_parser":parser, "cycles":"ECMAScript live bindings", "detached_jobs":"discarded at entry settlement", "promise_limit":work_limit, "job_limit":work_limit}),
         ),
     })
 }

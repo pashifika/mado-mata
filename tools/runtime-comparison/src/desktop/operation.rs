@@ -838,10 +838,10 @@ pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
                 Fault::new("NativeRefused", "Native requires explicit per-Start review")
             })?;
             super::native::validate_intent(intent)?;
-            if !cfg!(target_os = "macos") {
+            if !cfg!(any(target_os = "macos", windows)) {
                 return Err(Fault::new(
                     "NativeRefused",
-                    "Desktop Native is available only on macOS",
+                    "Desktop Native requires macOS or Windows",
                 ));
             }
             if request.replay_descriptor_path.is_some() {
@@ -877,6 +877,7 @@ pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
         plan.limits.duration_ms = limits.budgets().total_ms()?;
         plan.limits.readiness_ms = limits.readiness_ms;
         plan.limits.wait_ms = limits.wait_ms;
+        // Preserve reviewed expanded-input authority; VM work has its own bound.
         plan.limits.max_actions = limits.max_actions;
         plan.limits.cleanup_ms = limits.cleanup_ms;
         plan.limits.containment_ms = limits.containment_ms;

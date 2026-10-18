@@ -308,6 +308,18 @@ requested; a caught refusal still closes admission and remains the primary fault
 JavaScript uses ES module live bindings and cycles. Lua rejects cycles with an
 import chain. Each attempt has new module instances and mutable `host.state`.
 
+JavaScript (including compiled TypeScript) bounds Promise creation, executed jobs
+and retained unhandled rejections separately from input authority. Each attempt
+allows `limits.vm_bytes / 1024` of each, rounded down: 16,384 with the shipped
+16 MiB VM limit, at most 262,144 with the validated 256 MiB ceiling. This is a
+finite work allowance, not an estimate of Promise allocation size; VM memory
+and stage deadlines remain independently enforced. Counts span module
+initialization, readiness and workflow (or the selected Function), not each
+host call. Exhaustion returns `ResourceLimit`; detached jobs are discarded at
+entry settlement. Existing plan fields are unchanged. `limits.max_actions`
+still limits cumulative expanded input events, so a four-event allowance does
+not prevent async initialization and never authorizes a fifth input event.
+
 Effective `host.options` combine validated schema defaults with **top-level
 replacement**, not recursive merging. Nested values and priority arrays are
 readonly through aliases. Unknown fields, coercion, missing replacement fields,
