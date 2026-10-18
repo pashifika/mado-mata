@@ -16,6 +16,9 @@ const backward = {type: 'deleteContentBackward', data: null, composing: false};
 // Only the worker transport and clock are controlled: transactions, source mapping,
 // session admission, client fences and the TypeScript producer are production code.
 function harness(t, marked = 'host.call("¦")', preferences = {automatic: true, delay_ms: 100}) {
+  let now = 0;
+  // CodeMirror's synchronous parse budget must use the same controlled clock.
+  t.mock.method(Date, 'now', () => now);
   const position = marked.indexOf('¦');
   assert.notEqual(position, -1);
   let mapping = new SourcePositions(marked.replace('¦', ''));
@@ -23,7 +26,7 @@ function harness(t, marked = 'host.call("¦")', preferences = {automatic: true, 
   let context = {owner: 'lease-1', path: 'main.ts', revision: 1, generation: 1, source: mapping.source, schema: null, otherBytes: 0};
   let focused = true, composing = false, readOnly = false, visible = null;
   const workers = [], timers = new Map(), publications = [], statuses = [];
-  let now = 0, timerId = 0;
+  let timerId = 0;
   const clock = {
     setTimer(callback, ms) { const id = ++timerId; timers.set(id, {at: now + ms, callback}); return id; },
     clearTimer(id) { timers.delete(id); },
@@ -299,8 +302,9 @@ for (const automatic of [true, false]) {
     worker.ready();
     worker.respond();
     await Promise.resolve();
+    assert.deepEqual(h.visible.result.candidates.map(candidate => candidate.label).sort(), ['recognize', 'release']);
     h.type('z');
-    worker.respond();
+    assert.deepEqual(worker.respond().candidates, []);
     await Promise.resolve();
     assert.equal(h.visible, null);
     h.backspace();
