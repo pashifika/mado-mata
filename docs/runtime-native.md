@@ -5,6 +5,10 @@ The optional `engine` feature consumes the public `mado-pilot` facade at
 dependency, fake OCR backend, or substitute input route. macOS startup adds
 read-only Foundation/libproc lifetime checks during startup and exact bound-lifetime
 checks during execution; capture and input still use the public facade.
+Windows Desktop preparation verifies one saved executable/process and creation
+FILETIME; the child correlates that lifetime with SDK provenance and revalidates
+the retained window before admission. After attachment the SDK owns target
+liveness; Desktop does not add a per-call process scanner.
 
 **Native integration is available; native qualification is not complete.** The
 facade now exposes optional retained-process provenance. The harness requires an
@@ -74,6 +78,21 @@ Typed attempt summaries retain the original exit, final Script result and cleanu
 diagnostic truncation cannot discard the exit reason. An earlier capture fault
 outranks a later process exit. Window/permission/provider failure is not confirmed
 exit, and launch/capture availability is not a Script-observed usable screen.
+
+The [Windows Desktop Native lane](desktop.md#windows-attach-only-native-start)
+uses the same fixed engine child and ordinary/Edit Script paths, but only attaches
+to an already-running executable. Launch/recovery intent refuses before activity.
+Its saved policy is `system` / `require_focused` or `window_message` / `preserve`,
+without a macOS pointer mode. No automatic activation or route fallback is allowed.
+Legacy and foreign saved policy remains intact until explicit correction.
+
+Windows package input retains the exact native frame acquired through the
+production observation path and accepted by `Session::commit_frame`. Placement
+comes from that SDK frame, and dispatch re-commits it before admitting events.
+Both routes consume the SDK's logical event count; Win32 message expansion does
+not create additional caller authority. Missing/stale/terminal frames refuse.
+Controlled-provider coverage does not establish actual game effect, route
+compatibility, physical Stop settlement or full Windows qualification.
 
 The independent CLI retains explicit `native_config` and its existing preparation
 contract. External `run`/`manual` plans cannot select Desktop-only `native_budgets`,

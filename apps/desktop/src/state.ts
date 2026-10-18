@@ -23,13 +23,13 @@ export function acceptController(current:ControllerView, incoming:ControllerView
   return current.state === 'terminal' ? current : incoming;
 }
 
-export type NativeCause = 'missing'|'ambiguous'|'unverifiable';
+export type NativeCause = 'missing'|'ambiguous'|'unverifiable'|'lost';
 export type NativeLaunchOutcome = 'accepted'|'acceptedStopped'|'uncertain'|'rejected';
 // The failed stage, refined by target status where the remedy differs: a Script that never requested startup, a
 // Readiness that ended while startup was pending, and Readiness criteria that did not hold once capture was available.
 export type NativeFailure = Exclude<NativePhase, 'readiness'>|'unrequested'|'readinessPending'|'readinessCriteria';
 export interface NativeOutcome {failure:NativeFailure|null; cause:NativeCause|null; launch:NativeLaunchOutcome|null}
-const NATIVE_CAUSES:Record<string, NativeCause> = {NativeTargetMissing: 'missing', NativeTargetAmbiguous: 'ambiguous', NativeTargetUnverifiable: 'unverifiable'};
+const NATIVE_CAUSES:Record<string, NativeCause> = {NativeTargetMissing: 'missing', NativeTargetAmbiguous: 'ambiguous', NativeTargetUnverifiable: 'unverifiable', TargetLost: 'lost'};
 const READINESS_REFUSALS:Record<string, true> = {Script:true, ReadinessContract:true, TargetNotReady:true, NativeStartRefused:true, Authority:true, Argument:true};
 
 function nativeFailure({phase, status}:NativeProgress, category:string|null):NativeFailure {

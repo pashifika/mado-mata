@@ -141,11 +141,11 @@ pub struct NativeInputPolicy {
     pub click_hold_ms: u64,
 }
 
-/// Host-selected application policy, with optional fresh Operation process correspondence.
+/// Host-selected target policy and fresh process correspondence.
 #[derive(Debug)]
 pub struct NativeTarget {
     pub executable: PathBuf,
-    /// Script execution lets the SDK select the current process for the saved APP.
+    /// Windows requires PID/creation FILETIME; only macOS Script may defer selection to the SDK.
     pub process: Option<(u32, String)>,
     pub window_title: String,
     pub input: NativeInputPolicy,

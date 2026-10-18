@@ -12,7 +12,7 @@ use std::sync::{
 use std::time::Instant;
 
 #[derive(Clone)]
-pub(super) struct WindowsExecutableGuard {
+pub(in crate::application) struct WindowsExecutableGuard {
     retained: Arc<RetainedExecutable>,
 }
 
@@ -27,7 +27,7 @@ struct RetainedExecutable {
 }
 
 impl WindowsExecutableGuard {
-    pub(super) fn open(
+    pub(in crate::application) fn open(
         selected_path: &Path,
         cancellation: &AtomicBool,
         deadline: Instant,
@@ -47,15 +47,34 @@ impl WindowsExecutableGuard {
         }
     }
 
-    pub(super) fn canonical_path(&self) -> &Path {
+    pub(in crate::application) fn canonical_path(&self) -> &Path {
         &self.retained.canonical_path
     }
 
-    pub(super) fn identity(&self) -> &str {
+    pub(in crate::application) fn identity(&self) -> &str {
         &self.retained.identity
     }
 
-    pub(super) fn validate(
+    #[cfg(windows)]
+    pub(in crate::application) fn same_file(
+        &self,
+        path: &Path,
+        cancellation: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<bool, Fault> {
+        self.retained.proof.same_file(path, cancellation, deadline)
+    }
+
+    #[cfg(windows)]
+    pub(in crate::application) fn require_single_link(
+        &self,
+        cancellation: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<(), Fault> {
+        self.retained.proof.require_single_link(cancellation, deadline)
+    }
+
+    pub(in crate::application) fn validate(
         &self,
         selected_path: &Path,
         cancellation: &AtomicBool,
@@ -115,7 +134,8 @@ mod windows {
     use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_ID_INFO, FILE_SHARE_READ, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN, FileIdInfo,
+        FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_STANDARD_INFO, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN, FileIdInfo, FileStandardInfo,
         GetFileInformationByHandleEx, GetFileType,
     };
 
@@ -249,32 +269,33 @@ mod windows {
             {
                 return Err(refused(changed));
             }
-            let identity = checked_io(cancellation, deadline, changed, || {
-                let mut information = FILE_ID_INFO::default();
-                // SAFETY: The borrowed handle stays live, and the writable buffer has
-                // exactly the layout and size required by FileIdInfo. No pointer escapes.
-                #[expect(unsafe_code, reason = "audited FILE_ID_INFO output buffer")]
-                let result = unsafe {
-                    GetFileInformationByHandleEx(
-                        file.as_raw_handle(),
-                        FileIdInfo,
-                        (&raw mut information).cast(),
-                        std::mem::size_of::<FILE_ID_INFO>() as u32,
-                    )
-                };
-                if result == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(FileIdentity {
-                    volume: information.VolumeSerialNumber,
-                    file: information.FileId.Identifier,
-                })
-            })?;
+            let identity = checked_io(cancellation, deadline, changed, || file_identity(&file))?;
             Ok(Self {
                 _file: file,
                 identity,
             })
         }
+    }
+
+    fn file_identity(file: &File) -> io::Result<FileIdentity> {
+        let mut information = FILE_ID_INFO::default();
+        // SAFETY: The handle stays live and the output has the exact FileIdInfo layout.
+        #[expect(unsafe_code, reason = "audited FILE_ID_INFO output buffer")]
+        let result = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (&raw mut information).cast(),
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            )
+        };
+        if result == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(FileIdentity {
+            volume: information.VolumeSerialNumber,
+            file: information.FileId.Identifier,
+        })
     }
 
     pub(super) fn open(
@@ -320,6 +341,54 @@ mod windows {
     }
 
     impl Proof {
+        pub(super) fn require_single_link(
+            &self,
+            cancellation: &AtomicBool,
+            deadline: Instant,
+        ) -> Result<(), Fault> {
+            let file = &self.files.last().ok_or_else(|| refused(false))?._file;
+            let information = checked_io(cancellation, deadline, false, || {
+                let mut information = FILE_STANDARD_INFO::default();
+                // SAFETY: Live file handle and the exact FileStandardInfo output layout.
+                #[expect(unsafe_code, reason = "audited file link-count metadata query")]
+                let result = unsafe {
+                    GetFileInformationByHandleEx(
+                        file.as_raw_handle(),
+                        FileStandardInfo,
+                        (&raw mut information).cast(),
+                        std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+                    )
+                };
+                if result == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(information)
+            })?;
+            if information.NumberOfLinks != 1 || information.DeletePending || information.Directory {
+                return Err(Fault::new(
+                    "NativeTargetUnverifiable",
+                    "Native execution requires one executable file link; inaccessible aliases cannot be excluded",
+                ));
+            }
+            Ok(())
+        }
+
+        pub(super) fn same_file(
+            &self,
+            path: &Path,
+            cancellation: &AtomicBool,
+            deadline: Instant,
+        ) -> Result<bool, Fault> {
+            let file = checked_io(cancellation, deadline, false, || {
+                OpenOptions::new()
+                    .access_mode(FILE_READ_ATTRIBUTES)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                    .open(path)
+            })?;
+            let current = checked_io(cancellation, deadline, false, || file_identity(&file))?;
+            Ok(current == self.files.last().ok_or_else(|| refused(false))?.identity)
+        }
+
         pub(super) fn validate(
             &self,
             selected_path: &Path,
@@ -562,5 +631,45 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(error.category, "NativeExecutable");
+    }
+
+    #[test]
+    fn process_path_comparison_uses_file_identity_not_basename_or_alias_spelling() {
+        let fixture = Fixture::new();
+        let other = fixture.0.join("other");
+        fs::create_dir(&other).unwrap();
+        let same_name = other.join("selected.exe");
+        fs::write(&same_name, b"different file").unwrap();
+        let alias = fixture.0.join("different-name.exe");
+        fs::hard_link(fixture.executable(), &alias).unwrap();
+        let guard = open(&fixture.executable());
+        let cancellation = AtomicBool::new(false);
+        assert!(!guard.same_file(&same_name, &cancellation, deadline()).unwrap());
+        assert!(guard.same_file(&alias, &cancellation, deadline()).unwrap());
+        assert!(guard.same_file(&fixture.executable(), &cancellation, deadline()).unwrap());
+        assert_eq!(
+            guard.require_single_link(&cancellation, deadline()).unwrap_err().category,
+            "NativeTargetUnverifiable",
+        );
+        assert!(guard.same_file(&fixture.0.join("missing.exe"), &cancellation, deadline()).is_err());
+    }
+
+    #[test]
+    fn a_new_hardlink_cannot_pass_native_revalidation_unnoticed() {
+        let fixture = Fixture::new();
+        let guard = open(&fixture.executable());
+        let cancellation = AtomicBool::new(false);
+        guard.require_single_link(&cancellation, deadline()).unwrap();
+        let alias = fixture.0.join("later-alias.exe");
+        match fs::hard_link(fixture.executable(), &alias) {
+            Ok(()) => assert_eq!(
+                guard.require_single_link(&cancellation, deadline()).unwrap_err().category,
+                "NativeTargetUnverifiable",
+            ),
+            Err(_) => {
+                assert!(!alias.exists());
+                guard.require_single_link(&cancellation, deadline()).unwrap();
+            }
+        }
     }
 }

@@ -14,6 +14,7 @@ export default function NativeReview({bound, native, selectedProfile, valuesDirt
   const t = messages[useLocale()].ui;
   const nativeBinding = native.binding;
   const nativeInput = nativeBinding?.configuration.input ?? null;
+  const windows = bound.target.view?.platform === 'windows';
   const recipe = native?.recipe ?? null;
   // Launch recipe validity is conditional on host-confirmed absence, not a gate on attaching.
   const approvalOpen = (native.block === null || native.block === 'nativeApproval') && !locked;
@@ -35,7 +36,7 @@ export default function NativeReview({bound, native, selectedProfile, valuesDirt
     {term:t.common.environment, value:environment ? `${environment.profile} · ${environment.model} · ${environment.language} · ${environment.provider} · ${environment.runtime_profile}` : t.common.unconfigured},
     {term:t.run.nativeApplication, value:nativeBinding?.configuration.game.path ?? t.common.none, mono:true},
     {term:t.target.windowTitle, value:nativeBinding?.configuration.window_title ?? t.common.none},
-    {term:t.target.route, value:nativeInput ? nativeInput.route === 'system' ? t.target.system : t.target.processDirected : t.common.none, id:'native-route'},
+    {term:t.target.route, value:nativeInput ? nativeInput.route === 'system' ? t.target.system : nativeInput.route === 'window_message' ? t.target.windowMessage : t.target.processDirected : t.common.none, id:'native-route'},
     {term:t.target.focus, value:nativeInput ? nativeInput.focus === 'preserve' ? t.target.preserve : t.target.requireFocused : t.common.none, id:'native-focus'},
     {term:t.target.pointerMode, value:nativeInput?.pointer_mode === 'core_graphics' ? t.target.coreGraphics : nativeInput?.pointer_mode === 'appkit_background' ? t.target.appkitBackground : t.common.none, id:'native-pointer'},
     {term:t.target.clickHold, value:nativeInput ? `${nativeInput.click_hold_ms} ms` : t.common.none},
@@ -44,7 +45,7 @@ export default function NativeReview({bound, native, selectedProfile, valuesDirt
   const rows = (items:typeof identity) => items.map(item => <Fragment key={item.term}>
     <dt>{item.term}</dt><dd id={item.id} className={item.mono ? 'mono' : undefined}>{item.value}</dd>
   </Fragment>);
-  const help = <p className="field-help">{t.run.nativeHelp}</p>;
+  const help = <p className="field-help">{windows ? t.run.nativeWindowsHelp : t.run.nativeHelp}</p>;
   const recipeSection = recipe && <><span className="eyebrow">{t.run.nativeRecipe}</span>
     <dl className="run-identity" id="native-recipe">
       <dt>{t.run.nativeRecipient}</dt><dd id="native-recipient">{recipe.recipient === 'game' ? t.run.nativeRecipientGame
@@ -86,7 +87,7 @@ export default function NativeReview({bound, native, selectedProfile, valuesDirt
     <label className="checkbox-label"><input id="native-input-consent" type="checkbox" checked={native.input} disabled={!approvalOpen}
       onChange={event => handlers.native.approve('input', event.target.checked)}/>{t.run.nativeInput}</label>
   </>;
-  const launchRecovery = <><label className="checkbox-label"><input id="native-launch-consent" type="checkbox" checked={native.launch} disabled={!approvalOpen}
+  const launchRecovery = !windows && <><label className="checkbox-label"><input id="native-launch-consent" type="checkbox" checked={native.launch} disabled={!approvalOpen}
     onChange={event => handlers.native.approve('launch', event.target.checked)}/>{t.run.nativeLaunch}</label>
     <p className="field-help" id="native-launch-help">{t.run.nativeLaunchHelp}</p>
     <label className="checkbox-label"><input id="native-recovery-consent" type="checkbox" checked={native.recovery} disabled={!approvalOpen || !native.launch}

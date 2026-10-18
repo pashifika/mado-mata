@@ -1,6 +1,85 @@
 use super::super::fixtures::{Directory, inventory, put, stored_target, target_path};
 use super::*;
 
+#[test]
+fn legacy_windows_policy_survives_restart_without_translation() {
+    let directory = Directory::new();
+    directory.profiles("Owner");
+    directory.profiles("Other");
+    let mut saved = stored_target("Owner");
+    let binding = saved.binding.as_mut().unwrap();
+    binding.configuration.platform = "windows".into();
+    binding.configuration.game.path = r"C:\Games\Game.exe".into();
+    binding.resolution.game.path = r"C:\Games\Game.exe".into();
+    binding.resolution.game.executable = r"C:\Games\Game.exe".into();
+    let bytes = serde_json::to_vec_pretty(&saved).unwrap();
+    let path = target_path(&directory, "Owner");
+    put(&path, &bytes);
+
+    let store = directory.store();
+    assert_eq!(store.read_target("Owner", &saved.package_id).unwrap(), saved);
+    let configuration = &saved.binding.as_ref().unwrap().configuration;
+    for result in [
+        store.check_target(
+            "Owner", &saved.package_id, &crate::target::tests::declaration(),
+            &saved.expectation(), configuration,
+        ).map(|_| ()),
+        store.save_target(
+            "Owner", &saved.package_id, &crate::target::tests::declaration(),
+            &saved.expectation(), configuration.clone(), None,
+        ).map(|_| ()),
+    ] {
+        assert_eq!(result.unwrap_err().context["field"], "input");
+    }
+    drop(store);
+    let reopened = directory.store();
+    assert_eq!(reopened.read_target("Owner", &saved.package_id).unwrap(), saved);
+    assert_eq!(fs::read(path).unwrap(), bytes);
+    assert_eq!(reopened.read_target("Other", &saved.package_id).unwrap().binding, None);
+}
+
+#[cfg(windows)]
+#[test]
+fn explicit_windows_policy_save_corrects_legacy_intent_and_preserves_binding() {
+    let directory = Directory::new();
+    directory.profiles("Owner");
+    let executable = directory.0.join("game.exe");
+    put(&executable, b"metadata-only fixture");
+    let resolved = fs::canonicalize(&executable).unwrap().to_str().unwrap().to_owned();
+    let mut saved = stored_target("Owner");
+    let binding = saved.binding.as_mut().unwrap();
+    binding.configuration.platform = "windows".into();
+    binding.configuration.game.path = executable.to_str().unwrap().into();
+    binding.resolution.game.path = resolved.clone();
+    binding.resolution.game.executable = resolved;
+    put(&target_path(&directory, "Owner"), &serde_json::to_vec(&saved).unwrap());
+    let original_id = saved.binding.as_ref().unwrap().id.clone();
+    for (route, focus) in [("window_message", "preserve"), ("system", "require_focused")] {
+        let store = directory.store();
+        let mut configuration = saved.binding.as_ref().unwrap().configuration.clone();
+        configuration.input = Some(crate::target::TargetInputPolicy {
+            route: route.into(), focus: focus.into(), pointer_mode: None, click_hold_ms: 1000,
+        });
+        let check = store.check_target(
+            "Owner", &saved.package_id, &crate::target::tests::declaration(),
+            &saved.expectation(), &configuration,
+        ).unwrap();
+        assert!(!check.resolution_changed);
+        let revision = saved.revision;
+        saved = store.save_target(
+            "Owner", &saved.package_id, &crate::target::tests::declaration(),
+            &saved.expectation(), configuration.clone(), None,
+        ).unwrap().0;
+        assert_eq!(saved.revision, revision + 1);
+        assert_eq!(saved.binding.as_ref().unwrap().id, original_id);
+        assert_eq!(saved.binding.as_ref().unwrap().configuration, configuration);
+        drop(store);
+        let bytes = fs::read(target_path(&directory, "Owner")).unwrap();
+        assert_eq!(directory.store().read_target("Owner", &saved.package_id).unwrap(), saved);
+        assert_eq!(fs::read(target_path(&directory, "Owner")).unwrap(), bytes);
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn target_save_before_inspection_does_not_bind_run_or_enable_profiles() {

@@ -36,7 +36,11 @@ mod enabled {
     #[cfg(test)]
     mod native_wait_tests;
     #[cfg(test)]
+    mod native_frame_tests;
+    #[cfg(test)]
     mod publication_tests;
+    #[cfg(windows)]
+    mod windows_process;
     use super::*;
     use crate::desktop::NativeReview;
     use crate::environment::{Configuration, Placement, ReplayConfig, canonical, validate_replay};
@@ -129,8 +133,8 @@ mod enabled {
         /// Package review authorizes bounded Script input, not a fabricated action sequence.
         #[serde(default)]
         package_approved: bool,
-        #[serde(default)]
-        macos_process_pointer_mode: MacosProcessPointerMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        macos_process_pointer_mode: Option<MacosProcessPointerMode>,
         #[serde(default)]
         click_hold_ms: u64,
     }
@@ -175,7 +179,16 @@ mod enabled {
                     "click_hold_ms must be between 0 and 1000",
                 ));
             }
-            if self.macos_process_pointer_mode == MacosProcessPointerMode::AppKitBackground
+            if operating_system == "windows"
+                && self.package_approved
+                && self.macos_process_pointer_mode.is_some()
+            {
+                return Err(blocked(
+                    "input_route_unsupported",
+                    "Windows package input does not accept a macOS pointer mode",
+                ));
+            }
+            if self.macos_process_pointer_mode == Some(MacosProcessPointerMode::AppKitBackground)
                 && (!cfg!(target_os = "macos")
                     || operating_system != "macos"
                     || self.route != "process_directed"
@@ -250,7 +263,7 @@ mod enabled {
         queries: BTreeMap<String, Managed<Query>>,
         active_queries: usize,
         latest: Option<mp::FrameStamp>,
-        // One shared frame keeps macOS terminal-aware admission available after Script release.
+        // One shared committed frame retains terminal-aware admission after Script release.
         // This is not another capture or Script handle; finish drops it before close.
         native_frame: Option<mp::Frame>,
         serial: u64,
@@ -1132,8 +1145,7 @@ mod enabled {
                 None
             };
             let stamp = frame.stamp();
-            let native_frame =
-                (cfg!(target_os = "macos") && self.native.is_some()).then(|| frame.clone());
+            let native_frame = self.native.is_some().then(|| frame.clone());
             let value = self.retain_observation(state, frame, permit, &operation)?;
             // Latch only a committed frame; a rejected candidate establishes no baseline.
             state.placement = geometry;
@@ -1878,7 +1890,7 @@ mod enabled {
         );
         #[cfg(target_os = "macos")]
         let request = request.with_macos_config(mp::MacosConfig::new().with_process_pointer_mode(
-            match native.input.macos_process_pointer_mode {
+            match native.input.macos_process_pointer_mode.unwrap_or_default() {
                 MacosProcessPointerMode::CoreGraphics => mp::MacosProcessPointerMode::CoreGraphics,
                 MacosProcessPointerMode::AppKitBackground => {
                     mp::MacosProcessPointerMode::AppKitBackground
@@ -1963,7 +1975,7 @@ mod enabled {
         process_lifetime: &mut String,
     ) -> Result<Option<mp::TargetId>, Fault> {
         let lifetime = native_lifetime(config)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             let target = loop {
                 let target = probe_native_target(
@@ -1975,8 +1987,14 @@ mod enabled {
                             .map_err(|error| engine_error("target_discovery", error))
                     },
                     || {
+                        #[cfg(target_os = "macos")]
                         if let Some(lifetime) = lifetime {
                             check_native_process(config, lifetime, control, process_started)?;
+                        }
+                        #[cfg(windows)]
+                        {
+                            let _ = process_started;
+                            windows_process::check(config.process_id, lifetime, control)?;
                         }
                         Ok(())
                     },
@@ -1996,6 +2014,8 @@ mod enabled {
                         .min(control.deadline().saturating_duration_since(Instant::now())),
                 );
             };
+            #[cfg(windows)]
+            windows_process::check(config.process_id, lifetime, control)?;
             // Revalidate the retained target, never rediscover a replacement.
             let current = engine
                 .describe_window(target, operation)
@@ -2009,6 +2029,7 @@ mod enabled {
                 )
             })?;
             *process_lifetime = format!("{:016x}", identity.lifetime());
+            #[cfg(target_os = "macos")]
             if config.confirm_process_exit && process_started.is_none() {
                 let pid = identity.process_id().get();
                 let started = i32::try_from(pid)
@@ -2025,7 +2046,7 @@ mod enabled {
             }
             Ok(Some(target))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = process_started;
             control.check()?;
@@ -2048,7 +2069,7 @@ mod enabled {
         }
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", windows, test))]
     fn validate_retained_native_target(
         target: mp::TargetId,
         current: &mp::TargetDescription,
@@ -2063,7 +2084,7 @@ mod enabled {
         Ok(())
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", windows, test))]
     fn probe_native_target(
         config: &NativeConfig,
         control: &Control,
@@ -2241,7 +2262,15 @@ mod enabled {
                     "selected process path cannot be resolved",
                 )
             })?;
-            if canonical != config.executable_or_bundle {
+            #[cfg(windows)]
+            let same_executable = if config.input.package_approved {
+                windows_process::same_executable(&canonical, &config.executable_or_bundle)?
+            } else {
+                canonical == config.executable_or_bundle
+            };
+            #[cfg(not(windows))]
+            let same_executable = canonical == config.executable_or_bundle;
+            if !same_executable {
                 if config.process_id.is_none() {
                     continue;
                 }
@@ -2994,7 +3023,7 @@ mod enabled {
             assert!(replay.context.get("native_cleanup").is_none());
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         #[test]
         fn native_script_review_validates_without_claiming_an_expected_effect() {
             let plan: Plan = serde_json::from_str(include_str!("../fixtures/manual-plan.json"))
@@ -3003,12 +3032,13 @@ mod enabled {
             let raw = json!({
                 "executable_or_bundle":executable,"process_id":42,
                 "process_lifetime":"0123456789abcdef","window_rule":"Selected window",
-                "operating_system":"macos","hardware":std::env::consts::ARCH,
+                "operating_system":std::env::consts::OS,"hardware":std::env::consts::ARCH,
                 "permission_executable":executable,
                 "capture":{"approved":true,"duration_ms":5000,"max_frames":10,
                     "wait_ms":500,"interval_ms":50},
                 "input":{"approved":true,"duration_ms":5000,"max_actions":10,
-                    "route":"process_directed","focus":"preserve","package_approved":true,
+                    "route":if cfg!(windows) { "window_message" } else { "process_directed" },
+                    "focus":"preserve","package_approved":true,
                     "representative_actions":[]},
                 "geometry":null,"recognition_language":crate::environment::LANGUAGE,
                 "review":{"kind":"script"},"cleanup_ms":1000,"containment_ms":2000
@@ -3542,7 +3572,10 @@ mod enabled {
                     && lifetime
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) => {}
-            (None, None) if desktop && matches!(config.review, NativeReview::Script {}) => {}
+            (None, None)
+                if desktop
+                    && config.operating_system == "macos"
+                    && matches!(config.review, NativeReview::Script {}) => {}
             _ => {
                 return Err(blocked(
                     "native_authority_validation",
@@ -3550,10 +3583,10 @@ mod enabled {
                 ));
             }
         }
-        if config.confirm_process_exit && !desktop {
+        if config.confirm_process_exit && (!desktop || config.operating_system != "macos") {
             return Err(blocked(
                 "native_authority_validation",
-                "exit recovery evidence is Desktop-only",
+                "exit recovery evidence requires macOS Desktop",
             ));
         }
         Ok(())
@@ -3674,6 +3707,18 @@ mod enabled {
                 "explicit supported route and non-focus-changing policy are required",
             ));
         }
+        if input.package_approved
+            && config.operating_system == "windows"
+            && !matches!(
+                (input.route.as_str(), input.focus.as_str()),
+                ("system", "require_focused") | ("window_message", "preserve")
+            )
+        {
+            return Err(blocked(
+                "input_route_unsupported",
+                "Windows package input requires system/require_focused or window_message/preserve",
+            ));
+        }
         if config.cleanup_ms == 0
             || config.cleanup_ms > plan.limits.cleanup_ms
             || config.containment_ms == 0
@@ -3688,11 +3733,10 @@ mod enabled {
         if input.package_approved {
             if !input.representative_actions.is_empty()
                 || config.geometry.is_some()
-                || config.operating_system != "macos"
             {
                 return Err(blocked(
                     "input_authority",
-                    "reviewed package input is exclusive of manual geometry/actions and requires macOS",
+                    "reviewed package input is exclusive of manual geometry and actions",
                 ));
             }
         } else {

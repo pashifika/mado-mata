@@ -838,10 +838,10 @@ pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
                 Fault::new("NativeRefused", "Native requires explicit per-Start review")
             })?;
             super::native::validate_intent(intent)?;
-            if !cfg!(target_os = "macos") {
+            if !cfg!(any(target_os = "macos", windows)) {
                 return Err(Fault::new(
                     "NativeRefused",
-                    "Desktop Native is available only on macOS",
+                    "Desktop Native requires macOS or Windows",
                 ));
             }
             if request.replay_descriptor_path.is_some() {

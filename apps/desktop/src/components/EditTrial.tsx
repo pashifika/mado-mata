@@ -86,11 +86,12 @@ export default function EditTrial({state, facts, stale, open, onOpenChange, nati
   // Native names the saved application window, otherwise the package's declared one; it never falls back on its own.
   const declared = bound?.package.target ?? null;
   const saved = bound?.target.view?.compatible ? bound.target.view.record.binding : null;
+  const windows = bound?.target.view?.platform === 'windows';
   const application = saved?.configuration.window_title || declared?.window_title || declared?.id || null;
   const nativeUnavailable = nativeCapability === null ? nativeError ? t.run.nativeCapabilityError : app.nativeUnavailable
     : declared === null ? s.noTarget : null;
   const nativeReady = lane === 'native' && nativeCapability !== null && native !== null;
-  const targetMissing = nativeReady && (native.binding === null || native.block === 'nativeTarget' || native.block === 'nativeTargetDirty');
+  const targetMissing = nativeReady && (native.binding === null || native.block === 'nativeTarget' || native.block === 'nativeTargetDirty' || native.block === 'nativePolicy');
   const environmentMissing = environment === null && (lane === 'replay' || nativeReady);
   const entry = state?.unit === 'package' ? 'package' : candidate ? functionKey(candidate) : '';
   const argumentsKey = state?.selected ?? '';
@@ -172,13 +173,14 @@ export default function EditTrial({state, facts, stale, open, onOpenChange, nati
           {valuesBlock && <div id="trial-values-block" className="inline-warning trial-prerequisite"><span>{valuesBlock}</span>
             <button id="trial-values-action" type="button" onClick={() => leave(() => handlers.setup('values'))}>{s.setupValues}</button></div>}
           {targetMissing && <div id="trial-target-block" className="inline-warning trial-prerequisite">
-            <span>{native.block === 'nativeTarget' || native.block === 'nativeTargetDirty' ? app[native.block] : app.nativeBinding}</span>
+            <span>{native.block === 'nativeTarget' || native.block === 'nativeTargetDirty' || native.block === 'nativePolicy' ? app[native.block] : app.nativeBinding}</span>
             <button id="trial-target-action" type="button" onClick={() => leave(() => handlers.setup('target'))}>{s.setupTarget}</button></div>}
           {environmentMissing && <div id="trial-environment-block" className="inline-warning trial-prerequisite">
             <span>{bound.lane === 'replay' ? app.replayEnvironment : app.nativeEnvironment}</span>
             <button id="trial-environment-action" type="button" onClick={() => leave(handlers.environment)}>{s.setupEnvironment}</button></div>}
           {nativeReady && <>
             {state.unit === 'function' && <p className="field-help">{s.attachOnly}</p>}
+            {windows && <p id="trial-windows-attach-only" className="field-help">{s.windowsAttachOnly}</p>}
             <details id="trial-native-options" className="trial-native-options" open={native.workflowError || undefined}>
               <summary>{s.nativeOptions}
                 {native.launch && state.unit === 'package' && <span className="tag">{t.run.nativeLaunchApproval} · {t.run.nativeLaunchApproved}</span>}
@@ -193,7 +195,7 @@ export default function EditTrial({state, facts, stale, open, onOpenChange, nati
                   : s.durationHelp}</p>
               </div>
               {native.limits && <details><summary>{t.run.nativeLimits}</summary><pre>{JSON.stringify(native.limits, null, 2)}</pre></details>}
-              {state.unit === 'package' && <>
+              {state.unit === 'package' && !windows && <>
                 <p className="field-help">{s.packageStartup}</p>
                 {native.recipe && <dl className="run-identity" id="trial-native-recipe">
                   <dt>{t.run.nativeRecipient}</dt><dd>{native.recipe.recipient === 'game' ? t.run.nativeRecipientGame : t.run.nativeRecipientLauncher} · <code>{native.recipe.location.path}</code></dd>

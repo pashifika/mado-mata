@@ -12,6 +12,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 mod native_capture;
+#[cfg(windows)]
+pub(super) use native_capture::WindowsExecutableGuard;
 pub use native_capture::{
     NativeCandidateView, NativeCaptureArea, NativeCaptureBounds, NativeCaptureResult,
     NativeCoordinateUnit, NativePickerCandidate, NativePickerSnapshot, NativeSelectionView,

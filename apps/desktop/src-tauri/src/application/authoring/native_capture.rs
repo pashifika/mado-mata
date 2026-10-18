@@ -17,7 +17,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 mod windows_file;
-use windows_file::WindowsExecutableGuard;
+pub(in crate::application) use windows_file::WindowsExecutableGuard;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeCoordinateUnit {

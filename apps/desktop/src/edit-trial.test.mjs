@@ -483,6 +483,18 @@ function nativeRunContext(){
   return {controller:drafts,state,environment:structuredClone(trialEnvironment),capability:structuredClone(trialCapability)};
 }
 
+function windowsRunContext(route='system'){
+  const input=nativeRunContext();
+  const original=input.state.context.target;
+  const configuration={platform:'windows',game:{kind:'executable',path:'C:\\Fixture\\Game.exe'},
+    launcher:{kind:'executable',path:'C:\\Fixture\\Launcher.exe'},arguments:['','--retained'],
+    working_directory:'C:\\Fixture',window_title:'Exact window',
+    input:{route,focus:route === 'system' ? 'require_focused' : 'preserve',pointer_mode:null,click_hold_ms:50}};
+  const target={...original,platform:'windows',record:{...original.record,binding:{...original.record.binding,configuration,
+    resolution:{game:{path:configuration.game.path,executable:configuration.game.path},launcher:null,working_directory:null}}}};
+  return {...input,state:trialContext({...input.state.context,target},input.controller.current(),'fixture',null)};
+}
+
 // The final request one explicit Run submits after rereading `state` for the current saved source.
 function runRequest(input,state=input.state,intent=trialRunIntent(input.state,input.environment,input.capability)){
   return trialRunRequest(intent,state,trialSourceTicket(input.controller),input.environment,input.capability);
@@ -625,6 +637,73 @@ test('whole-package launch/recovery remain separate choices, Function never borr
   const retargeted={...input.state,bound:{...input.state.bound,target:readTarget(target,{...target.view,record:{...target.view.record,revision:2}})}};
   const native=deriveBound(retargeted.bound,input.environment,'en',input.capability,'script').native;
   assert.deepEqual([native.launch,native.recovery,native.intent.launch_approved],[false,false,false]);
+});
+
+for (const route of ['system','window_message']) test(`Windows ${route} Whole package and Function use explicit attach-only Run without hidden approval`,()=>{
+  const input=windowsRunContext(route);
+  const original=JSON.stringify(input.state.bound.target.view.record);
+  const facts=deriveBound(input.state.bound,input.environment,'en',input.capability,'script');
+  assert.equal(facts.startBlock,null);
+  assert.equal(facts.native.recipe,null);
+  assert.deepEqual([facts.native.capture,facts.native.input,facts.native.launch,facts.native.recovery],[false,false,false,false]);
+  assert.equal(chooseStartup(input).bound,input.state.bound);
+  const whole=runRequest(input);
+  assert.equal(whole.request.function,null);
+  assert.deepEqual(whole.request.native_intent.review,{kind:'script'});
+  assert.deepEqual([whole.request.native_intent.capture_approved,whole.request.native_intent.input_approved,
+    whole.request.native_intent.launch_approved,whole.request.native_intent.max_exit_recoveries],[true,true,false,0]);
+  input.state={...input.state,unit:'function',selected:functionKey(candidate),arguments:'[7]'};
+  const fn=runRequest(input);
+  assert.deepEqual(fn.request.function,{module:'battle.ts',function:'battle',arguments:[7]});
+  assert.deepEqual(fn.request.native_intent,whole.request.native_intent);
+  const again=runRequest(input);
+  assert.notEqual(again.request.native_intent,fn.request.native_intent);
+  assert.deepEqual(again.request,fn.request);
+  assert.equal(JSON.stringify(input.state.bound.target.view.record),original);
+});
+
+for (const [scenario,change,block] of [
+  ['missing environment',input=>({...input,environment:null}),'nativeEnvironment'],
+  ['unsupported host',input=>({...input,capability:null}),'nativeUnavailable'],
+  ['dirty target',input=>({...input,state:{...input.state,bound:{...input.state.bound,
+    target:editTarget(input.state.bound.target,{...input.state.bound.target.draft,clickHold:'100'})}}}),'nativeTargetDirty'],
+  ['legacy policy',input=>{
+    const target=input.state.context.target;
+    const configuration={...target.record.binding.configuration,input:{route:'process_directed',focus:'preserve',pointer_mode:'appkit_background',click_hold_ms:50}};
+    return {...input,state:trialContext({...input.state.context,target:{...target,record:{...target.record,
+      binding:{...target.record.binding,configuration}}}},input.controller.current(),'fixture',null)};
+  },'nativePolicy'],
+]) test(`Windows Script ${scenario} remains blocked without Controlled fallback`,()=>{
+  const input=change(windowsRunContext());
+  assert.equal(input.state.bound.lane,'native');
+  assert.equal(deriveBound(input.state.bound,input.environment,'en',input.capability,'script').native.block,block);
+  assert.equal(runRequest(input),'setupIncomplete');
+});
+
+test('Windows Save all and run uses current Function source and preserves source selection and Undo',()=>{
+  const input=windowsRunContext();
+  input.state={...input.state,unit:'function',selected:functionKey(candidate),arguments:'[3]'};
+  input.controller.update(state=>selectFile(state,'battle.ts'));
+  const intent=trialRunIntent(input.state,input.environment,input.capability);
+  const changed=source.replace('return turn;', 'return turn + 1;');
+  input.controller.update(state=>replaceFile(state,'battle.ts',changed));
+  assert.equal(trialSourceTicket(input.controller),null);
+  const ticket=saveTicket(input.controller.current(),'battle.ts');
+  const saved=view('saved-2');
+  saved.files[0].text=ticket.text;
+  input.controller.update(state=>applySave(state,ticket,{owner,committed_revision:'saved-2',view:saved,refresh_error:null}));
+  assert.equal(runRequest(input),'changed');
+  const reread=trialContext({...input.state.context,revision:'saved-2',package:{...input.state.context.package,inventory_identity:'inventory-2'}},
+    input.controller.current(),'fixture',input.state);
+  const prepared=runRequest(input,reread,intent);
+  assert.equal(prepared.request.inventory_identity,'inventory-2');
+  assert.deepEqual(prepared.request.function,{module:'battle.ts',function:'battle',arguments:[3]});
+  assert.deepEqual([prepared.request.native_intent.launch_approved,prepared.request.native_intent.max_exit_recoveries],[false,0]);
+  assert.equal(trialSourceTicket(input.controller).revision,'saved-2');
+  assert.equal(input.controller.current().selected,'battle.ts');
+  input.controller.update(state=>undoFile(state,'battle.ts'));
+  assert.equal(input.controller.current().drafts.get('battle.ts').text,source);
+  assert.equal(trialSourceTicket(input.controller),null);
 });
 
 test('a schema reread cannot silently drop the startup choices named by Run',()=>{

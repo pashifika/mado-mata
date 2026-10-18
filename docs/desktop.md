@@ -1,4 +1,4 @@
-# Desktop checkout: authoring, controlled/replay and macOS Native runs
+# Desktop checkout: authoring, controlled/replay and Native runs
 
 MadoMata's trusted Tauri/React WebView provides directory-package and Recognition
 authoring, signed package transfer, inspection, profiles, run control, App-local
@@ -16,8 +16,10 @@ target attachment. Its explicit startup request can attach to a verified saved
 application, or launch its saved recipe once when absence and separate approval
 permit it. Optional reviewed exit recovery remains available for Whole package.
 Edit's **Function** mode instead attaches to an already-running target and calls
-the selected function without package readiness, launch or recovery. Neither
-mode authorizes activation, game termination or Windows Native execution.
+the selected function without package readiness, launch or recovery.
+Windows Native uses the same ordinary/Edit runner but is **attach-only**:
+the game must already be running. Windows launch and exit recovery are refused.
+Neither platform's Native mode authorizes activation or game termination.
 
 The checkout includes macOS and Windows shells; Linux checks the frontend and
 shell-independent core. Windows interactive authoring and both-OS native
@@ -2060,11 +2062,14 @@ invalid, or incompatible local target is not an execution prerequisite.
    directory; an explicit directory for a bundle recipient is refused before
    launch, not ignored. The exact window title has its own full-width row.
    Supply it when the package leaves it local; a package-required title is read-only.
-3. On macOS, leave all input fields blank for capture-only use. To configure future input,
-   explicitly select a complete policy. Process-directed input requires a pointer
-   mode: Core Graphics permits either focus policy; AppKit background requires
-   preserved focus. System input requires an already focused target and no
-   process-pointer mode. Click hold is **0–1000 ms**. None grants execution authority.
+3. Leave input fields blank for capture-only use. Native execution requires an
+   explicit complete policy:
+   - **Windows:** `system` with `require_focused`, or `window_message` with
+     `preserve`; neither accepts a macOS pointer mode.
+   - **macOS:** process-directed input requires a pointer mode. Core Graphics
+     permits either focus policy; AppKit background requires preserved focus.
+     System input requires an already focused target and no process-pointer mode.
+   Click hold is **0–1000 ms**. Configuration grants no execution authority.
 4. **Check configuration** examines the current unsaved draft without writing.
    **Save binding** repeats validation and metadata resolution before an atomic
    write. Both inspect only filesystem metadata: executable accessibility,
@@ -2079,10 +2084,13 @@ invalid, or incompatible local target is not an execution prerequisite.
    updates at the same canonical location remain compatible; this is not a
    signed-binary or content check.
 
-An unbound draft uses the host platform. A saved binding from another platform
-is retained without conversion; its native picker is unavailable on this host.
-Windows selection and Check/Save configure filesystem metadata only: they do
-not enable Windows Native Start or running-application discovery.
+An unbound draft uses the host platform. Foreign-platform bindings and earlier
+Windows records with macOS-shaped input policy remain readable without automatic
+conversion. Select the current platform explicitly when correcting foreign
+intent, choose its valid policy, then Check/Save. Native stays unavailable until
+the saved intent is compatible. Opening, restarting or restoring a snapshot does
+not rewrite it. Windows Check/Save remains metadata-only; Native performs its own
+fresh execution-owned process correspondence.
 
 The native picker uses an asynchronous macOS sheet or a Windows owner-modal
 file dialog, available only while Run/OCR is idle. While it is open, new Run/OCR
@@ -2102,8 +2110,8 @@ failures are still shown.
 
 Neither action finds processes/windows, connects, captures, performs OCR, sends
 input, changes focus, or requests permissions. A passed check is **configuration
-metadata only**, not runtime identity, authority, or native acceptance. Native
-Start remains refused; R6 and initial Windows/macOS qualification remain open.
+metadata only**, not runtime identity, authority, or native acceptance.
+R6 and initial Windows/macOS qualification remain open.
 
 Paths are absolute UTF-8 strings of at most **4,096 bytes**. Titles are nonempty
 exact strings of at most **512 bytes**, not patterns. Arguments permit at most
@@ -2921,6 +2929,40 @@ An expired deadline remains unverified/incomplete, not a clean acknowledgement.
 The log bridge polls every **50 ms** and is joined during shutdown; that interval
 is not a join timeout. File-log shutdown follows below and never determines the
 run result.
+
+## Windows attach-only Native Start
+
+Use the fixed Windows engine artifact and selected OCR/DLL environment from
+[the checkout build procedure](#build-and-run-from-the-checkout). Build and
+controlled checks do not qualify actual game input.
+
+1. Start the authorized game independently. Save a Windows **Executable** Target
+   with its exact window title and either `system` / `require_focused` or
+   `window_message` / `preserve`. System input never activates the target.
+   Window-message delivery is target-specific and never a fallback.
+2. Use ordinary Run's Native review, or Edit's explicit Whole package/Function
+   Run. Whole package must request startup from `readiness()` and observe its own
+   usable-screen condition before returning `"Ready"`. Function attaches directly
+   and never invokes package readiness.
+3. Windows refuses launch approval and nonzero exit recovery, including crafted
+   requests. Stored launcher/arguments remain configuration data, not execution
+   authority. Confirmed process absence requires an independent game start and
+   a fresh Run; a windowless selected process may wait only within Startup.
+4. Preparation requires one verified process for the saved executable and one
+   exact SDK window. Ambiguity, incomplete discovery, stale saved resolution or
+   process/window replacement refuses rather than selecting a successor.
+   The executable must have one live filesystem link; hard-linked executables
+   are refused. This is disk/process correspondence, not publisher certification
+   or proof of previously mapped executable bytes.
+5. Preserve Script result, input receipts, newer-frame effect and physical
+   cleanup as separate evidence. Stop closes admission but does not itself prove
+   input release or child reaping. Fresh execution requires settled ownership.
+
+The shared Native budgets, recognition bases and cleanup rules below also apply,
+without launch/recovery. Missing engine/DLL/OCR setup must be corrected explicitly;
+there is no replacement runner or loader-search fallback. Actual Windows ordinary,
+Whole package, Function, both-route, Stop and fresh-rerun acceptance remain
+separate from CI; no universal background-input or M0/R6 claim is made.
 
 ## Reviewed macOS Native Start
 

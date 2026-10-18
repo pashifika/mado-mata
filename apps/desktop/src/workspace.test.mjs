@@ -480,6 +480,15 @@ function loadedBundle(id='a') {
   configuration.game.kind='bundle';
   return loadedTarget(id,configuration);
 }
+function windowsConfiguration(input={route:'system',focus:'require_focused',pointer_mode:null,click_hold_ms:0}) {
+  return {platform:'windows',game:{kind:'executable',path:'C:\\Fixture\\Game.exe'},
+    launcher:{kind:'executable',path:'C:\\Fixture\\Launcher.exe'},arguments:['','--literal','two words'],
+    working_directory:'C:\\Fixture',window_title:'Exact title',input};
+}
+function loadedWindows(configuration=windowsConfiguration()) {
+  const state=targetState(targetSelection());
+  return readTarget(state,targetView(state,{revision:1,configuration,platform:'windows'}));
+}
 function applicationResult(ticket,requestId,status='matched') {
   return {context:ticket.context,...ticket.expected,request_id:requestId,observation:{
     observed_at_ms:1730000000000,status,evidence:status === 'matched' ? 'signed_application' : null,
@@ -723,6 +732,105 @@ test('a selected capture-only target stays input-free when its saved Windows loc
   assert.deepEqual(readTargetDraft(state.draft).configuration,config);
   assert.equal(readTargetDraft({...state.draft,windowTitle:'Other window'}).configuration.input,null);
   assert.equal(readTargetDraft({...state.draft,route:'system'}).configuration,null);
+});
+
+for (const input of [
+  {route:'system',focus:'require_focused',pointer_mode:null,click_hold_ms:0},
+  {route:'window_message',focus:'preserve',pointer_mode:null,click_hold_ms:1000},
+]) test(`Windows ${input.route} policy preserves exact saved values and does not enable the macOS running check`,()=>{
+  const configuration=windowsConfiguration(input);
+  const state=loadedWindows(configuration);
+  const record=JSON.stringify(state.view.record);
+  assert.deepEqual(readTargetDraft(state.draft),{configuration,errors:{}});
+  assert.equal(targetDirty(state),false);
+  assert.equal(eligibleRunningApplication(state),null);
+  assert.equal(JSON.stringify(readTarget(state,state.view).view.record),record);
+  assert.equal(state.persisted,null);
+  assert.equal(state.observation,null);
+});
+
+for (const [update,field] of [
+  [{route:'process_directed',pointerMode:'core_graphics'},'route'],
+  [{route:'system',focus:'preserve'},'focus'],
+  [{route:'window_message',focus:'require_focused'},'focus'],
+  [{pointerMode:'appkit_background'},'pointerMode'],
+  [{pointerMode:'core_graphics'},'pointerMode'],
+  [{route:'unknown'},'route'],
+  [{clickHold:'1.5'},'clickHold'],
+  [{clickHold:'1001'},'clickHold'],
+  [{gameKind:'bundle'},'gameKind'],
+]) test(`Windows draft refuses ${JSON.stringify(update)} without rewriting saved intent`,()=>{
+  const state=loadedWindows();
+  const draft={...state.draft,...update};
+  const before=structuredClone(draft);
+  const parsed=readTargetDraft(draft);
+  assert.equal(parsed.configuration,null);
+  assert.ok(parsed.errors[field]);
+  assert.deepEqual(draft,before);
+  assert.deepEqual(state.view.record.binding.configuration,windowsConfiguration());
+});
+
+test('macOS refuses a Windows route while preserving its existing input combinations',()=>{
+  const state=loadedBundle();
+  assert.equal(readTargetDraft({...state.draft,route:'window_message',pointerMode:''}).errors.route,'policy');
+  for (const policy of [
+    {route:'system',focus:'require_focused',pointerMode:''},
+    {route:'process_directed',focus:'preserve',pointerMode:'core_graphics'},
+    {route:'process_directed',focus:'require_focused',pointerMode:'core_graphics'},
+    {route:'process_directed',focus:'preserve',pointerMode:'appkit_background'},
+  ]) assert.ok(readTargetDraft({...state.draft,...policy}).configuration);
+});
+
+test('legacy Windows policy remains clean, visible and ineligible until an explicit corrected Save',()=>{
+  const configuration=windowsConfiguration({route:'process_directed',focus:'preserve',pointer_mode:'appkit_background',click_hold_ms:50});
+  const state=loadedWindows(configuration);
+  const record=JSON.stringify(state.view.record);
+  assert.deepEqual([state.draft.route,state.draft.pointerMode],['process_directed','appkit_background']);
+  assert.equal(targetDirty(state),false);
+  assert.equal(readTargetDraft(state.draft).configuration,null);
+  assert.equal(nativeOf(approve(nativeDraft(state).bound)).block,'nativePolicy');
+  const reloaded=readTarget(state,state.view);
+  assert.equal(reloaded.draft,state.draft);
+  assert.equal(JSON.stringify(reloaded.view.record),record);
+  const corrected=editTarget(state,{...state.draft,route:'window_message',pointerMode:''});
+  assert.equal(targetDirty(corrected),true);
+  assert.equal(nativeOf(approve(nativeDraft(corrected).bound)).intent,null);
+  assert.equal(JSON.stringify(corrected.view.record),record);
+  const discarded=discardTarget(corrected);
+  assert.deepEqual(discarded.draft,state.draft);
+  assert.equal(targetDirty(discarded),false);
+  const ticket=targetTicket(corrected);
+  const committed=targetView(corrected,{revision:2,configuration:readTargetDraft(corrected.draft).configuration,platform:'windows'});
+  const saved=savedTarget(beginTarget(corrected,'save'),ticket,{view:committed,check:targetCheck(ticket).check});
+  assert.equal(nativeOf(approve(nativeDraft(saved).bound)).block,'nativeTarget');
+  const settled=readTarget({...saved,operation:null},committed);
+  assert.equal(targetDirty(settled),false);
+  assert.equal(nativeOf(approve(nativeDraft(settled).bound)).block,null);
+  assert.deepEqual(settled.view.record.binding.configuration.launcher,configuration.launcher);
+  assert.deepEqual(settled.view.record.binding.configuration.arguments,configuration.arguments);
+  assert.equal(settled.view.record.binding.configuration.working_directory,configuration.working_directory);
+});
+
+test('a foreign macOS binding needs explicit platform, executable and policy correction on Windows',()=>{
+  const foreign=loadedBundle();
+  const state=readTarget(foreign,{...foreign.view,platform:'windows'});
+  const record=JSON.stringify(state.view.record);
+  assert.equal(state.draft.platform,'macos');
+  assert.equal(targetDirty(state),false);
+  assert.equal(eligibleRunningApplication(state),null);
+  assert.equal(nativeOf(approve(nativeDraft(state).bound)).block,'nativeBinding');
+  const platform=editTarget(state,{...state.draft,platform:'windows'});
+  assert.equal(platform.draft.gameKind,'bundle');
+  assert.equal(platform.draft.gamePath,state.draft.gamePath);
+  assert.equal(platform.draft.route,'process_directed');
+  assert.equal(platform.draft.pointerMode,'core_graphics');
+  assert.equal(readTargetDraft(platform.draft).configuration,null);
+  const corrected=editTarget(platform,{...platform.draft,gameKind:'executable',gamePath:'C:\\Fixture\\Game.exe',
+    route:'system',focus:'require_focused',pointerMode:''});
+  assert.ok(readTargetDraft(corrected.draft).configuration);
+  assert.equal(nativeOf(approve(nativeDraft(corrected).bound)).intent,null);
+  assert.equal(JSON.stringify(corrected.view.record),record);
+  assert.deepEqual(discardTarget(corrected).draft,state.draft);
 });
 test('host-synchronized window binding updates clean target forms but preserves unsaved target edits',()=>{
   const old=loadedTarget('a',targetConfiguration());
@@ -1703,6 +1811,37 @@ test('a Native intent names the current saved binding only after both separate c
   assert.equal(nativeOf(edited).intent,null);
   // Submission spends the approval; the same request needs fresh consent.
   assert.equal(nativeOf(clearNativeApproval(approved)).intent,null);
+});
+
+test('Windows ordinary Native requires valid setup and two current consents, never launch or recovery',()=>{
+  const state=loadedWindows();
+  const bound=nativeDraft(state).bound;
+  assert.equal(nativeOf(bound).block,'nativeApproval');
+  assert.equal(nativeOf(bound).recipe,null);
+  const reviewed=approve(bound);
+  const intent=nativeOf(reviewed).intent;
+  assert.deepEqual([intent.capture_approved,intent.input_approved,intent.launch_approved,intent.max_exit_recoveries],[true,true,false,0]);
+  assert.equal(approveNative(reviewed,'launch',true,nativeEnvironment,nativeCapability),reviewed);
+  assert.equal(approveNative(reviewed,'recovery',true,nativeEnvironment,nativeCapability),reviewed);
+  for (const flags of [{launch:true},{recovery:true}]) {
+    const crafted={...reviewed,native:{...reviewed.native,...flags}};
+    assert.equal(nativeOf(crafted).block,'nativeAttachOnly');
+    assert.equal(nativeOf(crafted).intent,null);
+  }
+  assert.equal(nativeOf(reviewed,null).block,'nativeEnvironment');
+  assert.equal(nativeOf(reviewed,nativeEnvironment,null).block,'nativeUnavailable');
+  assert.equal(nativeOf(clearNativeApproval(reviewed)).block,'nativeApproval');
+  const controlled=deriveBound(chooseLane(reviewed,'controlled'),null,'en',null);
+  assert.deepEqual([controlled.native,controlled.startBlock],[null,null]);
+  assert.deepEqual(state.view.record.binding.configuration,windowsConfiguration());
+});
+
+test('Windows Native refuses a package macOS constraint and a foreign host even when the saved view is marked compatible',()=>{
+  const state=loadedWindows();
+  for (const target of [
+    {...state,declaration:{...state.declaration,macos:{bundle_id:'example.game'}}},
+    {...state,view:{...state.view,platform:'macos'}},
+  ]) assert.equal(nativeOf(approve(nativeDraft(target).bound)).block,'nativeBinding');
 });
 
 test('Native approval is withdrawn by relevant edits and never restored by editing back or returning to the lane',()=>{

@@ -3,7 +3,7 @@ import type {Locale, Message} from './i18n.ts';
 import {defaultDraft, readDraft} from './state.ts';
 import {mutatedRecovery, recoveryState, retriedRecovery, sameRecoveryContext, upsertOutcomes} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
-import {targetDirty, targetExpectation, targetState} from './target.ts';
+import {targetDirty, targetExpectation, targetInputErrors, targetState} from './target.ts';
 import type {TargetState} from './target.ts';
 import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, NativeCapability, NativeIntent, NativeLimits, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, TargetBinding, TargetLocation, WorkspaceRef, WorkspaceView} from './types.ts';
 
@@ -361,7 +361,7 @@ export interface Derived {
 const encoder = new TextEncoder();
 
 export type NativeTextError = 'blank'|'long'|'control';
-export type NativeBlock = 'nativeUnavailable'|'nativeWorkflow'|'nativeTarget'|'nativeBinding'|'nativeTargetDirty'|'nativeEnvironment'|'nativeText'|'nativeApproval';
+export type NativeBlock = 'nativeUnavailable'|'nativeWorkflow'|'nativeTarget'|'nativeBinding'|'nativePolicy'|'nativeAttachOnly'|'nativeTargetDirty'|'nativeEnvironment'|'nativeText'|'nativeApproval';
 // The working directory a launch would give its recipient: macOS defines it for bundles, where an explicit directory is
 // refused rather than ignored; an executable launcher gets the explicit directory or its own parent folder.
 export type NativeDirectory = 'os'|'refused'|'explicit'|'parent';
@@ -383,11 +383,14 @@ function nativeTextError(value:string):NativeTextError|null {
   return CONTROL.test(value) ? 'control' : null;
 }
 
-// The saved binding a Native Start names: a compatible macOS application bundle with an explicit input policy.
+// Native uses a saved binding for this host; foreign-platform intent is never translated.
 function nativeBinding(target:TargetState):TargetBinding|null {
   const binding = target.view?.compatible ? target.view.record.binding : null;
-  return binding && binding.configuration.platform === 'macos' && binding.configuration.game.kind === 'bundle'
-    && binding.configuration.input !== null && target.context.declaration_identity !== null ? binding : null;
+  if (!binding || binding.configuration.input === null || target.context.declaration_identity === null
+    || binding.configuration.platform !== target.view?.platform) return null;
+  const {platform, game} = binding.configuration;
+  return platform === 'macos' ? game.kind === 'bundle' ? binding : null
+    : game.kind === 'executable' && !target.declaration?.macos ? binding : null;
 }
 
 // Mirrors the host recipe rule: the separate launcher when present, otherwise the game bundle itself.
@@ -423,6 +426,8 @@ function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLi
 // Consent given for another request starts over rather than carrying the other consent forward.
 export function approveNative(bound:Bound, field:NativeConsent, value:boolean, environment:OcrEnvironment|null, capability:NativeCapability|null,
   reviewKind:'operation'|'script' = 'operation'):Bound {
+  if (value && (field === 'launch' || field === 'recovery')
+    && bound.target.view?.platform === 'windows') return bound;
   const {limits} = nativeDuration(bound.native, capability);
   if (limits === null) return clearNativeApproval(bound);
   const key = nativeKey(bound, environment, limits, reviewKind);
@@ -449,7 +454,7 @@ export function chooseLane(bound:Bound, lane:string):Bound {
 export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capability:NativeCapability|null, reviewKind:'operation'|'script' = 'operation'):NativeFacts {
   const target = bound.target;
   const binding = nativeBinding(target);
-  const recipe = binding && nativeRecipe(binding);
+  const recipe = binding?.configuration.platform === 'macos' ? nativeRecipe(binding) : null;
   const review = bound.native;
   const {workflowSeconds, limits} = nativeDuration(review, capability);
   const workflowError = capability !== null && limits === null;
@@ -465,6 +470,8 @@ export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capabi
     : workflowError ? 'nativeWorkflow'
     : targetExpectation(target) === null || target.operation !== null || target.review !== null ? 'nativeTarget'
     : binding === null ? 'nativeBinding'
+    : binding.configuration.input && Object.keys(targetInputErrors(binding.configuration.platform, binding.configuration.input)).length ? 'nativePolicy'
+    : binding.configuration.platform === 'windows' && current && (review.launch || review.recovery) ? 'nativeAttachOnly'
     : targetDirty(target) ? 'nativeTargetDirty'
     : environment === null ? 'nativeEnvironment'
     : operationError !== null || postconditionError !== null ? 'nativeText'
