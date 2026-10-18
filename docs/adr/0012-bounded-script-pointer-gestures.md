@@ -1,4 +1,4 @@
-# ADR 0009: Bounded Script pointer gestures
+# ADR 0012: Bounded Script pointer gestures
 
 - Status: Accepted for the development checkout; live-game acceptance remains separate
 - Scope: Additive `drag` action in `mado-host-v1`

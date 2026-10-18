@@ -1485,6 +1485,7 @@ impl Application {
             workspace: Some(owner.workspace.clone()),
             check: None,
             native: false,
+            trial: None,
             terminal: false,
         });
         if let Some(lease) = state.authoring.as_mut() {
@@ -1747,6 +1748,7 @@ impl Application {
         let mut state = lock(&self.workspaces);
         let lease = state.authoring.as_mut().ok_or_else(stale)?;
         lease.revision = committed.committed_revision.clone();
+        lease.recovery = None;
         lease.recognition.initialized = false;
         lease.recognition.revision += 1;
         lease

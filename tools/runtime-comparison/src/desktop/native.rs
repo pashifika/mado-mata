@@ -1,4 +1,4 @@
-use super::{NativeIntent, NativeTarget, StartRequest, native_limits};
+use super::{NativeIntent, NativeReview, NativeTarget, StartRequest, native_limits};
 use crate::inventory::Inventory;
 use crate::model::{Fault, Limits, Plan};
 use serde_json::{Value, json};
@@ -11,6 +11,22 @@ fn refused(message: &str) -> Fault {
 
 fn text(value: &str, bound: usize) -> bool {
     !value.trim().is_empty() && value.len() <= bound && !value.chars().any(char::is_control)
+}
+
+impl NativeReview {
+    pub(crate) fn validate(&self) -> Result<(), Fault> {
+        if let Self::Operation {
+            operation,
+            visible_postcondition,
+        } = self
+            && (!text(operation, 4096) || !text(visible_postcondition, 4096))
+        {
+            return Err(refused(
+                "Operation review requires bounded one-line operation and visible postcondition",
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
@@ -26,13 +42,12 @@ pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
         || !text(&intent.target_declaration_identity, 256)
         || !intent.capture_approved
         || !intent.input_approved
-        || !text(&intent.operation, 4096)
-        || !text(&intent.visible_postcondition, 4096)
     {
         return Err(refused(
-            "Native requires current target expectations, separate capture/input approval and reviewed operation/postcondition",
+            "Native requires current target expectations and explicit capture/input approval",
         ));
     }
+    intent.review.validate()?;
     let limits = &intent.limits;
     limits.budgets().total_ms()?;
     let ceiling = native_limits();
@@ -66,18 +81,19 @@ pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
 
 pub(super) fn validate_target(target: Option<&NativeTarget>) -> Result<&NativeTarget, Fault> {
     let target =
-        target.ok_or_else(|| refused("Native requires fresh host-owned target correspondence"))?;
+        target.ok_or_else(|| refused("Native requires a host-selected application target"))?;
     if !target.executable.is_absolute()
-        || target.process_id == 0
-        || target.process_lifetime.len() != 16
-        || !target
-            .process_lifetime
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || target.process.as_ref().is_some_and(|(pid, lifetime)| {
+            *pid == 0
+                || lifetime.len() != 16
+                || !lifetime
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
         || !text(&target.window_title, 4096)
     {
         return Err(refused(
-            "Native target requires the exact runtime executable, process lifetime and window",
+            "Native target requires an exact application path, window and valid optional process identity",
         ));
     }
     let policy = &target.input;
@@ -144,6 +160,11 @@ pub(super) fn project(
         .ok_or_else(|| refused("Native review is missing"))?;
     validate_intent(intent)?;
     validate_target(Some(target))?;
+    if target.process.is_none() && !matches!(intent.review, NativeReview::Script {}) {
+        return Err(refused(
+            "Operation review requires fresh process correspondence",
+        ));
+    }
     let Templates {
         package_entries,
         templates,
@@ -152,10 +173,10 @@ pub(super) fn project(
     let executable = target
         .executable
         .canonicalize()
-        .map_err(|_| refused("Verified runtime executable is no longer available"))?;
+        .map_err(|_| refused("Selected application path is no longer available"))?;
     if executable != target.executable || !executable.is_file() {
         return Err(refused(
-            "Verified runtime executable changed before native projection",
+            "Selected application path changed before native projection",
         ));
     }
     let permission_executable = engine.canonicalize().map_err(|_| {
@@ -168,7 +189,9 @@ pub(super) fn project(
     configuration["replay"] = Value::Null;
     configuration["native"] = json!({
         "executable_or_bundle":executable,
-        "process_id":target.process_id,"process_lifetime":target.process_lifetime,
+        "process_id":target.process.as_ref().map(|(pid, _)| pid),
+        "process_lifetime":target.process.as_ref().map(|(_, lifetime)| lifetime),
+        "confirm_process_exit":intent.max_exit_recoveries != 0,
         "window_rule":target.window_title,"operating_system":"macos",
         "hardware":std::env::consts::ARCH,"permission_executable":permission_executable,
         "capture":{"approved":true,"duration_ms":limits.budgets().total_ms()?,
@@ -176,9 +199,9 @@ pub(super) fn project(
         "input":{"approved":true,"duration_ms":limits.budgets().total_ms()?,"max_actions":limits.max_actions,
             "route":target.input.route,"focus":target.input.focus,
             "macos_process_pointer_mode":target.input.pointer_mode.as_deref().unwrap_or("core_graphics"),
-            "click_hold_ms":target.input.click_hold_ms,"reviewed_operation":intent.operation},
+            "click_hold_ms":target.input.click_hold_ms,"package_approved":true},
         "geometry":null,"recognition_language":configuration["ocr"]["language"],
-        "visible_postcondition":intent.visible_postcondition,
+        "review":intent.review,
         "cleanup_ms":limits.cleanup_ms,"containment_ms":limits.containment_ms,
         "package_entries":package_entries,"templates":templates
     });

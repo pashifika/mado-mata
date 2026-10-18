@@ -17,11 +17,11 @@ mod installed;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use installed::observe_installed;
 pub use installed::{
     InstalledIdentity, InstalledRelease, VerifiedInstalled, installed_destination,
     installed_releases, managed_identity, verify_installed,
 };
-pub(crate) use installed::observe_installed;
 
 use crate::author_signing::Signer;
 use crate::configuration::{create_private_file, publish_no_replace, sync_directory, temporary};

@@ -29,6 +29,7 @@ const ERROR_CATEGORY: Record<string, Category> = {
 
 interface Props {
   open: boolean; onCancel: () => void;
+  initialCategory?: Category;
   settings: Settings | null; draft: SettingsDraft; onDraft: (next: SettingsDraft) => void;
   // Owned by the caller because its SDK catalog also validates the draft for Save.
   setup: OcrSetupControls;
@@ -63,13 +64,15 @@ export default function SettingsDialog(props: Props) {
     if (!element) return;
     if (open && !element.open) {
       opener.current = document.activeElement;
+      if (props.initialCategory) setCategory(props.initialCategory);
       element.showModal();
-      element.querySelector<HTMLElement>('.settings-nav button[aria-selected="true"]')?.focus();
+      element.querySelector<HTMLElement>(props.initialCategory
+        ? `#settings-tab-${props.initialCategory}` : '.settings-nav button[aria-selected="true"]')?.focus();
     } else if (!open && element.open) {
       element.close();
       if (opener.current instanceof HTMLElement) opener.current.focus();
     }
-  }, [open]);
+  }, [open, props.initialCategory]);
   const errors = parsed.errors;
   const invalidCount: Record<Category, number> = {display: 0, notifications: 0, editor: 0, packages: 0, environment: 0, captures: 0, logs: 0, backups: 0};
   for (const key of Object.keys(errors)) {

@@ -742,6 +742,7 @@ pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Faul
     Ok(RuntimeMetrics {
         vm_bytes: Some(lua.used_memory()),
         jobs_executed: resumes.get(),
+        return_summary: None,
         source_diagnostic: Some(
             json!({"runtime":"mlua 0.12.1 / Lua 5.4", "cycles":"rejected with import chain", "coroutine_limit":limits.max_actions,"resume_limit":limits.max_actions,"detached_coroutines":"discarded at entry return"}),
         ),

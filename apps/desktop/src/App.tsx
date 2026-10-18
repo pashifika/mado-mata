@@ -28,13 +28,19 @@ import type {DoctorCheck, DoctorReport, DoctorRoute} from './doctor-types.ts';
 import SigningDialog from './components/SigningDialog.tsx';
 import Notifications from './components/Notifications.tsx';
 import NavigationHeader from './components/NavigationHeader.tsx';
+import ProfileRecovery from './components/ProfileRecovery.tsx';
 import type {RecoveryHandlers} from './components/ProfileRecovery.tsx';
 import ResultPanel, {FaultMessage, fault} from './components/ResultPanel.tsx';
+import EditTrial, {EditTrialFeedback} from './components/EditTrial.tsx';
+import EditExecutionSetup from './components/EditExecutionSetup.tsx';
+import type {EditTrialHandlers} from './components/EditTrial.tsx';
+import {applyTrialRecovery, currentTrialSource, trialContext, trialDiagnosticLocation, trialRunIntent, trialRunRequest, trialSourceBlock, trialSourceTicket} from './edit-trial.ts';
+import type {EditTrialState, TrialRunRefusal} from './edit-trial.ts';
 import RunPage from './pages/RunPage.tsx';
 import type {RunHandlers} from './pages/RunPage.tsx';
 import ExecutionPage from './pages/ExecutionPage.tsx';
 import type {RunSnapshot, RunView} from './pages/ExecutionPage.tsx';
-import StatusSurface, {ValidationStatusIcon} from './components/StatusSurface.tsx';
+import StatusSurface from './components/StatusSurface.tsx';
 import type {AuthoringStatusProps} from './components/StatusSurface.tsx';
 import {applicationStatus, authoringActivity, packageValidation, scopedAuthoring, workspaceStatus} from './status.ts';
 import type {StatusItem} from './status.ts';
@@ -52,27 +58,27 @@ import {dismissCard, emptyStack, ingestCards, interactCard, tickCards, trimCards
 import type {Card, CardStack} from './notifications.ts';
 import {DEFAULT_NOTIFICATIONS, acceptController, environmentDraft, faultSummary, readEnvironment, readSettingsDraft, retainLogs, retainedCheck, sameEnvironment, sameNotifications, settingsDraftAfterSave, settingsDraftFrom, staleReasons, text} from './state.ts';
 import type {CheckAssociation, LogStore, SettingsDraft} from './state.ts';
-import {editRecovery, readRecoveryDraft, recoveryTicket, selectRecovery} from './recovery.ts';
+import {editRecovery, readRecoveryDraft, recoveryTicket, sameRecoveryContext, selectRecovery} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {applyCatalogMutation, applyRecognitionMutation, applyRefresh, applyValidation, beginComposition, beginPending, catalogTicket, dirtyDrafts, discardFile, draftList, editFile, endComposition, failCommand, openSession, recordRange, redoFile, replaceFile, revealRange, sameAuthoringRef, selectFile, selectRecognition, undoFile, validationTicket} from './authoring.ts';
 import type {AuthoringSession} from './authoring.ts';
-import {revealDiagnostic} from './authoring.ts';
+import {offsetAt, revealDiagnostic} from './authoring.ts';
 import {AuthoringController} from './authoring-controller.ts';
-import type {CollaborationError, CollaborationResponse} from './authoring-controller.ts';
+import type {CollaborationError, CollaborationResponse, ExportTicket} from './authoring-controller.ts';
 import {hostFailure, parseHostOperation, requestError} from './authoring-requests.ts';
 import type {HostOperation, LifecycleResult, PublicationResult} from './authoring-requests.ts';
 import {only, record} from './structured-patch.ts';
 import {sdk, sdkDetail, searchSdk} from '../../../tools/runtime-comparison/compiler/sdk.mjs';
 import {CollaborationBridge} from './collaboration-bridge.ts';
 import {saveFileDraft, saveFiles} from './authoring-publication.ts';
-import type {PublicationPorts, SaveOutcome, SaveSequence, SaveTarget} from './authoring-publication.ts';
+import type {PublicationPorts, SaveSequence, SaveTarget} from './authoring-publication.ts';
 import {acceptExportReview, acceptImportReview, declaredRelease, exportConfirmable, exportReadiness, failExportPreparation, failImportPreparation, sameWorkspace, suggestedName} from './distribution.ts';
 import type {DistributionReview, ExportFlow, ImportFlow, InstalledRelease, Publication, SignerState, SigningInfo} from './distribution.ts';
 import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, approveNative, busy, clearNativeApproval, closeWorkspace, commandValues, deriveBound, editNativeReview, hasWorkspaceEdits, importProfileCommand, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
 import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
 import type {TargetOperation, TargetPickerField, TargetPickerTicket, TargetState} from './target.ts';
-import type {AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, BootstrapStatus, CatalogEdit, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetApplicationResponse, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {AuthoringMutation, AuthoringRef, AuthoringTrialContext, AuthoringValidation, AuthoringView, BootstrapStatus, CatalogEdit, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetApplicationResponse, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
 import type {CaptureCacheReceipt, NativeCapability, NativeSelectionView} from './types.ts';
 
 // Session state and command ownership stay here; authoring views load only when selected.
@@ -141,6 +147,8 @@ export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   // One host read of the platform's Native policy; until it answers Native stays unavailable.
   const [nativeCapability, setNativeCapability] = useState<{policy: NativeCapability | null; error: Fault | null}>({policy: null, error: null});
+  const knownNativeCapability = useRef<NativeCapability|null>(null);
+  knownNativeCapability.current = nativeCapability.policy;
   // Saved settings win once loaded; before that the temporary bootstrap presentation applies and persists nothing.
   const locale = settings?.locale ?? bootstrap.presentation;
   const t = messages[locale].app;
@@ -179,6 +187,16 @@ export default function App() {
   // collaboration requests; `authoringController.update` is the only writer and publishes `authoring` for rendering.
   const [authoring, setAuthoring] = useState<AuthoringSession | null>(null);
   const [authoringController] = useState(() => new AuthoringController(setAuthoring));
+  const [editTrial, setEditTrial] = useState<EditTrialState|null>(null);
+  const [trialDialogOwner, setTrialDialogOwner] = useState<string|null>(null);
+  const trialSettingsOwner = useRef<string|null>(null);
+  const [settingsInitialCategory, setSettingsInitialCategory] = useState<'environment'|undefined>();
+  const editTrialRef = useRef<EditTrialState|null>(null);
+  const trialGeneration = useRef(0);
+  // Setup reads report in the setup surfaces; Run preparation and admission report on the Edit page beside Run.
+  const [trialError, setTrialError] = useState<{fault:Fault; owner:AuthoringRef; revision:string; source:ExportTicket|null}|null>(null);
+  const [trialSetupError, setTrialSetupError] = useState<Fault|null>(null);
+  const [trialNotice, setTrialNotice] = useState<TrialRunRefusal|null>(null);
   const [collaboration] = useState(() => new CollaborationBridge({invoke, listen}));
   // The host's lease as last polled; undefined until the first poll of this session answers.
   const hostAuthoringRef = useRef<AuthoringRef | null | undefined>(undefined);
@@ -254,7 +272,7 @@ export default function App() {
   const defaultPackagesRoot = status?.default_packages_root ?? '';
   const packagesRoot = settings?.packages_root ?? defaultPackagesRoot;
   const derived = useMemo(() => Object.fromEntries(workspaces.filter(isBound).map(workspace => [workspace.id, deriveBound(workspace.bound, savedEnvironment, locale, nativeCapability.policy)])) as Record<string, Derived>, [workspaces, savedEnvironment, locale, nativeCapability.policy]);
-  const authoringWorkerPending = authoring?.pending?.kind === 'recognition_trial' || authoring?.pending?.kind === 'validate';
+  const authoringWorkerPending = authoring?.pending?.kind === 'recognition_trial' || authoring?.pending?.kind === 'validate' || authoring?.pending?.kind === 'script_trial';
   const nativeOccupied = nativeSelection?.occupied === true;
   const active = starting !== null || busy(view.state) || authoringWorkerPending || nativeSelection?.busy === true;
   const selected = nav.kind === 'workspace' ? workspaces.find(workspace => workspace.id === nav.id) : undefined;
@@ -334,8 +352,10 @@ export default function App() {
       recognitionConfigurationDirty.current = true;
       authoringController.update(session => session?.recognition
         ? {...session, recognition: recognition.invalidateConfiguration(session.recognition)} : session);
-      // A Native approval covered the environment it was given for, even if an identical one returns later.
+      // A Native choice covered the environment it was given for, even if an identical one returns later.
+      invalidateTrialRun();
       setWorkspaces(list => list.map(item => updateBound(item, clearNativeApproval)));
+      if (editTrialRef.current) publishTrial({...editTrialRef.current, bound:clearNativeApproval(editTrialRef.current.bound)});
     }
     knownOcrEnvironment.current = saved.ocr_environment;
     setSettings(saved);
@@ -509,13 +529,15 @@ export default function App() {
         // An Edit command settled during this poll decides the lease itself; this answer may predate it.
         if (pollAuthoring === authoringEpoch.current) {
           publishHostAuthoring(incoming.authoring ?? null);
-          setNativeSelection(incoming.native_selection ?? null);
+          const selection = incoming.native_selection ?? null;
+          setNativeSelection(current => recognition.sameJson(current, selection) ? current : selection);
         }
         if (pollEpoch === epoch.current && !startInFlight.current) {
           const next = {...idle, ...incoming.controller};
           setView(current => {
             if (pollEpoch !== epoch.current || startInFlight.current) return current;
-            return acceptController(current, next, expectedRun.current);
+            const accepted = acceptController(current, next, expectedRun.current);
+            return recognition.sameJson(current, accepted) ? current : accepted;
           });
         }
       } catch (cause) {
@@ -845,18 +867,6 @@ export default function App() {
       selectProfile: id => edit(current => selectProfile(current, id)),
       newDraft: preset => edit(current => newDraft(current, preset)),
       inspectPath: value => change(workspace.id, item => ({...item, inspectPath: value, error: null})),
-      validate: () => {
-        if (locked) return;
-        const checked = bound.draftRevision;
-        void runCommand(origin, 'validatingDraft', async () => {
-          const values = valuesForCommand(workspace);
-          const effective = await invoke<Record<string, Json>>('validate', {workspace: ref, values});
-          return {update: item => ({
-            ...updateBound(item, current => ({...current, validation: {draftRevision: checked, values: effective}})),
-            notice: {key: item.bound?.draftRevision === checked ? 'validated' : 'earlierValidated'},
-          })};
-        });
-      },
       saveProfile: () => {
         if (locked) return;
         const checked = bound.draftRevision;
@@ -929,7 +939,7 @@ export default function App() {
       package_path: bound.packagePath, inventory_identity: bound.package.inventory_identity,
       package_id: profile?.package_id ?? bound.package.package_id, schema_identity: profile?.schema_identity ?? bound.package.schema_identity,
       profile_id: profileId, values, lane: bound.lane, scenario: bound.lane === 'controlled' ? bound.scenario : 'workflow',
-      replay_descriptor_path: replay ? bound.descriptorPath.trim() || null : null, native_intent: nativeIntent,
+      replay_descriptor_path: replay ? bound.descriptorPath.trim() || null : null, native_intent: nativeIntent, function: null,
     };
     const profileName = profile && !facts.valuesDirty ? profile.name : bound.name;
     const ref = workspaceRef(workspace);
@@ -1060,6 +1070,349 @@ export default function App() {
     change(id, item => ({...item, page: 'edit'}));
     go({kind: 'workspace', id});
   }
+
+  // A setup, environment, owner or Stop change while a Run prepares cancels it before admission.
+  function invalidateTrialRun() {
+    trialGeneration.current += 1;
+  }
+
+  function publishTrial(next:EditTrialState|null) {
+    editTrialRef.current = next;
+    setEditTrial(next);
+  }
+
+  function editTrialSetup(update:(state:EditTrialState)=>EditTrialState) {
+    const current = editTrialRef.current;
+    if (!current || active || closing || hostCommand.current !== null) return;
+    const next = update(current);
+    invalidateTrialRun();
+    publishTrial({...next, bound:clearNativeApproval(next.bound)});
+    setTrialNotice(null);
+    setTrialSetupError(null);
+  }
+
+  async function readTrialContext(phase:'setup'|'run' = 'setup'):Promise<EditTrialState|null> {
+    const session = authoringController.current();
+    if (!session || leaseLost || active || session.pending !== null || hostCommand.current !== null) return null;
+    const generation = trialGeneration.current;
+    const source = trialSourceTicket(authoringController);
+    authoringController.update(current => current && sameAuthoringRef(current.owner, session.owner) ? beginPending(current, {kind:'script_trial'}) : current);
+    try {
+      const context = await authoringCall('readingTrial', () => invoke<AuthoringTrialContext>('authoring_trial_context', {owner:session.owner, revision:session.revision}));
+      const current = authoringController.current();
+      if (!current || generation !== trialGeneration.current) return null;
+      const workspace = openWorkspaces.current.find(item => item.id === current.owner.workspace.workspace_id);
+      if (!workspace) return null;
+      const previous = editTrialRef.current;
+      const next = trialContext(context, current, workspace.internalName, previous);
+      if (!next) return null;
+      publishTrial(next);
+      setTrialSetupError(null);
+      if (phase === 'run') setTrialError(null);
+      if (previous?.selected && !next.selected && next.unit === 'function') setTrialNotice('selectAgain');
+      return next;
+    } catch (cause) {
+      if (sameAuthoringRef(authoringController.current()?.owner, session.owner)) {
+        if (phase === 'setup') setTrialSetupError(fault(cause));
+        else setTrialError({fault:fault(cause), owner:session.owner, revision:session.revision, source});
+      }
+      return null;
+    } finally {
+      authoringController.update(current => current && sameAuthoringRef(current.owner, session.owner) && current.pending?.kind === 'script_trial'
+        ? {...current, pending:null} : current);
+    }
+  }
+
+  useEffect(() => {
+    invalidateTrialRun();
+    publishTrial(null);
+    setTrialError(null);
+    setTrialSetupError(null);
+    setTrialNotice(null);
+    setTrialDialogOwner(null);
+    trialSettingsOwner.current = null;
+  }, [authoring?.owner.token]);
+
+  useEffect(() => {
+    if (trialDialogOwner !== null && (selected?.page !== 'edit' || selected.id !== authoring?.owner.workspace.workspace_id || dialogOpen)) {
+      setTrialDialogOwner(null);
+    }
+  }, [selected?.id, selected?.page, dialogOpen, authoring?.owner.token, trialDialogOwner]);
+
+  // One explicit Run: Save all when drafts are dirty, reread the latest saved setup and submit what Run selected.
+  // A source, setup, target, environment or owner change meanwhile refuses the attempt before admission.
+  async function startTrial() {
+    let session = authoringController.current();
+    const initial = editTrialRef.current;
+    if (!session || !initial || !sameAuthoringRef(session.owner, initial.context.owner) || active || closing || leaseLost
+      || hostCommand.current !== null || nativeSelectionRef.current?.occupied || nativeSelectionRef.current?.busy) return;
+    if (trialSourceBlock(session, false) !== null) return;
+    const generation = trialGeneration.current;
+    const intent = trialRunIntent(initial, knownOcrEnvironment.current, knownNativeCapability.current);
+    const dirty = authoringController.describe().resources.some(resource => resource.dirty && (resource.role === undefined || resource.role === 'context'));
+    setTrialNotice(null);
+    setTrialError(null);
+    if (dirty) {
+      const saved = await saveAll();
+      if (saved.failure !== null || saved.remaining.length > 0) return;
+      const current = authoringController.current();
+      if (!current || !sameAuthoringRef(current.owner, session.owner)) {setTrialNotice('changed'); return;}
+      for (const [path, draft] of session.drafts) {
+        if (draft.text !== null && current.drafts.get(path)?.revision !== draft.revision) {setTrialNotice('changed'); return;}
+      }
+    }
+    const source = trialSourceTicket(authoringController);
+    if (!source || generation !== trialGeneration.current) {setTrialNotice('changed'); return;}
+    const setup = await readTrialContext('run');
+    if (!setup) return;
+    if (!currentTrialSource(authoringController, source) || generation !== trialGeneration.current) {setTrialNotice('changed'); return;}
+    session = authoringController.current();
+    if (!session) return;
+    const prepared = trialRunRequest(intent, setup, source, knownOcrEnvironment.current, knownNativeCapability.current);
+    if (typeof prepared === 'string') {setTrialNotice(prepared); return;}
+    if (!currentTrialSource(authoringController, source) || generation !== trialGeneration.current || resolvingAuthoring.current
+      || (hostAuthoringRef.current !== undefined && !sameAuthoringRef(hostAuthoringRef.current, source.owner))
+      || nativeSelectionRef.current?.occupied || nativeSelectionRef.current?.busy) {setTrialNotice('changed'); return;}
+    const owner = session.owner;
+    const {request, profileName} = prepared;
+    authoringController.update(current => current && sameAuthoringRef(current.owner, owner) ? beginPending(current, {kind:'script_trial'}) : current);
+    startInFlight.current = true;
+    epoch.current += 1;
+    flushSync(() => {
+      setStarting({workspaceId:owner.workspace.workspace_id, kind:'run'});
+      setStripMessage(null);
+    });
+    try {
+      const run = await authoringCall('admittingRun', () => invoke<string>('authoring_trial_start', {owner, revision:source.revision, request}));
+      if (!sameAuthoringRef(authoringController.current()?.owner, owner)) return;
+      expectedRun.current = run;
+      setOperation({run, kind:'run', workspace:owner.workspace, snapshot:{kind:'run', run, lane:request.lane,
+        packageId:request.package_id, profileName, profileId:request.profile_id, scenario:request.scenario, descriptorPath:request.replay_descriptor_path,
+        values:request.values, native:request.native_intent, trial:{source, invocation:request.function}}});
+      setView({...idle, run, state:'preparing', operation:'authoring_trial', workspace_id:owner.workspace.workspace_id, workspace_revision:owner.workspace.revision});
+    } catch (cause) {
+      if (sameAuthoringRef(authoringController.current()?.owner, owner)) setTrialError({fault:fault(cause), owner, revision:source.revision, source});
+    } finally {
+      authoringController.update(current => current && sameAuthoringRef(current.owner, owner) && current.pending?.kind === 'script_trial'
+        ? {...current, pending:null} : current);
+      epoch.current += 1;
+      startInFlight.current = false;
+      setStarting(null);
+    }
+  }
+
+  function updateTrialTarget(owner:AuthoringRef, update:(state:TargetState)=>TargetState) {
+    const current = editTrialRef.current;
+    if (!current || !sameAuthoringRef(current.context.owner, owner)) return;
+    invalidateTrialRun();
+    publishTrial({...current, bound:clearNativeApproval({...current.bound, target:update(current.bound.target)})});
+  }
+
+  async function trialTargetCommand(operation:TargetOperation, reviewedResolution?:TargetResolution) {
+    const setup = editTrialRef.current;
+    const session = authoringController.current();
+    if (!setup || !session || active || closing || hostCommand.current !== null || pickerRequest.current !== null
+      || !sameAuthoringRef(setup.context.owner, session.owner) || setup.context.revision !== session.revision) return;
+    const target = setup.bound.target;
+    const ticket = targetTicket(target);
+    const configuration = readTargetDraft(target.draft).configuration;
+    if (operation !== 'read' && (!ticket || (operation !== 'remove' && !configuration))) return;
+    if (reviewedResolution && (!target.review || !currentTargetDraft(target, target.review.ticket)
+      || JSON.stringify(reviewedResolution) !== JSON.stringify(target.review.resolution))) return;
+    cancelApplicationRequest(session.owner.workspace.workspace_id);
+    const args = {owner:session.owner, revision:session.revision};
+    const publish = (update:(state:TargetState)=>TargetState) => updateTrialTarget(session.owner, update);
+    publish(state => beginTarget(state, operation));
+    const labels = {read:'readingTarget', check:'checkingTarget', save:'savingTarget', remove:'removingTarget'} as const;
+    await authoringCall(labels[operation], async () => {
+      async function refresh() {
+        try {const next = await invoke<TargetView>('authoring_trial_read_target', args); publish(state => readTarget(state, next));}
+        catch (cause) {publish(state => targetReadFailed(state, fault(cause)));}
+      }
+      try {
+        if (operation === 'read') await refresh();
+        else if (ticket && operation === 'check') {
+          const response = await invoke<TargetCheckResponse>('authoring_trial_check_target', {...args, expected:ticket.expected, configuration});
+          publish(state => checkedTarget(state, ticket, response));
+        } else if (ticket && operation === 'save') {
+          const response = await invoke<TargetSaveResponse>('authoring_trial_save_target', {...args, expected:ticket.expected, configuration, reviewedResolution:reviewedResolution ?? null});
+          publish(state => savedTarget(state, ticket, response));
+          await refresh();
+        } else if (ticket) {
+          const response = await invoke<TargetView>('authoring_trial_remove_target', {...args, expected:ticket.expected});
+          publish(state => removedTarget(state, ticket, response));
+          await refresh();
+        }
+      } catch (cause) {
+        if (ticket) publish(state => targetFailed(state, ticket, fault(cause)));
+      } finally {
+        publish(state => ({...state, operation:null}));
+      }
+    });
+  }
+
+  async function trialChooseApplication(field:TargetPickerField) {
+    const setup = editTrialRef.current;
+    const session = authoringController.current();
+    if (!setup || !session || active || closing || hostCommand.current !== null || pickerRequest.current !== null
+      || setup.context.revision !== session.revision || !sameAuthoringRef(setup.context.owner, session.owner)) return;
+    const started = beginApplicationPicker(setup.bound.target, field);
+    if (!started.picker) return;
+    const picker = started.picker;
+    pickerRequest.current = {picker};
+    setPickerBusy(true);
+    updateTrialTarget(session.owner, () => started);
+    try {
+      const path = await invoke<string|null>('authoring_trial_choose_target_application', {owner:session.owner, revision:session.revision});
+      updateTrialTarget(session.owner, state => completeApplicationPicker(state, picker, path));
+    } catch (cause) {
+      updateTrialTarget(session.owner, state => completeApplicationPicker(state, picker, null, fault(cause)));
+    } finally {
+      if (pickerRequest.current?.picker === picker) {pickerRequest.current = null; setPickerBusy(false);}
+    }
+  }
+
+  async function trialCheckApplication() {
+    const setup = editTrialRef.current;
+    const session = authoringController.current();
+    if (!setup || !session || active || closing || hostCommand.current !== null || applicationRequest.current !== null || pickerRequest.current !== null
+      || !sameAuthoringRef(setup.context.owner, session.owner) || setup.context.revision !== session.revision) return;
+    const ticket = eligibleRunningApplication(setup.bound.target);
+    if (!ticket) return;
+    const requestId = crypto.randomUUID();
+    const args = {owner:session.owner, revision:session.revision, requestId};
+    applicationRequest.current = {workspace:session.owner.workspace, requestId};
+    updateTrialTarget(session.owner, state => beginRunningApplication(state, ticket, requestId));
+    try {
+      await invoke<void>('authoring_trial_reserve_running_application', args);
+      if (applicationRequest.current?.requestId !== requestId) {
+        await invoke<boolean>('cancel_running_application', {workspace:session.owner.workspace, requestId});
+        return;
+      }
+      const response = await invoke<TargetApplicationResponse>('authoring_trial_check_running_application', {...args, expected:ticket.expected});
+      updateTrialTarget(session.owner, state => completeRunningApplication(state, ticket, response));
+    } catch (cause) {
+      updateTrialTarget(session.owner, state => failRunningApplication(state, ticket, requestId, fault(cause)));
+    } finally {
+      if (applicationRequest.current?.requestId === requestId) applicationRequest.current = null;
+    }
+  }
+
+  function trialRecoveryHandlers():RecoveryHandlers {
+    const state = editTrialRef.current;
+    const session = authoringController.current();
+    const locked = !state || !session || !sameAuthoringRef(state.context.owner, session.owner)
+      || state.context.revision !== session.revision || active || closing || leaseLost || hostCommand.current !== null;
+    const edit = (update:(recovery:RecoveryState)=>RecoveryState) => {
+      if (!locked) editTrialSetup(current => current.recovery ? {...current, recovery:update(current.recovery)} : current);
+    };
+    async function mutate(reset:boolean) {
+      if (locked || !state?.recovery) return;
+      const ticket = recoveryTicket(state.recovery);
+      if (!ticket) return;
+      const parsed = readRecoveryDraft(state.recovery, locale);
+      if (!reset && Object.keys(parsed.errors).length > 0) return;
+      invalidateTrialRun();
+      publishTrial({...state, bound:clearNativeApproval(state.bound)});
+      try {
+        const mutation = await authoringCall(reset ? 'resettingProfile' : 'repairingProfile', () => invoke<RecoveryMutation>(
+          reset ? 'reset_profile' : 'repair_profile', reset ? {context:ticket.context, id:ticket.profileId, confirm:true}
+            : {context:ticket.context, id:ticket.profileId, values:parsed.values}));
+        const current = editTrialRef.current;
+        if (current && sameAuthoringRef(current.context.owner, state.context.owner)) publishTrial(applyTrialRecovery(current, ticket, mutation));
+      } catch (cause) {
+        if (sameAuthoringRef(authoringController.current()?.owner, state.context.owner)) setTrialSetupError(fault(cause));
+      }
+    }
+    async function discard() {
+      if (locked || !state?.recovery) return;
+      const context = state.recovery.view.context;
+      try {
+        await authoringCall('discardingRecovery', () => invoke<WorkspaceView>('discard_recovery', {context}));
+        const current = editTrialRef.current;
+        if (current?.recovery && sameAuthoringRef(current.context.owner, state.context.owner)
+          && sameRecoveryContext(current.recovery.view.context, context)) publishTrial({...current, recovery:null});
+      } catch (cause) {
+        if (sameAuthoringRef(authoringController.current()?.owner, state.context.owner)) setTrialSetupError(fault(cause));
+      }
+    }
+    return {
+      select:id => edit(current => selectRecovery(current, id)),
+      edit:(values, change) => edit(current => editRecovery(current, values, change)),
+      save:() => {void ownAuthoringWorker(() => mutate(false));},
+      reset:() => {void ownAuthoringWorker(() => mutate(true));},
+      retry:() => {void ownAuthoringWorker(readTrialContext);},
+      discard:() => {void ownAuthoringWorker(discard);},
+    };
+  }
+
+  function returnToTrial() {
+    const session = authoringController.current();
+    if (!session) return;
+    returnToEdit();
+    setTrialDialogOwner(session.owner.token);
+    const setup = editTrialRef.current;
+    if (!setup || !sameAuthoringRef(setup.context.owner, session.owner) || setup.context.revision !== session.revision) {
+      void ownAuthoringWorker(readTrialContext);
+    }
+  }
+
+  const trialHandlers:EditTrialHandlers = {
+    change:editTrialSetup,
+    bound:update => editTrialSetup(state => ({...state, bound:update(state.bound)})),
+    reload:() => {void ownAuthoringWorker(readTrialContext);},
+    run:() => {void ownAuthoringWorker(startTrial);},
+    setup:section => {
+      const owner = authoringController.current()?.owner.workspace.workspace_id;
+      if (!owner) return;
+      change(owner, item => ({...item, page:'run'}));
+      requestAnimationFrame(() => document.getElementById(section === 'target' ? 'target-heading'
+        : section === 'values' ? 'trial-profile' : 'edit-execution-setup-heading')?.focus());
+    },
+    environment:() => {
+      const owner = authoringController.current()?.owner;
+      if (!owner || settings === null || !normalReady) return;
+      openSettings();
+      trialSettingsOwner.current = owner.token;
+      setSettingsInitialCategory('environment');
+    },
+    results:() => {
+      const owner = authoringController.current()?.owner.workspace.workspace_id;
+      if (owner) change(owner, item => ({...item, page:'execution'}));
+    },
+    logs:() => {
+      const owner = authoringController.current()?.owner.workspace.workspace_id;
+      if (owner) change(owner, item => ({...item, page:'logs'}));
+    },
+    native:{
+      edit:value => editTrialSetup(state => ({...state, bound:editNativeReview(state.bound, 'workflowSeconds', value)})),
+      // Optional whole-package choices for later explicit Runs; they never depend on a Script revision.
+      approve:(field, value) => {
+        const current = editTrialRef.current;
+        if (!current || active || closing || hostCommand.current !== null || current.unit === 'function') return;
+        invalidateTrialRun();
+        publishTrial({...current, bound:approveNative(current.bound, field, value, knownOcrEnvironment.current, nativeCapability.policy, 'script')});
+      },
+    },
+    target:{
+      edit:draft => {
+        const current = editTrialRef.current;
+        if (current) cancelApplicationRequest(current.context.owner.workspace.workspace_id);
+        editTrialSetup(state => ({...state, bound:{...state.bound, target:editTarget(state.bound.target, draft)}}));
+      },
+      reload:() => {void trialTargetCommand('read');}, check:() => {void trialTargetCommand('check');},
+      save:reviewed => {void trialTargetCommand('save', reviewed);}, remove:() => {void trialTargetCommand('remove');},
+      discard:() => editTrialSetup(state => ({...state, bound:{...state.bound, target:discardTarget(state.bound.target)}})),
+      chooseApplication:field => {void trialChooseApplication(field);}, checkApplication:() => {void trialCheckApplication();},
+      cancelApplication:() => {
+        const current = editTrialRef.current;
+        const requestId = current?.bound.target.application.pending?.requestId;
+        if (!current || !requestId) return;
+        cancelApplicationRequest(current.context.owner.workspace.workspace_id);
+        updateTrialTarget(current.context.owner, state => cancelRunningApplication(state, requestId));
+      },
+    },
+  };
 
   const publicationPorts: PublicationPorts = {
     save: (owner, ticket) => authoringCall('savingFile', () => invoke<AuthoringMutation>('authoring_save',
@@ -1485,7 +1838,8 @@ export default function App() {
     const selection = session && nativeSelection && sameAuthoringRef(nativeSelection.owner, session.owner) && nativeSelection.revision === session.revision ? nativeSelection : null;
     const cache = session && nativeCache && sameAuthoringRef(nativeCache.owner, session.owner) && nativeCache.captureId === session.recognition?.view.capture_id ? nativeCache.result : null;
     const snapshot = session?.recognition ? recognition.previewSnapshot(session.recognition, locale, editable, editable ? null : ui.authoring.block('pending'),
-      running, selection, cache, session.pending !== null || authoringBusy !== null || captureTransition.current || closing || leaseLost || choice !== null) : null;
+      running, selection, cache, session.pending !== null || authoringBusy !== null || captureTransition.current || closing || leaseLost || choice !== null
+        || (busy(view.state) && view.operation === 'authoring_trial')) : null;
     const publication = ++previewPublication.current;
     try {await emitTo(recognition.PREVIEW_LABEL, recognition.PREVIEW_STATE,
       {publication, snapshot} satisfies recognition.PreviewStateMessage);}
@@ -1616,6 +1970,7 @@ export default function App() {
   async function stopValidation(): Promise<boolean | null> {
     const owner = authoringController.current()?.owner ?? hostAuthoringRef.current;
     if (!owner) return null;
+    invalidateTrialRun();
     const token = owner.token;
     setStopping(true);
     try {
@@ -2242,12 +2597,23 @@ export default function App() {
 
   function openSettings() {
     if (settings === null || !normalReady) return;
+    trialSettingsOwner.current = null;
+    setSettingsInitialCategory(undefined);
     menuButton.current?.focus();
     setMenuOpen(false);
     setSettingsDraft(settingsDraftFrom(settings));
     setDialogError(null);
     setSaveNotice(null);
     setDialogOpen(true);
+  }
+
+  function closeSettings() {
+    const owner = trialSettingsOwner.current;
+    trialSettingsOwner.current = null;
+    setDialogOpen(false);
+    if (owner) requestAnimationFrame(() => {
+      if (authoringController.current()?.owner.token === owner) returnToTrial();
+    });
   }
 
   // Available without a workspace; before the application is ready the dialog explains why nothing is read or changed.
@@ -2743,7 +3109,8 @@ export default function App() {
     </>,
   });
   // Ordinary Run/Check stays in its existing strip; Edit activity has only the bottom main-window owner.
-  const ordinaryStrip = (idPrefix: string): ReactNode => active && (!activity || (!validationActive && !recognitionActive && busy(view.state)) || starting !== null)
+  const ordinaryStrip = (idPrefix: string): ReactNode => active && !authoringWorkerPending && (!activity || view.operation !== 'authoring_trial')
+    && (!activity || (!validationActive && !recognitionActive && busy(view.state)) || starting !== null)
     && (!nativeOccupied || authoringWorkerPending || busy(view.state))
     ? <OperationStrip idPrefix={idPrefix} owner={owner === null ? t.applicationOwner : labelOf(owner)}
       kind={ui.operation(starting ? starting.kind === 'check' ? 'environment_check' : 'run' : view.operation)}
@@ -2809,6 +3176,53 @@ export default function App() {
   const selectedAuthoring = scopedAuthoring(selected, authoring);
   const savedValidation = selectedAuthoring ? packageValidation(selectedAuthoring, validationActive) : null;
   const selectedRun = selected ? runView(selected) : null;
+  const trialSnapshot = operation?.snapshot.kind === 'run' && operation.snapshot.trial && selectedRun?.view.run === operation.run
+    ? operation.snapshot : null;
+  const trialSourceCurrent = trialSnapshot?.trial && selectedAuthoring && sameAuthoringRef(trialSnapshot.trial.source.owner, selectedAuthoring.owner)
+    ? currentTrialSource(authoringController, trialSnapshot.trial.source) : undefined;
+  const trialPrimary = selectedRun?.view.error ?? (selectedRun?.view.result?.primary ? fault(selectedRun.view.result.primary) : null);
+  const trialLocation = trialPrimary ? trialDiagnosticLocation(trialPrimary) : null;
+  const trialSourceAvailable = trialSnapshot?.trial && trialLocation && selectedAuthoring
+    && sameAuthoringRef(trialSnapshot.trial.source.owner, selectedAuthoring.owner)
+    && selectedAuthoring.drafts.has(trialLocation.path) && !selectedAuthoring.drafts.get(trialLocation.path)?.missing;
+  function openTrialDiagnostic(diagnostic:Fault, attribution:{owner:AuthoringRef; source:ExportTicket|null}|null) {
+    const current = authoringController.current();
+    const location = trialDiagnosticLocation(diagnostic);
+    if (!current || !attribution || !location || !sameAuthoringRef(current.owner, attribution.owner)) return;
+    const source = attribution.source;
+    const draft = current.drafts.get(location.path);
+    if (!draft || draft.missing) return;
+    if (source && currentTrialSource(authoringController, source) && draft.text !== null) {
+      const offset = offsetAt(draft.text, location.line, location.column);
+      authoringController.update(session => session && sameAuthoringRef(session.owner, source.owner) ? revealRange(session, location.path, {start:offset, end:offset}) : session);
+    } else authoringController.update(session => session && sameAuthoringRef(session.owner, attribution.owner) ? selectFile(session, location.path, null) : session);
+    returnToEdit();
+  }
+  const executedSource = trialSnapshot?.trial?.source ?? null;
+  const openTrialSource = trialSourceAvailable && executedSource ? (diagnostic:Fault) => openTrialDiagnostic(diagnostic, {owner:executedSource.owner, source:executedSource}) : undefined;
+  const trialRunError = trialError;
+  const trialErrorSource = trialRunError && selectedAuthoring && sameAuthoringRef(trialRunError.owner, selectedAuthoring.owner)
+    ? {revision:trialRunError.revision, stale:!trialRunError.source || !currentTrialSource(authoringController, trialRunError.source),
+      paths:[...selectedAuthoring.drafts].filter(([, draft]) => !draft.missing).map(([path]) => path)} : null;
+  const hasTrialResult = Boolean(selected && selectedRun && trialSnapshot && selectedAuthoring
+    && sameAuthoringRef(trialSnapshot.trial?.source.owner, selectedAuthoring.owner));
+  const trialSourceReason = selectedAuthoring ? trialSourceBlock(selectedAuthoring, false) : null;
+  const trialSetup = editTrial && selectedAuthoring && sameAuthoringRef(editTrial.context.owner, selectedAuthoring.owner) ? editTrial : null;
+  const scriptTrialActive = starting !== null || (busy(view.state) && view.operation === 'authoring_trial');
+  const trialFacts = trialSetup ? deriveBound(trialSetup.bound, savedEnvironment, locale, nativeCapability.policy, 'script') : null;
+  const trialLocked = commandReason !== null || closing || active || leaseLost || pickerBusy;
+  const trialLoadBlocked = leaseLost || trialSourceReason === 'pending' || trialSourceReason === 'refresh';
+  const trialLoading = selectedAuthoring?.pending?.kind === 'script_trial' && !scriptTrialActive;
+  // Setup read before the latest save: opening Setup rereads its functions and saved target. Run always rereads.
+  const trialStale = trialSetup !== null && trialSetup.context.revision !== selectedAuthoring?.revision;
+  const trialBlock = leaseLost ? ui.authoring.leaseLostShort : nativeOccupied ? ui.scriptTrial.release
+    : trialSourceReason ? ui.scriptTrial.blocks[trialSourceReason]
+    : recognitionSaveReason ?? null;
+  const trialProfileRepair = selected && selectedAuthoring && trialSetup
+    ? <ProfileRecovery idPrefix="trial-recovery" label={workspaceLabel(selected, workspaces)}
+      help={ui.scriptTrial.profileRecoveryHelp}
+      state={trialSetup.recovery} outcomes={trialSetup.recoveryOutcomes} handlers={trialRecoveryHandlers()}
+      locked={trialLocked || trialSetup.context.revision !== selectedAuthoring.revision}/> : null;
   const applicationPending = closing ? t.closing : appBusy ? t[appBusy] : bootstrap.pending ? t[bootstrap.pending]
     : bootstrap.snapshotPending ? ui.bootstrap.snapshotting : null;
   const statusItems: StatusItem[] = selected
@@ -2817,11 +3231,11 @@ export default function App() {
   if (pollError) statusItems.unshift({id: 'poll', severity: 'error', text: `${t.application} · ${pollError.category}`, action: null});
   const currentPage = selected?.page === 'edit' && !editVisible ? 'run' : selected?.page;
   const pageTitle = currentPage === 'execution' ? ui.status.execution : currentPage === 'logs' ? t.logs
-    : currentPage === 'edit' ? t.edit : selected ? isBound(selected) ? t.runControl : t.guidance
+    : currentPage === 'edit' ? t.edit : selected ? selectedAuthoring || isBound(selected) ? t.runControl : t.guidance
     : nav.kind === 'closed' ? t.closedDiagnostics : t.application;
   const pageHelp = currentPage === 'execution' ? ui.status.executionHelp : currentPage === 'logs' ? t.workspaceLogHelp
     : currentPage === 'edit' ? ui.authoring.authority
-    : selected ? isBound(selected) ? ui.run.introduction : ui.status.inspectionRequired
+    : selected ? selectedAuthoring ? ui.scriptTrial.setupHelp : isBound(selected) ? ui.run.introduction : ui.status.inspectionRequired
     : nav.kind === 'closed' ? `${t.closedHelp} ${t.closedLogHelp}` : t.appLogHelp;
   const statusPhase = selected
     ? starting?.workspaceId === selected.id || selected.busy ? 'preparing' : selectedRun!.view.state
@@ -2832,7 +3246,7 @@ export default function App() {
   return <LocaleContext value={locale}><div className="app">
     <StatusSurface scopeKey={statusScope} scopeLabel={selected ? workspaceLabel(selected, workspaces) : nav.kind === 'closed' ? t.closedLabel(closedSelected?.label ?? nav.id) : t.application}
       scopePhase={statusPhase}
-      pageTitle={pageTitle} pageHelp={<p>{pageHelp}</p>} runLabel={selected && isBound(selected) ? t.runControl : t.guidance} items={statusItems} session={selectedAuthoring}
+      pageTitle={pageTitle} pageHelp={<p>{pageHelp}</p>} runLabel={selected && (selectedAuthoring || isBound(selected)) ? t.runControl : t.guidance} items={statusItems} session={selectedAuthoring}
       recognitionDirty={selectedAuthoring !== null && recognitionDirty} validating={selectedAuthoring !== null && validationActive}
       authoring={compactAuthoring(returnToEdit, !editVisible)}
       validation={savedValidation}
@@ -2882,9 +3296,7 @@ export default function App() {
       <nav className="workspace-pages" aria-label={selected ? t.selectedPages : t.currentScope}>
         {selected && <>
           <button id="page-run" type="button" className="nav-item" aria-current={selected.page === 'run' ? 'page' : undefined} onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'run'}));}}>
-            {isBound(selected) ? t.runControl : t.guidance}
-            {selected.bound && <ValidationStatusIcon id="profile-validation-status" label={ui.status.profile}
-              state={selected.bound.validation === null ? 'none' : selected.bound.validation.draftRevision === selected.bound.draftRevision ? 'valid' : 'stale'}/>}
+            {selectedAuthoring || isBound(selected) ? t.runControl : t.guidance}
           </button>
           <button id="page-execution" type="button" className="nav-item" aria-current={selected.page === 'execution' ? 'page' : undefined}
             onClick={() => {setReveal(null); change(selected.id, item => ({...item, page: 'execution'}));}}>{ui.status.execution}{needsAttention(runView(selected).view) && <span className="execution-attention" aria-label={t.attention(t.unresolved)}>!</span>}</button>
@@ -2894,7 +3306,6 @@ export default function App() {
           </button>
           {selected.id === leaseOwnerId && <button id="page-edit" type="button" className="nav-item" aria-current={selected.page === 'edit' && authoring !== null ? 'page' : undefined}
             onClick={() => {setReveal(null); returnToEdit();}}>{t.edit}
-            {savedValidation && <ValidationStatusIcon id="package-validation-status" label={ui.status.savedPackage} state={savedValidation.state}/>}
           </button>}
         </>}
         {nav.kind === 'application' && <span className="scope-label">{t.applicationLogs}</span>}
@@ -2922,14 +3333,28 @@ export default function App() {
             <button type="button" disabled={closing || commandReason !== null || (authoring.pending !== null && authoring.pending.kind !== 'recognition_trial' && authoring.pending.kind !== 'validate')}
               onClick={editHandlers.exit}>{ui.authoring.exit}</button></>}>
           <EditPage session={authoring} label={workspaceLabel(selected, workspaces)}
-          handlers={editHandlers} locked={commandReason !== null || closing} lockReason={commandReason ?? (closing ? t.applicationClosing : null)}
+          handlers={editHandlers} locked={commandReason !== null || closing || scriptTrialActive || pickerBusy}
+          lockReason={commandReason ?? (closing ? t.applicationClosing : scriptTrialActive ? ui.authoring.block('pending') : null)}
           packagesRoot={packagesRoot} leaseLost={leaseLost} validationActive={validationActive} recognitionDirty={recognitionDirty}
-          recognitionSaveBlock={recognitionSaveReason} exportBlock={active ? ui.authoring.blockedActive : null}
+          recognitionSaveBlock={recognitionSaveReason} exportBlock={active ? ui.authoring.block('pending') : null}
           completionPreferences={editorCompletion.current}
+          trial={<EditTrial state={trialSetup} facts={trialFacts} stale={trialStale}
+            open={trialDialogOwner === authoring.owner.token && !dialogOpen}
+            onOpenChange={open => setTrialDialogOwner(open ? authoring.owner.token : null)}
+            nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error} environment={savedEnvironment}
+            handlers={trialHandlers} locked={trialLocked} loadBlocked={trialLoadBlocked} loading={trialLoading}
+            block={trialBlock}
+            dirty={unsavedCount > 0} error={trialSetupError}
+            notice={trialNotice ? ui.scriptTrial[trialNotice] : null} hasResult={hasTrialResult}
+            strip={ordinaryStrip('trial')} authoring={leave => compactAuthoring(() => leave(returnToEdit), true)}/>}
+          trialFeedback={<EditTrialFeedback notice={trialNotice ? ui.scriptTrial[trialNotice] : null}
+            error={trialRunError?.fault ?? null} errorSource={trialErrorSource}
+            onDiagnostic={diagnostic => openTrialDiagnostic(diagnostic, trialRunError)}
+            onDismiss={() => {setTrialNotice(null); setTrialError(null);}}/>}
           recognition={authoring.recognition
             ? <DeferredView key={authoring.owner.token} fallback={<p role="status">{ui.bootstrap.state('loading')}</p>}
               error={cause => <FaultMessage title={ui.recognition.heading} value={fault(cause)}/>}>
-              <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null}
+              <RecognitionPage state={authoring.recognition} locked={commandReason !== null || closing || authoring.pending !== null || (busy(view.state) && view.operation === 'authoring_trial')}
               leaseLost={leaseLost} trialActive={recognitionActive}
               nativeSelection={nativeSelection && sameAuthoringRef(nativeSelection.owner, authoring.owner) && nativeSelection.revision === authoring.revision ? nativeSelection : null}
               onState={update => {
@@ -2948,7 +3373,13 @@ export default function App() {
             : <div className="button-row"><span role="status">{t.recognitionUnavailable}</span>
               <button id="recognition-reload" type="button" disabled={authoring.pending !== null || leaseLost || closing}
                 onClick={() => void readRecognition()}>{ui.authoring.refresh}</button></div>}/></DeferredView>}
-        {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (isBound(selected)
+        {selected && (selected.page === 'run' || (selected.page === 'edit' && !editVisible)) && (selectedAuthoring
+          ? <EditExecutionSetup key={selectedAuthoring.owner.token} state={trialSetup} facts={trialFacts}
+            handlers={trialHandlers} locked={trialLocked} loadBlocked={trialLoadBlocked} loading={trialLoading}
+            stale={trialStale} block={trialBlock} dirty={unsavedCount > 0} error={trialSetupError}
+            nativeCapability={nativeCapability.policy} nativeError={nativeCapability.error}
+            profileRepair={trialProfileRepair} onReturn={returnToTrial}/>
+          : isBound(selected)
           ? <RunPage key={`${selected.id}:${selected.revision}`} workspace={selected} label={workspaceLabel(selected, workspaces)} derived={derived[selected.id]} run={runView(selected)}
             locked={commandReason !== null || closing} active={active} pickerBusy={pickerBusy} starting={starting?.workspaceId === selected.id}
             handlers={handlers(selected)} authoring={pageAuthoring(selected)} environment={savedEnvironment}
@@ -2960,6 +3391,7 @@ export default function App() {
             packageAction={libraryLauncher(selected, false)}/>)}
         {selected && selected.page === 'execution' && selectedRun && <ExecutionPage label={workspaceLabel(selected, workspaces)} revision={selected.revision}
           run={selectedRun} snapshot={operation?.snapshot ?? null} starting={starting?.workspaceId === selected.id}
+          sourceCurrent={trialSourceCurrent} onSource={openTrialSource}
           disclosed={selectedRun.view.run !== null && selected.disclosedRun === selectedRun.view.run}
           onDisclose={next => change(selected.id, item => ({...item, disclosedRun: next ? selectedRun.view.run : null}))}/>}
         {selected && selected.page === 'logs' && <LogsPage eyebrow={t.activity(workspaceLabel(selected, workspaces))} heading={t.logs} description={t.workspaceLogHelp}
@@ -3005,14 +3437,14 @@ export default function App() {
       openCount={workspaces.length} savedCount={savedCount} onRefresh={() => void refreshSaved()} onReopen={name => void reopenWorkspace(name)} reopening={reopening} reopenError={reopenError}
       busyReason={appBusy === 'reopeningWorkspace' ? null : commandReason} strip={ordinaryStrip('saved')}
       authoring={compactAuthoring(() => {if (reopening === null) {setSavedOpen(false); returnToEdit();}}, true, reopening !== null)}/>
-    <SettingsDialog open={dialogOpen} onCancel={() => setDialogOpen(false)} settings={settings} draft={settingsDraft} onDraft={editSettingsDraft} setup={ocrSetup}
+    <SettingsDialog open={dialogOpen} initialCategory={settingsInitialCategory} onCancel={closeSettings} settings={settings} draft={settingsDraft} onDraft={editSettingsDraft} setup={ocrSetup}
       defaultPackagesRoot={defaultPackagesRoot}
       parsed={parsedSettings} dirty={dialogDirty} saving={appBusy === 'savingSettings'} busyReason={commandReason} saveError={dialogError?.kind === 'save' ? dialogError.value : null} saveNotice={renderMessage(locale, saveNotice)} onSave={() => void saveSettings()}
       envDirty={envDirty} active={active} pickerBusy={pickerBusy} target={checkTarget} onCheck={() => void checkEnvironment()} lastCheck={lastCheck} stale={checkStale} originLabel={labelOf}
       checkError={dialogError?.kind === 'check' ? dialogError.value : null} authoringReason={authoringReason}
       retained={logs.items.length} evicted={logs.evicted}
       onSnapshot={() => void snapshot(null)} snapshotPending={bootstrap.snapshotPending} snapshotOutcome={bootstrap.snapshotOutcome} strip={ordinaryStrip('dialog')}
-      authoring={compactAuthoring(() => {if (appBusy !== 'savingSettings') {setDialogOpen(false); returnToEdit();}}, true, appBusy === 'savingSettings')}/>
+      authoring={compactAuthoring(() => {if (appBusy !== 'savingSettings') {closeSettings(); returnToEdit();}}, true, appBusy === 'savingSettings')}/>
     <PluginsDialog open={pluginsOpen} onClose={closePlugins} plugins={plugins}
       unavailable={closing ? t.applicationClosing : normalReady ? null : ui.plugins.unavailable} strip={ordinaryStrip('plugins')}
       authoring={compactAuthoring(() => {closePlugins(); returnToEdit();}, true)}/>

@@ -133,6 +133,14 @@ async function linkJavaScript(request) {
       throw error;
     }
   }
+  for (const [role, entry] of Object.entries(request.entries ?? {})) {
+    const check = new SourceTextModule(`import { ${JSON.stringify(entry.function)} as entry } from ${JSON.stringify(entry.module)};`, { context });
+    try {
+      await check.link(() => declare(entry.module));
+    } catch (error) {
+      fail("Entry", "Declared entry export is unavailable", { ...entry, role, cause: error.message });
+    }
+  }
   return { identity: compilerIdentity };
 }
 
@@ -173,6 +181,81 @@ function inspect(request) {
     visit(file);
   }
   return { imports, functions, identity: compilerIdentity };
+}
+
+function functionCandidates(request) {
+  const candidates = [];
+  for (const [id, text] of Object.entries(request.sources)) {
+    if (id.startsWith("@") || id.endsWith(".d.ts")) continue;
+    const file = ts.createSourceFile(ROOT + id, text, ts.ScriptTarget.ES2020, true, id.endsWith(".js") ? ts.ScriptKind.JS : ts.ScriptKind.TS);
+    const add = (name, fn) => {
+      if (!ts.isIdentifier(name) || !fn.body || fn.asteriskToken) return;
+      let receiver = fn.parameters.some(parameter => parameter.name.getText(file) === "this");
+      const visit = node => {
+        if (node.kind === ts.SyntaxKind.ThisKeyword || node.kind === ts.SyntaxKind.SuperKeyword) receiver = true;
+        if (node !== fn && ts.isFunctionLike(node) && !ts.isArrowFunction(node)) return;
+        ts.forEachChild(node, visit);
+      };
+      visit(fn);
+      if (receiver) return;
+      let required = 0;
+      fn.parameters.forEach((parameter, index) => {
+        if (!parameter.questionToken && !parameter.initializer && !parameter.dotDotDotToken) required = index + 1;
+      });
+      const async = fn.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword) ? "async " : "";
+      const generics = fn.typeParameters?.length ? `<${fn.typeParameters.map(parameter => parameter.getText(file)).join(", ")}>` : "";
+      candidates.push({
+        ...origin(file, name.getStart(file)), function: name.text,
+        signature: `${async}${name.text}${generics}(${fn.parameters.map(parameter => parameter.getText(file)).join(", ")})${fn.type ? `: ${fn.type.getText(file)}` : ""}`,
+        required_arguments: required,
+      });
+    };
+    for (const statement of file.statements) {
+      if (ts.isFunctionDeclaration(statement) && statement.name) add(statement.name, statement);
+      if (ts.isVariableStatement(statement)) {
+        for (const declaration of statement.declarationList.declarations) {
+          let fn = declaration.initializer;
+          while (fn && (ts.isParenthesizedExpression(fn) || ts.isAsExpression(fn) || ts.isSatisfiesExpression(fn))) fn = fn.expression;
+          if (fn && (ts.isFunctionExpression(fn) || ts.isArrowFunction(fn))) add(declaration.name, fn);
+        }
+      }
+    }
+  }
+  return candidates;
+}
+
+function functionBridge(request) {
+  if (!request.function) return undefined;
+  const selected = functionCandidates(request).filter(candidate =>
+    candidate.module === request.function.module && candidate.function === request.function.function);
+  if (selected.length !== 1) fail("FunctionEntry", "Selected function is absent, ambiguous or unsupported", request.function);
+  const candidate = selected[0];
+  if (request.function.arguments.length < candidate.required_arguments) {
+    fail("FunctionArguments", `Required positional argument ${candidate.required_arguments} is missing`, candidate);
+  }
+  const names = new Set();
+  const visit = node => {
+    if (ts.isIdentifier(node) || ts.isStringLiteralLike(node)) names.add(node.text);
+    ts.forEachChild(node, visit);
+  };
+  for (const [id, source] of Object.entries(request.sources)) {
+    visit(ts.createSourceFile(ROOT + id, source, ts.ScriptTarget.ES2020, true));
+  }
+  let name = "__mado_function";
+  while (names.has(name)) name += "_";
+  const statement = ts.factory.createExportDeclaration(undefined, false,
+    ts.factory.createNamedExports([ts.factory.createExportSpecifier(false, candidate.function, name)]), undefined);
+  return { candidate, name, statement };
+}
+
+function bridgeJavaScript(request) {
+  const bridge = functionBridge(request);
+  if (!bridge) fail("FunctionEntry", "Function selection is required");
+  const module = bridge.candidate.module;
+  const file = ts.createSourceFile(ROOT + module, request.sources[module], ts.ScriptTarget.ES2020, true, ts.ScriptKind.JS);
+  // Append only a synthetic export: all authored coordinates and maps stay intact.
+  const suffix = ts.createPrinter().printNode(ts.EmitHint.Unspecified, bridge.statement, file);
+  return { source: request.sources[module] + "\n" + suffix, entry: { module, function: bridge.name } };
 }
 
 function capturedLibraries() {
@@ -277,7 +360,11 @@ function compile(request) {
   const program = ts.createProgram(roots, options, host);
   const errors = diagnostics(program, inspected.functions);
   if (errors.length) fail("TypeScript", "TypeScript compilation failed", { diagnostics: errors, compiler: compilerIdentity });
-  const result = program.emit();
+  const bridge = functionBridge(request);
+  const result = program.emit(undefined, undefined, undefined, undefined, bridge ? {
+    before: [() => file => file.fileName === ROOT + bridge.candidate.module
+      ? ts.factory.updateSourceFile(file, [...file.statements, bridge.statement]) : file],
+  } : undefined);
   if (result.emitSkipped || result.diagnostics.length) fail("TypeScript", "TypeScript emit failed", {
     diagnostics: result.diagnostics.map(diagnostic => diagnosticRecord(diagnostic, inspected.functions)),
     compiler: compilerIdentity,
@@ -299,8 +386,12 @@ function compile(request) {
   for (const id of Object.keys(sources)) {
     if (Object.hasOwn(request.sources, id)) fail("CompilerPolicy", "Emitted JavaScript collides with captured source", { module: id });
   }
+  if (bridge?.candidate.module.endsWith(".js")) {
+    sources[bridge.candidate.module] = bridgeJavaScript(request).source;
+  }
   return {
     sources, source_maps,
+    entry: bridge ? { module: bridge.candidate.module.replace(/\.ts$/, ".js"), function: bridge.name } : null,
     compiler: {
       ...compilerIdentity,
       options,
@@ -381,6 +472,8 @@ try {
     value = request.operation === "inspect" ? inspect(request)
       : request.operation === "inspect-javascript" ? inspectJavaScript(request)
       : request.operation === "link-javascript" ? await linkJavaScript(request)
+      : request.operation === "function-candidates" ? functionCandidates(request)
+      : request.operation === "bridge-javascript" ? bridgeJavaScript(request)
       : request.operation === "compile" ? compile(request)
       : fail("CompilerPolicy", "Unknown compiler operation");
   }

@@ -185,6 +185,27 @@ pub(crate) fn discover_native(
     }
 }
 
+/// Resolve the saved APP to its running executable without acquiring SDK resources.
+pub(crate) fn script_executable(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    resolution: &TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<Option<PathBuf>, Fault> {
+    observation_checkpoint(cancelled, deadline)?;
+    #[cfg(target_os = "macos")]
+    return macos::script_executable(configuration, declaration, resolution, cancelled, deadline);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (configuration, declaration, resolution);
+        Err(Fault::new(
+            "TargetPlatform",
+            "Application discovery requires macOS",
+        ))
+    }
+}
+
 /// Resolves OS installation metadata only for the retained SDK process lifetime.
 pub(crate) fn selected_application(
     candidate: &mado_runtime_comparison::authoring_capture::Candidate,

@@ -14,6 +14,7 @@ function bounds(min: number | undefined, max: number | undefined) {
 function catalog(data: typeof enData) {
   return {
     status: data.status,
+    scriptTrial: data.scriptTrial,
     captureCache: data.captureCache,
     nativeCapture: data.nativeCapture,
     recognition: {

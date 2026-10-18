@@ -807,9 +807,15 @@ impl Server {
         let flush_deadline = Instant::now() + self.hub.settings.write_timeout;
         let mut state = self.hub.state();
         while !state.clients.is_empty() && Instant::now() < flush_deadline {
-            state = self.hub.changed
-                .wait_timeout(state, flush_deadline.saturating_duration_since(Instant::now()))
-                .unwrap_or_else(PoisonError::into_inner).0;
+            state = self
+                .hub
+                .changed
+                .wait_timeout(
+                    state,
+                    flush_deadline.saturating_duration_since(Instant::now()),
+                )
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
         for client in &state.clients {
             let _ = client.stream.shutdown(Shutdown::Both);

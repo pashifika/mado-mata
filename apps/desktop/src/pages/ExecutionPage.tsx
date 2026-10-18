@@ -2,12 +2,16 @@ import ResultPanel, {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import {faultSummary, nativeOutcome, text} from '../state.ts';
 import type {CheckAssociation} from '../state.ts';
 import type {ControllerView, Json, NativeIntent} from '../types.ts';
+import type {ExportTicket} from '../authoring-controller.ts';
+import type {Fault, FunctionInvocation} from '../types.ts';
+import {shortRevision} from '../authoring.ts';
+import {trialDiagnosticLocation} from '../edit-trial.ts';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
 
 // Immutable facts captured when this frontend submitted the operation; the host view is authoritative.
 export type RunSnapshot =
-  | {kind: 'run'; run: string; lane: string; packageId: string; profileName: string; profileId: string; scenario: string; descriptorPath: string | null; values: Record<string, Json>; native: NativeIntent | null}
+  | {kind: 'run'; run: string; lane: string; packageId: string; profileName: string; profileId: string; scenario: string; descriptorPath: string | null; values: Record<string, Json>; native: NativeIntent | null; trial?:{source:ExportTicket; invocation:FunctionInvocation|null}}
   | {kind: 'check'; run: string; association: CheckAssociation};
 
 export interface RunView {view: ControllerView; live: boolean; olderRevision: number | null}
@@ -15,9 +19,10 @@ export interface RunView {view: ControllerView; live: boolean; olderRevision: nu
 interface Props {
   label: string; revision: number; run: RunView; snapshot: RunSnapshot | null; starting: boolean;
   disclosed: boolean; onDisclose: (next: boolean) => void;
+  compact?:boolean; sourceCurrent?:boolean; onSource?:(diagnostic:Fault)=>void;
 }
 
-export default function ExecutionPage({label, revision, run, snapshot, starting, disclosed, onDisclose}: Props) {
+export default function ExecutionPage({label, revision, run, snapshot, starting, disclosed, onDisclose, compact = false, sourceCurrent, onSource}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const view = run.view;
@@ -28,18 +33,34 @@ export default function ExecutionPage({label, revision, run, snapshot, starting,
   const lane = captured?.kind === 'run' ? captured.lane : text(view.result?.lane);
   const privatePrimary = !check && lane !== 'controlled';
   const outcome = nativeOutcome(view);
+  const trial = captured?.kind === 'run' ? captured.trial : undefined;
+  const functionRun = Boolean(trial?.invocation ?? view.result?.function);
+  const location = primary ? trialDiagnosticLocation(primary) : null;
   return <>
-    <div className="page-heading"><div><span className="eyebrow">{t.common.revision(label, revision)}</span><h1 id="run-heading">{t.common.execution}</h1></div></div>
-    <section className="panel" aria-labelledby="run-heading">
+    {!compact && <div className="page-heading"><div><span className="eyebrow">{t.common.revision(label, revision)}</span><h1 id="run-heading">{t.common.execution}</h1></div></div>}
+    <section className="panel" aria-label={t.common.execution}>
       <div className="panel-heading"><span className="eyebrow">{t.run.immutable}</span>
         <span className={`phase phase-${phase}`}>{t.phase(phase)}</span></div>
       <div className="panel-body">
         {run.olderRevision !== null && <p className="inline-warning">{t.run.olderRevision(run.olderRevision, revision)}</p>}
+        {trial && <><dl className="run-identity">
+          <dt>{t.scriptTrial.executed}</dt><dd><code title={trial.source.revision}>{shortRevision(trial.source.revision)}</code></dd>
+          <dt>{t.scriptTrial.unit}</dt><dd>{trial.invocation ? `${trial.invocation.module} · ${trial.invocation.function}` : t.scriptTrial.package}</dd>
+        </dl>
+          {sourceCurrent !== undefined && <p className={sourceCurrent ? 'field-help' : 'inline-warning'}>{sourceCurrent ? t.scriptTrial.sameSource : t.scriptTrial.newer}</p>}
+          {trial.invocation && (!privatePrimary || disclosed) && <details><summary>{t.scriptTrial.arguments}</summary><pre>{JSON.stringify(trial.invocation.arguments, null, 2)}</pre></details>}
+          {primary && (!privatePrimary || disclosed) && (location && onSource
+            ? <div className="button-row"><button type="button" onClick={() => onSource(primary)}>{t.scriptTrial.source} · {location.path}:{location.line}:{location.column}</button>
+              {sourceCurrent === false && <span className="field-help">{t.scriptTrial.sourceNewer}</span>}</div>
+            : <p className="field-help">{t.scriptTrial.sourceUnavailable}</p>)}
+        </>}
         {primary && (privatePrimary || check
           ? <section className="fault" role="alert"><strong>{check ? t.run.checkError : t.run.runError} · {faultSummary(primary, !privatePrimary)}</strong>
               <p>{t.run.diagnosticHelp}</p></section>
           : <FaultMessage title={t.run.runError} value={primary}/>)}
-        {outcome?.failure && <p className="fault" id="native-failure">{outcome.cause ? t.run.nativeCauses[outcome.cause] : t.run.nativeFailures[outcome.failure]}</p>}
+        {outcome?.failure && <p className="fault" id="native-failure">{outcome.cause === 'missing' && functionRun
+          ? t.run.nativeFunctionMissing
+          : outcome.cause ? t.run.nativeCauses[outcome.cause] : t.run.nativeFailures[outcome.failure]}</p>}
         {outcome?.launch && <p className="inline-warning" id="native-launch-outcome">{t.run.nativeLaunchOutcomes[outcome.launch]}</p>}
         {view.run === null ? <p className="muted" role="status">{starting ? t.run.submitted : t.run.noOperations}</p> : <>
           <p className="authority-note">{t.run.authority}</p>
@@ -51,8 +72,10 @@ export default function ExecutionPage({label, revision, run, snapshot, starting,
               <dt>{t.run.nativeLaunchRequest}</dt><dd id="native-launch">{t.run.launchDispositions[view.native_preparation.launch]}</dd></>}
             {captured?.kind === 'run' && <><dt>{t.run.capturedProfile}</dt><dd>{captured.profileName || t.run.untitled} · {captured.profileId}</dd><dt>{t.run.packageScenario}</dt><dd>{captured.packageId} / {captured.scenario}</dd>
               {captured.lane === 'replay' && <><dt>{t.common.descriptor}</dt><dd>{captured.descriptorPath}</dd></>}
-              {captured.native && <><dt>{t.run.nativeOperation}</dt><dd>{captured.native.operation}</dd>
-                <dt>{t.run.nativePostcondition}</dt><dd>{captured.native.visible_postcondition}</dd>
+              {captured.native && <>{captured.native.review.kind === 'operation'
+                ? <><dt>{t.run.nativeOperation}</dt><dd>{captured.native.review.operation}</dd>
+                  <dt>{t.run.nativePostcondition}</dt><dd>{captured.native.review.visible_postcondition}</dd></>
+                : <><dt>{t.scriptTrial.heading}</dt><dd>{t.scriptTrial.runAuthority}</dd></>}
                 <dt>{t.run.nativeBinding}</dt><dd><code>{captured.native.target_binding_id}</code> · {t.target.revision(captured.native.target_revision)}</dd>
                 <dt>{t.run.nativeLaunchApproval}</dt><dd>{captured.native.launch_approved ? t.run.nativeLaunchApproved : t.run.nativeLaunchNotApproved}</dd>
                 <dt>{t.run.nativeRecoveryApproval}</dt><dd id="captured-native-recoveries">{captured.native.max_exit_recoveries}</dd>

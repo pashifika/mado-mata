@@ -3,7 +3,9 @@ use crate::target::{
     AuthoringProcess, ResolvedLocation, TargetConfiguration, TargetInputPolicy, TargetLocation,
     TargetResolution,
 };
-use mado_runtime_comparison::desktop::{NativeIntent, native_limits};
+use mado_runtime_comparison::desktop::{
+    FunctionInvocation, NativeIntent, NativeReview, PackageInfo, native_limits,
+};
 use mado_runtime_comparison::model::{Plan, identity};
 use serde_json::json;
 use std::time::Duration;
@@ -73,6 +75,7 @@ fn inputs() -> (StartRequest, PackageInfo, TargetRecord) {
         lane: "native".into(),
         scenario: "workflow".into(),
         replay_descriptor_path: None,
+        function: None,
         native_intent: Some(NativeIntent {
             target_revision: record.revision,
             target_binding_id: record.binding.as_ref().unwrap().id.clone(),
@@ -81,12 +84,34 @@ fn inputs() -> (StartRequest, PackageInfo, TargetRecord) {
             input_approved: true,
             launch_approved: false,
             max_exit_recoveries: 0,
-            operation: "Click the declared button once".into(),
-            visible_postcondition: "The declared label changes".into(),
+            review: NativeReview::Operation {
+                operation: "Click the declared button once".into(),
+                visible_postcondition: "The declared label changes".into(),
+            },
             limits: native_limits(),
         }),
     };
     (request, package, record)
+}
+
+fn capture(
+    request: &StartRequest,
+    package: &PackageInfo,
+    record: TargetRecord,
+) -> Result<NativeBinding, Fault> {
+    let target = package
+        .target
+        .as_ref()
+        .zip(package.target_identity.as_deref());
+    NativeBinding::capture(request, &package.package_id, target, record)
+}
+
+fn function() -> FunctionInvocation {
+    FunctionInvocation {
+        module: "main.js".into(),
+        function: "battle".into(),
+        arguments: Vec::new(),
+    }
 }
 
 #[test]
@@ -121,37 +146,67 @@ fn stale_review_cannot_select_changed_binding_or_declaration() {
     let (request, package, mut record) = inputs();
     record.revision += 1;
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "TargetConflict"
     );
 
     let (request, package, mut record) = inputs();
     record.binding.as_mut().unwrap().id = "bbbbbbbbbbbbbbbbbbbb".into();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "TargetConflict"
     );
 
     let (request, mut package, record) = inputs();
     package.target_identity = Some("changed-declaration".into());
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "StaleIdentity"
     );
 
     let (request, package, mut record) = inputs();
     record.binding.as_mut().unwrap().package_id = "another.package".into();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "TargetConflict"
+    );
+}
+
+#[test]
+fn script_review_keeps_exact_saved_target_authority() {
+    let (mut request, package, record) = inputs();
+    request.native_intent.as_mut().unwrap().review = NativeReview::Script {};
+    capture(&request, &package, record.clone()).unwrap();
+    for changed in ["revision", "binding", "missing_binding", "declaration"] {
+        let mut selected = record.clone();
+        let mut reviewed = request.clone();
+        match changed {
+            "revision" => selected.revision += 1,
+            "binding" => selected.binding.as_mut().unwrap().id.push_str("-changed"),
+            "missing_binding" => selected.binding = None,
+            "declaration" => {
+                reviewed
+                    .native_intent
+                    .as_mut()
+                    .unwrap()
+                    .target_declaration_identity = "changed-declaration".into();
+            }
+            _ => unreachable!(),
+        }
+        let fault = capture(&reviewed, &package, selected).unwrap_err();
+        assert_eq!(
+            fault.category,
+            if changed == "declaration" {
+                "StaleIdentity"
+            } else {
+                "TargetConflict"
+            }
+        );
+    }
+    request.native_intent = None;
+    assert_eq!(
+        capture(&request, &package, record).unwrap_err().category,
+        "NativeRefused"
     );
 }
 
@@ -160,18 +215,14 @@ fn configuration_without_native_scope_cannot_be_projected() {
     let (request, package, mut record) = inputs();
     record.binding.as_mut().unwrap().configuration.game.kind = "executable".into();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "NativeTargetUnsupported"
     );
 
     let (request, package, mut record) = inputs();
     record.binding.as_mut().unwrap().configuration.input = None;
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "NativeTargetUnset"
     );
 
@@ -184,11 +235,25 @@ fn configuration_without_native_scope_cannot_be_projected() {
         .window_title
         .clear();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
-            .unwrap_err()
-            .category,
+        capture(&request, &package, record).unwrap_err().category,
         "NativeTargetUnset"
     );
+}
+
+#[test]
+fn a_function_review_refuses_launch_and_recovery() {
+    for (launch_approved, max_exit_recoveries) in [(true, 0), (false, 1)] {
+        let (mut request, package, record) = inputs();
+        request.function = Some(function());
+        let intent = request.native_intent.as_mut().unwrap();
+        intent.review = NativeReview::Script {};
+        intent.launch_approved = launch_approved;
+        intent.max_exit_recoveries = max_exit_recoveries;
+        assert_eq!(
+            capture(&request, &package, record).unwrap_err().category,
+            "NativeRefused"
+        );
+    }
 }
 
 fn process(pid: u32) -> AuthoringProcess {
@@ -208,27 +273,36 @@ fn only_unique_fresh_correspondence_selects_the_runtime_copy() {
         (vec![process(1), process(2)], "NativeTargetAmbiguous"),
     ] {
         let (request, package, record) = inputs();
-        let mut binding = NativeBinding::capture(&request, &package, record).unwrap();
+        let mut binding = capture(&request, &package, record).unwrap();
         let proof = AuthoringApplication {
             processes,
             installation: "verified".into(),
         };
-        assert_eq!(binding.project(proof).unwrap_err().category, category);
+        let mut platform = ScriptedPreparation::new([Ok(NativeDiscovery::Unique(proof))]);
+        assert_eq!(
+            binding
+                .discover(&control(), &mut platform)
+                .unwrap_err()
+                .category,
+            category
+        );
     }
     let (request, package, record) = inputs();
-    let mut binding = NativeBinding::capture(&request, &package, record).unwrap();
-    let target = binding
-        .project(AuthoringApplication {
+    let mut binding = capture(&request, &package, record).unwrap();
+    let mut platform =
+        ScriptedPreparation::new([Ok(NativeDiscovery::Unique(AuthoringApplication {
             processes: vec![process(7)],
             installation: "verified".into(),
-        })
+        }))]);
+    let target = binding
+        .discover(&control(), &mut platform)
+        .unwrap()
         .unwrap();
     assert_eq!(
         target.executable,
         std::path::Path::new("/runtime/Game.app/Contents/MacOS/Game")
     );
-    assert_eq!(target.process_id, 7);
-    assert_eq!(target.process_lifetime, "4123abcdef010203");
+    assert_eq!(target.process, Some((7, "4123abcdef010203".into())));
 }
 
 #[test]
@@ -242,7 +316,7 @@ fn cancellation_and_deadline_refuse_before_any_os_correspondence() {
     control.cancel();
     let (request, package, record) = inputs();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
+        capture(&request, &package, record)
             .unwrap()
             .resolve(&control, &|_| {}, &|| Ok(()))
             .unwrap_err()
@@ -254,7 +328,7 @@ fn cancellation_and_deadline_refuse_before_any_os_correspondence() {
     let control = Control::new(&plan.limits);
     let (request, package, record) = inputs();
     assert_eq!(
-        NativeBinding::capture(&request, &package, record)
+        capture(&request, &package, record)
             .unwrap()
             .resolve(&control, &|_| {}, &|| Ok(()))
             .unwrap_err()
@@ -265,6 +339,8 @@ fn cancellation_and_deadline_refuse_before_any_os_correspondence() {
 
 struct ScriptedPreparation {
     discoveries: std::collections::VecDeque<Result<NativeDiscovery, Fault>>,
+    running: std::collections::VecDeque<Result<bool, Fault>>,
+    presence_checks: usize,
     recipes: usize,
     launches: usize,
     recipe_fault: Option<Fault>,
@@ -278,6 +354,8 @@ impl ScriptedPreparation {
     fn new(discoveries: impl IntoIterator<Item = Result<NativeDiscovery, Fault>>) -> Self {
         Self {
             discoveries: discoveries.into_iter().collect(),
+            running: Default::default(),
+            presence_checks: 0,
             recipes: 0,
             launches: 0,
             recipe_fault: None,
@@ -292,6 +370,20 @@ impl ScriptedPreparation {
 impl PreparationPlatform for ScriptedPreparation {
     type Recipe = ();
     type Prepared = ();
+
+    fn script_executable(
+        &mut self,
+        binding: &NativeBinding,
+        _control: &Control,
+    ) -> Result<Option<std::path::PathBuf>, Fault> {
+        self.presence_checks += 1;
+        self.running
+            .pop_front()
+            .expect("unexpected application presence check")
+            .map(|present| {
+                present.then(|| binding.binding.resolution.game.executable.clone().into())
+            })
+    }
 
     fn discover(
         &mut self,
@@ -340,7 +432,7 @@ fn control() -> Control {
 fn binding(launch_approved: bool) -> NativeBinding {
     let (mut request, package, record) = inputs();
     request.native_intent.as_mut().unwrap().launch_approved = launch_approved;
-    NativeBinding::capture(&request, &package, record).unwrap()
+    capture(&request, &package, record).unwrap()
 }
 
 fn unique(pid: u32) -> Result<NativeDiscovery, Fault> {
@@ -355,7 +447,7 @@ fn fresh_attempts_recreate_the_one_shot_resolver_from_the_original_capture() {
     let (mut request, package, mut record) = inputs();
     request.native_intent.as_mut().unwrap().launch_approved = true;
     let original = record.binding.clone().unwrap();
-    let captured = NativeBinding::capture(&request, &package, record.clone()).unwrap();
+    let captured = capture(&request, &package, record.clone()).unwrap();
     record.binding.as_mut().unwrap().configuration.window_title = "Edited later".into();
     record.binding.as_mut().unwrap().configuration.input = None;
     record
@@ -401,7 +493,7 @@ fn fresh_attempts_recreate_the_one_shot_resolver_from_the_original_capture() {
         )
         .unwrap()
         .unwrap();
-    assert_eq!(target.process_id, 17);
+    assert_eq!(target.process.as_ref().unwrap().0, 17);
     assert_eq!(target.window_title, first_target.window_title);
     assert_eq!(target.input.route, first_target.input.route);
     assert_eq!(external_restart.launches, 0);
@@ -453,8 +545,7 @@ fn an_existing_game_or_external_launch_never_submits_the_recipe() {
             .resolve_with(&control(), &|_| {}, &|| Ok(()), &mut platform)
             .unwrap()
             .unwrap();
-        assert_eq!(target.process_id, 7);
-        assert_eq!(target.process_lifetime, "4123abcdef010203");
+        assert_eq!(target.process, Some((7, "4123abcdef010203".into())));
         assert_eq!(platform.recipes, expected_recipes);
         assert_eq!(platform.launches, 0);
     }
@@ -470,7 +561,7 @@ fn game_appearing_during_recipe_preparation_attaches_without_admission() {
         .resolve_with(&control, &|_| {}, &|| Ok(()), &mut platform)
         .unwrap()
         .unwrap();
-    assert_eq!(target.process_id, 17);
+    assert_eq!(target.process.as_ref().unwrap().0, 17);
     assert_eq!(platform.launches, 0);
     control
         .admit_launch()
@@ -605,8 +696,7 @@ fn accepted_launch_only_probes_again_when_requested_and_never_resubmits() {
         .resolve_with(&control, &report, &|| Ok(()), &mut platform)
         .unwrap()
         .unwrap();
-    assert_eq!(target.process_id, 9);
-    assert_eq!(target.process_lifetime, "4123abcdef010203");
+    assert_eq!(target.process, Some((9, "4123abcdef010203".into())));
     assert_eq!(platform.launches, 1);
     assert_eq!(platform.recipes, 1);
     assert_eq!(
@@ -807,5 +897,75 @@ fn failed_process_probe_after_launch_is_terminal_not_pending_or_retried() {
             "NativeTargetClosed"
         );
         assert_eq!(platform.launches, 1);
+    }
+}
+
+#[test]
+fn script_launch_requires_application_absence_and_rechecks_before_submission() {
+    for (presence, launches) in [
+        (vec![true], 0),
+        (vec![false, true], 0),
+        (vec![false, false, true], 1),
+    ] {
+        let (mut request, package, record) = inputs();
+        let intent = request.native_intent.as_mut().unwrap();
+        intent.review = NativeReview::Script {};
+        intent.launch_approved = true;
+        let mut binding = capture(&request, &package, record).unwrap();
+        let mut platform = ScriptedPreparation::new([]);
+        platform.running = presence.into_iter().map(Ok).collect();
+        let control = control();
+        let first = binding
+            .resolve_with(&control, &|_| {}, &|| Ok(()), &mut platform)
+            .unwrap();
+        let target = first.unwrap_or_else(|| {
+            binding
+                .resolve_with(&control, &|_| {}, &|| Ok(()), &mut platform)
+                .unwrap()
+                .unwrap()
+        });
+        assert_eq!(target.process, None);
+        assert_eq!(platform.launches, launches);
+        assert_eq!(
+            target.executable,
+            std::path::Path::new("/Applications/Game.app/Contents/MacOS/Game")
+        );
+        assert!(platform.running.is_empty());
+    }
+}
+
+#[test]
+fn unavailable_script_application_presence_never_authorizes_launch() {
+    let (mut request, package, record) = inputs();
+    let intent = request.native_intent.as_mut().unwrap();
+    intent.review = NativeReview::Script {};
+    intent.launch_approved = true;
+    let mut platform = ScriptedPreparation::new([]);
+    platform.running.push_back(Err(Fault::new(
+        "TargetObservationUnavailable",
+        "unavailable",
+    )));
+    let fault = capture(&request, &package, record)
+        .unwrap()
+        .resolve_with(&control(), &|_| {}, &|| Ok(()), &mut platform)
+        .unwrap_err();
+    assert_eq!(fault.category, "TargetObservationUnavailable");
+    assert_eq!((platform.recipes, platform.launches), (0, 0));
+}
+
+#[test]
+fn script_attachment_refuses_unmapped_app_before_window_wait_or_launch() {
+    for function in [None, Some(function())] {
+        let (mut request, package, record) = inputs();
+        request.function = function;
+        request.native_intent.as_mut().unwrap().review = NativeReview::Script {};
+        let mut platform = ScriptedPreparation::new([]);
+        platform.running.push_back(Ok(false));
+        let fault = capture(&request, &package, record)
+            .unwrap()
+            .resolve_with(&control(), &|_| {}, &|| panic!("no launch"), &mut platform)
+            .unwrap_err();
+        assert_eq!(fault.category, "NativeTargetMissing");
+        assert_eq!((platform.recipes, platform.launches), (0, 0));
     }
 }

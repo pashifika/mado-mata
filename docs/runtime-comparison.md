@@ -131,9 +131,13 @@ anchors its canonical location. Captured content, not later edits or ambient
 `node_modules`, is used for compilation, preflight, module loading, and assets.
 
 The desktop can [create and edit directory packages](desktop.md#edit-directory-packages).
-Its editable candidate accepts repairable text errors but does not weaken this
-CLI's executable inventory: Save, Validate, and explicit Inspect/Start remain
-separate operations.
+Its editable candidate accepts repairable text errors without weakening this
+CLI's executable inventory. [Edit Script execution](desktop.md#execute-scripts-in-edit)
+adds owner-bound Whole package/Function trials from explicitly saved content;
+it does not add a function/eval mode to the independent comparison CLI.
+Function trials use existing module-scope code, positional JSON arguments and a
+fresh VM. The transient compiler bridge changes neither source nor manifest;
+package readiness/workflow are not implicit function preludes.
 
 Directory capture separates declared PNG/raw image payloads from non-image
 source, profile, schema, and JSON content under the

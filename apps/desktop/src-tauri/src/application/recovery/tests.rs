@@ -2,8 +2,12 @@ use super::*;
 use crate::application::test_support::*;
 use crate::application::{RecoveryStatus, Selection};
 use crate::storage::{MAX_PROFILE_BYTES, Profile};
+use mado_runtime_comparison::images::{self, DecodedImage};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{atomic::Ordering, mpsc};
+use std::time::{Duration, Instant};
 
 fn schema(maximum: u64) -> Value {
     json!({
@@ -46,7 +50,7 @@ fn foreign_package(fixture: &Fixture, name: &str, package_id: &str) -> PathBuf {
 }
 
 fn initial(fixture: &Fixture) -> (PathBuf, Selection) {
-    let path = fixture.package_at("source");
+    let path = fixture.package_at("sources/source");
     install_schema(&path, &schema(10), json!({}));
     let selection = inspect_named(&fixture.application, "Main", &path).unwrap();
     (path, selection)
@@ -68,6 +72,379 @@ fn recovery(fixture: &Fixture, path: &Path, selection: &Selection) -> RecoveryRe
         .recovery
         .unwrap()
         .context
+}
+
+#[test]
+fn edit_discovery_preserves_profiles_until_explicit_owner_bound_repair_or_reset() {
+    let fixture = Fixture::new();
+    let app = &fixture.application;
+    let (path, selected) = initial(&fixture);
+    let compatible = save(&fixture, &selected, "Review schema", json!({"count":2}));
+    let invalid = save(&fixture, &selected, "Reset values", json!({"count":9}));
+    let compatible_file = profile_path(&fixture, "Main", &compatible);
+    let invalid_file = profile_path(&fixture, "Main", &invalid);
+    let compatible_before = fs::read(&compatible_file).unwrap();
+    let invalid_before = fs::read(&invalid_file).unwrap();
+    let tab_path = fixture.root.join("tabs/Main/tab.config");
+    let tab_before = fs::read(&tab_path).unwrap();
+    install_schema(&path, &schema(5), json!({}));
+    let editor = app
+        .authoring_open(&workspace_ref(&selected), &path)
+        .unwrap();
+    let trial = app
+        .authoring_trial_context(&editor.owner, &editor.revision)
+        .unwrap();
+    let view = trial.recovery.unwrap();
+    assert!(!view.binding_required);
+    assert!(!view.relocation);
+    assert_eq!(view.profiles.len(), 2);
+    assert!(trial.profiles.is_empty());
+    assert_eq!(trial.profiles_error.unwrap().category, "ProfileRejected");
+    assert_eq!(fs::read(&compatible_file).unwrap(), compatible_before);
+    assert_eq!(fs::read(&invalid_file).unwrap(), invalid_before);
+    let workspace = &app.workspace_catalog().unwrap().open[0];
+    assert_eq!(view_ref(workspace), editor.owner.workspace);
+    assert_eq!(
+        workspace
+            .selection
+            .as_ref()
+            .unwrap()
+            .package
+            .schema_identity,
+        selected.package.schema_identity
+    );
+    assert!(workspace.recovery.is_none());
+    assert!(app.poll().controller["run"].is_null());
+
+    let invalid_repair = app
+        .repair_profile(&view.context, &invalid.id, json!({"count":9}))
+        .unwrap();
+    assert!(invalid_repair.saved.is_none());
+    assert!(invalid_repair.issue.is_some());
+    assert_eq!(fs::read(&invalid_file).unwrap(), invalid_before);
+    let repaired = app
+        .repair_profile(&view.context, &compatible.id, compatible.values.clone())
+        .unwrap();
+    let saved = repaired.saved.unwrap();
+    assert_eq!(saved.id, compatible.id);
+    assert_eq!(saved.name, compatible.name);
+    assert_eq!(saved.values, json!({"count":2,"order":["first"]}));
+    assert_eq!(saved.schema_identity, trial.package.schema_identity);
+    assert_eq!(repaired.recovery.unwrap().profiles.len(), 1);
+    assert_eq!(
+        app.reset_profile(&view.context, &invalid.id, false)
+            .unwrap_err()
+            .category,
+        "ConfirmationRequired"
+    );
+    assert_eq!(fs::read(&invalid_file).unwrap(), invalid_before);
+    let reset = app.reset_profile(&view.context, &invalid.id, true).unwrap();
+    let reset_saved = reset.saved.unwrap();
+    assert_eq!(reset_saved.id, invalid.id);
+    assert_eq!(reset_saved.name, invalid.name);
+    assert_eq!(reset_saved.values, json!({"count":1,"order":["first"]}));
+    assert_eq!(reset_saved.schema_identity, trial.package.schema_identity);
+    assert_eq!(reset.catalog.unwrap().profiles.len(), 2);
+    assert!(reset.recovery.unwrap().profiles.is_empty());
+    assert_eq!(fs::read(&tab_path).unwrap(), tab_before);
+    assert_eq!(app.poll().authoring.as_ref(), Some(&editor.owner));
+
+    let mut start = request(&selected);
+    start.inventory_identity = trial.package.inventory_identity.clone();
+    start.schema_identity = trial.package.schema_identity.clone();
+    start.profile_id = saved.id.clone();
+    start.values = saved.values;
+    app.authoring_trial_start(&editor.owner, &editor.revision, start)
+        .unwrap();
+    let terminal = settled(app);
+    let error = terminal.error.unwrap();
+    assert_eq!(error.category, "ChildStartup");
+    assert_eq!(error.context["operation_stage"], "execution");
+    assert_eq!(app.poll().authoring.as_ref(), Some(&editor.owner));
+    assert_eq!(fs::read(tab_path).unwrap(), tab_before);
+}
+
+#[test]
+fn edit_recovery_rejects_ordinary_foreign_superseded_and_expired_contexts() {
+    let fixture = Fixture::new();
+    let app = &fixture.application;
+    let (path, selected) = initial(&fixture);
+    let saved = save(&fixture, &selected, "Repair", json!({"count":9}));
+    install_schema(&path, &schema(5), json!({}));
+    let ordinary = recovery(&fixture, &path, &selected);
+    let editor = app.authoring_open(&ordinary.workspace, &path).unwrap();
+    let file = profile_path(&fixture, "Main", &saved);
+    let before = fs::read(&file).unwrap();
+    assert_eq!(
+        app.repair_profile(&ordinary, &saved.id, json!({"count":1}))
+            .unwrap_err()
+            .category,
+        "AuthoringActive"
+    );
+    assert_eq!(
+        app.reset_profile(&ordinary, &saved.id, true)
+            .unwrap_err()
+            .category,
+        "AuthoringActive"
+    );
+    let first = app
+        .authoring_trial_context(&editor.owner, &editor.revision)
+        .unwrap()
+        .recovery
+        .unwrap()
+        .context;
+    let second = app
+        .authoring_trial_context(&editor.owner, &editor.revision)
+        .unwrap()
+        .recovery
+        .unwrap()
+        .context;
+    assert_eq!(first, second, "setup rereads must preserve the repair context");
+    let mut foreign = second.clone();
+    foreign.workspace.workspace_id.push_str("-foreign");
+    assert_eq!(
+        app.repair_profile(&foreign, &saved.id, json!({"count":1}))
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    assert_eq!(
+        app.retry_binding(&second).unwrap_err().category,
+        "AuthoringActive"
+    );
+    assert_eq!(
+        app.discard_recovery(&ordinary).unwrap_err().category,
+        "AuthoringActive"
+    );
+    let source = fs::read_to_string(path.join("main.js")).unwrap();
+    let published = app
+        .authoring_save(
+            &editor.owner,
+            &editor.revision,
+            "main.js",
+            format!("{source}\n// changed\n"),
+        )
+        .unwrap()
+        .view
+        .unwrap();
+    assert_eq!(
+        app.repair_profile(&second, &saved.id, json!({"count":1}))
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    let current = app
+        .authoring_trial_context(&editor.owner, &published.revision)
+        .unwrap()
+        .recovery
+        .unwrap()
+        .context;
+    // Recognition Save publishes a package revision just like source Save.
+    // Use only a generated image: no native capture, OCR or trial is involved.
+    let image_path = fixture.root.join("selected.png");
+    let image = DecodedImage::from_rgba(32, 24, vec![255; 32 * 24 * 4]).unwrap();
+    let png = images::encode_crop(&image, [0, 0, 32, 24]).unwrap();
+    fs::write(&image_path, png.as_bytes()).unwrap();
+    let recognition = app
+        .recognition_view(&editor.owner, &published.revision)
+        .unwrap();
+    let loaded = app
+        .recognition_load(
+            &editor.owner,
+            &published.revision,
+            &image_path,
+            recognition.capture_id.as_deref(),
+            recognition.document_revision,
+            false,
+        )
+        .unwrap();
+    let recognition_saved = app
+        .recognition_save(
+            &editor.owner,
+            &published.revision,
+            loaded.document_revision,
+            &[],
+            loaded.capture_id.as_deref().unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+    assert!(recognition_saved.mutation.refresh_error.is_none());
+    assert!(recognition_saved.recognition.is_some());
+    assert_ne!(
+        recognition_saved.mutation.committed_revision,
+        published.revision
+    );
+    assert_eq!(
+        app.reset_profile(&current, &saved.id, true)
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    assert_eq!(fs::read(&file).unwrap(), before);
+    let after_recognition = app
+        .authoring_trial_context(
+            &editor.owner,
+            &recognition_saved.mutation.committed_revision,
+        )
+        .unwrap()
+        .recovery
+        .unwrap()
+        .context;
+    assert_ne!(after_recognition, current);
+    let current = after_recognition;
+    fs::write(path.join("main.js"), format!("{source}\n// external\n")).unwrap();
+    assert_eq!(
+        app.reset_profile(&current, &saved.id, true)
+            .unwrap_err()
+            .category,
+        "AuthoringConflict"
+    );
+    let refreshed = app.authoring_refresh(&editor.owner).unwrap();
+    assert_eq!(
+        app.reset_profile(&current, &saved.id, true)
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    let last = app
+        .authoring_trial_context(&editor.owner, &refreshed.revision)
+        .unwrap()
+        .recovery
+        .unwrap()
+        .context;
+    let exited = app.authoring_exit(&editor.owner).unwrap();
+    let reopened = app.authoring_open(&view_ref(&exited), &path).unwrap();
+    assert_ne!(reopened.owner, editor.owner);
+    assert_eq!(
+        app.reset_profile(&last, &saved.id, true)
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    assert_eq!(fs::read(file).unwrap(), before);
+}
+
+#[test]
+fn closing_edit_recovery_retires_only_its_token_and_preserves_ordinary_workspace() {
+    let fixture = Fixture::new();
+    let app = &fixture.application;
+    let (path, selected) = initial(&fixture);
+    let saved = save(&fixture, &selected, "Repair", json!({"count":9}));
+    install_schema(&path, &schema(5), json!({}));
+    let ordinary = recovery(&fixture, &path, &selected);
+    let editor = app.authoring_open(&ordinary.workspace, &path).unwrap();
+    let context = app
+        .authoring_trial_context(&editor.owner, &editor.revision)
+        .unwrap()
+        .recovery
+        .unwrap()
+        .context;
+    let before = serde_json::to_value(&app.workspace_catalog().unwrap().open[0]).unwrap();
+    let file = profile_path(&fixture, "Main", &saved);
+    let bytes = fs::read(&file).unwrap();
+    assert_eq!(
+        app.retry_binding(&context).unwrap_err().category,
+        "AuthoringActive"
+    );
+    let closed = app.discard_recovery(&context).unwrap();
+    assert_eq!(serde_json::to_value(&closed).unwrap(), before);
+    assert_eq!(closed.recovery.unwrap().context, ordinary);
+    assert_eq!(app.poll().authoring.as_ref(), Some(&editor.owner));
+    assert_eq!(
+        app.discard_recovery(&context).unwrap_err().category,
+        "StaleIdentity"
+    );
+    assert_eq!(
+        app.repair_profile(&context, &saved.id, json!({"count":1}))
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    assert_eq!(
+        app.reset_profile(&context, &saved.id, true)
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    assert_eq!(
+        app.discard_recovery(&ordinary).unwrap_err().category,
+        "AuthoringActive"
+    );
+    assert_eq!(fs::read(file).unwrap(), bytes);
+}
+
+#[test]
+fn edit_recovery_cannot_replace_profiles_during_an_active_trial() {
+    let fixture = Fixture::new();
+    let app = &fixture.application;
+    let (path, selected) = initial(&fixture);
+    let saved = save(&fixture, &selected, "Busy", json!({"count":9}));
+    install_schema(&path, &schema(5), json!({}));
+    let editor = app
+        .authoring_open(&workspace_ref(&selected), &path)
+        .unwrap();
+    let trial = app
+        .authoring_trial_context(&editor.owner, &editor.revision)
+        .unwrap();
+    let context = trial.recovery.unwrap().context;
+    let file = profile_path(&fixture, "Main", &saved);
+    let before = fs::read(&file).unwrap();
+    let mut start = request(&selected);
+    start.inventory_identity = trial.package.inventory_identity.clone();
+    start.schema_identity = trial.package.schema_identity.clone();
+    start.values = json!({"count":1});
+    let store = lock(&app.store);
+    // Observe admission without taking the command gate or calling poll, whose
+    // first saved-target refresh needs the Store lock held by this test.
+    app.command_admitted.store(false, Ordering::Release);
+    let (started, start_result) = mpsc::sync_channel(1);
+    let starting = app.clone();
+    let starting_owner = editor.owner.clone();
+    let starter = std::thread::spawn(move || {
+        let result =
+            starting.authoring_trial_start(&starting_owner, &editor.revision, start);
+        let _ = started.send(result);
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if app.command_admitted.load(Ordering::Acquire)
+            && app.workspaces.try_lock().is_ok_and(|state| {
+                state.controller["state"] == "preparing"
+                    && state.controller["operation"] == "authoring_trial"
+            })
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "trial was not reserved");
+        std::thread::yield_now();
+    }
+    let (checked, check_result) = mpsc::sync_channel(1);
+    let checking = app.clone();
+    let checking_context = context.clone();
+    let checking_id = saved.id.clone();
+    let competitor = std::thread::spawn(move || {
+        let repair =
+            checking.repair_profile(&checking_context, &checking_id, json!({"count":1}));
+        let reset = checking.reset_profile(&checking_context, &checking_id, true);
+        let discarded = checking.discard_recovery(&checking_context);
+        let _ = checked.send((repair, reset, discarded));
+    });
+    let refusals = check_result.recv_timeout(Duration::from_secs(5));
+    let stopped = app.authoring_stop(&editor.owner);
+    drop(store);
+    let started = start_result.recv_timeout(Duration::from_secs(5));
+    let (repair, reset, discarded) =
+        refusals.expect("recovery commands must refuse without waiting for Store");
+    competitor.join().unwrap();
+    started.expect("cancelled trial admission did not finish").unwrap();
+    starter.join().unwrap();
+    assert!(stopped.unwrap());
+    assert_eq!(repair.unwrap_err().category, "RunActive");
+    assert_eq!(reset.unwrap_err().category, "RunActive");
+    assert_eq!(discarded.unwrap_err().category, "RunActive");
+    assert_eq!(settled(app).error.unwrap().category, "Cancelled");
+    app.discard_recovery(&context).unwrap();
+    assert_eq!(fs::read(file).unwrap(), before);
 }
 
 /// Drains the command records attributed to one workspace since the previous drain.
@@ -1682,22 +2059,56 @@ fn committed_recovery_survives_catalog_read_failure() {
         let committed: Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
         assert_eq!(
             committed,
-            json!([{"count":2,"order":["second"]}, {"count":1,"order":["first"]}])
+            json!([
+                {"count":2,"order":["second"]}, {"count":1,"order":["first"]},
+                {"count":2,"order":["second"]}, {"count":1,"order":["first"]}
+            ])
         );
         return;
     };
 
     let mut committed = Vec::new();
-    for (name, reset, expected) in [
-        ("Repair", false, json!({"count":2,"order":["second"]})),
-        ("Reset", true, json!({"count":1,"order":["first"]})),
+    for (name, reset, authoring, expected) in [
+        (
+            "Repair",
+            false,
+            false,
+            json!({"count":2,"order":["second"]}),
+        ),
+        ("Reset", true, false, json!({"count":1,"order":["first"]})),
+        (
+            "Edit repair",
+            false,
+            true,
+            json!({"count":2,"order":["second"]}),
+        ),
+        (
+            "Edit reset",
+            true,
+            true,
+            json!({"count":1,"order":["first"]}),
+        ),
     ] {
         let fixture = Fixture::new();
         let application = &fixture.application;
         let (path, selected) = initial(&fixture);
         let original = save(&fixture, &selected, name, json!({"count":9}));
         install_schema(&path, &schema(5), json!({}));
-        let context = recovery(&fixture, &path, &selected);
+        let editor = authoring.then(|| {
+            application
+                .authoring_open(&workspace_ref(&selected), &path)
+                .unwrap()
+        });
+        let context = if let Some(editor) = &editor {
+            application
+                .authoring_trial_context(&editor.owner, &editor.revision)
+                .unwrap()
+                .recovery
+                .unwrap()
+                .context
+        } else {
+            recovery(&fixture, &path, &selected)
+        };
         let file = profile_path(&fixture, "Main", &original);
 
         // Existing records stay readable; only the newly published file loses read access.
@@ -1760,7 +2171,22 @@ fn committed_recovery_survives_catalog_read_failure() {
             serde_json::to_value(&durable).unwrap(),
             serde_json::to_value(&saved).unwrap()
         );
-        let catalog = application.profiles(&context.workspace).unwrap();
+        let catalog = if let Some(editor) = &editor {
+            assert_eq!(application.poll().authoring.as_ref(), Some(&editor.owner));
+            let trial = application
+                .authoring_trial_context(&editor.owner, &editor.revision)
+                .unwrap();
+            let retained = trial.recovery.unwrap();
+            assert_eq!(retained.context, context);
+            assert!(retained.profiles.is_empty());
+            assert!(retained.profiles_error.is_none());
+            ProfileCatalog {
+                profiles: trial.profiles,
+                profiles_error: trial.profiles_error,
+            }
+        } else {
+            application.profiles(&context.workspace).unwrap()
+        };
         assert!(catalog.profiles_error.is_none());
         assert_eq!(catalog.profiles.len(), 1);
         assert_eq!(catalog.profiles[0].id, original.id);

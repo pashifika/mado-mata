@@ -258,19 +258,37 @@ impl Host {
     }
 
     pub fn begin_workflow(&self) -> Result<(), Fault> {
+        self.enter_workflow(false)
+    }
+
+    pub(crate) fn begin_function(&self) -> Result<(), Fault> {
+        self.enter_workflow(true)
+    }
+
+    fn enter_workflow(&self, function: bool) -> Result<(), Fault> {
         self.check()?;
         let mut state = lock(&self.inner.state);
-        if state.phase != Phase::Readiness {
+        if state.phase
+            != if function {
+                Phase::Instantiating
+            } else {
+                Phase::Readiness
+            }
+        {
             return Err(Fault::new(
                 "ReadinessContract",
-                "workflow requires explicit readiness",
+                if function {
+                    "function requires fresh instantiation"
+                } else {
+                    "workflow requires explicit readiness"
+                },
             ));
         }
         if self.script_startup() {
             if !self.capture_ready() {
                 return Err(Fault::new(
                     "ReadinessContract",
-                    "Ready requires a capture_ready Native target",
+                    "Execution requires a capture_ready Native target",
                 ));
             }
             let deadline = self.inner.control.native_transition(2, None)?;
@@ -285,7 +303,11 @@ impl Host {
         }
         lock(&self.inner.state).workflow_entered = true;
         if self.script_startup() {
-            self.native_phase(crate::desktop::NativePhase::Workflow);
+            self.native_phase(if function {
+                crate::desktop::NativePhase::Function
+            } else {
+                crate::desktop::NativePhase::Workflow
+            });
         } else if self.inner.plan.lane == "native" {
             crate::runner::emit_native_preparation(
                 &self.inner.control,

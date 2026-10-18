@@ -109,15 +109,13 @@ fn definition(line: &str) -> Option<(&'static str, Option<&str>)> {
     let end = line
         .find(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-')))
         .unwrap_or(line.len());
-    let name = DOTENV_OVERRIDES
-        .into_iter()
-        .find(|name| {
-            if cfg!(windows) {
-                name.eq_ignore_ascii_case(&line[..end])
-            } else {
-                *name == &line[..end]
-            }
-        })?;
+    let name = DOTENV_OVERRIDES.into_iter().find(|name| {
+        if cfg!(windows) {
+            name.eq_ignore_ascii_case(&line[..end])
+        } else {
+            *name == &line[..end]
+        }
+    })?;
     let rest = line[end..].trim_start();
     let rest = rest
         .strip_prefix('=')
@@ -408,7 +406,8 @@ impl Environment {
             search.extend([".bun/bin", ".local/bin"].map(|directory| home.join(directory)));
         }
         #[cfg(windows)]
-        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+        if let Some(local) = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
             .filter(|directory| directory.is_absolute())
         {
             search.push(local.join("omp"));
@@ -425,10 +424,17 @@ impl Environment {
                 .filter_map(|name| std::env::var_os(name).map(|value| (*name, value)))
                 .collect(),
             #[cfg(windows)]
-            native: ["SYSTEMROOT", "WINDIR", "TEMP", "TMP", "LOCALAPPDATA", "APPDATA"]
-                .into_iter()
-                .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
-                .collect(),
+            native: [
+                "SYSTEMROOT",
+                "WINDIR",
+                "TEMP",
+                "TMP",
+                "LOCALAPPDATA",
+                "APPDATA",
+            ]
+            .into_iter()
+            .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
+            .collect(),
         }
     }
 
@@ -525,7 +531,10 @@ fn runnable(metadata: &fs::Metadata) -> bool {
 
 fn executable(path: &Path) -> io::Result<Option<Executable>> {
     #[cfg(windows)]
-    if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("exe")) {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
         // Batch, PowerShell and POSIX wrappers are not executable launch plans.
         // Windows management invokes the installed standalone native OMP only.
         return Ok(None);

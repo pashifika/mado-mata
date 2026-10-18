@@ -14,13 +14,15 @@ fn javascript_preflight_refuses_missing_static_dependencies_without_evaluation()
         .get_mut("main.js")
         .unwrap()
         .push_str("\nthrow new Error('must not evaluate during inspect');\n");
-    let mut inventory = inspect_javascript(inventory, &limits).unwrap();
+    let mut inventory =
+        inspect_javascript(inventory, &limits, &Arc::new(Control::new(&limits))).unwrap();
     inventory
         .sources
         .get_mut("main.js")
         .unwrap()
         .push_str("\nexport { missing } from './missing.js';\n");
-    let fault = inspect_javascript(inventory, &limits).unwrap_err();
+    let fault =
+        inspect_javascript(inventory, &limits, &Arc::new(Control::new(&limits))).unwrap_err();
     assert_eq!(fault.category, "ImportRefused");
     assert_eq!(fault.context["specifier"], "./missing.js");
 }
@@ -43,7 +45,8 @@ fn javascript_preflight_links_present_modules_without_evaluation() {
          export { readiness };\n\
          throw new Error('dependency must not evaluate during inspect');\n",
     );
-    let inventory = inspect_javascript(inventory, &limits).unwrap();
+    let inventory =
+        inspect_javascript(inventory, &limits, &Arc::new(Control::new(&limits))).unwrap();
     for invalid_binding in [
         "import { notExported as unavailable } from './decisions.js';",
         "export { notExported } from './decisions.js';",
@@ -54,7 +57,8 @@ fn javascript_preflight_links_present_modules_without_evaluation() {
             .get_mut("main.js")
             .unwrap()
             .push_str(invalid_binding);
-        let fault = inspect_javascript(invalid, &limits).unwrap_err();
+        let fault =
+            inspect_javascript(invalid, &limits, &Arc::new(Control::new(&limits))).unwrap_err();
         assert_eq!(
             fault.category, "ImportRefused",
             "{invalid_binding}: {fault:?}"
@@ -106,14 +110,16 @@ fn javascript_preflight_follows_requested_declaration_modules_only() {
                  throw new Error('entry must not evaluate during inspect');\n"
             ),
         );
-        let selected = inspect_javascript(selected, &limits).unwrap();
+        let selected =
+            inspect_javascript(selected, &limits, &Arc::new(Control::new(&limits))).unwrap();
 
         let mut missing_export = selected.clone();
         missing_export.sources.insert(
             "bridge.d.ts".into(),
             "export { notExported as decide } from './decisions.js';".into(),
         );
-        let fault = inspect_javascript(missing_export, &limits).unwrap_err();
+        let fault = inspect_javascript(missing_export, &limits, &Arc::new(Control::new(&limits)))
+            .unwrap_err();
         assert_eq!(fault.category, "ImportRefused", "{request}: {fault:?}");
         assert!(fault.message.contains("notExported"), "{fault:?}");
 
@@ -122,7 +128,8 @@ fn javascript_preflight_follows_requested_declaration_modules_only() {
             "bridge.d.ts".into(),
             "export function decide() {\n  const value = ;\n}\n".into(),
         );
-        let fault = inspect_javascript(invalid_syntax, &limits).unwrap_err();
+        let fault = inspect_javascript(invalid_syntax, &limits, &Arc::new(Control::new(&limits)))
+            .unwrap_err();
         assert_eq!(fault.category, "Syntax", "{request}: {fault:?}");
         assert_eq!(fault.context["module"], "bridge.d.ts");
         assert_eq!(fault.context["line"], 2);
@@ -141,7 +148,8 @@ fn javascript_preflight_preserves_target_engine_syntax_location() {
         "decisions.js".into(),
         "export function decide() {\n  const value = ;\n}\n".into(),
     );
-    let fault = inspect_javascript(inventory, &limits).unwrap_err();
+    let fault =
+        inspect_javascript(inventory, &limits, &Arc::new(Control::new(&limits))).unwrap_err();
     assert_eq!(fault.category, "Syntax");
     assert_eq!(fault.context["module"], "decisions.js");
     assert_eq!(fault.context["line"], 2);
@@ -180,4 +188,37 @@ fn profile_capture_preserves_values_and_rejects_stale_inputs() {
             .category,
         "ProfileIdentity"
     );
+}
+
+#[test]
+fn captured_inspection_preserves_owner_stop_and_expired_deadline() {
+    let controller = DesktopController::new("unused-controlled".into(), "unused-engine".into());
+    for runtime in ["javascript", "typescript"] {
+        let mut limits = manual_plan().unwrap().limits;
+        let inventory = Inventory::capture(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures")
+                .join(runtime),
+            &limits,
+        )
+        .unwrap();
+        let stopped = Arc::new(Control::new(&limits));
+        stopped.cancel();
+        assert_eq!(
+            controller
+                .inspect_inventory(inventory.clone(), Some(&stopped))
+                .unwrap_err()
+                .category,
+            "Cancelled",
+        );
+        limits.duration_ms = 0;
+        let expired = Arc::new(Control::new(&limits));
+        assert_eq!(
+            controller
+                .inspect_inventory(inventory, Some(&expired))
+                .unwrap_err()
+                .category,
+            "Timeout",
+        );
+    }
 }

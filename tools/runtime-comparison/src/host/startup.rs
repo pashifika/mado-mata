@@ -13,6 +13,7 @@ pub(super) struct Startup {
     target_bound: bool,
     configuration: Option<Value>,
     worker: Option<JoinHandle<()>>,
+    function: bool,
 }
 
 impl Startup {
@@ -29,6 +30,7 @@ impl Startup {
             target_bound: false,
             configuration: None,
             worker: None,
+            function: false,
         }
     }
 }
@@ -81,10 +83,41 @@ impl Host {
                 "target startup is available only in Native Readiness",
             ));
         }
+        self.advance_startup(method == "target_start")
+    }
+
+    pub(crate) fn attach_function(&self) -> Result<(), Fault> {
+        if !self.script_startup() {
+            return Ok(());
+        }
+        if lock(&self.inner.state).phase != Phase::Instantiating
+            || self.inner.startup_link.get().is_none()
+        {
+            return Err(Fault::new(
+                "Authority",
+                "Function attachment requires fresh host-owned preparation",
+            ));
+        }
+        lock(&self.inner.startup).function = true;
+        self.native_phase(NativePhase::HostAttachment);
+        self.advance_startup(true)?;
+        while !self.capture_ready() {
+            self.check()?;
+            self.advance_startup(false)?;
+            if !self.capture_ready() {
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        self.check()?;
+        self.native_phase(NativePhase::Instantiation);
+        Ok(())
+    }
+
+    fn advance_startup(&self, start: bool) -> Result<Value, Fault> {
         self.check()?;
         self.reap_startup();
         let mut startup = lock(&self.inner.startup);
-        if method == "target_start" {
+        if start {
             if startup.requested {
                 return Err(Fault::new(
                     "NativeStartRefused",
@@ -227,7 +260,11 @@ impl Host {
         let mut startup = lock(&self.inner.startup);
         self.inner.control.check()?;
         startup.progress.status = NativeTargetStatus::CaptureReady;
-        startup.progress.phase = NativePhase::Readiness;
+        startup.progress.phase = if startup.function {
+            NativePhase::Instantiation
+        } else {
+            NativePhase::Readiness
+        };
         crate::runner::emit_native_status(&self.inner.control, startup.progress);
         Ok(())
     }

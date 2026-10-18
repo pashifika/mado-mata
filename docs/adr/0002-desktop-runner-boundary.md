@@ -48,6 +48,11 @@ The close worker posts its final exit on the event thread only if termination
 has not begun. Forced/incomplete outcomes are not rewritten as success.
 Unexpected application loss retains the runner's parent-loss contract.
 
+[ADR 0013](0013-edit-script-execution.md) reuses this reservation and supervised
+runner for Edit-owned Whole package/Function trials. It adds no WebView Script
+evaluation, persistent interpreter or second native controller.
+
+
 ## Application selection and read-only correspondence
 
 Keep machine-local Target records at version 1. The optional portable
