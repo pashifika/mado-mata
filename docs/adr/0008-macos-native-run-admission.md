@@ -91,6 +91,13 @@ twice. No route fallback, guessed coordinates or test-injected native frame.
 Windows acceptance remains separate: actual ordinary/Whole/Function execution,
 recognition, newer-frame effect, both-route outcomes, Stop and fresh rerun.
 
+The MSVC engine executable embeds a Per-Monitor V2 manifest. Native input combines
+DWM frame placement with desktop metrics; a DPI-unaware child can mix physical
+and virtualized coordinates and refuse valid points on scaled, negative-origin
+monitors. A Desktop-only manifest does not configure its child. Keep the fix in
+the runtime executable, not Script coordinates or input policy. A launched-child
+regression checks DPI awareness without capture or input.
+
 ## One-time confirmed-exit recovery
 
 `max_exit_recoveries` is per-Start authority: absent means zero; only zero or one

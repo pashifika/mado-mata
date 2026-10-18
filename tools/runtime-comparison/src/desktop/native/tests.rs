@@ -79,6 +79,42 @@ fn saved_script_review_does_not_replace_target_permissions_or_finite_limits() {
     }
 }
 
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn four_event_native_projection_bootstraps_typescript_without_widening_input() {
+    let inventory = fixture();
+    let mut request = request(&inventory);
+    request.lane = "native".into();
+    let mut selected = intent();
+    selected.limits.max_actions = 4;
+    request.native_intent = Some(selected);
+    let mut plan = crate::desktop::operation::requested_plan(&request).unwrap();
+    assert_eq!(plan.limits.max_actions, 4);
+    assert_eq!(
+        plan.limits.vm_bytes,
+        crate::desktop::manual_plan().unwrap().limits.vm_bytes
+    );
+    // Exercise the projected limits on real QuickJS, never a native input sink.
+    plan.lane = "controlled".into();
+    plan.native_budgets = None;
+    plan.profile = "template-first".into();
+    let compiled = crate::typescript::compile(&inventory, &plan.limits).unwrap();
+    let options = crate::host::resolve_options(
+        &compiled.schema,
+        &compiled.profiles[&plan.profile],
+        &compiled.package_id,
+    )
+    .unwrap();
+    let control = std::sync::Arc::new(Control::new(&plan.limits));
+    let host = crate::host::Host::new(plan, options, compiled.assets.clone(), control).unwrap();
+    let result = crate::javascript::run(std::sync::Arc::new(compiled), host.clone());
+    let cleanup = host.finish();
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(host.limits().max_actions, 4);
+    assert_eq!(host.snapshot()["effects"].as_array().unwrap().len(), 2);
+    assert_eq!(cleanup["clean"], true);
+}
+
 #[test]
 fn recovery_is_default_zero_and_requires_separate_launch_approval() {
     let mut raw = serde_json::to_value(intent()).unwrap();
@@ -113,7 +149,12 @@ fn target() -> NativeTarget {
         process: Some((17, "0123456789abcdef".into())),
         window_title: "Exact reviewed window".into(),
         input: NativeInputPolicy {
-            route: if cfg!(windows) { "window_message" } else { "process_directed" }.into(),
+            route: if cfg!(windows) {
+                "window_message"
+            } else {
+                "process_directed"
+            }
+            .into(),
             focus: "preserve".into(),
             pointer_mode: (!cfg!(windows)).then(|| "appkit_background".into()),
             click_hold_ms: 50,
@@ -452,7 +493,10 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
         if cfg!(windows) {
             assert!(native["input"].get("macos_process_pointer_mode").is_none());
         } else {
-            assert_eq!(native["input"]["macos_process_pointer_mode"], "appkit_background");
+            assert_eq!(
+                native["input"]["macos_process_pointer_mode"],
+                "appkit_background"
+            );
         }
         assert_eq!(native["input"]["click_hold_ms"], 50);
         assert_eq!(
@@ -733,7 +777,8 @@ fn only_script_projection_defers_process_selection_to_the_sdk() {
 fn windows_launch_and_recovery_refuse_before_reservation_or_preparation() {
     for (launch_approved, max_exit_recoveries) in [(true, 0), (true, 1), (false, 1)] {
         for review in [intent().review, NativeReview::Script {}] {
-            let controller = DesktopController::new("unused-controlled".into(), "unused-engine".into());
+            let controller =
+                DesktopController::new("unused-controlled".into(), "unused-engine".into());
             let mut request = request(&fixture());
             request.lane = "native".into();
             let mut selected = intent();
@@ -741,18 +786,22 @@ fn windows_launch_and_recovery_refuse_before_reservation_or_preparation() {
             selected.max_exit_recoveries = max_exit_recoveries;
             selected.review = review;
             request.native_intent = Some(selected);
-            let fault = controller.start_with_preparation(
-                request,
-                |_, _| -> Result<StartPreparation, Fault> {
-                    panic!("unsupported Windows intent reached preparation")
-                },
-                |_, _| {
-                    |_: &Control, _: &dyn Fn(crate::desktop::NativeProgress),
-                     _: &dyn Fn() -> Result<(), Fault>| -> Result<Option<NativeTarget>, Fault> {
-                        panic!("unsupported Windows intent reached target resolution")
-                    }
-                },
-            ).unwrap_err();
+            let fault = controller
+                .start_with_preparation(
+                    request,
+                    |_, _| -> Result<StartPreparation, Fault> {
+                        panic!("unsupported Windows intent reached preparation")
+                    },
+                    |_, _| {
+                        |_: &Control,
+                         _: &dyn Fn(crate::desktop::NativeProgress),
+                         _: &dyn Fn() -> Result<(), Fault>|
+                         -> Result<Option<NativeTarget>, Fault> {
+                            panic!("unsupported Windows intent reached target resolution")
+                        }
+                    },
+                )
+                .unwrap_err();
             assert_eq!(fault.category, "NativeRefused");
             assert!(controller.poll().run.is_none());
         }

@@ -28,7 +28,7 @@ mado-pilot-ocr = { git = "https://github.com/pashifika/mado-pilot", rev = "db939
 libc = "=0.2.189"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Performance", "Win32_System_Threading"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Performance", "Win32_System_Threading", "Win32_UI_HiDpi"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "=0.6.4", features = ["exception"], optional = true }

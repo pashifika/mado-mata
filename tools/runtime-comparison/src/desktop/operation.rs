@@ -877,6 +877,7 @@ pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
         plan.limits.duration_ms = limits.budgets().total_ms()?;
         plan.limits.readiness_ms = limits.readiness_ms;
         plan.limits.wait_ms = limits.wait_ms;
+        // Preserve reviewed expanded-input authority; VM work has its own bound.
         plan.limits.max_actions = limits.max_actions;
         plan.limits.cleanup_ms = limits.cleanup_ms;
         plan.limits.containment_ms = limits.containment_ms;

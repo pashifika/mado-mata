@@ -379,3 +379,41 @@ fn external_cli_plans_cannot_claim_desktop_reviewed_authority() {
         }
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn runtime_process_uses_per_monitor_coordinates() {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Stdio;
+    use windows_sys::Win32::UI::HiDpi::{GetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mado-runtime-comparison"))
+        .arg("target-probe")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start the real runtime without capture or input");
+    let started = Instant::now();
+    let (result, awareness) = loop {
+        let mut awareness = -1;
+        // SAFETY: child owns the live process handle; awareness is writable.
+        #[expect(unsafe_code, reason = "read-only DPI query on the owned runtime")]
+        let result = unsafe { GetProcessDpiAwareness(child.as_raw_handle(), &raw mut awareness) };
+        if (result == 0 && awareness == PROCESS_PER_MONITOR_DPI_AWARE)
+            || started.elapsed() >= Duration::from_secs(2)
+        {
+            break (result, awareness);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let stopped = child.kill();
+    let reaped = child.wait();
+    stopped.expect("stop only the owned idle probe");
+    reaped.expect("reap the owned idle probe");
+    assert_eq!(result, 0, "query runtime DPI awareness");
+    assert_eq!(
+        awareness, PROCESS_PER_MONITOR_DPI_AWARE,
+        "native pointer coordinates must not use a DPI-virtualized desktop"
+    );
+}

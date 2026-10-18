@@ -94,6 +94,13 @@ not create additional caller authority. Missing/stale/terminal frames refuse.
 Controlled-provider coverage does not establish actual game effect, route
 compatibility, physical Stop settlement or full Windows qualification.
 
+Windows MSVC runtime executables embed a
+[Per-Monitor V2 DPI manifest](https://learn.microsoft.com/en-us/windows/win32/hidpi/setting-the-default-dpi-awareness-for-a-process).
+This keeps desktop metrics in the physical coordinate space used by native
+capture and pointer placement, including scaled monitors with negative origins.
+Rebuild the fixed engine child after updating; changing Script coordinates or
+the game's display settings is not a substitute.
+
 The independent CLI retains explicit `native_config` and its existing preparation
 contract. External `run`/`manual` plans cannot select Desktop-only `native_budgets`,
 `native_config.native.input.package_approved: true`,
@@ -604,10 +611,10 @@ not modify recorded pixels or manufacture a successful postcondition.
 macOS cleanup uses the last successfully submitted or possibly effective pointer
 destination, not an observed physical pointer position.
 
-`limits.max_actions` also bounds JavaScript promise creation and executed jobs.
-Keep adequate VM startup allowance there and use `native.input.max_actions` for
-a tighter physical-input event bound; a three-event input allowance does not
-require a three-promise VM allowance.
+`limits.max_actions` bounds expanded input events, not JavaScript startup work.
+Promise creation, executed jobs and retained rejections each have an independent
+attempt-wide ceiling of `limits.vm_bytes / 1024`. Memory and stage deadlines
+still apply; a small input allowance does not require wider physical authority.
 
 `submit` admits bounded work; `settle` invokes the configured route using the
 retained frame stamp and unchanged-geometry policy. Native receipts retain SDK
