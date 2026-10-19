@@ -35,6 +35,9 @@ objc2 = { version = "=0.6.4", features = ["exception"], optional = true }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "libc", "NSRunningApplication"], optional = true }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSDate", "NSString", "NSURL"], optional = true }
 
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+sha2 = { version = "=0.10.9", features = ["asm"] }
+
 [build-dependencies]
 sha2 = "=0.10.9"
 

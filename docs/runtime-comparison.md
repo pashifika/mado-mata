@@ -468,6 +468,9 @@ Here `preflight_us` covers common host preparation and TypeScript compilation;
 `workflow_us` covers the adapter invocation, including JavaScript dependency
 inspection and module/readiness overhead. It is not an isolated script-body
 benchmark.
+On Apple Silicon, the existing SHA-256 dependency enables its upstream ARM
+backend. Resource bytes are still checked before and after engine initialization;
+the optimization neither skips verification nor changes digest identities.
 Peak RSS is an observed periodic maximum, not an OS peak or proof of cleanup.
 `steady_process_rss` separately reports a fixed workflow window: exclude the
 first 100 ms after workflow entry, then sample for 250 ms using the existing
