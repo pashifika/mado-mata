@@ -37,6 +37,11 @@ impl SharedDeadline {
     }
 }
 
+/// Shared measurement timestamp; unlike a deadline, it retains past boundaries.
+pub(super) fn now_us() -> Result<u64, Fault> {
+    Ok(now_ns()? / 1_000)
+}
+
 /// Nanoseconds on the clock `Instant::now` reads on this target.
 #[cfg(unix)]
 fn now_ns() -> Result<u64, Fault> {

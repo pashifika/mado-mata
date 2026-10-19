@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Use the same ordered action arrays and selected template asset across the
+  Rust, JavaScript, TypeScript and Lua comparison workloads. Support spatial
+  postconditions and a bounded pre-observation wait without retrying input.
+- Report sampled peak RSS separately from a fixed workflow-window RSS summary.
+  Preserve short or missing windows as unavailable, not passing memory evidence.
 - Release the OCR detector input tensor before preparing recognition crops.
   This shortens buffer lifetime; it does not cap ONNX Runtime memory usage.
 

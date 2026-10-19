@@ -415,7 +415,11 @@ fn same_signer_release_upgrade_keeps_profiles_and_recovers_an_incompatible_schem
         .unwrap();
     let first = installed(&fixture);
     let selection = select(application, &view_ref(&workspace), &first);
-    let custom = json!({"priorities":["ocr"],"actions":{"template":"E","ocr":"F"}});
+    let custom_actions = json!({
+        "template":[{"kind":"key_down","key":"E"},{"kind":"key_up","key":"E"}],
+        "ocr":[{"kind":"key_down","key":"F"},{"kind":"key_up","key":"F"}]
+    });
+    let custom = json!({"priorities":["ocr"],"actions":custom_actions});
     let saved = application
         .save_profile(&workspace_ref(&selection), None, "Custom", custom)
         .unwrap();
@@ -440,7 +444,7 @@ fn same_signer_release_upgrade_keeps_profiles_and_recovers_an_incompatible_schem
     assert_eq!(profile.id, saved.id);
     assert_eq!(profile.name, "Custom");
     assert_eq!(profile.values["priorities"], json!(["ocr"]));
-    assert_eq!(profile.values["actions"], json!({"template":"E","ocr":"F"}));
+    assert_eq!(profile.values["actions"], custom_actions);
     assert_eq!(profile.values["retries"], 2);
     assert_eq!(
         lock(&application.store).tab("Installed").unwrap().packages[0].source,
@@ -454,8 +458,8 @@ fn same_signer_release_upgrade_keeps_profiles_and_recovers_an_incompatible_schem
         SIGNER,
         Some(schema(|schema| {
             with_retries(schema);
-            schema["properties"]["actions"]["properties"]["template"] =
-                json!({"type":"string","enum":["A","C"]});
+            schema["properties"]["actions"]["properties"]["template"]["items"]["properties"]["key"]
+                ["enum"] = json!(["A", "C"]);
         })),
     );
     let file = profile_path(&fixture, "Installed", &saved);
@@ -480,7 +484,10 @@ fn same_signer_release_upgrade_keeps_profiles_and_recovers_an_incompatible_schem
         .repair_profile(
             &recovery.context,
             &saved.id,
-            json!({"priorities":["ocr"],"actions":{"template":"C","ocr":"F"},"retries":2}),
+            json!({"priorities":["ocr"],"actions":{
+                "template":[{"kind":"key_down","key":"C"},{"kind":"key_up","key":"C"}],
+                "ocr":[{"kind":"key_down","key":"F"},{"kind":"key_up","key":"F"}]
+            },"retries":2}),
         )
         .unwrap();
     assert!(repaired.issue.is_none());
@@ -489,7 +496,10 @@ fn same_signer_release_upgrade_keeps_profiles_and_recovers_an_incompatible_schem
     let selection = bound.workspace.selection.unwrap();
     assert_eq!(selection.source, reference(&narrowed));
     assert_eq!(selection.profiles[0].id, saved.id);
-    assert_eq!(selection.profiles[0].values["actions"]["template"], "C");
+    assert_eq!(
+        selection.profiles[0].values["actions"]["template"],
+        json!([{"kind":"key_down","key":"C"},{"kind":"key_up","key":"C"}])
+    );
 }
 
 #[test]
@@ -506,7 +516,10 @@ fn another_or_unknown_signer_is_refused_before_any_tab_write() {
             &workspace_ref(&selection),
             None,
             "Kept",
-            json!({"priorities":["ocr"],"actions":{"template":"E","ocr":"F"}}),
+            json!({"priorities":["ocr"],"actions":{
+                "template":[{"kind":"key_down","key":"E"},{"kind":"key_up","key":"E"}],
+                "ocr":[{"kind":"key_down","key":"F"},{"kind":"key_up","key":"F"}]
+            }}),
         )
         .unwrap();
     let tab = fixture.root.join("tabs/Installed");

@@ -34,9 +34,9 @@ pub use enabled::{Engine, release_runner_resources};
 #[cfg(feature = "engine")]
 mod enabled {
     #[cfg(test)]
-    mod native_wait_tests;
-    #[cfg(test)]
     mod native_frame_tests;
+    #[cfg(test)]
+    mod native_wait_tests;
     #[cfg(test)]
     mod publication_tests;
     #[cfg(windows)]
@@ -1477,6 +1477,13 @@ mod enabled {
             if request.expected.is_empty() || request.expected.len() > self.limits.log_bytes {
                 return Err(argument("postcondition text must be nonempty and bounded"));
             }
+            let region = match &request.roi {
+                Some(roi) => mp::OcrRegion::Region {
+                    rect: roi.rect(&current.frame)?,
+                    policy: mp::ClipPolicy::Reject,
+                },
+                None => mp::OcrRegion::FullFrame,
+            };
             let operation = self.operation(self.limits.wait_ms)?;
             let _active = self.active();
             let backend = self
@@ -1493,12 +1500,15 @@ mod enabled {
                     &current.frame,
                     backend.backend_identity(),
                     backend.model_identity(),
-                    mp::OcrRegion::FullFrame,
+                    region,
                     mp::CoordinateSpace::CapturePixels,
                     &operation,
                 ))
                 .map_err(|error| engine_error("postcondition_ocr", error))?;
             self.check_session(state)?;
+            if result.stamp() != now {
+                return Err(internal("recognition source correlation mismatch"));
+            }
             Ok(
                 json!({"satisfied":result.regions().iter().any(|region| region.text() == request.expected),
                 "frame":now.sequence().value(),"checkpoint":before.sequence().value(),"causation_claimed":false}),
@@ -1772,6 +1782,8 @@ mod enabled {
         observation: Value,
         checkpoint: Value,
         expected: String,
+        #[serde(default, deserialize_with = "Roi::deserialize_optional")]
+        roi: Option<Roi>,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -1792,6 +1804,13 @@ mod enabled {
     }
 
     impl Roi {
+        fn deserialize_optional<'de, D>(deserializer: D) -> Result<Option<Self>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            Self::deserialize(deserializer).map(Some)
+        }
+
         fn rect(&self, frame: &mp::Frame) -> Result<mp::Rect, Fault> {
             let extent = frame.descriptor().extent();
             if self.width == 0
@@ -3731,9 +3750,7 @@ mod enabled {
             ));
         }
         if input.package_approved {
-            if !input.representative_actions.is_empty()
-                || config.geometry.is_some()
-            {
+            if !input.representative_actions.is_empty() || config.geometry.is_some() {
                 return Err(blocked(
                     "input_authority",
                     "reviewed package input is exclusive of manual geometry and actions",

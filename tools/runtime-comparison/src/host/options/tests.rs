@@ -9,13 +9,13 @@ fn profiles_replace_complete_top_level_values_without_nested_inheritance() {
     let resolved = resolve_options(&schema, &omitted, "m0-workload").expect("whole default");
     assert_eq!(resolved["recognition"]["roi"]["width"], 640);
     let mut partial = omitted.clone();
-    partial["options"]["recognition"] = json!({"threshold":0.8});
+    partial["options"]["recognition"] = json!({"threshold":0.8,"asset":"marker"});
     let error = resolve_options(&schema, &partial, "m0-workload")
         .expect_err("partial object must not inherit ROI");
     assert_eq!(error.category, "Profile");
     assert_eq!(error.context["path"], "$.recognition.roi");
     partial["options"]["recognition"] =
-        json!({"threshold":0.8,"roi":{"x":0,"y":0,"width":320,"height":240}});
+        json!({"threshold":0.8,"roi":{"x":0,"y":0,"width":320,"height":240},"asset":"marker"});
     partial["options"]["priorities"] = json!(["ocr"]);
     let replacement =
         resolve_options(&schema, &partial, "m0-workload").expect("complete replacement");
@@ -45,18 +45,27 @@ fn profile_identity_unknown_fields_and_coercion_are_refused() {
         (json!({"priorities":["missing"]}), "$.priorities[0]"),
         (json!({"unknown":true}), "$.unknown"),
         (
-            json!({"recognition":{"threshold":"0.9","roi":{"x":0,"y":0,"width":640,"height":480}}}),
+            json!({"recognition":{"threshold":"0.9","roi":{"x":0,"y":0,"width":640,"height":480},"asset":"marker"}}),
             "$.recognition.threshold",
         ),
         (
-            json!({"recognition":{"threshold":2,"roi":{"x":0,"y":0,"width":640,"height":480}}}),
+            json!({"recognition":{"threshold":2,"roi":{"x":0,"y":0,"width":640,"height":480},"asset":"marker"}}),
             "$.recognition.threshold",
         ),
         (
-            json!({"actions":{"template":"A","ocr":"B","extra":"C"}}),
+            json!({"actions":{
+                "template":[{"kind":"key_down","key":"A"},{"kind":"key_up","key":"A"}],
+                "ocr":[{"kind":"key_down","key":"B"},{"kind":"key_up","key":"B"}],"extra":[]}}),
             "$.actions.extra",
         ),
         (json!({"priorities":[]}), "$.priorities"),
+        (
+            json!({"actions":{
+                "template":[{"kind":"key_down","key":"A"},{"kind":"key_up","key":"A"}],
+                "ocr":"B"}}),
+            "$.actions.ocr",
+        ),
+        (json!({"postcondition":"DONE"}), "$.postcondition"),
     ];
     for (options, path) in invalid_options {
         let invalid = json!({"package_id":"m0-workload","schema_version":1,"options":options});

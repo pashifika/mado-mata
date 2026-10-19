@@ -717,11 +717,50 @@ These observations are controlled/replay evidence, not live game effects or
 an adoption decision. Full native qualification, R6 and both-OS adoption remain
 incomplete; neither later desktop acceptance nor API availability closes them.
 
+### Current Apple Silicon native continuation
+
+At SDK pin `c1c6fd3f0d8400649c018ddef29075aee6e37fe4`, the common workload
+supports ordered native actions and spatial, strictly newer-frame
+postconditions across direct Rust, JavaScript, TypeScript and Lua. A separately
+frozen qualification completed all eight candidate/profile cases. Each case
+submitted one four-event click, satisfied its state-distinguishing postcondition,
+and physically settled with zero remaining native owners. Independent final
+images agreed with the declared states; this does not turn input submission
+into a causal application-effect guarantee.
+
+The following measured cohort stopped after 32 of 800 planned invocations:
+31 completed successfully and one TypeScript close operation returned
+`TargetLost` during settlement. Its receipt refused all four events, reported
+zero submitted events and no fallback; conservative `input_uncertain` accounting
+remains intact. All 32 invocations confirmed physical cleanup and child reaping.
+No input retry followed the refusal. Read-only identity observations after the
+stop did not identify the SDK guard that rejected that operation.
+
+Each candidate/profile has four attempted measurements; the failing profile has
+three successes. Successful-only p50 summaries retain the failed row separately.
+The raw CLI report's timing groups include failed invocations and are not those
+successful-only summaries.
+Neither p95 nor p99 has enough samples, and no tail result or passing complete
+cohort is claimed. The workflow-relative RSS window produced bounded samples;
+it is not proof of stationary memory use, an OS peak or leak freedom.
+
+Separate read-only lifecycle scenarios used explicitly authorized real process
+termination and background launch without requesting activation. JavaScript
+observed `TargetLost`; Lua observed a capture `Timeout`, not the expected
+target-loss classification. Both old processes were independently confirmed
+absent. Each explicitly selected new process lifetime then completed a fresh
+capture workflow. All four attempts physically settled, reaped their children
+and submitted zero input events. This does not establish game readiness,
+automatic recovery or a late-publication race result.
+
+Full both-OS qualification remains blocked by incomplete measurements and
+native scenario coverage. These results are not an adoption decision.
+
 ## Candidate and authoring observations
 
 | Path | Verified characteristics | Unresolved comparison |
 | --- | --- | --- |
-| Direct Rust | Independent decisions, shared-host safety, real recorded template/OCR and newer-frame postconditions | Representative native input costs and full live-target ownership matrix |
+| Direct Rust | Independent decisions, shared-host safety, recorded template/OCR, bounded native actions and spatial newer-frame postconditions | Complete representative native latency tails and full live-target ownership matrix |
 | JavaScript | ES module caching/live cycles, bounded jobs, interruptible computation, frozen options, recorded replay | Full native lifecycle corpus and representative performance |
 | Lua | Restricted secondary loading, coroutine interruption, cycle refusal, readonly values, recorded replay | Native workload coverage and representative performance |
 | TypeScript to JavaScript | Inventory-bound compiler, strict SDK/schema types, actual completions, original helper source locations | Separate compiler CPU/RSS are not included in runtime-child measurements |

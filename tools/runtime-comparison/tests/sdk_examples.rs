@@ -691,3 +691,32 @@ fn drag_action_shape_misuse_is_refused_by_the_trusted_compiler() {
         );
     }
 }
+
+#[test]
+fn postcondition_roi_compiles_and_limits_visible_evidence() {
+    let source = |roi: &str| {
+        format!(
+            "export function readiness(): MadoReady {{ return \"Ready\"; }}\nexport function workflow(): void {{\n  const before = host.call(\"observe\", {{}});\n  const after = host.call(\"observe\", {{}});\n  const result = host.call(\"postcondition\", {{ observation: after, checkpoint: before, expected: \"READY\", roi: {roi} }});\n  host.call(\"log\", {{ message: result.satisfied ? \"inside\" : \"outside\" }});\n  host.call(\"release\", {{ id: after.id }});\n  host.call(\"release\", {{ id: before.id }});\n}}\n"
+        )
+    };
+    for (roi, expected) in [
+        ("{ x: 100, y: 80, width: 40, height: 20 }", "inside"),
+        ("{ x: 0, y: 0, width: 40, height: 20 }", "outside"),
+    ] {
+        let result = run(&compiled(EMPTY_SCHEMA, &source(roi)), "success");
+        assert_eq!(result.returned_released().logs(), [expected]);
+        assert_eq!(result.effects(), 0);
+        assert_eq!(result.count("postcondition"), 1);
+    }
+    for invalid in [
+        "null",
+        "{ x: 100, y: 80, width: 40 }",
+        "{ x: \"100\", y: 80, width: 40, height: 20 }",
+        "{ x: 100, y: 80, width: 40, height: 20, space: \"screen\" }",
+    ] {
+        let fault = try_compile(EMPTY_SCHEMA, &source(invalid))
+            .err()
+            .unwrap_or_else(|| panic!("compiled invalid ROI: {invalid}"));
+        assert_eq!(fault.category, "TypeScript", "{invalid}: {fault:?}");
+    }
+}

@@ -18,7 +18,9 @@ pub use child::child;
 pub use evidence::Observer;
 #[cfg(feature = "engine")]
 pub(crate) use evidence::emit_backend_initialization_started;
-pub(crate) use evidence::{emit_host_wait_entered, emit_script_log, emit_vm_hook_reached};
+pub(crate) use evidence::{
+    emit_host_wait_entered, emit_script_log, emit_vm_hook_reached, emit_workflow_entered,
+};
 pub(crate) use evidence::{emit_native_preparation, emit_native_status};
 pub(crate) use payload::reserve_native_images;
 pub use protocol::read_json;
