@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Release the OCR detector input tensor before preparing recognition crops.
+  This shortens buffer lifetime; it does not cap ONNX Runtime memory usage.
+
+- Consume MadoPilot's one-ULP detector-roundoff repair and Windows commit-time
+  target-loss check. Keep tensor values and input routes unchanged.
+
 - Execute a whole package or an existing file-level function directly in Edit.
   Reuse explicit Save all, immutable source capture and the supervised runner;
   rerun current source with fresh VM state while preserving the game's state.

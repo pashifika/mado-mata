@@ -1,7 +1,7 @@
 # Runtime comparison: replay and native prerequisites
 
 The optional `engine` feature consumes the public `mado-pilot` facade at
-`db939f0905f0bff1a8185bef97e46d84b3571c80`. The harness uses no sibling path
+`f61a57f661c0314ea0a1d860d9298fbff86d903d`. The harness uses no sibling path
 dependency, fake OCR backend, or substitute input route. macOS startup adds
 read-only Foundation/libproc lifetime checks during startup and exact bound-lifetime
 checks during execution; capture and input still use the public facade.
@@ -130,8 +130,8 @@ selected native-library directories; it does not widen that path for Node.
 Initialization-only environment checks do not compile or evaluate package
 modules and do not require Node.
 
-Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/db939f0905f0bff1a8185bef97e46d84b3571c80/CONTRIBUTING.md#native-development-prerequisites)
-and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/db939f0905f0bff1a8185bef97e46d84b3571c80/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
+Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/CONTRIBUTING.md#native-development-prerequisites)
+and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
 Its `tools/setup-native.py` configures only the command it launches; it installs
 nothing. A separately obtained, revision-pinned public checkout can provide that
 setup tool without becoming the application's dependency source. From this
@@ -190,7 +190,7 @@ command and do not qualify a native OS/workload.
 
 ### Accepted OCR content
 
-The pinned SDK [model catalog](https://github.com/pashifika/mado-pilot/blob/db939f0905f0bff1a8185bef97e46d84b3571c80/crates/automation/ocr/resources/model-catalog.json)
+The pinned SDK [model catalog](https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/crates/automation/ocr/resources/model-catalog.json)
 owns implemented profiles, exact model/vocabulary bytes, relative paths and
 acquisition sources. Desktop [OCR resource setup](desktop.md#save-and-check-an-ocr-environment)
 downloads the selected complete set and the reviewed ONNX Runtime 1.29.0 archive,
