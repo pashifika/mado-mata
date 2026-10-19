@@ -11,8 +11,8 @@ Models (unmodified Apache-2.0 bytes)
   No affiliation or endorsement by these projects or hosts is implied.
 
 Content authority:
-  https://github.com/pashifika/mado-pilot/blob/c1c6fd3f0d8400649c018ddef29075aee6e37fe4/crates/automation/ocr/resources/model-catalog.json
-  https://github.com/pashifika/mado-pilot/blob/c1c6fd3f0d8400649c018ddef29075aee6e37fe4/docs/adr/0084-ocr-model-choices-and-test-results.md
+  https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/crates/automation/ocr/resources/model-catalog.json
+  https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/docs/adr/0084-ocr-model-choices-and-test-results.md
 License and attribution provenance:
   https://huggingface.co/SWHL/RapidOCR/blob/1cfba2e90fc938db55889873735088de210cc173/README.md
   https://huggingface.co/DjB314/RapidOCR/blob/04e88d0483f0bfcdd0f29429594244c10bfc2867/README.md
