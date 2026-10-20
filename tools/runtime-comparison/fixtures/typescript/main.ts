@@ -8,7 +8,7 @@ export function readiness(): MadoReady {
 
 export function workflow(): void {
   const observation = host.call("observe", {});
-  const asset = host.call("asset", { id: "marker" });
+  const asset = host.call("asset", { id: host.options.recognition.asset });
   const roi = host.options.recognition.roi;
   const template = host.call("recognize", { observation, kind: "template", asset: asset.id, roi });
   const ocr = host.call("recognize", { observation, kind: "ocr", roi });
@@ -16,16 +16,19 @@ export function workflow(): void {
   host.state.decision = decision;
   host.state.count = (typeof host.state.count === "number" ? host.state.count : 0) + 1;
   if (decision !== null) {
-    const key = host.options.actions[decision];
     const submission = host.call("submit", {
       observation,
-      actions: [{ kind: "key_down", key }, { kind: "key_up", key }],
+      actions: host.options.actions[decision] as readonly MadoAction[],
     });
     const receipt = host.call("settle", { id: submission.id });
     host.state.receipt = receipt;
+    if (host.options.postcondition.wait_ms > 0) {
+      host.call("wait", { duration_ms: host.options.postcondition.wait_ms });
+    }
     const after = host.call("observe", {});
     host.state.postcondition = host.call("postcondition", {
-      observation: after, checkpoint: observation, expected: host.options.postcondition,
+      observation: after, checkpoint: observation,
+      expected: host.options.postcondition.expected, roi: host.options.postcondition.roi,
     });
     host.call("release", { id: after.id });
     host.call("release", { id: receipt.id });

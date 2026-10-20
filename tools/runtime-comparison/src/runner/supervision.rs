@@ -14,6 +14,271 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+const RSS_POLL_MS: u64 = 5;
+const RSS_SETTLING_US: u64 = 100_000;
+const RSS_WINDOW_US: u64 = 250_000;
+const RSS_MIN_SAMPLES: u64 = 20;
+const RSS_MIN_SPAN_US: u64 = 200_000;
+
+#[derive(Default)]
+struct RssAccumulator {
+    samples: u64,
+    total: u128,
+    min: u64,
+    max: u64,
+    first_after_us: u64,
+    last_before_us: u64,
+}
+
+impl RssAccumulator {
+    fn observe(&mut self, before_us: u64, after_us: u64, bytes: u64) {
+        if self.samples == 0 {
+            self.min = bytes;
+            self.first_after_us = after_us;
+        }
+        self.samples += 1;
+        self.total += u128::from(bytes);
+        self.min = self.min.min(bytes);
+        self.max = self.max.max(bytes);
+        self.last_before_us = before_us;
+    }
+
+    fn report(&self, boundary_reason: Option<&str>) -> Value {
+        let span = self.last_before_us.saturating_sub(self.first_after_us);
+        let reason = boundary_reason.or({
+            if self.samples == 0 {
+                Some("no process RSS samples inside the declared window")
+            } else if self.samples < RSS_MIN_SAMPLES || span < RSS_MIN_SPAN_US {
+                Some("insufficient process RSS sample count or sampled span")
+            } else {
+                None
+            }
+        });
+        let summary = reason.is_none().then(|| {
+            json!({"min_bytes":self.min,"max_bytes":self.max,
+                "mean_bytes":self.total as f64 / self.samples as f64,
+                "samples":self.samples,"window_us":span,
+                "first_sample_after_clock_us":self.first_after_us,
+                "last_sample_before_clock_us":self.last_before_us})
+        });
+        json!({"summary":summary,"reason":reason})
+    }
+}
+
+#[derive(Default)]
+struct SteadyProcessRss {
+    started_us: Option<u64>,
+    finished_us: Option<u64>,
+    stopped_us: Option<u64>,
+    invalid_boundary: bool,
+    sampling_closed: bool,
+    child: RssAccumulator,
+    supervisor: RssAccumulator,
+}
+
+impl SteadyProcessRss {
+    fn retain_boundary(slot: &mut Option<u64>, incoming: Option<u64>) -> bool {
+        if let Some(incoming) = incoming {
+            if slot.is_some_and(|previous| previous != incoming) {
+                return false;
+            }
+            *slot = Some(incoming);
+        }
+        true
+    }
+
+    fn evidence(&mut self, value: &Value) {
+        if value["event"] == "WorkflowEntered" {
+            self.invalid_boundary |=
+                !Self::retain_boundary(&mut self.started_us, value["clock_us"].as_u64());
+        } else if value["event"] == "StopRequested" {
+            self.stop(value["clock_us"].as_u64());
+        } else if value["event"] == "EntrySettled" || value["event"] == "Terminal" {
+            self.invalid_boundary |= !Self::retain_boundary(
+                &mut self.started_us,
+                value["workflow_started_clock_us"].as_u64(),
+            );
+            self.invalid_boundary |= !Self::retain_boundary(
+                &mut self.finished_us,
+                value["workflow_finished_clock_us"].as_u64(),
+            );
+        }
+    }
+
+    fn stop(&mut self, at_us: Option<u64>) {
+        if let Some(at_us) = at_us {
+            self.stopped_us = Some(
+                self.stopped_us
+                    .map_or(at_us, |previous| previous.min(at_us)),
+            );
+        } else {
+            self.invalid_boundary = true;
+        }
+    }
+
+    fn window(&self) -> Option<(u64, u64)> {
+        let start = self.started_us?.checked_add(RSS_SETTLING_US)?;
+        Some((start, start.checked_add(RSS_WINDOW_US)?))
+    }
+
+    fn begin_sample(&mut self) -> Option<u64> {
+        if self.sampling_closed || self.invalid_boundary {
+            return None;
+        }
+        let (start, end) = self.window()?;
+        match super::clock::now_us() {
+            Ok(at) if at < start => None,
+            Ok(at) if at < end => Some(at),
+            Ok(_) => {
+                self.sampling_closed = true;
+                None
+            }
+            Err(_) => {
+                self.invalid_boundary = true;
+                None
+            }
+        }
+    }
+
+    fn observe(
+        &mut self,
+        before_us: u64,
+        after_us: u64,
+        child_bytes: Option<u64>,
+        supervisor_bytes: Option<u64>,
+    ) {
+        let Some((start, end)) = self.window() else {
+            return;
+        };
+        // Both clock readings surround the OS refresh; boundary-straddling
+        // samples cannot establish that their RSS belongs to this window.
+        if before_us < start || after_us >= end || after_us < before_us {
+            return;
+        }
+        if let Some(bytes) = child_bytes {
+            self.child.observe(before_us, after_us, bytes);
+        }
+        if let Some(bytes) = supervisor_bytes {
+            self.supervisor.observe(before_us, after_us, bytes);
+        }
+    }
+
+    fn report(&self) -> Value {
+        let reason = if self.invalid_boundary {
+            Some("inconsistent or unavailable lifecycle clock boundary")
+        } else if let Some((_, end)) = self.window() {
+            match self.finished_us {
+                None => Some("runtime entry completion boundary unavailable"),
+                Some(finished) if finished < end => {
+                    Some("workflow ended before the declared steady window completed")
+                }
+                Some(_) if self.stopped_us.is_some_and(|stopped| stopped < end) => {
+                    Some("Stop interrupted the declared steady window")
+                }
+                Some(_) => None,
+            }
+        } else {
+            Some("workflow start clock boundary unavailable")
+        };
+        json!({
+            "policy":{"version":1,"sampler":"existing supervisor sysinfo process refresh",
+                "clock":"shared OS monotonic microseconds; clock reads bracket each process refresh",
+                "poll_interval_ms":RSS_POLL_MS,"settling_offset_us":RSS_SETTLING_US,
+                "declared_window_us":RSS_WINDOW_US,"minimum_samples":RSS_MIN_SAMPLES,
+                "minimum_sampled_span_us":RSS_MIN_SPAN_US,
+                "boundaries":"fixed window after WorkflowEntered; runtime entry must finish at or after window end; an earlier Stop excludes it",
+                "aggregation":"unweighted arithmetic mean of actual samples; child and supervisor are separate, not summed",
+                "limitations":"windowed RSS, not allocator peak, OS peak, statistical stationarity or same-process leak proof; process refresh and scheduling add sampling gaps"},
+            "workflow_started_clock_us":self.started_us,
+            "runtime_entry_finished_clock_us":self.finished_us,"stop_clock_us":self.stopped_us,
+            "child":self.child.report(reason),"supervisor":self.supervisor.report(reason)
+        })
+    }
+}
+
+#[cfg(test)]
+mod rss_tests {
+    use super::*;
+
+    fn active_window() -> SteadyProcessRss {
+        let mut rss = SteadyProcessRss::default();
+        rss.evidence(&json!({"event":"WorkflowEntered","clock_us":1_000}));
+        rss.evidence(&json!({"event":"EntrySettled",
+            "workflow_started_clock_us":1_000,"workflow_finished_clock_us":351_000}));
+        rss
+    }
+
+    fn populate(rss: &mut SteadyProcessRss, count: u64, spacing: u64) {
+        for index in 0..count {
+            let before = 101_000 + index * spacing;
+            rss.observe(before, before + 100, Some(100 + index), None);
+        }
+    }
+
+    #[test]
+    fn rss_window_excludes_settling_boundary_straddles_and_cleanup() {
+        let mut rss = active_window();
+        for (before, after) in [
+            (1_000, 1_100),
+            (100_999, 101_001),
+            (350_999, 351_001),
+            (351_000, 351_100),
+            (400_000, 400_100),
+        ] {
+            rss.observe(before, after, Some(u64::MAX), Some(u64::MAX));
+        }
+        populate(&mut rss, 21, 11_000);
+        let reported = rss.report();
+        assert_eq!(reported["child"]["summary"]["samples"], 21);
+        assert_eq!(reported["child"]["summary"]["min_bytes"], 100);
+        assert_eq!(reported["child"]["summary"]["max_bytes"], 120);
+        assert_eq!(reported["child"]["summary"]["mean_bytes"], 110.0);
+        assert_eq!(reported["child"]["summary"]["window_us"], 219_900);
+        assert!(reported["supervisor"]["summary"].is_null());
+    }
+
+    #[test]
+    fn rss_requires_confirmed_workflow_start_and_full_window_completion() {
+        let mut missing = SteadyProcessRss::default();
+        populate(&mut missing, 21, 11_000);
+        assert!(missing.report()["child"]["summary"].is_null());
+
+        let mut unfinished = active_window();
+        unfinished.finished_us = None;
+        populate(&mut unfinished, 21, 11_000);
+        assert!(unfinished.report()["child"]["summary"].is_null());
+
+        let mut short = active_window();
+        short.finished_us = Some(350_999);
+        populate(&mut short, 21, 11_000);
+        assert!(short.report()["child"]["summary"].is_null());
+    }
+
+    #[test]
+    fn rss_requires_both_actual_sample_count_and_sampled_span() {
+        for (count, spacing) in [(0, 0), (19, 12_000), (40, 1_000)] {
+            let mut rss = active_window();
+            populate(&mut rss, count, spacing);
+            let reported = rss.report();
+            assert!(reported["child"]["summary"].is_null(), "{count}/{spacing}");
+            assert!(reported["child"]["reason"].is_string());
+        }
+    }
+
+    #[test]
+    fn interrupted_or_inconsistent_windows_do_not_report_a_mean() {
+        let mut rss = active_window();
+        populate(&mut rss, 21, 11_000);
+        rss.stop(Some(350_999));
+        assert!(rss.report()["child"]["summary"].is_null());
+
+        let mut conflicting = active_window();
+        populate(&mut conflicting, 21, 11_000);
+        conflicting.evidence(&json!({"event":"WorkflowEntered","clock_us":2_000}));
+        assert!(conflicting.report()["child"]["summary"].is_null());
+    }
+}
+
 pub fn sample(plan: &Plan, inventory: &Inventory) -> Result<Vec<RunRecord>, Fault> {
     plan.validate()?;
     let mut records = Vec::new();
@@ -244,7 +509,9 @@ fn loader_prerequisite_record(
             "child_started":false}),
         primary: Some(primary),
         metrics: json!({"elapsed_us":started.elapsed().as_micros(),"runtime":null,
-            "workflow_us":null,"vm_bytes":null,"child_process":null}),
+            "workflow_us":null,"vm_bytes":null,"child_process":null,
+            "child_steady_rss_bytes":null,"supervisor_steady_rss_bytes":null,
+            "steady_process_rss":SteadyProcessRss::default().report()}),
         milestones: Vec::new(),
         exit_code: None,
         forced: false,
@@ -416,6 +683,8 @@ fn supervise(
     let mut sampled_child_rss = 0u64;
     let mut sampled_parent_rss = 0u64;
     let mut metric_samples = 0usize;
+    let mut supervisor_metric_samples = 0usize;
+    let mut steady_rss = SteadyProcessRss::default();
     let mut probe_sequence = 0u64;
     let mut pending_probe = None;
     let mut entry_settled = None;
@@ -424,6 +693,7 @@ fn supervise(
         while let Ok(message) = receiver.try_recv() {
             match message {
                 Ok(mut value) if value["run"] == run && value["attempt"] == attempt => {
+                    steady_rss.evidence(&value);
                     if value["event"] == "TargetProbe" {
                         let result = (|| {
                             if entry_settled.is_some()
@@ -560,6 +830,7 @@ fn supervise(
                 || milestone_stop_due)
         {
             stop_sent_at = Some(Instant::now());
+            steady_rss.stop(super::clock::now_us().ok());
             if disconnect {
                 drop(commands.take());
             } else if let Some(sender) = commands.take() {
@@ -589,19 +860,27 @@ fn supervise(
                 .map_err(|e| Fault::new("Containment", e.to_string()))?;
             break;
         }
+        let sample_before_us = steady_rss.begin_sample();
         system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[child_pid, parent_pid]),
             true,
             ProcessRefreshKind::nothing().with_memory(),
         );
-        if let Some(process) = system.process(child_pid) {
-            sampled_child_rss = sampled_child_rss.max(process.memory());
+        let sample_after_us = sample_before_us.and_then(|_| super::clock::now_us().ok());
+        let child_rss = system.process(child_pid).map(sysinfo::Process::memory);
+        let supervisor_rss = system.process(parent_pid).map(sysinfo::Process::memory);
+        if let Some(bytes) = child_rss {
+            sampled_child_rss = sampled_child_rss.max(bytes);
             metric_samples += 1;
         }
-        if let Some(process) = system.process(parent_pid) {
-            sampled_parent_rss = sampled_parent_rss.max(process.memory());
+        if let Some(bytes) = supervisor_rss {
+            sampled_parent_rss = sampled_parent_rss.max(bytes);
+            supervisor_metric_samples += 1;
         }
-        thread::sleep(Duration::from_millis(5));
+        if let (Some(before), Some(after)) = (sample_before_us, sample_after_us) {
+            steady_rss.observe(before, after, child_rss, supervisor_rss);
+        }
+        thread::sleep(Duration::from_millis(RSS_POLL_MS));
     }
     let exit_us = started.elapsed().as_micros() as u64;
     drop(commands);
@@ -637,6 +916,7 @@ fn supervise(
     while let Ok(message) = receiver.try_recv() {
         match message {
             Ok(mut value) if value["run"] == run && value["attempt"] == attempt => {
+                steady_rss.evidence(&value);
                 if value["event"] == "TargetProbe" {
                     continue;
                 }
@@ -798,6 +1078,7 @@ fn supervise(
             }),
         );
     }
+    let steady_rss = steady_rss.report();
     Ok(RunRecord {
         version: 1,
         run,
@@ -824,8 +1105,12 @@ fn supervise(
             "preflight_us":terminal["preflight_us"],"workflow_us":terminal["workflow_us"],
             "runtime":terminal["runtime"],"child_process":terminal["process"],
             "child_rss_bytes":if metric_samples == 0 { None } else { Some(sampled_child_rss) },
-            "supervisor_rss_bytes":if metric_samples == 0 { None } else { Some(sampled_parent_rss) },"process_samples":metric_samples,
+            "supervisor_rss_bytes":if supervisor_metric_samples == 0 { None } else { Some(sampled_parent_rss) },
+            "process_samples":metric_samples,"supervisor_process_samples":supervisor_metric_samples,
             "rss_method":"5ms periodic samples, observed maximum not OS peak",
+            "child_steady_rss_bytes":steady_rss["child"]["summary"]["mean_bytes"],
+            "supervisor_steady_rss_bytes":steady_rss["supervisor"]["summary"]["mean_bytes"],
+            "steady_process_rss":steady_rss,
             "stop_receipt_us":receipt_latency("StopRequested"),"admission_close_us":receipt_latency("AdmissionClosed"),
             "stop_metric_method":"supervisor-clock upper bound including pipe delivery and polling; null when no external Stop",
             "child_stop_at_us":terminal["stop_at_us"],"child_admission_closed_at_us":terminal["admission_closed_at_us"],

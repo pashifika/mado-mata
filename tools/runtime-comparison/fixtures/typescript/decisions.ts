@@ -6,7 +6,8 @@ export function decide(template: MadoRecognition | null, ocr: MadoRecognition | 
   const threshold = host.options.recognition.threshold;
   const selected = choose(host.options.priorities, {
     template: template !== null && template.score >= threshold,
-    ocr: ocr !== null && ocr.score >= threshold,
+    ocr: ocr !== null && ocr.score >= threshold
+      && (host.options.recognition.expected === undefined || ocr.text === host.options.recognition.expected),
   });
   if (selected !== null && selected !== "template" && selected !== "ocr") {
     throw new Error("Approved helper returned an unknown decision");

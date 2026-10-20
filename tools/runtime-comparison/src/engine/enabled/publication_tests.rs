@@ -231,7 +231,8 @@ fn terminal_before_ocr_grouped_query_and_postcondition_commit_discards_even_empt
                 "postcondition" => {
                     capture.publish(1, mp::Continuity::Continuous).unwrap();
                     let newer = engine.call("observe", json!({})).unwrap();
-                    json!({"observation":newer,"checkpoint":observation,"expected":"visible"})
+                    json!({"observation":newer,"checkpoint":observation,"expected":"visible",
+                        "roi":{"x":2,"y":1,"width":4,"height":4}})
                 }
                 _ => unreachable!(),
             };
@@ -293,6 +294,113 @@ fn replay_keeps_no_match_distinct_from_postcondition_freshness_and_effect() {
         engine.call("postcondition", request).unwrap()["satisfied"],
         false
     );
+    assert_eq!(engine.finish()["clean"], true);
+}
+
+#[test]
+fn postcondition_roi_is_validated_before_ocr_and_reaches_the_backend_unchanged() {
+    let backend =
+        Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8).with_candidates(candidates()));
+    let (engine, capture) = controlled(backend.clone());
+    let before = engine.call("observe", json!({})).unwrap();
+    let roi = json!({"x":2,"y":1,"width":4,"height":4});
+    assert_eq!(
+        engine
+            .call(
+                "postcondition",
+                json!({
+                    "observation":before,"checkpoint":before,"expected":"visible","roi":roi
+                })
+            )
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    capture.publish(1, mp::Continuity::Continuous).unwrap();
+    let after = engine.call("observe", json!({})).unwrap();
+    for invalid in [
+        Value::Null,
+        json!({"x":2,"y":1,"width":0,"height":4}),
+        json!({"x":7,"y":1,"width":2,"height":4}),
+        json!({"x":2,"y":7,"width":4,"height":2}),
+        json!({"x":u32::MAX,"y":1,"width":2,"height":4}),
+    ] {
+        assert_eq!(
+            engine
+                .call(
+                    "postcondition",
+                    json!({
+                        "observation":after,"checkpoint":before,"expected":"visible","roi":invalid
+                    })
+                )
+                .unwrap_err()
+                .category,
+            "Argument"
+        );
+    }
+    assert_eq!(backend.recognition_count(), 0);
+    let result = engine
+        .call(
+            "postcondition",
+            json!({
+                "observation":after,"checkpoint":before,"expected":"visible","roi":roi
+            }),
+        )
+        .unwrap();
+    assert_eq!(result["satisfied"], true);
+    assert_eq!(result["causation_claimed"], false);
+    assert!(result["frame"].as_u64().unwrap() > result["checkpoint"].as_u64().unwrap());
+    assert_eq!(backend.recognition_count(), 1);
+    assert_eq!(
+        backend.last_region(),
+        Some(mp::PixelRect::new(2, 1, 6, 5).unwrap())
+    );
+    engine.call("release", json!({"id":after["id"]})).unwrap();
+    assert_eq!(
+        engine
+            .call(
+                "postcondition",
+                json!({
+                    "observation":after,"checkpoint":before,"expected":"visible","roi":roi
+                })
+            )
+            .unwrap_err()
+            .category,
+        "InvalidHandle"
+    );
+    assert_eq!(backend.recognition_count(), 1);
+    assert_eq!(engine.finish()["clean"], true);
+}
+
+#[test]
+fn cancelled_cropped_postcondition_does_not_publish_a_backend_match() {
+    let gate = Arc::new(CompletionGate::new());
+    let backend = Arc::new(
+        ControlledOcr::new(mp::PixelFormat::Rgba8)
+            .with_candidates(candidates())
+            .with_completion_gate(gate.clone()),
+    );
+    let (engine, capture) = controlled(backend);
+    let before = engine.call("observe", json!({})).unwrap();
+    capture.publish(1, mp::Continuity::Continuous).unwrap();
+    let after = engine.call("observe", json!({})).unwrap();
+    let result = thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            engine.call(
+                "postcondition",
+                json!({
+                    "observation":after,"checkpoint":before,"expected":"visible",
+                    "roi":{"x":2,"y":1,"width":4,"height":4}
+                }),
+            )
+        });
+        let _release = gate.release_guard();
+        assert!(gate.wait_until_entered(Duration::from_secs(5)));
+        engine.control.cancel();
+        gate.release();
+        worker.join().unwrap()
+    });
+    assert_eq!(result.unwrap_err().category, "Cancelled");
     assert_eq!(engine.finish()["clean"], true);
 }
 

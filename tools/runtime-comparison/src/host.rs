@@ -1076,10 +1076,22 @@ impl Host {
     fn postcondition(&self, args: &Value) -> Result<Value, Fault> {
         let map = object(
             args,
-            &["observation", "checkpoint", "expected"],
+            &["observation", "checkpoint", "expected", "roi"],
             &["observation", "checkpoint", "expected"],
         )?;
         let expected = string(map, "expected")?;
+        if expected.is_empty() || expected.len() > self.inner.plan.limits.log_bytes {
+            return Err(argument("postcondition text must be nonempty and bounded"));
+        }
+        let roi = map
+            .get("roi")
+            .map(|value| {
+                let roi: Region = serde_json::from_value(value.clone())
+                    .map_err(|error| argument(error.to_string()))?;
+                roi.validate(640, 480)?;
+                Ok::<_, Fault>(roi)
+            })
+            .transpose()?;
         let mut state = lock(&self.inner.state);
         let observation = self.observation(&state, &map["observation"])?;
         let checkpoint = self.observation(&state, &map["checkpoint"])?;
@@ -1097,7 +1109,15 @@ impl Host {
                 "postcondition evidence capacity exhausted",
             ));
         }
-        let result = json!({"satisfied":observation.visible == expected,"frame":frame,"checkpoint":checkpoint_frame});
+        let visible_region = Region {
+            x: 100,
+            y: 80,
+            width: 40,
+            height: 20,
+        };
+        let satisfied = observation.visible == expected
+            && roi.as_ref().is_none_or(|roi| roi.contains(&visible_region));
+        let result = json!({"satisfied":satisfied,"frame":frame,"checkpoint":checkpoint_frame});
         state.postconditions.push(result.clone());
         Ok(result)
     }
@@ -1311,20 +1331,22 @@ pub fn run_rust(host: &Host) -> Result<RuntimeMetrics, Fault> {
     host.call("release", json!({"id":ready["id"]}))?;
     host.begin_workflow()?;
     let options = host.options();
-    let roi = options["recognition"]["roi"].clone();
+    let roi = &options["recognition"]["roi"];
+    let asset = &options["recognition"]["asset"];
     let threshold = options["recognition"]["threshold"]
         .as_f64()
         .ok_or_else(|| Fault::new("Profile", "recognition.threshold must be numeric"))?;
     let before = host.call("observe", json!({}))?;
-    host.call("asset", json!({"id":"marker"}))?;
+    host.call("asset", json!({"id":asset}))?;
     let template = host.call(
         "recognize",
-        json!({"observation":before,"kind":"template","asset":"marker","roi":roi}),
+        json!({"observation":before,"kind":"template","asset":asset,"roi":roi}),
     )?;
     let ocr = host.call(
         "recognize",
         json!({"observation":before,"kind":"ocr","roi":roi}),
     )?;
+    let expected = options["recognition"].get("expected");
     let priorities = options["priorities"]
         .as_array()
         .ok_or_else(|| Fault::new("Profile", "priorities must be an array"))?;
@@ -1342,21 +1364,34 @@ pub fn run_rust(host: &Host) -> Result<RuntimeMetrics, Fault> {
             && result["score"]
                 .as_f64()
                 .is_some_and(|score| score >= threshold)
+            && (kind != "ocr" || expected.is_none_or(|text| result["text"] == *text))
         {
             selected = Some(kind);
             break;
         }
     }
     if let Some(kind) = selected {
-        let key = options["actions"][kind]
-            .as_str()
-            .ok_or_else(|| Fault::new("Profile", "selected action key is missing"))?;
-        let accepted = host.call("submit", json!({"observation":before,"actions":[{"kind":"key_down","key":key},{"kind":"key_up","key":key}]}))?;
+        let accepted = host.call(
+            "submit",
+            json!({"observation":before,"actions":options["actions"][kind]}),
+        )?;
         let receipt = host.call("settle", json!({"id":accepted["id"]}))?;
+        let wait_ms = options["postcondition"]["wait_ms"]
+            .as_u64()
+            .ok_or_else(|| {
+                Fault::new(
+                    "Profile",
+                    "postcondition.wait_ms must be a nonnegative integer",
+                )
+            })?;
+        if wait_ms > 0 {
+            host.call("wait", json!({"duration_ms":wait_ms}))?;
+        }
         let after = host.call("observe", json!({}))?;
         let postcondition = host.call(
             "postcondition",
-            json!({"observation":after,"checkpoint":before,"expected":options["postcondition"]}),
+            json!({"observation":after,"checkpoint":before,
+                "expected":options["postcondition"]["expected"],"roi":options["postcondition"]["roi"]}),
         )?;
         host.call("log", json!({"message":format!("decision={kind};receipt={};postcondition={}", receipt["status"], postcondition["satisfied"])}))?;
         host.call("release", json!({"id":after["id"]}))?;
@@ -1724,6 +1759,36 @@ mod tests {
     }
 
     #[test]
+    fn direct_control_keeps_postcondition_wait_within_the_host_limit() {
+        let mut host = make_host("success", "template-first");
+        let inner = Arc::get_mut(&mut host.inner).unwrap();
+        inner.plan.limits.wait_ms = 1;
+        inner.options["postcondition"]["wait_ms"] = json!(2);
+        assert_eq!(run_rust(&host).unwrap_err().category, "Argument");
+        let facts = host.snapshot();
+        assert_eq!(facts["receipts"][0]["status"], "Submitted");
+        assert_eq!(facts["operation_metrics"]["wait"]["count"], 1);
+        assert_eq!(facts["accepted"].as_array().unwrap().len(), 1);
+        assert_eq!(facts["postconditions"], json!([]));
+        assert_eq!(host.finish()["clean"], true);
+    }
+
+    #[test]
+    fn direct_control_refuses_an_invalid_later_click_before_any_input() {
+        let mut host = make_host("success", "template-first");
+        Arc::get_mut(&mut host.inner).unwrap().options["actions"]["template"] = json!([
+            {"kind":"click","x":10.5,"y":20.5,"button":"left"},
+            {"kind":"click","x":640,"y":20,"button":"left"}
+        ]);
+        assert_eq!(run_rust(&host).unwrap_err().category, "Argument");
+        let facts = host.snapshot();
+        assert_eq!(facts["accepted"], json!([]));
+        assert_eq!(facts["effects"], json!([]));
+        assert_eq!(facts["postconditions"], json!([]));
+        assert_eq!(host.finish()["clean"], true);
+    }
+
+    #[test]
     fn input_receipts_do_not_prove_postconditions_or_replay_uncertain_actions() {
         for (scenario, expected_status, submitted) in [
             ("partial", "Partial", 1),
@@ -1817,10 +1882,11 @@ mod tests {
     fn postconditions_require_newer_frames_and_actual_visible_content() {
         let host = ready_host("success");
         let before = observe(&host);
+        let roi = json!({"x":100,"y":80,"width":40,"height":20});
         assert_eq!(
             host.call(
                 "postcondition",
-                json!({"observation":before,"checkpoint":before,"expected":"DONE"})
+                json!({"observation":before,"checkpoint":before,"expected":"DONE","roi":roi})
             )
             .expect_err("old checkpoint")
             .category,
@@ -1830,7 +1896,7 @@ mod tests {
         assert_eq!(
             host.call(
                 "postcondition",
-                json!({"observation":merely_new,"checkpoint":before,"expected":"DONE"})
+                json!({"observation":merely_new,"checkpoint":before,"expected":"DONE","roi":roi})
             )
             .expect("fresh but unsatisfied")["satisfied"],
             false
@@ -1841,7 +1907,7 @@ mod tests {
         assert_eq!(
             host.call(
                 "postcondition",
-                json!({"observation":merely_new,"checkpoint":before,"expected":"DONE"})
+                json!({"observation":merely_new,"checkpoint":before,"expected":"DONE","roi":roi})
             )
             .expect("captured content is immutable")["satisfied"],
             false
@@ -1850,11 +1916,37 @@ mod tests {
         assert_eq!(
             host.call(
                 "postcondition",
-                json!({"observation":changed,"checkpoint":before,"expected":"DONE"})
+                json!({"observation":changed,"checkpoint":before,"expected":"DONE","roi":roi})
             )
             .expect("visible effect")["satisfied"],
             true
         );
+        assert_eq!(
+            host.call(
+                "postcondition",
+                json!({"observation":changed,"checkpoint":before,"expected":"DONE",
+                    "roi":{"x":0,"y":0,"width":40,"height":20}})
+            )
+            .expect("visible text outside the crop is not evidence")["satisfied"],
+            false
+        );
+        for invalid in [
+            Value::Null,
+            json!({"x":100,"y":80,"width":0,"height":20}),
+            json!({"x":639,"y":80,"width":2,"height":20}),
+            json!({"x":100,"y":479,"width":40,"height":2}),
+            json!({"x":u32::MAX,"y":80,"width":2,"height":20}),
+        ] {
+            assert_eq!(
+                host.call(
+                    "postcondition",
+                    json!({"observation":changed,"checkpoint":before,"expected":"DONE","roi":invalid})
+                )
+                .expect_err("ROI is never clipped")
+                .category,
+                "Argument"
+            );
+        }
         assert_eq!(host.finish()["clean"], true);
     }
 

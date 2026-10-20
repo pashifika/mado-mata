@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Record the bounded both-OS M0 adoption of QuickJS with TypeScript authoring,
+  with separate native input and Stop evidence, historical failures and explicit
+  release/compatibility limits. No SDK guard or input route changes.
+
+- Use the upstream ARM SHA-256 backend on Apple Silicon to reduce resource
+  verification time. Preserve every integrity check and existing digest formats.
+- Use the same ordered action arrays and selected template asset across the
+  Rust, JavaScript, TypeScript and Lua comparison workloads. Support spatial
+  postconditions and a bounded pre-observation wait without retrying input.
+- Report sampled peak RSS separately from a fixed workflow-window RSS summary.
+  Preserve short or missing windows as unavailable, not passing memory evidence.
 - Release the OCR detector input tensor before preparing recognition crops.
   This shortens buffer lifetime; it does not cap ONNX Runtime memory usage.
 

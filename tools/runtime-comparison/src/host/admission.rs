@@ -302,6 +302,7 @@ impl Host {
             return Err(error);
         }
         lock(&self.inner.state).workflow_entered = true;
+        crate::runner::emit_workflow_entered(self);
         if self.script_startup() {
             self.native_phase(if function {
                 crate::desktop::NativePhase::Function
