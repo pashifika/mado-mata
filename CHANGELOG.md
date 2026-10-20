@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Optimize PNG filtering and DEFLATE codecs in checkout builds to reduce
+  saved-image loading and Preview latency. Preserve pixels, streaming compression,
+  validation and resource limits; release profiles are unchanged.
+
 - Record the bounded both-OS M0 adoption of QuickJS with TypeScript authoring,
   with separate native input and Stop evidence, historical failures and explicit
   release/compatibility limits. No SDK guard or input route changes.
