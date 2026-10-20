@@ -85,8 +85,11 @@ apps/desktop/src-tauri/target/debug/mado-mata-desktop
 These commands do not enable the test-only `webdriver` feature. Normal builds
 have no automation listener, and release builds do not register that listener.
 
-Both Cargo manifests optimize SHA-256 in development builds so resource-integrity
-checks stay practical. The checks and their failure behavior are unchanged.
+Both Cargo manifests optimize SHA-256 and the `png`, `miniz_oxide`, and `fdeflate`
+dependencies in development builds so resource-integrity checks and saved-image
+loading/Preview stay practical. Application code remains unoptimized for debugging.
+Image pixels, streaming compression, validation and resource limits are unchanged;
+these package overrides do not change release profiles.
 
 Google author enrollment additionally requires the matching Desktop registration's
 `client_secret` string in Cargo's **build-time** `OIDC_CLIENT_KEY_GOOGLE`

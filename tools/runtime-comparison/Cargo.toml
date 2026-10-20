@@ -57,3 +57,13 @@ pedantic = "warn"
 # Keep resource-integrity checks fast in checkout builds.
 [profile.dev.package.sha2]
 opt-level = 3
+
+# Keep PNG processing responsive in checkout builds.
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.fdeflate]
+opt-level = 3
