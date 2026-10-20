@@ -2,21 +2,14 @@
 
 ## Decision
 
-**Development selection: JavaScript on QuickJS, with TypeScript authoring,
-for macOS manual development.**
+**M0 decision: `Adopt(JavaScript/QuickJS with TypeScript authoring)`.**
 
-**Full native qualification:**
-`Blocked(incomplete automated-native and both-OS qualification)`.
-The operator-approved macOS-first decision is recorded in the
-[ADR](adr/0001-runtime-comparison-boundaries.md#macos-first-development-selection).
-It reuses the working host/compiler and does not claim Windows input support or
-completed release qualification.
-The initial macOS process-directed probes failed. A separately authorized system
-route later completed the requested roundtrip with approved image verification;
-the OCR failures and a pre-correction native shutdown crash remain failed records.
-The Windows system-route acceptance attempt was refused before submitting any
-input event. Recorded-frame replay now exercises all four authoring/control paths
-on both OSes; neither that replay nor one native workflow establishes adoption.
+The bounded Windows and Apple Silicon study completes the original consumer
+comparison and R6 assessment. The [adoption ADR](adr/0001-runtime-comparison-boundaries.md#both-os-m0-adoption)
+records the evidence, compatibility limits and selection rationale. This is not
+general SDK/game compatibility, release packaging or Windows launch approval.
+Dated sections retain their historical failures and incomplete cohorts; they
+are not pooled into the accepted measurements below.
 
 ## Initial local evidence
 
@@ -665,6 +658,9 @@ focus change, or adoption decision was performed by that September repair pass.
 
 ### Current Windows reconciliation
 
+This is the historical replay/ownership assessment at the pin below, before
+the [completed both-OS study](#current-both-os-operating-criteria-assessment--2026-10-20).
+
 The current engine pin `4b4f3296838a9eecdcb00e9d2bb3121a25cdc240` supplies
 `Session::commit_frame`; consuming observation, recognition, query and
 postcondition publication now use terminal-aware commitment. The earlier
@@ -717,7 +713,7 @@ These observations are controlled/replay evidence, not live game effects or
 an adoption decision. Full native qualification, R6 and both-OS adoption remain
 incomplete; neither later desktop acceptance nor API availability closes them.
 
-### Current Apple Silicon native continuation
+### Historical Apple Silicon native continuation (`c1c6fd3`)
 
 At SDK pin `c1c6fd3f0d8400649c018ddef29075aee6e37fe4`, the common workload
 supports ordered native actions and spatial, strictly newer-frame
@@ -756,14 +752,95 @@ automatic recovery or a late-publication race result.
 Full both-OS qualification remains blocked by incomplete measurements and
 native scenario coverage. These results are not an adoption decision.
 
+### Current both-OS operating-criteria assessment — 2026-10-20
+
+Product `7bb6de800cbb9cd7f66aef468f722944fa5522db` uses SDK
+`f61a57f661c0314ea0a1d860d9298fbff86d903d`. The ordinary workload alternates two
+reversible list filters, using exact initial-state OCR and a changed-text
+postcondition on a strictly newer compatible frame. All four paths use the same
+options within each OS; platform coordinates and assets remain separate.
+
+| Evidence | Windows | Apple Silicon macOS |
+| --- | --- | --- |
+| Functional candidate/profile cases | 8/8 accepted | 8/8 accepted |
+| Separate input measurement | 160/160 accepted | 160/160 accepted |
+| Common input-free Stop comparison | 16/16 expected outcomes | 16/16 expected outcomes |
+
+Each accepted input cohort has twenty samples per candidate/profile, supporting
+nearest-rank p50/p95, not p99. Every measured invocation has complete input
+receipts, a satisfied newer-frame postcondition, certain input accounting,
+physical cleanup and child reaping. The Mac outer observer also confirms
+owned-process-group absence for all 160 invocations. Its 2,202 identity samples
+never show the target foreground; sampled observations are not continuous
+cursor/focus guarantees.
+
+Workflow distributions, in milliseconds:
+
+| Path / profile | Windows p50 | Windows p95 | macOS p50 | macOS p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Rust / A | 2225.004 | 2239.626 | 1760.392 | 1773.713 |
+| JavaScript / A | 2486.386 | 2499.258 | 1964.098 | 1980.645 |
+| TypeScript / A | 2489.689 | 2500.491 | 1972.208 | 1993.380 |
+| Lua / A | 2222.343 | 2236.578 | 1759.584 | 1774.241 |
+| Rust / B | 2220.176 | 2238.863 | 1763.574 | 1785.199 |
+| JavaScript / B | 2480.939 | 2515.355 | 1963.965 | 1983.756 |
+| TypeScript / B | 2487.434 | 2501.837 | 1987.465 | 2000.989 |
+| Lua / B | 2226.359 | 2260.921 | 1768.375 | 1786.862 |
+
+Compare candidates within an OS/profile only. These cold-child workflows include
+host/model work and a fixed 500 ms wait; they do not isolate VM overhead.
+
+The common Stop cohorts each contain eight ordinary returns and eight expected
+`FAIL/Cancelled` outcomes, with N=2 per candidate/mode. All confirmed physical
+cleanup and child reaping; no input was submitted. Stop interrupted observation,
+not OCR. On Mac, the maximum observed Stop receipt, admission closure, cleanup
+and containment times were respectively 6.569, 6.577, 28.592 and 38.660 ms,
+within their prospective limits. No p95/p99 is claimed for these small groups.
+Short Stop runs lack a completed workflow RSS window; missing RSS/VM values
+remain unavailable rather than zero or budget passes.
+
+The accepted Mac cohort's sampled child-RSS maximum was 592,969,728 bytes,
+below its prospective 1,024,000,000-byte ceiling. The combined input report has
+3,760 passing budget rows and 1,040 not-applicable rows, without failed or
+missing required input measurements. Separate common Stop reports retain
+44 unavailable values: 32 short workflow-RSS windows and 12 VM endpoints.
+These omissions are not zero or passing memory evidence. The fixed RSS window
+is neither an OS peak nor proof of stationarity or leak freedom.
+
+Historical Mac failures remain separate. One source-isolated diagnostic
+identifies an AppKit process lookup returning nil after one submitted event;
+the next event is refused before native invocation, with cleanup/reaping.
+This is a guarded SDK refusal, not a demonstrated contract violation or an
+explanation of every earlier uninstrumented failure. Short-lived external
+AppKit observers correlated with process-table churn. A later persistent
+AppKit observer failed its own metadata predicate after 131 runtime passes;
+only 130 outer invocations were accepted. Neither cohort was extended.
+
+The accepted fresh cohort uses one independent kernel/window observer.
+Production runtime bytes, SDK AppKit authority, input route and prospective
+budgets are unchanged. Removing external AppKit metadata dependence is not a
+fallback for the SDK's target guard. The mechanism behind historical nil
+lookups remains an upstream investigation risk, not a waived safety failure.
+
+**Decision: `Adopt(JavaScript/QuickJS with TypeScript authoring)`.**
+The reviewed original requirement ledger combines compatible, separately
+attributed controlled/replay/lifecycle evidence with these native comparisons;
+it does not merge their timing samples. R6 does not require another destructive
+trial or SDK-wide recertification. The CLI's generic `Blocked` decision is not
+an automatically reviewed adoption verdict; absent catalog attestations must
+not be fabricated or treated as instructions to repeat accepted scenarios.
+Historical budget failures remain failed. Release and checked delivery gates
+remain independent.
+
+
 ## Candidate and authoring observations
 
-| Path | Verified characteristics | Unresolved comparison |
+| Path | Verified characteristics | Selection boundary |
 | --- | --- | --- |
-| Direct Rust | Independent decisions, shared-host safety, recorded template/OCR, bounded native actions and spatial newer-frame postconditions | Complete representative native latency tails and full live-target ownership matrix |
-| JavaScript | ES module caching/live cycles, bounded jobs, interruptible computation, frozen options, recorded replay | Full native lifecycle corpus and representative performance |
-| Lua | Restricted secondary loading, coroutine interruption, cycle refusal, readonly values, recorded replay | Native workload coverage and representative performance |
-| TypeScript to JavaScript | Inventory-bound compiler, strict SDK/schema types, actual completions, original helper source locations | Separate compiler CPU/RSS are not included in runtime-child measurements |
+| Direct Rust | Independent decisions, shared-host safety, native actions and newer-frame postconditions; N20 per profile/OS | Control workload, not a Script runtime |
+| JavaScript | ES modules, bounded jobs, interruption, frozen options, replay and complete both-OS native comparison | Selected product VM; no universal speed claim |
+| Lua | Restricted loading, coroutine interruption, readonly values, replay and complete both-OS native comparison | Viable comparison adapter, not a second product runtime |
+| TypeScript to JavaScript | Inventory-bound compilation, strict SDK/schema types, completion and source diagnostics; complete native comparison | Preferred authoring path; compiler CPU/RSS are outside runtime-child measurements |
 
 The timings alone do not establish a speed winner. Corpus timings are cold-child
 measurements; the separate ownership probe establishes only its scoped warm
@@ -787,9 +864,9 @@ telemetry correction addresses the diagnosed uploader lifecycle without claiming
 a general SDK, OCR, or game repair. The [native guide](runtime-native.md) records
 the current strict admission, startup environment, and receipt contracts.
 
-Proceed with the selected JavaScript/TypeScript path and the
-[manual runner](runtime-comparison.md#manual-script-testing). Remaining native
-qualification is deferred, not a blocker on this macOS development path and not
-silently passed. Preserve the Windows refusal and the measurement limitations.
-Lua remains available in the comparison tool; no multi-runtime product
-requirement is introduced.
+Use the selected JavaScript/TypeScript path and the
+[manual runner](runtime-comparison.md#manual-script-testing). M0's bounded
+adoption study is complete; generic application compatibility, Windows launch,
+release packaging and checked delivery remain separate. Preserve historical
+refusals and measurement limits. Lua remains a comparison adapter; no
+multi-runtime product requirement is introduced.

@@ -11,9 +11,10 @@ Windows Native uses the same ordinary/Edit runner in attach-only mode; the game
 must already be running, and launch/recovery intent is refused.
 Follow [the desktop guide](docs/desktop.md)
 for checkout build/run commands and [the comparison guide](docs/runtime-comparison.md)
-for the independent CLI. Native qualification, R6, runtime adoption, release
-packaging, and additional-OS desktop support remain unresolved. Do not invent
-game-launch commands or treat controlled results as native acceptance.
+for the independent CLI. The bounded both-OS M0 study adopts QuickJS/TypeScript;
+see its recorded comparison and R6 assessment. General native compatibility,
+release packaging and additional-OS desktop support remain unresolved. Do not
+invent game-launch commands or treat controlled results as native acceptance.
 
 ## Setup and verification
 

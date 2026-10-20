@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Record the bounded both-OS M0 adoption of QuickJS with TypeScript authoring,
+  with separate native input and Stop evidence, historical failures and explicit
+  release/compatibility limits. No SDK guard or input route changes.
+
 - Use the upstream ARM SHA-256 backend on Apple Silicon to reduce resource
   verification time. Preserve every integrity check and existing digest formats.
 - Use the same ordered action arrays and selected template asset across the

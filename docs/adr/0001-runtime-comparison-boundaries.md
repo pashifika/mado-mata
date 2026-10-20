@@ -1,6 +1,6 @@
 # ADR 0001: bounded runtime comparison without native authority substitution
 
-- Status: accepted; QuickJS/TypeScript selected for macOS manual development; full native qualification incomplete
+- Status: accepted; JavaScript/QuickJS with TypeScript adopted by the bounded both-OS M0 study
 - Date: 2026-09-20
 - Change: `m0-runtime-comparison`
 - Integration: `change/m0-runtime-comparison` → `dev/runtime-comparison`
@@ -133,3 +133,42 @@ incomplete native qualification, not a prohibition on the selected macOS
 development path. Preserve historical failures and resume platform qualification
 when it serves the manually testable product. MadoPilot-side changes are retained
 in its private `local_docs/` for later separately scoped Change authoring.
+
+## Both-OS M0 adoption
+
+On 2026-10-20, record `Adopt(JavaScript/QuickJS with TypeScript authoring)`.
+The [current comparison](../runtime-comparison-results.md#current-both-os-operating-criteria-assessment--2026-10-20)
+completes eight functional cases and a separate 160-input cohort per OS,
+plus sixteen common Stop outcomes per OS. N20 per path/profile supports p50/p95,
+not p99; Stop N2 supports no tail claim. Input receipts, newer-frame effects,
+uncertainty, cleanup and outer containment remain independently checked.
+
+The original requirement assessment retains compatible controlled/replay and
+native lifecycle evidence, including R6's consuming publication repair.
+The SDK delta from `c1c6fd3` to `f61a57f` releases a detector tensor before an
+unchanged checkpoint; platform lifetime/publication guards are unchanged.
+Product `7bb6de8` adds target-scoped ARM SHA acceleration, locks and guidance,
+not a different native authority contract. Fresh current-build measurements
+supply performance evidence; historical timings and budget failures are not pooled.
+
+JavaScript and TypeScript meet the required behavior and prospective budgets.
+Choose their existing shared VM, typed SDK, completion and original-source
+diagnostics instead of maintaining another product runtime. Lua also completes
+the measured workload; this decision is not a claim that it failed or that
+JavaScript is fastest.
+
+Historical AppKit refusals retain their failed/uncertain outcomes. Isolated
+instrumentation identifies one nil lookup after a partial submission; it does
+not prove a target exit or SDK contract violation. External observer process
+churn is a correlation, not an established cause. A fresh independent
+kernel/window observer completes the accepted cohort without changing SDK
+guards. Keep residual AppKit sensitivity as an upstream investigation risk;
+do not add retries, fallback or destructive stress as an adoption shortcut.
+
+The standalone report remains a generic evidence/coverage evaluator whose
+`Blocked` value does not incorporate this reviewed, cross-artifact decision.
+Missing short-run metrics and catalog attestations are not fabricated.
+This decision supersedes the incomplete-study status above, not its historical
+facts. It grants no native operation, merge, release, canonical-spec
+synchronization or archive authority. Windows launch and broader SDK/game
+compatibility remain separate.

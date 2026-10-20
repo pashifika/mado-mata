@@ -9,10 +9,10 @@ actual interpreters and owned processes; their input sink is **non-native**.
 They do not capture a screen, launch a game, change focus, request permissions,
 or send operating-system input.
 
-**macOS development uses JavaScript on QuickJS with TypeScript authoring.**
-The [selection decision](adr/0001-runtime-comparison-boundaries.md#macos-first-development-selection)
-allows manual development before full both-OS qualification. Native qualification
-remains incomplete; invocation-only receipts do not prove application effect.
+**M0 adopts JavaScript on QuickJS with TypeScript authoring.**
+The [both-OS decision](adr/0001-runtime-comparison-boundaries.md#both-os-m0-adoption)
+records the bounded native comparison and its limits. This is not general
+game/release qualification; invocation-only receipts do not prove application effect.
 See [native prerequisites](runtime-native.md) before any real capture or input.
 
 ## Setup and commands
@@ -561,11 +561,11 @@ and full execution records in private evidence storage. The `report` command
 emits aggregate, content-identified results rather than raw native diagnostics.
 Do not publish raw `run` output merely because it is JSON.
 
-Full native qualification still needs Windows and Apple Silicon macOS evidence.
-The separately approved macOS development selection is JavaScript/QuickJS with
-TypeScript authoring; remaining qualification does not prevent manual development.
-It does not promise untested platform support or turn the comparison into a
-multi-runtime desktop product.
+The bounded Windows and Apple Silicon M0 study is complete; see the
+[comparison results](runtime-comparison-results.md#current-both-os-operating-criteria-assessment--2026-10-20).
+Its reviewed adoption decision does not promise untested platform support,
+Windows launch or a multi-runtime desktop product. Historical failures,
+unsupported quantiles and missing measurements remain explicit.
 
 ### Qualification ownership
 
