@@ -10,9 +10,9 @@ local function workflow()
     host.state.iterations = (host.state.iterations or 0) + 1
     local options = host.options
     local before = host.call('observe', {})
-    host.call('asset', { id = 'marker' })
+    host.call('asset', { id = options.recognition.asset })
     local template = host.call('recognize', {
-        observation = before, kind = 'template', asset = 'marker', roi = options.recognition.roi,
+        observation = before, kind = 'template', asset = options.recognition.asset, roi = options.recognition.roi,
     })
     local ocr = host.call('recognize', {
         observation = before, kind = 'ocr', roi = options.recognition.roi,
@@ -20,15 +20,18 @@ local function workflow()
     local decision = decisions.decide(options, template, ocr)
     host.state.decision = decision
     if decision ~= nil then
-        local key = options.actions[decision]
         local accepted = host.call('submit', {
             observation = before,
-            actions = {{ kind = 'key_down', key = key }, { kind = 'key_up', key = key }},
+            actions = options.actions[decision],
         })
         local receipt = host.call('settle', { id = accepted.id })
+        if options.postcondition.wait_ms > 0 then
+            host.call('wait', { duration_ms = options.postcondition.wait_ms })
+        end
         local after = host.call('observe', {})
         local postcondition = host.call('postcondition', {
-            observation = after, checkpoint = before, expected = options.postcondition,
+            observation = after, checkpoint = before,
+            expected = options.postcondition.expected, roi = options.postcondition.roi,
         })
         host.call('log', { message = 'decision=' .. decision .. ';receipt=' .. receipt.status .. ';postcondition=' .. tostring(postcondition.satisfied) })
         host.call('release', { id = after.id })

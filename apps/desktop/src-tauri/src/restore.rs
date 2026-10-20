@@ -1708,6 +1708,18 @@ pub(crate) mod tests {
 
     #[test]
     fn complete_snapshot_restores_target_intent_without_installation_metadata() {
+        restore_target_intent(target_record());
+        let mut windows = target_record();
+        let binding = windows.binding.as_mut().unwrap();
+        binding.configuration.platform = "windows".into();
+        binding.configuration.game.path = r"C:\Offline\Game.exe".into();
+        binding.resolution.game.path = r"C:\Offline\Game.exe".into();
+        binding.resolution.game.executable = r"C:\Offline\Game.exe".into();
+        assert!(binding.configuration.validate().is_err());
+        restore_target_intent(windows);
+    }
+
+    fn restore_target_intent(record: TargetRecord) {
         let source = Root::new();
         source.put("settings.json", &settings(200));
         source.put("tabs/Owner/tab.config", &tab("Owner", true));
@@ -1715,7 +1727,6 @@ pub(crate) mod tests {
             &format!("tabs/Owner/pkg/{}.config", profile_id()),
             &profile(),
         );
-        let record = target_record();
         let bytes = serde_json::to_vec(&record).unwrap();
         source.put("tabs/Owner/pkg/target.config", &bytes);
         let snapshot = capture(&source.0).unwrap();

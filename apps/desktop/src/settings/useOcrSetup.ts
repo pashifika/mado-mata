@@ -1,12 +1,12 @@
 import {useEffect, useRef, useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
-import {INITIAL_SETUP, OcrSetupSession} from './ocr-setup.ts';
-import type {SetupClient, SetupOperation, SetupState, SetupView} from './ocr-setup.ts';
+import {INITIAL_SETUP, OcrSetupSession, effectiveChoice} from './ocr-setup.ts';
+import type {OcrProfileChoice, SetupClient, SetupOperation, SetupState, SetupView} from './ocr-setup.ts';
 import type {EnvironmentDraft, SettingsDraft} from '../state.ts';
 
 const client:SetupClient = {
   catalog:() => invoke<SetupView>('ocr_setup_catalog'),
-  start:(resourceId, environment, nativeSelection) => invoke<string>('ocr_setup_start', {resourceId, environment, nativeSelection}),
+  start:(resourceId, profile, environment, nativeSelection) => invoke<string>('ocr_setup_start', {resourceId, profile, environment, nativeSelection}),
   poll:() => invoke<SetupOperation|null>('ocr_setup_poll'),
   cancel:operationId => invoke<void>('ocr_setup_cancel', {operationId}),
   pickFolder:() => invoke<string|null>('ocr_setup_pick_folder'),
@@ -16,6 +16,8 @@ const client:SetupClient = {
 
 export interface OcrSetupControls {
   state:SetupState; busy:boolean; stale:boolean; draft:EnvironmentDraft;
+  // Catalog choice for the draft profile, or the SDK default when blank; null when unloaded or unknown.
+  choice:OcrProfileChoice|null;
   reload:() => void; start:(resourceId:string) => void; recheck:() => void; cancel:() => void;
   homebrew:() => void; chooseFolder:() => void; addFolder:() => void; manual:() => void;
   guidance:(kind:'link'|'copy', resourceId:string, index:number) => void;
@@ -62,6 +64,7 @@ export function useOcrSetup(open:boolean, draft:SettingsDraft, onDraft:(next:Set
   return {
     state,
     draft:draft.environment,
+    choice:effectiveChoice(state.view, draft.environment.profile),
     busy:open && (state.pickerPending || state.cancelPending || state.starting !== null || Boolean(state.operation?.cleanup_error) || (state.id !== null && state.operation?.active !== false)),
     stale:state.checkedRevision !== null && session !== null && state.checkedRevision !== session.draftRevision,
     reload:() => {void sessionRef.current?.load();},

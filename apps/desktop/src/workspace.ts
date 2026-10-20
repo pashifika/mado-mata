@@ -3,7 +3,7 @@ import type {Locale, Message} from './i18n.ts';
 import {defaultDraft, readDraft} from './state.ts';
 import {mutatedRecovery, recoveryState, retriedRecovery, sameRecoveryContext, upsertOutcomes} from './recovery.ts';
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
-import {targetDirty, targetExpectation, targetState} from './target.ts';
+import {targetDirty, targetExpectation, targetInputErrors, targetState} from './target.ts';
 import type {TargetState} from './target.ts';
 import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, NativeCapability, NativeIntent, NativeLimits, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, TargetBinding, TargetLocation, WorkspaceRef, WorkspaceView} from './types.ts';
 
@@ -37,8 +37,8 @@ export interface Bound {
   // Last readable catalog of this Tab/package store and its current listing fault.
   profiles:Profile[]; profilesError:Fault|null;
   selectedId:string|null; name:string; preset:string; draft:Record<string,Json>;
-  // Local edit counter: a validation or save that raced a later edit must not overwrite it.
-  draftRevision:number; validation:{draftRevision:number;values:Record<string,Json>}|null;
+  // Local edit counter: a save that raced a later edit must not overwrite it.
+  draftRevision:number;
   lane:string; scenario:string; descriptorPath:string;
   // True once the operator changed profile/draft state; a pristine default draft closes without confirmation.
   touched:boolean;
@@ -118,7 +118,7 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
     packagePath: selection.package_path, package: selection.package,
     profiles: selection.profiles, profilesError: selection.profiles_error,
     selectedId: null, name: '', preset: '', draft: defaultDraft(selection.package.schema),
-    draftRevision: (previous?.draftRevision ?? 0) + 1, validation: null,
+    draftRevision: (previous?.draftRevision ?? 0) + 1,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
     touched: false, target: targetState(selection),
     native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', workflowSeconds: null, capture: false, input: false, launch: false, recovery: false, key: null},
@@ -361,7 +361,7 @@ export interface Derived {
 const encoder = new TextEncoder();
 
 export type NativeTextError = 'blank'|'long'|'control';
-export type NativeBlock = 'nativeUnavailable'|'nativeWorkflow'|'nativeTarget'|'nativeBinding'|'nativeTargetDirty'|'nativeEnvironment'|'nativeText'|'nativeApproval';
+export type NativeBlock = 'nativeUnavailable'|'nativeWorkflow'|'nativeTarget'|'nativeBinding'|'nativePolicy'|'nativeAttachOnly'|'nativeTargetDirty'|'nativeEnvironment'|'nativeText'|'nativeApproval';
 // The working directory a launch would give its recipient: macOS defines it for bundles, where an explicit directory is
 // refused rather than ignored; an executable launcher gets the explicit directory or its own parent folder.
 export type NativeDirectory = 'os'|'refused'|'explicit'|'parent';
@@ -383,11 +383,14 @@ function nativeTextError(value:string):NativeTextError|null {
   return CONTROL.test(value) ? 'control' : null;
 }
 
-// The saved binding a Native Start names: a compatible macOS application bundle with an explicit input policy.
+// Native uses a saved binding for this host; foreign-platform intent is never translated.
 function nativeBinding(target:TargetState):TargetBinding|null {
   const binding = target.view?.compatible ? target.view.record.binding : null;
-  return binding && binding.configuration.platform === 'macos' && binding.configuration.game.kind === 'bundle'
-    && binding.configuration.input !== null && target.context.declaration_identity !== null ? binding : null;
+  if (!binding || binding.configuration.input === null || target.context.declaration_identity === null
+    || binding.configuration.platform !== target.view?.platform) return null;
+  const {platform, game} = binding.configuration;
+  return platform === 'macos' ? game.kind === 'bundle' ? binding : null
+    : game.kind === 'executable' && !target.declaration?.macos ? binding : null;
 }
 
 // Mirrors the host recipe rule: the separate launcher when present, otherwise the game bundle itself.
@@ -411,19 +414,23 @@ function nativeDuration(review:NativeReview, capability:NativeCapability|null):{
 }
 
 // Everything the consent covers. Revisions are monotonic, so an edited-back draft or reissued selection stays stale.
-function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null):string {
+// Script launch/recovery choices omit the package inventory: each explicit Run executes the latest saved Script.
+function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null, reviewKind:'operation'|'script'):string {
   const target = bound.target;
   return JSON.stringify([target.context, target.draftRevision, target.view?.record.revision ?? null, target.view?.record.binding ?? null,
-    bound.packagePath, bound.package.inventory_identity, bound.package.schema_identity, bound.lane, bound.draftRevision,
+    bound.packagePath, reviewKind === 'script' ? null : bound.package.inventory_identity, bound.package.schema_identity, bound.lane, bound.draftRevision,
     bound.profiles.find(profile => profile.id === bound.selectedId) ?? null, environment, limits,
     bound.native.operation, bound.native.postcondition]);
 }
 
 // Consent given for another request starts over rather than carrying the other consent forward.
-export function approveNative(bound:Bound, field:NativeConsent, value:boolean, environment:OcrEnvironment|null, capability:NativeCapability|null):Bound {
+export function approveNative(bound:Bound, field:NativeConsent, value:boolean, environment:OcrEnvironment|null, capability:NativeCapability|null,
+  reviewKind:'operation'|'script' = 'operation'):Bound {
+  if (value && (field === 'launch' || field === 'recovery')
+    && bound.target.view?.platform === 'windows') return bound;
   const {limits} = nativeDuration(bound.native, capability);
   if (limits === null) return clearNativeApproval(bound);
-  const key = nativeKey(bound, environment, limits);
+  const key = nativeKey(bound, environment, limits, reviewKind);
   const review = bound.native.key === key ? bound.native : {...bound.native, capture: false, input: false, launch: false, recovery: false};
   if (field === 'recovery' && value && !review.launch) return bound;
   return {...bound, native: {...review, [field]: value, recovery: field === 'launch' && !value ? false : field === 'recovery' ? value : review.recovery, key}};
@@ -444,39 +451,42 @@ export function chooseLane(bound:Bound, lane:string):Bound {
   return clearNativeApproval({...bound, lane});
 }
 
-export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capability:NativeCapability|null):NativeFacts {
+export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capability:NativeCapability|null, reviewKind:'operation'|'script' = 'operation'):NativeFacts {
   const target = bound.target;
   const binding = nativeBinding(target);
-  const recipe = binding && nativeRecipe(binding);
+  const recipe = binding?.configuration.platform === 'macos' ? nativeRecipe(binding) : null;
   const review = bound.native;
   const {workflowSeconds, limits} = nativeDuration(review, capability);
   const workflowError = capability !== null && limits === null;
-  const current = limits !== null && review.key !== null && review.key === nativeKey(bound, environment, limits);
-  const capture = current && review.capture;
-  const input = current && review.input;
+  const current = limits !== null && review.key !== null && review.key === nativeKey(bound, environment, limits, reviewKind);
+  // Script setup grants no capture/input authority; only an explicit Edit Run grants it, for that one request.
+  const capture = reviewKind === 'operation' && current && review.capture;
+  const input = reviewKind === 'operation' && current && review.input;
   const launch = current && review.launch;
   const recovery = current && launch && review.recovery;
-  const operationError = nativeTextError(review.operation);
-  const postconditionError = nativeTextError(review.postcondition);
+  const operationError = reviewKind === 'operation' ? nativeTextError(review.operation) : null;
+  const postconditionError = reviewKind === 'operation' ? nativeTextError(review.postcondition) : null;
   const block:NativeBlock|null = capability === null ? 'nativeUnavailable'
     : workflowError ? 'nativeWorkflow'
     : targetExpectation(target) === null || target.operation !== null || target.review !== null ? 'nativeTarget'
     : binding === null ? 'nativeBinding'
+    : binding.configuration.input && Object.keys(targetInputErrors(binding.configuration.platform, binding.configuration.input)).length ? 'nativePolicy'
+    : binding.configuration.platform === 'windows' && current && (review.launch || review.recovery) ? 'nativeAttachOnly'
     : targetDirty(target) ? 'nativeTargetDirty'
     : environment === null ? 'nativeEnvironment'
     : operationError !== null || postconditionError !== null ? 'nativeText'
-    : !capture || !input ? 'nativeApproval' : null;
+    : reviewKind === 'operation' && (!capture || !input) ? 'nativeApproval' : null;
   const declaration = target.context.declaration_identity;
-  const intent = block === null && binding && limits && target.view && declaration !== null ? {
+  const intent:NativeIntent|null = block === null && binding && limits && target.view && declaration !== null ? {
     target_revision: target.view.record.revision, target_binding_id: binding.id, target_declaration_identity: declaration,
     capture_approved: capture, input_approved: input, launch_approved: launch,
     max_exit_recoveries: recovery ? 1 as const : 0 as const,
-    operation: review.operation, visible_postcondition: review.postcondition, limits,
+    review:reviewKind === 'script' ? {kind:'script'} : {kind:'operation', operation:review.operation, visible_postcondition:review.postcondition}, limits,
   } : null;
   return {binding, recipe, capture, input, launch, recovery, operationError, postconditionError, workflowSeconds, workflowError, limits, block, intent};
 }
 
-export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en', nativeCapability:NativeCapability|null = null):Derived {
+export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en', nativeCapability:NativeCapability|null = null, reviewKind:'operation'|'script' = 'operation'):Derived {
   const t = messages[locale].app;
   const parsed = readDraft(bound.package.schema, bound.draft, locale);
   const numericErrors = Object.keys(parsed.errors).length > 0;
@@ -485,7 +495,7 @@ export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, l
   const dirty = valuesDirty || bound.name !== selectedProfile?.name;
   const profileBound = !selectedProfile || (selectedProfile.package_id === bound.package.package_id && selectedProfile.schema_identity === bound.package.schema_identity);
   const descriptor = bound.descriptorPath.trim();
-  const native = bound.lane === 'native' ? nativeFacts(bound, savedEnvironment, nativeCapability) : null;
+  const native = bound.lane === 'native' ? nativeFacts(bound, savedEnvironment, nativeCapability, reviewKind) : null;
   const startBlock = bound.lane === 'replay' && !descriptor ? t.replayDescriptor
     : bound.lane === 'replay' && !savedEnvironment ? t.replayEnvironment
     : native?.block ? t[native.block] : null;
@@ -513,7 +523,7 @@ export function editDraft(bound:Bound, draft:Record<string,Json>):Bound {
 
 export function newDraft(bound:Bound, presetName = ''):Bound {
   const preset = presetName ? bound.package.profiles[presetName] : undefined;
-  return editDraft({...bound, selectedId: null, name: presetName, preset: presetName, validation: null},
+  return editDraft({...bound, selectedId: null, name: presetName, preset: presetName},
     preset ? structuredClone(preset.options) : defaultDraft(bound.package.schema));
 }
 
@@ -521,7 +531,7 @@ export function selectProfile(bound:Bound, id:string):Bound {
   if (!id) return newDraft(bound);
   const profile = bound.profiles.find(item => item.id === id);
   if (!profile) return bound;
-  return editDraft({...bound, selectedId: profile.id, name: profile.name, preset: '', validation: null}, structuredClone(profile.values));
+  return editDraft({...bound, selectedId: profile.id, name: profile.name, preset: ''}, structuredClone(profile.values));
 }
 
 export function workspaceRef(workspace:Pick<Workspace,'id'|'revision'>):WorkspaceRef {

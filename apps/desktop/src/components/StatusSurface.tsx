@@ -8,20 +8,6 @@ import type {Fault} from '../types.ts';
 import AuthoringValidation from './AuthoringValidation.tsx';
 import {HelpPanel, HelpProvider, HelpTrigger, InfoHint, useHelp} from './ContextualHelp.tsx';
 
-export function ValidationStatusIcon({id, state, label}: {
-  id: string; state: PackageValidation['state']; label: string;
-}) {
-  const ui = messages[useLocale()].ui;
-  const description = `${label} · ${state === 'running' ? ui.authoring.validating : ui.status[state]}`;
-  return <span id={id} className={`validation-icon validation-${state}`} role="img" aria-label={description} title={description}>
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      {state !== 'running' && <circle cx="8" cy="8" r="6"/>}
-      <path d={state === 'valid' ? 'm4.8 8 2.1 2.1 4.3-4.3' : state === 'invalid' ? 'm5.8 5.8 4.4 4.4m0-4.4-4.4 4.4'
-        : state === 'stale' ? 'M8 4.5V8h3' : state === 'running' ? 'M5 3h6v2L5 11v2h6v-2L5 5Z' : 'M5.5 8h5'}/>
-    </svg>
-  </span>;
-}
-
 export interface AuthoringStatusProps {
   activity: AuthoringActivity; ownerLabel: string; showReturn: boolean; returnDisabled: boolean; stopDisabled: boolean;
   onReturn: () => void; onStop: () => void; onRelease: () => void; details: ReactNode;
@@ -80,6 +66,7 @@ export function AuthoringFooterStatus({idPrefix, activity, ownerLabel, returnDis
       element.style.removeProperty('--authoring-details-max-height');
     };
   }, [attention]);
+  if (!worker && !capture && !attention && !activity.stopRequested) return null;
   const phase = activity.stopRequested ? 'stopping' : worker?.phase ?? (capture?.busy ? 'running' : 'idle');
   const stateLabel = activity.stopRequested ? a.stopPending : worker ? ui.phase(worker.phase) : capture ? ui.nativeCapture.status[capture.status] : ui.phase('idle');
   return <div ref={authoring} id={`${idPrefix}-status`} className="footer-authoring">

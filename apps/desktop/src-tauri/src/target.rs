@@ -185,6 +185,27 @@ pub(crate) fn discover_native(
     }
 }
 
+/// Resolve the saved APP to its running executable without acquiring SDK resources.
+pub(crate) fn script_executable(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    resolution: &TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<Option<PathBuf>, Fault> {
+    observation_checkpoint(cancelled, deadline)?;
+    #[cfg(target_os = "macos")]
+    return macos::script_executable(configuration, declaration, resolution, cancelled, deadline);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (configuration, declaration, resolution);
+        Err(Fault::new(
+            "TargetPlatform",
+            "Application discovery requires macOS",
+        ))
+    }
+}
+
 /// Resolves OS installation metadata only for the retained SDK process lifetime.
 pub(crate) fn selected_application(
     candidate: &mado_runtime_comparison::authoring_capture::Candidate,
@@ -306,8 +327,29 @@ fn observation_checkpoint(cancelled: &AtomicBool, deadline: Instant) -> Result<(
     Ok(())
 }
 impl TargetConfiguration {
-    /// Portable shape validation; deliberately does not inspect the filesystem.
     pub fn validate(&self) -> Result<(), Fault> {
+        self.validate_shape()?;
+        if let Some(policy) = &self.input {
+            policy.validate_for_platform(&self.platform)?;
+        }
+        Ok(())
+    }
+
+    /// Persisted intent remains readable even when its platform cannot execute it.
+    fn validate_stored(&self) -> Result<(), Fault> {
+        self.validate_shape()?;
+        if let Some(policy) = &self.input {
+            let platform = if self.platform == "windows" && policy.route == "process_directed" {
+                "macos"
+            } else {
+                &self.platform
+            };
+            policy.validate_for_platform(platform)?;
+        }
+        Ok(())
+    }
+
+    fn validate_shape(&self) -> Result<(), Fault> {
         if !matches!(self.platform.as_str(), "macos" | "windows") {
             return Err(configuration_fault(
                 "platform",
@@ -365,25 +407,6 @@ impl TargetConfiguration {
                 "arguments",
                 "literal arguments exceed 8192 total bytes",
             ));
-        }
-        if let Some(policy) = &self.input {
-            let supported = match policy.route.as_str() {
-                "system" => policy.focus == "require_focused" && policy.pointer_mode.is_none(),
-                "process_directed" => match policy.pointer_mode.as_deref() {
-                    Some("core_graphics") => {
-                        matches!(policy.focus.as_str(), "preserve" | "require_focused")
-                    }
-                    Some("appkit_background") => policy.focus == "preserve",
-                    _ => false,
-                },
-                _ => false,
-            };
-            if !supported || policy.click_hold_ms > 1000 {
-                return Err(configuration_fault(
-                    "input",
-                    "unsupported input policy combination or click hold",
-                ));
-            }
         }
         Ok(())
     }
@@ -473,6 +496,34 @@ impl TargetConfiguration {
             },
             bundle_id,
         ))
+    }
+}
+
+impl TargetInputPolicy {
+    pub fn validate_for_platform(&self, platform: &str) -> Result<(), Fault> {
+        let supported = match (platform, self.route.as_str()) {
+            ("macos" | "windows", "system") => {
+                self.focus == "require_focused" && self.pointer_mode.is_none()
+            }
+            ("windows", "window_message") => {
+                self.focus == "preserve" && self.pointer_mode.is_none()
+            }
+            ("macos", "process_directed") => match self.pointer_mode.as_deref() {
+                Some("core_graphics") => {
+                    matches!(self.focus.as_str(), "preserve" | "require_focused")
+                }
+                Some("appkit_background") => self.focus == "preserve",
+                _ => false,
+            },
+            _ => false,
+        };
+        if !supported || self.click_hold_ms > 1000 {
+            return Err(configuration_fault(
+                "input",
+                "Save a platform-compatible route, focus and pointer policy with a 0–1000 ms click hold",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -580,7 +631,7 @@ impl TargetRecord {
                     "invalid declaration identity",
                 ));
             }
-            binding.configuration.validate()?;
+            binding.configuration.validate_stored()?;
             binding.resolution.validate(&binding.configuration)?;
         }
         Ok(())
@@ -1011,6 +1062,42 @@ pub(crate) mod tests {
                 click_hold_ms: 0,
             }),
         }
+    }
+
+    #[test]
+    fn windows_policy_requires_explicit_platform_correction() {
+        let mut selected = configuration(r"C:\Games\Game.exe");
+        selected.platform = "windows".into();
+        assert_eq!(selected.validate().unwrap_err().context["field"], "input");
+        selected.validate_stored().unwrap();
+        for (route, focus) in [
+            ("system", "require_focused"),
+            ("window_message", "preserve"),
+        ] {
+            selected.input = Some(TargetInputPolicy {
+                route: route.into(),
+                focus: focus.into(),
+                pointer_mode: None,
+                click_hold_ms: 1000,
+            });
+            selected.validate_declaration(&declaration()).unwrap();
+            let mut invalid = selected.clone();
+            invalid.input.as_mut().unwrap().pointer_mode = Some("core_graphics".into());
+            assert_eq!(invalid.validate().unwrap_err().context["field"], "input");
+            invalid = selected.clone();
+            invalid.input.as_mut().unwrap().focus = if focus == "preserve" {
+                "require_focused".into()
+            } else {
+                "preserve".into()
+            };
+            assert_eq!(invalid.validate().unwrap_err().context["field"], "input");
+            invalid = selected.clone();
+            invalid.input.as_mut().unwrap().click_hold_ms = 1001;
+            assert_eq!(invalid.validate().unwrap_err().context["field"], "input");
+        }
+        let mut macos = configuration("/metadata/game");
+        macos.input = selected.input;
+        assert_eq!(macos.validate().unwrap_err().context["field"], "input");
     }
 
     #[test]

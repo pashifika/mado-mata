@@ -2,7 +2,7 @@ import {useEffect, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
 import EnvironmentPanel from './EnvironmentPanel.tsx';
 import type {CheckTarget, LastCheck} from './EnvironmentPanel.tsx';
-import {useOcrSetup} from './useOcrSetup.ts';
+import type {OcrSetupControls} from './useOcrSetup.ts';
 import {FaultMessage} from '../components/ResultPanel.tsx';
 import CaptureCacheControls from '../components/CaptureCacheControls.tsx';
 import Select from '../components/Select.tsx';
@@ -29,9 +29,12 @@ const ERROR_CATEGORY: Record<string, Category> = {
 
 interface Props {
   open: boolean; onCancel: () => void;
+  initialCategory?: Category;
   settings: Settings | null; draft: SettingsDraft; onDraft: (next: SettingsDraft) => void;
+  // Owned by the caller because its SDK catalog also validates the draft for Save.
+  setup: OcrSetupControls;
   defaultPackagesRoot: string;
-  parsed: {settings: EditableSettings | null; errors: Record<string, string>};
+  parsed: {settings: EditableSettings | null; errors: Record<string, string>; pending: boolean};
   dirty: boolean; saving: boolean; saveError: Fault | null; saveNotice: string; onSave: () => void;
   // Label of the package/workspace host command that keeps Save and Check unavailable; distinct from saving so
   // Cancel, Escape and editing stay available while another command is in flight.
@@ -49,11 +52,10 @@ interface Props {
 export default function SettingsDialog(props: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
-  const {open, onCancel, settings, draft, onDraft, parsed, dirty, saving, saveError, saveNotice, onSave, busyReason, envDirty, active, pickerBusy, target, onCheck, checkError, authoringReason, lastCheck, stale, originLabel, retained, evicted, onSnapshot, snapshotPending, snapshotOutcome, strip, authoring} = props;
+  const {open, onCancel, settings, draft, onDraft, setup, parsed, dirty, saving, saveError, saveNotice, onSave, busyReason, envDirty, active, pickerBusy, target, onCheck, checkError, authoringReason, lastCheck, stale, originLabel, retained, evicted, onSnapshot, snapshotPending, snapshotOutcome, strip, authoring} = props;
   const dialog = useRef<HTMLDialogElement>(null);
   const opener = useRef<Element | null>(null);
   const [category, setCategory] = useState<Category>('notifications');
-  const setup = useOcrSetup(open, draft, onDraft);
   const saveBlockReason = busyReason ?? (setup.busy ? t.ocrSetup.busy : null);
   function cancel() {setup.close(); onCancel();}
   // Native modal semantics: the rest of the document is inert, Escape raises cancel, and focus returns to the opener.
@@ -62,13 +64,15 @@ export default function SettingsDialog(props: Props) {
     if (!element) return;
     if (open && !element.open) {
       opener.current = document.activeElement;
+      if (props.initialCategory) setCategory(props.initialCategory);
       element.showModal();
-      element.querySelector<HTMLElement>('.settings-nav button[aria-selected="true"]')?.focus();
+      element.querySelector<HTMLElement>(props.initialCategory
+        ? `#settings-tab-${props.initialCategory}` : '.settings-nav button[aria-selected="true"]')?.focus();
     } else if (!open && element.open) {
       element.close();
       if (opener.current instanceof HTMLElement) opener.current.focus();
     }
-  }, [open]);
+  }, [open, props.initialCategory]);
   const errors = parsed.errors;
   const invalidCount: Record<Category, number> = {display: 0, notifications: 0, editor: 0, packages: 0, environment: 0, captures: 0, logs: 0, backups: 0};
   for (const key of Object.keys(errors)) {
@@ -81,6 +85,7 @@ export default function SettingsDialog(props: Props) {
   // Errors in an unselected category and a pending host command both block Save; the footer names which.
   const status = saving ? t.settings.saving
     : invalid > 0 ? t.settings.invalid(invalid, invalidLabels)
+    : parsed.pending ? setup.state.error === null ? t.ocrSetup.loading : messages[locale].validation.profilesUnavailable
     : dirty && saveBlockReason ? t.settings.wait(saveBlockReason)
     : saveError ? t.settings.saveFailed
     : dirty ? t.settings.unsaved : saveNotice || t.settings.unchanged;

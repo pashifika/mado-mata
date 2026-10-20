@@ -229,13 +229,12 @@ for (const {scenario,localName,expectedName} of [
   test(`a selected profile changed on disk keeps the local draft as a draft and ${scenario}`,()=>{
     let tab=sameSourceTabs()[0];
     tab=updateBound(tab,bound=>({...selectProfile(bound,'P'),name:localName}));
-    tab=updateBound(tab,bound=>({...editDraft(bound,{count:'8'}),validation:{draftRevision:bound.draftRevision+1,values:{count:8}}}));
+    tab=updateBound(tab,bound=>editDraft(bound,{count:'8'}));
     const before=tab.bound;
     const after=applyCatalog(tab,{profiles:[profile('P','Reviewed again',{count:7},'shared')],profiles_error:null});
     assert.equal(after.bound.selectedId,'P');
     assert.deepEqual(after.bound.draft,{count:'8'});
     assert.equal(after.bound.draftRevision,before.draftRevision);
-    assert.deepEqual(after.bound.validation,{draftRevision:before.draftRevision,values:{count:8}});
     assert.equal(after.bound.name,expectedName);
     assert.deepEqual(after.bound.profiles[0].values,{count:7});
     assert.equal(after.notice.key,'updatedElsewhere');
@@ -287,7 +286,7 @@ test('an unchanged catalog or an unbound Tab is left as it is',()=>{
 });
 
 for (const {scenario,update} of [
-  {scenario:'validation',update:item=>updateBound(item,bound=>({...bound,validation:{draftRevision:bound.draftRevision,values:{count:5}}}))},
+  {scenario:'a profile rename',update:item=>updateBound(item,bound=>({...bound,name:'Renamed profile'}))},
   {scenario:'a failed profile mutation',update:item=>({...item,error:unreadable})},
 ]) {
   test(`${scenario} in one Tab cannot roll back another Tab after a successful write whose refresh failed`,()=>{
@@ -326,10 +325,10 @@ test('two Tabs keep independent drafts and switching never touches the other',()
 
 test('a completion for a closed, rebound, stale or reopened workspace is discarded without touching another Tab',()=>{
   const open=[bindSelection(workspaceFromView(view('a')),selection('a',1)),bindSelection(workspaceFromView(view('b')),selection('b',1))];
-  const update=item=>updateBound(item,bound=>({...bound,validation:{draftRevision:bound.draftRevision,values:{count:1}}}));
+  const update=item=>updateBound(item,bound=>({...bound,name:'Completed profile save'}));
   const afterClose=applyIfCurrent(closeWorkspace(open,'a'),{id:'a',revision:1},update);
   assert.equal(afterClose.length,1);
-  assert.equal(afterClose[0].bound.validation,null);
+  assert.equal(afterClose[0].bound.name,'');
   const rebound=[bindSelection(open[0],selection('a',2)),open[1]];
   assert.equal(applyIfCurrent(rebound,{id:'a',revision:1},update),rebound);
   const staleDraft=applyIfCurrent(open,{id:'a',revision:1,draftRevision:open[0].bound.draftRevision+1},update);
@@ -338,7 +337,7 @@ test('a completion for a closed, rebound, stale or reopened workspace is discard
   const reopened=[open[1],workspaceFromView(view('a2',{internal:'a',display:'Tab a'}))];
   assert.equal(applyIfCurrent(reopened,{id:'a',revision:1},update),reopened);
   const applied=applyIfCurrent(open,{id:'a',revision:1,draftRevision:open[0].bound.draftRevision},update);
-  assert.deepEqual(applied[0].bound.validation,{draftRevision:open[0].bound.draftRevision,values:{count:1}});
+  assert.equal(applied[0].bound.name,'Completed profile save');
   assert.equal(applied[1],open[1]);
 });
 
@@ -480,6 +479,15 @@ function loadedBundle(id='a') {
   const configuration=targetConfiguration('/metadata/Game.app');
   configuration.game.kind='bundle';
   return loadedTarget(id,configuration);
+}
+function windowsConfiguration(input={route:'system',focus:'require_focused',pointer_mode:null,click_hold_ms:0}) {
+  return {platform:'windows',game:{kind:'executable',path:'C:\\Fixture\\Game.exe'},
+    launcher:{kind:'executable',path:'C:\\Fixture\\Launcher.exe'},arguments:['','--literal','two words'],
+    working_directory:'C:\\Fixture',window_title:'Exact title',input};
+}
+function loadedWindows(configuration=windowsConfiguration()) {
+  const state=targetState(targetSelection());
+  return readTarget(state,targetView(state,{revision:1,configuration,platform:'windows'}));
 }
 function applicationResult(ticket,requestId,status='matched') {
   return {context:ticket.context,...ticket.expected,request_id:requestId,observation:{
@@ -724,6 +732,105 @@ test('a selected capture-only target stays input-free when its saved Windows loc
   assert.deepEqual(readTargetDraft(state.draft).configuration,config);
   assert.equal(readTargetDraft({...state.draft,windowTitle:'Other window'}).configuration.input,null);
   assert.equal(readTargetDraft({...state.draft,route:'system'}).configuration,null);
+});
+
+for (const input of [
+  {route:'system',focus:'require_focused',pointer_mode:null,click_hold_ms:0},
+  {route:'window_message',focus:'preserve',pointer_mode:null,click_hold_ms:1000},
+]) test(`Windows ${input.route} policy preserves exact saved values and does not enable the macOS running check`,()=>{
+  const configuration=windowsConfiguration(input);
+  const state=loadedWindows(configuration);
+  const record=JSON.stringify(state.view.record);
+  assert.deepEqual(readTargetDraft(state.draft),{configuration,errors:{}});
+  assert.equal(targetDirty(state),false);
+  assert.equal(eligibleRunningApplication(state),null);
+  assert.equal(JSON.stringify(readTarget(state,state.view).view.record),record);
+  assert.equal(state.persisted,null);
+  assert.equal(state.observation,null);
+});
+
+for (const [update,field] of [
+  [{route:'process_directed',pointerMode:'core_graphics'},'route'],
+  [{route:'system',focus:'preserve'},'focus'],
+  [{route:'window_message',focus:'require_focused'},'focus'],
+  [{pointerMode:'appkit_background'},'pointerMode'],
+  [{pointerMode:'core_graphics'},'pointerMode'],
+  [{route:'unknown'},'route'],
+  [{clickHold:'1.5'},'clickHold'],
+  [{clickHold:'1001'},'clickHold'],
+  [{gameKind:'bundle'},'gameKind'],
+]) test(`Windows draft refuses ${JSON.stringify(update)} without rewriting saved intent`,()=>{
+  const state=loadedWindows();
+  const draft={...state.draft,...update};
+  const before=structuredClone(draft);
+  const parsed=readTargetDraft(draft);
+  assert.equal(parsed.configuration,null);
+  assert.ok(parsed.errors[field]);
+  assert.deepEqual(draft,before);
+  assert.deepEqual(state.view.record.binding.configuration,windowsConfiguration());
+});
+
+test('macOS refuses a Windows route while preserving its existing input combinations',()=>{
+  const state=loadedBundle();
+  assert.equal(readTargetDraft({...state.draft,route:'window_message',pointerMode:''}).errors.route,'policy');
+  for (const policy of [
+    {route:'system',focus:'require_focused',pointerMode:''},
+    {route:'process_directed',focus:'preserve',pointerMode:'core_graphics'},
+    {route:'process_directed',focus:'require_focused',pointerMode:'core_graphics'},
+    {route:'process_directed',focus:'preserve',pointerMode:'appkit_background'},
+  ]) assert.ok(readTargetDraft({...state.draft,...policy}).configuration);
+});
+
+test('legacy Windows policy remains clean, visible and ineligible until an explicit corrected Save',()=>{
+  const configuration=windowsConfiguration({route:'process_directed',focus:'preserve',pointer_mode:'appkit_background',click_hold_ms:50});
+  const state=loadedWindows(configuration);
+  const record=JSON.stringify(state.view.record);
+  assert.deepEqual([state.draft.route,state.draft.pointerMode],['process_directed','appkit_background']);
+  assert.equal(targetDirty(state),false);
+  assert.equal(readTargetDraft(state.draft).configuration,null);
+  assert.equal(nativeOf(approve(nativeDraft(state).bound)).block,'nativePolicy');
+  const reloaded=readTarget(state,state.view);
+  assert.equal(reloaded.draft,state.draft);
+  assert.equal(JSON.stringify(reloaded.view.record),record);
+  const corrected=editTarget(state,{...state.draft,route:'window_message',pointerMode:''});
+  assert.equal(targetDirty(corrected),true);
+  assert.equal(nativeOf(approve(nativeDraft(corrected).bound)).intent,null);
+  assert.equal(JSON.stringify(corrected.view.record),record);
+  const discarded=discardTarget(corrected);
+  assert.deepEqual(discarded.draft,state.draft);
+  assert.equal(targetDirty(discarded),false);
+  const ticket=targetTicket(corrected);
+  const committed=targetView(corrected,{revision:2,configuration:readTargetDraft(corrected.draft).configuration,platform:'windows'});
+  const saved=savedTarget(beginTarget(corrected,'save'),ticket,{view:committed,check:targetCheck(ticket).check});
+  assert.equal(nativeOf(approve(nativeDraft(saved).bound)).block,'nativeTarget');
+  const settled=readTarget({...saved,operation:null},committed);
+  assert.equal(targetDirty(settled),false);
+  assert.equal(nativeOf(approve(nativeDraft(settled).bound)).block,null);
+  assert.deepEqual(settled.view.record.binding.configuration.launcher,configuration.launcher);
+  assert.deepEqual(settled.view.record.binding.configuration.arguments,configuration.arguments);
+  assert.equal(settled.view.record.binding.configuration.working_directory,configuration.working_directory);
+});
+
+test('a foreign macOS binding needs explicit platform, executable and policy correction on Windows',()=>{
+  const foreign=loadedBundle();
+  const state=readTarget(foreign,{...foreign.view,platform:'windows'});
+  const record=JSON.stringify(state.view.record);
+  assert.equal(state.draft.platform,'macos');
+  assert.equal(targetDirty(state),false);
+  assert.equal(eligibleRunningApplication(state),null);
+  assert.equal(nativeOf(approve(nativeDraft(state).bound)).block,'nativeBinding');
+  const platform=editTarget(state,{...state.draft,platform:'windows'});
+  assert.equal(platform.draft.gameKind,'bundle');
+  assert.equal(platform.draft.gamePath,state.draft.gamePath);
+  assert.equal(platform.draft.route,'process_directed');
+  assert.equal(platform.draft.pointerMode,'core_graphics');
+  assert.equal(readTargetDraft(platform.draft).configuration,null);
+  const corrected=editTarget(platform,{...platform.draft,gameKind:'executable',gamePath:'C:\\Fixture\\Game.exe',
+    route:'system',focus:'require_focused',pointerMode:''});
+  assert.ok(readTargetDraft(corrected.draft).configuration);
+  assert.equal(nativeOf(approve(nativeDraft(corrected).bound)).intent,null);
+  assert.equal(JSON.stringify(corrected.view.record),record);
+  assert.deepEqual(discardTarget(corrected).draft,state.draft);
 });
 test('host-synchronized window binding updates clean target forms but preserves unsaved target edits',()=>{
   const old=loadedTarget('a',targetConfiguration());
@@ -1697,13 +1804,44 @@ test('a Native intent names the current saved binding only after both separate c
   const facts=deriveBound(approved,nativeEnvironment,'en',nativeCapability);
   assert.equal(facts.startBlock,null);
   assert.deepEqual(facts.native.intent,{target_revision:1,target_binding_id:'binding-1',target_declaration_identity:'declaration-1',
-    capture_approved:true,input_approved:true,launch_approved:false,max_exit_recoveries:0,operation:'Press Confirm once',visible_postcondition:'Result dialog is shown',limits:nativeLimits});
+    capture_approved:true,input_approved:true,launch_approved:false,max_exit_recoveries:0,review:{kind:'operation',operation:'Press Confirm once',visible_postcondition:'Result dialog is shown'},limits:nativeLimits});
   // Consent given for an older request does not combine with consent given after an edit.
   const edited=approveNative(editDraft(captureOnly,{count:2}),'input',true,nativeEnvironment,nativeCapability);
   assert.equal(nativeOf(edited).capture,false);
   assert.equal(nativeOf(edited).intent,null);
   // Submission spends the approval; the same request needs fresh consent.
   assert.equal(nativeOf(clearNativeApproval(approved)).intent,null);
+});
+
+test('Windows ordinary Native requires valid setup and two current consents, never launch or recovery',()=>{
+  const state=loadedWindows();
+  const bound=nativeDraft(state).bound;
+  assert.equal(nativeOf(bound).block,'nativeApproval');
+  assert.equal(nativeOf(bound).recipe,null);
+  const reviewed=approve(bound);
+  const intent=nativeOf(reviewed).intent;
+  assert.deepEqual([intent.capture_approved,intent.input_approved,intent.launch_approved,intent.max_exit_recoveries],[true,true,false,0]);
+  assert.equal(approveNative(reviewed,'launch',true,nativeEnvironment,nativeCapability),reviewed);
+  assert.equal(approveNative(reviewed,'recovery',true,nativeEnvironment,nativeCapability),reviewed);
+  for (const flags of [{launch:true},{recovery:true}]) {
+    const crafted={...reviewed,native:{...reviewed.native,...flags}};
+    assert.equal(nativeOf(crafted).block,'nativeAttachOnly');
+    assert.equal(nativeOf(crafted).intent,null);
+  }
+  assert.equal(nativeOf(reviewed,null).block,'nativeEnvironment');
+  assert.equal(nativeOf(reviewed,nativeEnvironment,null).block,'nativeUnavailable');
+  assert.equal(nativeOf(clearNativeApproval(reviewed)).block,'nativeApproval');
+  const controlled=deriveBound(chooseLane(reviewed,'controlled'),null,'en',null);
+  assert.deepEqual([controlled.native,controlled.startBlock],[null,null]);
+  assert.deepEqual(state.view.record.binding.configuration,windowsConfiguration());
+});
+
+test('Windows Native refuses a package macOS constraint and a foreign host even when the saved view is marked compatible',()=>{
+  const state=loadedWindows();
+  for (const target of [
+    {...state,declaration:{...state.declaration,macos:{bundle_id:'example.game'}}},
+    {...state,view:{...state.view,platform:'macos'}},
+  ]) assert.equal(nativeOf(approve(nativeDraft(target).bound)).block,'nativeBinding');
 });
 
 test('Native approval is withdrawn by relevant edits and never restored by editing back or returning to the lane',()=>{
@@ -1949,7 +2087,7 @@ test('selected workspace status does not borrow a foreign late notice, validatio
   const authoring={owner:{workspace:{workspace_id:'a'},token:'owner-a'},notice:{key:'authoringOpened'}};
   assert.equal(scopedAuthoring(b,authoring),null);
   assert.equal(scopedAuthoring(undefined,authoring),null);
-  const late=applyIfCurrent([a,b],{id:'a',revision:0},item=>({...item,notice:{key:'validated'}}));
+  const late=applyIfCurrent([a,b],{id:'a',revision:0},item=>({...item,notice:{key:'authoringOpened'}}));
   const shown=workspaceStatus(late[1],deriveBound(b.bound,null),terminal('a-run',{error:unreadable}),authoring,'en');
   assert.deepEqual(shown,[]);
   assert.equal(workspaceStatus(late[0],undefined,null,null,'en').at(-1).id,'notice');
@@ -1963,17 +2101,4 @@ test('execution disclosure remains possible when package selection retires and r
   workspace={...workspace,disclosedRun:'old'};
   assert.equal(workspace.bound,null);
   assert.equal(bindSelection(workspace,selection('a',3)).disclosedRun,null);
-});
-
-test('profile validation retains its checked revision across value edits and unrelated notices',()=>{
-  let tab=bindSelection(workspaceFromView(view('a')),selection('a',1));
-  const checked=tab.bound.draftRevision;
-  tab=updateBound(tab,bound=>({...bound,validation:{draftRevision:checked,values:{count:1}}}));
-  tab=updateBound({...tab,notice:null},bound=>({...editDraft(bound,{count:2}),name:'Another name'}));
-  assert.equal(tab.bound.validation.draftRevision,checked);
-  assert.notEqual(tab.bound.validation.draftRevision,tab.bound.draftRevision);
-  assert.deepEqual(tab.bound.validation.values,{count:1});
-  assert.equal(newDraft(tab.bound).validation,null);
-  assert.equal(selectProfile(tab.bound,'prof-a').validation,null);
-  assert.equal(bindSelection(tab,selection('a',2)).bound.validation,null);
 });

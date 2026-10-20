@@ -284,7 +284,7 @@ impl Application {
             distribution::prepare_export(candidate.draft().clone(), &signer, &attempt.cancel)?;
         let package = self
             .runner
-            .inspect_inventory(prepared.draft().validate()?)?;
+            .inspect_inventory(prepared.draft().validate()?, None)?;
         cancelled(&attempt.cancel)?;
         let view = DistributionReview {
             facts: prepared.facts().clone(),
@@ -321,7 +321,7 @@ impl Application {
         let prepared = distribution::prepare_import(path, &attempt.cancel)?;
         let package = self
             .runner
-            .inspect_inventory(prepared.draft().validate()?)?;
+            .inspect_inventory(prepared.draft().validate()?, None)?;
         cancelled(&attempt.cancel)?;
         let facts = prepared.facts();
         let destination = distribution::installed_destination(&self.root, facts)?;

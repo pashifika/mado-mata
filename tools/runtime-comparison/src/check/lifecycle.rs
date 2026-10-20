@@ -78,11 +78,11 @@ fn profile_cases(rows: &mut Vec<Value>, inventory: &Inventory) -> Result<(), Fau
     let options = host.options();
     let partial_profile = json!({
         "package_id":inventory.package_id,"schema_version":1,
-        "options":{"recognition":{"threshold":0.8}}
+        "options":{"recognition":{"threshold":0.8,"asset":"marker"}}
     });
     let partial = resolve_options(&inventory.schema, &partial_profile, &inventory.package_id);
     let passed = options["recognition"]
-        == json!({"threshold":0.9,"roi":{"x":0,"y":0,"width":640,"height":480}})
+        == json!({"threshold":0.9,"roi":{"x":0,"y":0,"width":640,"height":480},"asset":"marker"})
         && fault_is(&partial, "Profile")
         && partial
             .as_ref()
@@ -135,21 +135,21 @@ fn invalid_profile_cases(
         (
             "coercion",
             json!({"package_id":inventory.package_id,"schema_version":1,
-                "options":{"recognition":{"threshold":"0.9","roi":{"x":0,"y":0,"width":640,"height":480}}}}),
+                "options":{"recognition":{"threshold":"0.9","roi":{"x":0,"y":0,"width":640,"height":480},"asset":"marker"}}}),
             "Profile",
             Some("$.recognition.threshold:"),
         ),
         (
             "missing-field",
             json!({"package_id":inventory.package_id,"schema_version":1,
-                "options":{"recognition":{"threshold":0.8}}}),
+                "options":{"recognition":{"threshold":0.8,"asset":"marker"}}}),
             "Profile",
             Some("$.recognition.roi:"),
         ),
         (
             "out-of-range",
             json!({"package_id":inventory.package_id,"schema_version":1,
-                "options":{"recognition":{"threshold":1.1,"roi":{"x":0,"y":0,"width":640,"height":480}}}}),
+                "options":{"recognition":{"threshold":1.1,"roi":{"x":0,"y":0,"width":640,"height":480},"asset":"marker"}}}),
             "Profile",
             Some("$.recognition.threshold:"),
         ),

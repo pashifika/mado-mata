@@ -1,12 +1,12 @@
 use super::*;
 use crate::desktop::test_support::settled;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use crate::desktop::test_support::{request, settled_with_timeout};
-#[cfg(target_os = "macos")]
-use crate::desktop::{NativeIntent, native_limits};
+#[cfg(any(target_os = "macos", windows))]
+use crate::desktop::{NativeIntent, NativeReview, native_limits};
 use crate::inventory::PackageDraft;
 use std::fs;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use std::sync::atomic::AtomicBool;
 
 struct Package {
@@ -33,7 +33,7 @@ impl Package {
         Self { root }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     fn request(&self) -> StartRequest {
         let inventory = Inventory::capture(&self.root, &manual_plan().unwrap().limits).unwrap();
         let mut request = request(&inventory);
@@ -45,10 +45,12 @@ impl Package {
             target_declaration_identity: "reviewed-declaration".into(),
             capture_approved: true,
             input_approved: true,
-            launch_approved: true,
+            launch_approved: cfg!(target_os = "macos"),
             max_exit_recoveries: 0,
-            operation: "One reviewed workflow".into(),
-            visible_postcondition: "Reviewed result".into(),
+            review: NativeReview::Operation {
+                operation: "One reviewed workflow".into(),
+                visible_postcondition: "Reviewed result".into(),
+            },
             limits: native_limits(),
         });
         request
@@ -61,7 +63,7 @@ impl Drop for Package {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn refused_before_resolve(
     request: StartRequest,
     engine: PathBuf,
@@ -123,7 +125,7 @@ fn refused_before_resolve(
     fault
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[test]
 fn invalid_native_inputs_never_reach_target_resolution() {
     for invalid in [

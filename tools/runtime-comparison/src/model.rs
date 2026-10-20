@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-pub const ENGINE_REVISION: &str = "453132bcf4128c180dc0699dfccca5fe1f098164";
+pub const ENGINE_REVISION: &str = "f61a57f661c0314ea0a1d860d9298fbff86d903d";
 pub const MAX_TRANSPORT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 
@@ -788,6 +788,8 @@ pub struct RuntimeMetrics {
     pub vm_bytes: Option<usize>,
     pub jobs_executed: u64,
     pub source_diagnostic: Option<Value>,
+    #[serde(default)]
+    pub return_summary: Option<Value>,
 }
 
 pub fn identity<T: Serialize>(value: &T) -> Result<String, Fault> {

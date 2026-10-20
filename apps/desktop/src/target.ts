@@ -103,8 +103,9 @@ function currentRecord(state:TargetState, ticket:TargetTicket):boolean {
 export function eligibleRunningApplication(state:TargetState):TargetTicket|null {
   const ticket = targetTicket(state);
   return ticket && state.operation === null && state.application.pending === null && state.picker === null
-    && state.review === null && !targetDirty(state) && state.view?.compatible
-    && state.view.record.binding?.configuration.game.kind === 'bundle' ? ticket : null;
+    && state.review === null && !targetDirty(state) && state.view?.compatible && state.view.platform === 'macos'
+    && state.view.record.binding?.configuration.platform === 'macos'
+    && state.view.record.binding.configuration.game.kind === 'bundle' ? ticket : null;
 }
 
 export function beginRunningApplication(state:TargetState, ticket:TargetTicket, requestId:string):TargetState {
@@ -236,6 +237,20 @@ export function targetFailed(state:TargetState, ticket:TargetTicket, error:Fault
 
 export type TargetField = keyof TargetDraft;
 export type TargetFieldError = 'required'|'path'|'text'|'arguments'|'hold'|'policy';
+
+export function targetInputErrors(platform:TargetConfiguration['platform'], input:TargetInputPolicy):Partial<Record<TargetField,TargetFieldError>> {
+  const errors:Partial<Record<TargetField,TargetFieldError>> = {};
+  if (input.route !== 'system' && input.route !== (platform === 'windows' ? 'window_message' : 'process_directed')) errors.route = 'policy';
+  if (input.focus !== 'preserve' && input.focus !== 'require_focused'
+    || input.route === 'system' && input.focus !== 'require_focused'
+    || input.route === 'window_message' && input.focus !== 'preserve'
+    || input.pointer_mode === 'appkit_background' && input.focus !== 'preserve') errors.focus = 'policy';
+  if (platform === 'windows' || input.route === 'system') {
+    if (input.pointer_mode !== null) errors.pointerMode = 'policy';
+  } else if (input.pointer_mode !== 'core_graphics' && input.pointer_mode !== 'appkit_background') errors.pointerMode = 'required';
+  if (!Number.isInteger(input.click_hold_ms) || input.click_hold_ms < 0 || input.click_hold_ms > 1000) errors.clickHold = 'hold';
+  return errors;
+}
 export function readTargetDraft(draft:TargetDraft):{configuration:TargetConfiguration|null; errors:Partial<Record<TargetField,TargetFieldError>>} {
   const errors:Partial<Record<TargetField,TargetFieldError>> = {};
   const bytes = (value:string) => encoder.encode(value).length;
@@ -243,9 +258,11 @@ export function readTargetDraft(draft:TargetDraft):{configuration:TargetConfigur
   const validPath = (value:string) => (draft.platform === 'windows' ? /^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(value) : value.startsWith('/'))
     && bytes(value) <= 4096 && !controls.test(value);
   if (!draft.gameKind) errors.gameKind = 'required';
+  if (draft.platform === 'windows' && draft.gameKind && draft.gameKind !== 'executable') errors.gameKind = 'policy';
   if (!validPath(draft.gamePath)) errors.gamePath = 'path';
   if (draft.separateLauncher) {
     if (!draft.launcherKind) errors.launcherKind = 'required';
+    if (draft.platform === 'windows' && draft.launcherKind && draft.launcherKind !== 'executable') errors.launcherKind = 'policy';
     if (!validPath(draft.launcherPath)) errors.launcherPath = 'path';
   }
   if (draft.workingDirectory !== '' && !validPath(draft.workingDirectory)) errors.workingDirectory = 'path';
@@ -253,13 +270,15 @@ export function readTargetDraft(draft:TargetDraft):{configuration:TargetConfigur
   if (draft.arguments.length > 32 || draft.arguments.some(arg => bytes(arg) > 1024 || controls.test(arg))
     || draft.arguments.reduce((sum, arg) => sum + bytes(arg), 0) > 8192) errors.arguments = 'arguments';
   const inputEnabled = draft.route !== '' || draft.focus !== '' || draft.pointerMode !== '' || draft.clickHold !== '';
-  if (draft.platform === 'windows' && inputEnabled) errors.route = 'policy';
-  if (inputEnabled) {
+  const input:TargetInputPolicy|null = inputEnabled ? {
+    route:draft.route as TargetInputPolicy['route'], focus:draft.focus as TargetInputPolicy['focus'],
+    pointer_mode:draft.platform === 'macos' && draft.route === 'system' || draft.pointerMode === '' ? null : draft.pointerMode,
+    click_hold_ms:Number(draft.clickHold),
+  } : null;
+  if (input) {
+    Object.assign(errors, targetInputErrors(draft.platform, input));
     if (!draft.route) errors.route = 'required';
     if (!draft.focus) errors.focus = 'required';
-    if (draft.route === 'process_directed' && !draft.pointerMode) errors.pointerMode = 'required';
-    if (draft.route === 'system' && draft.focus !== 'require_focused') errors.focus = 'policy';
-    if (draft.route === 'process_directed' && draft.pointerMode === 'appkit_background' && draft.focus !== 'preserve') errors.focus = 'policy';
     if (!/^\d+$/.test(draft.clickHold) || Number(draft.clickHold) > 1000) errors.clickHold = 'hold';
   }
   if (Object.keys(errors).length || !draft.gameKind || (inputEnabled && (!draft.route || !draft.focus))
@@ -267,6 +286,5 @@ export function readTargetDraft(draft:TargetDraft):{configuration:TargetConfigur
   return {errors, configuration:{platform:draft.platform, game:{kind:draft.gameKind, path:draft.gamePath},
     launcher:draft.separateLauncher ? {kind:draft.launcherKind as TargetLocation['kind'], path:draft.launcherPath} : null,
     arguments:[...draft.arguments], working_directory:draft.workingDirectory === '' ? null : draft.workingDirectory,
-    window_title:draft.windowTitle, input:inputEnabled ? {route:draft.route as TargetInputPolicy['route'], focus:draft.focus as TargetInputPolicy['focus'],
-      pointer_mode:draft.route === 'system' ? null : draft.pointerMode as Exclude<TargetInputPolicy['pointer_mode'],null>, click_hold_ms:Number(draft.clickHold)} : null}};
+    window_title:draft.windowTitle, input}};
 }

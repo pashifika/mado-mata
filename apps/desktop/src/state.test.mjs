@@ -1,8 +1,26 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {acceptController,attemptOutcomes,nativeOutcome,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,packageDestination,portableComponent,SUPPORTED_PROFILES,DEFAULT_NOTIFICATIONS} from './state.ts';
+import {acceptController,attemptOutcomes,nativeOutcome,retainLogs,defaultDraft,readDraft,verifiedCleanup,cleanupLabel,readEnvironment,environmentDraft,sameEnvironment,staleReasons,boundedText,faultSummary,readSettingsDraft,settingsDraftAfterSave,settingsDraftFrom,packageDestination,portableComponent,DEFAULT_NOTIFICATIONS} from './state.ts';
 import {messages} from './i18n.ts';
-import {OcrSetupSession,setupEnvironment} from './settings/ocr-setup.ts';
+import {OcrSetupSession,evaluationCount,evaluationTags,selectProfile,setupEnvironment} from './settings/ocr-setup.ts';
+
+const DEFAULT_PROFILE='g-004-rapidocr-ppocrv4-det-v6-rec-small-v1';
+const BOUNDED_PROFILE='phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2';
+const TINY_PROFILE='ppocrv6-tiny-det-small-rec-max736-v1';
+const LANGUAGE='horizontal-ja-basic-latin-ascii-digits-ui-symbols-v1';
+const RUNTIME_PROFILE='onnxruntime-1.29.0-api17-cpu';
+const HOST='aarch64-apple-darwin';
+function rules(outcomes) {return outcomes.map((outcome,index)=>({rule_id:`rule-${index}`,outcome}));}
+function summary(target,provider,outcomes) {return {target,provider,criteria:'criteria-v1.json',evidence:null,rules:rules(outcomes)};}
+function profileChoiceFixture(profile,resource_id,{model=profile,evaluations=[]}={}) {
+  return {profile,model,language:LANGUAGE,provider:'cpu',runtime_profile:RUNTIME_PROFILE,preprocessing:`${profile}-preprocessing`,display_name:profile,variant:null,resource_id,evaluations};
+}
+// Catalog order deliberately differs from the SDK default; the old pair shares one model set.
+const PROFILES=[
+  profileChoiceFixture(TINY_PROFILE,'models-tiny',{model:'tiny-model',evaluations:[summary(HOST,'cpu',['failed','failed','passed'])]}),
+  profileChoiceFixture(DEFAULT_PROFILE,'rapidocr-models',{evaluations:[summary(HOST,'cpu',['passed','passed','not_run'])]}),
+  profileChoiceFixture(BOUNDED_PROFILE,'rapidocr-models',{evaluations:[summary(HOST,'cpu',['not_run','not_run','not_run'])]}),
+];
 
 test('late predecessor result cannot replace the successor or its preparing state',()=>{
   const current={run:'next',state:'preparing',result:null};
@@ -103,6 +121,11 @@ for (const {scenario, view, expected} of [
     view:settledNative({status:'pending',phase:'launch_submission',launch:'rejected'},{error:cancelled}),expected:{failure:null,cause:null,launch:'rejected'}},
   {scenario:'an absent game without launch approval names the missing-target remedy',
     view:settledNative({status:'pending',phase:'target_discovery',launch:'not_requested'},{error:fault('NativeTargetMissing')}),expected:{failure:'target_discovery',cause:'missing',launch:null}},
+  {scenario:'a Windows attach-only window timeout does not claim the running game is absent',
+    view:settledNative({status:'pending',phase:'waiting_for_window',launch:'not_requested'},{error:fault('Timeout')}),expected:{failure:'waiting_for_window',cause:null,launch:null}},
+  {scenario:'a lost retained Windows target has its own remedy without launch or reattachment',
+    view:settledNative({status:'capture_ready',phase:'workflow',launch:'not_requested'},{result:{status:'FAIL',primary:fault('TargetLost'),cleanup:{clean:false}}}),
+    expected:{failure:'workflow',cause:'lost',launch:null}},
   {scenario:'several matching running copies name the ambiguity remedy',
     view:settledNative({status:'pending',phase:'target_discovery',launch:'not_requested'},{error:fault('NativeTargetAmbiguous')}),expected:{failure:'target_discovery',cause:'ambiguous',launch:null}},
   {scenario:'a preflight refusal before Script entry names preflight rather than a missing startup request',
@@ -219,12 +242,12 @@ for (const {scenario,draft} of [
   {scenario:'whitespace-only environment paths are unconfigured',draft:{profile:'',model_root:' \t',runtime_path:' ',library_paths:'\n \t\r\n'}},
 ]) {
   test(scenario,()=>{
-    assert.deepEqual(readEnvironment(draft),{environment:null,errors:{}});
+    for (const profiles of [PROFILES,null]) assert.deepEqual(readEnvironment(draft,profiles),{environment:null,errors:{},pending:false});
   });
 }
 
 test('a selected environment profile requires every path field',()=>{
-  const partial=readEnvironment({profile:SUPPORTED_PROFILES[0].profile,model_root:'  ',runtime_path:'',library_paths:''});
+  const partial=readEnvironment({profile:DEFAULT_PROFILE,model_root:'  ',runtime_path:'',library_paths:''},PROFILES);
   assert.equal(partial.environment,null);
   assert.deepEqual(Object.keys(partial.errors).sort(),['library_paths','model_root','runtime_path']);
 });
@@ -234,9 +257,9 @@ for (const {scenario,library_paths} of [
   {scenario:'a configured environment refuses 65 reviewed libraries',library_paths:Array.from({length:65},(_,index)=>`/lib/${index}.dylib`).join('\n')},
 ]) {
   test(scenario,()=>{
-    const draft={profile:SUPPORTED_PROFILES[0].profile,model_root:' /models ',runtime_path:'/rt.dylib',library_paths};
+    const draft={profile:DEFAULT_PROFILE,model_root:' /models ',runtime_path:'/rt.dylib',library_paths};
     const original=structuredClone(draft);
-    const parsed=readEnvironment(draft);
+    const parsed=readEnvironment(draft,PROFILES);
     assert.equal(parsed.environment,null);
     assert.deepEqual(Object.keys(parsed.errors),['library_paths']);
     assert.deepEqual(draft,original);
@@ -248,34 +271,99 @@ for (const {scenario,libraries} of [
   {scenario:'a configured environment accepts 64 reviewed libraries despite blank lines',libraries:Array.from({length:64},(_,index)=>`/lib/${index}.dylib`)},
 ]) {
   test(scenario,()=>{
-    const draft={profile:SUPPORTED_PROFILES[0].profile,model_root:'/models',runtime_path:'/rt.dylib',library_paths:`\n${libraries.map(path=>` ${path} `).join('\r\n\n')}\n`};
-    const parsed=readEnvironment(draft);
+    const draft={profile:DEFAULT_PROFILE,model_root:'/models',runtime_path:'/rt.dylib',library_paths:`\n${libraries.map(path=>` ${path} `).join('\r\n\n')}\n`};
+    const parsed=readEnvironment(draft,PROFILES);
     assert.deepEqual(parsed.errors,{});
     assert.deepEqual(parsed.environment?.native_library_paths,libraries);
   });
 }
 
-test('a saved profile outside the supported set cannot be re-saved unchanged',()=>{
+test('a saved profile outside the catalog stays in the draft and cannot be re-saved unchanged',()=>{
   const saved={model:'other',profile:'other-profile',language:'x',provider:'cuda',runtime_profile:'y',model_root:'/models',runtime_path:'/rt.dylib',native_library_paths:[]};
-  const parsed=readEnvironment(environmentDraft(saved));
+  const draft=environmentDraft(saved);
+  const parsed=readEnvironment(draft,PROFILES);
   assert.equal(parsed.environment,null);
   assert.ok(parsed.errors.profile);
+  assert.equal(draft.profile,'other-profile');
 });
 
-test('environment draft round-trips through the fixed supported tuple with trimmed library lines',()=>{
-  const draft={profile:SUPPORTED_PROFILES[1].profile,model_root:' /models ',runtime_path:'/rt/libonnxruntime.dylib',library_paths:'\n /lib/a.dylib \n\n/lib/b.dylib\r\n'};
-  const {environment,errors}=readEnvironment(draft);
-  assert.deepEqual(errors,{});
-  assert.deepEqual(environment,{
-    model:SUPPORTED_PROFILES[1].model,profile:SUPPORTED_PROFILES[1].profile,
-    language:'horizontal-ja-basic-latin-ascii-digits-ui-symbols-v1',provider:'cpu',runtime_profile:'onnxruntime-1.29.0-api17-cpu',
-    model_root:'/models',runtime_path:'/rt/libonnxruntime.dylib',native_library_paths:['/lib/a.dylib','/lib/b.dylib'],
-  });
-  assert.equal(sameEnvironment(readEnvironment(environmentDraft(environment)).environment,environment),true);
-  assert.equal(sameEnvironment(environment,{...environment,native_library_paths:['/lib/b.dylib','/lib/a.dylib']}),false);
+const roundTripped={model:BOUNDED_PROFILE,profile:BOUNDED_PROFILE,language:LANGUAGE,provider:'cpu',runtime_profile:RUNTIME_PROFILE,
+  model_root:'/models',runtime_path:'/rt/libonnxruntime.dylib',native_library_paths:['/lib/a.dylib','/lib/b.dylib']};
+test('an old saved tuple round-trips unchanged through its SDK descriptor regardless of catalog order',()=>{
+  for (const profiles of [PROFILES,[...PROFILES].reverse()]) {
+    assert.deepEqual(readEnvironment(environmentDraft(roundTripped),profiles),{environment:roundTripped,errors:{},pending:false});
+  }
+  const edited={profile:BOUNDED_PROFILE,model_root:' /models ',runtime_path:'/rt/libonnxruntime.dylib',library_paths:'\n /lib/a.dylib \n\n/lib/b.dylib\r\n'};
+  assert.deepEqual(readEnvironment(edited,PROFILES).environment,roundTripped);
+  assert.equal(sameEnvironment(roundTripped,{...roundTripped,native_library_paths:['/lib/b.dylib','/lib/a.dylib']}),false);
 });
 
-const checkedEnvironment=readEnvironment({profile:SUPPORTED_PROFILES[0].profile,model_root:'/models',runtime_path:'/rt.dylib',library_paths:'/lib/a.dylib'}).environment;
+test('a catalog model saves its descriptor tuple even when its recorded rules failed or never ran',()=>{
+  const draft={profile:TINY_PROFILE,model_root:'/tiny',runtime_path:'/rt.dylib',library_paths:'/lib/a.dylib'};
+  const expected={model:'tiny-model',profile:TINY_PROFILE,language:LANGUAGE,provider:'cpu',runtime_profile:RUNTIME_PROFILE,model_root:'/tiny',runtime_path:'/rt.dylib',native_library_paths:['/lib/a.dylib']};
+  assert.deepEqual(readEnvironment(draft,PROFILES),{environment:expected,errors:{},pending:false});
+  assert.deepEqual(readEnvironment(draft,PROFILES.map(item=>({...item,evaluations:[]}))),{environment:expected,errors:{},pending:false});
+});
+
+test('a configured draft waits for catalog validation without announcing an invalid field or producing a save payload',()=>{
+  const draft=environmentDraft(roundTripped);
+  assert.deepEqual(readEnvironment(draft,null),{environment:null,errors:{},pending:true});
+  const settingsDraft={...settingsDraftFrom(null),environment:draft};
+  assert.deepEqual(readSettingsDraft(settingsDraft,null),{settings:null,errors:{},pending:true});
+  const invalid=readSettingsDraft({...settingsDraft,logLimit:'invalid'},null);
+  assert.equal(invalid.settings,null);
+  assert.equal(invalid.pending,true);
+  assert.deepEqual(Object.keys(invalid.errors),['logLimit']);
+  const loaded=readSettingsDraft(settingsDraft,PROFILES);
+  assert.equal(loaded.pending,false);
+  assert.deepEqual(loaded.settings.ocr_environment,roundTripped);
+  assert.deepEqual(draft,environmentDraft(roundTripped));
+});
+
+test('recorded results count only this host target and the model provider; nothing run reads as not run',()=>{
+  const choice={...PROFILES[0],evaluations:[summary(HOST,'cpu',['passed','failed','incomplete','not_run']),summary('x86_64-pc-windows-msvc','cpu',['passed']),summary(HOST,'cuda',['passed'])]};
+  assert.deepEqual(evaluationCount(choice,HOST),{passed:1,total:4});
+  assert.equal(evaluationCount(choice,'x86_64-unknown-linux-gnu'),null);
+  assert.equal(evaluationCount(PROFILES[2],HOST),null);
+});
+
+function evaluatedChoice(changes={},patch={}) {
+  const ids=['text_order','region_count','geometry','unexpected_detection','confidence','stability','vocabulary_coverage',
+    'source_correlation','lifecycle','execution_bounds','process_budgets','workload_budgets','relative_latency'];
+  return {...PROFILES[0],evaluations:[{target:HOST,provider:'cpu',criteria:'tools/ocr-models/criteria-v1.json',
+    evidence:{report:'test-report.json',measured_source_revision:'measured',execution_sha256:'execution',evaluator_revision:'evaluated'},
+    rules:ids.map(rule_id=>({rule_id,outcome:changes[rule_id]??'passed'})),...patch}]};
+}
+
+const evaluatedOtherTarget=evaluatedChoice({}, {target:'x86_64-pc-windows-msvc'}).evaluations[0];
+const evaluatedOtherProvider=evaluatedChoice({}, {provider:'cuda'}).evaluations[0];
+for (const {scenario,choice,expected} of [
+  {scenario:'a fast model retains its reading caution',choice:evaluatedChoice({text_order:'failed',region_count:'failed'}),expected:['fast','reading_attention']},
+  {scenario:'unmeasured speed does not erase successful reading checks',choice:evaluatedChoice({relative_latency:'not_run'}),expected:['speed_unmeasured','reading_good']},
+  {scenario:'missing vocabulary coverage prevents a positive reading conclusion',choice:evaluatedChoice({vocabulary_coverage:'not_run'}),expected:['fast','reading_incomplete']},
+  {scenario:'failed comparative timing is not presented as fast or as a reading failure',choice:evaluatedChoice({relative_latency:'failed'}),expected:['speed_attention','reading_good']},
+  {scenario:'incomplete timing stays distinct from a measured speed failure',choice:evaluatedChoice({relative_latency:'incomplete'}),expected:['speed_incomplete','reading_good']},
+  {scenario:'a lifecycle failure adds an independent third caution',choice:evaluatedChoice({text_order:'failed',lifecycle:'failed'}),expected:['fast','reading_attention','runtime_attention']},
+  {scenario:'incomplete resource measurements add runtime uncertainty',choice:evaluatedChoice({workload_budgets:'incomplete'}),expected:['fast','reading_good','runtime_incomplete']},
+  {scenario:'an unfamiliar criterion cannot inherit the known fast threshold',choice:evaluatedChoice({}, {criteria:'tools/ocr-models/criteria-v2.json'}),expected:['unverified']},
+  {scenario:'a result without report attribution cannot claim measured performance',choice:evaluatedChoice({}, {evidence:null}),expected:['unverified']},
+  {scenario:'an entirely unmeasured profile stays unevaluated',choice:PROFILES[2],expected:['not_evaluated']},
+  {scenario:'other targets and providers cannot supply this selection with tags',choice:{...PROFILES[0],evaluations:[evaluatedOtherTarget,evaluatedOtherProvider]},expected:['not_evaluated']},
+]) test(`model result tags: ${scenario}`,()=>{
+  assert.deepEqual(evaluationTags(choice,HOST),expected);
+});
+
+test('switching to another model set clears only the model root; a shared or unknown set keeps it',()=>{
+  const view=setupView();
+  const draft={profile:DEFAULT_PROFILE,model_root:'/rapidocr',runtime_path:'/runtime',library_paths:'/native'};
+  assert.deepEqual(selectProfile(draft,BOUNDED_PROFILE,view),{...draft,profile:BOUNDED_PROFILE});
+  assert.deepEqual(selectProfile(draft,TINY_PROFILE,view),{...draft,profile:TINY_PROFILE,model_root:''});
+  assert.deepEqual(selectProfile({...draft,profile:''},TINY_PROFILE,view),{...draft,profile:TINY_PROFILE,model_root:''});
+  assert.deepEqual(selectProfile({...draft,profile:'retired'},TINY_PROFILE,view),{...draft,profile:TINY_PROFILE});
+  assert.deepEqual(selectProfile(draft,TINY_PROFILE,null),{...draft,profile:TINY_PROFILE});
+});
+
+const checkedEnvironment=readEnvironment({profile:DEFAULT_PROFILE,model_root:'/models',runtime_path:'/rt.dylib',library_paths:'/lib/a.dylib'},PROFILES).environment;
 const workspace={workspace_id:'ws-1',revision:1};
 const association={operation:'desktop-1',workspace,environment:checkedEnvironment,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
 const unchanged={saved:checkedEnvironment,draftDirty:false,workspace,descriptorPath:'/corpus/a.json',packageInventoryIdentity:'inv-1'};
@@ -297,36 +385,36 @@ for (const {scenario,current,reasons} of [
 
 test('a completed settings Save preserves later locale and invalid input edits',()=>{
   const submitted={...settingsDraftFrom(null),locale:'ja'};
-  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted,PROFILES).settings};
   const current={...submitted,locale:'en',logLimit:'not a number'};
   const settled=settingsDraftAfterSave(current,submitted,saved);
   assert.equal(settled.locale,'en');
   assert.equal(settled.logLimit,'not a number');
-  const parsed=readSettingsDraft(settled);
+  const parsed=readSettingsDraft(settled,PROFILES);
   assert.equal(parsed.settings,null);
   assert.ok(parsed.errors.logLimit);
 });
 
 const validSettingsDraft={locale:'en',logLimit:' 250 ',notifications:{...DEFAULT_NOTIFICATIONS},completionAutomatic:true,completionDelayMs:'100',captureCacheEnabled:false,environment:environmentDraft(checkedEnvironment),backupDirectory:'',packagesRoot:''};
 test('a complete settings draft becomes one editable settings object without version or package hint',()=>{
-  const parsed=readSettingsDraft(validSettingsDraft);
+  const parsed=readSettingsDraft(validSettingsDraft,PROFILES);
   assert.deepEqual(parsed.errors,{});
   assert.deepEqual(parsed.settings,{locale:'en',gui_log_limit:250,ocr_environment:checkedEnvironment,notifications:{visible_count:2,timeout_seconds:8,show_success:true},editor_completion:{automatic:true,delay_ms:100},capture_cache_enabled:false,backup_directory:null,packages_root:null});
-  assert.equal(readSettingsDraft({...validSettingsDraft,environment:environmentDraft(null)}).settings.ocr_environment,null);
+  assert.equal(readSettingsDraft({...validSettingsDraft,environment:environmentDraft(null)},null).settings.ocr_environment,null);
 });
 
 test('completion drafts use host values without previewing or mutating the saved preferences',()=>{
   const initial=settingsDraftFrom(null);
   assert.equal(initial.completionAutomatic,true);
   assert.equal(initial.completionDelayMs,'100');
-  const saved={version:1,package_path:null,...readSettingsDraft(initial).settings,editor_completion:{automatic:false,delay_ms:0}};
+  const saved={version:1,package_path:null,...readSettingsDraft(initial,PROFILES).settings,editor_completion:{automatic:false,delay_ms:0}};
   const original=structuredClone(saved);
   const draft=settingsDraftFrom(saved);
   assert.equal(draft.completionAutomatic,false);
   assert.equal(draft.completionDelayMs,'0');
   draft.completionAutomatic=true;
   draft.completionDelayMs='1000';
-  assert.deepEqual(readSettingsDraft(draft).settings.editor_completion,{automatic:true,delay_ms:1000});
+  assert.deepEqual(readSettingsDraft(draft,PROFILES).settings.editor_completion,{automatic:true,delay_ms:1000});
   assert.deepEqual(saved,original);
   const reopened=settingsDraftFrom(saved);
   assert.equal(reopened.completionAutomatic,false);
@@ -339,7 +427,7 @@ for (const {scenario,automatic,delay,expected} of [
   {scenario:'the upper boundary with surrounding whitespace',automatic:false,delay:' 1000 ',expected:{automatic:false,delay_ms:1000}},
 ]) {
   test(`completion preferences accept ${scenario}`,()=>{
-    const parsed=readSettingsDraft({...validSettingsDraft,completionAutomatic:automatic,completionDelayMs:delay});
+    const parsed=readSettingsDraft({...validSettingsDraft,completionAutomatic:automatic,completionDelayMs:delay},PROFILES);
     assert.deepEqual(parsed.errors,{});
     assert.deepEqual(parsed.settings.editor_completion,expected);
   });
@@ -347,11 +435,11 @@ for (const {scenario,automatic,delay,expected} of [
 
 test('settled completion preferences are reconstructed from the authoritative Save response',()=>{
   const submitted={...validSettingsDraft,completionAutomatic:false,completionDelayMs:' 250 '};
-  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted,PROFILES).settings};
   const settled=settingsDraftAfterSave(submitted,submitted,saved);
   assert.equal(settled.completionAutomatic,false);
   assert.equal(settled.completionDelayMs,'250');
-  assert.deepEqual(readSettingsDraft(settled).settings.editor_completion,saved.editor_completion);
+  assert.deepEqual(readSettingsDraft(settled,PROFILES).settings.editor_completion,saved.editor_completion);
   assert.equal(submitted.completionDelayMs,' 250 ');
 });
 
@@ -362,11 +450,11 @@ for (const {scenario,edit,expected,errors} of [
 ]) {
   test(`a completed Save preserves ${scenario} made after submission`,()=>{
     const submitted={...validSettingsDraft,completionAutomatic:false,completionDelayMs:'250'};
-    const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+    const saved={version:1,package_path:null,...readSettingsDraft(submitted,PROFILES).settings};
     const current={...submitted,...edit};
     const settled=settingsDraftAfterSave(current,submitted,saved);
     assert.equal(settled,current);
-    const parsed=readSettingsDraft(settled);
+    const parsed=readSettingsDraft(settled,PROFILES);
     assert.deepEqual(parsed.settings?.editor_completion ?? null,expected);
     assert.deepEqual(Object.keys(parsed.errors),errors);
     assert.deepEqual(saved.editor_completion,{automatic:false,delay_ms:250});
@@ -376,7 +464,7 @@ test('cache preference persists through a saved settings draft without overridin
   const initial=settingsDraftFrom(null);
   assert.equal(initial.captureCacheEnabled,false);
   const submitted={...initial,captureCacheEnabled:true};
-  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted,PROFILES).settings};
   assert.equal(saved.capture_cache_enabled,true);
   assert.equal(settingsDraftAfterSave(submitted,submitted,saved).captureCacheEnabled,true);
   const later={...submitted,captureCacheEnabled:false};
@@ -389,18 +477,18 @@ test('the backup directory draft is blank for the default destination and otherw
   assert.equal(settingsDraftFrom({version:1,gui_log_limit:1000,package_path:null,ocr_environment:null,
     notifications:DEFAULT_NOTIFICATIONS,editor_completion:{automatic:true,delay_ms:100},locale:'en',backup_directory:null}).captureCacheEnabled,false,
     'older saved settings without the flag default to opt-out');
-  assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:'   '}).settings.backup_directory,null);
-  assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:' /private/backups '}).settings.backup_directory,'/private/backups');
+  assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:'   '},PROFILES).settings.backup_directory,null);
+  assert.equal(readSettingsDraft({...validSettingsDraft,backupDirectory:' /private/backups '},PROFILES).settings.backup_directory,'/private/backups');
 });
 
 test('packages root defaults, persisted drafts and edits made during Save remain distinct',()=>{
   const submitted={...validSettingsDraft,packagesRoot:' /private/packages '};
-  const saved={version:1,package_path:null,...readSettingsDraft(submitted).settings};
+  const saved={version:1,package_path:null,...readSettingsDraft(submitted,PROFILES).settings};
   assert.equal(saved.packages_root,'/private/packages');
   assert.equal(settingsDraftAfterSave(submitted,submitted,saved).packagesRoot,'/private/packages');
   const changed={...submitted,packagesRoot:'/private/later'};
   assert.equal(settingsDraftAfterSave(changed,submitted,saved).packagesRoot,'/private/later');
-  assert.equal(readSettingsDraft({...submitted,packagesRoot:'  '}).settings.packages_root,null);
+  assert.equal(readSettingsDraft({...submitted,packagesRoot:'  '},PROFILES).settings.packages_root,null);
   assert.equal(settingsDraftFrom(null).packagesRoot,'');
 });
 
@@ -436,7 +524,7 @@ for (const {scenario,draft,field} of [
   {scenario:'an oversized packages root',draft:{...validSettingsDraft,packagesRoot:`/${'あ'.repeat(1400)}`},field:'packagesRoot'},
 ]) {
   test(`settings draft refuses ${scenario} without producing a save payload`,()=>{
-    const parsed=readSettingsDraft(draft);
+    const parsed=readSettingsDraft(draft,PROFILES);
     assert.equal(parsed.settings,null);
     assert.ok(parsed.errors[field]);
   });
@@ -467,14 +555,16 @@ function deferredSetup() {
   return {promise,resolve,reject};
 }
 
-function setupView({environment=null,resolved={},items=null,native_methods=['homebrew','folders']}={}) {
+// `profile` binds the reply; the default reply belongs to the SDK default profile and its model set.
+function setupView({environment=null,resolved={},items=null,native_methods=['homebrew','folders'],profile=DEFAULT_PROFILE,profiles=PROFILES}={}) {
   return {
-    items:items ?? ['rapidocr-models','onnxruntime','native-libraries'].map(id=>({
+    items:items ?? ['rapidocr-models','onnxruntime','native-libraries','models-tiny'].map(id=>({
       id,name:{en:id,ja:id},state:'missing',detail:{en:'fixture',ja:'fixture'},downloadable:id!=='native-libraries',links:[],commands:[],
     })),
     environment,
     resolved:{model_root:environment?.model_root ?? null,runtime_path:environment?.runtime_path ?? null,native_library_paths:environment?.native_library_paths ?? null,...resolved},
     native_methods,
+    profiles,default_profile:DEFAULT_PROFILE,target:HOST,profile,resource_id:profiles.find(item=>item.profile===profile)?.resource_id ?? '',
   };
 }
 
@@ -482,26 +572,31 @@ function setupOperation({id='owned',active=false,stage='complete',resource_id='r
   return {id,active,progress:{stage,resource_id,bytes:100,total:100},result,error,cleanup_error};
 }
 
-function setupHarness(initial=validSettingsDraft, overrides={}) {
+// Opens like the dialog: the catalog is loaded with no earlier operation, then only later calls are recorded.
+async function setupHarness(initial=validSettingsDraft, overrides={}) {
   const calls=[], published=[], adopted=[];
-  let draft=initial;
+  let draft=initial, opening=true;
   const client={
     catalog:async()=>{calls.push({kind:'catalog'}); return overrides.catalog ? overrides.catalog() : setupView();},
-    start:async(resourceId,environment,nativeSelection)=>{calls.push({kind:'start',resourceId,environment,nativeSelection}); return overrides.start ? overrides.start() : 'owned';},
-    poll:async()=>{calls.push({kind:'poll'}); return overrides.poll ? overrides.poll() : setupOperation();},
+    start:async(resourceId,profile,environment,nativeSelection)=>{calls.push({kind:'start',resourceId,profile,environment,nativeSelection}); return overrides.start ? overrides.start() : 'owned';},
+    poll:async()=>{calls.push({kind:'poll'}); return opening ? null : overrides.poll ? overrides.poll() : setupOperation();},
     cancel:async(operationId)=>{calls.push({kind:'cancel',operationId}); if (overrides.cancel) await overrides.cancel();},
     pickFolder:async()=>{calls.push({kind:'pickFolder'}); return overrides.pickFolder ? overrides.pickFolder() : '/installation';},
     openLink:async(resourceId,index)=>{calls.push({kind:'link',resourceId,index}); if (overrides.openLink) await overrides.openLink();},
     copyCommand:async(resourceId,index)=>{calls.push({kind:'copy',resourceId,index}); if (overrides.copyCommand) await overrides.copyCommand();},
   };
   const session=new OcrSetupSession(client,draft,state=>published.push(state),next=>{draft=next; adopted.push(next);});
+  await session.load();
+  opening=false;
+  calls.length=0;
+  published.length=0;
   return {session,calls,published,adopted,get draft(){return draft;},edit(next){draft=next; session.observeDraft(next);}};
 }
 
 const blankSetupDraft={...validSettingsDraft,environment:environmentDraft(null)};
 
 test('resource catalog and installation guidance stay read-only',async()=>{
-  const harness=setupHarness(blankSetupDraft);
+  const harness=await setupHarness(blankSetupDraft);
   await harness.session.load();
   await harness.session.guidance('link','onnxruntime',0);
   await harness.session.guidance('copy','native-libraries',1);
@@ -512,34 +607,31 @@ test('resource catalog and installation guidance stay read-only',async()=>{
   assert.equal(harness.draft,blankSetupDraft);
 });
 
-test('Recheck preserves partial hints and unsupported nonblank profiles without relaxing Save',()=>{
-  assert.equal(setupEnvironment(environmentDraft(null)),null);
+test('Recheck hints keep the draft selection and take tuple fields only from its catalog choice',()=>{
+  assert.equal(setupEnvironment(environmentDraft(null),null),null);
   const partial={profile:'',model_root:'',runtime_path:' /runtime ',library_paths:' /library-a \n\n /library-b '};
-  const hints=setupEnvironment(partial);
-  assert.equal(hints.profile,'');
-  assert.equal(hints.runtime_path,'/runtime');
-  assert.deepEqual(hints.native_library_paths,['/library-a','/library-b']);
-  assert.equal(readEnvironment(partial).environment,null);
-  assert.equal(setupEnvironment({...partial,profile:'unsupported'}).profile,'unsupported');
-  assert.equal(setupEnvironment({...partial,profile:SUPPORTED_PROFILES[1].profile}).model,SUPPORTED_PROFILES[1].model);
+  assert.deepEqual(setupEnvironment(partial,null),{profile:'',model:'',language:'',provider:'',runtime_profile:'',model_root:'',runtime_path:'/runtime',native_library_paths:['/library-a','/library-b']});
+  assert.equal(readEnvironment(partial,PROFILES).environment,null);
+  assert.equal(setupEnvironment({...partial,profile:'unsupported'},null).profile,'unsupported');
+  assert.equal(setupEnvironment({...partial,profile:TINY_PROFILE},PROFILES[0]).model,'tiny-model');
 });
 
 for (const {scenario,resourceId,resolved,expected} of [
-  {scenario:'models',resourceId:'rapidocr-models',resolved:{model_root:'/managed-models'},expected:{profile:SUPPORTED_PROFILES[0].profile,model_root:'/managed-models',runtime_path:'',library_paths:''}},
-  {scenario:'runtime',resourceId:'onnxruntime',resolved:{runtime_path:'/managed-runtime'},expected:{profile:SUPPORTED_PROFILES[0].profile,model_root:'',runtime_path:'/managed-runtime',library_paths:''}},
+  {scenario:'models',resourceId:'rapidocr-models',resolved:{model_root:'/managed-models'},expected:{profile:DEFAULT_PROFILE,model_root:'/managed-models',runtime_path:'',library_paths:''}},
+  {scenario:'runtime',resourceId:'onnxruntime',resolved:{runtime_path:'/managed-runtime'},expected:{profile:DEFAULT_PROFILE,model_root:'',runtime_path:'/managed-runtime',library_paths:''}},
 ]) {
-  test(`a ${scenario} download automatically selects its verified path with all manual fields blank`,async()=>{
+  test(`a ${scenario} download selects its verified path and the SDK default, not the first listed model`,async()=>{
     const original=structuredClone(blankSetupDraft);
     const result=setupView({resolved});
-    const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
+    const harness=await setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
     await harness.session.start(resourceId,harness.draft);
-    assert.deepEqual(harness.calls[0],{kind:'start',resourceId,environment:null,nativeSelection:null});
+    assert.deepEqual(harness.calls[0],{kind:'start',resourceId,profile:DEFAULT_PROFILE,environment:null,nativeSelection:null});
     await harness.session.poll();
     assert.deepEqual(harness.draft.environment,expected);
     assert.equal(harness.adopted.length,1);
     assert.equal(harness.session.snapshot.adopted,true);
     assert.equal(harness.session.snapshot.checkedRevision,harness.session.draftRevision);
-    assert.equal(readSettingsDraft(harness.draft).settings,null);
+    assert.equal(readSettingsDraft(harness.draft,PROFILES).settings,null);
     assert.deepEqual(blankSetupDraft,original);
     await harness.session.poll();
     assert.equal(harness.adopted.length,1);
@@ -547,12 +639,30 @@ for (const {scenario,resourceId,resolved,expected} of [
   });
 }
 
+test('without a loaded catalog a blank selection starts nothing rather than guessing a model',async()=>{
+  const harness=await setupHarness(blankSetupDraft,{catalog:async()=>{throw {category:'OcrSetup',message:'catalog unavailable',context:null};}});
+  await harness.session.start('inspect',harness.draft);
+  assert.deepEqual(harness.calls,[]);
+  assert.equal(harness.session.busy,false);
+});
+
+test('a new catalog model downloads and selects its own model set through the generic path',async()=>{
+  const initial={...blankSetupDraft,environment:{...blankSetupDraft.environment,profile:TINY_PROFILE,runtime_path:'/rt.dylib',library_paths:'/lib/a.dylib'}};
+  const result=setupView({profile:TINY_PROFILE,resolved:{model_root:'/managed-tiny'}});
+  const harness=await setupHarness(initial,{poll:async()=>setupOperation({resource_id:'models-tiny',result})});
+  await harness.session.start('models-tiny',harness.draft);
+  assert.deepEqual(harness.calls[0],{kind:'start',resourceId:'models-tiny',profile:TINY_PROFILE,environment:null,nativeSelection:null});
+  await harness.session.poll();
+  assert.equal(harness.draft.environment.model_root,'/managed-tiny');
+  assert.equal(readSettingsDraft(harness.draft,PROFILES).settings.ocr_environment.model,'tiny-model');
+});
+
 test('independent downloads and native discovery complete one draft without saving or resetting earlier item statuses',async()=>{
-  const saved={version:1,package_path:null,...readSettingsDraft(blankSetupDraft).settings};
+  const saved={version:1,package_path:null,...readSettingsDraft(blankSetupDraft,PROFILES).settings};
   const original=structuredClone(saved);
   let result=setupView({resolved:{model_root:'/managed-models'}});
   result.items[0].state='verified';
-  const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
+  const harness=await setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
   await harness.session.load();
   await harness.session.start('rapidocr-models',harness.draft);
   await harness.session.poll();
@@ -566,38 +676,63 @@ test('independent downloads and native discovery complete one draft without savi
   await harness.session.start('onnxruntime',harness.draft);
   await harness.session.poll();
   assert.deepEqual(harness.draft.environment,{
-    profile:SUPPORTED_PROFILES[0].profile,model_root:'/managed-models',runtime_path:'/managed-runtime',
+    profile:DEFAULT_PROFILE,model_root:'/managed-models',runtime_path:'/managed-runtime',
     library_paths:'/opencv/core\n/opencv/imgproc\n/opencv/imgcodecs',
   });
-  assert.deepEqual(harness.session.snapshot.view.items.map(item=>item.state),['verified','verified','verified']);
+  assert.deepEqual(harness.session.snapshot.view.items.map(item=>item.state),['verified','verified','verified','missing']);
   assert.deepEqual(harness.session.snapshot.view.resolved,{
     model_root:'/managed-models',runtime_path:'/managed-runtime',native_library_paths:['/opencv/core','/opencv/imgproc','/opencv/imgcodecs'],
   });
-  assert.equal(readSettingsDraft(harness.draft).settings.ocr_environment.runtime_path,'/managed-runtime');
+  assert.equal(readSettingsDraft(harness.draft,PROFILES).settings.ocr_environment.runtime_path,'/managed-runtime');
   assert.deepEqual(saved,original);
   assert.equal(harness.adopted.length,3);
   assert.deepEqual(harness.calls.filter(call=>call.kind==='start').map(call=>call.nativeSelection),[null,{method:'homebrew'},null]);
 });
 
-for (const {scenario,profile} of [
-  {scenario:'a supported nondefault profile',profile:SUPPORTED_PROFILES[1].profile},
-  {scenario:'an explicit unsupported profile',profile:'unsupported-profile'},
-  {scenario:'an explicit whitespace profile',profile:' '},
+test('automatic model selection preserves a nondefault model sharing the default model set',async()=>{
+  const initial={...blankSetupDraft,environment:{...blankSetupDraft.environment,profile:BOUNDED_PROFILE}};
+  const harness=await setupHarness(initial,{poll:async()=>setupOperation({result:setupView({profile:BOUNDED_PROFILE,resolved:{model_root:'/models'}})})});
+  await harness.session.start('rapidocr-models',initial);
+  assert.equal(harness.calls[0].profile,BOUNDED_PROFILE);
+  await harness.session.poll();
+  assert.equal(harness.draft.environment.profile,BOUNDED_PROFILE);
+  assert.equal(harness.draft.environment.model_root,'/models');
+});
+
+for (const {scenario,profile,result} of [
+  {scenario:'another profile',profile:BOUNDED_PROFILE,result:setupView({resolved:{model_root:'/models',runtime_path:'/runtime'}})},
+  {scenario:'another model set',profile:BOUNDED_PROFILE,result:{...setupView({profile:BOUNDED_PROFILE,resolved:{model_root:'/models',runtime_path:'/runtime'}}),resource_id:'models-tiny'}},
+  {scenario:'the default profile while an unavailable profile was requested',profile:'retired-profile',result:setupView({resolved:{model_root:'/models',runtime_path:'/runtime'}})},
 ]) {
-  test(`automatic model selection preserves ${scenario}`,async()=>{
+  test(`a reply bound to ${scenario} never fills the unchanged draft`,async()=>{
     const initial={...blankSetupDraft,environment:{...blankSetupDraft.environment,profile}};
-    const harness=setupHarness(initial,{poll:async()=>setupOperation({result:setupView({resolved:{model_root:'/models'}})})});
-    await harness.session.start('rapidocr-models',initial);
+    const harness=await setupHarness(initial,{poll:async()=>setupOperation({result})});
+    await harness.session.start('inspect',harness.draft);
+    assert.equal(harness.calls[0].profile,profile);
     await harness.session.poll();
-    assert.equal(harness.draft.environment.profile,profile);
-    assert.equal(harness.draft.environment.model_root,'/models');
-    assert.equal(readSettingsDraft(harness.draft).settings,null);
+    assert.deepEqual(harness.adopted,[]);
+    assert.equal(harness.draft,initial);
   });
 }
 
+test('a model download finishing after the selection moved to another model set leaves that model unfilled',async()=>{
+  const pending=deferredSetup();
+  const harness=await setupHarness(validSettingsDraft,{poll:()=>pending.promise});
+  await harness.session.start('rapidocr-models',harness.draft);
+  const polling=harness.session.poll();
+  const view=harness.session.snapshot.view;
+  const moved={...harness.draft,environment:selectProfile(harness.draft.environment,TINY_PROFILE,view)};
+  harness.edit(moved);
+  pending.resolve(setupOperation({result:setupView({resolved:{model_root:'/rapidocr-models'}})}));
+  await polling;
+  assert.deepEqual(harness.adopted,[]);
+  assert.deepEqual(harness.draft.environment,{...validSettingsDraft.environment,profile:TINY_PROFILE,model_root:''});
+  assert.notEqual(harness.session.snapshot.checkedRevision,harness.session.draftRevision);
+});
+
 test('a download adopts only its own resource and preserves current explicit dependency paths',async()=>{
   const result=setupView({resolved:{model_root:'/new-models',runtime_path:'/old-runtime',native_library_paths:['/old-native']}});
-  const harness=setupHarness(validSettingsDraft,{poll:async()=>setupOperation({result})});
+  const harness=await setupHarness(validSettingsDraft,{poll:async()=>setupOperation({result})});
   await harness.session.start('rapidocr-models',harness.draft);
   await harness.session.poll();
   assert.equal(harness.draft.environment.model_root,'/new-models');
@@ -609,20 +744,20 @@ test('a download adopts only its own resource and preserves current explicit dep
 test('inspection fills verified partial paths but never replaces nonblank explicit paths',async()=>{
   const initial={...blankSetupDraft,environment:{...blankSetupDraft.environment,runtime_path:'/explicit-runtime'}};
   const result=setupView({resolved:{model_root:'/models',runtime_path:'/different-runtime',native_library_paths:['/native']}});
-  const harness=setupHarness(initial,{poll:async()=>setupOperation({result})});
+  const harness=await setupHarness(initial,{poll:async()=>setupOperation({result})});
   await harness.session.start('inspect',initial);
   await harness.session.poll();
-  assert.deepEqual(harness.draft.environment,{profile:SUPPORTED_PROFILES[0].profile,model_root:'/models',runtime_path:'/explicit-runtime',library_paths:'/native'});
+  assert.deepEqual(harness.draft.environment,{profile:DEFAULT_PROFILE,model_root:'/models',runtime_path:'/explicit-runtime',library_paths:'/native'});
   assert.equal(harness.session.snapshot.view.environment,null);
   assert.equal(harness.session.snapshot.checkedRevision,harness.session.draftRevision);
 });
 
 test('a successful download selects the default profile even when its verified path is already present',async()=>{
   const initial={...blankSetupDraft,environment:{...blankSetupDraft.environment,model_root:'/models'}};
-  const harness=setupHarness(initial,{poll:async()=>setupOperation({result:setupView({resolved:{model_root:'/models'}})})});
+  const harness=await setupHarness(initial,{poll:async()=>setupOperation({result:setupView({resolved:{model_root:'/models'}})})});
   await harness.session.start('rapidocr-models',initial);
   await harness.session.poll();
-  assert.equal(harness.draft.environment.profile,SUPPORTED_PROFILES[0].profile);
+  assert.equal(harness.draft.environment.profile,DEFAULT_PROFILE);
   assert.equal(harness.draft.environment.model_root,'/models');
   assert.equal(harness.adopted.length,1);
   await harness.session.poll();
@@ -630,7 +765,7 @@ test('a successful download selects the default profile even when its verified p
 });
 
 test('advanced manual Recheck explicitly leaves native discovery and keeps the supplied library list',async()=>{
-  const harness=setupHarness(blankSetupDraft);
+  const harness=await setupHarness(blankSetupDraft);
   await harness.session.load();
   await harness.session.useHomebrew(harness.draft);
   await harness.session.poll();
@@ -638,7 +773,7 @@ test('advanced manual Recheck explicitly leaves native discovery and keeps the s
   await harness.session.useManual(harness.draft);
   assert.equal(harness.session.snapshot.nativeSelection,null);
   assert.deepEqual(harness.calls.filter(call=>call.kind==='start').at(-1),{
-    kind:'start',resourceId:'inspect',environment:checkedEnvironment,nativeSelection:null,
+    kind:'start',resourceId:'inspect',profile:DEFAULT_PROFILE,environment:checkedEnvironment,nativeSelection:null,
   });
   await harness.session.poll();
   assert.deepEqual(harness.draft.environment,validSettingsDraft.environment);
@@ -647,7 +782,7 @@ test('advanced manual Recheck explicitly leaves native discovery and keeps the s
 
 test('automatic adoption merges unrelated edits made during the operation into the current draft',async()=>{
   const pending=deferredSetup();
-  const harness=setupHarness(blankSetupDraft,{poll:()=>pending.promise});
+  const harness=await setupHarness(blankSetupDraft,{poll:()=>pending.promise});
   await harness.session.start('rapidocr-models',harness.draft);
   const polling=harness.session.poll();
   const edited={...harness.draft,backupDirectory:'/draft-backups',logLimit:'500',notifications:{...harness.draft.notifications,show_success:false}};
@@ -669,7 +804,7 @@ for (const {scenario,resourceId} of [
   test(`an OCR edit and revert fences ${scenario} and a fresh inspection can recover`,async()=>{
     const pending=deferredSetup();
     let result=pending.promise;
-    const harness=setupHarness(blankSetupDraft,{poll:()=>result});
+    const harness=await setupHarness(blankSetupDraft,{poll:()=>result});
     await harness.session.start(resourceId,harness.draft);
     const polling=harness.session.poll();
     harness.edit({...blankSetupDraft,environment:{...blankSetupDraft.environment,runtime_path:'/new-runtime'}});
@@ -694,12 +829,12 @@ for (const {scenario,resourceId} of [
 ]) {
   test(`closing before ${scenario} returns cancels only its late operation, never the successor`,async()=>{
     const start=deferredSetup();
-    const old=setupHarness(blankSetupDraft,{start:()=>start.promise});
+    const old=await setupHarness(blankSetupDraft,{start:()=>start.promise});
     const pending=old.session.start(resourceId,old.draft);
     assert.equal(old.session.busy,true);
     old.session.close();
     const publications=old.published.length;
-    const successor=setupHarness(blankSetupDraft,{start:async()=> 'successor'});
+    const successor=await setupHarness(blankSetupDraft,{start:async()=> 'successor'});
     await successor.session.start('inspect',successor.draft);
     start.resolve('predecessor');
     await pending;
@@ -714,7 +849,7 @@ for (const {scenario,resourceId} of [
 test('Cancel before Start remains latched, and complete retained models can be reused by explicit Recheck',async()=>{
   const start=deferredSetup();
   const result=setupView({resolved:{model_root:'/retained-models'}});
-  const harness=setupHarness(blankSetupDraft,{start:()=>start.promise,poll:async()=>setupOperation({result})});
+  const harness=await setupHarness(blankSetupDraft,{start:()=>start.promise,poll:async()=>setupOperation({result})});
   const pending=harness.session.start('rapidocr-models',harness.draft);
   await harness.session.cancel();
   assert.deepEqual(harness.calls.filter(call=>call.kind==='cancel'),[]);
@@ -737,7 +872,7 @@ test('Cancel before Start remains latched, and complete retained models can be r
 });
 
 test('a foreign poll result is never adopted and Cancel targets only the dialog-owned ID',async()=>{
-  const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({id:'foreign',result:setupView({environment:checkedEnvironment})})});
+  const harness=await setupHarness(blankSetupDraft,{poll:async()=>setupOperation({id:'foreign',result:setupView({environment:checkedEnvironment})})});
   await harness.session.start('inspect',harness.draft);
   await harness.session.poll();
   assert.equal(harness.session.snapshot.unavailable,true);
@@ -749,12 +884,12 @@ test('a foreign poll result is never adopted and Cancel targets only the dialog-
 
 test('an inspection finishing after close cannot publish or fill a replacement dialog',async()=>{
   const pending=deferredSetup();
-  const old=setupHarness(blankSetupDraft,{poll:()=>pending.promise});
+  const old=await setupHarness(blankSetupDraft,{poll:()=>pending.promise});
   await old.session.start('inspect',old.draft);
   const polling=old.session.poll();
   old.session.close();
   const publications=old.published.length;
-  const successor=setupHarness(blankSetupDraft,{start:async()=> 'successor',poll:async()=>setupOperation({id:'successor',result:setupView({environment:checkedEnvironment})})});
+  const successor=await setupHarness(blankSetupDraft,{start:async()=> 'successor',poll:async()=>setupOperation({id:'successor',result:setupView({environment:checkedEnvironment})})});
   await successor.session.start('inspect',successor.draft);
   await successor.session.poll();
   pending.resolve(setupOperation({result:setupView({environment:{...checkedEnvironment,runtime_path:'/old-runtime'}})}));
@@ -771,7 +906,7 @@ for (const {scenario,stage,error,cleanup_error,expectedBusy} of [
   {scenario:'incomplete inspection cleanup',stage:'complete',error:null,cleanup_error:{category:'Storage',message:'cleanup failed',context:null},expectedBusy:true},
 ]) {
   test(`${scenario} remains visible without automatically filling paths`,async()=>{
-    const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({stage,error,cleanup_error,result:setupView({environment:checkedEnvironment})})});
+    const harness=await setupHarness(blankSetupDraft,{poll:async()=>setupOperation({stage,error,cleanup_error,result:setupView({environment:checkedEnvironment})})});
     await harness.session.start('inspect',harness.draft);
     await harness.session.poll();
     assert.equal(harness.session.snapshot.operation.error,error);
@@ -784,13 +919,13 @@ for (const {scenario,stage,error,cleanup_error,expectedBusy} of [
 
 test('Homebrew discovery automatically fills native paths and repeats the selected method',async()=>{
   const result=setupView({resolved:{native_library_paths:['/homebrew/core','/homebrew/imgproc','/homebrew/imgcodecs']}});
-  const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
+  const harness=await setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
   await harness.session.load();
   await harness.session.useHomebrew(harness.draft);
-  assert.deepEqual(harness.calls.filter(call=>call.kind==='start'),[{kind:'start',resourceId:'inspect',environment:null,nativeSelection:{method:'homebrew'}}]);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start'),[{kind:'start',resourceId:'inspect',profile:DEFAULT_PROFILE,environment:null,nativeSelection:{method:'homebrew'}}]);
   await harness.session.poll();
   assert.equal(harness.draft.environment.library_paths,'/homebrew/core\n/homebrew/imgproc\n/homebrew/imgcodecs');
-  assert.equal(harness.draft.environment.profile,SUPPORTED_PROFILES[0].profile);
+  assert.equal(harness.draft.environment.profile,DEFAULT_PROFILE);
   assert.equal(harness.draft.environment.model_root,'');
   assert.equal(harness.draft.environment.runtime_path,'');
   await harness.session.start('inspect',harness.draft);
@@ -799,11 +934,11 @@ test('Homebrew discovery automatically fills native paths and repeats the select
 
 test('choosing an installation folder fills the native list without editing individual paths',async()=>{
   const result=setupView({resolved:{native_library_paths:['/installation/core','/installation/codec']}});
-  const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
+  const harness=await setupHarness(blankSetupDraft,{poll:async()=>setupOperation({result})});
   await harness.session.load();
   await harness.session.pickFolder(harness.draft);
   assert.deepEqual(harness.session.snapshot.nativeSelection,{method:'folders',paths:['/installation']});
-  assert.deepEqual(harness.calls.filter(call=>call.kind==='start'),[{kind:'start',resourceId:'inspect',environment:null,nativeSelection:{method:'folders',paths:['/installation']}}]);
+  assert.deepEqual(harness.calls.filter(call=>call.kind==='start'),[{kind:'start',resourceId:'inspect',profile:DEFAULT_PROFILE,environment:null,nativeSelection:{method:'folders',paths:['/installation']}}]);
   await harness.session.poll();
   assert.equal(harness.draft.environment.library_paths,'/installation/core\n/installation/codec');
   await harness.session.start('inspect',harness.draft);
@@ -813,7 +948,7 @@ test('choosing an installation folder fills the native list without editing indi
 test('an explicitly added dependency folder is retained through failure and used on each subsequent inspection',async()=>{
   const paths=['/opencv','/extra-dependencies'];
   let operation=setupOperation({stage:'failed',error:{category:'Storage',message:'missing dependency',context:null}});
-  const harness=setupHarness(blankSetupDraft,{pickFolder:async()=>paths.shift(),poll:async()=>operation});
+  const harness=await setupHarness(blankSetupDraft,{pickFolder:async()=>paths.shift(),poll:async()=>operation});
   await harness.session.load();
   await harness.session.pickFolder(harness.draft);
   await harness.session.poll();
@@ -829,7 +964,7 @@ test('an explicitly added dependency folder is retained through failure and used
 });
 
 test('cancelling the folder picker keeps the existing source choice and never starts inspection',async()=>{
-  const harness=setupHarness(blankSetupDraft,{pickFolder:async()=>null});
+  const harness=await setupHarness(blankSetupDraft,{pickFolder:async()=>null});
   await harness.session.load();
   await harness.session.useHomebrew(harness.draft);
   await harness.session.poll();
@@ -843,7 +978,7 @@ test('cancelling the folder picker keeps the existing source choice and never st
 
 test('a folder picker result after an OCR edit and revert is ignored',async()=>{
   const picker=deferredSetup();
-  const harness=setupHarness(blankSetupDraft,{pickFolder:()=>picker.promise});
+  const harness=await setupHarness(blankSetupDraft,{pickFolder:()=>picker.promise});
   await harness.session.load();
   const choosing=harness.session.pickFolder(harness.draft);
   assert.equal(harness.session.busy,true);
@@ -862,7 +997,7 @@ test('a folder picker result after an OCR edit and revert is ignored',async()=>{
 test('unrelated draft edits while choosing a folder are preserved by its automatic inspection',async()=>{
   const picker=deferredSetup();
   const result=setupView({resolved:{native_library_paths:['/opencv/core']}});
-  const harness=setupHarness(blankSetupDraft,{pickFolder:()=>picker.promise,poll:async()=>setupOperation({result})});
+  const harness=await setupHarness(blankSetupDraft,{pickFolder:()=>picker.promise,poll:async()=>setupOperation({result})});
   await harness.session.load();
   const choosing=harness.session.pickFolder(harness.draft);
   harness.edit({...harness.draft,backupDirectory:'/new-backups'});
@@ -880,11 +1015,11 @@ for (const {scenario,stop} of [
 ]) {
   test(`a late folder answer after ${scenario} cannot enter a successor dialog or picker`,async()=>{
     const picker=deferredSetup();
-    const old=setupHarness(blankSetupDraft,{pickFolder:()=>picker.promise});
+    const old=await setupHarness(blankSetupDraft,{pickFolder:()=>picker.promise});
     await old.session.load();
     const choosing=old.session.pickFolder(old.draft);
     await stop(old.session);
-    const successor=setupHarness(blankSetupDraft,{pickFolder:async()=>'/successor-folder'});
+    const successor=await setupHarness(blankSetupDraft,{pickFolder:async()=>'/successor-folder'});
     await successor.session.load();
     await successor.session.pickFolder(successor.draft);
     picker.resolve('/old-folder');
@@ -898,7 +1033,7 @@ for (const {scenario,stop} of [
 test('cancelling one picker fences its answer even after a new picker starts in the same session',async()=>{
   const first=deferredSetup(), second=deferredSetup();
   let count=0;
-  const harness=setupHarness(blankSetupDraft,{pickFolder:()=>++count===1 ? first.promise : second.promise});
+  const harness=await setupHarness(blankSetupDraft,{pickFolder:()=>++count===1 ? first.promise : second.promise});
   await harness.session.load();
   const old=harness.session.pickFolder(harness.draft);
   await harness.session.cancel();
@@ -915,7 +1050,7 @@ test('cancelling one picker fences its answer even after a new picker starts in 
 
 test('duplicate folders do not expand approval and eight approved folders refuse a ninth picker',async()=>{
   const answers=['/folder-1','/folder-1',...Array.from({length:7},(_,index)=>`/folder-${index+2}`)];
-  const harness=setupHarness(blankSetupDraft,{pickFolder:async()=>answers.shift()});
+  const harness=await setupHarness(blankSetupDraft,{pickFolder:async()=>answers.shift()});
   await harness.session.load();
   await harness.session.pickFolder(harness.draft);
   await harness.session.poll();
@@ -934,7 +1069,7 @@ test('duplicate folders do not expand approval and eight approved folders refuse
 
 test('folder picker failures remain actionable without dropping the source selection',async()=>{
   const failure={category:'Transport',message:'picker unavailable',context:null};
-  const harness=setupHarness(blankSetupDraft,{pickFolder:async()=>{throw failure;}});
+  const harness=await setupHarness(blankSetupDraft,{pickFolder:async()=>{throw failure;}});
   await harness.session.load();
   await harness.session.pickFolder(harness.draft);
   assert.equal(harness.session.snapshot.error,failure);
@@ -945,7 +1080,7 @@ test('folder picker failures remain actionable without dropping the source selec
 });
 
 test('platform method admission never opens an unsupported native picker or Homebrew search',async()=>{
-  const harness=setupHarness(blankSetupDraft,{catalog:async()=>setupView({native_methods:[]})});
+  const harness=await setupHarness(blankSetupDraft,{catalog:async()=>setupView({native_methods:[]})});
   await harness.session.load();
   await harness.session.useHomebrew(harness.draft);
   await harness.session.pickFolder(harness.draft);
@@ -955,7 +1090,7 @@ test('platform method admission never opens an unsupported native picker or Home
 test('polling stays single-flight and transport failures do not release ownership',async()=>{
   const pending=deferredSetup();
   let result=pending.promise;
-  const harness=setupHarness(blankSetupDraft,{poll:()=>result});
+  const harness=await setupHarness(blankSetupDraft,{poll:()=>result});
   await harness.session.start('rapidocr-models',harness.draft);
   const polling=harness.session.poll();
   await harness.session.poll();
@@ -975,7 +1110,7 @@ test('failed cancellation can be retried and terminal polling admits no work bef
   const failure={category:'Transport',message:'cancel unavailable',context:null};
   const cancellation=deferredSetup();
   let failed=true;
-  const harness=setupHarness(blankSetupDraft,{cancel:async()=>{if (failed) throw failure; await cancellation.promise;},poll:async()=>setupOperation({result:setupView({environment:checkedEnvironment})})});
+  const harness=await setupHarness(blankSetupDraft,{cancel:async()=>{if (failed) throw failure; await cancellation.promise;},poll:async()=>setupOperation({result:setupView({environment:checkedEnvironment})})});
   await harness.session.start('rapidocr-models',harness.draft);
   await harness.session.cancel();
   assert.equal(harness.session.snapshot.error,failure);
@@ -997,7 +1132,7 @@ test('failed cancellation can be retried and terminal polling admits no work bef
 
 test('reopening observes a settling predecessor without adopting it, then explicit Recheck can reuse its files',async()=>{
   let operation=setupOperation({id:'predecessor',active:true,stage:'verifying',result:setupView({environment:checkedEnvironment})});
-  const harness=setupHarness(blankSetupDraft,{poll:async()=>operation});
+  const harness=await setupHarness(blankSetupDraft,{poll:async()=>operation});
   await harness.session.load();
   assert.equal(harness.session.snapshot.id,'predecessor');
   assert.equal(harness.session.snapshot.owned,false);
@@ -1019,7 +1154,7 @@ test('reopening observes a settling predecessor without adopting it, then explic
 
 test('closing a progress-only observer never cancels a predecessor or its successor',async()=>{
   let operation=setupOperation({id:'predecessor',active:true,stage:'downloading'});
-  const harness=setupHarness(blankSetupDraft,{poll:async()=>operation});
+  const harness=await setupHarness(blankSetupDraft,{poll:async()=>operation});
   await harness.session.load();
   operation=setupOperation({id:'successor',active:true,stage:'verifying'});
   await harness.session.poll();
@@ -1031,7 +1166,7 @@ test('closing a progress-only observer never cancels a predecessor or its succes
 
 test('reopened incomplete cleanup stays visible and blocks new setup until restart',async()=>{
   const cleanup_error={category:'Storage',message:'could not remove staging',context:null};
-  const harness=setupHarness(blankSetupDraft,{poll:async()=>setupOperation({id:'predecessor',cleanup_error})});
+  const harness=await setupHarness(blankSetupDraft,{poll:async()=>setupOperation({id:'predecessor',cleanup_error})});
   await harness.session.load();
   assert.equal(harness.session.busy,true);
   assert.equal(harness.session.snapshot.operation.cleanup_error,cleanup_error);
@@ -1045,7 +1180,7 @@ test('reopened incomplete cleanup stays visible and blocks new setup until resta
 test('retrying initial status failure remains read-only and finds the still-settling predecessor',async()=>{
   const failure={category:'Transport',message:'status unavailable',context:null};
   let failed=true;
-  const harness=setupHarness(blankSetupDraft,{poll:async()=>{
+  const harness=await setupHarness(blankSetupDraft,{poll:async()=>{
     if (failed) throw failure;
     return setupOperation({id:'predecessor',active:true,stage:'downloading'});
   }});

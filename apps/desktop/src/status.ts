@@ -62,15 +62,16 @@ export function authoringActivity(session: AuthoringSession | null, hostOwner: A
   const capture = native && sameAuthoringRef(native.owner, owner) ? native : null;
   const live = busy(operation.state) && operation.workspace_id === owner.workspace.workspace_id
     && operation.workspace_revision === owner.workspace.revision
-    && (operation.operation === 'authoring_validate' || operation.operation.startsWith('recognition_'));
+    && (operation.operation === 'authoring_validate' || operation.operation === 'authoring_trial' || operation.operation.startsWith('recognition_'));
   const pending = session?.pending?.kind;
   const trialPending = pending === 'recognition_trial' || recognition?.running != null;
   const worker = live ? {kind: ui.operation(operation.operation), phase: operation.state, run: operation.run, cancellable: true}
+    : pending === 'script_trial' ? {kind:t.readingTrial, phase:'preparing', run:null, cancellable:true}
     : pending === 'validate' || trialPending
       ? {kind: ui.operation(pending === 'validate' ? 'authoring_validate' : recognition?.running ? 'recognition_trial' : 'recognition_capabilities'),
         phase: 'preparing', run: null, cancellable: true}
       : pending ? {kind: {save: t.savingFile, catalog: t.changingCatalog, refresh: t.refreshingPackage, validate: ui.authoring.validating,
-        recognition: t.updatingRecognition, recognition_trial: ui.operation('recognition_trial'), exit: t.exitingEdit, duplicate: t.duplicatingPackage}[pending],
+        recognition: t.updatingRecognition, recognition_trial: ui.operation('recognition_trial'), script_trial:t.readingTrial, exit: t.exitingEdit, duplicate: t.duplicatingPackage}[pending],
         phase: 'preparing', run: null, cancellable: false} : null;
   const items: AuthoringActivity['items'] = [];
   const fault = (id: string, value: Fault | null | undefined, recognition = false) => {

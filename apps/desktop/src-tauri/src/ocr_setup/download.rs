@@ -1,4 +1,4 @@
-use super::catalog::{Asset, Catalog, LICENSE, NOTICE};
+use super::catalog::{Asset, Catalog, LICENSE};
 use super::{SetupProgress, check_cancel, fault, files, io_fault};
 use mado_runtime_comparison::model::Fault;
 use serde::{Deserialize, Serialize};
@@ -153,8 +153,12 @@ pub(super) fn acquire_with(
         }
         report(&mut progress, "verifying", total);
         check_cancel(cancel)?;
+        let staged_root = staging
+            .canonicalize()
+            .map_err(|error| io_fault("staging", error))?;
+        files::models(&staged_root, catalog, cancel)?;
         write_new(&staging.join("LICENSE.txt"), LICENSE.as_bytes())?;
-        write_new(&staging.join("NOTICE.txt"), NOTICE.as_bytes())?;
+        write_new(&staging.join("NOTICE.txt"), catalog.notice().as_bytes())?;
         let receipt = Receipt {
             schema: 1,
             engine_revision: catalog.engine_revision.clone(),
@@ -381,6 +385,13 @@ pub(super) fn cleanup(owned: &Path, catalog: &Catalog) -> Result<(), Fault> {
         .iter()
         .map(|asset| staging.join(&asset.path))
         .collect();
+    // A later explicit operation may select a different set than the interrupted one.
+    for profile in mado_runtime_comparison::environment::ocr_profiles() {
+        allowed_files.extend(
+            mado_runtime_comparison::environment::model_resources(profile)
+                .map(|resource| staging.join(resource.relative_path)),
+        );
+    }
     allowed_files
         .extend(["LICENSE.txt", "NOTICE.txt", "receipt.json"].map(|name| staging.join(name)));
     cleanup_tree(&staging, &allowed_files)?;

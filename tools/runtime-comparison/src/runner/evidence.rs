@@ -13,6 +13,7 @@ use std::thread;
 
 static EXECUTION_EVIDENCE: OnceLock<mpsc::SyncSender<(&'static str, u64)>> = OnceLock::new();
 static HOST_WAIT_REPORTED: AtomicBool = AtomicBool::new(false);
+static WORKFLOW_STARTED_CLOCK_US: AtomicU64 = AtomicU64::new(0);
 pub(super) static BACKEND_INITIALIZATION_STARTED: AtomicBool = AtomicBool::new(false);
 static SCRIPT_LOGS: OnceLock<ScriptStream> = OnceLock::new();
 static NATIVE_EVIDENCE: OnceLock<mpsc::SyncSender<(NativeProgress, u64)>> = OnceLock::new();
@@ -21,9 +22,9 @@ static NATIVE_EVENTS: AtomicU8 = AtomicU8::new(0);
 static NATIVE_STATUS: AtomicU8 = AtomicU8::new(0);
 static NATIVE_LAUNCH: AtomicU8 = AtomicU8::new(0);
 const NATIVE_EVENT_LIMIT: u8 = 10;
-const LIFECYCLE_RECORD_LIMIT: usize = 26;
+const LIFECYCLE_RECORD_LIMIT: usize = 27;
 
-const NATIVE_PHASES: [NativePhase; 8] = [
+const NATIVE_PHASES: [NativePhase; 11] = [
     NativePhase::Preflight,
     NativePhase::TargetDiscovery,
     NativePhase::LaunchSubmission,
@@ -32,6 +33,9 @@ const NATIVE_PHASES: [NativePhase; 8] = [
     NativePhase::NativeInitialization,
     NativePhase::Readiness,
     NativePhase::Workflow,
+    NativePhase::HostAttachment,
+    NativePhase::Instantiation,
+    NativePhase::Function,
 ];
 
 struct ScriptStream {
@@ -182,6 +186,19 @@ pub(crate) fn emit_host_wait_entered(host: &Host) {
     {
         let _ = sender.try_send(("HostWaitEntered", host.control().elapsed_us()));
     }
+}
+
+pub(crate) fn emit_workflow_entered(host: &Host) {
+    if let Some(sender) = EXECUTION_EVIDENCE.get() {
+        let clock_us = super::clock::now_us().unwrap_or(0);
+        WORKFLOW_STARTED_CLOCK_US.store(clock_us, Ordering::Release);
+        let _ = sender.try_send(("WorkflowEntered", host.control().elapsed_us()));
+    }
+}
+
+pub(super) fn workflow_started_clock_us() -> Option<u64> {
+    let clock_us = WORKFLOW_STARTED_CLOCK_US.load(Ordering::Acquire);
+    (clock_us != 0).then_some(clock_us)
 }
 
 #[cfg(feature = "engine")]
@@ -361,18 +378,19 @@ pub(super) fn start_evidence(invocation: &Invocation) {
         });
     }
     {
-        // SDK initialization, instruction hook, and host wait have independent
-        // bounded notifications; Check never emits either VM/workflow event.
-        let (sender, receiver) = mpsc::sync_channel(3);
+        // Initialization, instruction hook, host wait and workflow entry have
+        // independent bounded notifications.
+        let (sender, receiver) = mpsc::sync_channel(4);
         let _ = EXECUTION_EVIDENCE.set(sender);
         let event_run = run.clone();
         let operation = invocation.operation;
         thread::spawn(move || {
-            for (event, at_us) in receiver.iter().take(3) {
+            for (event, at_us) in receiver.iter().take(4) {
                 let stage =
                     (event == "BackendInitializationStarted").then_some("backend_initialization");
                 let _ = emit(&json!({"event":event,"run":event_run,"attempt":attempt,
-                    "operation":operation.name(),"stage":stage,"at_us":at_us}));
+                    "operation":operation.name(),"stage":stage,"at_us":at_us,
+                    "clock_us":(event == "WorkflowEntered").then(workflow_started_clock_us).flatten()}));
             }
         });
     }

@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+- Record the bounded both-OS M0 adoption of QuickJS with TypeScript authoring,
+  with separate native input and Stop evidence, historical failures and explicit
+  release/compatibility limits. No SDK guard or input route changes.
+
+- Use the upstream ARM SHA-256 backend on Apple Silicon to reduce resource
+  verification time. Preserve every integrity check and existing digest formats.
+- Use the same ordered action arrays and selected template asset across the
+  Rust, JavaScript, TypeScript and Lua comparison workloads. Support spatial
+  postconditions and a bounded pre-observation wait without retrying input.
+- Report sampled peak RSS separately from a fixed workflow-window RSS summary.
+  Preserve short or missing windows as unavailable, not passing memory evidence.
+- Release the OCR detector input tensor before preparing recognition crops.
+  This shortens buffer lifetime; it does not cap ONNX Runtime memory usage.
+
+- Consume MadoPilot's one-ULP detector-roundoff repair and Windows commit-time
+  target-loss check. Keep tensor values and input routes unchanged.
+
+- Execute a whole package or an existing file-level function directly in Edit.
+  Reuse explicit Save all, immutable source capture and the supervised runner;
+  rerun current source with fresh VM state while preserving the game's state.
+  Native Function is attach-only, without launch, recovery or hidden readiness.
+  Keep shared Stop and independent cleanup.
+- Put Validate and a right-aligned Run/Setup split button in Package contents.
+  Setup selects the unit and destination without executing. Run uses current
+  Script; dirty Save all and run continues directly, including Real application.
+  Remove the additional Allow screen and source-change reapproval. Preserve
+  optional whole-package launch/recovery choices across Script edits.
+  Use package defaults; missing prerequisites link to settings and back.
+  Advanced configuration preserves source drafts and Undo. Remove Setup's
+  validation icon; Status details retains saved-validation state and diagnostics.
+  Remove Run's separate profile Validate action while retaining inline errors
+  and mandatory Start/Save validation.
+- Resolve Edit's saved APP to its actual runtime executable before SDK selection,
+  including macOS App Translocation. Use existing signed correspondence only
+  when paths differ; keep runtime lifetime/capture/input checks in the SDK.
+  Preserve launch absence and recovery exit evidence. Ordinary Run keeps its review.
+- Keep the action named Run after completion; dirty source uses Save all and run.
+  Optimize SHA-256 in checkout builds without skipping resource-integrity checks.
+- Bound native input delivery by remaining execution authority, not the scheduled
+  hold limit. A drag at that limit no longer loses its final events to delivery
+  overhead; cancellation, phase deadlines and cleanup remain enforced.
+- Shorten native launch/recovery explanations without changing consent, cleanup
+  requirements or execution limits.
+- Avoid idle desktop rerenders for unchanged poll snapshots. Reuse UTF-8 byte
+  counts for unchanged file drafts without retaining closed editing sessions.
+- Hide idle Edit controls in dialog footers when no work, capture, pending Stop
+  or attention is present. Keep active Stop, capture release and diagnostic controls.
+- Refuse ambiguous same-path APP processes before Script Native window selection.
+  Show stale advanced setup explicitly and reload it when returning to Setup;
+  preserve invocation inputs and keep target actions disabled until refreshed.
+- Give missing-target Function trials manual app-start guidance instead of
+  unavailable launch approval; retain Whole package guidance.
+
 - Keep macOS engine-check temporary paths short for Unix socket fixtures,
   independently of its descriptive build and dependency-cache directory.
 

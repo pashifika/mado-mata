@@ -1,5 +1,8 @@
 use super::{LocalizedText, SetupItem, SetupLink, fault};
-use mado_runtime_comparison::environment::{BOUNDED_PROFILE, G004_PROFILE};
+use mado_runtime_comparison::environment::{
+    DEFAULT_OCR_PROFILE_ID, OcrProfileDescriptor, digest_hex, model_resources, ocr_profile,
+    ocr_profiles,
+};
 use mado_runtime_comparison::model::{ENGINE_REVISION, Fault};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,39 +12,29 @@ use std::path::{Component, Path};
 pub(super) const LICENSE: &str = include_str!("../../resources/ocr-model-LICENSE.txt");
 pub(super) const NOTICE: &str = include_str!("../../resources/ocr-model-NOTICE.txt");
 const JSON: &str = include_str!("../../resources/ocr-catalog.json");
-// The catalog may change transport, never the engine's accepted content.
-const ACCEPTED: [(&str, u64, &str); 2] = [
-    (
-        "rapidocr-v3.9.2/ch_PP-OCRv4_det_mobile.onnx",
-        4_745_517,
-        "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
-    ),
-    (
-        "rapidocr-v3.9.2/PP-OCRv6_rec_small.onnx",
-        21_234_383,
-        "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
-    ),
-];
 
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone)]
 pub(super) struct Catalog {
     pub schema: u32,
     pub engine_revision: String,
-    pub profiles: Vec<String>,
+    pub profile: &'static OcrProfileDescriptor,
     pub models: Models,
     pub platforms: Vec<Platform>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Dependencies {
+    schema: u32,
+    engine_revision: String,
+    platforms: Vec<Platform>,
+}
+
+#[derive(Clone)]
 pub(super) struct Models {
     pub id: String,
     pub name: LocalizedText,
     pub detail: LocalizedText,
-    pub version: String,
-    pub license: String,
-    pub license_url: String,
     pub links: Vec<SetupLink>,
     pub commands: Vec<String>,
     pub assets: Vec<Asset>,
@@ -118,22 +111,31 @@ pub(super) struct RuntimeMember {
 
 impl Catalog {
     pub fn load() -> Result<Self, Fault> {
-        let catalog: Self =
+        Self::for_profile(DEFAULT_OCR_PROFILE_ID)
+    }
+
+    pub fn for_profile(id: &str) -> Result<Self, Fault> {
+        let profile = ocr_profile(id)?;
+        let dependencies: Dependencies =
             serde_json::from_str(JSON).map_err(|error| fault("catalog", &error.to_string()))?;
+        let catalog = Self {
+            schema: dependencies.schema,
+            engine_revision: dependencies.engine_revision,
+            profile,
+            models: Models::from_profile(profile),
+            platforms: dependencies.platforms,
+        };
         catalog.validate()?;
         Ok(catalog)
     }
 
     pub fn validate(&self) -> Result<(), Fault> {
-        let profiles: BTreeSet<_> = self.profiles.iter().map(String::as_str).collect();
+        let resources = model_resources(self.profile);
         if self.schema != 1
             || self.engine_revision != ENGINE_REVISION
-            || profiles != BTreeSet::from([G004_PROFILE, BOUNDED_PROFILE])
-            || self.profiles.len() != 2
-            || self.models.id != "rapidocr-models"
-            || self.models.version.is_empty()
-            || self.models.license != "Apache-2.0"
-            || self.models.assets.len() != ACCEPTED.len()
+            || ocr_profile(self.profile.profile_id)? != self.profile
+            || self.models.id != model_resource_id(self.profile)
+            || self.models.assets.len() != 2 + usize::from(self.profile.auxiliary.is_some())
         {
             return Err(fault("catalog", "unsupported catalog/engine/model mapping"));
         }
@@ -143,18 +145,20 @@ impl Catalog {
             &self.models.links,
             &self.models.commands,
         )?;
-        https(&self.models.license_url)?;
         let mut paths = BTreeSet::new();
-        for asset in &self.models.assets {
+        for (asset, resource) in self.models.assets.iter().zip(resources) {
             safe_relative(&asset.path)?;
             https(&asset.url)?;
             if !paths.insert(&asset.path)
-                || !ACCEPTED.contains(&(asset.path.as_str(), asset.bytes, asset.sha256.as_str()))
+                || asset.path != resource.relative_path
+                || asset.bytes != resource.byte_len
+                || asset.sha256 != digest_hex(&resource.sha256)
+                || asset.url != resource.source_url
+                || resource.license != "Apache-2.0"
+                || resource.notice.is_empty()
+                || resource.source_revision.is_empty()
             {
-                return Err(fault(
-                    "catalog",
-                    "model content is not accepted by the pinned engine",
-                ));
+                return Err(fault("catalog", "model resource differs from the pinned SDK"));
             }
         }
         let mut targets = BTreeSet::new();
@@ -253,27 +257,41 @@ impl Catalog {
     }
 
     pub fn installation_name(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(self.schema.to_le_bytes());
-        // Source/guidance edits do not duplicate the same accepted model set.
-        for (path, bytes, digest) in ACCEPTED {
-            hasher.update(path.as_bytes());
-            hasher.update(bytes.to_le_bytes());
-            hasher.update(digest.as_bytes());
+        installation_name(self.schema, &self.models.assets)
+    }
+
+    pub fn notice(&self) -> String {
+        use std::fmt::Write;
+        let mut text = String::from(NOTICE);
+        writeln!(
+            &mut text,
+            "\nSelected SDK resources at {}:",
+            self.engine_revision
+        )
+        .expect("writing to a String");
+        for resource in model_resources(self.profile) {
+            writeln!(
+                &mut text,
+                "\n{}\n  Source: {}\n  Revision: {}\n  License: {}\n  Notice: {}",
+                resource.relative_path,
+                resource.source_url,
+                resource.source_revision,
+                resource.license,
+                resource.notice
+            )
+            .expect("writing to a String");
         }
-        format!("models-{:x}", hasher.finalize())
+        text
     }
 
     pub fn items(&self) -> Vec<SetupItem> {
-        let mut items = vec![SetupItem {
-            id: self.models.id.clone(),
-            name: self.models.name.clone(),
-            state: "not_checked".into(),
-            detail: self.models.detail.clone(),
-            downloadable: true,
-            links: self.models.links.clone(),
-            commands: self.models.commands.clone(),
-        }];
+        let mut items = vec![self.models.item()];
+        for profile in ocr_profiles() {
+            let id = model_resource_id(profile);
+            if !items.iter().any(|item| item.id == id) {
+                items.push(Models::from_profile(profile).item());
+            }
+        }
         if let Some(platform) = self.platform() {
             items.extend([platform.runtime.item(), platform.native.item()]);
         } else {
@@ -288,6 +306,98 @@ impl Catalog {
             });
         }
         items
+    }
+}
+
+pub(super) fn model_resource_id(profile: &OcrProfileDescriptor) -> String {
+    let default = ocr_profile(DEFAULT_OCR_PROFILE_ID).expect("SDK default is declared");
+    let identity = |resource: &mado_runtime_comparison::environment::ResourceDescriptor| {
+        (resource.relative_path, resource.byte_len, resource.sha256)
+    };
+    if model_resources(profile)
+        .map(identity)
+        .eq(model_resources(default).map(identity))
+    {
+        "rapidocr-models".into()
+    } else {
+        let mut hasher = Sha256::new();
+        hasher.update(1_u32.to_le_bytes());
+        for resource in model_resources(profile) {
+            hasher.update(resource.relative_path.as_bytes());
+            hasher.update(resource.byte_len.to_le_bytes());
+            hasher.update(digest_hex(&resource.sha256).as_bytes());
+        }
+        format!("models-{:x}", hasher.finalize())
+    }
+}
+
+fn installation_name(schema: u32, assets: &[Asset]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(schema.to_le_bytes());
+    // Preserve the published v1 identity, independent of URLs and SDK revision.
+    for asset in assets {
+        hasher.update(asset.path.as_bytes());
+        hasher.update(asset.bytes.to_le_bytes());
+        hasher.update(asset.sha256.as_bytes());
+    }
+    format!("models-{:x}", hasher.finalize())
+}
+
+impl Asset {
+    fn from_resource(resource: &mado_runtime_comparison::environment::ResourceDescriptor) -> Self {
+        Self {
+            path: resource.relative_path.into(),
+            bytes: resource.byte_len,
+            sha256: digest_hex(&resource.sha256),
+            url: resource.source_url.into(),
+        }
+    }
+}
+
+impl Models {
+    fn from_profile(profile: &OcrProfileDescriptor) -> Self {
+        Self {
+            id: model_resource_id(profile),
+            name: LocalizedText::new(profile.display_name, profile.display_name),
+            detail: LocalizedText::new(
+                "Download the selected model's complete resource set. Cancelling settings keeps downloaded files. Save and Check separately to test engine initialization.",
+                "選択したモデルの全リソースを取得します。設定をキャンセルしても取得済みファイルは残ります。保存後のCheckでエンジン初期化を確認してください。",
+            ),
+            links: vec![
+                SetupLink {
+                    label: LocalizedText::new(
+                        "SDK resource identities and provenance",
+                        "SDKリソースの識別情報と出典",
+                    ),
+                    url: format!("https://github.com/pashifika/mado-pilot/blob/{ENGINE_REVISION}/crates/automation/ocr/resources/model-catalog.json"),
+                },
+                SetupLink {
+                    label: LocalizedText::new("Apache-2.0 license", "Apache-2.0ライセンス"),
+                    url: "https://www.apache.org/licenses/LICENSE-2.0".into(),
+                },
+                SetupLink {
+                    label: LocalizedText::new(
+                        "Hugging Face download terms",
+                        "Hugging Faceの利用規約",
+                    ),
+                    url: "https://huggingface.co/terms-of-service".into(),
+                },
+            ],
+            commands: Vec::new(),
+            assets: model_resources(profile).map(Asset::from_resource).collect(),
+        }
+    }
+
+    fn item(&self) -> SetupItem {
+        SetupItem {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            state: "not_checked".into(),
+            detail: self.detail.clone(),
+            downloadable: true,
+            links: self.links.clone(),
+            commands: self.commands.clone(),
+        }
     }
 }
 

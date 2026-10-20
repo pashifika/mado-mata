@@ -1,5 +1,6 @@
 use super::evidence::{
     BACKEND_INITIALIZATION_STARTED, emit_settlement, retain_script_logs, start_evidence,
+    workflow_started_clock_us,
 };
 use super::protocol::{Invocation, Operation, emit, frame};
 use crate::host::{Host, resolve_options, run_rust};
@@ -129,6 +130,21 @@ pub fn child() -> Result<bool, Fault> {
     }
     if let Some(modules) = &invocation.prepared_modules {
         modules.parser(&invocation.inventory)?;
+        if modules.function.is_some()
+            && (invocation.operation != Operation::Run
+                || !matches!(
+                    invocation.plan.candidate.as_str(),
+                    "javascript" | "typescript"
+                )
+                || invocation.plan.scenario != "success"
+                || invocation.attempt != 1
+                || (invocation.plan.lane == "native" && !invocation.prepare_target))
+        {
+            return Err(Fault::new(
+                "Authority",
+                "Function invocation has incompatible operation authority",
+            ));
+        }
     }
     // The supervisor's deadline is absolute on the shared clock: spawn, payload
     // transfer and validation above are already charged, and no Host or native
@@ -224,7 +240,7 @@ pub fn child() -> Result<bool, Fault> {
         };
         let _ = emit(
             &json!({"event":"StopRequested","run":input_run,"attempt":attempt,"reason":reason,
-            "at_us":input_control.stop_us.load(Ordering::Acquire)}),
+            "at_us":input_control.stop_us.load(Ordering::Acquire),"clock_us":super::clock::now_us().ok()}),
         );
         let _ = emit(
             &json!({"event":"AdmissionClosed","run":input_run,"attempt":attempt,
@@ -365,6 +381,7 @@ pub fn child() -> Result<bool, Fault> {
         "lua" => crate::lua::run(inventory.clone(), host.clone()),
         _ => Err(Fault::new("InvalidPlan", "unknown candidate")),
     });
+    let workflow_finished_clock_us = super::clock::now_us().ok();
     let workflow_us = started.elapsed().as_micros();
     let (metrics, primary) = match runtime {
         Ok(metrics) => (Some(metrics), host.failure()),
@@ -399,7 +416,8 @@ pub fn child() -> Result<bool, Fault> {
         json!({"event":"EntrySettled","run":invocation.run,"attempt":attempt,
         "entry_outcome":entry_outcome,"primary":primary,"runtime":metrics,"observations":observations,
         "compiled_inventory_identity":inventory.identity,"preflight_us":preflight_us,
-        "workflow_us":workflow_us,"at_us":control.elapsed_us()}),
+        "workflow_us":workflow_us,"workflow_started_clock_us":workflow_started_clock_us(),
+        "workflow_finished_clock_us":workflow_finished_clock_us,"at_us":control.elapsed_us()}),
     )
     .err();
     control.cancel();
@@ -428,6 +446,8 @@ pub fn child() -> Result<bool, Fault> {
         "primary":primary,"entry_outcome":entry_outcome,"cleanup":cleanup,"observations":observations,"runtime":metrics,
         "entry_emission_failure":entry_emission,
         "compiled_inventory_identity":inventory.identity,"preflight_us":preflight_us,"workflow_us":workflow_us,
+        "workflow_started_clock_us":workflow_started_clock_us(),
+        "workflow_finished_clock_us":workflow_finished_clock_us,
         "stop_at_us":control.stop_us.load(Ordering::Acquire),
         "admission_closed_at_us":control.closed_us.load(Ordering::Acquire),"process":process_metrics()}),
     );

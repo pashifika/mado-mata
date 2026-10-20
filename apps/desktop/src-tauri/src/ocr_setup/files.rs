@@ -12,8 +12,22 @@ pub(super) fn models(root: &Path, catalog: &Catalog, cancel: &AtomicBool) -> Res
     if !root.is_absolute() {
         return Err(fault("models", "model root must be absolute"));
     }
+    let resolved = root
+        .canonicalize()
+        .map_err(|error| io_fault("models", error))?;
     for asset in &catalog.models.assets {
-        verify(&root.join(&asset.path), asset.bytes, &asset.sha256, cancel)?;
+        let path = resolved.join(&asset.path);
+        if path
+            .canonicalize()
+            .map_err(|error| io_fault("models", error))?
+            != path
+        {
+            return Err(fault(
+                "models",
+                "model resources must remain inside their root without symlink aliases",
+            ));
+        }
+        verify(&path, asset.bytes, &asset.sha256, cancel)?;
     }
     Ok(())
 }

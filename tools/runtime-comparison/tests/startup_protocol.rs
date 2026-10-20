@@ -648,6 +648,7 @@ fn desktop_default_off_retains_one_real_child_result_under_its_reservation() {
         scenario: "workflow".into(),
         replay_descriptor_path: None,
         native_intent: None,
+        function: None,
     };
     let run = controller.start(request.clone(), None).unwrap();
     assert_eq!(

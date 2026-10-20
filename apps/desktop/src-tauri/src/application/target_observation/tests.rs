@@ -21,10 +21,7 @@ fn pending(
 ) {
     let selection = inspect_named(application, "Observed", &package_path()).unwrap();
     let owner = workspace_ref(&selection);
-    let selected = lock(&application.workspaces)
-        .resolve(&owner)
-        .unwrap()
-        .clone();
+    let scope = TargetScope::selected(lock(&application.workspaces).resolve(&owner).unwrap());
     let cancelled = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));
     let (send, receive) = mpsc::sync_channel(1);
@@ -36,7 +33,8 @@ fn pending(
         result: Some(send.clone()),
     });
     let pending = PendingObservation {
-        selected,
+        owner: TargetOwner::Workspace(owner.clone()),
+        scope,
         expected: TargetExpectation {
             revision: 0,
             binding_id: None,

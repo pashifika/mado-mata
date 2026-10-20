@@ -71,7 +71,9 @@ impl State {
                 if self.phase != "stopping" {
                     self.phase = match phase {
                         NativePhase::Settling | NativePhase::Recovering => "recovering",
-                        NativePhase::Workflow | NativePhase::Readiness => "running",
+                        NativePhase::Workflow | NativePhase::Readiness | NativePhase::Function => {
+                            "running"
+                        }
                         _ => "preparing",
                     };
                 }
@@ -248,6 +250,12 @@ impl DesktopController {
         request: StartRequest,
         environment: Option<OcrEnvironment>,
     ) -> Result<String, Fault> {
+        if request.function.is_some() {
+            return Err(Fault::new(
+                "Authority",
+                "Function execution requires an Edit-owned preparation",
+            ));
+        }
         self.start_with_preparation(
             request,
             move |request, _| {
@@ -337,11 +345,14 @@ impl DesktopController {
                 evidence.stage("request_validation", observer);
                 let prepared = (|| {
                     control.check()?;
-                    encode_bounded(&request, REQUEST_BYTES)?;
+                    let request_bytes = REQUEST_BYTES + if request.function.is_some() { 72 * 1024 } else { 0 };
+                    encode_bounded(&request, request_bytes)?;
                     evidence.fields["package_inventory_identity"] =
                         json!(request.inventory_identity);
                     evidence.fields["schema_identity"] = json!(request.schema_identity);
                     evidence.fields["profile_id"] = json!(request.profile_id);
+                    evidence.fields["function"] = json!(request.function);
+                    evidence.fields["package_readiness"] = json!(if request.function.is_some() { "not_invoked" } else { "script" });
                     let plan = requested_plan(&request)?;
                     if let Some(budgets) = plan.native_budgets {
                         control.start_native(budgets, None)?;
@@ -794,6 +805,25 @@ fn run_attempts(
 }
 
 pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
+    if let Some(function) = &request.function {
+        function.validate()?;
+        if request.scenario != "workflow" {
+            return Err(Fault::new(
+                "FunctionEntry",
+                "Function execution rejects fixture scenarios",
+            ));
+        }
+        if request
+            .native_intent
+            .as_ref()
+            .is_some_and(|intent| intent.launch_approved || intent.max_exit_recoveries != 0)
+        {
+            return Err(Fault::new(
+                "NativeRefused",
+                "Function execution is attach-only and rejects launch and recovery",
+            ));
+        }
+    }
     match request.lane.as_str() {
         "controlled" | "replay" => {
             if request.native_intent.is_some() {
@@ -808,10 +838,10 @@ pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
                 Fault::new("NativeRefused", "Native requires explicit per-Start review")
             })?;
             super::native::validate_intent(intent)?;
-            if !cfg!(target_os = "macos") {
+            if !cfg!(any(target_os = "macos", windows)) {
                 return Err(Fault::new(
                     "NativeRefused",
-                    "Desktop Native is available only on macOS",
+                    "Desktop Native requires macOS or Windows",
                 ));
             }
             if request.replay_descriptor_path.is_some() {
@@ -847,6 +877,7 @@ pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
         plan.limits.duration_ms = limits.budgets().total_ms()?;
         plan.limits.readiness_ms = limits.readiness_ms;
         plan.limits.wait_ms = limits.wait_ms;
+        // Preserve reviewed expanded-input authority; VM work has its own bound.
         plan.limits.max_actions = limits.max_actions;
         plan.limits.cleanup_ms = limits.cleanup_ms;
         plan.limits.containment_ms = limits.containment_ms;
@@ -1064,31 +1095,45 @@ fn prepare_run(
         templates: None,
         modules: None,
     };
+    if let Some(function) = &request.function {
+        evidence.stage("function_preflight", observer);
+        let (inventory, modules) = crate::typescript::PreparedModules::capture_function(
+            &prepared.inventory,
+            function,
+            &plan.limits,
+            control,
+        )?;
+        prepared.inventory = inventory;
+        prepared.modules = Some(modules);
+        evidence.complete();
+    }
     if plan.lane == "native" {
         evidence.stage("static_preflight", observer);
         prepared.templates = Some(super::native::prepare_templates(
             &prepared.inventory,
             &plan.limits,
         )?);
-        if plan.candidate == "typescript" {
+        if plan.candidate == "typescript" && prepared.modules.is_none() {
             prepared.inventory = crate::typescript::compile_with_control(
                 &prepared.inventory,
                 &plan.limits,
                 control,
             )?;
         }
-        let inventory = Arc::new(prepared.inventory);
-        prepared.modules = Some(crate::typescript::PreparedModules::capture(
-            &inventory,
-            &plan.limits,
-            control,
-        )?);
-        prepared.inventory = Arc::try_unwrap(inventory).map_err(|_| {
-            Fault::new(
-                "Runtime",
-                "static preflight retained the captured inventory",
-            )
-        })?;
+        if prepared.modules.is_none() {
+            let inventory = Arc::new(prepared.inventory);
+            prepared.modules = Some(crate::typescript::PreparedModules::capture(
+                &inventory,
+                &plan.limits,
+                control,
+            )?);
+            prepared.inventory = Arc::try_unwrap(inventory).map_err(|_| {
+                Fault::new(
+                    "Runtime",
+                    "static preflight retained the captured inventory",
+                )
+            })?;
+        }
         evidence.complete();
         evidence.stage("engine_availability", observer);
         prepared.engine = Some(engine_available(executable, control)?);

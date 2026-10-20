@@ -1,10 +1,14 @@
 # Runtime comparison: replay and native prerequisites
 
 The optional `engine` feature consumes the public `mado-pilot` facade at
-`453132bcf4128c180dc0699dfccca5fe1f098164`. The harness uses no sibling path
+`f61a57f661c0314ea0a1d860d9298fbff86d903d`. The harness uses no sibling path
 dependency, fake OCR backend, or substitute input route. macOS startup adds
 read-only Foundation/libproc lifetime checks during startup and exact bound-lifetime
 checks during execution; capture and input still use the public facade.
+Windows Desktop preparation verifies one saved executable/process and creation
+FILETIME; the child correlates that lifetime with SDK provenance and revalidates
+the retained window before admission. After attachment the SDK owns target
+liveness; Desktop does not add a per-call process scanner.
 
 **Native integration is available; native qualification is not complete.** The
 facade now exposes optional retained-process provenance. The harness requires an
@@ -64,6 +68,10 @@ At the default, the outer allowances are 120/243 s without/with recovery; at the
 per-call waits 1 s and pacing 100 ms. More duration grants no additional resource
 credits. The pinned SDK's monotonic timeout accepts this finite allowance; its
 separate 2 s maximum for an individual macOS native wait is unchanged.
+Native input dispatch uses the remaining input, capture, attempt and phase
+authority, not the scheduled-wait limit. This leaves time for SDK delivery around
+an allowed hold without enlarging Script waits or event budgets; Stop still
+cancels the in-flight operation.
 The larger ceiling does not qualify useful long-running Native work, late Stop,
 long-duration recovery or leak freedom; actual workload evidence remains separate.
 Typed attempt summaries retain the original exit, final Script result and cleanup;
@@ -71,9 +79,30 @@ diagnostic truncation cannot discard the exit reason. An earlier capture fault
 outranks a later process exit. Window/permission/provider failure is not confirmed
 exit, and launch/capture availability is not a Script-observed usable screen.
 
+The [Windows Desktop Native lane](desktop.md#windows-attach-only-native-start)
+uses the same fixed engine child in attach-only mode. See the Desktop guide for
+setup, supported input policies and operator acceptance.
+
+Windows package input retains the exact native frame acquired through the
+production observation path and accepted by `Session::commit_frame`. Placement
+comes from that SDK frame, and dispatch re-commits it before admitting events.
+Both routes consume the SDK's logical event count; Win32 message expansion does
+not create additional caller authority. Missing/stale/terminal frames refuse.
+Controlled-provider coverage does not establish actual game effect, route
+compatibility, physical Stop settlement or full Windows qualification.
+
+Windows MSVC runtime executables embed a
+[Per-Monitor V2 DPI manifest](https://learn.microsoft.com/en-us/windows/win32/hidpi/setting-the-default-dpi-awareness-for-a-process).
+This keeps desktop metrics in the physical coordinate space used by native
+capture and pointer placement, including scaled monitors with negative origins.
+Rebuild the fixed engine child after updating; changing Script coordinates or
+the game's display settings is not a substitute.
+
 The independent CLI retains explicit `native_config` and its existing preparation
-contract. External `run`/`manual` plans cannot select Desktop-only `native_budgets`
-or `input.reviewed_operation`; the new startup calls do not grant CLI authority.
+contract. External `run`/`manual` plans cannot select Desktop-only `native_budgets`,
+`native_config.native.input.package_approved: true`,
+`native_config.native.confirm_process_exit: true` or
+`native_config.native.review.kind: "script"`. Startup calls do not grant CLI authority.
 See [ADR 0008](adr/0008-macos-native-run-admission.md) for recipe semantics,
 deadline/ownership rules, first-frame placement and result commitment.
 
@@ -84,14 +113,15 @@ engine build, acquire the following separately; the harness downloads nothing:
 
 - Rust 1.98.1, the application's locked Git dependency, and a native C++ toolchain.
 - Apple Silicon macOS: Xcode Command Line Tools, OpenCV 4 development files, and
-  libclang. The pinned engine qualifies macOS 26 with deployment minimum 26.5.2;
-  it does not qualify macOS 27 automatically.
+  libclang. The deployment minimum remains 26.5.2. The pinned SDK distinguishes
+  historical macOS 26 evidence from its current macOS 27 CPU OCR cohort;
+  neither replaces this application's separate native capture/input acceptance.
 - Windows x64: an x64 MSVC developer shell, Windows SDK, OpenCV 4.14.0 development
   files/DLLs, and LLVM/libclang 22.1.8.
 - ONNX Runtime **1.29.0**, C API **17**, CPU provider. Supply the canonical regular
   file `libonnxruntime.1.29.0.dylib` on Apple Silicon or `onnxruntime.dll` on Windows.
   No `PATH` search, alternate runtime, accelerator preference, or fallback is used.
-- The accepted detector and recognizer below, under one canonical model root.
+- The chosen profile's complete model set below, including its required vocabulary asset.
 
 JavaScript and TypeScript execution also require the pinned Node.js **24.18.0**
 on an absolute `PATH` entry before launch. On Windows, the supervisor resolves
@@ -100,8 +130,8 @@ selected native-library directories; it does not widen that path for Node.
 Initialization-only environment checks do not compile or evaluate package
 modules and do not require Node.
 
-Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/453132bcf4128c180dc0699dfccca5fe1f098164/CONTRIBUTING.md#native-development-prerequisites)
-and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/453132bcf4128c180dc0699dfccca5fe1f098164/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
+Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/CONTRIBUTING.md#native-development-prerequisites)
+and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
 Its `tools/setup-native.py` configures only the command it launches; it installs
 nothing. A separately obtained, revision-pinned public checkout can provide that
 setup tool without becoming the application's dependency source. From this
@@ -160,33 +190,40 @@ command and do not qualify a native OS/workload.
 
 ### Accepted OCR content
 
-Both supported profiles use these exact Apache-2.0 model bytes. Desktop
-[OCR resource setup](desktop.md#save-and-check-an-ocr-environment) can download
-the shared set and the reviewed ONNX Runtime 1.29.0 archive, retain their required
-notices, and select each verified path in the settings draft independently.
-Manual acquisition through the pinned upstream procedure remains supported; do
-not rename arbitrary models to these paths. OpenCV installation stays external.
-Desktop can resolve its required library closure from explicit Homebrew locations
-or selected folders, but metadata checks do not prove that a particular OpenCV
-build matches the engine runner. Save and run the real engine Check or a
-saved-image Recognition trial for initialization evidence.
+The pinned SDK [model catalog](https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/crates/automation/ocr/resources/model-catalog.json)
+owns implemented profiles, exact model/vocabulary bytes, relative paths and
+acquisition sources. Desktop [OCR resource setup](desktop.md#save-and-check-an-ocr-environment)
+downloads the selected complete set and the reviewed ONNX Runtime 1.29.0 archive,
+retains notices, and selects verified paths in the draft independently.
+Manual acquisition remains supported; renaming arbitrary models does not admit
+them. Missing or changed vocabulary files are not a complete model installation.
 
-| Relative path under `model_root` | Bytes | SHA-256 |
-|---|---:|---|
-| `rapidocr-v3.9.2/ch_PP-OCRv4_det_mobile.onnx` | 4745517 | `d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9` |
-| `rapidocr-v3.9.2/PP-OCRv6_rec_small.onnx` | 21234383 | `6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884` |
+At this pin, `model` and `profile` have the same value, chosen from:
 
-Supported `model` and `profile` values must be equal and one of:
-
-- `g-004-rapidocr-ppocrv4-det-v6-rec-small-v1`
+- `g-004-rapidocr-ppocrv4-det-v6-rec-small-v1` (unchanged default)
 - `phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2`
+- `ppocrv6-tiny-det-small-rec-max736-v1`
+
+The two legacy profiles still share `rapidocr-v3.9.2/ch_PP-OCRv4_det_mobile.onnx`
+and `rapidocr-v3.9.2/PP-OCRv6_rec_small.onnx`, with unchanged installation identity.
+The new profile requires all three paths under its model root:
+
+- `huggingface/PaddlePaddle/PP-OCRv6_tiny_det_onnx/inference.onnx`
+- `huggingface/PaddlePaddle/PP-OCRv6_small_rec_onnx/inference.onnx`
+- `huggingface/PaddlePaddle/PP-OCRv6_small_rec_onnx/inference.yml`
 
 `language` is `horizontal-ja-basic-latin-ascii-digits-ui-symbols-v1`, `provider`
-is `cpu`, and `runtime_profile` is `onnxruntime-1.29.0-api17-cpu`. CoreML is not a
-supported alternative here; CUDA requires a different qualified configuration
-and is not enabled by this comparison. Unsupported choices fail rather than fall
-back. The facade validates the complete accepted model tuple and runtime API
-before publishing an engine.
+is `cpu`, and `runtime_profile` is `onnxruntime-1.29.0-api17-cpu`. Other providers
+are not enabled by this comparison. Unsupported tuples fail rather than fall
+back. The facade validates the complete model tuple and runtime API before
+publishing an engine.
+
+Recorded benchmark failures do not hide an implemented choice or change the
+legacy default. The desktop shows scoped per-rule results, not an aggregate
+quality or performance ranking; see [ADR 0011](adr/0011-ocr-model-choices-and-rule-results.md).
+File verification, model results and local initialization are separate facts.
+OpenCV installation stays external. Save and run the real engine Check with a
+recorded corpus or a saved-image Recognition trial for initialization evidence.
 
 ## Saved-image authoring trials
 
@@ -253,7 +290,12 @@ neither source edits nor a recorded-frame descriptor are generated by Save.
 The supplied workload consumes four observations: the host's readiness guard,
 the package readiness routine, the workflow decision, and a strictly newer
 postcondition. Supply those four acquisitions in order; unmatched query waits
-can consume additional frames. Set the profile ROI to the recorded dimensions.
+can consume additional frames. Set `recognition.asset`, `recognition.roi`,
+`postcondition.expected`, `postcondition.roi`, and `postcondition.wait_ms` for
+the recorded workload. Update the profile schema's spatial bounds and ordered
+action arrays for the capture dimensions; the supplied defaults target the
+controlled fixture, not arbitrary recordings. Choose a postcondition that
+distinguishes the intended resulting state from the starting state.
 Keep the complete package within `limits.snapshot_files`, `limits.snapshot_bytes`,
 and the [shared image policy](adr/0006-saved-image-recognition-observations.md#image-policy).
 Three distinct 320-by-160 RGBA assets occupy 614400 bytes before other package
@@ -392,6 +434,8 @@ the required prospective `native_config.native` record:
 - `process_id`: the nonzero native PID. `process_lifetime`: exactly 16 lowercase
   hexadecimal digits of the provider's opaque `TargetProcessIdentity::lifetime`.
   This is not a portable timestamp or a value to compare across providers.
+  Only internal Desktop Script requests may omit this pair and let the SDK bind
+  the saved executable/window; external CLI and ordinary operation review may not.
 - `window_rule`: the complete, exact window name, not a pattern.
 - `operating_system`: `windows` or `macos`, matching the host; `hardware` records
   the operator's selected machine.
@@ -399,10 +443,18 @@ the required prospective `native_config.native` record:
 - `input`: independent `approved`, `duration_ms`, `max_actions`, `route`, `focus`,
   and nonempty `representative_actions`.
   Optional `macos_process_pointer_mode` and `click_hold_ms` are described below.
-- `geometry`: the placement object above; `recognition_language`,
-  `visible_postcondition`, `cleanup_ms`, and `containment_ms`.
+- `review`: `kind: "operation"` with explicit nonempty `operation` and
+  `visible_postcondition` text.
+- `geometry`: the placement object above; `recognition_language`, `cleanup_ms`,
+  and `containment_ms`.
 - Optional `package_entries` and `templates` use the same captured-asset mapping
   as replay. Omit both for OCR-only execution.
+
+Omit `input.package_approved` and `confirm_process_exit` or set them to `false`.
+Desktop-only authority and `review.kind: "script"` are rejected before
+package/output I/O; they cannot replace the CLI's explicit operation review,
+geometry or representative actions. Desktop uses exit confirmation only for
+approved recovery after SDK target loss, not as a duplicate capture/input guard.
 
 All authorities must be positive, finite, and within the plan's enclosing bounds.
 The native and enclosing `containment_ms` must be equal; the supervisor cannot
@@ -561,10 +613,10 @@ not modify recorded pixels or manufacture a successful postcondition.
 macOS cleanup uses the last successfully submitted or possibly effective pointer
 destination, not an observed physical pointer position.
 
-`limits.max_actions` also bounds JavaScript promise creation and executed jobs.
-Keep adequate VM startup allowance there and use `native.input.max_actions` for
-a tighter physical-input event bound; a three-event input allowance does not
-require a three-promise VM allowance.
+`limits.max_actions` bounds expanded input events, not JavaScript startup work.
+Promise creation, executed jobs and retained rejections each have an independent
+attempt-wide ceiling of `limits.vm_bytes / 1024`. Memory and stage deadlines
+still apply; a small input allowance does not require wider physical authority.
 
 `submit` admits bounded work; `settle` invokes the configured route using the
 retained frame stamp and unchanged-geometry policy. Native receipts retain SDK

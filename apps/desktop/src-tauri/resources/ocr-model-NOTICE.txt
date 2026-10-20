@@ -1,4 +1,4 @@
-MadoMata OCR resource acquisition review — 2026-10-09
+MadoMata OCR resource acquisition — SDK catalog integration 2026-10-16
 
 Models (unmodified Apache-2.0 bytes)
   RapidOCR: Copyright (c) RapidAI contributors
@@ -10,20 +10,22 @@ Models (unmodified Apache-2.0 bytes)
   The detector's hosting filename differs; its bytes are unchanged.
   No affiliation or endorsement by these projects or hosts is implied.
 
-Accepted content authority:
-  https://github.com/pashifika/mado-pilot/blob/453132bcf4128c180dc0699dfccca5fe1f098164/docs/adr/0054-g004-model-download-fallback.md
-  https://github.com/pashifika/mado-pilot/blob/453132bcf4128c180dc0699dfccca5fe1f098164/.github/workflows/rust.yml
+Content authority:
+  https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/crates/automation/ocr/resources/model-catalog.json
+  https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/docs/adr/0084-ocr-model-choices-and-test-results.md
 License and attribution provenance:
   https://huggingface.co/SWHL/RapidOCR/blob/1cfba2e90fc938db55889873735088de210cc173/README.md
   https://huggingface.co/DjB314/RapidOCR/blob/04e88d0483f0bfcdd0f29429594244c10bfc2867/README.md
   https://huggingface.co/DjB314/RapidOCR/blob/04e88d0483f0bfcdd0f29429594244c10bfc2867/LICENSE
 
-Both public, ungated pinned URLs were read and SHA-256 checked during source
-review: detector 4745517 bytes, recognizer 21234383 bytes, matching the pinned
-engine identities in ocr-catalog.json. The HTTPS redirects used us.aws.cdn.hf.co.
-The independent mirror is transport, not a new model qualification authority.
-The application downloads only these two selected files, never entire repos.
-No hf-mirror.com or ModelScope fallback is enabled.
+The pinned SDK defines every selected detector, recognizer and required vocabulary
+YAML resource, including immutable source revision, exact bytes, digest, license
+and notice provenance. The selected resources are listed below in each installed
+NOTICE.txt; receipt.json retains their exact URLs and content identities.
+PaddlePaddle's PP-OCRv6 tiny detector and small recognizer/YAML are hosted in the
+official PaddlePaddle repositories at the SDK-declared revisions. No model bytes
+are bundled with MadoMata. Only the selected complete set is downloaded, never
+entire repositories. No mirror fallback or empirical-result admission is added.
 
 Hosting terms:
   https://huggingface.co/terms-of-service

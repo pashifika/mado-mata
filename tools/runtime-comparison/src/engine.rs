@@ -34,10 +34,15 @@ pub use enabled::{Engine, release_runner_resources};
 #[cfg(feature = "engine")]
 mod enabled {
     #[cfg(test)]
+    mod native_frame_tests;
+    #[cfg(test)]
     mod native_wait_tests;
     #[cfg(test)]
     mod publication_tests;
+    #[cfg(windows)]
+    mod windows_process;
     use super::*;
+    use crate::desktop::NativeReview;
     use crate::environment::{Configuration, Placement, ReplayConfig, canonical, validate_replay};
     use crate::host::{
         Action, DragEvent, HandleBudget, HandlePermit, Managed, PointerButton, drag_events,
@@ -57,8 +62,10 @@ mod enabled {
     #[serde(deny_unknown_fields)]
     struct NativeConfig {
         executable_or_bundle: PathBuf,
-        process_id: u32,
-        process_lifetime: String,
+        process_id: Option<u32>,
+        process_lifetime: Option<String>,
+        #[serde(default)]
+        confirm_process_exit: bool,
         window_rule: String,
         operating_system: String,
         hardware: String,
@@ -67,7 +74,7 @@ mod enabled {
         input: InputAuthority,
         geometry: Option<Placement>,
         recognition_language: String,
-        visible_postcondition: String,
+        review: NativeReview,
         cleanup_ms: u64,
         containment_ms: u64,
         #[serde(default)]
@@ -123,11 +130,11 @@ mod enabled {
         focus: String,
         #[serde(default)]
         representative_actions: Vec<Action>,
-        /// Desktop reviews trusted package intent, not a fabricated input sequence.
+        /// Package review authorizes bounded Script input, not a fabricated action sequence.
         #[serde(default)]
-        reviewed_operation: Option<String>,
-        #[serde(default)]
-        macos_process_pointer_mode: MacosProcessPointerMode,
+        package_approved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        macos_process_pointer_mode: Option<MacosProcessPointerMode>,
         #[serde(default)]
         click_hold_ms: u64,
     }
@@ -143,7 +150,7 @@ mod enabled {
 
     impl InputAuthority {
         fn authorize(&self, action: &Action) -> Result<(), Fault> {
-            if self.reviewed_operation.is_some()
+            if self.package_approved
                 || self.representative_actions.iter().any(|allowed| {
                     matches!(
                         (action, allowed),
@@ -172,7 +179,16 @@ mod enabled {
                     "click_hold_ms must be between 0 and 1000",
                 ));
             }
-            if self.macos_process_pointer_mode == MacosProcessPointerMode::AppKitBackground
+            if operating_system == "windows"
+                && self.package_approved
+                && self.macos_process_pointer_mode.is_some()
+            {
+                return Err(blocked(
+                    "input_route_unsupported",
+                    "Windows package input does not accept a macOS pointer mode",
+                ));
+            }
+            if self.macos_process_pointer_mode == Some(MacosProcessPointerMode::AppKitBackground)
                 && (!cfg!(target_os = "macos")
                     || operating_system != "macos"
                     || self.route != "process_directed"
@@ -247,14 +263,14 @@ mod enabled {
         queries: BTreeMap<String, Managed<Query>>,
         active_queries: usize,
         latest: Option<mp::FrameStamp>,
-        // One shared frame keeps macOS terminal-aware admission available after Script release.
+        // One shared committed frame retains terminal-aware admission after Script release.
         // This is not another capture or Script handle; finish drops it before close.
         native_frame: Option<mp::Frame>,
         serial: u64,
         cleanup: Option<Value>,
         process_lifetime: String,
-        // Preserve the independent OS process-start check across Script polls.
-        native_process_started: Option<(u64, u64)>,
+        // Preselection continuity while waiting; optional exit-recovery evidence after binding.
+        native_process_started: Option<(u32, (u64, u64))>,
         captured_frames: u64,
         last_capture: Option<Instant>,
         input_events: usize,
@@ -469,17 +485,12 @@ mod enabled {
                     (None, Some(native)) => (&native.package_entries, &native.templates),
                     _ => return Err(internal("validated engine configuration changed")),
                 };
-                let profile = match config.ocr.profile.as_str() {
-                    mp::ACCEPTED_G004_PROFILE_ID => mp::OcrProviderProfile::NativeG004,
-                    mp::ACCEPTED_BOUNDED_PROFILE_ID => mp::OcrProviderProfile::BoundedDetector,
-                    _ => return Err(blocked("ocr_unsupported", "unsupported OCR profile")),
-                };
-                let ocr = mp::OcrProviderConfig::new(
-                    profile,
-                    mp::OcrExecutionProviderPolicy::Cpu,
+                let ocr = mp::OcrProfileConfig::from_id(
+                    &config.ocr.profile,
                     &config.ocr.model_root,
                     &config.ocr.runtime.path,
-                );
+                )
+                .map_err(|error| prerequisite_error("ocr_unsupported", error))?;
                 let engine = if let Some(replay) = &config.replay {
                     let request = mp::ReplayEngineRequest::new(replay_source(
                         replay,
@@ -489,7 +500,7 @@ mod enabled {
                     )?);
                     control.check()?;
                     crate::runner::emit_backend_initialization_started(&control);
-                    mp::replay_engine_with_ocr_provider(request, &ocr, &operation)
+                    mp::replay_engine_with_ocr_profile(request, &ocr, &operation)
                         .map_err(|error| prerequisite_error("backend_initialization", error))?
                 } else {
                     native_engine(
@@ -560,10 +571,11 @@ mod enabled {
             };
             drop(cache);
             control.check()?;
-            let process_lifetime = config.native.as_ref().map_or_else(
-                || attempt_id.to_owned(),
-                |native| native.process_lifetime.clone(),
-            );
+            let mut process_lifetime = config
+                .native
+                .as_ref()
+                .and_then(|native| native.process_lifetime.clone())
+                .unwrap_or_else(|| attempt_id.to_owned());
             let mut native_process_started = None;
             let session = if deferred_startup.is_none() {
                 Some(
@@ -575,6 +587,7 @@ mod enabled {
                         &operation,
                         true,
                         &mut native_process_started,
+                        &mut process_lifetime,
                     )?
                     .ok_or_else(|| internal("blocking session initialization returned pending"))?,
                 )
@@ -628,6 +641,11 @@ mod enabled {
                 return Ok(true);
             }
             let operation = self.operation(self.limits.wait_ms)?;
+            let State {
+                native_process_started,
+                process_lifetime,
+                ..
+            } = &mut *state;
             let session = Self::open_target_session(
                 &self.resources,
                 self.native.as_ref(),
@@ -635,7 +653,8 @@ mod enabled {
                 &self.bridge,
                 &operation,
                 false,
-                &mut state.native_process_started,
+                native_process_started,
+                process_lifetime,
             )?;
             state.session = session;
             Ok(state.session.is_some())
@@ -648,7 +667,8 @@ mod enabled {
             bridge: &CancellationBridge,
             operation: &mp::OperationContext,
             wait: bool,
-            process_started: &mut Option<(u64, u64)>,
+            process_started: &mut Option<(u32, (u64, u64))>,
+            process_lifetime: &mut String,
         ) -> Result<Option<mp::Session>, Fault> {
             let (target, request) = if let Some(native) = native {
                 let Some(target) = discover_native_target(
@@ -658,6 +678,7 @@ mod enabled {
                     operation,
                     wait,
                     process_started,
+                    process_lifetime,
                 )?
                 else {
                     return Ok(None);
@@ -665,7 +686,7 @@ mod enabled {
                 control.check()?;
                 let mut input =
                     mp::InputOpenRequest::new().with_requirement(mp::InputRequirement::Required);
-                if native.input.reviewed_operation.is_some() {
+                if native.input.package_approved {
                     input = input
                         .requiring(mp::InputOperationKind::Pointer, native.route()?)
                         .requiring(mp::InputOperationKind::Keyboard, native.route()?);
@@ -819,6 +840,10 @@ mod enabled {
         pub fn call(&self, method: &str, args: Value) -> Result<Value, Fault> {
             let result = self.call_inner(method, args);
             if method != "release"
+                && self
+                    .native
+                    .as_ref()
+                    .is_some_and(|native| native.confirm_process_exit)
                 && result
                     .as_ref()
                     .is_err_and(|fault| fault.category == "TargetLost")
@@ -826,9 +851,11 @@ mod enabled {
                 let state = self.lock()?;
                 let process = self.check_bound_process(&state);
                 self.check()?;
-                if let Err(fault) = process
+                if let Err(mut fault) = process
                     && fault.category == "TargetExited"
                 {
+                    fault.context["sdk_fault"] = serde_json::to_value(result.as_ref().unwrap_err())
+                        .map_err(|_| internal("SDK fault serialization failed"))?;
                     return Err(fault);
                 }
             }
@@ -842,10 +869,18 @@ mod enabled {
             let mut state = self.lock()?;
             if method != "release" {
                 self.check_session(&state)?;
-                if self.native.is_some()
+                // Query waits may return a previously committed historical result.
+                // New query work performs its own SDK admission; never revoke that history.
+                if method != "query_wait"
+                    && self.native.is_some()
                     && let Some(frame) = &state.native_frame
                 {
-                    self.check_process_frame(&state, frame)?;
+                    state
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .commit_frame(frame, &self.operation(self.limits.wait_ms)?)
+                        .map_err(|error| engine_error("capture_terminal", error))?;
                 }
             }
             let result = match method {
@@ -976,17 +1011,17 @@ mod enabled {
             Ok(())
         }
 
+        // Only refines SDK TargetLost for approved recovery; never admits capture or input.
         fn check_bound_process(&self, state: &State) -> Result<(), Fault> {
             self.check()?;
             #[cfg(target_os = "macos")]
-            if let Some(native) = &self.native {
-                let expected = state.native_process_started.ok_or_else(|| {
-                    blocked(
-                        "target_identity_unavailable",
-                        "bound kernel lifetime is missing",
-                    )
-                })?;
-                let pid = i32::try_from(native.process_id).map_err(|_| selected_process_lost())?;
+            if self
+                .native
+                .as_ref()
+                .is_some_and(|native| native.confirm_process_exit)
+                && let Some((pid, expected)) = state.native_process_started
+            {
+                let pid = i32::try_from(pid).map_err(|_| selected_process_lost())?;
                 #[cfg(test)]
                 let current = self
                     .process_probe
@@ -1002,35 +1037,12 @@ mod enabled {
             Ok(())
         }
 
-        fn check_process_frame(&self, state: &State, frame: &mp::Frame) -> Result<(), Fault> {
-            let process = self.check_bound_process(state);
-            if process.is_err() {
-                // A kernel proof must not hide an earlier provider/permission fault.
-                // Commit is public, terminal-aware, and neither captures nor maps pixels.
-                let operation = self.operation(self.limits.wait_ms)?;
-                state
-                    .session
-                    .as_ref()
-                    .ok_or_else(|| Fault::new("Closed", "session closed"))?
-                    .commit_frame(frame, &operation)
-                    .map_err(|error| engine_error("target_lifetime", error))?;
-            }
-            process
-        }
-
         fn check_session(&self, state: &State) -> Result<(), Fault> {
             self.check()?;
             if state.session.is_none() {
                 return Err(Fault::new("Closed", "session closed"));
             }
-            #[cfg(target_os = "macos")]
-            if self.native.is_some() && state.native_process_started.is_none() {
-                return Err(blocked(
-                    "target_identity_unavailable",
-                    "bound kernel lifetime is missing",
-                ));
-            }
-            // This is ownership/cancellation and binding only. The public facade orders each
+            // This is ownership/cancellation only. The public facade orders each
             // actual result against capture termination; is_closed proves cleanup,
             // not live admission, and must not replace the original capture fault.
             Ok(())
@@ -1111,9 +1123,6 @@ mod enabled {
                 .map_err(|error| engine_error("capture", error))?;
             state.captured_frames += 1;
             state.last_capture = Some(Instant::now());
-            if self.native.is_some() {
-                self.check_process_frame(state, &frame)?;
-            }
             let geometry = if let Some(native) = &self.native {
                 let actual = frame.transform().target().ok_or_else(|| {
                     Fault::new(
@@ -1136,8 +1145,7 @@ mod enabled {
                 None
             };
             let stamp = frame.stamp();
-            let native_frame =
-                (cfg!(target_os = "macos") && self.native.is_some()).then(|| frame.clone());
+            let native_frame = self.native.is_some().then(|| frame.clone());
             let value = self.retain_observation(state, frame, permit, &operation)?;
             // Latch only a committed frame; a rejected candidate establishes no baseline.
             state.placement = geometry;
@@ -1469,6 +1477,13 @@ mod enabled {
             if request.expected.is_empty() || request.expected.len() > self.limits.log_bytes {
                 return Err(argument("postcondition text must be nonempty and bounded"));
             }
+            let region = match &request.roi {
+                Some(roi) => mp::OcrRegion::Region {
+                    rect: roi.rect(&current.frame)?,
+                    policy: mp::ClipPolicy::Reject,
+                },
+                None => mp::OcrRegion::FullFrame,
+            };
             let operation = self.operation(self.limits.wait_ms)?;
             let _active = self.active();
             let backend = self
@@ -1485,12 +1500,15 @@ mod enabled {
                     &current.frame,
                     backend.backend_identity(),
                     backend.model_identity(),
-                    mp::OcrRegion::FullFrame,
+                    region,
                     mp::CoordinateSpace::CapturePixels,
                     &operation,
                 ))
                 .map_err(|error| engine_error("postcondition_ocr", error))?;
             self.check_session(state)?;
+            if result.stamp() != now {
+                return Err(internal("recognition source correlation mismatch"));
+            }
             Ok(
                 json!({"satisfied":result.regions().iter().any(|region| region.text() == request.expected),
                 "frame":now.sequence().value(),"checkpoint":before.sequence().value(),"causation_claimed":false}),
@@ -1612,7 +1630,7 @@ mod enabled {
             if remaining == 0 {
                 return Err(Fault::new("Timeout", "native input authority expired"));
             }
-            let operation = self.operation(self.limits.wait_ms.min(remaining))?;
+            let operation = self.operation(remaining)?;
             self.check_session(state)?;
             if !self.control.admission.load(Ordering::Acquire) {
                 return Err(Fault::new(
@@ -1764,6 +1782,8 @@ mod enabled {
         observation: Value,
         checkpoint: Value,
         expected: String,
+        #[serde(default, deserialize_with = "Roi::deserialize_optional")]
+        roi: Option<Roi>,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -1784,6 +1804,13 @@ mod enabled {
     }
 
     impl Roi {
+        fn deserialize_optional<'de, D>(deserializer: D) -> Result<Option<Self>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            Self::deserialize(deserializer).map(Some)
+        }
+
         fn rect(&self, frame: &mp::Frame) -> Result<mp::Rect, Fault> {
             let extent = frame.descriptor().extent();
             if self.width == 0
@@ -1871,7 +1898,7 @@ mod enabled {
 
     fn native_engine(
         native: &NativeConfig,
-        ocr: &mp::OcrProviderConfig,
+        ocr: &mp::OcrProfileConfig,
         operation: &mp::OperationContext,
         control: &Control,
         initialization_started: Option<&AtomicBool>,
@@ -1882,7 +1909,7 @@ mod enabled {
         );
         #[cfg(target_os = "macos")]
         let request = request.with_macos_config(mp::MacosConfig::new().with_process_pointer_mode(
-            match native.input.macos_process_pointer_mode {
+            match native.input.macos_process_pointer_mode.unwrap_or_default() {
                 MacosProcessPointerMode::CoreGraphics => mp::MacosProcessPointerMode::CoreGraphics,
                 MacosProcessPointerMode::AppKitBackground => {
                     mp::MacosProcessPointerMode::AppKitBackground
@@ -1903,9 +1930,9 @@ mod enabled {
             }
         }
         #[cfg(target_os = "macos")]
-        let result = mp::macos_engine_with_ocr_provider(request, ocr, operation);
+        let result = mp::macos_engine_with_ocr_profile(request, ocr, operation);
         #[cfg(windows)]
-        let result = mp::windows_engine_with_ocr_provider(request, ocr, operation);
+        let result = mp::windows_engine_with_ocr_profile(request, ocr, operation);
         #[cfg(any(target_os = "macos", windows))]
         {
             result.map_err(|error| prerequisite_error("engine_initialization", error))
@@ -1922,13 +1949,19 @@ mod enabled {
 
     const NATIVE_WINDOW_CANDIDATE_LIMIT: usize = 64;
 
-    fn native_lifetime(config: &NativeConfig) -> Result<u64, Fault> {
-        u64::from_str_radix(&config.process_lifetime, 16).map_err(|_| {
-            blocked(
-                "native_authority_validation",
-                "invalid opaque process lifetime",
-            )
-        })
+    fn native_lifetime(config: &NativeConfig) -> Result<Option<u64>, Fault> {
+        config
+            .process_lifetime
+            .as_deref()
+            .map(|lifetime| {
+                u64::from_str_radix(lifetime, 16).map_err(|_| {
+                    blocked(
+                        "native_authority_validation",
+                        "invalid opaque process lifetime",
+                    )
+                })
+            })
+            .transpose()
     }
 
     fn selected_process_lost() -> Fault {
@@ -1943,9 +1976,9 @@ mod enabled {
         process_id: u32,
         lifetime: u64,
         config: &NativeConfig,
-        expected_lifetime: u64,
+        expected_lifetime: Option<u64>,
     ) -> Result<(), Fault> {
-        if process_id != config.process_id || lifetime != expected_lifetime {
+        if Some(process_id) != config.process_id || Some(lifetime) != expected_lifetime {
             return Err(selected_process_lost());
         }
         Ok(())
@@ -1957,10 +1990,11 @@ mod enabled {
         control: &Control,
         operation: &mp::OperationContext,
         wait: bool,
-        process_started: &mut Option<(u64, u64)>,
+        process_started: &mut Option<(u32, (u64, u64))>,
+        process_lifetime: &mut String,
     ) -> Result<Option<mp::TargetId>, Fault> {
         let lifetime = native_lifetime(config)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             let target = loop {
                 let target = probe_native_target(
@@ -1971,7 +2005,18 @@ mod enabled {
                             .discover(operation)
                             .map_err(|error| engine_error("target_discovery", error))
                     },
-                    || check_native_process(config, lifetime, control, process_started),
+                    || {
+                        #[cfg(target_os = "macos")]
+                        if let Some(lifetime) = lifetime {
+                            check_native_process(config, lifetime, control, process_started)?;
+                        }
+                        #[cfg(windows)]
+                        {
+                            let _ = process_started;
+                            windows_process::check(config.process_id, lifetime, control)?;
+                        }
+                        Ok(())
+                    },
                 )?;
                 if let Some(target) = target {
                     break target;
@@ -1988,16 +2033,39 @@ mod enabled {
                         .min(control.deadline().saturating_duration_since(Instant::now())),
                 );
             };
+            #[cfg(windows)]
+            windows_process::check(config.process_id, lifetime, control)?;
             // Revalidate the retained target, never rediscover a replacement.
             let current = engine
                 .describe_window(target, operation)
                 .map_err(|error| engine_error("target_revalidation", error))?;
             control.check()?;
             validate_retained_native_target(target, &current, config, lifetime)?;
-            check_native_process(config, lifetime, control, process_started)?;
+            let identity = current.process_identity().ok_or_else(|| {
+                blocked(
+                    "target_identity_unavailable",
+                    "selected window lacks process provenance",
+                )
+            })?;
+            *process_lifetime = format!("{:016x}", identity.lifetime());
+            #[cfg(target_os = "macos")]
+            if config.confirm_process_exit && process_started.is_none() {
+                let pid = identity.process_id().get();
+                let started = i32::try_from(pid)
+                    .ok()
+                    .and_then(|pid| super::lifetime::probe(pid).ok())
+                    .and_then(|current| super::lifetime::require_current(None, current).ok());
+                // Bind only while the SDK still recognizes the retained window, not a PID successor.
+                engine
+                    .describe_window(target, operation)
+                    .map_err(|error| engine_error("target_revalidation", error))?;
+                control.check()?;
+                // Unavailable independent evidence cannot upgrade an SDK loss to confirmed exit.
+                *process_started = started.map(|started| (pid, started));
+            }
             Ok(Some(target))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = process_started;
             control.check()?;
@@ -2005,8 +2073,11 @@ mod enabled {
                 .discover(operation)
                 .map_err(|error| engine_error("target_discovery", error))?;
             control.check()?;
-            let target =
-                select_native_target(&targets, config, lifetime)?.map(mp::TargetDescription::id);
+            let selected = select_native_target(&targets, config, lifetime)?;
+            if let Some(identity) = selected.and_then(mp::TargetDescription::process_identity) {
+                *process_lifetime = format!("{:016x}", identity.lifetime());
+            }
+            let target = selected.map(mp::TargetDescription::id);
             if target.is_none() && wait {
                 return Err(blocked(
                     "target_identity_mismatch",
@@ -2017,12 +2088,12 @@ mod enabled {
         }
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", windows, test))]
     fn validate_retained_native_target(
         target: mp::TargetId,
         current: &mp::TargetDescription,
         config: &NativeConfig,
-        lifetime: u64,
+        lifetime: Option<u64>,
     ) -> Result<(), Fault> {
         if select_native_target(std::slice::from_ref(current), config, lifetime)?
             .is_none_or(|selected| selected.id() != target)
@@ -2032,7 +2103,7 @@ mod enabled {
         Ok(())
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", windows, test))]
     fn probe_native_target(
         config: &NativeConfig,
         control: &Control,
@@ -2058,19 +2129,25 @@ mod enabled {
         Ok(selected.map(mp::TargetDescription::id))
     }
 
+    // Operation preselection must not drift while windowless. Script delegates selection
+    // to the SDK and never enters this path; window absence cannot prove process exit.
     #[cfg(target_os = "macos")]
     fn check_native_process(
         config: &NativeConfig,
         lifetime: u64,
         control: &Control,
-        started: &mut Option<(u64, u64)>,
+        started: &mut Option<(u32, (u64, u64))>,
     ) -> Result<(), Fault> {
         use objc2::rc::autoreleasepool;
         use objc2_app_kit::NSRunningApplication;
 
         control.check()?;
-        let pid = i32::try_from(config.process_id).map_err(|_| selected_process_lost())?;
-        let before = super::lifetime::require_current(*started, super::lifetime::probe(pid)?)?;
+        let selected_pid = config.process_id.ok_or_else(selected_process_lost)?;
+        let pid = i32::try_from(selected_pid).map_err(|_| selected_process_lost())?;
+        let before = super::lifetime::require_current(
+            started.map(|(_, started)| started),
+            super::lifetime::probe(pid)?,
+        )?;
         let result = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
             autoreleasepool(|_| {
                 let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
@@ -2095,7 +2172,7 @@ mod enabled {
                     u32::try_from(app.processIdentifier()).map_err(|_| selected_process_lost())?,
                     launch.to_bits(),
                     config,
-                    lifetime,
+                    Some(lifetime),
                 )?;
                 let url = if config.executable_or_bundle.is_dir() {
                     app.bundleURL()
@@ -2145,16 +2222,17 @@ mod enabled {
         // Kernel lifetime checks remain live in this non-AppKit engine child.
         super::lifetime::require_current(Some(before), super::lifetime::probe(pid)?)?;
         control.check()?;
-        *started = Some(before);
+        *started = Some((selected_pid, before));
         Ok(())
     }
 
     fn select_native_target<'a>(
         targets: &'a [mp::TargetDescription],
         config: &NativeConfig,
-        lifetime: u64,
+        lifetime: Option<u64>,
     ) -> Result<Option<&'a mp::TargetDescription>, Fault> {
         let mut selected = None;
+        let target_is_bundle = config.executable_or_bundle.is_dir();
         for (index, target) in targets
             .iter()
             .filter(|target| {
@@ -2175,16 +2253,18 @@ mod enabled {
                     "an exact-name window lacks verified process provenance",
                 )
             })?;
-            if identity.process_id().get() != config.process_id {
-                continue;
+            if let Some(pid) = config.process_id {
+                if identity.process_id().get() != pid {
+                    continue;
+                }
+                require_selected_lifetime(
+                    identity.process_id().get(),
+                    identity.lifetime(),
+                    config,
+                    lifetime,
+                )?;
             }
-            require_selected_lifetime(
-                identity.process_id().get(),
-                identity.lifetime(),
-                config,
-                lifetime,
-            )?;
-            let path = if config.executable_or_bundle.is_dir() {
+            let path = if target_is_bundle {
                 identity.application_bundle_path()
             } else {
                 Some(identity.executable_path())
@@ -2201,7 +2281,18 @@ mod enabled {
                     "selected process path cannot be resolved",
                 )
             })?;
-            if canonical != config.executable_or_bundle {
+            #[cfg(windows)]
+            let same_executable = if config.input.package_approved {
+                windows_process::same_executable(&canonical, &config.executable_or_bundle)?
+            } else {
+                canonical == config.executable_or_bundle
+            };
+            #[cfg(not(windows))]
+            let same_executable = canonical == config.executable_or_bundle;
+            if !same_executable {
+                if config.process_id.is_none() {
+                    continue;
+                }
                 return Err(selected_process_lost());
             }
             if selected.replace(target).is_some() {
@@ -2685,7 +2776,7 @@ mod enabled {
                     .category,
                 "Authority"
             );
-            input.reviewed_operation = Some("reviewed held-pointer workflow".into());
+            input.package_approved = true;
             input.authorize(&click).expect("reviewed workflow");
             input.authorize(&gesture).expect("reviewed workflow drag");
         }
@@ -2949,6 +3040,89 @@ mod enabled {
             );
             assert_eq!(replay.category, "Cancelled");
             assert!(replay.context.get("native_cleanup").is_none());
+        }
+
+        #[cfg(any(target_os = "macos", windows))]
+        #[test]
+        fn native_script_review_validates_without_claiming_an_expected_effect() {
+            let plan: Plan = serde_json::from_str(include_str!("../fixtures/manual-plan.json"))
+                .expect("finite manual plan");
+            let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+            let raw = json!({
+                "executable_or_bundle":executable,"process_id":42,
+                "process_lifetime":"0123456789abcdef","window_rule":"Selected window",
+                "operating_system":std::env::consts::OS,"hardware":std::env::consts::ARCH,
+                "permission_executable":executable,
+                "capture":{"approved":true,"duration_ms":5000,"max_frames":10,
+                    "wait_ms":500,"interval_ms":50},
+                "input":{"approved":true,"duration_ms":5000,"max_actions":10,
+                    "route":if cfg!(windows) { "window_message" } else { "process_directed" },
+                    "focus":"preserve","package_approved":true,
+                    "representative_actions":[]},
+                "geometry":null,"recognition_language":crate::environment::LANGUAGE,
+                "review":{"kind":"script"},"cleanup_ms":1000,"containment_ms":2000
+            });
+            let config: NativeConfig = serde_json::from_value(raw.clone()).unwrap();
+            validate_native(Some(&config), &plan).unwrap();
+            assert_eq!(
+                serde_json::to_value(&config).unwrap()["review"],
+                json!({"kind":"script"})
+            );
+            for (pointer, invalid, stage) in [
+                ("/capture/approved", json!(false), "capture_authority"),
+                ("/input/approved", json!(false), "input_authority"),
+                ("/input/package_approved", json!(false), "input_authority"),
+                ("/input/max_actions", json!(0), "input_authority"),
+                ("/capture/duration_ms", json!(10001), "capture_authority"),
+                ("/cleanup_ms", json!(0), "cleanup_authority"),
+                (
+                    "/input/representative_actions",
+                    json!([
+                        {"kind":"click","x":1,"y":2,"button":"left"}
+                    ]),
+                    "input_authority",
+                ),
+                (
+                    "/review",
+                    json!({"kind":"operation","operation":" ",
+                    "visible_postcondition":"A label changes"}),
+                    "native_review",
+                ),
+                (
+                    "/review",
+                    json!({"kind":"operation","operation":"Click once",
+                    "visible_postcondition":"line\nbreak"}),
+                    "native_review",
+                ),
+            ] {
+                let mut invalid_config = raw.clone();
+                *invalid_config.pointer_mut(pointer).unwrap() = invalid;
+                let config = serde_json::from_value(invalid_config).unwrap();
+                let fault = validate_native(Some(&config), &plan).unwrap_err();
+                assert_eq!(fault.context["stage"], stage, "{pointer}");
+                assert!(fault.context.get("native_cleanup").is_none());
+            }
+
+            let mut manual = raw;
+            manual["review"] = json!({"kind":"operation","operation":"Click once",
+                "visible_postcondition":"The selected label changes"});
+            let config = serde_json::from_value(manual.clone()).unwrap();
+            validate_native(Some(&config), &plan).unwrap();
+            manual["input"]["package_approved"] = json!(false);
+            manual["input"]["representative_actions"] = json!([
+                {"kind":"click","x":1,"y":2,"button":"left"}
+            ]);
+            manual["geometry"] = json!({
+                "desktop_origin":[0,0],"logical_size":[8,8],"scale":[1,1]
+            });
+            let config = serde_json::from_value(manual.clone()).unwrap();
+            validate_native(Some(&config), &plan).unwrap();
+            manual["review"] = json!({"kind":"script"});
+            let config = serde_json::from_value(manual).unwrap();
+            assert_eq!(
+                validate_native(Some(&config), &plan).unwrap_err().context["stage"],
+                "input_authority"
+            );
         }
 
         #[test]
@@ -3340,13 +3514,9 @@ mod enabled {
         control: &Control,
     ) -> Result<mp::OcrModelIdentity, Fault> {
         crate::environment::validate_ocr(config, control)?;
-        match config.ocr.profile.as_str() {
-            mp::ACCEPTED_G004_PROFILE_ID => Ok(mp::OcrModelIdentity::accepted_g004()),
-            mp::ACCEPTED_BOUNDED_PROFILE_ID => {
-                Ok(mp::OcrModelIdentity::accepted_bounded_detector())
-            }
-            _ => Err(blocked("ocr_unsupported", "unsupported OCR profile")),
-        }
+        crate::environment::ocr_profile(&config.ocr.profile)?
+            .identity()
+            .map_err(|error| prerequisite_error("ocr_unsupported", error.into()))
     }
 
     fn replay_source(
@@ -3413,27 +3583,53 @@ mod enabled {
         .map_err(|error| prerequisite_error("geometry", error.into()))
     }
 
+    fn validate_process_selection(config: &NativeConfig, desktop: bool) -> Result<(), Fault> {
+        match (config.process_id, config.process_lifetime.as_deref()) {
+            (Some(pid), Some(lifetime))
+                if pid != 0
+                    && lifetime.len() == 16
+                    && lifetime
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) => {}
+            (None, None)
+                if desktop
+                    && config.operating_system == "macos"
+                    && matches!(config.review, NativeReview::Script {}) => {}
+            _ => {
+                return Err(blocked(
+                    "native_authority_validation",
+                    "exact process identity is required outside Desktop Script execution",
+                ));
+            }
+        }
+        if config.confirm_process_exit && (!desktop || config.operating_system != "macos") {
+            return Err(blocked(
+                "native_authority_validation",
+                "exit recovery evidence requires macOS Desktop",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_native(config: Option<&NativeConfig>, plan: &Plan) -> Result<(), Fault> {
         let config = config.ok_or_else(|| blocked("native_authority_unset", "native requires an operator-approved target and separate finite capture/input authority"))?;
         config
+            .review
+            .validate()
+            .map_err(|fault| blocked("native_review", &fault.message))?;
+        config
             .input
             .validate_pointer_options(&config.operating_system)?;
+        validate_process_selection(config, plan.native_budgets.is_some())?;
         if !config.executable_or_bundle.is_absolute()
             || !config.permission_executable.is_absolute()
-            || config.process_id == 0
-            || config.process_lifetime.len() != 16
-            || !config
-                .process_lifetime
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             || config.window_rule.is_empty()
             || config.hardware.is_empty()
             || config.recognition_language.is_empty()
-            || config.visible_postcondition.is_empty()
         {
             return Err(blocked(
                 "native_authority_validation",
-                "target path, lifetime, window rule, hardware, permission executable, recognition language and visible postcondition are required",
+                "target path, lifetime, window rule, hardware, permission executable and recognition language are required",
             ));
         }
         if config.operating_system != std::env::consts::OS
@@ -3513,7 +3709,7 @@ mod enabled {
             || input.duration_ms > plan.limits.duration_ms
             || input.max_actions == 0
             || input.max_actions > plan.limits.max_actions
-            || (input.representative_actions.is_empty() && input.reviewed_operation.is_none())
+            || (input.representative_actions.is_empty() && !input.package_approved)
             || input.representative_actions.len() > input.max_actions
         {
             return Err(blocked(
@@ -3530,6 +3726,18 @@ mod enabled {
                 "explicit supported route and non-focus-changing policy are required",
             ));
         }
+        if input.package_approved
+            && config.operating_system == "windows"
+            && !matches!(
+                (input.route.as_str(), input.focus.as_str()),
+                ("system", "require_focused") | ("window_message", "preserve")
+            )
+        {
+            return Err(blocked(
+                "input_route_unsupported",
+                "Windows package input requires system/require_focused or window_message/preserve",
+            ));
+        }
         if config.cleanup_ms == 0
             || config.cleanup_ms > plan.limits.cleanup_ms
             || config.containment_ms == 0
@@ -3541,40 +3749,37 @@ mod enabled {
                 "cleanup must fit the plan and containment must equal the supervisor's finite bound",
             ));
         }
-        match &input.reviewed_operation {
-            Some(operation) => {
-                if operation.trim().is_empty()
-                    || operation.len() > 4096
-                    || operation.chars().any(char::is_control)
-                    || !input.representative_actions.is_empty()
-                    || config.geometry.is_some()
-                    || config.operating_system != "macos"
-                {
-                    return Err(blocked(
-                        "input_authority",
-                        "reviewed package intent is exclusive of manual geometry/actions and requires macOS",
-                    ));
-                }
+        if input.package_approved {
+            if !input.representative_actions.is_empty() || config.geometry.is_some() {
+                return Err(blocked(
+                    "input_authority",
+                    "reviewed package input is exclusive of manual geometry and actions",
+                ));
             }
-            None => {
-                placement(config.geometry.as_ref().ok_or_else(|| {
-                    blocked(
-                        "geometry",
-                        "manual native authority requires explicit placement",
-                    )
-                })?)?;
-                native_sequence(
-                    &input.representative_actions,
-                    None,
-                    input.max_actions,
-                    input.click_hold_ms,
-                    Some((
-                        plan.limits.wait_ms,
-                        input.duration_ms.min(config.capture.duration_ms),
-                    )),
+        } else {
+            if matches!(config.review, NativeReview::Script {}) {
+                return Err(blocked(
+                    "input_authority",
+                    "saved Script review requires explicit package input approval",
+                ));
+            }
+            placement(config.geometry.as_ref().ok_or_else(|| {
+                blocked(
+                    "geometry",
+                    "manual native authority requires explicit placement",
                 )
-                .map_err(|fault| blocked("input_authority", &fault.message))?;
-            }
+            })?)?;
+            native_sequence(
+                &input.representative_actions,
+                None,
+                input.max_actions,
+                input.click_hold_ms,
+                Some((
+                    plan.limits.wait_ms,
+                    input.duration_ms.min(config.capture.duration_ms),
+                )),
+            )
+            .map_err(|fault| blocked("input_authority", &fault.message))?;
         }
         config.route()?;
         config.focus()?;

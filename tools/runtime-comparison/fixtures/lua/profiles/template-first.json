@@ -3,6 +3,9 @@
   "schema_version": 1,
   "options": {
     "priorities": ["template", "ocr"],
-    "actions": {"template": "A", "ocr": "B"}
+    "actions": {
+      "template": [{"kind": "key_down", "key": "A"}, {"kind": "key_up", "key": "A"}],
+      "ocr": [{"kind": "key_down", "key": "B"}, {"kind": "key_up", "key": "B"}]
+    }
   }
 }

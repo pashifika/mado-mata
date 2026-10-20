@@ -86,6 +86,10 @@ export interface PageAuthoring {
 interface Props {
   session: AuthoringSession; label: string; handlers: EditHandlers;
   recognition: ReactNode; recognitionDirty: boolean;
+  // Script Run/Setup split control and its settings-only dialog beside Validate.
+  trial: ReactNode;
+  // Notices and failures of the latest explicit Run before admission, shown with this page's other errors.
+  trialFeedback: ReactNode;
   // Why the dirty recognition draft cannot be saved as it is; Save all still saves file drafts first.
   recognitionSaveBlock: string | null;
   // The effective packages root (the sources folder) the host resolves Duplicate destinations in; shown as a preview only.
@@ -101,7 +105,7 @@ interface Props {
   exportBlock: string | null;
 }
 
-export default function EditPage({session, label, handlers, recognition, recognitionDirty, recognitionSaveBlock, packagesRoot, completionPreferences, locked, lockReason, leaseLost, validationActive, exportBlock}: Props) {
+export default function EditPage({session, label, handlers, recognition, trial, trialFeedback, recognitionDirty, recognitionSaveBlock, packagesRoot, completionPreferences, locked, lockReason, leaseLost, validationActive, exportBlock}: Props) {
   const locale = useLocale();
   const t = messages[locale].ui;
   const a = t.authoring;
@@ -370,6 +374,11 @@ export default function EditPage({session, label, handlers, recognition, recogni
   const current = validationCurrent(session);
   // A publication or a validation that reached disk capture can report an interrupted save that needs recovery.
   const recoveryFault = session.error?.category === AUTHORING_RECOVERY || (current && validation?.diagnostics.some(item => item.category === AUTHORING_RECOVERY) === true);
+  const validationControls = <div className="package-validation" aria-label={a.savedValidationHeading}>
+    <ButtonHint hint={a.validationHelp}><button id="authoring-validate" type="button"
+      disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button></ButtonHint>
+    {trial}
+  </div>;
 
   const railButton = <button ref={railToggle} id="authoring-tree-toggle" type="button" className="icon-button" aria-controls="authoring-rail" aria-expanded={railOpen}
     aria-label={railOpen ? a.collapseTree : a.expandTree} title={railOpen ? a.collapseTree : a.expandTree}
@@ -483,9 +492,6 @@ export default function EditPage({session, label, handlers, recognition, recogni
           title={saveReason ? a.block(saveReason) : undefined} onClick={() => selected && handlers.save(selected.path)}>{pending?.kind === 'save' ? a.working : a.save}</button>
         <button id="authoring-save-all" type="button" disabled={publishLocked || (savable.length === 0 && (!recognitionDirty || recognitionSaveBlock !== null)) || saveAllReason !== null}
           title={saveAllReason ?? recognitionSaveBlock ?? undefined} onClick={handlers.saveAll}>{a.saveAll}</button>
-        <ButtonHint hint={a.validationHelp}>
-          <button id="authoring-validate" type="button" disabled={publishLocked || pending !== null || validating} onClick={handlers.validate}>{validating ? a.validating : a.validate}</button>
-        </ButtonHint>
         <ButtonHint hint={a.exitHint}>
           <button id="authoring-exit" type="button" disabled={locked || (pending !== null && pending.kind !== 'recognition_trial' && pending.kind !== 'validate')}
             onClick={handlers.exit}>{pending?.kind === 'exit' ? a.working : a.exit}</button>
@@ -494,6 +500,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
     </div>
     {leaseLost && <p id="authoring-lease-lost" className="inline-warning" role="alert">{a.leaseLost}</p>}
     {session.error && <div id="authoring-error"><FaultMessage title={a.actionFailed} value={session.error}/></div>}
+    {trialFeedback}
     {recoveryFault && <div className="button-row"><button id="authoring-recover" type="button" disabled={locked} onClick={handlers.recover}>{a.recover}</button>
       <span className="muted">{a.recoverHelp}</span></div>}
     {session.conflict && <section id="authoring-conflict" className="inline-warning" role="alert"><strong>{a.conflictHeading}</strong> {a.conflictHelp}
@@ -507,6 +514,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
         <div><dt>{a.revision}</dt><dd id="authoring-revision" className="mono" title={session.revision}>{shortRevision(session.revision)}</dd></div>
       </dl>
     </div>
+    {!railOpen && <div className="package-validation-collapsed"><span>{a.railHeading}</span>{validationControls}</div>}
     <div className={railOpen ? 'repo' : 'repo rail-closed'}>
       <aside id="authoring-rail" className="panel repo-rail" aria-labelledby="authoring-rail-heading" hidden={!railOpen} onContextMenu={event => event.preventDefault()}>
         <div className="rail-heading"><h2 aria-labelledby="authoring-rail-heading"><span id="authoring-rail-heading">{a.railHeading}</span>
@@ -514,6 +522,7 @@ export default function EditPage({session, label, handlers, recognition, recogni
           <button id="authoring-tree-add" type="button" className="icon-button" aria-label={a.addFile} title={addReason ?? a.addFile}
             disabled={addReason !== null} onClick={() => setIntent({kind: 'add'})}><span aria-hidden="true">+</span></button>
           {railOpen && railButton}</div>
+        {railOpen && validationControls}
         <div id="authoring-rail-body" className="rail-body">
           <ul className="file-tree rail-groups">
             <li>

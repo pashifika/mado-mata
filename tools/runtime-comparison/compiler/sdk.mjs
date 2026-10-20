@@ -170,7 +170,7 @@ export const methods = deepFreeze({
       availability: { stages: ["workflow", "closed"], lanes: ["controlled", "replay", "native"], authority: "input" },
       examples: ["input-receipt"],
     }],
-  postcondition: ["{ observation: MadoObservation; checkpoint: MadoObservation; expected: string }", "{ readonly satisfied: boolean; readonly frame: number; readonly checkpoint: number }",
+  postcondition: ["{ observation: MadoObservation; checkpoint: MadoObservation; expected: string; roi?: MadoRegion }", "{ readonly satisfied: boolean; readonly frame: number; readonly checkpoint: number }",
     "Check the expected visual condition against a strictly newer compatible observation than the checkpoint. Frame freshness or input submission alone does not establish the expected effect.",
     {
       purpose: {
@@ -180,6 +180,7 @@ export const methods = deepFreeze({
       constraints: [
         "observation must be strictly newer than checkpoint in the same session and geometry; otherwise it fails with StaleFrame.",
         "satisfied reports whether the expected visual condition is present in observation; input submission or a newer frame alone is not the effect.",
+        "Optional roi uses whole capture pixels and must be nonempty and wholly inside observation, like recognize. OCR scans only this crop; omitted roi scans the full frame. No clipping or extra wait budget is applied.",
         "Both observations stay owned by the caller.",
       ],
       availability: { stages: ["readiness", "workflow"], lanes: ["controlled", "replay", "native"], authority: "capture" },

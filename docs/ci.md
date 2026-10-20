@@ -72,6 +72,7 @@ The version and integrity sources are:
 | Script editor | CodeMirror state 6.7.6, view 6.43.13, language 6.12.4, JavaScript 6.2.5, autocomplete 6.20.3, commands 6.11.1; existing TypeScript 5.9.3 language service | Exact [frontend manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json); trusted ES2020 declarations are bundled by the [build helper](../apps/desktop/build/trusted-libraries.mjs), with no runtime downloads |
 | Desktop Rust | Tauri 2.11.6, tauri-build 2.6.3, tracing 0.1.41, tracing-subscriber 0.3.20 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Saved-image payloads | png 0.18.1; flate2 1.1.9 (default features disabled; `rust_backend`) | [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock) |
+| Resource integrity | sha2 0.10.9; `asm` only on macOS aarch64, with sha2-asm 0.6.4 locked | [Runtime manifest](../tools/runtime-comparison/Cargo.toml) and both runtime/desktop lockfiles; existing native C toolchain, no changed verification or digest format |
 | Desktop configuration | zip 8.6.0 (default features disabled; `deflate-flate2` for reviewed runtime archives), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
 | Desktop OCR acquisition | ureq 3.4.2 with only `rustls`; rustls 0.23.45 in the lockfile; tar 0.4.46 without default features; flate2 1.1.9 with only `rust_backend` | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock); fixed HTTPS sources, bounded transfers/selected-member extraction, exact hashes, retained notices, no shell or installer |
 | Package metadata | semver 1.0.28, icu_locale_core 2.3.0 (`alloc`, no default features) | Exact [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock); shared bounded SemVer/language identifiers |
@@ -130,6 +131,15 @@ metadata. They also check the current test process's kernel architecture and
 invalid-PID refusal without launching an application. Non-macOS bundle resolution
 is explicitly unsupported; portable declaration, record, restore, and
 observation-policy checks remain cross-platform.
+Windows core checks also cover attach-only policy/admission, bounded candidate
+classification, cancellation and real-file executable identity/hardlink refusal.
+Portable record tests preserve legacy/foreign target intent across restart and
+snapshot restore. These checks do not discover a live game or send native input.
+The model-free `engine` suite covers real acquisition/terminal commitment through
+controlled providers, route receipts and incomplete cleanup. Run that suite on
+Windows with the pinned native setup and fixed engine target directory from
+[the desktop guide](desktop.md#build-and-run-from-the-checkout); the ordinary
+Windows hosted `--runtime-only` job does not enable `engine`.
 Apple framework dependencies are macOS-target-scoped. Native selection uses
 host-owned AppKit sheets for application bundles or saved PNGs, not a general
 dialog/filesystem plugin capability. Recognition Copy uses `NSPasteboard` only
@@ -243,6 +253,9 @@ The full check has these responsibilities:
   geometry/Undo, grouped selection, stale trial/Copy state, and per-Start Native
   consent invalidation), and
   type-check/build its trusted UI and bundled language worker.
+  Completion-session tests share a controlled clock with CodeMirror's parser so
+  CPU contention cannot change the tested syntax context. Production parse limits
+  remain unchanged.
   Shared-authoring tests also cover versioned unsaved reads, original-UTF-16
   batch edits, ABA/IME refusal, structured-field provenance, chronological
   Undo, snippet dependencies, publication prefixes and lifecycle resolution.

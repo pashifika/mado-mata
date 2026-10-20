@@ -575,6 +575,95 @@ enum Proof<'a> {
     Native(&'a mut super::AuthoringApplication),
 }
 
+pub(super) fn script_executable(
+    configuration: &TargetConfiguration,
+    declaration: &TargetDeclaration,
+    resolution: &TargetResolution,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<Option<PathBuf>, Fault> {
+    let guard = Guard {
+        cancelled,
+        deadline,
+    };
+    configuration.validate_declaration(declaration)?;
+    resolution.validate(configuration)?;
+    let result = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
+        autoreleasepool(|_| {
+            let selected = inspect_bundle(&configuration.game.path, "game", &|| guard.check())?;
+            if selected.resolution != resolution.game {
+                return Err(unavailable("installation_changed"));
+            }
+            let bundle_id = selected
+                .bundle_id
+                .as_deref()
+                .ok_or_else(|| unavailable("bundle_identifier"))?;
+            if declaration
+                .macos
+                .as_ref()
+                .is_some_and(|constraint| constraint.bundle_id != bundle_id)
+            {
+                return Err(unavailable("bundle_identifier"));
+            }
+            let identifier = NSString::from_str(bundle_id);
+            let applications = guard.call(|| {
+                NSRunningApplication::runningApplicationsWithBundleIdentifier(&identifier)
+            })?;
+            if applications.len() > MAX_CANDIDATES {
+                return Err(unavailable("candidate_limit"));
+            }
+            if applications.is_empty() {
+                return Ok(None);
+            }
+            let mut relocated = false;
+            for app in applications.iter() {
+                let url = guard
+                    .call(|| app.executableURL())?
+                    .ok_or_else(|| unavailable("runtime_url"))?;
+                relocated |= guard.call(|| url_path(&url))?? != resolution.game.executable;
+            }
+            if !relocated {
+                return unique_script_executable(&resolution.game.executable, applications.len())
+                    .map(Some);
+            }
+            // SDK path matching cannot map App Translocation or a signed relocated copy.
+            // Reuse established correspondence only when the runtime path differs.
+            match discover_native(configuration, declaration, resolution, cancelled, deadline)? {
+                super::NativeDiscovery::Unique(mut proof) if proof.processes.len() == 1 => {
+                    Ok(Some(
+                        proof
+                            .processes
+                            .pop()
+                            .expect("one verified process")
+                            .executable,
+                    ))
+                }
+                super::NativeDiscovery::Absent => Ok(None),
+                super::NativeDiscovery::Ambiguous => Err(Fault::new(
+                    "NativeTargetAmbiguous",
+                    "Multiple running applications match the saved installation",
+                )),
+                _ => Err(Fault::new(
+                    "NativeTargetUnverifiable",
+                    "The running application could not be mapped to the saved installation",
+                )),
+            }
+        })
+    }));
+    guard.check()?;
+    result.map_err(|_| unavailable("platform_exception"))?
+}
+
+fn unique_script_executable(executable: &str, candidate_count: usize) -> Result<PathBuf, Fault> {
+    if candidate_count != 1 {
+        return Err(Fault::new(
+            "NativeTargetAmbiguous",
+            "Multiple running applications match the saved installation",
+        ));
+    }
+    Ok(PathBuf::from(executable))
+}
+
 pub(super) fn discover_native(
     configuration: &TargetConfiguration,
     declaration: &TargetDeclaration,
@@ -951,6 +1040,22 @@ mod tests {
     use super::*;
     use crate::target::tests::MetadataFixture;
     use std::cell::Cell;
+
+    #[test]
+    fn same_path_script_mapping_requires_one_process_before_window_selection() {
+        let executable = "/Applications/Example.app/Contents/MacOS/Example";
+        assert_eq!(
+            unique_script_executable(executable, 1).unwrap(),
+            PathBuf::from(executable)
+        );
+        // One matching window cannot disambiguate two processes from the same APP.
+        assert_eq!(
+            unique_script_executable(executable, 2)
+                .unwrap_err()
+                .category,
+            "NativeTargetAmbiguous"
+        );
+    }
 
     #[test]
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]

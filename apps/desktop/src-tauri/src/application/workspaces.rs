@@ -328,7 +328,7 @@ impl Application {
                 "package_id":identity.package_id,"artifact_id":identity.artifact_id,
             })));
         }
-        let package = runner.inspect_inventory(inventory.clone())?;
+        let package = runner.inspect_inventory(inventory.clone(), None)?;
         publisher.check_admission(verified.archive_path())?;
         Ok((verified, inventory, package))
     }
@@ -451,7 +451,7 @@ impl Application {
     }
 }
 
-fn check_package_values(package: &PackageInfo) -> Result<(), Fault> {
+pub(super) fn check_package_values(package: &PackageInfo) -> Result<(), Fault> {
     check_webview_value(&package.schema, "$.schema")?;
     for (name, preset) in &package.profiles {
         check_webview_value(preset, &format!("$.presets[{name:?}]"))?;

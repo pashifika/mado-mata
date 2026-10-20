@@ -24,6 +24,17 @@ fn hash_path(hash: &mut Sha256, path: &Path) {
 }
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        let manifest = Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("Cargo package root"))
+            .join("windows.manifest");
+        println!("cargo:rustc-link-arg-bin=mado-runtime-comparison=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-bin=mado-runtime-comparison=/MANIFESTINPUT:{}",
+            manifest.display()
+        );
+    }
     let rustc = std::env::var_os("RUSTC").expect("Cargo supplies RUSTC");
     let output = Command::new(rustc)
         .arg("--version")
@@ -49,6 +60,7 @@ fn main() {
         "Cargo.lock",
         "rust-toolchain.toml",
         "build.rs",
+        "windows.manifest",
         "src",
         "fixtures",
         "compiler/compile.mjs",

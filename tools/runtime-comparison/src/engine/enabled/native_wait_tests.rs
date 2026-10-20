@@ -13,8 +13,8 @@ fn config() -> NativeConfig {
         "permission_executable":executable,
         "capture":{"approved":true,"duration_ms":5000,"max_frames":10,"wait_ms":500,"interval_ms":50},
         "input":{"approved":true,"duration_ms":5000,"max_actions":10,
-            "route":"process_directed","focus":"preserve","reviewed_operation":"test"},
-        "geometry":null,"recognition_language":"test","visible_postcondition":"test",
+            "route":"process_directed","focus":"preserve","package_approved":true},
+        "geometry":null,"recognition_language":"test","review":{"kind":"script"},
         "cleanup_ms":1000,"containment_ms":2000
     }))
     .unwrap()
@@ -145,7 +145,7 @@ fn overflowing_window_candidates_never_become_a_truncated_unique_match() {
     candidates.extend(
         (0..NATIVE_WINDOW_CANDIDATE_LIMIT).map(|_| window(&issuer, &config, Some((99, 7)))),
     );
-    let fault = select_native_target(&candidates, &config, 7).unwrap_err();
+    let fault = select_native_target(&candidates, &config, Some(7)).unwrap_err();
     assert_eq!(fault.context["stage"], "target_candidate_limit");
 }
 
@@ -159,7 +159,7 @@ fn windowless_process_loss_or_replacement_refuses_before_discovering_a_successor
                 &config,
                 &control,
                 || Ok(Vec::new()),
-                || { require_selected_lifetime(42, 7, &config, 7) }
+                || { require_selected_lifetime(42, 7, &config, Some(7)) }
             )
             .unwrap(),
             None
@@ -170,7 +170,7 @@ fn windowless_process_loss_or_replacement_refuses_before_discovering_a_successor
             || panic!("a successor must not be discovered"),
             || {
                 let (pid, lifetime) = replacement.ok_or_else(selected_process_lost)?;
-                require_selected_lifetime(pid, lifetime, &config, 7)
+                require_selected_lifetime(pid, lifetime, &config, Some(7))
             },
         )
         .unwrap_err();
@@ -293,10 +293,10 @@ fn a_selected_window_is_not_replaced_by_matching_metadata_or_a_new_title() {
     let config = config();
     let issuer = IdentityIssuer::new();
     let selected = window(&issuer, &config, Some((42, 7)));
-    validate_retained_native_target(selected.id(), &selected, &config, 7).unwrap();
+    validate_retained_native_target(selected.id(), &selected, &config, Some(7)).unwrap();
     let replacement = window(&issuer, &config, Some((42, 7)));
     assert_eq!(
-        validate_retained_native_target(selected.id(), &replacement, &config, 7)
+        validate_retained_native_target(selected.id(), &replacement, &config, Some(7))
             .unwrap_err()
             .category,
         "TargetLost"
@@ -311,7 +311,7 @@ fn a_selected_window_is_not_replaced_by_matching_metadata_or_a_new_title() {
     .with_capability(mp::TargetCapability::capture_only(mp::TargetKind::Window))
     .with_process_identity(selected.process_identity().unwrap().clone());
     assert_eq!(
-        validate_retained_native_target(selected.id(), &renamed, &config, 7)
+        validate_retained_native_target(selected.id(), &renamed, &config, Some(7))
             .unwrap_err()
             .category,
         "TargetLost"
@@ -334,4 +334,190 @@ fn cancellation_during_process_validation_does_not_begin_window_discovery() {
     .unwrap_err();
     assert_eq!(fault.category, "Cancelled");
     assert_eq!(fault.context["stage"], "waiting_for_window");
+}
+
+#[test]
+fn desktop_script_selects_current_sdk_process_but_not_a_different_application() {
+    let mut other = config();
+    let mut config = config();
+    config.process_id = None;
+    config.process_lifetime = None;
+    let issuer = IdentityIssuer::new();
+    let selected = window(&issuer, &config, Some((91, 13)));
+    let selected_id = selected.id();
+    other.executable_or_bundle = config.executable_or_bundle.parent().unwrap().to_path_buf();
+    let wrong_app = window(&issuer, &other, Some((42, 7)));
+    assert_eq!(
+        select_native_target(&[wrong_app, selected], &config, None)
+            .unwrap()
+            .unwrap()
+            .id(),
+        selected_id
+    );
+    assert!(select_native_target(&[], &config, None).unwrap().is_none());
+    let ambiguous = [
+        window(&issuer, &config, Some((91, 13))),
+        window(&issuer, &config, Some((92, 14))),
+    ];
+    assert_eq!(
+        select_native_target(&ambiguous, &config, None)
+            .unwrap_err()
+            .context["stage"],
+        "target_identity_ambiguous"
+    );
+}
+
+#[test]
+fn only_desktop_script_can_omit_a_process_and_recovery_evidence_stays_internal() {
+    let mut config = config();
+    validate_process_selection(&config, false).unwrap();
+    config.process_id = None;
+    assert!(validate_process_selection(&config, true).is_err());
+    config.process_lifetime = None;
+    validate_process_selection(&config, true).unwrap();
+    assert!(validate_process_selection(&config, false).is_err());
+    config.review = NativeReview::Operation {
+        operation: "reviewed operation".into(),
+        visible_postcondition: "reviewed effect".into(),
+    };
+    assert!(validate_process_selection(&config, true).is_err());
+    config.process_id = Some(42);
+    assert!(validate_process_selection(&config, true).is_err());
+    config.process_lifetime = Some("0000000000000007".into());
+    config.confirm_process_exit = true;
+    validate_process_selection(&config, true).unwrap();
+    assert!(validate_process_selection(&config, false).is_err());
+}
+
+#[test]
+fn script_selection_uses_the_resolved_executable_independently_of_wrapped_bundle_metadata() {
+    let mut config = config();
+    config.process_id = None;
+    config.process_lifetime = None;
+    let issuer = IdentityIssuer::new();
+    // The real file supplies canonical path semantics without creating or launching an APP.
+    let executable = config.executable_or_bundle.clone();
+    let outer = executable.parent().unwrap().join("Outer.app");
+    let inner = outer.join("Wrapper/Inner.app");
+    for bundle in [None, Some(outer), Some(inner)] {
+        let identity =
+            mp::TargetProcessIdentity::new(NonZeroU32::new(91).unwrap(), 13, executable.clone())
+                .unwrap();
+        let identity = match bundle {
+            Some(bundle) => identity.with_application_bundle_path(bundle).unwrap(),
+            None => identity,
+        };
+        let selected = window(&issuer, &config, None).with_process_identity(identity);
+        let id = selected.id();
+        assert_eq!(
+            select_native_target(std::slice::from_ref(&selected), &config, None)
+                .unwrap()
+                .unwrap()
+                .id(),
+            id
+        );
+        validate_retained_native_target(id, &selected, &config, None).unwrap();
+        let replacement = window(&issuer, &config, None)
+            .with_process_identity(selected.process_identity().unwrap().clone());
+        assert_eq!(
+            validate_retained_native_target(id, &replacement, &config, None)
+                .unwrap_err()
+                .category,
+            "TargetLost"
+        );
+    }
+    // Matching bundle metadata never overrides a different SDK executable identity.
+    let wrong = window(&issuer, &config, None).with_process_identity(
+        mp::TargetProcessIdentity::new(
+            NonZeroU32::new(92).unwrap(),
+            14,
+            executable.parent().unwrap().to_path_buf(),
+        )
+        .unwrap()
+        .with_application_bundle_path(executable.clone())
+        .unwrap(),
+    );
+    assert!(
+        select_native_target(&[wrong], &config, None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn windows_script_requires_the_selected_process_and_never_recovery_evidence() {
+    let mut selected = config();
+    selected.operating_system = "windows".into();
+    validate_process_selection(&selected, true).unwrap();
+    selected.confirm_process_exit = true;
+    assert!(validate_process_selection(&selected, true).is_err());
+    selected.confirm_process_exit = false;
+    selected.process_id = None;
+    selected.process_lifetime = None;
+    assert!(validate_process_selection(&selected, true).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_package_authority_requires_exact_route_focus_and_no_pointer_mode() {
+    let plan: Plan =
+        serde_json::from_str(include_str!("../../../fixtures/manual-plan.json")).unwrap();
+    let mut selected = config();
+    selected.operating_system = "windows".into();
+    selected.recognition_language = crate::environment::LANGUAGE.into();
+    for (route, focus) in [("system", "require_focused"), ("window_message", "preserve")] {
+        selected.input.route = route.into();
+        selected.input.focus = focus.into();
+        validate_native(Some(&selected), &plan).unwrap();
+        selected.input.macos_process_pointer_mode = Some(MacosProcessPointerMode::CoreGraphics);
+        assert_eq!(
+            validate_native(Some(&selected), &plan).unwrap_err().context["stage"],
+            "input_route_unsupported"
+        );
+        selected.input.macos_process_pointer_mode = None;
+    }
+    for (route, focus) in [
+        ("system", "preserve"),
+        ("window_message", "require_focused"),
+        ("process_directed", "preserve"),
+    ] {
+        selected.input.route = route.into();
+        selected.input.focus = focus.into();
+        assert_eq!(
+            validate_native(Some(&selected), &plan).unwrap_err().context["stage"],
+            "input_route_unsupported"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn single_link_requirement_does_not_change_standalone_cli_selection() {
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let root = std::env::temp_dir().join(format!("mado-native-cli-links-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let root = Directory(root);
+    let path = root.0.join("selected");
+    std::fs::write(&path, b"metadata-only fixture").unwrap();
+    std::fs::hard_link(&path, root.0.join("alias")).unwrap();
+    let mut selected = config();
+    selected.operating_system = "windows".into();
+    selected.executable_or_bundle = path.canonicalize().unwrap();
+    selected.input.package_approved = false;
+    let target = window(&IdentityIssuer::new(), &selected, Some((42, 7)));
+    let candidates = [target];
+    assert_eq!(
+        select_native_target(&candidates, &selected, Some(7)).unwrap().unwrap().id(),
+        candidates[0].id(),
+    );
+    selected.input.package_approved = true;
+    assert_eq!(
+        select_native_target(&candidates, &selected, Some(7)).unwrap_err().context["stage"],
+        "target_identity_unavailable",
+    );
 }

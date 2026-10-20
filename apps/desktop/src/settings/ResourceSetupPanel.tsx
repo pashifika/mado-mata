@@ -1,33 +1,40 @@
 import {FaultMessage, fault} from '../components/ResultPanel.tsx';
 import {messages} from '../i18n.ts';
 import {useLocale} from '../locale.tsx';
-import {SUPPORTED_PROFILES} from '../state.ts';
+import {profileChoice} from './ocr-setup.ts';
 import type {OcrSetupControls} from './useOcrSetup.ts';
 
 export default function ResourceSetupPanel({setup, block}:{setup:OcrSetupControls; block:string|null}) {
   const locale = useLocale();
   const t = messages[locale].ui.ocrSetup;
-  const {state, busy, stale, draft} = setup;
+  const {state, busy, stale, draft, choice} = setup;
+  const view = state.view;
   const operation = state.operation;
   const progress = operation?.progress;
   const success = operation !== null && !operation.active && progress?.stage === 'complete' && !operation.error && !operation.cleanup_error;
   const downloaded = state.owned && success && state.resourceId !== 'inspect';
-  const blocked = block !== null || busy || state.catalogPending;
+  // Setup acts for the draft's model, or the SDK default when blank; an unavailable explicit selection is never substituted.
+  const blocked = block !== null || busy || state.catalogPending || choice === null;
   const bytes = new Intl.NumberFormat(locale);
+  const models = choice?.resource_id ?? null;
+  const modelSets = new Set(view?.profiles.map(item => item.resource_id));
+  // Only the selected model set is shown; other sets' items describe models not in this draft.
+  const items = view?.items.filter(item => !modelSets.has(item.id) || item.id === models) ?? [];
   const selected = {
-    'rapidocr-models':Boolean(draft.model_root.trim()),
+    models:Boolean(draft.model_root.trim()),
     onnxruntime:Boolean(draft.runtime_path.trim()),
     'native-libraries':Boolean(draft.library_paths.trim()),
   };
-  const supported = SUPPORTED_PROFILES.some(item => item.profile === draft.profile);
+  const explicit = view && draft.profile ? profileChoice(view.profiles, draft.profile) : null;
+  const unavailable = view !== null && draft.profile !== '' && explicit === null;
   const selection = state.nativeSelection;
   const folders = selection?.method === 'folders' ? selection.paths : [];
-  const needsAttention = state.view?.items.some(item => item.state === 'missing' || item.state === 'incompatible' || item.state === 'unsupported') || progress?.stage === 'failed';
+  const needsAttention = items.some(item => item.state === 'missing' || item.state === 'incompatible' || item.state === 'unsupported') || progress?.stage === 'failed';
   const remaining = [
-    ...(!selected['rapidocr-models'] ? [t.nextModels] : []),
+    ...(!selected.models ? [t.nextModels] : []),
     ...(!selected.onnxruntime ? [t.nextRuntime] : []),
-    ...(!selected['native-libraries'] ? [state.view && state.view.native_methods.length === 0 ? t.nextUnsupported : t.nextNative] : []),
-    ...(!supported && draft.profile ? [t.nextProfile] : !supported && selected['rapidocr-models'] && selected.onnxruntime && selected['native-libraries'] ? [t.nextBlankProfile] : []),
+    ...(!selected['native-libraries'] ? [view && view.native_methods.length === 0 ? t.nextUnsupported : t.nextNative] : []),
+    ...(unavailable ? [t.nextProfile] : !draft.profile && selected.models && selected.onnxruntime && selected['native-libraries'] ? [t.nextBlankProfile] : []),
     ...(needsAttention ? [t.nextAttention] : []),
   ];
   return <section className="ocr-setup" aria-labelledby="ocr-setup-heading">
@@ -53,10 +60,11 @@ export default function ResourceSetupPanel({setup, block}:{setup:OcrSetupControl
     {downloaded && <p className="inline-info">{state.cancelRequested || stale ? t.downloadedRetained : t.downloaded}</p>}
     {state.owned && success && operation?.result === null && <p className="inline-warning" role="alert">{t.noResult}</p>}
     {state.pickerStale && <p className="inline-warning" role="alert">{t.pickerStale}</p>}
-    {state.view && <ul className="ocr-setup-items">
-      {state.view.items.map(item => {
-        const name = t.itemNames[item.id as keyof typeof t.itemNames] ?? t.otherItem;
-        const hasPath = selected[item.id as keyof typeof selected] ?? false;
+    {view && <ul className="ocr-setup-items">
+      {items.map(item => {
+        const key = item.id === models ? 'models' : item.id;
+        const name = t.itemNames[key as keyof typeof t.itemNames] ?? t.otherItem;
+        const hasPath = selected[key as keyof typeof selected] ?? false;
         const owned = state.resourceId === item.id;
         const verifiedDownload = owned && downloaded;
         const attention = item.state === 'missing' || item.state === 'incompatible' || item.state === 'unsupported';
@@ -65,12 +73,12 @@ export default function ResourceSetupPanel({setup, block}:{setup:OcrSetupControl
         return <li key={item.id} className="ocr-setup-item">
           <div className="section-heading"><strong>{name}</strong>
             <span className={`tag ${attention ? 'stale' : hasPath || verifiedDownload || item.state === 'verified' ? 'current' : ''}`}>{itemStatus}</span></div>
-          <p className="field-help">{t.itemHelp[item.id as keyof typeof t.itemHelp] ?? t.otherHelp}</p>
+          <p className="field-help">{t.itemHelp[key as keyof typeof t.itemHelp] ?? t.otherHelp}</p>
           <div className="button-row">
             {item.downloadable && <button type="button" disabled={blocked || (hasPath && (verifiedDownload || item.state === 'verified'))} onClick={() => setup.start(item.id)}>{t.download}</button>}
             {item.id === 'native-libraries' && <>
-              {state.view?.native_methods.includes('homebrew') && <button type="button" disabled={blocked} aria-pressed={selection?.method === 'homebrew'} onClick={setup.homebrew}>{t.homebrew}</button>}
-              {state.view?.native_methods.includes('folders') && <button type="button" disabled={blocked} aria-pressed={selection?.method === 'folders'} onClick={setup.chooseFolder}>{t.chooseFolder}</button>}
+              {view.native_methods.includes('homebrew') && <button type="button" disabled={blocked} aria-pressed={selection?.method === 'homebrew'} onClick={setup.homebrew}>{t.homebrew}</button>}
+              {view.native_methods.includes('folders') && <button type="button" disabled={blocked} aria-pressed={selection?.method === 'folders'} onClick={setup.chooseFolder}>{t.chooseFolder}</button>}
               {selection?.method === 'folders' && <button type="button" disabled={blocked || folders.length >= 8} onClick={setup.addFolder}>{t.addFolder}</button>}
               {selection && <button type="button" disabled={blocked} onClick={setup.recheck}>{t.checkSelection}</button>}
             </>}
@@ -91,13 +99,13 @@ export default function ResourceSetupPanel({setup, block}:{setup:OcrSetupControl
         </li>;
       })}
     </ul>}
-    {!state.catalogPending && state.view === null && <button type="button" onClick={setup.reload}>{t.retryCatalog}</button>}
-    <div className="button-row"><button id="recheck-ocr-resources" type="button" disabled={blocked || state.view === null} onClick={setup.recheck}>{t.recheck}</button></div>
+    {!state.catalogPending && view === null && <button type="button" onClick={setup.reload}>{t.retryCatalog}</button>}
+    <div className="button-row"><button id="recheck-ocr-resources" type="button" disabled={blocked} onClick={setup.recheck}>{t.recheck}</button></div>
     {block && <p className="inline-info">{block}</p>}
     {stale && <p className="inline-warning">{t.stale}</p>}
     {state.adopted && !stale && <p className="inline-info">{t.adopted}</p>}
     {remaining.length > 0 ? <div className="ocr-setup-next"><p>{t.remaining}</p><ul>{remaining.map(step => <li key={step}>{step}</li>)}</ul></div>
-      : supported && <p className="inline-info">{t.ready}</p>}
+      : explicit && <p className="inline-info">{t.ready}</p>}
     <p className="field-help">{t.recheckHelp}</p>
     {(draft.model_root || draft.runtime_path || draft.library_paths) && <details className="ocr-setup-details"><summary>{t.paths}</summary>
       <dl className="fixed-facts"><dt>{messages[locale].ui.environment.modelRoot}</dt><dd>{draft.model_root || '—'}</dd>

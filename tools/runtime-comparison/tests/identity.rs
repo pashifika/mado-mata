@@ -24,7 +24,8 @@ impl PlanFile {
             .expect("clock")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "mado-identity-{}-{nonce}-{sequence}.json", std::process::id()
+            "mado-identity-{}-{nonce}-{sequence}.json",
+            std::process::id()
         ));
         let file = File::create_new(&path).expect("create private controlled plan");
         let owner = Self(path);
@@ -267,6 +268,7 @@ fn inspected_package_starts_controlled_without_requiring_an_engine() {
                 scenario: "workflow".into(),
                 replay_descriptor_path: None,
                 native_intent: None,
+                function: None,
             },
             None,
         )
@@ -318,16 +320,30 @@ fn missing_replay_environment_retains_a_blocked_cli_record_without_a_child() {
 
 #[test]
 fn external_cli_plans_cannot_claim_desktop_reviewed_authority() {
-    for form in ["reviewed_operation", "native_budgets"] {
+    for form in [
+        "package_approved",
+        "script_review",
+        "native_budgets",
+        "confirm_process_exit",
+    ] {
         let mut plan: Plan =
             serde_json::from_str(include_str!("../fixtures/controlled-plan.json")).unwrap();
         plan.lane = "native".into();
         plan.scenario = "workflow".into();
-        if form == "reviewed_operation" {
+        if form != "native_budgets" {
             plan.native_config = Some(serde_json::json!({
-                "native": {"geometry":null,"input":{
-                    "reviewed_operation":"Press the reviewed key","representative_actions":[]
-                }}
+                "native": {
+                    "confirm_process_exit": form == "confirm_process_exit",
+                    "review": if form == "script_review" {
+                        serde_json::json!({"kind":"script"})
+                    } else {
+                        serde_json::json!({"kind":"operation","operation":"Press the reviewed key",
+                            "visible_postcondition":"The reviewed label changes"})
+                    },
+                    "geometry":{"desktop_origin":[0,0],"logical_size":[8,8],"scale":[1,1]},
+                    "input":{"package_approved":form == "package_approved",
+                        "representative_actions":[{"kind":"click","x":1,"y":2,"button":"left"}]}
+                }
             }));
         } else {
             let budgets = mado_runtime_comparison::model::NativeBudgets {
@@ -362,4 +378,42 @@ fn external_cli_plans_cannot_claim_desktop_reviewed_authority() {
             );
         }
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn runtime_process_uses_per_monitor_coordinates() {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Stdio;
+    use windows_sys::Win32::UI::HiDpi::{GetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mado-runtime-comparison"))
+        .arg("target-probe")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start the real runtime without capture or input");
+    let started = Instant::now();
+    let (result, awareness) = loop {
+        let mut awareness = -1;
+        // SAFETY: child owns the live process handle; awareness is writable.
+        #[expect(unsafe_code, reason = "read-only DPI query on the owned runtime")]
+        let result = unsafe { GetProcessDpiAwareness(child.as_raw_handle(), &raw mut awareness) };
+        if (result == 0 && awareness == PROCESS_PER_MONITOR_DPI_AWARE)
+            || started.elapsed() >= Duration::from_secs(2)
+        {
+            break (result, awareness);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let stopped = child.kill();
+    let reaped = child.wait();
+    stopped.expect("stop only the owned idle probe");
+    reaped.expect("reap the owned idle probe");
+    assert_eq!(result, 0, "query runtime DPI awareness");
+    assert_eq!(
+        awareness, PROCESS_PER_MONITOR_DPI_AWARE,
+        "native pointer coordinates must not use a DPI-virtualized desktop"
+    );
 }

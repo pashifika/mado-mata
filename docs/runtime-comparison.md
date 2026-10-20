@@ -9,10 +9,10 @@ actual interpreters and owned processes; their input sink is **non-native**.
 They do not capture a screen, launch a game, change focus, request permissions,
 or send operating-system input.
 
-**macOS development uses JavaScript on QuickJS with TypeScript authoring.**
-The [selection decision](adr/0001-runtime-comparison-boundaries.md#macos-first-development-selection)
-allows manual development before full both-OS qualification. Native qualification
-remains incomplete; invocation-only receipts do not prove application effect.
+**M0 adopts JavaScript on QuickJS with TypeScript authoring.**
+The [both-OS decision](adr/0001-runtime-comparison-boundaries.md#both-os-m0-adoption)
+records the bounded native comparison and its limits. This is not general
+game/release qualification; invocation-only receipts do not prove application effect.
 See [native prerequisites](runtime-native.md) before any real capture or input.
 
 ## Setup and commands
@@ -131,9 +131,13 @@ anchors its canonical location. Captured content, not later edits or ambient
 `node_modules`, is used for compilation, preflight, module loading, and assets.
 
 The desktop can [create and edit directory packages](desktop.md#edit-directory-packages).
-Its editable candidate accepts repairable text errors but does not weaken this
-CLI's executable inventory: Save, Validate, and explicit Inspect/Start remain
-separate operations.
+Its editable candidate accepts repairable text errors without weakening this
+CLI's executable inventory. [Edit Script execution](desktop.md#execute-scripts-in-edit)
+adds owner-bound Whole package/Function trials from explicitly saved content;
+it does not add a function/eval mode to the independent comparison CLI.
+Function trials use existing module-scope code, positional JSON arguments and a
+fresh VM. The transient compiler bridge changes neither source nor manifest;
+package readiness/workflow are not implicit function preludes.
 
 Directory capture separates declared PNG/raw image payloads from non-image
 source, profile, schema, and JSON content under the
@@ -304,6 +308,18 @@ requested; a caught refusal still closes admission and remains the primary fault
 JavaScript uses ES module live bindings and cycles. Lua rejects cycles with an
 import chain. Each attempt has new module instances and mutable `host.state`.
 
+JavaScript (including compiled TypeScript) bounds Promise creation, executed jobs
+and retained unhandled rejections separately from input authority. Each attempt
+allows `limits.vm_bytes / 1024` of each, rounded down: 16,384 with the shipped
+16 MiB VM limit, at most 262,144 with the validated 256 MiB ceiling. This is a
+finite work allowance, not an estimate of Promise allocation size; VM memory
+and stage deadlines remain independently enforced. Counts span module
+initialization, readiness and workflow (or the selected Function), not each
+host call. Exhaustion returns `ResourceLimit`; detached jobs are discarded at
+entry settlement. Existing plan fields are unchanged. `limits.max_actions`
+still limits cumulative expanded input events, so a four-event allowance does
+not prevent async initialization and never authorizes a fifth input event.
+
 Effective `host.options` combine validated schema defaults with **top-level
 replacement**, not recursive merging. Nested values and priority arrays are
 readonly through aliases. Unknown fields, coercion, missing replacement fields,
@@ -320,6 +336,16 @@ The selected workflow performs observation, template/OCR recognition, priority
 choice, ordered submission, receipt handling, and an independent strictly
 newer-frame condition.
 
+The supplied workload selects `recognition.asset`, applies `threshold` in
+`priorities` order, and submits the selected `actions.template` or `actions.ocr`
+array unchanged. Optional `recognition.expected` requires an exact OCR text
+match for decision eligibility; it is not an argument to `recognize`.
+`postcondition` contains `expected`, `roi`, and `wait_ms`. A positive wait uses
+one bounded `wait` after settlement and before the newer observation; it does
+not poll or retry input. Recorded/native packages must set both recognition
+and postcondition regions, action coordinates, and schema bounds for their
+captured geometry. The supplied defaults describe the controlled fixture.
+
 `host.call(method, arguments)` exposes compact JSON values and managed identities,
 not native payloads. Operations include `asset`, `observe`, `recognize`,
 `scan_ocr_zones`, `query`, `query_wait`, `submit`, `settle`, `postcondition`, `wait`,
@@ -329,6 +355,11 @@ returns explicit per-zone `no_match`; query exhaustion is a typed timeout.
 No uncertain action is automatically replayed. Release remains available after
 admission closes. The controlled-only `fixture` operation injects declared state
 transitions; it is not native authority.
+
+The `postcondition` host operation accepts an optional `roi: MadoRegion`.
+Omission uses the full observation; explicit regions must fit without clipping.
+Invalid regions, including `null`, are refused. Region selection does not relax
+checkpoint freshness, source identity, geometry, cancellation, or cleanup.
 
 Desktop Native Readiness additionally permits `target_start` and `target_status`,
 each with exactly `{}`. They use only the host's immutable saved binding and
@@ -437,9 +468,21 @@ Here `preflight_us` covers common host preparation and TypeScript compilation;
 `workflow_us` covers the adapter invocation, including JavaScript dependency
 inspection and module/readiness overhead. It is not an isolated script-body
 benchmark.
-RSS is an observed periodic maximum, not an OS peak or proof of cleanup. VM
-allocation and live-owner values are explicitly endpoint measurements, not peaks.
-Missing values remain unavailable rather than becoming zero.
+On Apple Silicon, the existing SHA-256 dependency enables its upstream ARM
+backend. Resource bytes are still checked before and after engine initialization;
+the optimization neither skips verification nor changes digest identities.
+Peak RSS is an observed periodic maximum, not an OS peak or proof of cleanup.
+`steady_process_rss` separately reports a fixed workflow window: exclude the
+first 100 ms after workflow entry, then sample for 250 ms using the existing
+5 ms process sampler. Each process needs at least 20 samples spanning 200 ms;
+the entry must finish at or after the window end, without an earlier Stop.
+Refreshes crossing the window boundary are excluded. The summary retains
+sample count, observed span, minimum, maximum, and unweighted mean.
+This window is not proof of statistical stationarity or same-process leak
+freedom. Missing or short windows remain `null` with a reason and an
+`UNEXECUTED` budget row, never a zero or a pass. Child and supervisor means use
+their existing separate process-memory bounds. VM allocation and live-owner
+values remain endpoint measurements, not peaks.
 CPU describes the runtime child, not a process-tree total; RSS is sampled
 separately for the supervisor and child. The separate trusted parser/compiler
 worker's CPU/RSS are not included. TypeScript compilation time is in preflight;
@@ -518,8 +561,28 @@ and full execution records in private evidence storage. The `report` command
 emits aggregate, content-identified results rather than raw native diagnostics.
 Do not publish raw `run` output merely because it is JSON.
 
-Full native qualification still needs Windows and Apple Silicon macOS evidence.
-The separately approved macOS development selection is JavaScript/QuickJS with
-TypeScript authoring; remaining qualification does not prevent manual development.
-It does not promise untested platform support or turn the comparison into a
-multi-runtime desktop product.
+The bounded Windows and Apple Silicon M0 study is complete; see the
+[comparison results](runtime-comparison-results.md#current-both-os-operating-criteria-assessment--2026-10-20).
+Its reviewed adoption decision does not promise untested platform support,
+Windows launch or a multi-runtime desktop product. Historical failures,
+unsupported quantiles and missing measurements remain explicit.
+
+### Qualification ownership
+
+MadoPilot owns native capture/input, retained-source liveness, platform routing,
+OCR backend correctness and SDK cleanup contracts. Defects in those contracts
+belong in the SDK; the consumer must not duplicate their guards or add fallback
+routes to hide a refusal.
+
+MadoMata verifies its use of that public contract: argument/ROI translation,
+immutable inputs, VM admission and cancellation, result publication, ownership
+release, child containment and user-visible outcomes. SDK evidence can support
+these checks, but does not execute the consuming Script or desktop path.
+
+The full both-OS candidate/direct-Rust comparison is the original M0 runtime
+adoption study, not SDK recertification or a prerequisite for every product PR.
+Its sample counts support the stated quantiles; 800 native invocations are not
+a standing merge requirement. A scoped consumer change can ship with its
+affected verification while that study remains incomplete. Closing or changing
+the study's original acceptance contract is a separate explicit decision;
+historical failures and unavailable measurements remain visible.

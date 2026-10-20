@@ -72,6 +72,84 @@ fn controlled(backend: Arc<ControlledOcr>) -> (Engine, Arc<ControlledCapture>) {
 }
 
 #[test]
+fn native_drag_at_wait_limit_completes_within_execution_authority() {
+    let mut engine = replay(Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8)));
+    let issuer = Arc::new(mado_pilot_core::IdentityIssuer::new());
+    let capture = Arc::new(
+        ControlledCapture::new(
+            issuer.clone(),
+            mp::PixelExtent::new(8, 8),
+            mp::PixelFormat::Rgba8,
+        )
+        .unwrap(),
+    );
+    let input = Arc::new(mado_pilot_testkit::ControlledInput::new(capture.target()));
+    let facade = mp::Engine::new(EngineWiring {
+        engine: issuer.engine(),
+        capture: capture.clone(),
+        matcher: Matcher::new(Arc::new(ControlledMatcher::new(mp::PixelFormat::Rgba8))),
+        loader: PackageLoader::new(),
+        ocr: None,
+        input: Some(input.clone()),
+        permission: None,
+    })
+    .unwrap();
+    let operation = mp::OperationContext::new();
+    let session = facade
+        .open_session(
+            capture.target(),
+            &mp::SessionRequest::new()
+                .capturing(mp::OpenRequest::new())
+                .requesting_input(
+                    mp::InputOpenRequest::new()
+                        .with_requirement(mp::InputRequirement::Required)
+                        .requiring(mp::InputOperationKind::Pointer, mp::InputDelivery::System),
+                ),
+            &operation,
+        )
+        .unwrap();
+    {
+        let mut state = engine.lock().unwrap();
+        state.session.take().unwrap().close(&operation).unwrap();
+        state.session = Some(session);
+    }
+    Arc::get_mut(&mut engine.resources).unwrap().engine = facade;
+    capture.publish(0, mp::Continuity::Continuous).unwrap();
+    let observation = engine.call("observe", json!({})).unwrap();
+    engine.native = Some(
+        serde_json::from_value(json!({
+            "executable_or_bundle":"controlled-input","process_id":null,
+            "process_lifetime":null,"window_rule":"controlled-input",
+            "operating_system":"test","hardware":"test","permission_executable":"test",
+            "capture":{"approved":true,"duration_ms":5000,"max_frames":10,"wait_ms":100,"interval_ms":50},
+            "input":{"approved":true,"duration_ms":5000,"max_actions":10,
+                "route":"system","focus":"preserve","package_approved":true},
+            "geometry":null,"recognition_language":"test","review":{"kind":"script"},
+            "cleanup_ms":1000,"containment_ms":2000
+        }))
+        .unwrap(),
+    );
+    engine.limits.wait_ms = 100;
+    engine.control.admission.store(true, Ordering::Release);
+    let actions = json!([{"kind":"drag","button":"left","path":[
+        {"x":1,"y":2,"hold_ms":50},{"x":3,"y":4,"hold_ms":50},{"x":1,"y":2}
+    ]}]);
+    let receipt = engine
+        .call(
+            "dispatch",
+            json!({"observation":observation,"actions":actions}),
+        )
+        .unwrap();
+    assert_eq!(receipt["status"], "Submitted", "{receipt}");
+    assert_eq!(receipt["submitted_events"], 7);
+    assert_eq!(input.submitted_events().len(), 7);
+    engine
+        .call("release", json!({"id":observation["id"]}))
+        .unwrap();
+    assert_eq!(engine.finish()["clean"], true);
+}
+
+#[test]
 fn terminal_accounting_requires_settlement_and_retains_consumed_frames() {
     let (engine, capture) = controlled(Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8)));
     assert_eq!(
@@ -153,7 +231,8 @@ fn terminal_before_ocr_grouped_query_and_postcondition_commit_discards_even_empt
                 "postcondition" => {
                     capture.publish(1, mp::Continuity::Continuous).unwrap();
                     let newer = engine.call("observe", json!({})).unwrap();
-                    json!({"observation":newer,"checkpoint":observation,"expected":"visible"})
+                    json!({"observation":newer,"checkpoint":observation,"expected":"visible",
+                        "roi":{"x":2,"y":1,"width":4,"height":4}})
                 }
                 _ => unreachable!(),
             };
@@ -215,6 +294,113 @@ fn replay_keeps_no_match_distinct_from_postcondition_freshness_and_effect() {
         engine.call("postcondition", request).unwrap()["satisfied"],
         false
     );
+    assert_eq!(engine.finish()["clean"], true);
+}
+
+#[test]
+fn postcondition_roi_is_validated_before_ocr_and_reaches_the_backend_unchanged() {
+    let backend =
+        Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8).with_candidates(candidates()));
+    let (engine, capture) = controlled(backend.clone());
+    let before = engine.call("observe", json!({})).unwrap();
+    let roi = json!({"x":2,"y":1,"width":4,"height":4});
+    assert_eq!(
+        engine
+            .call(
+                "postcondition",
+                json!({
+                    "observation":before,"checkpoint":before,"expected":"visible","roi":roi
+                })
+            )
+            .unwrap_err()
+            .category,
+        "StaleIdentity"
+    );
+    capture.publish(1, mp::Continuity::Continuous).unwrap();
+    let after = engine.call("observe", json!({})).unwrap();
+    for invalid in [
+        Value::Null,
+        json!({"x":2,"y":1,"width":0,"height":4}),
+        json!({"x":7,"y":1,"width":2,"height":4}),
+        json!({"x":2,"y":7,"width":4,"height":2}),
+        json!({"x":u32::MAX,"y":1,"width":2,"height":4}),
+    ] {
+        assert_eq!(
+            engine
+                .call(
+                    "postcondition",
+                    json!({
+                        "observation":after,"checkpoint":before,"expected":"visible","roi":invalid
+                    })
+                )
+                .unwrap_err()
+                .category,
+            "Argument"
+        );
+    }
+    assert_eq!(backend.recognition_count(), 0);
+    let result = engine
+        .call(
+            "postcondition",
+            json!({
+                "observation":after,"checkpoint":before,"expected":"visible","roi":roi
+            }),
+        )
+        .unwrap();
+    assert_eq!(result["satisfied"], true);
+    assert_eq!(result["causation_claimed"], false);
+    assert!(result["frame"].as_u64().unwrap() > result["checkpoint"].as_u64().unwrap());
+    assert_eq!(backend.recognition_count(), 1);
+    assert_eq!(
+        backend.last_region(),
+        Some(mp::PixelRect::new(2, 1, 6, 5).unwrap())
+    );
+    engine.call("release", json!({"id":after["id"]})).unwrap();
+    assert_eq!(
+        engine
+            .call(
+                "postcondition",
+                json!({
+                    "observation":after,"checkpoint":before,"expected":"visible","roi":roi
+                })
+            )
+            .unwrap_err()
+            .category,
+        "InvalidHandle"
+    );
+    assert_eq!(backend.recognition_count(), 1);
+    assert_eq!(engine.finish()["clean"], true);
+}
+
+#[test]
+fn cancelled_cropped_postcondition_does_not_publish_a_backend_match() {
+    let gate = Arc::new(CompletionGate::new());
+    let backend = Arc::new(
+        ControlledOcr::new(mp::PixelFormat::Rgba8)
+            .with_candidates(candidates())
+            .with_completion_gate(gate.clone()),
+    );
+    let (engine, capture) = controlled(backend);
+    let before = engine.call("observe", json!({})).unwrap();
+    capture.publish(1, mp::Continuity::Continuous).unwrap();
+    let after = engine.call("observe", json!({})).unwrap();
+    let result = thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            engine.call(
+                "postcondition",
+                json!({
+                    "observation":after,"checkpoint":before,"expected":"visible",
+                    "roi":{"x":2,"y":1,"width":4,"height":4}
+                }),
+            )
+        });
+        let _release = gate.release_guard();
+        assert!(gate.wait_until_entered(Duration::from_secs(5)));
+        engine.control.cancel();
+        gate.release();
+        worker.join().unwrap()
+    });
+    assert_eq!(result.unwrap_err().category, "Cancelled");
     assert_eq!(engine.finish()["clean"], true);
 }
 
@@ -378,9 +564,9 @@ fn native_policy() -> NativeConfig {
         "operating_system":"macos","hardware":"test","permission_executable":"/unused-engine",
         "capture":{"approved":true,"duration_ms":10000,"max_frames":3,"wait_ms":1000,"interval_ms":1},
         "input":{"approved":true,"duration_ms":10000,"max_actions":4,"route":"system",
-            "focus":"preserve","click_hold_ms":50,"reviewed_operation":"Click once"},
+            "focus":"preserve","click_hold_ms":50,"package_approved":true},
         "geometry":null,"recognition_language":crate::environment::LANGUAGE,
-        "visible_postcondition":"visible","cleanup_ms":500,"containment_ms":2000
+        "review":{"kind":"script"},"cleanup_ms":500,"containment_ms":2000
     })).unwrap()
 }
 
@@ -388,9 +574,11 @@ fn native_policy() -> NativeConfig {
 fn bind_scripted_process(engine: &mut Engine) {
     use super::super::lifetime::{classify_metadata, require_current};
 
-    let pid = engine.native.as_ref().unwrap().process_id;
+    engine.native.as_mut().unwrap().confirm_process_exit = true;
+    let pid = engine.native.as_ref().unwrap().process_id.unwrap();
     let current = classify_metadata(pid, pid, libc::SRUN, (100, 20)).unwrap();
-    engine.lock().unwrap().native_process_started = Some(require_current(None, current).unwrap());
+    engine.lock().unwrap().native_process_started =
+        Some((pid, require_current(None, current).unwrap()));
     script_process(engine, Ok(current));
 }
 
@@ -399,7 +587,7 @@ fn script_process(
     engine: &mut Engine,
     current: Result<super::super::lifetime::ProcessState, Fault>,
 ) {
-    let pid = engine.native.as_ref().unwrap().process_id;
+    let pid = engine.native.as_ref().unwrap().process_id.unwrap();
     engine.process_probe = Some(Box::new(move |requested| {
         assert_eq!(requested, i32::try_from(pid).unwrap());
         current.clone()
@@ -414,7 +602,7 @@ fn controlled_native() -> (Engine, Arc<ControlledCapture>, Value) {
     let observation = engine.call("observe", json!({})).unwrap();
     engine.native = Some(native_policy());
     bind_scripted_process(&mut engine);
-    // The controlled provider has no native placement. Seed the lifetime gate
+    // The controlled provider has no native placement. Seed terminal ordering
     // with its actual public-facade frame, not a fabricated successful response.
     // Native observation/retention itself is covered by placed_replay below.
     {
@@ -653,7 +841,6 @@ fn provider_terminal_before_process_exit_preserves_the_consumer_fault() {
                 "query_wait" => {
                     let query = engine.call("query", recognition(&observation)).unwrap();
                     let wait = json!({"id":query["id"],"timeout_ms":1_000});
-                    engine.call("query_wait", wait.clone()).unwrap();
                     wait
                 }
                 "scan_ocr_zones" => grouped(&observation),
@@ -662,7 +849,7 @@ fn provider_terminal_before_process_exit_preserves_the_consumer_fault() {
             };
             capture.terminate(terminal);
             script_process(&mut engine, Ok(ProcessState::Absent));
-            let expected = engine_error("target_lifetime", terminal.into());
+            let expected = engine_error("capture_terminal", terminal.into());
             let fault = engine.call(method, args).unwrap_err();
             assert_eq!(fault.category, expected.category, "{terminal:?}/{method}");
             assert_eq!(fault.message, expected.message, "{terminal:?}/{method}");
@@ -706,23 +893,23 @@ fn terminal_before_the_first_frame_is_not_masked_by_process_exit() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn provider_failure_during_process_probe_wins_before_exit_publication() {
-    use super::super::lifetime::ProcessState;
+fn script_without_recovery_keeps_sdk_target_loss_without_process_probes() {
     use mado_pilot_capture::CaptureFault;
 
     let (mut engine, capture, observation) = controlled_native();
-    engine
-        .call("release", json!({"id":observation["id"]}))
-        .unwrap();
-    engine.process_probe = Some(Box::new(move |_| {
-        capture.terminate(CaptureFault::AccessDenied);
-        Ok(ProcessState::Absent)
+    engine.native.as_mut().unwrap().confirm_process_exit = false;
+    engine.lock().unwrap().native_process_started = None;
+    engine.process_probe = Some(Box::new(|_| {
+        panic!("Script must not poll process validity")
     }));
-    let fault = engine.call("observe", json!({})).unwrap_err();
-    let expected = engine_error("target_lifetime", CaptureFault::AccessDenied.into());
+    capture.terminate(CaptureFault::CaptureItemClosed);
+    let fault = engine
+        .call("recognize", recognition(&observation))
+        .unwrap_err();
+    let expected = engine_error("capture_terminal", CaptureFault::CaptureItemClosed.into());
     assert_eq!(fault.category, expected.category);
     assert_eq!(fault.context, expected.context);
-    assert_eq!(engine.lock().unwrap().captured_frames, 1);
+    assert!(fault.context["exit_reason"].is_null());
     assert_eq!(engine.finish()["clean"], true);
 }
 
@@ -742,14 +929,14 @@ fn confirmed_exit_after_script_release_needs_no_additional_capture_credit() {
             "reused_pid",
         ),
     ] {
-        let mut engine = placed_replay();
+        let (mut engine, capture, observation) = controlled_native();
         engine.native.as_mut().unwrap().capture.max_frames = 1;
-        let observation = engine.call("observe", json!({})).unwrap();
         engine
             .call("release", json!({"id":observation["id"]}))
             .unwrap();
         assert!(engine.lock().unwrap().observations.is_empty());
         script_process(&mut engine, Ok(current));
+        capture.lose(capture.target());
         let fault = engine.call("observe", json!({})).unwrap_err();
         assert_eq!(fault.category, "TargetExited");
         assert_eq!(fault.context["exit_reason"], reason);
@@ -792,6 +979,7 @@ fn only_positive_process_proof_refines_a_facade_target_loss() {
         assert_eq!(fault.category, category);
         if category == "TargetExited" {
             assert_eq!(fault.context["exit_reason"], "absent");
+            assert_eq!(fault.context["sdk_fault"]["category"], "TargetLost");
         } else {
             assert!(fault.context["exit_reason"].is_null());
         }
@@ -801,27 +989,21 @@ fn only_positive_process_proof_refines_a_facade_target_loss() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn native_admission_without_a_bound_lifetime_fails_before_capture_or_probe() {
+fn script_native_admission_needs_no_independent_process_baseline() {
     let mut engine = placed_replay();
+    engine.native.as_mut().unwrap().confirm_process_exit = false;
     engine.lock().unwrap().native_process_started = None;
-    engine.process_probe = Some(Box::new(|_| {
-        panic!("an unbound process must not be probed")
-    }));
-    let fault = engine.call("observe", json!({})).unwrap_err();
-    assert_eq!(fault.category, "Blocked");
-    assert_eq!(fault.context["stage"], "target_identity_unavailable");
-    let state = engine.lock().unwrap();
-    assert_eq!(state.captured_frames, 0);
-    assert!(state.observations.is_empty());
-    assert!(state.native_frame.is_none());
-    drop(state);
+    engine.process_probe = Some(Box::new(|_| panic!("SDK owns target validity")));
+    let observation = engine.call("observe", json!({})).unwrap();
+    assert!(observation["id"].is_string());
+    assert_eq!(engine.lock().unwrap().captured_frames, 1);
     assert_eq!(engine.finish()["clean"], true);
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn in_flight_recognition_keeps_provider_fault_when_the_process_also_exits() {
-    use super::super::lifetime::{ProcessState, classify_metadata};
+    use super::super::lifetime::ProcessState;
     use mado_pilot_capture::CaptureFault;
 
     for terminal in [CaptureFault::AccessDenied, CaptureFault::StreamEnded] {
@@ -843,23 +1025,12 @@ fn in_flight_recognition_keeps_provider_fault_when_the_process_also_exits() {
                     .clone(),
             );
         }
-        let exited = Arc::new(AtomicBool::new(false));
-        let probe = exited.clone();
-        let alive = classify_metadata(17, 17, libc::SRUN, (100, 20)).unwrap();
-        engine.process_probe = Some(Box::new(move |pid| {
-            assert_eq!(pid, 17);
-            Ok(if probe.load(Ordering::Acquire) {
-                ProcessState::Absent
-            } else {
-                alive
-            })
-        }));
+        script_process(&mut engine, Ok(ProcessState::Absent));
         let result = thread::scope(|scope| {
             let worker = scope.spawn(|| engine.call("recognize", recognition(&observation)));
             let _release = gate.release_guard();
             assert!(gate.wait_until_entered(Duration::from_secs(5)));
             capture.terminate(terminal);
-            exited.store(true, Ordering::Release);
             gate.release();
             worker.join().unwrap()
         });
@@ -879,16 +1050,21 @@ fn in_flight_recognition_keeps_provider_fault_when_the_process_also_exits() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn first_frame_orders_a_confirmed_exit_without_publishing_an_observation() {
-    use super::super::lifetime::ProcessState;
+fn sdk_loss_before_first_frame_publishes_no_observation_or_recovery_claim() {
+    use mado_pilot_capture::CaptureFault;
 
-    let mut engine = placed_replay();
-    script_process(&mut engine, Ok(ProcessState::Absent));
+    let (mut engine, capture) = controlled(Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8)));
+    engine.native = Some(native_policy());
+    engine.process_probe = Some(Box::new(|_| {
+        panic!("attach-only Script has no exit classifier")
+    }));
+    capture.terminate(CaptureFault::CaptureItemClosed);
     let fault = engine.call("observe", json!({})).unwrap_err();
-    assert_eq!(fault.category, "TargetExited");
-    assert_eq!(fault.context["exit_reason"], "absent");
+    let expected = engine_error("capture", CaptureFault::CaptureItemClosed.into());
+    assert_eq!(fault.category, expected.category);
+    assert_eq!(fault.context, expected.context);
     let state = engine.lock().unwrap();
-    assert_eq!(state.captured_frames, 1);
+    assert_eq!(state.captured_frames, 0);
     assert!(state.observations.is_empty());
     assert!(state.placement.is_none());
     assert!(state.latest.is_none());
@@ -896,8 +1072,31 @@ fn first_frame_orders_a_confirmed_exit_without_publishing_an_observation() {
     drop(state);
     assert!(engine.handle_budget.reserve(engine.limits.handles).is_ok());
     assert_eq!(engine.finish()["clean"], true);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_historical_query_does_not_poll_or_revoke_an_sdk_committed_result() {
+    let (mut engine, capture, observation) = controlled_native();
+    engine.native.as_mut().unwrap().confirm_process_exit = false;
+    engine.lock().unwrap().native_process_started = None;
+    engine.process_probe = Some(Box::new(|_| {
+        panic!("historical results need no process probe")
+    }));
+    let query = engine.call("query", recognition(&observation)).unwrap();
+    let wait = json!({"id":query["id"],"timeout_ms":1_000});
+    let historical = engine.call("query_wait", wait.clone()).unwrap();
+    capture.lose(capture.target());
+    assert_eq!(engine.call("query_wait", wait).unwrap(), historical);
     assert_eq!(
-        engine.terminal_accounting().unwrap(),
-        json!({"frames":1,"expanded_input_events":0,"input_uncertain":false})
+        engine
+            .call(
+                "validate_observation",
+                json!({"observation":historical["observation"]})
+            )
+            .unwrap_err()
+            .category,
+        "TargetLost"
     );
+    assert_eq!(engine.finish()["clean"], true);
 }

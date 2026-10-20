@@ -12,13 +12,16 @@ pub fn ocr_setup_catalog() -> Result<SetupView, Fault> {
 #[tauri::command]
 pub async fn ocr_setup_start(
     resource_id: String,
+    profile: String,
     environment: Option<OcrEnvironment>,
     native_selection: Option<NativeSelection>,
     state: tauri::State<'_, Backend>,
 ) -> Result<String, Fault> {
     let application = state.bootstrap.application()?;
-    background(move || application.ocr_setup_start(resource_id, environment, native_selection))
-        .await
+    background(move || {
+        application.ocr_setup_start(resource_id, profile, environment, native_selection)
+    })
+    .await
 }
 
 #[tauri::command]

@@ -1,6 +1,8 @@
 import {messages} from './i18n.ts';
 import type {Locale} from './i18n.ts';
 import type {ControllerView, EditableSettings, EditorCompletionPreferences, Fault, LaunchDisposition, LogEntry, NativePhase, NativeProgress, NotificationPreferences, OcrEnvironment, RetainedCheck, Schema, Settings, Json, WorkspaceRef} from './types.ts';
+import {profileChoice} from './settings/ocr-setup.ts';
+import type {OcrProfileChoice} from './settings/ocr-setup.ts';
 
 export const DISCLOSURE_LIMIT = 512 * 1024;
 
@@ -21,17 +23,18 @@ export function acceptController(current:ControllerView, incoming:ControllerView
   return current.state === 'terminal' ? current : incoming;
 }
 
-export type NativeCause = 'missing'|'ambiguous'|'unverifiable';
+export type NativeCause = 'missing'|'ambiguous'|'unverifiable'|'lost';
 export type NativeLaunchOutcome = 'accepted'|'acceptedStopped'|'uncertain'|'rejected';
 // The failed stage, refined by target status where the remedy differs: a Script that never requested startup, a
 // Readiness that ended while startup was pending, and Readiness criteria that did not hold once capture was available.
 export type NativeFailure = Exclude<NativePhase, 'readiness'>|'unrequested'|'readinessPending'|'readinessCriteria';
 export interface NativeOutcome {failure:NativeFailure|null; cause:NativeCause|null; launch:NativeLaunchOutcome|null}
-const NATIVE_CAUSES:Record<string, NativeCause> = {NativeTargetMissing: 'missing', NativeTargetAmbiguous: 'ambiguous', NativeTargetUnverifiable: 'unverifiable'};
+const NATIVE_CAUSES:Record<string, NativeCause> = {NativeTargetMissing: 'missing', NativeTargetAmbiguous: 'ambiguous', NativeTargetUnverifiable: 'unverifiable', TargetLost: 'lost'};
 const READINESS_REFUSALS:Record<string, true> = {Script:true, ReadinessContract:true, TargetNotReady:true, NativeStartRefused:true, Authority:true, Argument:true};
 
 function nativeFailure({phase, status}:NativeProgress, category:string|null):NativeFailure {
   if (phase === 'preflight') return phase;
+  if (phase === 'host_attachment' || phase === 'instantiation' || phase === 'function') return phase;
   if (phase === 'settling' || phase === 'recovering') return phase;
   if (status === 'not_requested') return 'unrequested';
   if (status === 'pending' && category !== null && Object.hasOwn(READINESS_REFUSALS, category)) return 'readinessPending';
@@ -188,16 +191,6 @@ export function cleanupLabel(result:ControllerView['result'], fallback:Record<st
   return t.unverified;
 }
 
-// Supported OCR tuples mirror the pinned engine's accepted set; the backend Check/Start
-// validation remains authoritative and refuses anything else without fallback.
-export const ENVIRONMENT_LANGUAGE = 'horizontal-ja-basic-latin-ascii-digits-ui-symbols-v1';
-export const ENVIRONMENT_PROVIDER = 'cpu';
-export const ENVIRONMENT_RUNTIME_PROFILE = 'onnxruntime-1.29.0-api17-cpu';
-export const SUPPORTED_PROFILES = [
-  {profile:'g-004-rapidocr-ppocrv4-det-v6-rec-small-v1', model:'g-004-rapidocr-ppocrv4-det-v6-rec-small-v1'},
-  {profile:'phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2', model:'phase-3-1-rapidocr-ppocrv4-det-v6-rec-small-bounded-v2'},
-] as const;
-
 export interface EnvironmentDraft {profile:string; model_root:string; runtime_path:string; library_paths:string}
 
 export function environmentDraft(saved:OcrEnvironment|null):EnvironmentDraft {
@@ -206,24 +199,26 @@ export function environmentDraft(saved:OcrEnvironment|null):EnvironmentDraft {
     : {profile:'', model_root:'', runtime_path:'', library_paths:''};
 }
 
-// A wholly blank draft means unconfigured; anything else must be a complete supported tuple.
-export function readEnvironment(draft:EnvironmentDraft, locale:Locale = 'en'):{environment:OcrEnvironment|null; errors:Record<string,string>} {
+// A wholly blank draft means unconfigured; anything else must be a complete tuple of one SDK catalog choice.
+// Missing catalog metadata is pending validation, not an invalid saved field.
+export function readEnvironment(draft:EnvironmentDraft, profiles:readonly OcrProfileChoice[]|null, locale:Locale = 'en'):{environment:OcrEnvironment|null; errors:Record<string,string>; pending:boolean} {
   const t = messages[locale].validation;
   const modelRoot = draft.model_root.trim();
   const runtimePath = draft.runtime_path.trim();
   const libraries = draft.library_paths.split(/\r?\n/).map(line => line.trim()).filter(line => line !== '');
-  if (!draft.profile && !modelRoot && !runtimePath && libraries.length === 0) return {environment:null, errors:{}};
+  if (!draft.profile && !modelRoot && !runtimePath && libraries.length === 0) return {environment:null, errors:{}, pending:false};
+  if (profiles === null) return {environment:null, errors:{}, pending:true};
   const errors:Record<string,string> = {};
-  const supported = SUPPORTED_PROFILES.find(item => item.profile === draft.profile);
-  if (!supported) errors.profile = draft.profile ? t.unsupportedProfile : t.chooseProfile;
+  const choice = profileChoice(profiles, draft.profile);
+  if (!choice) errors.profile = draft.profile ? t.unsupportedProfile : t.chooseProfile;
   if (!modelRoot) errors.model_root = t.modelRoot;
   if (!runtimePath) errors.runtime_path = t.runtimePath;
   if (libraries.length < 1 || libraries.length > 64) errors.library_paths = t.libraries;
-  if (Object.keys(errors).length > 0 || !supported) return {environment:null, errors};
+  if (Object.keys(errors).length > 0 || !choice) return {environment:null, errors, pending:false};
   return {environment:{
-    model:supported.model, profile:supported.profile, language:ENVIRONMENT_LANGUAGE, provider:ENVIRONMENT_PROVIDER,
-    runtime_profile:ENVIRONMENT_RUNTIME_PROFILE, model_root:modelRoot, runtime_path:runtimePath, native_library_paths:libraries,
-  }, errors};
+    model:choice.model, profile:choice.profile, language:choice.language, provider:choice.provider,
+    runtime_profile:choice.runtime_profile, model_root:modelRoot, runtime_path:runtimePath, native_library_paths:libraries,
+  }, errors, pending:false};
 }
 
 export function sameEnvironment(left:OcrEnvironment|null, right:OcrEnvironment|null):boolean {
@@ -301,7 +296,7 @@ export function settingsDraftAfterSave(current:SettingsDraft, submitted:Settings
 }
 
 // The dialog edits one draft; the whole edit is validated together before a single atomic save.
-export function readSettingsDraft(draft:SettingsDraft, locale:Locale = 'en'):{settings:EditableSettings|null; errors:Record<string,string>} {
+export function readSettingsDraft(draft:SettingsDraft, profiles:readonly OcrProfileChoice[]|null, locale:Locale = 'en'):{settings:EditableSettings|null; errors:Record<string,string>; pending:boolean} {
   const t = messages[locale].validation;
   const errors:Record<string,string> = {};
   const limitText = draft.logLimit.trim();
@@ -319,13 +314,13 @@ export function readSettingsDraft(draft:SettingsDraft, locale:Locale = 'en'):{se
   if (packagesRoot && (!/^(\/|[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(packagesRoot)
     || packagesRoot.split(/[\\/]/).includes('..') || /[\u0000-\u001f\u007f-\u009f]/.test(packagesRoot)
     || new TextEncoder().encode(packagesRoot).length > 4096)) errors.packagesRoot = t.packagesRoot;
-  const environment = readEnvironment(draft.environment, locale);
+  const environment = readEnvironment(draft.environment, profiles, locale);
   Object.assign(errors, environment.errors);
-  if (Object.keys(errors).length > 0) return {settings: null, errors};
+  if (Object.keys(errors).length > 0 || environment.pending) return {settings: null, errors, pending:environment.pending};
   const destination = draft.backupDirectory.trim();
   return {settings: {locale:draft.locale, gui_log_limit: limit, ocr_environment: environment.environment, notifications: {...draft.notifications},
     editor_completion: {automatic: draft.completionAutomatic, delay_ms: delay},
-    capture_cache_enabled:draft.captureCacheEnabled, backup_directory: destination === '' ? null : destination, packages_root: packagesRoot === '' ? null : packagesRoot}, errors};
+    capture_cache_enabled:draft.captureCacheEnabled, backup_directory: destination === '' ? null : destination, packages_root: packagesRoot === '' ? null : packagesRoot}, errors, pending:false};
 }
 
 export function portableComponent(value:string):boolean {

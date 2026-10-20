@@ -18,6 +18,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::JoinHandle;
 
+pub use crate::typescript::FunctionInvocation;
+
 const LOG_CAPACITY: usize = 64;
 const PROGRESS_CAPACITY: usize = 32;
 const REQUEST_BYTES: usize = 65_536;
@@ -42,6 +44,8 @@ pub struct StartRequest {
     pub replay_descriptor_path: Option<String>,
     #[serde(default)]
     pub native_intent: Option<NativeIntent>,
+    #[serde(default)]
+    pub function: Option<FunctionInvocation>,
 }
 
 fn workflow() -> String {
@@ -60,9 +64,19 @@ pub struct NativeIntent {
     pub launch_approved: bool,
     #[serde(default)]
     pub max_exit_recoveries: u8,
-    pub operation: String,
-    pub visible_postcondition: String,
+    pub review: NativeReview,
     pub limits: NativeLimits,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeReview {
+    Operation {
+        operation: String,
+        visible_postcondition: String,
+    },
+    // A unit variant would silently discard unknown fields during deserialization.
+    Script {},
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -127,12 +141,12 @@ pub struct NativeInputPolicy {
     pub click_hold_ms: u64,
 }
 
-/// Fresh application correspondence, never accepted from public IPC.
+/// Host-selected target policy and fresh process correspondence.
 #[derive(Debug)]
 pub struct NativeTarget {
     pub executable: PathBuf,
-    pub process_id: u32,
-    pub process_lifetime: String,
+    /// Windows requires PID/creation FILETIME; only macOS Script may defer selection to the SDK.
+    pub process: Option<(u32, String)>,
     pub window_title: String,
     pub input: NativeInputPolicy,
 }
@@ -156,6 +170,9 @@ pub enum NativePhase {
     WaitingForWindow,
     NativeInitialization,
     Readiness,
+    HostAttachment,
+    Instantiation,
+    Function,
     Workflow,
     Settling,
     Recovering,

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::sync::LazyLock;
 
-const METRICS: [&str; 13] = [
+const METRICS: [&str; 15] = [
     "startup_us",
     "preflight_us",
     "host_call_us",
@@ -17,6 +17,8 @@ const METRICS: [&str; 13] = [
     "cpu_percent",
     "supervisor_rss_bytes",
     "child_rss_bytes",
+    "supervisor_steady_rss_bytes",
+    "child_steady_rss_bytes",
     "vm_bytes",
     "live_owners",
 ];
@@ -354,7 +356,12 @@ pub fn coverage(rows: &[Value]) -> Result<Vec<Value>, Fault> {
 
 fn budget(row: &Value, metric: &str) -> Value {
     let observed = row["metrics"][metric].as_f64();
-    let bound = row["metrics"]["budgets"][metric].as_f64();
+    let bound_metric = match metric {
+        "supervisor_steady_rss_bytes" => "supervisor_rss_bytes",
+        "child_steady_rss_bytes" => "child_rss_bytes",
+        _ => metric,
+    };
+    let bound = row["metrics"]["budgets"][bound_metric].as_f64();
     let ordinary_return = row["metrics"]["stop_receipt_us"].is_null() && row["primary"].is_null();
     let (status, reason) = match (observed, bound) {
         (Some(value), Some(bound))
@@ -379,13 +386,29 @@ fn budget(row: &Value, metric: &str) -> Value {
                 "ordinary return has no external Stop sample",
             )
         }
+        (None, _)
+            if metric == "supervisor_steady_rss_bytes" || metric == "child_steady_rss_bytes" =>
+        {
+            let process = if metric == "child_steady_rss_bytes" {
+                "child"
+            } else {
+                "supervisor"
+            };
+            (
+                "UNEXECUTED",
+                row["metrics"]["steady_process_rss"][process]["reason"]
+                    .as_str()
+                    .unwrap_or("steady RSS window instrumentation unavailable; not a budget pass"),
+            )
+        }
         _ => (
             "UNEXECUTED",
             "measurement or prospective numeric bound unavailable; not a budget pass",
         ),
     };
     json!({"evidence":reference(row),"candidate":row["candidate"],"os":os(row),"lane":row["lane"],
-        "plan_identity":row["plan_identity"],"metric":metric,"observed":observed,"bound":bound,"status":status,"reason":reason})
+        "plan_identity":row["plan_identity"],"metric":metric,"observed":observed,"bound":bound,
+        "bound_metric":bound_metric,"status":status,"reason":reason})
 }
 
 pub fn summarize(data: &Value) -> Result<Value, Fault> {
@@ -402,6 +425,7 @@ pub fn summarize(data: &Value) -> Result<Value, Fault> {
     let mut groups = BTreeMap::<String, Vec<f64>>::new();
     let mut comparisons = BTreeMap::<String, BTreeMap<String, Vec<f64>>>::new();
     let mut budgets = Vec::new();
+    let mut process_rss = Vec::new();
     for row in rows {
         let status = row["status"]
             .as_str()
@@ -421,6 +445,16 @@ pub fn summarize(data: &Value) -> Result<Value, Fault> {
         }
         if row["metrics"].is_object() {
             budgets.extend(METRICS.iter().map(|metric| budget(row, metric)));
+            process_rss.push(
+                json!({"evidence":reference(row),"candidate":row["candidate"],
+                "os":os(row),"lane":row["lane"],
+                "sampled_peak":{"child_bytes":row["metrics"]["child_rss_bytes"],
+                    "supervisor_bytes":row["metrics"]["supervisor_rss_bytes"],
+                    "method":row["metrics"]["rss_method"]},
+                "steady_window":row["metrics"]["steady_process_rss"],
+                "reason":row["metrics"]["steady_process_rss"].is_null()
+                    .then_some("steady RSS window instrumentation unavailable")}),
+            );
         }
         if let Some(value) = row["metrics"]["workflow_us"]
             .as_f64()
@@ -499,7 +533,7 @@ pub fn summarize(data: &Value) -> Result<Value, Fault> {
     // runtime-adoption decision.
     Ok(
         json!({"version":1,"counts":counts,"timings":timings,"direct_rust_deltas":deltas,
-        "coverage_counts":coverage_counts,"coverage":matrix,"budgets":budgets,
+        "coverage_counts":coverage_counts,"coverage":matrix,"budgets":budgets,"process_rss":process_rss,
         "qualification":{"version":1,
             "required_row_metadata":["build (complete build/runtime/engine/OS/hardware identity)",
                 "qualification.version = 1","qualification.configuration_sha256","qualification.corpus_sha256"],
@@ -786,5 +820,25 @@ mod tests {
             assert_eq!(summary["counts"]["FAIL"], 1);
             assert_eq!(summary["decision"]["kind"], "Blocked");
         }
+    }
+
+    #[test]
+    fn absent_steady_rss_never_passes_an_available_process_memory_budget() {
+        let mut row = workflow_row("template-first");
+        row["metrics"] = json!({"child_rss_bytes":100,"supervisor_rss_bytes":200,
+            "budgets":{"child_rss_bytes":1_000,"supervisor_rss_bytes":1_000}});
+        let summary = summarize(&json!({"version":1,"runs":[row]})).unwrap();
+        let budgets = summary["budgets"].as_array().unwrap();
+        for metric in ["child_steady_rss_bytes", "supervisor_steady_rss_bytes"] {
+            let budget = budgets
+                .iter()
+                .find(|budget| budget["metric"] == metric)
+                .unwrap();
+            assert_eq!(budget["status"], "UNEXECUTED");
+            assert!(budget["observed"].is_null());
+            assert_eq!(budget["bound"], 1_000.0);
+        }
+        assert!(summary["process_rss"][0]["steady_window"].is_null());
+        assert!(summary["process_rss"][0]["reason"].is_string());
     }
 }

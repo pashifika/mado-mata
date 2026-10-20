@@ -77,6 +77,7 @@ input[type="checkbox"] { width: 16px; height: 16px; min-height: 0; margin: 0; ac
 .select { min-width: 0; }
 .select-trigger { display: flex; align-items: center; gap: 12px; text-align: left; font-weight: 400; }
 .select-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-label-rich { white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
 .select-chevron { width: 6px; height: 6px; margin: -3px 2px 0 0; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); flex-shrink: 0; color: var(--text-muted); }
 .select-trigger[aria-expanded="true"] .select-chevron { margin-top: 3px; transform: rotate(225deg); }
 .select-popup { position: fixed; z-index: 60; display: flex; flex-direction: column; padding: 6px; background: var(--surface); color: var(--text); border: 1px solid #c8d2de; border-radius: var(--radius); box-shadow: 0 10px 28px #12223b22; }
@@ -152,12 +153,6 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .dropdown [role="menuitem"][aria-current="page"] { font-weight: 600; }
 .menu-description { margin: 4px 0 0; padding: 9px 10px 4px; border-top: 1px solid #e6ebf1; font-size: 11px; color: var(--text-muted); }
 .count { margin-left: auto; font-size: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
-.validation-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 18px; height: 18px; padding: 1px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text-muted); }
-.validation-icon svg { width: 14px; height: 14px; }
-.validation-valid { color: var(--ok); }
-.validation-invalid { color: var(--danger); }
-.validation-stale { color: var(--warn); }
-.validation-running { color: var(--accent); }
 
 /* Workspace state and local pages share one compact navigation row. */
 .workspace-bar { display: flex; align-items: center; gap: 16px; padding: 7px var(--space-5); background: #e4e9ef; border-bottom: 1px solid #cfd8e2; }
@@ -233,11 +228,20 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .save-status { color: var(--ok); font-weight: 600; }
 .save-status.unsaved { color: var(--warn); }
 .run-grid { display: grid; grid-template-columns: minmax(300px, 1.15fr) minmax(300px, 1fr); gap: 18px; align-items: start; }
-/* Keep source controls together and technical details separate from profiles. */
+/* Keep source facts beside Edit and technical details separate from profiles. */
 .package-source { display: grid; gap: 10px; margin-bottom: 18px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-alt); min-width: 0; }
-.package-source-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.package-source-controls { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
-.package-source-controls button { padding: 5px 10px; font-size: 12px; }
+.package-source-heading { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.package-source-title { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.package-source-controls { display: grid; grid-template-columns: max-content max-content; align-items: start; gap: 7px; margin-left: auto; }
+.package-source-reinspect { grid-area: 1 / 1; }
+.package-source-change { grid-area: 1 / 2; }
+.package-source-body { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px 16px; min-width: 0; }
+.package-source-edit { justify-self: end; }
+.package-source-facts { display: grid; gap: 10px; min-width: 0; }
+.package-source-facts .field-heading { margin-bottom: 0; }
+.package-source-path { grid-column: 1 / -1; }
+.package-source-kind { color: var(--accent); background: var(--info-soft); }
+.package-source-controls button, .package-source-edit button { padding: 5px 10px; font-size: 12px; }
 .package-source-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
 .package-source-identity strong { min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
 .package-source .field { margin-bottom: 0; }
@@ -302,7 +306,6 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 :where(.app, .bootstrap-page) .dismissible-fault { padding-inline-end: 46px; }
 :where(.app, .bootstrap-page) .inline-warning button { font-size: 11px; }
 :where(.app, .bootstrap-page) .operation-status:empty { min-height: 0; padding: 0; margin: 0; border: 0; background: transparent; }
-.validated > summary { color: var(--ok); }
 .open-form { margin-top: 4px; }
 .open-form h2 { margin-top: 18px; }
 .open-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
@@ -359,6 +362,19 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .ocr-setup-details { margin: 10px 0; font-size: 11px; }
 .ocr-setup-details summary { cursor: pointer; color: var(--text-muted); }
 .ocr-setup-details code { overflow-wrap: anywhere; }
+.ocr-model-choice { display: grid; gap: 5px; min-width: 0; }
+.ocr-model-name { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.ocr-model-secondary { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 5px 12px; }
+.ocr-model-variant { color: var(--text-muted); font-size: 11px; }
+.ocr-model-tags { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+.ocr-model-tags .tag { font-size: 10px; box-shadow: inset 0 0 0 1px currentColor; }
+.ocr-model-tags .ocr-fast { color: var(--accent); background: var(--info-soft); }
+.ocr-model-evaluation { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
+.ocr-model-evaluation .section-heading { margin-bottom: 0; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ocr-model-evaluation .fixed-facts { margin: 6px 0 8px; }
+.ocr-model-rules { list-style: none; padding: 0; margin: 0 0 4px; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 12px; font-size: 11px; }
+.ocr-model-rules li { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-width: 0; }
+.ocr-model-rules code { font-size: 10px; overflow-wrap: anywhere; }
 .ocr-setup-next { padding: 10px 12px; background: var(--surface-muted); border-radius: var(--radius-sm); font-size: 11px; }
 .ocr-setup-next p { margin: 0 0 6px; }
 .ocr-setup-next ul { margin: 0; padding-left: 18px; }
@@ -523,6 +539,41 @@ html:has(.navigation-header) { overscroll-behavior-y: none; }
 .rail-heading { display: flex; align-items: center; gap: 4px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--border); }
 .rail-heading h2 { flex: 1; min-width: 0; margin: 0; font-size: 13px; }
 .rail-body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 6px; }
+.package-validation { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.package-validation > button { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.package-validation-collapsed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.package-validation-collapsed .package-validation { flex: 1; min-width: 0; padding: 0; border: 0; }
+/* Run and its settings-only Setup share a connected control, even when Run is unavailable. */
+.trial-run-control { display: inline-flex; align-items: stretch; flex: 0 1 auto; min-width: 0; max-width: 100%; margin-inline-start: auto; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); }
+.trial-run-control > button { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; border: 0; border-radius: 0; background: transparent; color: #fff; }
+.trial-run-control > button:hover:not(:disabled) { background: var(--accent-hover); }
+.trial-run-control > button:focus-visible { position: relative; z-index: 1; }
+.trial-run-control > .trial-run-main { flex: 1; min-width: 0; padding: 7px 12px; border-radius: 5px 0 0 5px; overflow-wrap: anywhere; }
+.trial-run-control > .trial-run-setup { flex: 0 0 32px; width: 32px; padding: 4px 7px; border-inline-start: 1px solid #ffffff40; border-radius: 0 5px 5px 0; }
+.trial-run-setup .select-chevron { margin-inline: 0; color: inherit; }
+.trial-run-summary { flex: 1 1 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.trial-feedback .diagnostic-list { max-height: 30vh; overflow: auto; }
+.trial-dialog { width: min(560px, calc(100vw - 30px)); }
+.trial-dialog-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.trial-dialog-title h2 { min-width: 0; overflow-wrap: anywhere; }
+.trial-dialog textarea { min-height: 72px; max-height: 30vh; resize: vertical; font-family: var(--mono); }
+.trial-dialog .run-identity { margin-bottom: 8px; }
+.trial-links .link { padding: 0; }
+.trial-signature { margin: 8px 0 0; overflow-wrap: anywhere; font-size: 11px; }
+/* Arguments stay one summary line unless needed; the summary shows the current JSON without wrapping. */
+.trial-arguments { margin: -6px 0 12px; }
+.trial-arguments > summary { font-size: 11px; color: var(--text-muted); }
+.trial-arguments > summary code { display: inline-block; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; color: var(--text); }
+.trial-arguments .field { margin: 4px 0 0; }
+/* A missing prerequisite and its direct action share one row. */
+.trial-prerequisite { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
+.trial-prerequisite > span { flex: 1 1 220px; min-width: 0; }
+.trial-prerequisite button { flex-shrink: 0; margin: 0; }
+.trial-native-options { margin: 14px 0 8px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 11px; }
+.trial-native-options > summary { color: var(--text-muted); }
+.trial-native-options > summary .tag { margin-left: 6px; color: var(--warn); background: var(--warn-soft); }
+.trial-native-options .run-identity { margin-bottom: 8px; }
+.execution-options { min-width: 0; margin: 0; padding: 0; border: 0; }
 .rail-missing { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
 .rail-missing h3 { margin: 4px 6px 2px; font-size: 11px; }
 .rail-missing .field-help { margin: 0 6px 6px; font-size: 10px; }
