@@ -39,6 +39,7 @@ mod enabled {
     mod native_wait_tests;
     #[cfg(test)]
     mod publication_tests;
+    mod recognition;
     #[cfg(windows)]
     mod windows_process;
     use super::*;
@@ -257,7 +258,7 @@ mod enabled {
 
     struct State {
         attempt_id: String,
-        session: Option<mp::Session>,
+        session: Option<Arc<mp::Session>>,
         observations: BTreeMap<String, Managed<Observation>>,
         results: BTreeMap<String, Managed<Retained>>,
         queries: BTreeMap<String, Managed<Query>>,
@@ -346,7 +347,8 @@ mod enabled {
         attempt: u64,
         bridge: CancellationBridge,
         closing: AtomicBool,
-        in_flight: AtomicUsize,
+        in_flight: Arc<AtomicUsize>,
+        query_worker: Mutex<Option<recognition::Worker>>,
         handles: AtomicUsize,
         handle_budget: Arc<HandleBudget>,
         native: Option<NativeConfig>,
@@ -598,7 +600,7 @@ mod enabled {
                 resources,
                 state: Mutex::new(State {
                     attempt_id: attempt_id.to_owned(),
-                    session,
+                    session: session.map(Arc::new),
                     observations: BTreeMap::new(),
                     results: BTreeMap::new(),
                     queries: BTreeMap::new(),
@@ -622,7 +624,8 @@ mod enabled {
                 attempt,
                 bridge,
                 closing: AtomicBool::new(false),
-                in_flight: AtomicUsize::new(0),
+                in_flight: Arc::new(AtomicUsize::new(0)),
+                query_worker: Mutex::new(None),
                 handles: AtomicUsize::new(0),
                 handle_budget,
                 native: config.native,
@@ -656,7 +659,7 @@ mod enabled {
                 native_process_started,
                 process_lifetime,
             )?;
-            state.session = session;
+            state.session = session.map(Arc::new);
             Ok(state.session.is_some())
         }
 
@@ -804,7 +807,7 @@ mod enabled {
                 }),
                 state: Mutex::new(State {
                     attempt_id: attempt_id.into(),
-                    session: Some(session),
+                    session: Some(Arc::new(session)),
                     observations: BTreeMap::new(),
                     results: BTreeMap::new(),
                     queries: BTreeMap::new(),
@@ -828,7 +831,8 @@ mod enabled {
                 run: plan.id.clone(),
                 attempt,
                 closing: AtomicBool::new(false),
-                in_flight: AtomicUsize::new(0),
+                in_flight: Arc::new(AtomicUsize::new(0)),
+                query_worker: Mutex::new(None),
                 handles: AtomicUsize::new(0),
                 handle_budget,
                 native: None,
@@ -1230,115 +1234,124 @@ mod enabled {
         ) -> Result<Value, Fault> {
             let permit = self.handle_budget.reserve(1)?;
             let observation = self.observation(state, &request.observation)?;
-            let roi = request.roi.rect(&observation.frame)?;
             let operation = self.operation(wait_ms)?;
+            if request.kind == "ocr" {
+                self.wait_for_query_idle(&operation)?;
+            }
             let _active = self.active();
             let session = state
                 .session
                 .as_ref()
                 .ok_or_else(|| Fault::new("Closed", "session closed"))?;
-            let (retained, mut compact) = match request.kind.as_str() {
-                "template" => {
-                    let alias = request
-                        .asset
-                        .as_ref()
-                        .ok_or_else(|| argument("template asset is required"))?;
-                    let template = self.resources.templates.get(alias).ok_or_else(|| {
-                        argument("template asset is not declared in engine configuration")
-                    })?;
-                    let view = observation
-                        .frame
-                        .view(roi, mp::ClipPolicy::Reject)
-                        .map_err(|error| engine_error("template_roi", error.into()))?;
-                    let find = mp::FindRequest::view(
-                        &view,
-                        template,
-                        mp::MatchOptions::from_defaults(template.defaults()),
-                    )
-                    .map_err(|error| engine_error("template_request", error))?;
-                    let outcome = session
-                        .find_template(&find, &operation)
-                        .map_err(|error| engine_error("template_recognition", error))?;
-                    let Some(found) = outcome.result().matches().first() else {
-                        self.check_session(state)?;
-                        return Ok(Value::Null);
-                    };
-                    let bounds = found.bounds();
-                    let value = json!({"kind":"template","observation":request.observation,
-                        "region":{"x":bounds.left(),"y":bounds.top(),"width":bounds.width(),"height":bounds.height()},
-                        "score":found.score()});
-                    (Retained::Template(outcome), value)
-                }
-                "ocr" => {
-                    if request.asset.is_some() {
-                        return Err(argument("OCR forbids asset"));
-                    }
-                    let backend = self
-                        .resources
-                        .engine
-                        .ocr_backend()
-                        .ok_or_else(|| internal("OCR backend missing"))?;
-                    let outcome = session
-                        .recognize(mp::OcrRequest::new(
-                            &observation.frame,
-                            backend.backend_identity(),
-                            backend.model_identity(),
-                            mp::OcrRegion::Region {
-                                rect: roi,
-                                policy: mp::ClipPolicy::Reject,
-                            },
-                            mp::CoordinateSpace::CapturePixels,
-                            &operation,
-                        ))
-                        .map_err(|error| engine_error("ocr_recognition", error))?;
-                    let found = outcome.regions().iter().find(|region| {
-                        request
-                            .expected
-                            .as_ref()
-                            .is_none_or(|text| region.text() == text)
-                    });
-                    let Some(found) = found else {
-                        self.check_session(state)?;
-                        return Ok(Value::Null);
-                    };
-                    if found.text().len() > self.limits.log_bytes {
-                        return Err(Fault::new(
-                            "LimitExceeded",
-                            "OCR compact text exceeds configured byte bound",
-                        ));
-                    }
-                    let points = found.geometry().points();
-                    let left = points
-                        .iter()
-                        .map(|point| point.x())
-                        .fold(f64::INFINITY, f64::min);
-                    let top = points
-                        .iter()
-                        .map(|point| point.y())
-                        .fold(f64::INFINITY, f64::min);
-                    let right = points
-                        .iter()
-                        .map(|point| point.x())
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    let bottom = points
-                        .iter()
-                        .map(|point| point.y())
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    let value = json!({"kind":"ocr","observation":request.observation,
-                        "region":{"x":left,"y":top,"width":right-left,"height":bottom-top},
-                        "score":found.confidence().get(),"text":found.text()});
-                    (Retained::Ocr(outcome), value)
-                }
-                _ => return Err(argument("unknown recognition kind")),
-            };
+            let found = recognition::recognize_frame(
+                &self.resources,
+                session,
+                &observation.frame,
+                request,
+                &operation,
+                self.limits.log_bytes,
+            )?
+            .map(|(retained, value)| (Managed::new(retained, permit), value));
+            self.publish_recognition(state, request, found)
+        }
+
+        fn publish_recognition(
+            &self,
+            state: &mut State,
+            request: &RecognitionRequest,
+            found: recognition::Recognized,
+        ) -> Result<Value, Fault> {
             self.check_session(state)?;
+            let Some((retained, mut compact)) = found else {
+                return Ok(Value::Null);
+            };
+            let observation = self.observation(state, &request.observation)?;
             if retained.stamp() != observation.frame.stamp() {
                 return Err(internal("recognition source correlation mismatch"));
             }
             let id = next_id(state, "result")?;
             compact["id"] = Value::String(id.clone());
-            state.results.insert(id, Managed::new(retained, permit));
+            state.results.insert(id, retained);
             Ok(compact)
+        }
+
+        fn wait_for_query_idle(&self, operation: &mp::OperationContext) -> Result<(), Fault> {
+            let slot = self
+                .query_worker
+                .lock()
+                .map_err(|_| internal("query worker state poisoned"))?;
+            while slot.as_ref().is_some_and(recognition::Worker::is_busy) {
+                self.check()?;
+                if let Some(interruption) = operation.interruption() {
+                    return Err(engine_error("recognition_admission", interruption.into()));
+                }
+                thread::sleep(
+                    operation
+                        .remaining()
+                        .unwrap_or(Duration::from_millis(1))
+                        .min(Duration::from_millis(1)),
+                );
+            }
+            Ok(())
+        }
+
+        fn query_recognize(
+            &self,
+            state: &mut State,
+            request: &RecognitionRequest,
+            deadline: Instant,
+        ) -> Result<Value, Fault> {
+            let token = mp::CancellationToken::new();
+            let operation = self
+                .operation(remaining_ms(deadline)?)?
+                .with_cancellation(token.clone());
+            self.wait_for_query_idle(&operation)?;
+            let mut slot = self
+                .query_worker
+                .lock()
+                .map_err(|_| internal("query worker state poisoned"))?;
+            if slot.is_none() {
+                *slot = Some(recognition::Worker::new()?);
+            }
+            let worker = slot.as_ref().unwrap();
+            let permit = self.handle_budget.reserve(1)?;
+            let frame = self.observation(state, &request.observation)?.frame.clone();
+            let receiver = worker.submit(
+                recognition::Job {
+                    resources: Arc::clone(&self.resources),
+                    session: Arc::clone(
+                        state
+                            .session
+                            .as_ref()
+                            .ok_or_else(|| Fault::new("Closed", "session closed"))?,
+                    ),
+                    frame,
+                    request: request.clone(),
+                    operation,
+                    text_limit: self.limits.log_bytes,
+                    permit,
+                },
+                Arc::clone(&self.in_flight),
+            )?;
+            let result = (|| {
+                loop {
+                    self.check()?;
+                    let _ = remaining_ms(deadline)?;
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    match receiver.recv_timeout(remaining.min(Duration::from_millis(1))) {
+                        Ok(found) => {
+                            let _ = remaining_ms(deadline)?;
+                            return self.publish_recognition(state, request, found?);
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(Fault::new("Backend", "query recognition worker stopped"));
+                        }
+                    }
+                }
+            })();
+            token.cancel();
+            result
         }
 
         fn scan_ocr_zones(
@@ -1371,6 +1384,7 @@ mod enabled {
                 .ocr_backend()
                 .ok_or_else(|| internal("OCR backend missing"))?;
             let operation = self.operation(wait_ms)?;
+            self.wait_for_query_idle(&operation)?;
             let request = mp::OcrZoneScanRequest::new(
                 &observation.frame,
                 backend.backend_identity(),
@@ -1433,8 +1447,7 @@ mod enabled {
             let result = (|| {
                 loop {
                     self.check_session(state)?;
-                    let wait_ms = remaining_ms(deadline)?;
-                    let value = self.recognize(state, &query.request, wait_ms)?;
+                    let value = self.query_recognize(state, &query.request, deadline)?;
                     if !value.is_null() {
                         return Ok(value);
                     }
@@ -1485,6 +1498,7 @@ mod enabled {
                 None => mp::OcrRegion::FullFrame,
             };
             let operation = self.operation(self.limits.wait_ms)?;
+            self.wait_for_query_idle(&operation)?;
             let _active = self.active();
             let backend = self
                 .resources
@@ -1715,6 +1729,22 @@ mod enabled {
             if let Some(cleanup) = &state.cleanup {
                 return cleanup.clone();
             }
+            let worker_error = match self
+                .query_worker
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_mut()
+                .map(|worker| worker.settle(started + budget))
+            {
+                Some(Err(error)) => {
+                    return json!({"clean":false,"reason":"native_work_unsettled",
+                        "in_flight":self.in_flight.load(Ordering::Acquire),
+                        "native_owners":self.handles.load(Ordering::Acquire),
+                        "physical_cleanup_confirmed":false,"worker_error":error});
+                }
+                Some(Ok(error)) => error,
+                None => None,
+            };
             state.queries.clear();
             state.results.clear();
             state.observations.clear();
@@ -1731,18 +1761,24 @@ mod enabled {
                     }
                     None => Ok(()),
                 });
-            let closed = close.is_ok() && state.session.as_ref().is_none_or(mp::Session::is_closed);
+            let closed = close.is_ok()
+                && state
+                    .session
+                    .as_ref()
+                    .is_none_or(|session| session.is_closed());
             let clean = closed && !state.input_cleanup_incomplete;
             if closed {
                 state.session = None;
             }
             let result = json!({"clean":clean,"native_owners":usize::from(!closed),
                 "in_flight":self.in_flight.load(Ordering::Acquire),"script_handles":0,
-                "runner_engines":1,"runner_models":1,"close_error":close.err(),
+                "runner_engines":1,"runner_models":1,"close_error":close.err(),"worker_error":worker_error,
                 "session_closed":closed,"physical_cleanup_confirmed":clean,
                 "native_input_release":if self.native.is_none() {"not_applicable_replay"}
                     else if state.input_cleanup_incomplete {"incomplete"} else {"no_outstanding_sequence_state"}});
-            state.cleanup = Some(result.clone());
+            if closed {
+                state.cleanup = Some(result.clone());
+            }
             result
         }
     }
@@ -1785,7 +1821,7 @@ mod enabled {
         #[serde(default, deserialize_with = "Roi::deserialize_optional")]
         roi: Option<Roi>,
     }
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct RecognitionRequest {
         observation: Value,
@@ -1794,7 +1830,7 @@ mod enabled {
         roi: Roi,
         expected: Option<String>,
     }
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Roi {
         x: u32,
@@ -1843,7 +1879,14 @@ mod enabled {
         state.observations.len() + state.results.len() + state.queries.len() + state.active_queries
     }
     fn remaining_ms(deadline: Instant) -> Result<u64, Fault> {
-        remaining_ms_from(deadline.saturating_duration_since(Instant::now()))
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(engine_error(
+                "query_wait",
+                mp::Error::new(mp::Status::DeadlineExceeded, "query wait deadline expired"),
+            ));
+        }
+        remaining_ms_from(remaining)
     }
     fn remaining_ms_from(remaining: Duration) -> Result<u64, Fault> {
         if remaining.is_zero() {
