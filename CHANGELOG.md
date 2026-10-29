@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Return query timeout and Stop without waiting for non-interruptible recognition.
+  Keep late work owned until it finishes, reject late results, serialize subsequent
+  OCR within its own deadline, and drain the worker during session cleanup.
+
 - Optimize PNG filtering and DEFLATE codecs in checkout builds to reduce
   saved-image loading and Preview latency. Preserve pixels, streaming compression,
   validation and resource limits; release profiles are unchanged.
