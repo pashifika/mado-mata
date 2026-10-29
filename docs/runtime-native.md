@@ -223,7 +223,7 @@ legacy default. The desktop shows scoped per-rule results, not an aggregate
 quality or performance ranking; see [ADR 0011](adr/0011-ocr-model-choices-and-rule-results.md).
 File verification, model results and local initialization are separate facts.
 OpenCV installation stays external. Save and run the real engine Check with a
-recorded corpus or a saved-image Recognition trial for initialization evidence.
+recorded corpus or a saved-image OCR trial for OCR initialization evidence.
 
 ## Saved-image authoring trials
 
@@ -234,7 +234,7 @@ runs real facade recognition, and closes its session; it never evaluates package
 source, captures a live window, or submits input.
 
 OCR submits one `scan_ocr_zones` request for any distinct selected definitions
-within the actual child's `MAX_OCR_ZONES` capability (**8** at the pinned revision).
+within the actual child's `MAX_OCR_ZONES` capability.
 Selection order is caller order, with each result group attributed to that
 definition; regions retain engine order. The saved-definition limit is separate.
 An excess request is refused rather than split, clipped, or silently truncated.
@@ -243,7 +243,11 @@ capture-pixel geometry, not pre-normalization backend output. No application
 exact-match judge or expected-text filter participates in the trial.
 
 Template trials use the selected pattern, separate search ROI, and validated
-manifest defaults. They report actual threshold/scores/boxes, not an invented
+manifest defaults. They initialize the OpenCV matcher, not OCR detector or
+recognizer sessions. The saved App OCR configuration and its model/runtime/native
+library hashes are still verified; a template result does not prove that OCR
+initialization succeeds. OCR trials retain the selected CPU provider and refuse
+fallback. Template results report actual threshold/scores/boxes, not an invented
 no-match score. Saved OCR sample trials use the complete crop without needing
 the original image; their crop-local geometry does not verify current-frame
 placement. The [authoring decision](adr/0006-saved-image-recognition-observations.md)
