@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Initialize only template matching for saved-image Template trials, without
+  starting unused OCR sessions. Keep App OCR configuration and resource-hash
+  checks. Use Check or an OCR trial to verify OCR initialization; a successful
+  Template trial is not OCR initialization evidence.
+
+- Return query timeout and Stop without waiting for non-interruptible recognition.
+  Keep late work owned until it finishes, reject late results, serialize subsequent
+  OCR within its own deadline, and drain the worker during session cleanup.
+
+- Optimize PNG filtering and DEFLATE codecs in checkout builds to reduce
+  saved-image loading and Preview latency. Preserve pixels, streaming compression,
+  validation and resource limits; release profiles are unchanged.
+
 - Record the bounded both-OS M0 adoption of QuickJS with TypeScript authoring,
   with separate native input and Stop evidence, historical failures and explicit
   release/compatibility limits. No SDK guard or input route changes.

@@ -85,8 +85,11 @@ apps/desktop/src-tauri/target/debug/mado-mata-desktop
 These commands do not enable the test-only `webdriver` feature. Normal builds
 have no automation listener, and release builds do not register that listener.
 
-Both Cargo manifests optimize SHA-256 in development builds so resource-integrity
-checks stay practical. The checks and their failure behavior are unchanged.
+Both Cargo manifests optimize SHA-256 and the `png`, `miniz_oxide`, and `fdeflate`
+dependencies in development builds so resource-integrity checks and saved-image
+loading/Preview stay practical. Application code remains unoptimized for debugging.
+Image pixels, streaming compression, validation and resource limits are unchanged;
+these package overrides do not change release profiles.
 
 Google author enrollment additionally requires the matching Desktop registration's
 `client_secret` string in Cargo's **build-time** `OIDC_CLIENT_KEY_GOOGLE`
@@ -1641,9 +1644,9 @@ Use this workflow:
    freshness follows its geometry or definitions, separately from trial evidence.
 3. Name definitions and choose **OCR** or **Template** explicitly; there is no
    automatic fallback. Up to **256 definitions** fit within **256 KiB** of
-   metadata. Nine or more definitions are valid even though the pinned engine
-   accepts only **8 OCR zones per grouped request**. Select any subset within
-   the reported capability and choose **Try OCR**. The UI sends list order;
+   metadata. The definition limit is independent of the child's advertised
+   OCR-zone limit. Select any subset within the reported capability and choose
+   **Try OCR**. The UI sends list order;
    the host preserves any distinct caller-supplied selection order in one
    grouped request. Excess selection is refused, never split or truncated.
 4. Read all returned OCR regions under their originating definition: public
@@ -1662,6 +1665,9 @@ Use this workflow:
    reports the effective threshold, actual scores, and boxes; no-match invents
    no score. Threshold and maximum-result defaults are displayed, not editable
    tuning controls. Fine matching criteria belong to Script authors.
+   Template trials initialize only matching, without constructing OCR sessions;
+   they still verify the saved App OCR environment and resource hashes. Use
+   **Try OCR** or **Check** to verify OCR initialization.
 6. Check **Save crop** only for definitions whose current pixels should be
    persisted, then choose **Save recognition**. Metadata-only Save needs no
    loaded image when retaining confirmed content setup, including after a failed
@@ -1681,7 +1687,7 @@ Use this workflow:
 8. **Copy checked OCR (one request)** uses every checked OCR **Trial** row in
    list order, independently of **Selected definition**. The adjacent names and
    count show the selection. Capability discovery must have completed; an
-   unknown bound or more than the engine's **8 zones** refuses the whole Copy.
+   unknown bound or a selection above the reported limit refuses the whole Copy.
    There is no hidden batching. **Copy selected template recognize** retains
    its selected saved-template behavior.
    Optional **Script reference text** is bounded to **4 KiB UTF-8** and preserved

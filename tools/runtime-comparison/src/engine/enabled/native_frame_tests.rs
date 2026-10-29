@@ -167,7 +167,7 @@ fn fixture_with_input(
     {
         let mut state = engine.lock().unwrap();
         state.session.take().unwrap().close(&operation).unwrap();
-        state.session = Some(session);
+        state.session = Some(Arc::new(session));
     }
     Arc::get_mut(&mut engine.resources).unwrap().engine = facade;
     engine.native = Some(serde_json::from_value(json!({
