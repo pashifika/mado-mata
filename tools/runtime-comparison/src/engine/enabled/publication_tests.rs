@@ -64,7 +64,7 @@ fn controlled(backend: Arc<ControlledOcr>) -> (Engine, Arc<ControlledCapture>) {
     {
         let mut state = engine.lock().unwrap();
         state.session.take().unwrap().close(&operation).unwrap();
-        state.session = Some(session);
+        state.session = Some(Arc::new(session));
     }
     Arc::get_mut(&mut engine.resources).unwrap().engine = facade;
     capture.publish(0, mp::Continuity::Continuous).unwrap();
@@ -111,7 +111,7 @@ fn native_drag_at_wait_limit_completes_within_execution_authority() {
     {
         let mut state = engine.lock().unwrap();
         state.session.take().unwrap().close(&operation).unwrap();
-        state.session = Some(session);
+        state.session = Some(Arc::new(session));
     }
     Arc::get_mut(&mut engine.resources).unwrap().engine = facade;
     capture.publish(0, mp::Continuity::Continuous).unwrap();
@@ -254,6 +254,158 @@ fn terminal_before_ocr_grouped_query_and_postcondition_commit_discards_even_empt
             assert!(engine.handle_budget.reserve(engine.limits.handles).is_ok());
         }
     }
+}
+
+#[test]
+fn query_deadline_returns_before_recognition_and_preserves_physical_ownership() {
+    let gate = Arc::new(CompletionGate::new());
+    let backend = Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8).with_calls(vec![
+        ScriptedOcrCall::new(candidates()).with_completion_gate(gate.clone()),
+    ]));
+    let (mut engine, _) = controlled(backend);
+    engine.limits.cleanup_ms = 20;
+    let source = engine.call("observe", json!({})).unwrap();
+    let query = engine.call("query", recognition(&source)).unwrap();
+    engine.call("release", json!({"id":source["id"]})).unwrap();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    thread::scope(|scope| {
+        let _release = gate.release_guard();
+        scope.spawn(|| {
+            sender
+                .send(engine.call("query_wait", json!({"id":query["id"],"timeout_ms":100})))
+                .unwrap();
+        });
+        assert!(gate.wait_until_entered(Duration::from_secs(2)));
+        let fault = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("caller deadline must not wait for the blocked recognizer")
+            .unwrap_err();
+        assert_eq!(fault.category, "Timeout");
+        assert_eq!(fault.context["stage"], "query_wait");
+        assert_eq!(fault.context["cause"]["status"], "deadline_exceeded");
+        assert_eq!(engine.snapshot()["in_flight"], 1);
+        assert!(engine.lock().unwrap().results.is_empty());
+        let repeated = engine.call("query_wait", json!({"id":query["id"],"timeout_ms":1_000}));
+        assert_eq!(repeated.unwrap_err().category, "Timeout");
+        engine.call("release", json!({"id":query["id"]})).unwrap();
+        // The physical job still owns its result permit and SDK resources.
+        assert!(engine.handle_budget.reserve(engine.limits.handles).is_err());
+        let cleanup = engine.finish();
+        assert_eq!(cleanup["clean"], false);
+        assert_eq!(cleanup["physical_cleanup_confirmed"], false);
+        assert_eq!(cleanup["in_flight"], 1);
+        gate.release();
+    });
+    assert!(gate.wait_until_completed(Duration::from_secs(2)));
+    engine.limits.cleanup_ms = plan().limits.cleanup_ms;
+    assert_eq!(engine.finish()["clean"], true);
+    assert!(engine.lock().unwrap().results.is_empty());
+    assert!(engine.handle_budget.reserve(engine.limits.handles).is_ok());
+}
+
+#[test]
+fn query_cancellation_returns_without_waiting_for_recognition() {
+    let gate = Arc::new(CompletionGate::new());
+    let backend = Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8).with_calls(vec![
+        ScriptedOcrCall::new(candidates()).with_completion_gate(gate.clone()),
+    ]));
+    let (engine, _) = controlled(backend);
+    let source = engine.call("observe", json!({})).unwrap();
+    let query = engine.call("query", recognition(&source)).unwrap();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    thread::scope(|scope| {
+        let _release = gate.release_guard();
+        scope.spawn(|| {
+            sender
+                .send(engine.call("query_wait", json!({"id":query["id"],"timeout_ms":5_000})))
+                .unwrap();
+        });
+        assert!(gate.wait_until_entered(Duration::from_secs(2)));
+        engine.control.cancel();
+        let fault = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Stop must not wait for the blocked recognizer")
+            .unwrap_err();
+        assert_eq!(fault.category, "Cancelled");
+        assert_eq!(engine.snapshot()["in_flight"], 1);
+        assert!(engine.lock().unwrap().results.is_empty());
+        gate.release();
+    });
+    assert!(gate.wait_until_completed(Duration::from_secs(2)));
+    assert_eq!(engine.finish()["clean"], true);
+    assert!(engine.handle_budget.reserve(engine.limits.handles).is_ok());
+}
+
+#[test]
+fn synchronous_ocr_waits_for_expired_query_work_within_its_own_deadline() {
+    for method in ["recognize", "scan_ocr_zones", "postcondition"] {
+        let gate = Arc::new(CompletionGate::new());
+        let backend = Arc::new(
+            ControlledOcr::new(mp::PixelFormat::Rgba8)
+                .with_calls(vec![
+                    ScriptedOcrCall::new(candidates()).with_completion_gate(gate.clone()),
+                ])
+                .with_candidates(candidates()),
+        );
+        let (mut engine, capture) = controlled(backend.clone());
+        engine.limits.wait_ms = 100;
+        let source = engine.call("observe", json!({})).unwrap();
+        let query = engine.call("query", recognition(&source)).unwrap();
+        let _release = gate.release_guard();
+        assert_eq!(
+            engine
+                .call("query_wait", json!({"id":query["id"],"timeout_ms":100}))
+                .unwrap_err()
+                .category,
+            "Timeout",
+        );
+        assert!(gate.wait_until_entered(Duration::from_secs(2)));
+        let args = match method {
+            "recognize" => recognition(&source),
+            "scan_ocr_zones" => grouped(&source),
+            "postcondition" => {
+                capture.publish(1, mp::Continuity::Continuous).unwrap();
+                let newer = engine.call("observe", json!({})).unwrap();
+                json!({"observation":newer,"checkpoint":source,"expected":"visible"})
+            }
+            _ => unreachable!(),
+        };
+        let fault = engine.call(method, args.clone()).unwrap_err();
+        assert_eq!(fault.category, "Timeout", "{method}");
+        assert_eq!(fault.context["stage"], "recognition_admission", "{method}");
+        assert_eq!(backend.recognition_count(), 1, "{method}");
+        gate.release();
+        assert!(gate.wait_until_completed(Duration::from_secs(2)));
+        let result = engine.call(method, args).unwrap();
+        match method {
+            "recognize" => assert_eq!(result["text"], "visible"),
+            "scan_ocr_zones" => assert_eq!(result["zones"][0]["regions"][0]["text"], "visible"),
+            "postcondition" => assert_eq!(result["satisfied"], true),
+            _ => unreachable!(),
+        }
+        assert_eq!(engine.finish()["clean"], true);
+        assert!(engine.handle_budget.reserve(engine.limits.handles).is_ok());
+    }
+}
+
+#[test]
+fn query_matches_its_retained_frame_before_acquiring_a_newer_one() {
+    let (engine, capture) = controlled(Arc::new(
+        ControlledOcr::new(mp::PixelFormat::Rgba8).with_candidates(candidates()),
+    ));
+    let source = engine.call("observe", json!({})).unwrap();
+    let query = engine.call("query", recognition(&source)).unwrap();
+    engine.call("release", json!({"id":source["id"]})).unwrap();
+    capture.publish(1, mp::Continuity::Continuous).unwrap();
+    let newer = engine.call("observe", json!({})).unwrap();
+    let result = engine
+        .call("query_wait", json!({"id":query["id"],"timeout_ms":1_000}))
+        .unwrap();
+    assert_eq!(result["observation"]["frame"], source["frame"]);
+    assert_ne!(result["observation"]["frame"], newer["frame"]);
+    assert_eq!(result["text"], "visible");
+    assert_eq!(engine.finish()["clean"], true);
+    assert!(engine.handle_budget.reserve(engine.limits.handles).is_ok());
 }
 
 #[test]
@@ -656,7 +808,7 @@ fn placed_replay() -> Engine {
     {
         let mut state = engine.lock().unwrap();
         state.session.take().unwrap().close(&operation).unwrap();
-        state.session = Some(session);
+        state.session = Some(Arc::new(session));
     }
     Arc::get_mut(&mut engine.resources).unwrap().engine = facade;
     engine.native = Some(native_policy());

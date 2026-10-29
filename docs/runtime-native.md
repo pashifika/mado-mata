@@ -407,15 +407,24 @@ different bytes fails identity validation; it does not silently become the old
 configuration. Changing the configured identities requires a new runner.
 
 Frames and facade results remain in Rust. Managed release invalidates handles;
-query creation retains an independent source observation. Stop reaches the engine
-cancellation token on a separate thread, independent of the host/native work
-mutex. Late values are checked again before publication. Logical cancellation
-never claims that a blocked backend has returned.
+query creation retains an independent source observation. A query searches that
+frame first and acquires a newer frame only after no match. Its caller wait returns
+`Timeout` or `Cancelled` without joining non-interruptible native recognition.
+These waits are not hard-real-time guarantees.
 
-`finish` cancels, releases retained results/observations, and closes the session
-with separate finite cleanup authority. Its facts distinguish remaining owners,
-in-flight work, close error, and confirmed session cleanup. An incomplete native
-input-release receipt remains incomplete even if session close later succeeds.
+One lazy, bounded recognition worker per engine owns unfinished query work.
+Late work retains its frame, engine/session owners and result permit until physical
+completion; it cannot publish a result. Subsequent query work and synchronous OCR
+wait for that worker within their own deadline. Stop reaches the engine
+cancellation token independently of the host/native work mutex, and late values
+are checked again before publication.
+
+`finish` settles the query worker, releases retained results/observations, and
+closes the session with separate finite cleanup authority. Its facts distinguish
+unfinished work, a joined worker failure, remaining owners, close error, and
+confirmed session cleanup. An incomplete session close remains retryable.
+An incomplete native input-release receipt remains incomplete even if session
+close later succeeds.
 Compatible model/engine owners remain a separately counted runner baseline. At
 runner shutdown, after
 all hosts are dropped, `release_runner_resources` drops that baseline. The
