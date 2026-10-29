@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Initialize only template matching for saved-image Template trials, without
+  starting unused OCR sessions. Keep App OCR configuration and resource-hash
+  checks. Use Check or an OCR trial to verify OCR initialization; a successful
+  Template trial is not OCR initialization evidence.
+
 - Return query timeout and Stop without waiting for non-interruptible recognition.
   Keep late work owned until it finishes, reject late results, serialize subsequent
   OCR within its own deadline, and drain the worker during session cleanup.
