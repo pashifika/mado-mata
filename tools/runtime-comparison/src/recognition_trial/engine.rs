@@ -79,6 +79,49 @@ fn context(token: &mp::CancellationToken, millis: u64) -> Result<mp::OperationCo
         .map_err(|error| fault("operation_context", error))
 }
 
+fn trial_engine(
+    selection: &WireSelection,
+    request: mp::ReplayEngineRequest,
+    profile: &mp::OcrProfileConfig,
+    operation: &mp::OperationContext,
+) -> Result<mp::Engine, mp::Error> {
+    match selection {
+        WireSelection::Ocr { .. } => {
+            mp::replay_engine_with_ocr_profile(request, profile, operation)
+        }
+        WireSelection::Template { .. } => {
+            if let Some(interruption) = operation.interruption() {
+                return Err(interruption.into());
+            }
+            let engine = mp::replay_engine(request)?;
+            if let Some(interruption) = operation.interruption() {
+                return Err(interruption.into());
+            }
+            Ok(engine)
+        }
+    }
+}
+
+fn verify_trial_backend(selection: &WireSelection, engine: &mp::Engine) -> Result<(), Fault> {
+    if matches!(selection, WireSelection::Ocr { .. }) {
+        let provider = engine.ocr_provider().ok_or_else(|| {
+            blocked(
+                "backend_initialization",
+                "OCR provider identity unavailable",
+            )
+        })?;
+        if provider.active_provider() != mp::OcrExecutionProvider::Cpu
+            || provider.initialization_fell_back()
+        {
+            return Err(blocked(
+                "ocr_provider_mismatch",
+                "configured CPU provider was not selected exactly",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn execute(
     request: WireRequest,
     rgba: Vec<u8>,
@@ -141,7 +184,8 @@ pub(crate) fn execute(
         let source = mp::replay::ReplaySource::from_targets(vec![target])
             .map_err(|error| fault("saved_frame", error.into()))?;
         engine = Some(
-            mp::replay_engine_with_ocr_profile(
+            trial_engine(
+                &request.selection,
                 mp::ReplayEngineRequest::new(source),
                 &profile,
                 &operation,
@@ -150,20 +194,7 @@ pub(crate) fn execute(
         );
         let engine = engine.as_ref().expect("engine initialized");
         validate_ocr(&config, &control)?;
-        let provider = engine.ocr_provider().ok_or_else(|| {
-            blocked(
-                "backend_initialization",
-                "OCR provider identity unavailable",
-            )
-        })?;
-        if provider.active_provider() != mp::OcrExecutionProvider::Cpu
-            || provider.initialization_fell_back()
-        {
-            return Err(blocked(
-                "ocr_provider_mismatch",
-                "configured CPU provider was not selected exactly",
-            ));
-        }
+        verify_trial_backend(&request.selection, engine)?;
         let targets = engine
             .discover(&operation)
             .map_err(|error| fault("saved_frame_discovery", error))?;
@@ -324,4 +355,150 @@ fn ocr(
         .scan_ocr_zones(request)
         .map_err(|error| fault("ocr_recognition", error))?;
     crate::ocr_scan::project(&scanned, zones, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mado_pilot_testkit::match_fixtures;
+
+    fn source() -> mp::replay::ReplaySource {
+        let descriptor =
+            mp::FrameDescriptor::packed(match_fixtures::SCENE, mp::PixelFormat::Rgba8).unwrap();
+        let frame = mp::replay::ReplayFrame::new(
+            descriptor,
+            mp::MonotonicInstant::ORIGIN,
+            mp::Continuity::Continuous,
+            None,
+            match_fixtures::scene_pixels(mp::PixelFormat::Rgba8).into_boxed_slice(),
+        )
+        .unwrap();
+        mp::replay::ReplaySource::from_targets(vec![
+            mp::replay::ReplayTarget::new("saved-template", vec![frame]).unwrap(),
+        ])
+        .unwrap()
+    }
+
+    fn selection() -> WireSelection {
+        WireSelection::Template {
+            id: "template".into(),
+            search: PixelRect {
+                x: 0,
+                y: 0,
+                width: match_fixtures::SCENE.width(),
+                height: match_fixtures::SCENE.height(),
+            },
+            manifest: String::new(),
+            png_bytes: 0,
+            template_id: "template".into(),
+            template_path: "template.png".into(),
+        }
+    }
+
+    fn unloaded_profile() -> mp::OcrProfileConfig {
+        let root =
+            std::env::temp_dir().join(format!("madomata-unused-trial-ocr-{}", std::process::id()));
+        mp::OcrProfileConfig::from_id(
+            crate::environment::ocr_profiles()
+                .next()
+                .unwrap()
+                .profile_id,
+            &root,
+            root.join("runtime"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn template_engine_matches_without_initializing_ocr_resources() {
+        let operation = mp::OperationContext::new();
+        let engine = trial_engine(
+            &selection(),
+            mp::ReplayEngineRequest::new(source()),
+            &unloaded_profile(),
+            &operation,
+        )
+        .unwrap();
+        assert!(engine.ocr_provider().is_none());
+        verify_trial_backend(&selection(), &engine).unwrap();
+        let target = engine.discover(&operation).unwrap()[0].id();
+        let session = engine
+            .open(target, &mp::OpenRequest::new(), &operation)
+            .unwrap();
+        let frame = session
+            .acquire_frame(&mp::FrameRequest::latest(), &operation)
+            .unwrap();
+        let template = engine
+            .prepare_template(&match_fixtures::planted_template("template"), &operation)
+            .unwrap();
+        let result = session
+            .find_template(
+                &mp::FindRequest::exact(
+                    &frame,
+                    &template,
+                    mp::MatchOptions::from_defaults(mp::MatchDefaults::new(0.99, 8).unwrap()),
+                ),
+                &operation,
+            )
+            .unwrap();
+        let mut found: Vec<_> = result
+            .result()
+            .matches()
+            .iter()
+            .map(|value| {
+                (
+                    u32::try_from(value.bounds().left()).unwrap(),
+                    u32::try_from(value.bounds().top()).unwrap(),
+                )
+            })
+            .collect();
+        found.sort_unstable();
+        assert_eq!(found, match_fixtures::PLANTED);
+        session.close(&operation).unwrap();
+        assert!(session.is_closed());
+    }
+
+    #[test]
+    fn ocr_trial_still_refuses_unavailable_ocr_resources() {
+        let error = trial_engine(
+            &WireSelection::Ocr { zones: Vec::new() },
+            mp::ReplayEngineRequest::new(source()),
+            &unloaded_profile(),
+            &mp::OperationContext::new(),
+        )
+        .err()
+        .expect("OCR selection must initialize its configured backend");
+        assert_eq!(error.status(), mp::Status::Unsupported);
+    }
+
+    #[test]
+    fn ocr_trial_refuses_a_template_only_engine() {
+        let engine = trial_engine(
+            &selection(),
+            mp::ReplayEngineRequest::new(source()),
+            &unloaded_profile(),
+            &mp::OperationContext::new(),
+        )
+        .unwrap();
+        let error = verify_trial_backend(&WireSelection::Ocr { zones: Vec::new() }, &engine)
+            .expect_err("OCR selection requires its configured provider");
+        assert_eq!(error.category, "Blocked");
+        assert_eq!(error.context["stage"], "backend_initialization");
+    }
+
+    #[test]
+    fn cancelled_template_trial_cannot_publish_an_engine() {
+        let token = mp::CancellationToken::new();
+        token.cancel();
+        let operation = mp::OperationContext::new().with_cancellation(token);
+        let error = trial_engine(
+            &selection(),
+            mp::ReplayEngineRequest::new(source()),
+            &unloaded_profile(),
+            &operation,
+        )
+        .err()
+        .expect("cancelled construction must not publish");
+        assert_eq!(error.status(), mp::Status::Cancelled);
+    }
 }
