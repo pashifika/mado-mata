@@ -476,8 +476,25 @@ try {
       : request.operation === "bridge-javascript" ? bridgeJavaScript(request)
       : request.operation === "compile" ? compile(request)
       : fail("CompilerPolicy", "Unknown compiler operation");
+    if (request.operation === "compile" && request.inspect_emitted === true) {
+      // Preserve the Rust inventory's BTreeMap order and retained contents.
+      const ids = [
+        ...Object.keys(request.sources).filter(id => !id.endsWith(".ts") || id.endsWith(".d.ts")),
+        ...Object.keys(value.sources),
+      ].sort();
+      const sources = Object.create(null);
+      for (const id of ids) {
+        sources[id] = Object.hasOwn(value.sources, id) ? value.sources[id] : request.sources[id];
+      }
+      value.inspection = inspectJavaScript({ sources });
+    }
   }
-  const output = JSON.stringify(workerData.selfCheck ? value : { ok: true, value });
+  let output = JSON.stringify(workerData.selfCheck ? value : { ok: true, value });
+  if (Buffer.byteLength(output) + 1 > workerData.limit && value.inspection) {
+    // Keep the existing compilation budget; runtime can inspect separately.
+    delete value.inspection;
+    output = JSON.stringify({ ok: true, value });
+  }
   if (Buffer.byteLength(output) + 1 > workerData.limit) fail("CompilerLimit", "Compiler output exceeds its bound");
   parentPort.postMessage({ output, ok: true });
 } catch (error) {
