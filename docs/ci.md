@@ -110,7 +110,10 @@ It follows that revision's upstream hosted procedure: install Homebrew
 locked trusted TypeScript compiler, and run the unfiltered consumer
 `cargo test --locked --features engine --lib` suite. The Homebrew OpenCV **major**
 is constrained to 4; its minor version is intentionally not a qualification pin.
-The resolved version is visible in the job log. npm/Homebrew caches and this
+The resolved version is visible in the job log. After native setup, the check
+keeps the validated Node.js executable first on `PATH`, ahead of native tool
+directories that may contain another Node installation. Native compiler and
+library settings remain intact. npm/Homebrew caches and this
 engine build live under `.cache/engine-consumer`; temporary files use the shorter
 `.cache/et` directory so fixture socket names fit macOS's pathname limit.
 
@@ -464,7 +467,7 @@ the same commands the local check uses:
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund --prefix tools/runtime-comparison/compiler
-node tools/runtime-comparison/compiler/compile.mjs --self-check
+npm run self-check --prefix tools/runtime-comparison/compiler
 cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml
 cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml
 cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- check

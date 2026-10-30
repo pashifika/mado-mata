@@ -359,10 +359,14 @@ pub fn child() -> Result<bool, Fault> {
         );
     }
     let mut inventory = invocation.inventory;
+    let mut compiled_imports = None;
     let compilation =
         if invocation.plan.candidate == "typescript" && invocation.prepared_modules.is_none() {
-            crate::typescript::compile_with_control(&inventory, &invocation.plan.limits, &control)
-                .map(|compiled| inventory = compiled)
+            crate::typescript::compile_for_execution(&inventory, &invocation.plan.limits, &control)
+                .map(|(compiled, imports)| {
+                    inventory = compiled;
+                    compiled_imports = imports;
+                })
         } else {
             Ok(())
         };
@@ -376,7 +380,11 @@ pub fn child() -> Result<bool, Fault> {
             Some(modules) => {
                 crate::javascript::run_prepared(inventory.clone(), host.clone(), modules)
             }
-            None => crate::javascript::run(inventory.clone(), host.clone()),
+            None => crate::javascript::run_with_compiled_imports(
+                inventory.clone(),
+                host.clone(),
+                compiled_imports,
+            ),
         },
         "lua" => crate::lua::run(inventory.clone(), host.clone()),
         _ => Err(Fault::new("InvalidPlan", "unknown candidate")),

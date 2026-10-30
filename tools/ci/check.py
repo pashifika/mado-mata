@@ -165,7 +165,7 @@ def check_runtime(root, results_directory):
     run([npm, "test", "--prefix", "integrations/omp"], root)
     compiler = root / RUNTIME_ROOT / "compiler"
     run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], compiler)
-    run([node, "compile.mjs", "--self-check"], compiler)
+    run([npm, "run", "self-check"], compiler)
     run([node, "--test", "sdk.test.mjs"], compiler)
     cargo = ["cargo", f"+{RUST_VERSION}"]
     run([*cargo, "test", "--locked", "--manifest-path", LAUNCH_ROOT / "Cargo.toml"], root)

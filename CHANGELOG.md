@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Require Node.js 24.22.2 for the trusted compiler, checkout builds and all CI
-  lanes.
+  lanes. Runtime admission refuses other versions, including older 24.x patches.
 
 - Pin MadoPilot to v0.5.0 (`a97d8fd`), preserving OCR resources and CPU defaults.
   Saved-image OCR trials use the child's limit of 16 zones. Constant BGR

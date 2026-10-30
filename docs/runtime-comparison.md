@@ -20,10 +20,12 @@ See [native prerequisites](runtime-native.md) before any real capture or input.
 Run from the repository root with Rust **1.98.1** and Node.js **24.22.2**. The
 controlled build needs a C toolchain for the vendored interpreters, but no OpenCV,
 ONNX models, sibling checkout, private planning repository, or game installation.
+The compiler refuses other Node.js versions, including older 24.x patches, before
+inspecting package source.
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund --prefix tools/runtime-comparison/compiler
-node tools/runtime-comparison/compiler/compile.mjs --self-check
+npm run self-check --prefix tools/runtime-comparison/compiler
 cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml
 cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml
 cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- check
@@ -308,6 +310,13 @@ requested; a caught refusal still closes admission and remains the primary fault
 JavaScript uses ES module live bindings and cycles. Lua rejects cycles with an
 import chain. Each attempt has new module instances and mutable `host.state`.
 
+Ordinary controlled/replay TypeScript execution inspects emitted JavaScript
+inside the existing compiler worker. Its non-serializable import receipt is bound
+to the compiled inventory; Rust still authorizes every import before QuickJS
+entry. If those optional facts do not fit the existing compiler reply bound,
+runtime performs the standalone inspection instead. Native and selected-function
+static linking remain separate and unchanged.
+
 JavaScript (including compiled TypeScript) bounds Promise creation, executed jobs
 and retained unhandled rejections separately from input authority. Each attempt
 allows `limits.vm_bytes / 1024` of each, rounded down: 16,384 with the shipped
@@ -470,10 +479,11 @@ Cargo lock hash, engine revision, compiler/interpreter versions, build profile,
 OS/kernel, and architecture. Keep materially different identities separate.
 Metrics distinguish startup, preflight, workflow, fixed host-operation timing,
 cleanup, process CPU, sampled supervisor/child RSS, VM allocation, and live owners.
-Here `preflight_us` covers common host preparation and TypeScript compilation;
-`workflow_us` covers the adapter invocation, including JavaScript dependency
-inspection and module/readiness overhead. It is not an isolated script-body
-benchmark.
+Here `preflight_us` covers common host preparation and TypeScript compilation,
+including emitted-source AST inspection for ordinary TypeScript execution.
+`workflow_us` covers adapter invocation, import authorization and module/readiness
+overhead. Standalone JavaScript inspection, when needed, also occurs in this
+stage. These timings are not an isolated script-body benchmark.
 On Apple Silicon, the existing SHA-256 dependency enables its upstream ARM
 backend. Resource bytes are still checked before and after engine initialization;
 the optimization neither skips verification nor changes digest identities.
@@ -496,8 +506,7 @@ their existing separate process-memory bounds. VM allocation and live-owner
 values remain endpoint measurements, not peaks.
 CPU describes the runtime child, not a process-tree total; RSS is sampled
 separately for the supervisor and child. The separate trusted parser/compiler
-worker's CPU/RSS are not included. TypeScript compilation time is in preflight;
-JavaScript dependency-inspection time is in the adapter/workflow measurement.
+worker's CPU/RSS are not included.
 
 Entry settlement is recorded before cleanup can block. A retained `Returned`
 entry with forced/incomplete cleanup still has a failed overall outcome; missing

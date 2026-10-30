@@ -9,6 +9,7 @@ const ROOT = "/inventory/";
 const LIB = "/compiler/";
 const SDK = "/sdk/host.d.ts";
 const VERSION = "5.9.3";
+const NODE_VERSION = "24.22.2";
 const HARD_LIMIT = 64 * 1024 * 1024;
 const digest = value => createHash("sha256").update(value).digest("hex");
 const fail = (category, message, context = {}) => {
@@ -458,8 +459,8 @@ function selfCheck() {
 
 
 try {
-  if (ts.version !== VERSION || !process.versions.node.startsWith("24.")) {
-    fail("CompilerIdentity", "The application requires TypeScript 5.9.3 and Node 24", compilerIdentity);
+  if (ts.version !== VERSION || process.versions.node !== NODE_VERSION) {
+    fail("CompilerIdentity", `The application requires TypeScript ${VERSION} and Node ${NODE_VERSION}`, compilerIdentity);
   }
   if (!Number.isSafeInteger(workerData.limit) || workerData.limit < 1 || workerData.limit > HARD_LIMIT) {
     fail("CompilerPolicy", "Invalid compiler worker output bound");
@@ -476,8 +477,25 @@ try {
       : request.operation === "bridge-javascript" ? bridgeJavaScript(request)
       : request.operation === "compile" ? compile(request)
       : fail("CompilerPolicy", "Unknown compiler operation");
+    if (request.operation === "compile" && request.inspect_emitted === true) {
+      // Preserve the Rust inventory's BTreeMap order and retained contents.
+      const ids = [
+        ...Object.keys(request.sources).filter(id => !id.endsWith(".ts") || id.endsWith(".d.ts")),
+        ...Object.keys(value.sources),
+      ].sort();
+      const sources = Object.create(null);
+      for (const id of ids) {
+        sources[id] = Object.hasOwn(value.sources, id) ? value.sources[id] : request.sources[id];
+      }
+      value.inspection = inspectJavaScript({ sources });
+    }
   }
-  const output = JSON.stringify(workerData.selfCheck ? value : { ok: true, value });
+  let output = JSON.stringify(workerData.selfCheck ? value : { ok: true, value });
+  if (Buffer.byteLength(output) + 1 > workerData.limit && value.inspection) {
+    // Keep the existing compilation budget; runtime can inspect separately.
+    delete value.inspection;
+    output = JSON.stringify({ ok: true, value });
+  }
   if (Buffer.byteLength(output) + 1 > workerData.limit) fail("CompilerLimit", "Compiler output exceeds its bound");
   parentPort.postMessage({ output, ok: true });
 } catch (error) {
