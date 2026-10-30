@@ -67,3 +67,7 @@ opt-level = 3
 
 [profile.dev.package.fdeflate]
 opt-level = 3
+
+# Keep template score-map selection responsive in checkout engine builds.
+[profile.dev.package.mado-pilot-backend-opencv]
+opt-level = 3
