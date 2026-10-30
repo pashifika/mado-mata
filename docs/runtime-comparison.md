@@ -477,6 +477,11 @@ benchmark.
 On Apple Silicon, the existing SHA-256 dependency enables its upstream ARM
 backend. Resource bytes are still checked before and after engine initialization;
 the optimization neither skips verification nor changes digest identities.
+Checkout engine builds also optimize the SDK's Rust OpenCV backend in the
+`dev` profile so score-map selection does not run unoptimized. Other development
+settings remain unchanged. This does not alter search regions, thresholds,
+native OpenCV settings or the `release` profile; full-frame correlation still
+covers the complete requested region.
 Peak RSS is an observed periodic maximum, not an OS peak or proof of cleanup.
 `steady_process_rss` separately reports a fixed workflow window: exclude the
 first 100 ms after workflow entry, then sample for 250 ms using the existing
