@@ -481,14 +481,28 @@ fn host_call<'js>(
 }
 
 pub fn run(inventory: Arc<Inventory>, host: Host) -> Result<RuntimeMetrics, Fault> {
+    run_with_compiled_imports(inventory, host, None)
+}
+
+pub(crate) fn run_with_compiled_imports(
+    inventory: Arc<Inventory>,
+    host: Host,
+    imports: Option<crate::typescript::CompiledImports>,
+) -> Result<RuntimeMetrics, Fault> {
     inventory.validate()?;
-    let parser =
-        crate::typescript::validate_javascript_imports(&inventory, &host.limits(), &host.control())
-            .map_err(|fault| {
-                let fault = annotate(fault, &inventory, "<loader>", "loading", None);
-                host.fail(fault.clone());
-                fault
-            })?;
+    let parser = match imports {
+        Some(imports) => imports.resolve(&inventory, &host.control()),
+        None => crate::typescript::validate_javascript_imports(
+            &inventory,
+            &host.limits(),
+            &host.control(),
+        ),
+    }
+    .map_err(|fault| {
+        let fault = annotate(fault, &inventory, "<loader>", "loading", None);
+        host.fail(fault.clone());
+        fault
+    })?;
     run_with_parser(inventory, host, parser, None)
 }
 

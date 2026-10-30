@@ -259,12 +259,68 @@ struct Inspection {
     identity: Value,
 }
 
+impl Inspection {
+    fn resolve_import(
+        &self,
+        inventory: &Inventory,
+        import: &Import,
+        control: &Control,
+    ) -> Result<String, Fault> {
+        control.check()?;
+        inventory
+            .resolve(&import.from, &import.specifier)
+            .map_err(|mut fault| {
+                fault.context["module"] = json!(import.from);
+                fault.context["line"] = json!(import.line);
+                fault.context["column"] = json!(import.column);
+                fault.context["kind"] = json!(import.kind);
+                fault.context["parser"] = self.identity.clone();
+                fault
+            })
+    }
+
+    fn metadata(self, limit: usize) -> Value {
+        json!({
+            "identity": self.identity,
+            "transport_bytes": limit,
+            "heap_mib": COMPILER_HEAP_MIB,
+            "deadline": "remaining-attempt",
+        })
+    }
+}
+
+/// Compiler-owned import facts, never accepted from a serialized inventory.
+pub(crate) struct CompiledImports {
+    inventory_identity: String,
+    inspection: Inspection,
+    transport_bytes: usize,
+}
+
+impl CompiledImports {
+    pub(crate) fn resolve(self, inventory: &Inventory, control: &Control) -> Result<Value, Fault> {
+        control.check()?;
+        if inventory.identity != self.inventory_identity
+            || inventory.metadata["runtime"] != "javascript"
+        {
+            return Err(Fault::new(
+                "StaleIdentity",
+                "compiled imports do not match the captured executable inventory",
+            ));
+        }
+        for import in &self.inspection.imports {
+            self.inspection.resolve_import(inventory, import, control)?;
+        }
+        Ok(self.inspection.metadata(self.transport_bytes))
+    }
+}
+
 #[derive(Deserialize)]
 struct Compilation {
     sources: BTreeMap<String, String>,
     source_maps: BTreeMap<String, String>,
     compiler: Value,
     entry: Option<Entry>,
+    inspection: Option<Inspection>,
 }
 
 #[derive(Deserialize)]
@@ -580,7 +636,10 @@ impl PreparedModules {
         invocation.validate()?;
         inventory.validate()?;
         let (compiled, entry) = match inventory.metadata["runtime"].as_str() {
-            Some("typescript") => compile_invocation(inventory, limits, control, Some(invocation))?,
+            Some("typescript") => {
+                compile_invocation(inventory, limits, control, Some(invocation), false)
+                    .map(|(inventory, entry, _)| (inventory, entry))?
+            }
             Some("javascript") => {
                 #[derive(Deserialize)]
                 struct Bridge {
@@ -674,19 +733,7 @@ fn inspect_javascript(
         serde_json::from_value(transport(&request, limit, deadline, Some(control))?)
             .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
     control.check()?;
-    let resolve = |import: &Import| {
-        control.check()?;
-        inventory
-            .resolve(&import.from, &import.specifier)
-            .map_err(|mut fault| {
-                fault.context["module"] = json!(import.from);
-                fault.context["line"] = json!(import.line);
-                fault.context["column"] = json!(import.column);
-                fault.context["kind"] = json!(import.kind);
-                fault.context["parser"] = inspection.identity.clone();
-                fault
-            })
-    };
+    let resolve = |import: &Import| inspection.resolve_import(inventory, import, control);
     if link {
         let mut imports: BTreeMap<&str, Vec<&Import>> = BTreeMap::new();
         for import in &inspection.imports {
@@ -739,12 +786,7 @@ fn inspect_javascript(
             resolve(import)?;
         }
     }
-    Ok(json!({
-        "identity": inspection.identity,
-        "transport_bytes": limit,
-        "heap_mib": COMPILER_HEAP_MIB,
-        "deadline": "remaining-attempt",
-    }))
+    Ok(inspection.metadata(limit))
 }
 
 /// Compile only the immutable inventory, before creating the JavaScript VM.
@@ -759,7 +801,17 @@ pub(crate) fn compile_with_control(
     limits: &Limits,
     control: &Control,
 ) -> Result<Inventory, Fault> {
-    compile_invocation(inventory, limits, control, None).map(|(inventory, _)| inventory)
+    compile_invocation(inventory, limits, control, None, false).map(|(inventory, _, _)| inventory)
+}
+
+/// Reuse emitted-source inspection when it fits the bounded compiler reply.
+pub(crate) fn compile_for_execution(
+    inventory: &Inventory,
+    limits: &Limits,
+    control: &Control,
+) -> Result<(Inventory, Option<CompiledImports>), Fault> {
+    compile_invocation(inventory, limits, control, None, true)
+        .map(|(inventory, _, imports)| (inventory, imports))
 }
 
 fn compile_invocation(
@@ -767,7 +819,8 @@ fn compile_invocation(
     limits: &Limits,
     control: &Control,
     function: Option<&FunctionInvocation>,
-) -> Result<(Inventory, Option<Entry>), Fault> {
+    inspect_emitted: bool,
+) -> Result<(Inventory, Option<Entry>, Option<CompiledImports>), Fault> {
     control.check()?;
     inventory.validate()?;
     limits.validate()?;
@@ -815,6 +868,9 @@ fn compile_invocation(
             .insert(import.specifier, destination);
     }
     request["operation"] = json!("compile");
+    if inspect_emitted {
+        request["inspect_emitted"] = json!(true);
+    }
     request["resolutions"] = serde_json::to_value(resolutions)
         .map_err(|error| attribute(Fault::new("CompilerProtocol", error.to_string())))?;
     request["compiler_identity"] = inspection.identity;
@@ -851,7 +907,12 @@ fn compile_invocation(
     }
     control.check()?;
     compiled.refresh_identity()?;
-    Ok((compiled, compilation.entry))
+    let imports = compilation.inspection.map(|inspection| CompiledImports {
+        inventory_identity: compiled.identity.clone(),
+        inspection,
+        transport_bytes: limit,
+    });
+    Ok((compiled, compilation.entry, imports))
 }
 
 fn vlq(segment: &str) -> Option<Vec<i64>> {
@@ -1053,6 +1114,107 @@ pub fn map_fault(inventory: &Inventory, mut fault: Fault) -> Fault {
 mod tests {
     use super::*;
     use crate::model::Plan;
+
+    fn execution_fixture() -> (Plan, Inventory) {
+        let mut plan: Plan =
+            serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
+        plan.candidate = "typescript".into();
+        plan.limits.duration_ms = 30_000;
+        let inventory = Inventory::capture(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/typescript"),
+            &plan.limits,
+        )
+        .unwrap();
+        (plan, inventory)
+    }
+
+    #[test]
+    fn compiled_imports_refuse_replacement_and_preserve_stop_precedence() {
+        let (plan, inventory) = execution_fixture();
+        for (cancelled, category) in [(false, "StaleIdentity"), (true, "Cancelled")] {
+            let control = Arc::new(Control::new(&plan.limits));
+            let host = crate::host::Host::new(
+                plan.clone(),
+                json!({}),
+                inventory.assets.clone(),
+                control.clone(),
+            )
+            .unwrap();
+            let (mut compiled, imports) =
+                compile_for_execution(&inventory, &plan.limits, &control).unwrap();
+            compiled
+                .sources
+                .get_mut("main.js")
+                .unwrap()
+                .push_str("\nhost.call('log', {message: 'replacement-evaluated'});\n");
+            compiled.refresh_identity().unwrap();
+            if cancelled {
+                control.cancel();
+            }
+            let fault = crate::javascript::run_with_compiled_imports(
+                Arc::new(compiled),
+                host.clone(),
+                imports,
+            )
+            .unwrap_err();
+            assert_eq!(fault.category, category, "{fault:?}");
+            assert!(!host.workflow_entered());
+            assert_eq!(host.snapshot()["logs"], json!([]));
+            assert_eq!(host.finish()["clean"], true);
+        }
+    }
+
+    #[test]
+    fn emitted_imports_preserve_first_refusal_and_original_source_location() {
+        let (plan, mut inventory) = execution_fixture();
+        inventory.sources.insert(
+            "main.ts".into(),
+            "import { dependency } from './z.js';\n\
+             export function readiness(): MadoReady {host.call('log',{message:'readiness-entered'});return 'Ready';}\n\
+             export function workflow(): void {dependency();}\n\
+             export function deferred() {return import('node:fs' as string);}\n".into(),
+        );
+        inventory.sources.insert(
+            "z.ts".into(),
+            "export function dependency() {return import('node:path' as string);}\n".into(),
+        );
+        inventory.refresh_identity().unwrap();
+        for reuse_imports in [false, true] {
+            let control = Arc::new(Control::new(&plan.limits));
+            let host = crate::host::Host::new(
+                plan.clone(),
+                json!({}),
+                inventory.assets.clone(),
+                control.clone(),
+            )
+            .unwrap();
+            let (compiled, imports) = if reuse_imports {
+                compile_for_execution(&inventory, &plan.limits, &control).unwrap()
+            } else {
+                (
+                    compile_with_control(&inventory, &plan.limits, &control).unwrap(),
+                    None,
+                )
+            };
+            let compiled = Arc::new(compiled);
+            let fault = crate::javascript::run_with_compiled_imports(
+                compiled.clone(),
+                host.clone(),
+                imports,
+            )
+            .unwrap_err();
+            let fault = map_fault(&compiled, fault);
+            assert_eq!(fault.category, "ImportRefused", "{fault:?}");
+            assert_eq!(fault.context["module"], "main.js", "{fault:?}");
+            assert_eq!(fault.context["specifier"], "node:fs");
+            let original = &fault.context["typescript"]["frames"][0]["original"];
+            assert_eq!(original["module"], "main.ts");
+            assert_eq!(original["line"], 4);
+            assert!(!host.workflow_entered());
+            assert_eq!(host.snapshot()["logs"], json!([]));
+            assert_eq!(host.finish()["clean"], true);
+        }
+    }
 
     struct StopDuringEncoding<'a>(&'a Control);
 
