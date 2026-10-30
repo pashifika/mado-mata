@@ -1447,6 +1447,138 @@ fn grouped_copy_uses_the_cached_engine_limit_and_verifies_every_checked_zone() {
 }
 
 #[test]
+fn grouped_trial_and_copy_admit_sixteen_zones_and_refuse_seventeen_as_one_request() {
+    let editor = Editor::new();
+    let app = editor.app();
+    let loaded = editor.load();
+    let capture_id = loaded.capture_id.clone().unwrap();
+    let mut document = loaded.document.unwrap();
+    document.definitions = (0..17)
+        .map(|index| {
+            let mut definition = zone(&format!("zone{index}"));
+            definition.region.u0 = f64::from(index) / 32.0;
+            definition.region.u1 = f64::from(index + 1) / 32.0;
+            definition
+        })
+        .collect();
+    document.definitions.push(RecognitionDefinition {
+        kind: RecognitionKind::Template,
+        expected: None,
+        template: Some(TemplateSettings {
+            search_region: NormalizedRect {
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+            },
+            threshold: 0.9,
+            max_results: 32,
+        }),
+        ..zone("pattern")
+    });
+    document.template_rights = Some(TemplateRights {
+        license: "CC0-1.0".into(),
+        created_by: "regression test".into(),
+        created_for: None,
+        reviewed: true,
+    });
+    let current = app
+        .recognition_update(
+            &editor.view.owner,
+            &editor.view.revision,
+            document,
+            loaded.frame.as_ref().map(|frame| frame.id.as_str()),
+            loaded.document_revision,
+            &capture_id,
+        )
+        .unwrap();
+    grant_capability(app, 16);
+    let ids: Vec<String> = (0..17).rev().map(|index| format!("zone{index}")).collect();
+    let selected = &ids[..16];
+    let copied = app
+        .recognition_copy(
+            &editor.view.owner,
+            &editor.view.revision,
+            current.document_revision,
+            selected,
+            SnippetKind::OcrRecognize,
+            &capture_id,
+        )
+        .unwrap();
+    assert_eq!(copied.definition_ids, selected);
+    assert!(!copied.verified, "admission is not recognition evidence");
+    assert!(
+        app.recognition_copy(
+            &editor.view.owner,
+            &editor.view.revision,
+            current.document_revision,
+            &ids,
+            SnippetKind::OcrRecognize,
+            &capture_id,
+        )
+        .is_err(),
+        "Copy refuses the whole selection rather than publishing a subset"
+    );
+
+    let candidate = app
+        .publisher
+        .open(Path::new(&editor.view.package_path))
+        .unwrap();
+    let image =
+        Arc::new(images::decode_png(&fs::read(&editor.source).unwrap(), ImageKind::Input).unwrap());
+    let prepare = |selection: &[String]| {
+        prepare_trial(
+            current.document.as_ref().unwrap(),
+            &capture_id,
+            &candidate,
+            Some(image.clone()),
+            selection,
+            None,
+            Some(16),
+        )
+    };
+    let (frame, selection) = prepare(selected).unwrap();
+    assert!(Arc::ptr_eq(&frame.image, &image));
+    let TrialSelection::Ocr { zones } = selection else {
+        panic!("the entire checked OCR selection must remain grouped");
+    };
+    assert_eq!(
+        zones
+            .iter()
+            .map(|zone| zone.id.as_str())
+            .collect::<Vec<_>>(),
+        selected.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        zones.iter().map(|zone| zone.rect).collect::<Vec<_>>(),
+        (1..17)
+            .rev()
+            .map(|x| PixelRect {
+                x,
+                y: 6,
+                width: 1,
+                height: 12,
+            })
+            .collect::<Vec<_>>(),
+        "every selected zone maps against the same retained frame in selection order"
+    );
+    assert!(
+        prepare(&ids).is_err(),
+        "trial preparation refuses seventeen zones instead of truncating or batching"
+    );
+    let (template_frame, selection) =
+        prepare(&["pattern".into()]).expect("one template is not counted as an OCR zone group");
+    assert!(Arc::ptr_eq(&template_frame.image, &image));
+    let TrialSelection::Template { template } = selection else {
+        panic!("template trial must not become an OCR scan");
+    };
+    let crop = images::decode_png(&template.png, ImageKind::Crop).unwrap();
+    assert_eq!((crop.width, crop.height), (16, 12));
+    assert_eq!(&crop.rgba[..4], &[8, 6, 17, 255]);
+    assert_eq!(&crop.rgba[crop.rgba.len() - 4..], &[23, 17, 17, 255]);
+}
+
+#[test]
 fn copy_never_certifies_a_trial_captured_at_an_older_package_revision() {
     let editor = Editor::new();
     let app = editor.app();
