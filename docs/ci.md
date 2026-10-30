@@ -464,7 +464,7 @@ the same commands the local check uses:
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund --prefix tools/runtime-comparison/compiler
-node tools/runtime-comparison/compiler/compile.mjs --self-check
+npm run self-check --prefix tools/runtime-comparison/compiler
 cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml
 cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml
 cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- check
