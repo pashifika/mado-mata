@@ -4,6 +4,6 @@
   "private": true,
   "type": "module",
   "engines": { "node": "24.22.2" },
-  "scripts": { "self-check": "node compile.mjs --self-check" },
+  "scripts": { "self-check": "node --test runtime-identity.test.mjs && node compile.mjs --self-check" },
   "dependencies": { "typescript": "5.9.3" }
 }
