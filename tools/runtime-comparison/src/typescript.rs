@@ -545,7 +545,7 @@ pub(crate) fn node_from_path() -> Result<std::path::PathBuf, Fault> {
     }
     Err(Fault::new(
         "Blocked",
-        "Node 24.18.0 node.exe is required on an absolute PATH entry",
+        "Node 24.22.2 node.exe is required on an absolute PATH entry",
     ))
 }
 

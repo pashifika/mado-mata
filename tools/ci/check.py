@@ -13,7 +13,7 @@ import tempfile
 from tooling import ROOT, host_platform, installed_tool, load_manifest
 
 RUST_VERSION = "1.98.1"
-NODE_VERSION = "24.18.0"
+NODE_VERSION = "24.22.2"
 RUNTIME_ROOT = Path("tools/runtime-comparison")
 DESKTOP_ROOT = Path("apps/desktop")
 LAUNCH_ROOT = Path("crates/application-launch")

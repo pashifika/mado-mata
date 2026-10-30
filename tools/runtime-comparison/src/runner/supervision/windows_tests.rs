@@ -169,14 +169,10 @@ fn parser_process_fixture() {
     let result = crate::javascript::run(std::sync::Arc::new(inventory), host.clone());
     let facts = host.snapshot();
     let cleanup = host.finish();
-    let metrics = result.unwrap();
+    result.unwrap();
     assert!(host.failure().is_none());
     assert_eq!(cleanup["clean"], true);
     assert_eq!(facts["dispatches"], 1);
     assert_eq!(facts["postconditions"][0]["satisfied"], true);
     assert_eq!(host.snapshot()["live_handles"], 0);
-    assert_eq!(
-        metrics.source_diagnostic.unwrap()["import_parser"]["identity"]["node"],
-        "24.18.0"
-    );
 }

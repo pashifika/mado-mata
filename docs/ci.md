@@ -2,9 +2,9 @@
 
 ## Install the pinned tools
 
-Use Git, Python 3.11 or newer, Rustup, Node.js **24.18.0** with its bundled npm,
+Use Git, Python 3.11 or newer, Rustup, Node.js **24.22.2** with its bundled npm,
 and a native C/C++ build toolchain. Install Node from its
-[official release](https://nodejs.org/dist/v24.18.0/) and verify the release's
+[official release](https://nodejs.org/dist/v24.22.2/) and verify the release's
 signed checksums. Rustup installs Rust **1.98.1** with the command below.
 Linux needs a C compiler and linker; macOS needs Xcode Command Line Tools;
 Windows needs the Visual Studio C++ build tools and Windows SDK for Rust's
@@ -66,7 +66,7 @@ The version and integrity sources are:
 | lychee | 0.24.2 | [toolchain.json](../tools/ci/toolchain.json), including host assets and SHA-256 values |
 | PyYAML | 6.0.3 | [requirements.txt](../tools/ci/requirements.txt), hash-pinned Python distributions |
 | Rust | 1.98.1 | [check.py](../tools/ci/check.py), explicit `cargo +1.98.1` |
-| Node.js | 24.18.0 | [check.py](../tools/ci/check.py) and [workflows](#hosted-workflow-and-required-gate) |
+| Node.js | 24.22.2 | [check.py](../tools/ci/check.py) and [workflows](#hosted-workflow-and-required-gate) |
 | TypeScript | 5.9.3 | [Compiler manifest](../tools/runtime-comparison/compiler/package.json) and [lockfile](../tools/runtime-comparison/compiler/package-lock.json) |
 | Desktop frontend | React 19.3.0, TypeScript 5.9.3, Vite 8.3.0, Tauri API 2.11.1 / CLI 2.11.5 | [App manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json) |
 | Script editor | CodeMirror state 6.7.6, view 6.43.13, language 6.12.4, JavaScript 6.2.5, autocomplete 6.20.3, commands 6.11.1; existing TypeScript 5.9.3 language service | Exact [frontend manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json); trusted ES2020 declarations are bundled by the [build helper](../apps/desktop/build/trusted-libraries.mjs), with no runtime downloads |

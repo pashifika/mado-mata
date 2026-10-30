@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Require Node.js 24.22.2 for the trusted compiler, checkout builds and all CI
+  lanes.
+
+- Pin MadoPilot to v0.5.0 (`a97d8fd`), preserving OCR resources and CPU defaults.
+  Saved-image OCR trials use the child's limit of 16 zones. Constant BGR
+  templates, including every `1x1` image, are refused rather than reported as
+  no-match. Historical measurements do not establish a release-wide speedup.
+
 - Initialize only template matching for saved-image Template trials, without
   starting unused OCR sessions. Keep App OCR configuration and resource-hash
   checks. Use Check or an OCR trial to verify OCR initialization; a successful

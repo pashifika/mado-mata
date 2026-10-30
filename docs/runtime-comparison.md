@@ -17,7 +17,7 @@ See [native prerequisites](runtime-native.md) before any real capture or input.
 
 ## Setup and commands
 
-Run from the repository root with Rust **1.98.1** and Node.js **24.18.0**. The
+Run from the repository root with Rust **1.98.1** and Node.js **24.22.2**. The
 controlled build needs a C toolchain for the vendored interpreters, but no OpenCV,
 ONNX models, sibling checkout, private planning repository, or game installation.
 
