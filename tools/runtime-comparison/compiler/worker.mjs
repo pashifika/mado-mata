@@ -9,6 +9,7 @@ const ROOT = "/inventory/";
 const LIB = "/compiler/";
 const SDK = "/sdk/host.d.ts";
 const VERSION = "5.9.3";
+const NODE_VERSION = "24.22.2";
 const HARD_LIMIT = 64 * 1024 * 1024;
 const digest = value => createHash("sha256").update(value).digest("hex");
 const fail = (category, message, context = {}) => {
@@ -458,8 +459,8 @@ function selfCheck() {
 
 
 try {
-  if (ts.version !== VERSION || !process.versions.node.startsWith("24.")) {
-    fail("CompilerIdentity", "The application requires TypeScript 5.9.3 and Node 24", compilerIdentity);
+  if (ts.version !== VERSION || process.versions.node !== NODE_VERSION) {
+    fail("CompilerIdentity", `The application requires TypeScript ${VERSION} and Node ${NODE_VERSION}`, compilerIdentity);
   }
   if (!Number.isSafeInteger(workerData.limit) || workerData.limit < 1 || workerData.limit > HARD_LIMIT) {
     fail("CompilerPolicy", "Invalid compiler worker output bound");

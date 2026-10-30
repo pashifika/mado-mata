@@ -20,10 +20,12 @@ See [native prerequisites](runtime-native.md) before any real capture or input.
 Run from the repository root with Rust **1.98.1** and Node.js **24.22.2**. The
 controlled build needs a C toolchain for the vendored interpreters, but no OpenCV,
 ONNX models, sibling checkout, private planning repository, or game installation.
+The compiler refuses other Node.js versions, including older 24.x patches, before
+inspecting package source.
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund --prefix tools/runtime-comparison/compiler
-node tools/runtime-comparison/compiler/compile.mjs --self-check
+npm run self-check --prefix tools/runtime-comparison/compiler
 cargo +1.98.1 build --locked --manifest-path tools/runtime-comparison/Cargo.toml
 cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml
 cargo +1.98.1 run --locked --manifest-path tools/runtime-comparison/Cargo.toml -- check

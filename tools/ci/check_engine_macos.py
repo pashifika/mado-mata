@@ -58,9 +58,20 @@ def main():
         run(["brew", "list", "--versions", "opencv@4"], ROOT)
         run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund",
              "--prefix", str(RUNTIME_ROOT / "compiler")], ROOT)
-        run(["node", str(RUNTIME_ROOT / "compiler/compile.mjs"), "--self-check"], ROOT)
+        run(["npm", "run", "self-check", "--prefix", str(RUNTIME_ROOT / "compiler")], ROOT)
+        node_bin = str(Path(subprocess.check_output(
+            ["node", "-p", "process.execPath"], cwd=ROOT, text=True,
+        ).strip()).parent)
+        # Native setup prepends tool directories that may contain a different Node.
+        # Restore only the checked Node's priority, retaining the native environment.
+        launch = (
+            "import os, sys; "
+            "os.environ['PATH'] = sys.argv[1] + os.pathsep + os.environ['PATH']; "
+            "os.execvp(sys.argv[2], sys.argv[2:])"
+        )
         run([sys.executable, str(checkout / "tools/setup-native.py"), "--",
-             *cargo, "test", "--locked", "--manifest-path", str(manifest), "--features", "engine",
+             sys.executable, "-c", launch, node_bin, *cargo,
+             "test", "--locked", "--manifest-path", str(manifest), "--features", "engine",
              "--target-dir", str(scratch / "target"), "--lib"], ROOT)
         return 0
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
