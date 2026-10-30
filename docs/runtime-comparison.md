@@ -356,6 +356,12 @@ No uncertain action is automatically replayed. Release remains available after
 admission closes. The controlled-only `fixture` operation injects declared state
 transitions; it is not native authority.
 
+Engine-backed template `recognize` and template queries request only the canonical
+first match, preserving the authored threshold and suppression rules. The returned
+bounds, score and source observation remain attributable to that match. This
+operation-local limit does not change saved template settings or the multiple
+matches returned by authoring trials; it is independent of OCR zone cardinality.
+
 The `postcondition` host operation accepts an optional `roi: MadoRegion`.
 Omission uses the full observation; explicit regions must fit without clipping.
 Invalid regions, including `null`, are refused. Region selection does not relax
@@ -398,7 +404,7 @@ try {
 
 The entire request is validated before backend work: exact retained-frame
 dimensions, bounded content, finite ordered normalized edges, unique bounded
-IDs, and the engine's zone limit (8 at the current pin). Mapping uses floor for
+IDs, and the engine's zone limit (16 in MadoPilot v0.5.0). Mapping uses floor for
 left/top and ceil for right/bottom, with rejected clipping. Retained observations
 do not inherit the separate saved-PNG pixel ceiling. No per-zone calls, implicit
 splitting, or expected-text filtering occur. The controlled lane uses a distinct
