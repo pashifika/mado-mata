@@ -32,7 +32,7 @@ Release packaging and full runtime adoption remain unresolved. See the
 ## Build and run from the checkout
 
 Run these commands from the product repository root on macOS, with Xcode Command
-Line Tools, Rustup, and Node.js **24.18.0** with its bundled npm. Use the
+Line Tools, Rustup, and Node.js **24.22.2** with its bundled npm. Use the
 [pinned tool installation](ci.md#install-the-pinned-tools) for integrity and CI
 setup. The application dependencies are fixed by the committed manifests and
 lockfiles:
@@ -135,7 +135,7 @@ cross-compilation target for a local app run. CI may use other directories for
 compilation checks. Moving a binary alone does not supply the fixed paths.
 
 On Windows, use an x64 MSVC developer terminal with the Windows SDK, Node.js
-24.18.0, Rust 1.98.1, and an installed WebView2 runtime for interactive use.
+24.22.2, Rust 1.98.1, and an installed WebView2 runtime for interactive use.
 Preserve the [tracked symlink](development-guidance.md#claude-symlink).
 The same dependency installation, frontend build, and Cargo build commands above
 apply. Launch the checkout artifact with:

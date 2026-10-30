@@ -1,7 +1,7 @@
 # Runtime comparison: replay and native prerequisites
 
-The optional `engine` feature consumes the public `mado-pilot` facade at
-`f61a57f661c0314ea0a1d860d9298fbff86d903d`. The harness uses no sibling path
+The optional `engine` feature consumes the public `mado-pilot` v0.5.0 facade at
+`a97d8fdc5a197f31a477603d689569e4214846bc`. The harness uses no sibling path
 dependency, fake OCR backend, or substitute input route. macOS startup adds
 read-only Foundation/libproc lifetime checks during startup and exact bound-lifetime
 checks during execution; capture and input still use the public facade.
@@ -9,6 +9,11 @@ Windows Desktop preparation verifies one saved executable/process and creation
 FILETIME; the child correlates that lifetime with SDK provenance and revalidates
 the retained window before admission. After attachment the SDK owns target
 liveness; Desktop does not add a per-call process scanner.
+
+This release pin leaves OCR resources, default CPU options and input routes
+unchanged; it does not adopt the SDK's watcher APIs. Upstream matching changes
+are not an application-wide speedup claim. Historical measurements retain their
+original revision and workload scope.
 
 **Native integration is available; native qualification is not complete.** The
 facade now exposes optional retained-process provenance. The harness requires an
@@ -123,15 +128,15 @@ engine build, acquire the following separately; the harness downloads nothing:
   No `PATH` search, alternate runtime, accelerator preference, or fallback is used.
 - The chosen profile's complete model set below, including its required vocabulary asset.
 
-JavaScript and TypeScript execution also require the pinned Node.js **24.18.0**
+JavaScript and TypeScript execution also require the pinned Node.js **24.22.2**
 on an absolute `PATH` entry before launch. On Windows, the supervisor resolves
 that trusted executable before restricting the child's DLL search path to the
 selected native-library directories; it does not widen that path for Node.
 Initialization-only environment checks do not compile or evaluate package
 modules and do not require Node.
 
-Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/CONTRIBUTING.md#native-development-prerequisites)
-and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
+Use the pinned upstream [native build procedure](https://github.com/pashifika/mado-pilot/blob/a97d8fdc5a197f31a477603d689569e4214846bc/CONTRIBUTING.md#native-development-prerequisites)
+and [OCR dependency procedure](https://github.com/pashifika/mado-pilot/blob/a97d8fdc5a197f31a477603d689569e4214846bc/docs/third-party-dependencies.md#implemented-onnx-runtime-prerequisite).
 Its `tools/setup-native.py` configures only the command it launches; it installs
 nothing. A separately obtained, revision-pinned public checkout can provide that
 setup tool without becoming the application's dependency source. From this
@@ -190,7 +195,7 @@ command and do not qualify a native OS/workload.
 
 ### Accepted OCR content
 
-The pinned SDK [model catalog](https://github.com/pashifika/mado-pilot/blob/f61a57f661c0314ea0a1d860d9298fbff86d903d/crates/automation/ocr/resources/model-catalog.json)
+The pinned SDK [model catalog](https://github.com/pashifika/mado-pilot/blob/a97d8fdc5a197f31a477603d689569e4214846bc/crates/automation/ocr/resources/model-catalog.json)
 owns implemented profiles, exact model/vocabulary bytes, relative paths and
 acquisition sources. Desktop [OCR resource setup](desktop.md#save-and-check-an-ocr-environment)
 downloads the selected complete set and the reviewed ONNX Runtime 1.29.0 archive,
@@ -234,7 +239,7 @@ runs real facade recognition, and closes its session; it never evaluates package
 source, captures a live window, or submits input.
 
 OCR submits one `scan_ocr_zones` request for any distinct selected definitions
-within the actual child's `MAX_OCR_ZONES` capability.
+within the actual child's `MAX_OCR_ZONES` capability (16 in v0.5.0).
 Selection order is caller order, with each result group attributed to that
 definition; regions retain engine order. The saved-definition limit is separate.
 An excess request is refused rather than split, clipped, or silently truncated.
@@ -252,6 +257,10 @@ no-match score. Saved OCR sample trials use the complete crop without needing
 the original image; their crop-local geometry does not verify current-frame
 placement. The [authoring decision](adr/0006-saved-image-recognition-observations.md)
 owns observation semantics and the shared image policy.
+
+v0.5.0 refuses templates whose BGR pixels are constant, including every `1x1`
+image and alpha-only variation. A template must vary in at least one BGR channel;
+preparation refusal is an error, not a successful no-match.
 
 The trial deadline is **30 s**, followed by independent **1 s** cleanup and
 **2 s** containment bounds. Cancellation reaches the engine without waiting
@@ -280,7 +289,7 @@ Each recorded frame, PNG template, and MadoPilot package manifest must be a
   Its `madopilot-package.json` entry must be a valid upstream asset manifest,
   including template content SHA-256, dimensions, license, and match defaults.
   The facade supports PNG templates, not raw template pixels. See the pinned
-  [manifest example](https://github.com/pashifika/mado-pilot/blob/acc5d98ae8cfc4958970be826a28011bc12185c9/fixtures/assets/phase1-slice/madopilot-package.json).
+  [manifest example](https://github.com/pashifika/mado-pilot/blob/a97d8fdc5a197f31a477603d689569e4214846bc/fixtures/assets/phase1-slice/madopilot-package.json).
 - `replay.templates` maps host recognition asset aliases to template IDs declared
   by that engine manifest. Neither map grants filesystem access.
 
@@ -568,7 +577,7 @@ per-click `run` commands and independent screenshot inspectors open and close
 different sessions and must not be reported as a continuous-capture trial.
 
 The Rust facade's
-[`TargetProcessIdentity`](https://github.com/pashifika/mado-pilot/blob/acc5d98ae8cfc4958970be826a28011bc12185c9/crates/automation/capture/src/descriptor.rs)
+[`TargetProcessIdentity`](https://github.com/pashifika/mado-pilot/blob/a97d8fdc5a197f31a477603d689569e4214846bc/crates/automation/capture/src/descriptor.rs)
 is optional discovery provenance, not continuing liveness or input authority.
 macOS publishes paths from its retained application and exact launch-value bits.
 Windows publishes the executable path and creation value from the same retained
