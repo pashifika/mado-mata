@@ -231,23 +231,48 @@ test('definition and metadata budgets refuse edits without changing the draft',(
   assert.equal(state.document,full);
 });
 
-test('nine saved definitions stay valid while a grouped trial is bounded by the engine limit',()=>{
+for (const maximum of [8,16]) {
+  test(`${maximum+1} saved definitions stay valid while grouped Trial and Copy use the reported ${maximum}-zone limit`,()=>{
+    let state=loaded();
+    state=applyView(state,{...state.view,capabilities:{...state.view.capabilities,max_ocr_zones:maximum}});
+    for (let index=0; index<=maximum; index++) state=create(state,edges(index*20,0,index*20+10,10),`zone ${index}`);
+    state=sync(state);
+    assert.equal(saveBlock(state),null);
+    const ids=state.document.definitions.map(item=>item.id);
+    for (const id of [...ids].reverse()) state=toggleTrial(state,id);
+    assert.equal(state.trialIds.length,maximum+1);
+    assert.equal(trialBlock(state,'frame',state.trialIds),'overLimit');
+    assert.equal(trialTicket(state,'frame',state.trialIds),null,'the whole request is refused, not split');
+    assert.equal(copyBlock(state,state.trialIds,'ocr_recognize'),'overLimit');
+    assert.equal(copyTicket(state,state.trialIds,'ocr_recognize'),null,'Copy cannot publish a partial selection');
+    state=toggleTrial(state,ids.at(-1));
+    const expected=ids.slice(0,maximum);
+    const ticket=trialTicket(state,'frame',[...state.trialIds].reverse());
+    assert.equal(trialBlock(state,'frame',state.trialIds),null);
+    assert.deepEqual(ticket.selected_ids,expected,'Trial preserves document order, not check or request order');
+    assert.equal(copyBlock(state,state.trialIds,'ocr_recognize'),null);
+    assert.deepEqual(copyTicket(state,state.trialIds,'ocr_recognize').definition_ids,expected);
+    // Without the engine's reported bound there is no fallback number.
+    const unknown={...state,view:{...state.view,capabilities:{...state.view.capabilities,max_ocr_zones:null}}};
+    assert.equal(trialBlock(unknown,'frame',['r1']),'noCapability');
+  });
+}
+
+test('one multi-result template trial remains admissible beside seventeen OCR definitions under a sixteen-zone capability',()=>{
   let state=loaded();
-  for (let index=0; index<9; index++) state=create(state,edges(index*20,0,index*20+10,10),`zone ${index}`);
-  state=sync(state);
-  assert.equal(saveBlock(state),null);
-  for (const {id} of state.document.definitions) state=toggleTrial(state,id);
-  assert.equal(state.trialIds.length,9);
+  state=applyView(state,{...state.view,capabilities:{...state.view.capabilities,max_ocr_zones:16}});
+  for (let index=0; index<17; index++) {
+    state=create(state,edges(index*20,0,index*20+10,10),`zone ${index}`);
+    state=toggleTrial(state,state.selected);
+  }
+  state=create(state,edges(0,20,10,30),'pattern');
+  state=sync(setKind(state,state.selected,'template'));
+  const templateId=state.selected;
   assert.equal(trialBlock(state,'frame',state.trialIds),'overLimit');
-  assert.equal(trialTicket(state,'frame',state.trialIds),null);
-  assert.equal(copyBlock(state,state.trialIds,'ocr_recognize'),'overLimit','grouped Copy is one request under the same engine bound');
-  state=toggleTrial(state,'r9');
-  const ticket=trialTicket(state,'frame',state.trialIds);
-  assert.deepEqual(ticket.selected_ids,['r1','r2','r3','r4','r5','r6','r7','r8']);
-  assert.deepEqual(copyTicket(state,state.trialIds,'ocr_recognize').definition_ids,ticket.selected_ids);
-  // Without the engine's reported bound there is no fallback number.
-  const unknown={...state,view:{...state.view,capabilities:{...state.view.capabilities,max_ocr_zones:null}}};
-  assert.equal(trialBlock(unknown,'frame',['r1']),'noCapability');
+  assert.equal(trialBlock(state,'frame',[templateId]),null);
+  assert.deepEqual(trialTicket(state,'frame',[templateId]).selected_ids,[templateId]);
+  assert.equal(trialBlock(state,'frame',[state.trialIds[0],templateId]),'mixedKinds');
+  assert.equal(trialTicket(state,'frame',[state.trialIds[0],templateId]),null);
 });
 
 test('refresh retains the Game content ROI, unsaved definitions and selected original crops; resized frames require explicit rebase',()=>{

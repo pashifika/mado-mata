@@ -40,6 +40,8 @@ mod enabled {
     #[cfg(test)]
     mod publication_tests;
     mod recognition;
+    #[cfg(test)]
+    mod template_tests;
     #[cfg(windows)]
     mod windows_process;
     use super::*;

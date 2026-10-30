@@ -356,6 +356,12 @@ No uncertain action is automatically replayed. Release remains available after
 admission closes. The controlled-only `fixture` operation injects declared state
 transitions; it is not native authority.
 
+Engine-backed template `recognize` and template queries request only the canonical
+first match, preserving the authored threshold and suppression rules. The returned
+bounds, score and source observation remain attributable to that match. This
+operation-local limit does not change saved template settings or the multiple
+matches returned by authoring trials; it is independent of OCR zone cardinality.
+
 The `postcondition` host operation accepts an optional `roi: MadoRegion`.
 Omission uses the full observation; explicit regions must fit without clipping.
 Invalid regions, including `null`, are refused. Region selection does not relax
@@ -398,7 +404,7 @@ try {
 
 The entire request is validated before backend work: exact retained-frame
 dimensions, bounded content, finite ordered normalized edges, unique bounded
-IDs, and the engine's zone limit (8 at the current pin). Mapping uses floor for
+IDs, and the engine's zone limit (16 in MadoPilot v0.5.0). Mapping uses floor for
 left/top and ceil for right/bottom, with rejected clipping. Retained observations
 do not inherit the separate saved-PNG pixel ceiling. No per-zone calls, implicit
 splitting, or expected-text filtering occur. The controlled lane uses a distinct
@@ -471,6 +477,11 @@ benchmark.
 On Apple Silicon, the existing SHA-256 dependency enables its upstream ARM
 backend. Resource bytes are still checked before and after engine initialization;
 the optimization neither skips verification nor changes digest identities.
+Checkout engine builds also optimize the SDK's Rust OpenCV backend in the
+`dev` profile so score-map selection does not run unoptimized. Other development
+settings remain unchanged. This does not alter search regions, thresholds,
+native OpenCV settings or the `release` profile; full-frame correlation still
+covers the complete requested region.
 Peak RSS is an observed periodic maximum, not an OS peak or proof of cleanup.
 `steady_process_rss` separately reports a fixed workflow window: exclude the
 first 100 ms after workflow entry, then sample for 250 ms using the existing

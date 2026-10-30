@@ -154,12 +154,12 @@ pub(super) fn recognize_frame(
             let view = frame
                 .view(roi, mp::ClipPolicy::Reject)
                 .map_err(|error| engine_error("template_roi", error.into()))?;
-            let find = mp::FindRequest::view(
-                &view,
-                template,
-                mp::MatchOptions::from_defaults(template.defaults()),
-            )
-            .map_err(|error| engine_error("template_request", error))?;
+            // Script recognition and queries expose only the canonical first match.
+            let options = mp::MatchOptions::from_defaults(template.defaults())
+                .with_max_results(1)
+                .map_err(|error| engine_error("template_request", error.into()))?;
+            let find = mp::FindRequest::view(&view, template, options)
+                .map_err(|error| engine_error("template_request", error))?;
             let outcome = session
                 .find_template(&find, operation)
                 .map_err(|error| engine_error("template_recognition", error))?;
