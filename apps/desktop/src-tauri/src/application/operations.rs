@@ -1,8 +1,8 @@
 use super::native_run::NativeBinding;
 use super::profiles::{check_selected_profile, desktop_options, normalize_editor_numbers};
 use super::{
-    Application, CheckInputs, OperationOwner, Poll, RetainedCheck, WorkspaceRef, WorkspaceResult,
-    Workspaces, lock,
+    Application, CheckInputs, NativeCleanup, OperationOwner, Poll, RetainedCheck, WorkspaceRef,
+    WorkspaceResult, Workspaces, lock,
 };
 use crate::distribution::InstalledIdentity;
 use crate::logging::LogStatus;
@@ -15,15 +15,29 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock, atomic::Ordering, mpsc};
 use std::time::Duration;
 
-impl Workspaces {
-    pub(super) fn native_ready(&self) -> Result<(), Fault> {
-        if self.native_cleanup_required {
+impl NativeCleanup {
+    fn ready(self) -> Result<(), Fault> {
+        if self == Self::Required {
             return Err(Fault::new(
                 "NativeCleanupRequired",
                 "Previous native cleanup was incomplete or unverified; reconcile the target and restart the application before another native run",
             ));
         }
         Ok(())
+    }
+
+    fn settle(&mut self, native: bool, outcome: &TerminalOutcome<'_>) -> bool {
+        let required = native && outcome.requires_native_reconciliation();
+        if required {
+            *self = Self::Required;
+        }
+        required
+    }
+}
+
+impl Workspaces {
+    pub(super) fn native_ready(&self) -> Result<(), Fault> {
+        self.native_cleanup.ready()
     }
 
     pub(super) fn idle(&self) -> Result<(), Fault> {
@@ -145,10 +159,7 @@ impl Application {
             if !authoring_operation {
                 let outcome = TerminalOutcome::from_view(&controller);
                 let (level, message) = outcome.notice();
-                native_reconciliation = owner.native && outcome.requires_native_reconciliation();
-                if native_reconciliation {
-                    state.native_cleanup_required = true;
-                }
+                native_reconciliation = state.native_cleanup.settle(owner.native, &outcome);
                 self.logger.emit(
                     "Rust",
                     level,
@@ -672,6 +683,9 @@ fn installed_inventory(root: &Path, identity: &InstalledIdentity) -> Result<Inve
         .draft()
         .validate()
 }
+
+#[cfg(test)]
+mod cleanup_model;
 
 #[cfg(test)]
 mod tests;

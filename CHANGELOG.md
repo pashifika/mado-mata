@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add development-only Stateright safety checks for run reservation, Stop,
+  settlement and sticky Native cleanup admission, sharing production decisions.
+  Existing runtime/core CI includes the finite models; they do not authorize
+  native operations or replace real-worker and OS acceptance checks.
+
 - Require Node.js 24.22.2 for the trusted compiler, checkout builds and all CI
   lanes. Runtime admission refuses other versions, including older 24.x patches.
 
