@@ -28,7 +28,10 @@ from tooling import load_manifest
 CI_DIR = Path(__file__).resolve().parent
 ROOT = CI_DIR.parents[1]
 REPO = "owner/project"
-GATE_JOBS = ("branch-flow", "repository", "runtime-macos", "runtime-windows")
+GATE_JOBS = (
+    "branch-flow", "repository", "runtime-macos", "runtime-windows",
+    "desktop-macos", "desktop-windows", "engine-macos",
+)
 HEAD_BRANCH = "dev/runtime-comparison"
 HEAD_SHA = "a1" * 20
 
@@ -217,7 +220,7 @@ class GateTests(unittest.TestCase):
     def test_only_all_mandatory_success_passes(self):
         for selector_result in ("success", "skipped"):
             for job in GATE_JOBS:
-                for status in ("success", "failure", "cancelled", "skipped", "", None, "neutral", [], True):
+                for status in ("success", "failure", "cancelled", "abandoned", "skipped", "", None, "neutral", [], True):
                     with self.subTest(selector=selector_result, job=job, status=status):
                         needs = gate_needs(selector_result)
                         needs[job]["result"] = status
@@ -634,7 +637,8 @@ class RuntimeOutputTests(unittest.TestCase):
         return code, output.getvalue() + errors.getvalue(), snapshots
 
     def test_public_runtime_modes_retain_evidence_after_snapshot_removal(self):
-        for arguments in ([], ["--runtime-only"]):
+        for arguments in ([], ["--runtime-only"], ["--lane", "runtime"],
+                          ["--runtime-only", "--lane", "runtime"]):
             for status in ("PASS", "FAIL"):
                 with self.subTest(arguments=arguments, status=status):
                     payload = json.dumps({"version": 1, "check_passed": True,
@@ -647,15 +651,44 @@ class RuntimeOutputTests(unittest.TestCase):
                     self.assertEqual(len(snapshots), 1)
                     self.assertFalse(snapshots[0].exists())
 
+    def test_invalid_lane_arguments_are_refused_by_cli(self):
+        cases = (
+            ["--policy-only", "--lane", "runtime"],
+            ["--policy-only", "--lane", "desktop"],
+            ["--lane", "unknown"],
+            ["--lane"],
+        )
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(
+                    [sys.executable, "-B", str(CI_DIR / "check.py"), *arguments],
+                    cwd=self.root, text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+
     def test_policy_only_does_not_create_runtime_evidence(self):
         code, console, snapshots = self.invoke_public_mode(["--policy-only"], b"must not execute")
         self.assertEqual(code, 0, console)
         self.assertEqual(snapshots, [])
         self.assertFalse(self.results.exists())
 
+    def test_desktop_only_preserves_prior_runtime_evidence_without_claiming_it(self):
+        self.results.mkdir(parents=True)
+        for arguments in (["--lane", "desktop"], ["--runtime-only", "--lane", "desktop"]):
+            with self.subTest(arguments=arguments):
+                self.stdout_path.write_bytes(b"prior runtime results")
+                self.stderr_path.write_bytes(b"prior runtime diagnostics")
+                code, console, snapshots = self.invoke_public_mode(arguments, b"must not execute")
+                self.assertEqual(code, 0, console)
+                self.assertEqual(snapshots, [])
+                self.assertEqual(self.stdout_path.read_bytes(), b"prior runtime results")
+                self.assertEqual(self.stderr_path.read_bytes(), b"prior runtime diagnostics")
+                self.assertNotIn(str(self.stdout_path), console)
+
     def test_early_public_check_failure_discards_previous_runtime_evidence(self):
         self.results.mkdir(parents=True)
-        for arguments in ([], ["--runtime-only"]):
+        for arguments in ([], ["--runtime-only"], ["--lane", "runtime"],
+                          ["--runtime-only", "--lane", "runtime"]):
             with self.subTest(arguments=arguments):
                 self.stdout_path.write_bytes(b"old results")
                 self.stderr_path.write_bytes(b"old diagnostics")
@@ -914,15 +947,19 @@ class RepositoryPolicyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     check_ci_workflow(workflow, self.manifest["actions"], "ci-push.yml")
 
-    def test_controlled_lanes_cannot_skip_execution_or_change_toolchains(self):
-        for name in ("repository", "runtime-macos", "runtime-windows"):
+    def test_execution_lanes_cannot_skip_checks_or_change_toolchains(self):
+        for name in ("repository", "runtime-macos", "runtime-windows",
+                     "desktop-macos", "desktop-windows", "engine-macos"):
             for mutation in ("skip job", "skip step", "mask failure", "policy only", "wrong runner",
                              "floating rust", "floating node", "missing node", "implicit cache", "redirect command"):
                 with self.subTest(job=name, mutation=mutation):
                     workflow = deepcopy(self.workflow)
                     job = workflow["jobs"][name]
                     steps = job["steps"]
-                    check = next(step for step in steps if "tools/ci/check.py" in step.get("run", ""))
+                    check = next(step for step in steps if any(
+                        script in step.get("run", "")
+                        for script in ("tools/ci/check.py", "tools/ci/check_engine_macos.py")
+                    ))
                     node = next(step for step in steps if step.get("uses", "").startswith("actions/setup-node@"))
                     if mutation == "skip job":
                         job["if"] = "false"
@@ -949,7 +986,7 @@ class RepositoryPolicyTests(unittest.TestCase):
                         check_ci_workflow(workflow, self.manifest["actions"])
 
     def test_full_hosted_lanes_cannot_drop_workflow_or_link_checks(self):
-        for name in ("repository", "runtime-macos"):
+        for name in ("repository", "runtime-macos", "desktop-macos"):
             for mutation in ("runtime only", "missing native tools"):
                 with self.subTest(job=name, mutation=mutation):
                     workflow = deepcopy(self.workflow)
@@ -965,7 +1002,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_macos_engine_consumer_execution_is_mandatory(self):
         workflow = deepcopy(self.workflow)
-        steps = workflow["jobs"]["runtime-macos"]["steps"]
+        steps = workflow["jobs"]["engine-macos"]["steps"]
         engine = next(step for step in steps if step.get("run") == "python3 tools/ci/check_engine_macos.py")
         steps.remove(engine)
         with self.assertRaises(ValueError):
@@ -1018,7 +1055,7 @@ class RepositoryPolicyTests(unittest.TestCase):
                         steps.append({"name": "Extra step", "run": "echo unexpected"})
                     with self.assertRaises(ValueError):
                         check_ci_workflow(workflow, self.manifest["actions"])
-        for name in (SELECTOR_JOB, "branch-flow", "gate"):
+        for name in (SELECTOR_JOB, "branch-flow", "gate", "desktop-macos", "desktop-windows", "engine-macos"):
             with self.subTest(non_runtime_job=name):
                 workflow = deepcopy(self.workflow)
                 upload = next(step for step in workflow["jobs"]["repository"]["steps"]
@@ -1026,13 +1063,18 @@ class RepositoryPolicyTests(unittest.TestCase):
                 workflow["jobs"][name]["steps"].append(deepcopy(upload))
                 with self.assertRaises(ValueError):
                     check_ci_workflow(workflow, self.manifest["actions"])
+                workflow["jobs"][name]["steps"][-1].pop("if")
+                with self.assertRaises(ValueError):
+                    check_ci_workflow(workflow, self.manifest["actions"])
 
     def test_windows_symlink_setup_must_precede_checkout(self):
-        workflow = deepcopy(self.workflow)
-        steps = workflow["jobs"]["runtime-windows"]["steps"]
-        steps[0], steps[1] = steps[1], steps[0]
-        with self.assertRaisesRegex(ValueError, "before checkout"):
-            check_ci_workflow(workflow, self.manifest["actions"])
+        for name in ("runtime-windows", "desktop-windows"):
+            with self.subTest(job=name):
+                workflow = deepcopy(self.workflow)
+                steps = workflow["jobs"][name]["steps"]
+                steps[0], steps[1] = steps[1], steps[0]
+                with self.assertRaisesRegex(ValueError, "before checkout"):
+                    check_ci_workflow(workflow, self.manifest["actions"])
 
     def test_tracked_private_paths_and_missing_public_guides_are_refused(self):
         check_paths(sorted(REQUIRED_FILES))
