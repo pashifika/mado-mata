@@ -85,14 +85,14 @@ The version and integrity sources are:
 | GitHub Actions | Full commit SHAs | [Workflows](#hosted-workflow-and-required-gate) and [toolchain.json](../tools/ci/toolchain.json) |
 | actions/upload-artifact | v7.0.1 (`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`) | [Stable release](https://github.com/actions/upload-artifact/releases/tag/v7.0.1), [tag commit](https://api.github.com/repos/actions/upload-artifact/git/ref/tags/v7.0.1), and [pinned inputs](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) |
 
-CI uses Python 3.13, `ubuntu-24.04`, `macos-26`, and `windows-2025`. The macOS job
-prints and requires `arm64`; runtime checks also print their actual host identity.
-Linux and macOS run the full public check, including pinned actionlint and
+CI uses Python 3.13, `ubuntu-24.04`, `macos-26`, and `windows-2025`. Each macOS
+job prints and requires `arm64`; check commands also print their host identity.
+Linux runs the full public check. macOS and Windows run independent runtime
+and desktop lanes; macOS also runs the model-free `engine` consumer suite in
+its own required job. Both ordinary macOS lanes retain pinned actionlint and
 offline local-link validation. Windows retains `--runtime-only` because the
-native-tool installer has no Windows assets. Before the full check, macOS also
-runs the model-free `engine` consumer library suite described below. The
-event-specific PR, push and manual workflows use the same platform scope; none
-performs physical-device GUI/game acceptance.
+native-tool installer has no Windows assets. PR, push and manual workflows
+use the same platform scope; none performs physical-device GUI/game acceptance.
 Update versions, integrity values, workflow references, and this guide together
 through a checked Change. A new installer host needs a verified release asset.
 
@@ -397,6 +397,27 @@ toolchain scratch root, not the application-path acceptance scenario.
 
 The two narrower modes are mutually exclusive. Missing tools, invalid input,
 or failing commands remain failures; neither mode substitutes for the full gate.
+
+To run one ordinary lane independently:
+
+```sh
+python3 tools/ci/check.py --lane runtime
+python3 tools/ci/check.py --lane desktop
+```
+
+On Windows, use `python` and add `--runtime-only` to either command. That flag
+omits actionlint and lychee; it does not select a runtime lane. `--policy-only`
+cannot be combined with `--lane`. Without a lane, the existing combined sequence
+remains the default.
+
+The runtime lane owns OMP adapter, compiler/SDK, application-launch and controlled
+runtime checks. The desktop lane installs its own trusted compiler and frontend
+dependencies, then runs frontend/core checks and platform-applicable shell checks.
+Each lane uses its own disposable tracked-file snapshot. Hosted jobs build fresh
+outputs and reuse compatible outputs only within that job; they neither restore
+compiler-output caches nor download binaries from another job. A lane-only pass
+is not a full-check pass.
+
 These checks do not install remote rulesets or verify live GitHub enforcement.
 
 Desktop `0.2.0` marks the first rejecting development version, not a runtime
@@ -436,21 +457,25 @@ replaces earlier evidence so a failed attempt cannot reuse a previous result.
 `--policy-only` does not run the controlled command or produce fresh runtime
 evidence; any files from an earlier runtime invocation are not policy-only
 evidence.
-Desktop checks run after the controlled suite. A frontend/core/shell failure
-still fails the job without discarding the already captured runtime evidence.
+In the combined local command, desktop checks run after the controlled suite.
+A frontend/core/shell failure still fails that command without discarding the
+already captured runtime evidence. Desktop-only invocations leave prior runtime
+files untouched and report controlled execution as unexecuted.
 These two files are not GUI acceptance results or application-local logs.
 
-The Linux, macOS arm64, and Windows jobs each attempt an artifact upload after
-the controlled check with `always()`, including when an earlier step fails.
+The Linux full-check and macOS/Windows runtime jobs each attempt an artifact
+upload after the controlled check with `always()`, including when an earlier
+step fails.
 Artifacts are named `controlled-runtime-${{ runner.os }}-${{ runner.arch }}` and
 retained for **7 days**. Downloads contain only `runtime-results.json` and
 `runtime-stderr.log`. Hidden-file inclusion is explicit because their source
 paths are under `.cache`; no directory, private planning files, or native
 evidence is uploaded.
 
-If an earlier prerequisite fails before evidence exists, the upload warns about
-missing files without replacing the original failure. It does not make the
-runtime job or mandatory gate pass. Other upload failures remain job failures.
+Desktop and engine jobs do not upload controlled results. If an earlier runtime
+prerequisite fails before evidence exists, the upload warns about missing files
+without replacing the original failure. It does not make the runtime job or
+mandatory gate pass. Other upload failures remain job failures.
 These artifacts contain controlled results, not native qualification evidence;
 artifact upload grants no native capture, OCR, game-launch, or input authority.
 
@@ -564,7 +589,7 @@ revalidation procedure above remains required.
 Only this selector job receives `pull-requests: read` alongside `contents: read`,
 using the read-only `github.token` as `GH_TOKEN`. API responses and credentials
 are not logged. Failure to write the required `GITHUB_OUTPUT` is a selector
-failure, not a successful selection. A failed selector still allows the four
+failure, not a successful selection. A failed selector still allows mandatory
 checks to attempt work, but cannot produce a passing gate.
 
 The stable result is intentionally event-specific:
@@ -576,21 +601,24 @@ The stable result is intentionally event-specific:
 | Manual dispatch | `CI Gate (manual)` | No |
 
 Unless an exact-head promotion PR suppresses the duplicate push run, the `gate`
-job runs with `always()` and needs the selector plus all four mandatory jobs:
+job runs with `always()` and needs the selector plus all seven mandatory jobs:
 
 | Job | Coverage |
 | --- | --- |
 | `branch-flow` | Event and branch-route validation |
 | `repository` | Full local check, controlled runtime, desktop frontend/core on Linux |
-| `runtime-macos` | Policy, governance tests, controlled runtime, desktop frontend/core, and shell build on Apple Silicon macOS |
-| `runtime-windows` | Policy, governance tests, controlled runtime, desktop frontend/core, Windows shell build and non-GUI shell/owned-process contracts |
+| `runtime-macos` | Policy, governance, actionlint/local links, adapter, compiler/SDK, application-launch and controlled runtime checks on Apple Silicon macOS |
+| `runtime-windows` | Policy, governance, adapter, compiler/SDK, application-launch and controlled runtime checks on Windows |
+| `desktop-macos` | Policy, governance, actionlint/local links, frontend/core checks and shell build on Apple Silicon macOS |
+| `desktop-windows` | Policy, governance, frontend/core checks, shell build and non-GUI shell/owned-process contracts on Windows |
+| `engine-macos` | Model-free engine consumer library tests with pinned-source native setup on Apple Silicon macOS |
 
 Only success from every mandatory job passes. Failure, cancellation, missing
 results, unexpected dependencies, and skipped mandatory work cannot produce a
 successful gate. The selector must succeed or be skipped (as on PR/manual
 events); its output does not excuse skipped mandatory results. There are no
-optional lanes. On a confirmed duplicate push, the four jobs and push gate are
-skipped, not reported as successful validation.
+optional lanes. On a confirmed duplicate push, all seven jobs and the push gate
+are skipped, not reported as successful validation.
 
 All job display names are literal, including skipped jobs. GitHub can expose
 unevaluated name expressions when a job is skipped. Ordinary job names omit
@@ -602,8 +630,15 @@ check. Policy validates all three workflows, including their event, gate
 context, permissions, pinned commands and mandatory dependencies.
 
 The aggregate reads `NEEDS_JSON` as data and requires exactly the selector plus
-the four mandatory job IDs; keep that set synchronized across all three
+the seven mandatory job IDs; keep that set synchronized across all three
 workflows when adding a lane.
+
+Independent lanes start after the selector, not after another build lane.
+Rerunning a lane builds fresh outputs; earlier successful jobs keep their
+original attempt attribution. More jobs can reduce gate latency while increasing
+total runner time. Timing reports distinguish initial queue delay, complete
+gate-completion interval and aggregate non-skipped job duration, including setup
+and uploads. Failed or partial attempts are not successful performance samples.
 
 Branch flow reads `GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`, and
 `GITHUB_REPOSITORY`; non-PR contexts also use `GITHUB_REF`. PR metadata is JSON

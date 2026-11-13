@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Run macOS and Windows runtime/desktop CI lanes independently, with a separate
+  required macOS engine lane. Preserve clean builds, all platform checks and the
+  fail-closed `CI Gate`; expose `--lane runtime|desktop` for local verification.
+
 - Require Node.js 24.22.2 for the trusted compiler, checkout builds and all CI
   lanes. Runtime admission refuses other versions, including older 24.x patches.
 
