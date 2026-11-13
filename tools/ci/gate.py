@@ -4,7 +4,10 @@ import json
 import os
 import sys
 
-EXPECTED_JOBS = frozenset({"branch-flow", "repository", "runtime-macos", "runtime-windows"})
+EXPECTED_JOBS = frozenset({
+    "branch-flow", "repository", "runtime-macos", "runtime-windows",
+    "desktop-macos", "desktop-windows", "engine-macos",
+})
 SELECTOR_JOB = "dev-push-policy"
 CHECKS_IF = (
     "${{ !cancelled() && (github.event_name != 'push' || "

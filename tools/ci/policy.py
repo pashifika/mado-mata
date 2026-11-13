@@ -39,6 +39,9 @@ HOSTED_RUNNERS = {
     "repository": "ubuntu-24.04",
     "runtime-macos": "macos-26",
     "runtime-windows": "windows-2025",
+    "desktop-macos": "macos-26",
+    "desktop-windows": "windows-2025",
+    "engine-macos": "macos-26",
     "gate": "ubuntu-24.04",
 }
 
@@ -207,13 +210,14 @@ def check_workflow_hygiene(workflow, pins, label):
             require(isinstance(step, dict), f"{where}: each step must be an object")
             require(("uses" in step) != ("run" in step), f"{where}: step must have exactly one of uses or run")
             runtime_upload = (
-                label in CI_WORKFLOWS and name in {"repository", "runtime-macos", "runtime-windows"}
-                and isinstance(step.get("uses"), str)
+                label in CI_WORKFLOWS and isinstance(step.get("uses"), str)
                 and step["uses"].startswith("actions/upload-artifact@")
             )
             require("continue-on-error" not in step,
                     f"{where}: mandatory steps cannot ignore failures")
             if runtime_upload:
+                require(name in {"repository", "runtime-macos", "runtime-windows"},
+                        f"{where}: only controlled runtime owners may upload evidence")
                 require(step.get("if") in ("${{ always() }}", "always()"),
                         f"{where}: controlled evidence upload must run with always()")
                 require("actions/upload-artifact" in pins,
@@ -309,25 +313,31 @@ def check_ci_workflow(workflow, pins, label="ci.yml"):
             "python3 tools/ci/install_tools.py", "python3 tools/ci/check.py",
         ],
         "gate": ["python3 tools/ci/gate.py"],
-        "runtime-macos": [
-            "python3 -c \"import platform; print(platform.platform(), platform.machine()); assert platform.machine() == 'arm64'\"",
-            f"rustup toolchain install {RUST_VERSION} --profile minimal",
-            "python3 -m pip install --require-hashes -r tools/ci/requirements.txt",
-            "python3 tools/ci/check_engine_macos.py",
-            "python3 tools/ci/install_tools.py",
-            "python3 tools/ci/check.py",
-        ],
-        "runtime-windows": [
-            "git config --global core.symlinks true",
-            f"rustup toolchain install {RUST_VERSION} --profile minimal",
-            "python -m pip install --require-hashes -r tools/ci/requirements.txt",
-            "python tools/ci/check.py --runtime-only",
-        ],
     }
+    arm64 = "python3 -c \"import platform; print(platform.platform(), platform.machine()); assert platform.machine() == 'arm64'\""
+    rust = f"rustup toolchain install {RUST_VERSION} --profile minimal"
+    for lane in ("runtime", "desktop"):
+        commands[f"{lane}-macos"] = [
+            arm64, rust,
+            "python3 -m pip install --require-hashes -r tools/ci/requirements.txt",
+            "python3 tools/ci/install_tools.py",
+            f"python3 tools/ci/check.py --lane {lane}",
+        ]
+        commands[f"{lane}-windows"] = [
+            "git config --global core.symlinks true", rust,
+            "python -m pip install --require-hashes -r tools/ci/requirements.txt",
+            f"python tools/ci/check.py --runtime-only --lane {lane}",
+        ]
+    commands["engine-macos"] = [
+        arm64, rust, "python3 tools/ci/check_engine_macos.py",
+    ]
     for name, expected in commands.items():
         actual = [step["run"].strip() for step in jobs[name]["steps"] if "run" in step]
         require(actual == expected, f"ci.yml/{name}: required public commands must run without masking failures")
-    for name in ("repository", "runtime-macos", "runtime-windows"):
+    for name in ("repository", "runtime-macos", "runtime-windows",
+                 "desktop-macos", "desktop-windows", "engine-macos"):
+        require(jobs[name].get("timeout-minutes") == 30,
+                f"ci.yml/{name}: checks must retain the 30-minute timeout")
         steps = jobs[name]["steps"]
         for action, settings in (
             ("actions/setup-python", {"python-version": "3.13"}),
@@ -336,8 +346,15 @@ def check_ci_workflow(workflow, pins, label="ci.yml"):
             setup = [step for step in steps if step.get("uses", "").startswith(action + "@")]
             require(len(setup) == 1 and setup[0].get("with") == settings,
                     f"ci.yml/{name}: {action} must install the pinned tool without implicit caching")
-        check_index = next(index for index, step in enumerate(steps) if "tools/ci/check.py" in step.get("run", ""))
+        command = "tools/ci/check_engine_macos.py" if name == "engine-macos" else "tools/ci/check.py"
+        check_index = next(index for index, step in enumerate(steps) if command in step.get("run", ""))
         uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
+        require(all(index < check_index for index, step in enumerate(steps)
+                    if "uses" in step and step not in uploads),
+                f"ci.yml/{name}: checkout and tool setup must precede checks")
+        if name in {"desktop-macos", "desktop-windows", "engine-macos"}:
+            require(not uploads, f"ci.yml/{name}: non-runtime lanes must not upload controlled evidence")
+            continue
         require(len(uploads) == 1 and steps[check_index + 1:] == uploads,
                 f"ci.yml/{name}: exactly one controlled evidence upload must immediately follow checks")
         require(uploads[0].get("with") == {
@@ -350,12 +367,9 @@ def check_ci_workflow(workflow, pins, label="ci.yml"):
             "include-hidden-files": True,
             "if-no-files-found": "warn",
         }, f"ci.yml/{name}: upload only the two controlled evidence files with bounded retention")
-        require(all(index < check_index for index, step in enumerate(steps)
-                    if "uses" in step and step not in uploads),
-                f"ci.yml/{name}: checkout and tool setup must precede checks")
-    windows = jobs["runtime-windows"]["steps"]
-    require(windows[0].get("run") == "git config --global core.symlinks true",
-            "ci.yml/runtime-windows: preserve symlinks before checkout")
+    for name in ("runtime-windows", "desktop-windows"):
+        require(jobs[name]["steps"][0].get("run") == "git config --global core.symlinks true",
+                f"ci.yml/{name}: preserve symlinks before checkout")
     gate_step = next(step for step in gate["steps"] if "run" in step)
     require(gate_step.get("env") == {"NEEDS_JSON": "${{ toJSON(needs) }}"},
             "ci.yml: gate must read the actual needs results through NEEDS_JSON")

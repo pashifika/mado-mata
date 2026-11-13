@@ -152,9 +152,9 @@ def run_runtime_check(command, root, results_directory):
         raise ValueError("controlled runtime check failed; see retained evidence")
 
 
-def check_runtime(root, results_directory):
-    """Exercise the controlled runtime and desktop without native authority."""
-    print(f"Controlled runtime host: {platform.platform()} ({platform.machine()})", flush=True)
+def node_tools(root):
+    """Require the same pinned Node installation in either application lane."""
+    print(f"Application checks host: {platform.platform()} ({platform.machine()})", flush=True)
     node = shutil.which("node")
     npm = shutil.which("npm")
     if node is None or npm is None:
@@ -162,6 +162,11 @@ def check_runtime(root, results_directory):
     version = subprocess.run([node, "--version"], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
     if version != f"v{NODE_VERSION}":
         raise ValueError(f"Node.js {NODE_VERSION} is required; found {version!r}")
+    return node, npm
+
+
+def check_runtime(root, results_directory, node, npm):
+    """Exercise the controlled runtime without native authority."""
     run([npm, "test", "--prefix", "integrations/omp"], root)
     compiler = root / RUNTIME_ROOT / "compiler"
     run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], compiler)
@@ -173,6 +178,11 @@ def check_runtime(root, results_directory):
     run([*cargo, "build", *manifest], root)
     run([*cargo, "test", *manifest], root)
     run_runtime_check([*cargo, "run", *manifest, "--", "check"], root, results_directory)
+
+
+def check_desktop(root, npm):
+    """Exercise frontend, core, and applicable shell checks without GUI authority."""
+    cargo = ["cargo", f"+{RUST_VERSION}"]
     run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefix", DESKTOP_ROOT], root)
     run([npm, "test", "--prefix", DESKTOP_ROOT], root)
     run([npm, "run", "build", "--prefix", DESKTOP_ROOT], root)
@@ -191,18 +201,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--policy-only", action="store_true", help="governance policy and its tests only; no runtime, desktop, or external tools")
-    modes.add_argument("--runtime-only", action="store_true", help="policy, its tests, controlled runtime, and desktop; omit actionlint and lychee")
+    modes.add_argument("--runtime-only", action="store_true", help="policy, its tests, and selected application checks; omit actionlint and lychee")
+    parser.add_argument("--lane", choices=("runtime", "desktop"), help="run one application lane; omit for combined runtime and desktop checks")
     args = parser.parse_args()
-    if sys.version_info < (3, 11):
-        print("Repository checks require Python 3.11 or newer.", file=sys.stderr)
-        return 1
+    if args.policy_only and args.lane is not None:
+        parser.error("--policy-only cannot be combined with --lane")
     try:
         results_directory = ROOT / RUNTIME_RESULTS
-        if not args.policy_only:
+        if not args.policy_only and args.lane != "desktop":
             # Clear old evidence even if policy, dependencies, or the build fail
             # before the runtime command starts.
             for name in ("runtime-results.json", "runtime-stderr.log"):
                 (results_directory / name).unlink(missing_ok=True)
+        if sys.version_info < (3, 11):
+            raise ValueError("Repository checks require Python 3.11 or newer.")
         try:
             from policy import check_paths, check_repository, tracked_files
         except ModuleNotFoundError as error:
@@ -235,9 +247,22 @@ def main():
                 run([tools["lychee"], "--offline", "--include-fragments", "--no-progress", "--no-ignore", "--hidden",
                      "--config", lychee_config, "--root-dir", snapshot, "--", *markdown], snapshot)
             if not args.policy_only:
-                check_runtime(snapshot, results_directory)
+                node, npm = node_tools(snapshot)
+                if args.lane != "desktop":
+                    check_runtime(snapshot, results_directory, node, npm)
+                else:
+                    # Desktop validation calls the compiler directly, not the runtime executable.
+                    run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], snapshot / RUNTIME_ROOT / "compiler")
+                if args.lane != "runtime":
+                    check_desktop(snapshot, npm)
         if args.policy_only:
             print("Repository checks passed (policy and governance tests only; runtime, desktop, and external tools unexecuted).")
+        elif args.lane:
+            executed = "controlled runtime" if args.lane == "runtime" else "desktop checks"
+            unexecuted = "desktop checks" if args.lane == "runtime" else "controlled runtime"
+            external = "actionlint and lychee unexecuted" if args.runtime_only else "actionlint and offline local links"
+            print(f"Repository checks passed ({args.lane} lane: policy, governance tests, {executed}, "
+                  f"{external}; {unexecuted} unexecuted).")
         elif args.runtime_only:
             print("Repository checks passed (policy, governance tests, controlled runtime, desktop checks; actionlint and lychee unexecuted).")
         else:
