@@ -162,10 +162,25 @@ for (const {scenario, makeUnsafe} of unsafeDescriptors) test(scenario, {skip: WI
   assert.equal(calls, 0);
 });
 
-test('discovery of a missing selected root remains empty', async t => {
+test('missing-root discovery needs no privacy helper and honors cancellation', async t => {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'mc-'));
   t.after(() => rm(root, {recursive: true, force: true}));
-  assert.deepEqual((await discover(join(root, 'absent'))).instances, []);
+  const absent = join(root, 'absent');
+  const systemRoot = process.env.SystemRoot;
+  try {
+    // Top-level tests run serially in this file's isolated Node test process.
+    // An unavailable helper must not turn absence into a privacy timeout.
+    delete process.env.SystemRoot;
+    assert.deepEqual((await discover(absent)).instances, []);
+    await assert.rejects(discover(absent, AbortSignal.abort()), {code: 'Cancelled'});
+    if (WINDOWS) {
+      await assert.rejects(discover(root), {code: 'UnsafeEndpoint'});
+      await assert.rejects(discover('\\\\server\\share\\absent'), {code: 'UnsafeEndpoint'});
+    }
+  } finally {
+    if (systemRoot === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = systemRoot;
+  }
 });
 
 test('Windows accepts a read-only shared root but rejects a readable descriptor ACL', {skip: !WINDOWS}, async t => {
@@ -183,6 +198,7 @@ test('Windows rejects a junction in the selected endpoint path', {skip: !WINDOWS
   const alias = join(fixture.root, 'alias');
   await symlink(fixture.root, alias, 'junction');
   await assert.rejects(readDescriptor(alias, fixture.endpoint.instance), {code: 'UnsafeEndpoint'});
+  await assert.rejects(discover(alias), {code: 'UnsafeEndpoint'});
 });
 
 test('Windows rejects remote pipes and descriptor replacement before submission', {skip: !WINDOWS}, async t => {
