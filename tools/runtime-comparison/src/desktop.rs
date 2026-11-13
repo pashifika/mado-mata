@@ -1,5 +1,6 @@
 //! One application-owned operation, with independent lifecycle and log queues.
 
+mod lifecycle;
 mod native;
 mod operation;
 mod packages;
@@ -10,6 +11,7 @@ mod test_support;
 
 use crate::inventory::{Inventory, TargetDeclaration};
 use crate::model::{Control, Fault, NativeBudgets, Plan};
+use lifecycle::Lifecycle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -241,10 +243,9 @@ struct Active {
 }
 
 struct State {
-    closed: bool,
+    lifecycle: Lifecycle,
     run: Option<String>,
     operation: &'static str,
-    phase: &'static str,
     active: Option<Active>,
     result: Option<Value>,
     error: Option<Fault>,
@@ -259,10 +260,9 @@ struct State {
 impl State {
     fn new() -> Self {
         Self {
-            closed: false,
+            lifecycle: Lifecycle::new(),
             run: None,
             operation: "run",
-            phase: "idle",
             active: None,
             result: None,
             error: None,

@@ -1,3 +1,4 @@
+use super::lifecycle::{AdmissionRefusal, Progress, StopDecision};
 use super::packages::{runtime, select_profile};
 use super::{
     Active, ControllerView, DesktopController, LOG_CAPACITY, LaunchDisposition, NEXT_RUN,
@@ -68,22 +69,14 @@ impl State {
                 value["status"] = json!(status);
                 value["phase"] = json!(phase);
                 value["launch"] = json!(launch);
-                if self.phase != "stopping" {
-                    self.phase = match phase {
-                        NativePhase::Settling | NativePhase::Recovering => "recovering",
-                        NativePhase::Workflow | NativePhase::Readiness | NativePhase::Function => {
-                            "running"
-                        }
-                        _ => "preparing",
-                    };
-                }
+                self.lifecycle.progress(Progress::native(phase));
             }
         }
         value["child_run"] = value["run"].clone();
         value["run"] = json!(run);
         value["operation"] = json!(self.operation);
-        if value["event"] == "ChildStarted" && self.phase == "preparing" {
-            self.phase = "running";
+        if value["event"] == "ChildStarted" {
+            self.lifecycle.progress(Progress::ChildStarted);
         }
         if self.progress.len() < PROGRESS_CAPACITY {
             self.progress.push(value);
@@ -235,7 +228,7 @@ impl State {
                 self.error = Some(error);
             }
         }
-        self.phase = "terminal";
+        self.lifecycle.settled();
         if self.progress.len() < PROGRESS_CAPACITY {
             self.progress
                 .push(json!({"event":"ControllerSettled","run":self.run,"worker_finished":true}));
@@ -567,18 +560,21 @@ impl DesktopController {
     ) -> Result<String, Fault> {
         let mut state = self.state();
         state.refresh();
-        if state.closed {
-            return Err(Fault::new(
-                "ControllerClosed",
-                "controller is shutting down",
-            ));
-        }
-        if state.active.is_some() {
-            return Err(Fault::new(
-                "RunActive",
-                "previous operation has not settled and been reaped",
-            )
-            .with_context(json!({"run":state.run,"operation":state.operation})));
+        match state.lifecycle.admission(state.active.is_some()) {
+            Ok(()) => {}
+            Err(AdmissionRefusal::Closed) => {
+                return Err(Fault::new(
+                    "ControllerClosed",
+                    "controller is shutting down",
+                ));
+            }
+            Err(AdmissionRefusal::Active) => {
+                return Err(Fault::new(
+                    "RunActive",
+                    "previous operation has not settled and been reaped",
+                )
+                .with_context(json!({"run":state.run,"operation":state.operation})));
+            }
         }
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -616,7 +612,7 @@ impl DesktopController {
             .map_err(|error| Fault::new("Startup", error.to_string()))?;
         state.run = Some(run.clone());
         state.operation = operation;
-        state.phase = "preparing";
+        state.lifecycle.started();
         state.result = None;
         state.error = None;
         state.native_preparation = None;
@@ -639,20 +635,27 @@ impl DesktopController {
 
     pub fn stop(&self, run: &str) -> Result<(), Fault> {
         let mut state = self.state();
-        if state.run.as_deref() != Some(run) {
-            return Err(Fault::new(
-                "StaleIdentity",
-                "Stop does not name the current application run",
-            ));
-        }
-        if let Some(active) = &state.active {
-            active.control.cancel();
-            if state.phase != "stopping" {
-                state.phase = "stopping";
-                if state.progress.len() < PROGRESS_CAPACITY {
-                    state
-                        .progress
-                        .push(json!({"event":"StopRequestedByApplication","run":run}));
+        let State {
+            lifecycle,
+            run: current,
+            active,
+            progress,
+            ..
+        } = &mut *state;
+        match lifecycle.stop(current.as_deref(), run, active.is_some()) {
+            StopDecision::Stale => {
+                return Err(Fault::new(
+                    "StaleIdentity",
+                    "Stop does not name the current application run",
+                ));
+            }
+            StopDecision::Inactive => {}
+            StopDecision::Cancel { notify } => {
+                if let Some(active) = active {
+                    active.control.cancel();
+                }
+                if notify && progress.len() < PROGRESS_CAPACITY {
+                    progress.push(json!({"event":"StopRequestedByApplication","run":run}));
                 }
             }
         }
@@ -666,7 +669,7 @@ impl DesktopController {
         ControllerView {
             run: state.run.clone(),
             operation: state.operation.into(),
-            state: state.phase.into(),
+            state: state.lifecycle.status().into(),
             result: state.result.clone(),
             error: state.error.clone(),
             progress: state.progress.clone(),
@@ -681,10 +684,10 @@ impl DesktopController {
     pub fn shutdown(&self) -> Result<(), Fault> {
         {
             let mut state = self.state();
-            state.closed = true;
+            let worker_owned = state.active.is_some();
+            state.lifecycle.close(worker_owned);
             if let Some(active) = &state.active {
                 active.control.cancel();
-                state.phase = "stopping";
             }
         }
         let deadline = Instant::now() + Duration::from_millis(SHUTDOWN_MS);

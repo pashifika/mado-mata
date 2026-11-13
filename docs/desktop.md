@@ -895,6 +895,9 @@ bypass them. The selected root must be current-user-owned on a local drive,
 without reparse components or another user's write/delete authority. Read-only
 root sharing is allowed; the collaboration directory, descriptors and pipe
 remain private. MadoMata does not rewrite an existing root's ACL to make it pass.
+Discovery of a missing selected root returns no instances without starting that
+helper. This absence check does not verify or authorize a root; every existing
+root still requires the handle-based checks, and cancellation remains a refusal.
 
 ### Install, select and remove the adapter
 

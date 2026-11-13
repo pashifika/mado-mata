@@ -42,6 +42,7 @@ sha2 = { version = "=0.10.9", features = ["asm"] }
 sha2 = "=0.10.9"
 
 [dev-dependencies]
+stateright = "=0.31.0"
 mado-pilot-runtime = { git = "https://github.com/pashifika/mado-pilot", rev = "a97d8fdc5a197f31a477603d689569e4214846bc" }
 mado-pilot-capture = { git = "https://github.com/pashifika/mado-pilot", rev = "a97d8fdc5a197f31a477603d689569e4214846bc" }
 mado-pilot-core = { git = "https://github.com/pashifika/mado-pilot", rev = "a97d8fdc5a197f31a477603d689569e4214846bc" }

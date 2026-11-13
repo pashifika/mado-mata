@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Return empty OMP discovery for a missing data root without starting the Windows
+  privacy helper. Keep cancellation and full handle/ACL verification for existing
+  roots; do not extend the privacy timeout or retry failed verification.
+
+- Add development-only Stateright safety checks for run reservation, Stop,
+  settlement and sticky Native cleanup admission, sharing production decisions.
+  Existing runtime/core CI includes the finite models; they do not authorize
+  native operations or replace real-worker and OS acceptance checks.
+
 - Run macOS and Windows runtime/desktop CI lanes independently, with a separate
   required macOS engine lane. Preserve clean builds, all platform checks and the
   fail-closed `CI Gate`; expose `--lane runtime|desktop` for local verification.

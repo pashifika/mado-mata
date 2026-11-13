@@ -394,12 +394,13 @@ fn late_child_progress_cannot_erase_capture_readiness_or_the_launch_disposition(
 fn old_attempt_progress_cannot_replace_fresh_preparation_or_reopen_stopped_owner() {
     let mut state = State::new();
     state.run = Some("owner".into());
-    state.phase = "running";
+    state.lifecycle.started();
+    state.lifecycle.progress(Progress::ChildStarted);
     state.progress(
         json!({"event":"NativePreparation","app_run":"owner","attempt":1,
         "status":"capture_ready","phase":"settling","launch":"accepted"}),
     );
-    assert_eq!(state.phase, "recovering");
+    assert_eq!(state.lifecycle.status(), "recovering");
     state.progress(
         json!({"event":"NativePreparation","app_run":"owner","attempt":2,
         "status":"not_requested","phase":"preflight","launch":"not_requested"}),
@@ -412,12 +413,12 @@ fn old_attempt_progress_cannot_replace_fresh_preparation_or_reopen_stopped_owner
     assert_eq!(state.native_preparation, fresh);
     assert_eq!(fresh.unwrap().attempt, 2);
     assert_eq!(fresh.unwrap().launch, LaunchDisposition::NotRequested);
-    state.phase = "stopping";
+    state.lifecycle.stop(Some("owner"), "owner", true);
     state.progress(
         json!({"event":"NativePreparation","app_run":"owner","attempt":2,
         "status":"pending","phase":"target_discovery","launch":"not_requested"}),
     );
-    assert_eq!(state.phase, "stopping");
+    assert_eq!(state.lifecycle.status(), "stopping");
     state.log(json!({"run":"owner","attempt":1,"sequence":1,"message":"old"}));
     state.log(json!({"run":"owner","attempt":2,"sequence":1,"message":"fresh"}));
     assert_eq!(
