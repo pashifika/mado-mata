@@ -3,8 +3,9 @@
 ## Unreleased
 
 - Return empty OMP discovery for a missing data root without starting the Windows
-  privacy helper. Keep cancellation and full handle/ACL verification for existing
-  roots; do not extend the privacy timeout or retry failed verification.
+  privacy helper. Bound the root probe and honor cancellation while it is pending.
+  Keep full handle/ACL verification for existing roots; do not extend the helper
+  timeout or retry failed verification.
 
 - Add development-only Stateright safety checks for run reservation, Stop,
   settlement and sticky Native cleanup admission, sharing production decisions.

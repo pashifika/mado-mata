@@ -898,6 +898,9 @@ remain private. MadoMata does not rewrite an existing root's ACL to make it pass
 Discovery of a missing selected root returns no instances without starting that
 helper. This absence check does not verify or authorize a root; every existing
 root still requires the handle-based checks, and cancellation remains a refusal.
+The existence probe has its own 10-second wait limit and responds to cancellation
+while pending. This stops waiting, not the underlying filesystem I/O; late probe
+completion cannot continue discovery. Timeout and cancellation never mean absence.
 
 ### Install, select and remove the adapter
 
