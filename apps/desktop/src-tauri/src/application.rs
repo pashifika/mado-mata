@@ -287,6 +287,13 @@ struct OperationOwner {
     terminal: bool,
 }
 
+/// In-memory Native admission latch; only application restart starts it ready again.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum NativeCleanup {
+    Ready,
+    Required,
+}
+
 struct Workspaces {
     open: Vec<Workspace>,
     session: String,
@@ -297,7 +304,7 @@ struct Workspaces {
     target_picker: Option<WorkspaceRef>,
     authoring: Option<authoring::Lease>,
     next_authoring: u64,
-    native_cleanup_required: bool,
+    native_cleanup: NativeCleanup,
 }
 
 pub struct Application {
@@ -405,7 +412,7 @@ impl Application {
             target_picker: None,
             authoring: None,
             next_authoring: 1,
-            native_cleanup_required: false,
+            native_cleanup: NativeCleanup::Ready,
         };
         for tab in store.tabs()?.tabs.into_iter().filter(|tab| tab.open) {
             let workspace = workspaces.next_workspace()?;

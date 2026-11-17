@@ -362,7 +362,30 @@ export function defaultDataRoot() {
 function windowsRoot(dataRoot) {
   // Rust canonical paths can carry the local extended-length prefix. Never
   // convert an extended UNC/device path into an accepted local drive path.
-  return resolve(dataRoot).replace(/^\\\\\?\\(?=[a-z]:\\)/i, '');
+  const root = resolve(dataRoot).replace(/^\\\\\?\\(?=[a-z]:\\)/i, '');
+  if (!/^[a-z]:\\/i.test(root) || root.indexOf(':', 2) >= 0 || root.includes('\0')) {
+    failure('UnsafeEndpoint', 'The Windows collaboration root must use a local drive path.');
+  }
+  return root;
+}
+
+async function probeWindowsRoot(root, signal) {
+  let timer, cancel;
+  try {
+    await new Promise((resolveProbe, reject) => {
+      cancel = () => reject(new CollaborationError('Cancelled', 'Discovery was cancelled.'));
+      timer = setTimeout(() => reject(new CollaborationError(
+        'PrivacyCheckTimeout', 'The bounded Windows root check did not finish.')), 10_000);
+      signal?.addEventListener('abort', cancel, {once: true});
+      if (signal?.aborted) { cancel(); return; }
+      // Bound the wait, not the filesystem operation. Observe late failures
+      // without allowing late completion to continue endpoint discovery.
+      lstat(root).then(resolveProbe, reject);
+    });
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', cancel);
+  }
 }
 
 async function descriptorDirectory(dataRoot) {
@@ -419,10 +442,15 @@ export async function readDescriptor(dataRoot, instance, signal) {
 }
 
 export async function discover(dataRoot = defaultDataRoot(), signal) {
+  if (signal?.aborted) failure('Cancelled', 'Discovery was cancelled.');
   let names;
   try {
     if (WINDOWS) {
-      ({names} = await windowsInspect({mode: 'list', root: windowsRoot(dataRoot)}, signal));
+      const root = windowsRoot(dataRoot);
+      // Absence grants no endpoint authority and needs no Windows helper.
+      // Any existing entry still goes through the full handle/ACL checks.
+      await probeWindowsRoot(root, signal);
+      ({names} = await windowsInspect({mode: 'list', root}, signal));
     } else {
       const directory = await descriptorDirectory(dataRoot);
       names = [];
@@ -435,6 +463,7 @@ export async function discover(dataRoot = defaultDataRoot(), signal) {
       }
     }
   } catch (error) {
+    if (signal?.aborted) failure('Cancelled', 'Discovery was cancelled.');
     if (error.code === 'ENOENT') return {instances: [], disclosure: DISCLOSURE};
     if (error instanceof CollaborationError) throw error;
     failure('DiscoveryUnavailable', 'The selected data root cannot be inspected.');

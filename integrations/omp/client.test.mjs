@@ -1,12 +1,13 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:net';
-import {chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile} from 'node:fs/promises';
+import filesystem, {chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {once} from 'node:events';
 import {spawn} from 'node:child_process';
 import {randomBytes} from 'node:crypto';
+import {syncBuiltinESMExports} from 'node:module';
 import {AuthoringConnection, checkCompatibility, discover, FRAME_BYTES, publicError, readDescriptor, request} from './client.mjs';
 import register from './index.mjs';
 
@@ -162,10 +163,63 @@ for (const {scenario, makeUnsafe} of unsafeDescriptors) test(scenario, {skip: WI
   assert.equal(calls, 0);
 });
 
-test('discovery of a missing selected root remains empty', async t => {
+test('missing-root discovery needs no privacy helper and honors cancellation', async t => {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'mc-'));
   t.after(() => rm(root, {recursive: true, force: true}));
-  assert.deepEqual((await discover(join(root, 'absent'))).instances, []);
+  const absent = join(root, 'absent');
+  const systemRoot = process.env.SystemRoot;
+  try {
+    // Top-level tests run serially in this file's isolated Node test process.
+    // An unavailable helper must not turn absence into a privacy timeout.
+    delete process.env.SystemRoot;
+    assert.deepEqual((await discover(absent)).instances, []);
+    await assert.rejects(discover(absent, AbortSignal.abort()), {code: 'Cancelled'});
+    if (WINDOWS) {
+      await assert.rejects(discover(root), {code: 'UnsafeEndpoint'});
+      await assert.rejects(discover('\\\\server\\share\\absent'), {code: 'UnsafeEndpoint'});
+    }
+  } finally {
+    if (systemRoot === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = systemRoot;
+  }
+});
+
+const stalledRootChecks = [
+  {scenario: 'cancellation', code: 'Cancelled', interrupt: (controller) => controller.abort()},
+  {scenario: 'deadline', code: 'PrivacyCheckTimeout', interrupt: (_controller, t) => t.mock.timers.tick(10_000)},
+];
+for (const {scenario, code, interrupt} of stalledRootChecks) test(`Windows discovery ${scenario} does not wait for a stalled root lookup`, {skip: !WINDOWS, timeout: 5_000}, async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'mc-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  const held = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  const original = filesystem.lstat;
+  const lookup = t.mock.method(filesystem, 'lstat', (path, ...options) => {
+    if (path !== root) return original(path, ...options);
+    entered.resolve();
+    return held.promise;
+  });
+  syncBuiltinESMExports();
+  t.mock.timers.enable({apis: ['setTimeout']});
+  const controller = new AbortController();
+  let outcome;
+  const pending = discover(root, controller.signal).then(
+    value => { outcome = {value}; },
+    error => { outcome = {error}; },
+  );
+  try {
+    await entered.promise;
+    interrupt(controller, t);
+    await new Promise(resolveTurn => setImmediate(resolveTurn));
+    assert.equal(outcome?.error?.code, code);
+    assert.equal(outcome.error.outcome, 'not_applied');
+  } finally {
+    held.reject(Object.assign(new Error('late filesystem absence'), {code: 'ENOENT'}));
+    await pending;
+    lookup.mock.restore();
+    syncBuiltinESMExports();
+    t.mock.timers.reset();
+  }
 });
 
 test('Windows accepts a read-only shared root but rejects a readable descriptor ACL', {skip: !WINDOWS}, async t => {
@@ -183,6 +237,7 @@ test('Windows rejects a junction in the selected endpoint path', {skip: !WINDOWS
   const alias = join(fixture.root, 'alias');
   await symlink(fixture.root, alias, 'junction');
   await assert.rejects(readDescriptor(alias, fixture.endpoint.instance), {code: 'UnsafeEndpoint'});
+  await assert.rejects(discover(alias), {code: 'UnsafeEndpoint'});
 });
 
 test('Windows rejects remote pipes and descriptor replacement before submission', {skip: !WINDOWS}, async t => {

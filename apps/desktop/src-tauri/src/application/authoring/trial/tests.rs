@@ -530,7 +530,7 @@ fn native_trials_and_ordinary_native_runs_share_the_reconciliation_gate() {
     let app = trial.app();
     let owner = &trial.editor.owner;
     let context = trial.context();
-    lock(&app.workspaces).native_cleanup_required = true;
+    lock(&app.workspaces).native_cleanup = crate::application::NativeCleanup::Required;
     let mut native = trial_request(&context, None);
     native.lane = "native".into();
     assert_eq!(

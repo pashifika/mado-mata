@@ -42,7 +42,7 @@ impl DesktopController {
     }
 
     fn check_open(&self) -> Result<(), Fault> {
-        if self.state().closed {
+        if self.state().lifecycle.is_closed() {
             return Err(Fault::new(
                 "ControllerClosed",
                 "controller is shutting down",

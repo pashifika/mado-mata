@@ -60,6 +60,9 @@ windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Stor
 [build-dependencies]
 tauri-build = { version = "=2.6.3", optional = true }
 
+[dev-dependencies]
+stateright = "=0.31.0"
+
 [lints.rust]
 # Audited native FFI uses local expectations; all other unsafe code is rejected.
 unsafe_code = "deny"

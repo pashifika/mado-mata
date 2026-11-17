@@ -18,7 +18,7 @@ fn pending_worker_reserves_run_and_stale_stop_cannot_cancel_successor() {
     {
         let mut state = controller.state();
         state.run = Some("successor".into());
-        state.phase = "preparing";
+        state.lifecycle.started();
         state.active = Some(Active {
             native_preparation: Default::default(),
             attempts: Default::default(),

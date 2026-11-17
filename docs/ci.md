@@ -71,6 +71,7 @@ The version and integrity sources are:
 | Desktop frontend | React 19.3.0, TypeScript 5.9.3, Vite 8.3.0, Tauri API 2.11.1 / CLI 2.11.5 | [App manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json) |
 | Script editor | CodeMirror state 6.7.6, view 6.43.13, language 6.12.4, JavaScript 6.2.5, autocomplete 6.20.3, commands 6.11.1; existing TypeScript 5.9.3 language service | Exact [frontend manifest](../apps/desktop/package.json) and [lockfile](../apps/desktop/package-lock.json); trusted ES2020 declarations are bundled by the [build helper](../apps/desktop/build/trusted-libraries.mjs), with no runtime downloads |
 | Desktop Rust | Tauri 2.11.6, tauri-build 2.6.3, tracing 0.1.41, tracing-subscriber 0.3.20 | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
+| Lifecycle model checking | Stateright 0.31.0 (MIT), development-only | Exact `dev-dependencies` in the [Runtime manifest](../tools/runtime-comparison/Cargo.toml) and [App manifest](../apps/desktop/src-tauri/Cargo.toml), with their lockfiles |
 | Saved-image payloads | png 0.18.1; flate2 1.1.9 (default features disabled; `rust_backend`) | [Runtime Cargo manifest](../tools/runtime-comparison/Cargo.toml) and [lockfile](../tools/runtime-comparison/Cargo.lock) |
 | Resource integrity | sha2 0.10.9; `asm` only on macOS aarch64, with sha2-asm 0.6.4 locked | [Runtime manifest](../tools/runtime-comparison/Cargo.toml) and both runtime/desktop lockfiles; existing native C toolchain, no changed verification or digest format |
 | Desktop configuration | zip 8.6.0 (default features disabled; `deflate-flate2` for reviewed runtime archives), unicode-normalization 0.1.25, plist 1.10.1 (default features disabled; pinned streaming API feature) | [App Cargo manifest](../apps/desktop/src-tauri/Cargo.toml) and [lockfile](../apps/desktop/src-tauri/Cargo.lock) |
@@ -160,6 +161,40 @@ Platform-only test imports use `#[cfg]`; intentional cross-platform mutability
 and native discovery outcomes use reason-bearing `#[cfg_attr(..., expect(...))]`
 only for builds where their Unix/macOS consumers are absent. Global unused-code
 warnings remain enabled.
+
+## Lifecycle model checks
+
+Stateright checks finite safety models using the same lifecycle and Native
+cleanup admission decisions as production. It is a development-only dependency;
+the application does not use its Actor runtime or start its Explorer web service.
+After the pinned Rust setup, run the models from the product root:
+
+```sh
+cargo +1.98.1 test --locked --manifest-path tools/runtime-comparison/Cargo.toml --lib stateright -- --nocapture
+cargo +1.98.1 test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features --lib stateright -- --nocapture
+```
+
+The existing unfiltered runtime and Desktop core Cargo test commands in
+`tools/ci/check.py` include these checks on Linux, macOS and Windows. No additional
+CI lane, private planning files, OCR models or native permissions are required.
+
+The controller model bounds successful runs to two distinct IDs, with one owned
+worker and one queued accepted progress event. It explores Start, progress, Stop,
+worker completion, later polling/join, failed spawn and shutdown ordering.
+Progress identity/attempt filtering remains covered by the existing regressions.
+The application model uses one owner, Native/non-native lanes and five cleanup
+evidence classes delivered through result or fault records. Repeated cycles
+remain enabled; its clean-run witness counter saturates at two.
+
+Safety properties reject unsafe states; reachability properties require useful
+successful paths as well, so refusal of all work cannot pass. Both models exhaust
+their finite abstractions rather than treating a timeout or depth cutoff as success.
+
+These models do not execute OS input, capture, process cleanup or filesystem
+durability operations. They do not prove real thread scheduling or eventual
+termination. Existing real-worker and application-boundary regressions remain
+necessary; a passing model is not Native acceptance or a substitute for the
+full repository check.
 
 ## Local check scope
 

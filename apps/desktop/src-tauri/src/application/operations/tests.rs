@@ -402,7 +402,7 @@ fn another_non_native_operation_cannot_clear_required_native_reconciliation() {
     let application = &fixture.application;
     let selection = inspect_named(application, "Main", &package_path()).unwrap();
     let workspace = workspace_ref(&selection);
-    lock(&application.workspaces).native_cleanup_required = true;
+    lock(&application.workspaces).native_cleanup = NativeCleanup::Required;
     let mut native = request(&selection);
     native.lane = "native".into();
     assert_eq!(
@@ -424,7 +424,7 @@ fn another_non_native_operation_cannot_clear_required_native_reconciliation() {
 fn reconstruction_cannot_discard_required_native_reconciliation() {
     let fixture = Fixture::new();
     let application = &fixture.application;
-    lock(&application.workspaces).native_cleanup_required = true;
+    lock(&application.workspaces).native_cleanup = NativeCleanup::Required;
     assert_eq!(
         application.prepare_reconstruction().unwrap_err().category,
         "NativeCleanupRequired"
