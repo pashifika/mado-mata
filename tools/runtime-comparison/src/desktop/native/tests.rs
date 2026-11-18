@@ -1,7 +1,9 @@
 use super::*;
 use crate::desktop::StartPreparation;
 use crate::desktop::test_support::{fixture, request, settled};
-use crate::desktop::{DesktopController, NativeInputPolicy, NativeLimits};
+use crate::desktop::{
+    ContinuousLimits, DesktopController, NativeInputPolicy, NativeLimits, continuous_limits,
+};
 use crate::images::{DecodedImage, PayloadBytes, encode_crop};
 use crate::model::Control;
 #[cfg(any(target_os = "macos", windows))]
@@ -21,7 +23,7 @@ fn intent() -> NativeIntent {
             operation: "Submit the reviewed package action once".into(),
             visible_postcondition: "The selected result is visible".into(),
         },
-        limits: native_limits(),
+        limits: native_limits().into(),
     }
 }
 
@@ -86,7 +88,11 @@ fn four_event_native_projection_bootstraps_typescript_without_widening_input() {
     let mut request = request(&inventory);
     request.lane = "native".into();
     let mut selected = intent();
-    selected.limits.max_actions = 4;
+    selected.limits = NativeLimits {
+        max_actions: 4,
+        ..native_limits()
+    }
+    .into();
     request.native_intent = Some(selected);
     let mut plan = crate::desktop::operation::requested_plan(&request).unwrap();
     assert_eq!(plan.limits.max_actions, 4);
@@ -162,6 +168,231 @@ fn target() -> NativeTarget {
     }
 }
 
+fn refused_before_reservation(
+    controller: &DesktopController,
+    inventory: &Inventory,
+    intent: NativeIntent,
+) {
+    let mut request = request(inventory);
+    request.lane = "native".into();
+    request.native_intent = Some(intent);
+    let fault = controller
+        .start_with_preparation(
+            request,
+            |_, _| -> Result<StartPreparation, Fault> {
+                panic!("invalid review reached host preparation")
+            },
+            |_, _| {
+                |_: &Control,
+                 _: &dyn Fn(crate::desktop::NativeProgress),
+                 _: &dyn Fn() -> Result<(), Fault>|
+                 -> Result<Option<NativeTarget>, Fault> {
+                    panic!("invalid review reached target resolution")
+                }
+            },
+        )
+        .unwrap_err();
+    assert_eq!(fault.category, "NativeRefused");
+    assert!(controller.poll().run.is_none());
+}
+
+fn continuous() -> NativeIntent {
+    NativeIntent {
+        limits: continuous_limits().into(),
+        ..intent()
+    }
+}
+
+#[test]
+fn continuous_wire_is_explicit_and_never_mixes_finite_lifetime_fields() {
+    let finite = serde_json::to_value(intent()).unwrap();
+    assert_eq!(
+        finite["limits"],
+        serde_json::to_value(native_limits()).unwrap()
+    );
+    let raw = serde_json::to_value(continuous()).unwrap();
+    assert_eq!(raw["limits"]["lifecycle"], "continuous");
+    assert!(raw["limits"].get("overall_ms").is_none());
+    let decoded: NativeIntent = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(
+        decoded.limits.budgets().workflow,
+        crate::model::NativeWorkflow::Continuous { overall_ms: None }
+    );
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), raw);
+    let mut timed = raw.clone();
+    timed["limits"]["overall_ms"] = json!(3_600_000);
+    let decoded: NativeIntent = serde_json::from_value(timed).unwrap();
+    assert_eq!(
+        decoded.limits.budgets().workflow,
+        crate::model::NativeWorkflow::Continuous {
+            overall_ms: Some(3_600_000)
+        }
+    );
+    let mut invalid = Vec::new();
+    for (base, field, value) in [
+        (&finite, "lifecycle", json!("finite")),
+        (&finite, "lifecycle", json!("continuous")),
+        (&finite, "overall_ms", json!(60_000)),
+        (&finite, "max_batch_events", json!(64)),
+        (&raw, "lifecycle", json!("Continuous")),
+        (&raw, "workflow_ms", json!(30_000)),
+        (&raw, "max_frames", json!(300)),
+        (&raw, "max_actions", json!(64)),
+        (&raw, "overall_ms", Value::Null),
+        (&raw, "overall_ms", json!(-1)),
+        (&raw, "overall_ms", json!(1.5)),
+        (&raw, "overall_ms", json!("60000")),
+    ] {
+        let mut changed = base.clone();
+        changed["limits"][field] = value;
+        invalid.push(changed);
+    }
+    let mut untagged = raw.clone();
+    untagged["limits"]
+        .as_object_mut()
+        .unwrap()
+        .remove("lifecycle");
+    invalid.push(untagged);
+    for changed in invalid {
+        assert!(
+            serde_json::from_value::<NativeIntent>(changed.clone()).is_err(),
+            "{changed}"
+        );
+    }
+}
+
+#[test]
+fn continuous_review_refuses_recovery_edit_and_unpublished_limits_before_reservation() {
+    validate_intent(&continuous()).unwrap();
+    validate_intent(&NativeIntent {
+        limits: ContinuousLimits {
+            overall_ms: Some(1),
+            ..continuous_limits()
+        }
+        .into(),
+        ..intent()
+    })
+    .unwrap();
+    // Initial launch keeps its own macOS approval; it grants no recovery.
+    let launch = validate_intent(&NativeIntent {
+        launch_approved: true,
+        ..continuous()
+    });
+    assert_eq!(launch.is_ok(), !cfg!(windows));
+    let controller = DesktopController::new(
+        "must-not-launch-controlled".into(),
+        "must-not-launch-engine".into(),
+    );
+    let inventory = fixture();
+    let mut cases = vec![
+        NativeIntent {
+            launch_approved: true,
+            max_exit_recoveries: 1,
+            ..continuous()
+        },
+        NativeIntent {
+            max_exit_recoveries: 1,
+            ..continuous()
+        },
+        NativeIntent {
+            review: NativeReview::Script {},
+            ..continuous()
+        },
+    ];
+    let template = continuous_limits;
+    for limits in [
+        ContinuousLimits {
+            overall_ms: Some(0),
+            ..template()
+        },
+        ContinuousLimits {
+            overall_ms: Some(u64::MAX),
+            ..template()
+        },
+        ContinuousLimits {
+            startup_ms: 0,
+            ..template()
+        },
+        ContinuousLimits {
+            startup_ms: 60_001,
+            ..template()
+        },
+        ContinuousLimits {
+            readiness_ms: 30_001,
+            ..template()
+        },
+        ContinuousLimits {
+            readiness_ms: 999,
+            ..template()
+        },
+        ContinuousLimits {
+            wait_ms: 0,
+            ..template()
+        },
+        ContinuousLimits {
+            wait_ms: 1_001,
+            ..template()
+        },
+        ContinuousLimits {
+            wait_ms: 99,
+            ..template()
+        },
+        ContinuousLimits {
+            interval_ms: 0,
+            ..template()
+        },
+        ContinuousLimits {
+            interval_ms: 101,
+            ..template()
+        },
+        // Forged faster capture cadence under the displayed 100 ms spacing.
+        ContinuousLimits {
+            interval_ms: 1,
+            ..template()
+        },
+        ContinuousLimits {
+            interval_ms: 99,
+            ..template()
+        },
+        ContinuousLimits {
+            cleanup_ms: 0,
+            ..template()
+        },
+        ContinuousLimits {
+            cleanup_ms: 1_001,
+            ..template()
+        },
+        ContinuousLimits {
+            containment_ms: 1_999,
+            ..template()
+        },
+        ContinuousLimits {
+            max_batch_events: 0,
+            ..template()
+        },
+        ContinuousLimits {
+            max_batch_events: 65,
+            ..template()
+        },
+        ContinuousLimits {
+            event_interval_ms: 999,
+            ..template()
+        },
+        ContinuousLimits {
+            event_interval_ms: 1_001,
+            ..template()
+        },
+    ] {
+        cases.push(NativeIntent {
+            limits: limits.into(),
+            ..intent()
+        });
+    }
+    for intent in cases {
+        refused_before_reservation(&controller, &inventory, intent);
+    }
+}
+
 #[test]
 fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
     let controller = DesktopController::new(
@@ -169,29 +400,8 @@ fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
         "must-not-launch-engine".into(),
     );
     let inventory = fixture();
-    let refused_before_effects = |intent| {
-        let mut request = request(&inventory);
-        request.lane = "native".into();
-        request.native_intent = Some(intent);
-        let fault = controller
-            .start_with_preparation(
-                request,
-                |_, _| -> Result<StartPreparation, Fault> {
-                    panic!("invalid review reached host preparation")
-                },
-                |_, _| {
-                    |_: &Control,
-                     _: &dyn Fn(crate::desktop::NativeProgress),
-                     _: &dyn Fn() -> Result<(), Fault>|
-                     -> Result<Option<NativeTarget>, Fault> {
-                        panic!("invalid review reached target resolution")
-                    }
-                },
-            )
-            .unwrap_err();
-        assert_eq!(fault.category, "NativeRefused");
-        assert!(controller.poll().run.is_none());
-    };
+    let refused_before_effects =
+        |intent| refused_before_reservation(&controller, &inventory, intent);
     for (pointer, invalid) in [
         ("/target_revision", json!(0)),
         ("/target_binding_id", json!("")),
@@ -253,7 +463,10 @@ fn native_review_rejects_missing_approval_identity_and_unbounded_intent() {
             ..native_limits()
         },
     ] {
-        refused_before_effects(NativeIntent { limits, ..intent() });
+        refused_before_effects(NativeIntent {
+            limits: limits.into(),
+            ..intent()
+        });
     }
     for invalid in [json!(-1), json!(1.5), json!("900000"), Value::Null] {
         let mut raw = serde_json::to_value(intent()).unwrap();
@@ -301,10 +514,17 @@ fn native_approval_cannot_enter_other_lanes_or_bypass_host_correspondence() {
         "must-not-launch-controlled".into(),
         "must-not-launch-engine".into(),
     );
-    for lane in ["controlled", "replay", "native"] {
+    for (lane, intent) in [
+        ("controlled", intent()),
+        ("replay", intent()),
+        ("native", intent()),
+        ("controlled", continuous()),
+        ("replay", continuous()),
+        ("native", continuous()),
+    ] {
         let mut request = request(&fixture());
         request.lane = lane.into();
-        request.native_intent = Some(intent());
+        request.native_intent = Some(intent);
         controller.start(request, None).unwrap();
         let terminal = settled(&controller);
         let fault = terminal.error.unwrap();
@@ -442,7 +662,12 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
                 "max_frames":300,"wait_ms":1000,"interval_ms":100,"max_actions":64,
                 "cleanup_ms":1000,"containment_ms":2000
             },
-            "max_workflow_ms":900000
+            "max_workflow_ms":900000,
+            "continuous_limits":{
+                "lifecycle":"continuous","startup_ms":60000,"readiness_ms":30000,
+                "wait_ms":1000,"interval_ms":100,"cleanup_ms":1000,"containment_ms":2000,
+                "max_batch_events":64,"event_interval_ms":1000
+            }
         })
     );
     let inventory = authored_inventory();
@@ -454,15 +679,21 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
     ] {
         let mut selected = intent();
         selected.review = review;
-        selected.limits = capability.default_limits.clone();
-        selected.limits.workflow_ms = workflow_ms;
+        selected.limits = NativeLimits {
+            workflow_ms,
+            ..capability.default_limits.clone()
+        }
+        .into();
         let mut request = request(&inventory);
         request.lane = "native".into();
         request.native_intent = Some(selected);
         let mut target = target();
         let mut plan = crate::desktop::operation::requested_plan(&request).unwrap();
         assert_eq!(plan.limits.duration_ms, total_ms);
-        assert_eq!(plan.native_budgets.unwrap().workflow_ms, workflow_ms);
+        assert_eq!(
+            plan.native_budgets.unwrap().workflow_ms(),
+            Some(workflow_ms)
+        );
         let environment = json!({"version":1,"ocr":{"language":crate::environment::LANGUAGE},"native_libraries":[],"replay":null,"native":null});
         let templates = prepare_templates(&inventory, &plan.limits).unwrap();
         project(
@@ -519,8 +750,66 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
         target.window_title = "replacement".into();
         let review = request.native_intent.as_mut().unwrap();
         review.input_approved = false;
-        review.limits.workflow_ms = 1_000;
+        review.limits = NativeLimits {
+            workflow_ms: 1_000,
+            ..native_limits()
+        }
+        .into();
         assert_eq!(identity(&plan).unwrap(), frozen);
+    }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn continuous_projection_omits_finite_lifetime_authority() {
+    let inventory = authored_inventory();
+    let environment = json!({"version":1,"ocr":{"language":crate::environment::LANGUAGE},"native_libraries":[],"replay":null,"native":null});
+    for overall_ms in [None, Some(1_800_000)] {
+        let mut selected = intent();
+        selected.launch_approved = cfg!(target_os = "macos");
+        selected.limits = ContinuousLimits {
+            overall_ms,
+            ..continuous_limits()
+        }
+        .into();
+        let mut request = request(&inventory);
+        request.lane = "native".into();
+        request.native_intent = Some(selected);
+        let target = target();
+        let mut plan = crate::desktop::operation::requested_plan(&request).unwrap();
+        let budgets = plan.native_budgets.unwrap();
+        assert!(budgets.continuous());
+        assert_eq!(budgets.workflow_ms(), None);
+        // Only finite Startup + Readiness remain in the plan's duration.
+        assert_eq!(plan.limits.duration_ms, 90_000);
+        assert_eq!(plan.limits.max_actions, 64);
+        let templates = prepare_templates(&inventory, &plan.limits).unwrap();
+        project(
+            &mut plan,
+            &request,
+            &target,
+            &target.executable,
+            &templates,
+            environment.clone(),
+        )
+        .unwrap();
+        let native = &plan.native_config.as_ref().unwrap()["native"];
+        assert_eq!(
+            native["capture"],
+            json!({"approved":true,"wait_ms":1000,"interval_ms":100})
+        );
+        let input = native["input"].as_object().unwrap();
+        for absent in ["duration_ms", "max_actions"] {
+            assert!(!input.contains_key(absent), "{absent}");
+        }
+        assert_eq!(input["max_batch_events"], 64);
+        assert_eq!(input["event_interval_ms"], 1_000);
+        assert_eq!(input["route"], target.input.route);
+        assert_eq!(input["package_approved"], true);
+        assert_eq!(native["confirm_process_exit"], false);
+        assert_eq!(native["cleanup_ms"], 1_000);
+        assert_eq!(native["containment_ms"], 2_000);
+        assert!(native.get("overall_ms").is_none());
     }
 }
 
@@ -529,11 +818,28 @@ fn native_projection_freezes_exact_host_target_review_and_declared_template_asse
 fn native_admission_reserves_selected_duration_before_preparation() {
     use std::time::{Duration, Instant};
 
-    for (workflow_ms, recoveries, operation_ms) in [
-        (30_000, 0, 120_000),
-        (30_000, 1, 243_000),
-        (900_000, 0, 990_000),
-        (900_000, 1, 1_983_000),
+    let finite = |workflow_ms| -> crate::desktop::NativeRunLimits {
+        NativeLimits {
+            workflow_ms,
+            ..native_limits()
+        }
+        .into()
+    };
+    let continuous = |overall_ms| -> crate::desktop::NativeRunLimits {
+        ContinuousLimits {
+            overall_ms,
+            ..continuous_limits()
+        }
+        .into()
+    };
+    for (limits, recoveries, operation_ms) in [
+        (finite(30_000), 0, Some(120_000)),
+        (finite(30_000), 1, Some(243_000)),
+        (finite(900_000), 0, Some(990_000)),
+        (finite(900_000), 1, Some(1_983_000)),
+        (continuous(None), 0, None),
+        (continuous(Some(5_000)), 0, Some(5_000)),
+        (continuous(Some(7_200_000)), 0, Some(7_200_000)),
     ] {
         if cfg!(windows) && recoveries != 0 {
             continue;
@@ -545,22 +851,39 @@ fn native_admission_reserves_selected_duration_before_preparation() {
         let mut request = request(&fixture());
         request.lane = "native".into();
         let mut selected = intent();
-        selected.review = NativeReview::Script {};
-        selected.limits.workflow_ms = workflow_ms;
+        if matches!(limits, crate::desktop::NativeRunLimits::Finite(_)) {
+            selected.review = NativeReview::Script {};
+        }
+        selected.limits = limits;
         selected.max_exit_recoveries = recoveries;
         selected.launch_approved = recoveries == 1;
+        let captured = json!(selected.limits);
+        let private = [
+            selected.target_binding_id.clone(),
+            "reviewed package action".into(),
+        ];
         request.native_intent = Some(selected);
         let before = Instant::now();
         controller
             .start_with_preparation(
                 request,
-                move |_, control| -> Result<StartPreparation, Fault> {
+                move |request, control| -> Result<StartPreparation, Fault> {
+                    // A later edit cannot replace the limits admission already captured.
+                    request.native_intent.as_mut().unwrap().limits = native_limits().into();
                     let now = Instant::now();
-                    let duration = Duration::from_millis(operation_ms);
-                    assert!(control.outer_deadline() >= before + duration);
-                    assert!(control.outer_deadline() <= now + duration);
-                    assert!(control.deadline() >= before + Duration::from_millis(60_000));
-                    assert!(control.deadline() <= now + Duration::from_millis(60_000));
+                    match operation_ms.map(Duration::from_millis) {
+                        Some(duration) => {
+                            let outer = control.outer_deadline().unwrap();
+                            assert!(outer >= before + duration);
+                            assert!(outer <= now + duration);
+                        }
+                        None => assert_eq!(control.outer_deadline(), None),
+                    }
+                    // Startup stays finite, capped by any shorter overall deadline.
+                    let startup = Duration::from_millis(operation_ms.unwrap_or(60_000).min(60_000));
+                    let stage = control.deadline_opt().unwrap();
+                    assert!(stage >= before + startup);
+                    assert!(stage <= now + startup);
                     // End at the public preparation boundary, before any native work.
                     Err(Fault::new("NativeFreeBoundary", "reservation observed"))
                 },
@@ -580,7 +903,52 @@ fn native_admission_reserves_selected_duration_before_preparation() {
             fault.context["cleanup"],
             json!({"clean":true,"child_started":false})
         );
+        assert_eq!(fault.context["native_limits"], captured);
+        let retained = fault.context.to_string();
+        for text in &private {
+            assert!(!retained.contains(text.as_str()), "{text}");
+        }
     }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn continuous_overall_deadline_expires_from_reservation_without_renewal() {
+    use std::time::Duration;
+    let controller = DesktopController::new("unused-controlled".into(), "unused-engine".into());
+    let mut request = request(&fixture());
+    request.lane = "native".into();
+    let mut selected = intent();
+    selected.limits = ContinuousLimits {
+        overall_ms: Some(20),
+        ..continuous_limits()
+    }
+    .into();
+    request.native_intent = Some(selected);
+    controller
+        .start_with_preparation(
+            request,
+            |_, control| -> Result<StartPreparation, Fault> {
+                std::thread::sleep(Duration::from_millis(40));
+                control.check()?;
+                panic!("expired continuous preparation continued")
+            },
+            |_, _| {
+                |_: &Control,
+                 _: &dyn Fn(crate::desktop::NativeProgress),
+                 _: &dyn Fn() -> Result<(), Fault>|
+                 -> Result<Option<NativeTarget>, Fault> {
+                    panic!("expired continuous Run must not resolve a target")
+                }
+            },
+        )
+        .unwrap();
+    let fault = settled(&controller).error.unwrap();
+    assert_eq!(fault.category, "Timeout");
+    assert_eq!(
+        fault.context["cleanup"],
+        json!({"clean":true,"child_started":false})
+    );
 }
 
 #[test]
@@ -700,6 +1068,20 @@ fn function_requests_reject_launch_recovery_and_controlled_scenarios() {
             "NativeRefused"
         );
     }
+    // Edit Function invocations stay finite whatever review accompanies them.
+    for review in [NativeReview::Script {}, intent().review] {
+        request.native_intent = Some(NativeIntent {
+            review,
+            limits: continuous_limits().into(),
+            ..intent()
+        });
+        assert_eq!(
+            crate::desktop::operation::requested_plan(&request)
+                .unwrap_err()
+                .category,
+            "NativeRefused"
+        );
+    }
     request.lane = "controlled".into();
     request.native_intent = None;
     request.scenario = "partial".into();
@@ -737,7 +1119,7 @@ fn only_script_projection_defers_process_selection_to_the_sdk() {
         let budgets = request.native_intent.as_ref().unwrap().limits.budgets();
         plan.lane = "native".into();
         plan.native_budgets = Some(budgets);
-        plan.limits.duration_ms = budgets.total_ms().unwrap();
+        plan.limits.duration_ms = budgets.preparation_ms().unwrap();
         plan.limits.readiness_ms = budgets.readiness_ms;
         let templates = prepare_templates(&inventory, &plan.limits).unwrap();
         let environment = json!({"version":1,"ocr":{"language":crate::environment::LANGUAGE},"native_libraries":[],"replay":null,"native":null});
@@ -776,7 +1158,11 @@ fn only_script_projection_defers_process_selection_to_the_sdk() {
 #[test]
 fn windows_launch_and_recovery_refuse_before_reservation_or_preparation() {
     for (launch_approved, max_exit_recoveries) in [(true, 0), (true, 1), (false, 1)] {
-        for review in [intent().review, NativeReview::Script {}] {
+        for (review, limits) in [
+            (intent().review, intent().limits),
+            (NativeReview::Script {}, intent().limits),
+            (intent().review, continuous_limits().into()),
+        ] {
             let controller =
                 DesktopController::new("unused-controlled".into(), "unused-engine".into());
             let mut request = request(&fixture());
@@ -785,6 +1171,7 @@ fn windows_launch_and_recovery_refuse_before_reservation_or_preparation() {
             selected.launch_approved = launch_approved;
             selected.max_exit_recoveries = max_exit_recoveries;
             selected.review = review;
+            selected.limits = limits;
             request.native_intent = Some(selected);
             let fault = controller
                 .start_with_preparation(

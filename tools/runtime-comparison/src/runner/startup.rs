@@ -13,11 +13,11 @@ pub(super) fn identify(run: &str, attempt: u64) {
     let _ = IDENTITY.set((run.to_owned(), attempt));
 }
 
-pub(crate) fn emit_native_transition(phase: u8, deadline: Instant) -> Result<(), Fault> {
+pub(crate) fn emit_native_transition(phase: u8, deadline: Option<Instant>) -> Result<(), Fault> {
     if let Some((run, attempt)) = IDENTITY.get() {
         super::protocol::emit(&serde_json::json!({
             "event":"NativeTransition","run":run,"attempt":attempt,"phase":phase,
-            "deadline":super::clock::SharedDeadline::from_instant(deadline)?,
+            "deadline":deadline.map(super::clock::SharedDeadline::from_instant).transpose()?,
         }))?;
     }
     Ok(())

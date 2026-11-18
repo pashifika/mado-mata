@@ -181,7 +181,7 @@ fn grouped(observation: &Value) -> Value {
 #[test]
 fn acquired_observation_losing_commit_is_not_published_and_releases_its_permit() {
     let (engine, capture) = controlled(Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8)));
-    let operation = engine.operation(1_000).unwrap();
+    let operation = engine.operation(1_000, None).unwrap();
     let mut state = engine.lock().unwrap();
     let frame = state
         .session
@@ -199,7 +199,7 @@ fn acquired_observation_losing_commit_is_not_published_and_releases_its_permit()
         .unwrap();
     let permit = engine.handle_budget.reserve(1).unwrap();
     let fault = engine
-        .retain_observation(&mut state, frame, permit, &operation)
+        .retain_observation(&mut state, frame, permit, &operation, None)
         .unwrap_err();
     assert_eq!(fault.category, "TargetLost");
     assert_eq!(fault.context["stage"], "observation_publication");
@@ -840,10 +840,10 @@ fn native_capture_budget_and_expanded_held_click_budget_apply_without_dispatch()
         limits.workflow_ms = workflow_ms;
         let mut engine = placed_replay();
         let native = engine.native.as_mut().unwrap();
-        native.capture.duration_ms = limits.budgets().total_ms().unwrap();
+        native.capture.duration_ms = Some(limits.budgets().preparation_ms().unwrap());
         native.input.duration_ms = native.capture.duration_ms;
-        native.capture.max_frames = limits.max_frames;
-        native.input.max_actions = limits.max_actions;
+        native.capture.max_frames = Some(limits.max_frames);
+        native.input.max_actions = Some(limits.max_actions);
         // Seed only consumed accounting; the last acquisition uses the real facade.
         engine.lock().unwrap().captured_frames = limits.max_frames - 1;
         let observation = engine.call("observe", json!({})).unwrap();
@@ -862,18 +862,24 @@ fn native_capture_budget_and_expanded_held_click_budget_apply_without_dispatch()
         };
         let mut state = engine.lock().unwrap();
         state.input_events = limits.max_actions - 4;
-        let input = engine.input_request(&state, &request).unwrap();
+        let input = engine.input_request(&state, &request, None).unwrap();
         assert_eq!(input.sequence().len(), 4);
         for spent in [limits.max_actions - 3, limits.max_actions] {
             state.input_events = spent;
             assert_eq!(
-                engine.input_request(&state, &request).unwrap_err().category,
+                engine
+                    .input_request(&state, &request, None)
+                    .unwrap_err()
+                    .category,
                 "ActionLimit"
             );
         }
         state.input_cleanup_incomplete = true;
         assert_eq!(
-            engine.input_request(&state, &request).unwrap_err().category,
+            engine
+                .input_request(&state, &request, None)
+                .unwrap_err()
+                .category,
             "IncompleteCleanup"
         );
         drop(state);
@@ -1082,7 +1088,7 @@ fn confirmed_exit_after_script_release_needs_no_additional_capture_credit() {
         ),
     ] {
         let (mut engine, capture, observation) = controlled_native();
-        engine.native.as_mut().unwrap().capture.max_frames = 1;
+        engine.native.as_mut().unwrap().capture.max_frames = Some(1);
         engine
             .call("release", json!({"id":observation["id"]}))
             .unwrap();

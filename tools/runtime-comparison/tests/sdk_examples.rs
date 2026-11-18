@@ -316,7 +316,7 @@ fn execute(compiled: &Arc<Inventory>, scenario: &str, label: &str, stop_while_he
 fn exercise(id: &str, compiled: &Arc<Inventory>, baseline: &Run) -> Vec<Run> {
     let runs: Vec<Run> = match id {
         "observation-lifetime" => vec![run(compiled, "success")],
-        "grouped-ocr" | "template-match" | "bounded-poll" => vec![
+        "grouped-ocr" | "template-match" | "bounded-poll" | "scoped-search" => vec![
             run(compiled, "success"),
             run(compiled, "no-match"),
             run(compiled, "backend-failure"),
@@ -345,6 +345,17 @@ fn exercise(id: &str, compiled: &Arc<Inventory>, baseline: &Run) -> Vec<Run> {
             assert_eq!(success.count("observe"), baseline.count("observe") + 1);
             assert_eq!(success.count("release"), baseline.count("release") + 1);
             assert_eq!(success.logs().len(), 1);
+        }
+        "scoped-search" => {
+            assert_eq!(
+                scenario("success").returned_released().logs(),
+                ["search: found"]
+            );
+            assert_eq!(
+                scenario("no-match").returned_released().logs(),
+                ["search: absent"]
+            );
+            assert_eq!(scenario("backend-failure").fault(), Some("Backend"));
         }
         "grouped-ocr" => {
             let success = scenario("success").returned_released();

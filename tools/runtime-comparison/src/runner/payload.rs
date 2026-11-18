@@ -70,6 +70,7 @@ pub(super) fn read(input: &mut impl BufRead) -> Result<Invocation, Fault> {
         return Err(Fault::new("Transport", "invalid binary asset manifest"));
     }
     invocation.plan.validate()?;
+    invocation.validate_projection()?;
     let mut total = 0usize;
     for size in asset_lengths.values() {
         total = total
@@ -256,12 +257,12 @@ mod tests {
     use std::io::Cursor;
     use std::time::Instant;
 
-    fn invocation() -> Invocation {
+    fn invocation(fixture: &str) -> Invocation {
         let mut plan: Plan =
             serde_json::from_str(include_str!("../../fixtures/manual-plan.json")).unwrap();
         plan.limits.snapshot_bytes = images::PACKAGE_BYTES;
         let inventory = Inventory::capture(
-            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/typescript")),
+            &std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures")).join(fixture),
             &plan.limits,
         )
         .unwrap();
@@ -273,15 +274,94 @@ mod tests {
             inventory,
             observe_logs: false,
             prepared_modules: None,
-            deadline: SharedDeadline::from_instant(Instant::now()).unwrap(),
+            deadline: Some(SharedDeadline::from_instant(Instant::now()).unwrap()),
             startup_deadline: None,
             prepare_target: false,
         }
     }
 
     #[test]
+    fn only_reviewed_continuous_payloads_drop_the_finite_workflow_clock() {
+        use crate::model::{Control, NativeBudgets, NativeWorkflow};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let mut request = invocation("javascript");
+        request.plan.candidate = "javascript".into();
+        request.plan.lane = "native".into();
+        request.prepare_target = true;
+        let js = Arc::new(request.inventory);
+        request.prepared_modules = Some(
+            crate::typescript::PreparedModules::capture(
+                &js,
+                &request.plan.limits,
+                &Arc::new(Control::new(&request.plan.limits)),
+            )
+            .unwrap(),
+        );
+        request.inventory = Arc::into_inner(js).unwrap();
+        for overall_ms in [None, Some(1_800_000)] {
+            let budgets = NativeBudgets {
+                workflow: NativeWorkflow::Continuous { overall_ms },
+                ..NativeBudgets::DEFAULT
+            };
+            request.plan.native_budgets = Some(budgets);
+            request.plan.limits.duration_ms = budgets.preparation_ms().unwrap();
+            request.plan.limits.readiness_ms = budgets.readiness_ms;
+            let supervisor = Control::reserved(budgets.operation_ms(0).unwrap()).unwrap();
+            supervisor.start_native(budgets, None).unwrap();
+            request.deadline = supervisor
+                .outer_deadline()
+                .map(SharedDeadline::from_instant)
+                .transpose()
+                .unwrap();
+            let startup = supervisor.native_startup_deadline(budgets).unwrap();
+            request.startup_deadline = Some(SharedDeadline::from_instant(startup).unwrap());
+            let mut bytes = Vec::new();
+            write(&mut request, &mut bytes).unwrap();
+            let received = read(&mut Cursor::new(bytes)).unwrap();
+            let child = received.child_control().unwrap();
+            let origin = child.started();
+            child.set_test_time(origin);
+            assert!(child.require_deadline().unwrap() <= startup);
+            assert!(!child.continuous_workflow());
+            child.native_transition(1, None).unwrap();
+            assert_eq!(child.deadline_opt(), Some(origin + Duration::from_secs(30)));
+            child.native_transition(2, None).unwrap();
+            assert!(child.continuous_workflow());
+            child.set_test_time(origin + Duration::from_secs(901));
+            child.check().unwrap();
+            assert_eq!(child.deadline_opt().is_some(), overall_ms.is_some());
+            assert!(child.deadline_opt() <= supervisor.outer_deadline());
+            child.cancel();
+            assert_eq!(child.check().unwrap_err().category, "Cancelled");
+        }
+        request.deadline = None;
+        assert_eq!(
+            request.validate_projection().unwrap_err().category,
+            "Transport"
+        );
+        request.deadline = request.startup_deadline;
+        request.attempt = 2;
+        assert_eq!(
+            request.validate_projection().unwrap_err().category,
+            "NativeRefused"
+        );
+        request.attempt = 1;
+        request.prepare_target = false;
+        assert_eq!(
+            request.validate_projection().unwrap_err().category,
+            "NativeRefused"
+        );
+        for lane in ["controlled", "replay"] {
+            request.plan.lane = lane.into();
+            assert_eq!(request.plan.validate().unwrap_err().category, "InvalidPlan");
+        }
+    }
+
+    #[test]
     fn image_sized_binary_segments_cannot_consume_the_following_stop_frame() {
-        let mut invocation = invocation();
+        let mut invocation = invocation("typescript");
         // Above the previous decoded-frame allowance; newline/control-looking bytes
         // are pixels, not control records.
         let mut image = vec![10u8; 3 * 1024 * 1024];
@@ -306,7 +386,7 @@ mod tests {
 
     #[test]
     fn oversized_binary_lengths_are_rejected_before_reading_or_allocating_payloads() {
-        let mut invocation = invocation();
+        let mut invocation = invocation("typescript");
         let mut value: Value = serde_json::from_slice(&header(&mut invocation).unwrap()).unwrap();
         value["asset_lengths"]["marker"] = serde_json::json!(images::PACKAGE_BYTES + 1);
         let mut bytes = serde_json::to_vec(&value).unwrap();
@@ -319,7 +399,7 @@ mod tests {
 
     #[test]
     fn truncated_binary_input_never_publishes_a_partial_inventory() {
-        let mut invocation = invocation();
+        let mut invocation = invocation("typescript");
         let bytes = header(&mut invocation).unwrap();
         let error = read(&mut Cursor::new(bytes))
             .err()

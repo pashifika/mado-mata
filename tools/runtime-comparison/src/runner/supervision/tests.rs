@@ -67,13 +67,13 @@ emit('Terminal', primary=None, entry_outcome='Returned', cleanup={'clean': True}
     .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let owner = Arc::new(Control::new(&plan.limits));
-    let control = Arc::new(Control::for_attempt(Arc::clone(&owner), &plan.limits, true));
+    let control = Arc::new(Control::for_attempt(Arc::clone(&owner), true));
     control
         .start_native(
             NativeBudgets {
                 startup_ms: 5_000,
                 readiness_ms: 5_000,
-                workflow_ms: 150,
+                workflow: crate::model::NativeWorkflow::Finite { workflow_ms: 150 },
             },
             None,
         )
@@ -107,7 +107,7 @@ emit('Terminal', primary=None, entry_outcome='Returned', cleanup={'clean': True}
         let started = events.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(started["event"], "ChildStarted");
         control.native_transition(1, None).unwrap();
-        let workflow = control.native_transition(2, None).unwrap();
+        let workflow = control.native_transition(2, None).unwrap().unwrap();
         fs::write(fixture.0.join("enter"), b"").unwrap();
         let settled = events.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(settled["event"], "EntrySettled");
@@ -116,7 +116,7 @@ emit('Terminal', primary=None, entry_outcome='Returned', cleanup={'clean': True}
         );
         assert!(control.check().is_ok());
         assert_eq!(control.outer_deadline(), original_deadline);
-        assert_eq!(control.deadline(), original_deadline);
+        assert_eq!(control.deadline_opt(), original_deadline);
         fs::write(fixture.0.join("finish"), b"").unwrap();
         worker.join().unwrap().unwrap()
     });

@@ -20,24 +20,38 @@ impl SharedDeadline {
     pub(super) fn from_instant(deadline: Instant) -> Result<Self, Fault> {
         // Shared clock first: the later Instant read only shrinks the remainder.
         let shared = now_ns()? / 1_000;
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let remaining = u64::try_from(remaining.as_micros()).unwrap_or(u64::MAX);
-        Ok(Self(shared.saturating_add(remaining)))
+        let local = Instant::now();
+        let at = if let Some(remaining) = deadline.checked_duration_since(local) {
+            u128::from(shared) + remaining.as_micros()
+        } else {
+            // Keep the order of elapsed stage and overall deadlines, too.
+            let elapsed = local.duration_since(deadline).as_nanos().div_ceil(1_000);
+            u128::from(shared).saturating_sub(elapsed)
+        };
+        u64::try_from(at).map(Self).map_err(|_| {
+            Fault::new(
+                "Clock",
+                "absolute operation deadline exceeds transport range",
+            )
+        })
     }
 
     /// Child side. Rounds its own reading up, so the local deadline never passes
-    /// the supervisor's; an already-elapsed deadline is simply now.
+    /// the supervisor's, even if transfer outlasted the original deadline.
     pub(super) fn instant(self) -> Result<Instant, Fault> {
         // Instant first: the later shared read only shrinks the remainder.
         let local = Instant::now();
         let shared = now_ns()?.div_ceil(1_000);
-        let remaining = Duration::from_micros(self.0.saturating_sub(shared));
-        // An unrepresentable far deadline refuses rather than extends.
-        Ok(local.checked_add(remaining).unwrap_or(local))
+        let at = if self.0 >= shared {
+            local.checked_add(Duration::from_micros(self.0 - shared))
+        } else {
+            local.checked_sub(Duration::from_micros(shared - self.0))
+        };
+        at.ok_or_else(|| Fault::new("Clock", "received deadline exceeds monotonic clock range"))
     }
 }
 
-/// Shared measurement timestamp; unlike a deadline, it retains past boundaries.
+/// Shared measurement timestamp, without deadline rounding.
 pub(super) fn now_us() -> Result<u64, Fault> {
     Ok(now_ns()? / 1_000)
 }
@@ -116,13 +130,14 @@ mod tests {
     fn transferred_deadline_never_passes_the_supervisor_deadline() {
         let limits = limits();
         let supervisor = Control::new(&limits);
-        let wire = SharedDeadline::from_instant(supervisor.deadline()).unwrap();
+        let deadline = supervisor.require_deadline().unwrap();
+        let wire = SharedDeadline::from_instant(deadline).unwrap();
         let child = Control::with_deadline(&limits, wire.instant().unwrap());
         // Every spawn/transfer/validation microsecond is charged to the child.
-        assert!(child.deadline() <= supervisor.deadline());
+        assert!(child.require_deadline().unwrap() <= deadline);
         // The bound is the supervisor's remaining time, not a collapsed value;
         // half of the 10 s manual budget tolerates any realistic test stall.
-        assert!(child.deadline() > Instant::now() + Duration::from_secs(5));
+        assert!(child.require_deadline().unwrap() > Instant::now() + Duration::from_secs(5));
         assert_eq!(child.stop_reason(), None);
         child.cancel();
         assert_eq!(child.stop_reason(), Some(StopReason::Cancelled));
@@ -133,9 +148,9 @@ mod tests {
         let limits = limits();
         let elapsed = Instant::now() - Duration::from_millis(1);
         let supervisor = Control::with_deadline(&limits, elapsed);
-        let wire = SharedDeadline::from_instant(supervisor.deadline()).unwrap();
+        let wire = SharedDeadline::from_instant(supervisor.require_deadline().unwrap()).unwrap();
         let child = Control::with_deadline(&limits, wire.instant().unwrap());
-        assert!(child.deadline() <= Instant::now());
+        assert!(child.require_deadline().unwrap() <= elapsed);
         assert_eq!(child.stop_reason(), Some(StopReason::Timeout));
         assert_eq!(child.admit_launch().unwrap_err().category, "Timeout");
         child.cancel();

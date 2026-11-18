@@ -157,7 +157,10 @@ impl Host {
             || state.active.is_some()
             || !state.held_keys.is_empty()
             || !state.held_buttons.is_empty()
-            || state.receipts.len() != state.released_receipts.len()
+            || state
+                .receipts
+                .values()
+                .any(|receipt| receipt.permit.is_some())
             || self.inner.physical.load(Ordering::Acquire) != 0
             || !lock(&self.inner.workers).is_empty()
         {
@@ -227,6 +230,23 @@ impl Host {
             let fault = Fault::new("Timeout", "readiness deadline expired");
             self.fail(fault.clone());
             return Err(fault);
+        }
+        if !state.scopes.is_empty()
+            && state.held_keys.values().any(|(_, id)| {
+                *id != 0
+                    && state
+                        .scopes
+                        .get(id)
+                        .is_none_or(|scope| scope.check().is_err())
+            })
+        {
+            drop(state);
+            let fault = Fault::new("IncompleteCleanup", "expired context owns held input");
+            self.fail(fault.clone());
+            return Err(fault);
+        }
+        if let Some(scope) = &self.scope {
+            scope.check()?;
         }
         Ok(())
     }
@@ -358,7 +378,19 @@ impl Host {
         }
         #[cfg(feature = "engine")]
         if let Some(engine) = self.inner.engine.get() {
-            engine.call("validate_observation", json!({"observation":observation}))?;
+            engine
+                .call_scoped(
+                    "validate_observation",
+                    json!({"observation":observation}),
+                    self.scope.as_ref(),
+                )
+                .inspect_err(|error| {
+                    if (self.scope.is_some() || self.inner.control.continuous_workflow())
+                        && !super::local_fault(error)
+                    {
+                        self.fail(error.clone());
+                    }
+                })?;
         }
         Ok(())
     }

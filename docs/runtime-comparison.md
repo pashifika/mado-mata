@@ -318,8 +318,8 @@ runtime performs the standalone inspection instead. Native and selected-function
 static linking remain separate and unchanged.
 
 JavaScript (including compiled TypeScript) bounds Promise creation, executed jobs
-and retained unhandled rejections separately from input authority. Each attempt
-allows `limits.vm_bytes / 1024` of each, rounded down: 16,384 with the shipped
+and retained unhandled rejections separately from input authority. Each finite
+attempt allows `limits.vm_bytes / 1024` of each, rounded down: 16,384 with the shipped
 16 MiB VM limit, at most 262,144 with the validated 256 MiB ceiling. This is a
 finite work allowance, not an estimate of Promise allocation size; VM memory
 and stage deadlines remain independently enforced. Counts span module
@@ -328,6 +328,13 @@ host call. Exhaustion returns `ResourceLimit`; detached jobs are discarded at
 entry settlement. Existing plan fields are unchanged. `limits.max_actions`
 still limits cumulative expanded input events, so a four-event allowance does
 not prevent async initialization and never authorizes a fifth input event.
+Continuous Workflow is exclusive to ordinary Desktop Native review. It handles
+at most 256 jobs per slice and rechecks cancellation at VM interrupts without
+requiring a Script call. The Promise creation allowance renews at these
+checkpoints. At most 1,024 Promises may remain outstanding across a continuous
+attempt (fewer if the VM work allowance is smaller), and at most 64 unhandled
+rejections are retained. Heap and stack limits still apply. Entry settlement discards detached
+work; comparison plans and replay remain finite.
 
 Effective `host.options` combine validated schema defaults with **top-level
 replacement**, not recursive merging. Nested values and priority arrays are

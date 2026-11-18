@@ -12,8 +12,8 @@ Capture remains a separate input-free owner; neither its historical frames nor
 Target Check authorize a Script run.
 
 The ordinary Run page submits current package/profile/target expectations,
-separate launch-if-absent/capture/input/recovery consent, reviewed
-operation/postcondition text, and finite limits.
+separate launch-if-absent/capture/input consent, reviewed operation/postcondition
+text and lifecycle limits. Only finite review can also approve exit recovery.
 Approval is transient and spent on every Start. Relevant edits, including a target
 draft changed back to its saved value, invalidate it. The text describes the
 operator's review, not a hostile-script sandbox. Edit uses explicit Script Run
@@ -230,7 +230,7 @@ fault does not revoke historical results or turn them into current input authori
 
 ## Bounds and termination
 
-The reviewed host tuple defaults to **60 s Startup**, **30 s Readiness** and
+The finite host tuple defaults to **60 s Startup**, **30 s Readiness** and
 **30 s Workflow**. Startup/Readiness defaults are also their ceilings; Workflow
 has a separately published **900 s** ceiling. One shared duration policy owns
 backend validation and the capability response. The Run page accepts **1–900
@@ -245,7 +245,7 @@ process/window preparation and native initialization. Readiness starts once at
 `capture_ready`; Workflow starts once after `"Ready"`. No phase borrows unused
 time or renews its own budget.
 
-At reservation the host fixes an absolute outer deadline. For stage sum `B` and
+At finite reservation the host fixes an absolute outer deadline. For stage sum `B` and
 admitted recovery count `r`, it is `(1 + r) * B + r * 3000 ms`: **120 s** by
 default, or **243 s** with one recovery. Selecting the maximum Workflow produces
 **990 s** without recovery and **1983 s** with one recovery, below the general
@@ -264,7 +264,7 @@ entry. Desktop Native no longer inherits the generic hidden 2-second Readiness
 bound. The pinned SDK accepts the finite operation duration; its separate
 2-second maximum for an individual macOS native wait is unchanged.
 
-Other bounds remain 300 acquired frames across both attempts, 1 s waits, 100 ms
+Finite limits are 300 acquired frames across both attempts, 1 s waits, 100 ms
 pacing, and 64 cumulative expanded input events. A click consumes three events,
 or four with a hold; each key press/release consumes one. Only verified terminal
 accounting transfers unused credits. Partial or uncertain input never permits
@@ -274,6 +274,15 @@ The Workflow ceiling is a finite admission boundary, not a reliability
 qualification. Useful uninterrupted Native execution, late owner-bound Stop and
 a clean explicit successor require separate actual Desktop evidence; controlled
 tests do not establish long-duration recovery or arbitrary-duration support.
+
+Only ordinary Native Start can admit continuous Workflow. Startup and Readiness
+remain finite. A positive overall duration bounds all stages from reservation;
+omission removes the outer clock, not the operation owner or Stop. At `"Ready"`,
+bounded calls on the same target session replace the finite Workflow timer and
+lifetime frame/event credits. Capture pacing and an expanded-event rate shared
+by all scopes prevent context churn from granting more work. Exit is terminal;
+the operator must review a new Start after settlement. Edit, replay, controlled
+execution and standalone plans do not acquire this authority.
 
 Preserve explicit cancellation versus whole-operation timeout through the typed
 supervisor verdict. The child closes admission at its deadline, but keeps its own

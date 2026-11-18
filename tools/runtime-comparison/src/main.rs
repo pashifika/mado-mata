@@ -76,6 +76,8 @@ fn read_external_plan(path: &Path) -> Result<Plan, Fault> {
                     .pointer("/input/package_approved")
                     .and_then(serde_json::Value::as_bool)
                     == Some(true)
+                    || native.pointer("/input/max_batch_events").is_some()
+                    || native.pointer("/input/event_interval_ms").is_some()
                     || native
                         .pointer("/review/kind")
                         .and_then(serde_json::Value::as_str)

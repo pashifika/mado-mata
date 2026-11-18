@@ -472,7 +472,8 @@ fn drag_waits_must_fit_remaining_time_at_admission_and_dispatch() {
     // Observe the deadline itself, not guessed input timing.
     wait_until(|| {
         host.control()
-            .deadline()
+            .deadline_opt()
+            .unwrap()
             .saturating_duration_since(Instant::now())
             < Duration::from_millis(800)
     });
@@ -668,6 +669,7 @@ fn drag_faults_stop_before_later_moves_and_preserve_exact_partial_progress() {
             }
             let host = Host {
                 inner: weak.upgrade().expect("host retained"),
+                scope: None,
             };
             match category {
                 "Timeout" => host.control().stop(StopReason::Timeout),
@@ -709,6 +711,7 @@ fn inject_at(host: &Host, events: usize, event: &'static str) {
         if count == events {
             Host {
                 inner: weak.upgrade().expect("host retained"),
+                scope: None,
             }
             .call("fixture", json!({"event":event}))
             .unwrap();
@@ -962,11 +965,7 @@ fn owner_stop_during_drag_closes_attempt_input_without_waiting_for_dwell() {
     let mut host = make_host("success", "template-first");
     let inner = Arc::get_mut(&mut host.inner).expect("unshared host");
     let owner = Arc::new(Control::new(&inner.plan.limits));
-    inner.control = Arc::new(Control::for_attempt(
-        Arc::clone(&owner),
-        &inner.plan.limits,
-        true,
-    ));
+    inner.control = Arc::new(Control::for_attempt(Arc::clone(&owner), true));
     host.begin_readiness().expect("readiness");
     host.begin_workflow().expect("workflow");
     let observation = observe(&host);
@@ -992,4 +991,45 @@ fn owner_stop_during_drag_closes_attempt_input_without_waiting_for_dwell() {
     assert_eq!(receipt["submitted_events"], 2);
     assert_eq!(host.snapshot()["effects"].as_array().unwrap().len(), 2);
     assert_eq!(host.finish()["clean"], true);
+}
+
+#[test]
+fn closing_an_active_child_keeps_its_input_owner_and_partial_receipt() {
+    let root = ready_host("success");
+    let id = root.context_rpc(0, "child", "context", json!({})).unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    let frame = root.context_rpc(id, "call", "observe", json!({})).unwrap();
+    let sequence = root
+        .context_rpc(
+            id,
+            "call",
+            "submit",
+            json!({"observation":frame,
+        "actions":[drag(json!([{"x":0,"y":0,"hold_ms":100},{"x":1,"y":1}]))]}),
+        )
+        .unwrap();
+    let (arrived, resume) = pause_drag(&root, 2, true);
+    let worker = root.clone();
+    let dispatch = thread::spawn(move || {
+        worker.context_rpc(id, "call", "settle", json!({"id":sequence["id"]}))
+    });
+    arrived.recv_timeout(Duration::from_secs(1)).unwrap();
+    root.context_rpc(id, "close", "context", json!({})).unwrap();
+    let active = root.snapshot();
+    assert_eq!(active["live_handles"], 1); // Only the dispatched sequence remains owned.
+    assert_eq!(active["held_buttons"], json!(["left"]));
+    resume.send(()).unwrap();
+    assert_eq!(
+        dispatch.join().unwrap().unwrap_err().category,
+        "InputUncertain"
+    );
+    let settled = root.snapshot();
+    let receipt = &settled["receipts"][0];
+    assert_eq!(receipt["status"], "Partial");
+    assert_eq!(receipt["submitted_events"], 2);
+    assert_eq!(receipt["cleanup"]["released"], 1);
+    assert_eq!(settled["live_handles"], 0);
+    assert_eq!(root.finish()["clean"], true);
+    assert_eq!(root.terminal_accounting().unwrap()["input_uncertain"], true);
 }

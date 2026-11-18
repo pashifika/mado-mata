@@ -1,15 +1,20 @@
 mod admission;
 mod options;
+mod scope;
 mod sequence;
 mod startup;
 
 pub(crate) use admission::{HandleBudget, HandlePermit, Managed};
 pub use options::{option_path, resolve_options};
+pub(crate) use scope::{WorkflowScope, local_fault};
+pub(crate) use sequence::EventWindow;
 #[cfg(feature = "engine")]
 pub(crate) use sequence::{DragEvent, drag_events};
 
 #[cfg(test)]
 mod ocr_scan_tests;
+#[cfg(test)]
+mod sustained_tests;
 #[cfg(test)]
 mod test_support;
 
@@ -17,7 +22,7 @@ use crate::images::PayloadBytes;
 use crate::model::{Control, Fault, Limits, Plan, RuntimeMetrics};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -174,6 +179,7 @@ pub(crate) enum PointerButton {
 // The same permit moves from queued to active input, then to the retained receipt.
 struct Sequence {
     id: String,
+    scope: Option<WorkflowScope>,
     order: u64,
     observation: Value,
     actions: Vec<Action>,
@@ -220,21 +226,28 @@ struct State {
     focus: bool,
     route: bool,
     visible: String,
+    scopes: BTreeMap<u64, WorkflowScope>,
+    scoped_handles: BTreeMap<String, u64>,
+    last_capture: Option<Instant>,
+    event_window: EventWindow,
+    sequence_count: u64,
     handles: BTreeMap<String, Managed<Handle>>,
     queue: VecDeque<Sequence>,
     active: Option<String>,
-    accepted: Vec<Value>,
+    accepted: VecDeque<Value>,
     receipts: BTreeMap<String, Receipt>,
-    released_receipts: BTreeSet<String>,
-    effects: Vec<Value>,
-    held_keys: BTreeMap<String, u64>,
+    archived_receipts: VecDeque<Value>,
+    input_uncertain: bool,
+    effects: VecDeque<Value>,
+    // Sequence order and Workflow context (0 is the root).
+    held_keys: BTreeMap<String, (u64, u64)>,
     held_buttons: BTreeMap<PointerButton, u64>,
     pointer_position: Option<(f64, f64)>,
     pointer_waiting: bool,
     // Set once a drag batch is interrupted after its first event; no later input.
     input_closed: bool,
     release_outcomes: Vec<Value>,
-    postconditions: Vec<Value>,
+    postconditions: VecDeque<Value>,
     observations: u64,
     recognitions: u64,
     admitted_actions: usize,
@@ -260,7 +273,8 @@ struct Worker {
     thread: JoinHandle<()>,
 }
 
-const OPERATIONS: [&str; 16] = [
+const OPERATIONS: [&str; 17] = [
+    "context",
     "asset",
     "observe",
     "recognize",
@@ -295,6 +309,7 @@ struct Inner {
     options: Value,
     assets: BTreeMap<String, PayloadBytes>,
     control: Arc<Control>,
+    root_scope: OnceLock<WorkflowScope>,
     attempt: u64,
     lifetime: String,
     state: Mutex<State>,
@@ -323,6 +338,7 @@ struct Inner {
 #[derive(Clone)]
 pub struct Host {
     inner: Arc<Inner>,
+    scope: Option<WorkflowScope>,
 }
 
 /// One explicitly queued controlled successor. Its control exists before its VM,
@@ -390,6 +406,7 @@ impl Host {
         }
         let held = plan.scenario == "held-work";
         Ok(Self {
+            scope: None,
             inner: Arc::new(Inner {
                 plan,
                 options,
@@ -411,20 +428,26 @@ impl Host {
                     focus: true,
                     route: true,
                     visible: "READY".into(),
+                    scopes: BTreeMap::new(),
+                    scoped_handles: BTreeMap::new(),
+                    last_capture: None,
+                    event_window: EventWindow::default(),
+                    sequence_count: 0,
                     handles: BTreeMap::new(),
                     queue: VecDeque::new(),
                     active: None,
-                    accepted: Vec::new(),
+                    accepted: VecDeque::new(),
                     receipts: BTreeMap::new(),
-                    released_receipts: BTreeSet::new(),
-                    effects: Vec::new(),
+                    archived_receipts: VecDeque::new(),
+                    input_uncertain: false,
+                    effects: VecDeque::new(),
                     held_keys: BTreeMap::new(),
                     held_buttons: BTreeMap::new(),
                     pointer_position: None,
                     pointer_waiting: false,
                     input_closed: false,
                     release_outcomes: Vec::new(),
-                    postconditions: Vec::new(),
+                    postconditions: VecDeque::new(),
                     observations: 0,
                     recognitions: 0,
                     admitted_actions: 0,
@@ -436,6 +459,7 @@ impl Host {
                     dropped_logs: 0,
                     cleanup: None,
                 }),
+                root_scope: OnceLock::new(),
                 failure: Mutex::new(None),
                 native_cleanup_unverified: AtomicBool::new(false),
                 native_initialization_started: AtomicBool::new(false),
@@ -533,7 +557,15 @@ impl Host {
             .position(|name| *name == method)
             .unwrap_or(OPERATIONS.len() - 1);
         let started = Instant::now();
-        let result = self.call_inner(method, args);
+        let result = self.call_owned(method, args).map_err(|error| {
+            if local_fault(&error) {
+                self.failure()
+                    .or_else(|| self.inner.control.check().err())
+                    .unwrap_or(error)
+            } else {
+                error
+            }
+        });
         if let Err(error) = &result {
             self.retain_terminal_fault(error);
         }
@@ -558,14 +590,19 @@ impl Host {
     }
 
     fn call_inner(&self, method: &str, args: Value) -> Result<Value, Fault> {
-        if method == "release" {
-            return self.release(&args);
-        }
         if method == "fixture" {
             return self.fixture(&args);
         }
         if method == "settle" {
             return self.settle(&args);
+        }
+        if method == "context" {
+            object(&args, &[], &[])?;
+            self.check()?;
+            if lock(&self.inner.state).phase != Phase::Workflow {
+                return Err(Fault::new("AdmissionClosed", "context requires Workflow"));
+            }
+            return Ok(self.scope_descriptor(0, self.inner.control.deadline_opt()));
         }
         self.check()?;
         if method != "asset"
@@ -609,6 +646,7 @@ impl Host {
                     | "postcondition"
             ) {
                 if method == "postcondition"
+                    && !self.inner.control.continuous_workflow()
                     && lock(&self.inner.state).postconditions.len()
                         >= self.inner.plan.limits.max_actions
                 {
@@ -617,24 +655,26 @@ impl Host {
                         "postcondition evidence capacity exhausted",
                     ));
                 }
-                let value = engine.call(method, args)?;
-                // Checks the harness latch, not the SDK's unexposed capture terminal cause.
-                self.check()?;
+                let value = engine.call_scoped(method, args, self.scope.as_ref())?;
                 let mut state = lock(&self.inner.state);
                 match method {
                     "observe" => state.observations += 1,
                     "recognize" | "scan_ocr_zones" | "query_wait" => state.recognitions += 1,
-                    "postcondition"
-                        if state.postconditions.len() < self.inner.plan.limits.max_actions =>
-                    {
-                        state.postconditions.push(value.clone())
+                    "postcondition" => {
+                        self.inner.control.check()?;
+                        self.check_local()?;
+                        if self.inner.control.continuous_workflow()
+                            || state.postconditions.len() < self.inner.plan.limits.max_actions
+                        {
+                            self.record_sample(&mut state.postconditions, value.clone());
+                        }
                     }
                     _ => {}
                 }
                 return Ok(value);
             }
         }
-        let result = match method {
+        match method {
             "asset" => {
                 let map = object(&args, &["id"], &["id"])?;
                 let id = string(map, "id")?;
@@ -670,11 +710,7 @@ impl Host {
             }
             "log" => self.log(&args),
             _ => Err(argument(format!("unknown host method: {method}"))),
-        };
-        if result.is_ok() {
-            self.check()?;
         }
-        result
     }
 
     fn next_id(&self, state: &mut State, kind: &str) -> String {
@@ -700,7 +736,7 @@ impl Host {
 
     fn observe(&self) -> Result<Value, Fault> {
         self.check()?;
-        let mut state = lock(&self.inner.state);
+        let mut state = self.capture_slot(lock(&self.inner.state), None)?;
         let permit = self.inner.handle_budget.reserve(1)?;
         let frame = self.frame(&mut state);
         let value = frame.value.clone();
@@ -1008,7 +1044,9 @@ impl Host {
         crate::runner::emit_host_wait_entered(self);
         loop {
             if let Err(error) = self.check() {
-                lock(&self.inner.state).handles.remove(id);
+                if self.scope.is_none() {
+                    lock(&self.inner.state).handles.remove(id);
+                }
                 return Err(error);
             }
             let mut state = lock(&self.inner.state);
@@ -1041,6 +1079,16 @@ impl Host {
                 .as_ref()
                 .is_none_or(|work| work.completed.load(Ordering::Acquire))
             {
+                if self.inner.control.continuous_workflow() {
+                    state = self.capture_slot(state, Some(deadline.min(query.deadline)))?;
+                    self.validate_identity(&state, &query.frame.value)?;
+                    if !state.handles.contains_key(id) {
+                        return Err(Fault::new(
+                            "InvalidHandle",
+                            "query was released while pacing capture",
+                        ));
+                    }
+                }
                 let mut frame = self.frame(&mut state);
                 Arc::make_mut(&mut frame).value["id"] = json!(id);
                 let result = match self.recognition_value(&frame, &query.kind, &query.roi, id) {
@@ -1103,7 +1151,9 @@ impl Host {
                 "postcondition requires a strictly newer accepted frame",
             ));
         }
-        if state.postconditions.len() >= self.inner.plan.limits.max_actions {
+        if !self.inner.control.continuous_workflow()
+            && state.postconditions.len() >= self.inner.plan.limits.max_actions
+        {
             return Err(Fault::new(
                 "ResultLimit",
                 "postcondition evidence capacity exhausted",
@@ -1117,8 +1167,10 @@ impl Host {
         };
         let satisfied = observation.visible == expected
             && roi.as_ref().is_none_or(|roi| roi.contains(&visible_region));
+        self.inner.control.check()?;
+        self.check_local()?;
         let result = json!({"satisfied":satisfied,"frame":frame,"checkpoint":checkpoint_frame});
-        state.postconditions.push(result.clone());
+        self.record_sample(&mut state.postconditions, result.clone());
         Ok(result)
     }
 
@@ -1205,12 +1257,7 @@ impl Host {
         {
             return Err(Fault::new("Accounting", "Attempt ownership is not settled"));
         }
-        let input_uncertain = state.receipts.values().any(|receipt| {
-            matches!(
-                receipt.value["status"].as_str(),
-                Some("Partial" | "Uncertain")
-            )
-        });
+        let input_uncertain = state.input_uncertain;
         #[cfg(feature = "engine")]
         if let Some(engine) = self.inner.engine.get() {
             let admitted_actions = state.admitted_actions;
@@ -1236,6 +1283,7 @@ impl Host {
             .receipts
             .values()
             .map(|receipt| &receipt.value)
+            .chain(&state.archived_receipts)
             .collect();
         receipts.sort_unstable_by_key(|receipt| receipt["order"].as_u64());
         let mut value = json!({
@@ -1252,6 +1300,18 @@ impl Host {
             "pointer_waiting":state.pointer_waiting,
             "release_outcomes":state.release_outcomes
         });
+        if self.inner.root_scope.get().is_some() || self.inner.control.continuous_workflow() {
+            value["live_contexts"] = json!(state.scopes.len());
+            let owned_receipts = state
+                .receipts
+                .values()
+                .filter(|receipt| receipt.permit.is_some())
+                .count();
+            value["attempt_owners"] = json!(
+                value["attempt_owners"].as_u64().unwrap_or(0)
+                    + (state.scopes.len() + owned_receipts) as u64
+            );
+        }
         if self.inner.plan.lane == "controlled" {
             value["target_identity"] = json!({
                 "scope":"controlled PID-reuse injection; not OS PID recycling",

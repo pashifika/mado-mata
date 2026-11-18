@@ -51,7 +51,7 @@ impl Drop for Fixture {
 fn capture_observes_owner_stop_between_files_before_its_snapshot_deadline() {
     let fixture = Fixture::new();
     let owner = std::sync::Arc::new(crate::model::Control::new(&fixture.limits));
-    let attempt = crate::model::Control::for_attempt(owner.clone(), &fixture.limits, true);
+    let attempt = crate::model::Control::for_attempt(owner.clone(), true);
     let mut capture = capture_files(&fixture.root, &fixture.limits, Some(&attempt)).unwrap();
     owner.cancel();
     assert_eq!(

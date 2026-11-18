@@ -17,11 +17,13 @@ fn native_host_with_deadline(
     let budgets = NativeBudgets {
         startup_ms: 10_000,
         readiness_ms: 10_000,
-        workflow_ms: 10_000,
+        workflow: crate::model::NativeWorkflow::Finite {
+            workflow_ms: 10_000,
+        },
     };
     plan.lane = "native".into();
     plan.native_budgets = Some(budgets);
-    plan.limits.duration_ms = budgets.total_ms().unwrap();
+    plan.limits.duration_ms = budgets.preparation_ms().unwrap();
     plan.limits.readiness_ms = budgets.readiness_ms;
     let control = Arc::new(Control::new(&plan.limits));
     control.start_native(budgets, deadline).unwrap();

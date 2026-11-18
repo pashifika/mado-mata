@@ -29,6 +29,8 @@ export default function ExecutionPage({label, revision, run, snapshot, starting,
   const phase = starting ? 'preparing' : view.state;
   const check = view.operation === 'environment_check';
   const captured = snapshot?.run === view.run ? snapshot : null;
+  const capturedLimits = captured?.kind === 'run' ? captured.native?.limits ?? null : null;
+  const continuousLimits = capturedLimits && 'lifecycle' in capturedLimits ? capturedLimits : null;
   const primary = view.error ?? (view.result?.primary ? fault(view.result.primary) : null);
   const lane = captured?.kind === 'run' ? captured.lane : text(view.result?.lane);
   const privatePrimary = !check && lane !== 'controlled';
@@ -79,7 +81,11 @@ export default function ExecutionPage({label, revision, run, snapshot, starting,
                 <dt>{t.run.nativeBinding}</dt><dd><code>{captured.native.target_binding_id}</code> · {t.target.revision(captured.native.target_revision)}</dd>
                 <dt>{t.run.nativeLaunchApproval}</dt><dd>{captured.native.launch_approved ? t.run.nativeLaunchApproved : t.run.nativeLaunchNotApproved}</dd>
                 <dt>{t.run.nativeRecoveryApproval}</dt><dd id="captured-native-recoveries">{captured.native.max_exit_recoveries}</dd>
-                <dt>{t.run.capturedBudgets}</dt><dd id="captured-native-budgets">{t.run.nativeStartup} {captured.native.limits.startup_ms} ms · {t.run.nativeReadiness} {captured.native.limits.readiness_ms} ms · {t.run.nativeWorkflow} {captured.native.limits.workflow_ms} ms</dd></>}</>}
+                <dt>{t.run.nativeLifecycle}</dt><dd id="captured-native-lifecycle">{continuousLimits ? t.run.nativeContinuous : t.run.nativeFinite}</dd>
+                <dt>{t.run.capturedBudgets}</dt><dd id="captured-native-budgets">{t.run.nativeStartup} {captured.native.limits.startup_ms} ms · {t.run.nativeReadiness} {captured.native.limits.readiness_ms} ms
+                  {' · '}{t.run.nativeWorkflow} {'workflow_ms' in captured.native.limits ? `${captured.native.limits.workflow_ms} ms` : t.run.nativeContinuous}</dd>
+                {continuousLimits && <><dt>{t.run.nativeDuration}</dt><dd id="captured-native-overall">{continuousLimits.overall_ms === undefined
+                  ? t.run.nativeNoOverall : t.run.nativeEnvelope(continuousLimits.overall_ms)}</dd></>}</>}</>}
             {captured?.kind === 'check' && <><dt>{t.run.checkedProfile}</dt><dd>{captured.association.environment?.profile ?? t.common.unconfigured}</dd>
               <dt>{t.common.descriptor}</dt><dd>{captured.association.descriptorPath ?? t.run.noInitialization}</dd></>}
           </dl>

@@ -306,7 +306,7 @@ fn owned_recovery_loop_settles_past_workflow_without_renewing_run_authority() {
         let run = controller
             .reserve(
                 "run",
-                Some(budgets.operation_ms(1).unwrap()),
+                budgets.operation_ms(1).unwrap(),
                 move |run, owner, observer, _, _| {
                     let mut plan = manual_plan().unwrap();
                     let mut request = request(&fixture());
@@ -322,13 +322,12 @@ fn owned_recovery_loop_settles_past_workflow_without_renewing_run_authority() {
                             operation: "Controlled owner-loop regression".into(),
                             visible_postcondition: "Fresh attempt completes".into(),
                         },
-                        limits,
+                        limits: limits.into(),
                     });
                     plan.native_budgets = Some(budgets);
-                    plan.limits.duration_ms = budgets.total_ms().unwrap();
+                    plan.limits.duration_ms = budgets.preparation_ms().unwrap();
                     plan.limits.readiness_ms = budgets.readiness_ms;
-                    let initial =
-                        Arc::new(Control::for_attempt(Arc::clone(owner), &plan.limits, true));
+                    let initial = Arc::new(Control::for_attempt(Arc::clone(owner), true));
                     initial.start_native(budgets, None).unwrap();
                     let outer = owner.outer_deadline();
                     let evidence = Evidence::new("run", run, None, None).unwrap();
@@ -399,6 +398,7 @@ fn owned_recovery_loop_settles_past_workflow_without_renewing_run_authority() {
                                     2,
                                     Some(Instant::now() + Duration::from_millis(100)),
                                 )
+                                .unwrap()
                                 .unwrap();
                             let primary = if attempt == 1 {
                                 host.call("fixture", json!({"event":"confirmed_exit"}))
@@ -530,11 +530,11 @@ fn repeated_exit_and_recovered_stage_stop_keep_run_boundaries() {
             let run = controller
                 .reserve(
                     "run",
-                    Some(budgets.operation_ms(1).unwrap()),
+                    budgets.operation_ms(1).unwrap(),
                     move |run, owner, observer, _, _| {
                         let mut plan = manual_plan().unwrap();
                         plan.native_budgets = Some(budgets);
-                        plan.limits.duration_ms = budgets.total_ms().unwrap();
+                        plan.limits.duration_ms = budgets.preparation_ms().unwrap();
                         plan.limits.readiness_ms = budgets.readiness_ms;
                         let mut request = request(&fixture());
                         request.native_intent = Some(crate::desktop::NativeIntent {
@@ -549,10 +549,9 @@ fn repeated_exit_and_recovered_stage_stop_keep_run_boundaries() {
                                 operation: "Controlled recovery boundary regression".into(),
                                 visible_postcondition: "Owned attempts settle before reuse".into(),
                             },
-                            limits,
+                            limits: limits.into(),
                         });
-                        let initial =
-                            Arc::new(Control::for_attempt(Arc::clone(owner), &plan.limits, true));
+                        let initial = Arc::new(Control::for_attempt(Arc::clone(owner), true));
                         initial.start_native(budgets, None).unwrap();
                         let outer = owner.outer_deadline();
                         let evidence = Evidence::new("run", run, None, None).unwrap();
@@ -766,6 +765,88 @@ fn repeated_exit_and_recovered_stage_stop_keep_run_boundaries() {
 }
 
 #[test]
+fn continuous_attempt_has_no_outer_deadline_credit_or_successor_but_keeps_stop() {
+    let controller = DesktopController::new("unused-controlled".into(), "unused-engine".into());
+    let (entered, started) = mpsc::sync_channel(1);
+    let (release, wait) = mpsc::sync_channel(1);
+    let limits = crate::desktop::continuous_limits();
+    let budgets = limits.budgets();
+    let run = controller
+        .reserve(
+            "run",
+            budgets.operation_ms(0).unwrap(),
+            move |run, owner, observer, _, _| {
+                assert_eq!(owner.outer_deadline(), None);
+                let mut plan = manual_plan().unwrap();
+                plan.lane = "native".into();
+                plan.native_budgets = Some(budgets);
+                plan.limits.duration_ms = budgets.preparation_ms().unwrap();
+                plan.limits.readiness_ms = budgets.readiness_ms;
+                let mut request = request(&fixture());
+                // Even an eligible exit and launch approval yield no continuous successor.
+                request.native_intent = Some(crate::desktop::NativeIntent {
+                    target_revision: 1,
+                    target_binding_id: "continuous-owner".into(),
+                    target_declaration_identity: "controlled-only".into(),
+                    capture_approved: true,
+                    input_approved: true,
+                    launch_approved: true,
+                    max_exit_recoveries: 0,
+                    review: crate::desktop::NativeReview::Operation {
+                        operation: "Continuous owner regression".into(),
+                        visible_postcondition: "Stop closes the only attempt".into(),
+                    },
+                    limits: limits.into(),
+                });
+                let initial = Arc::new(Control::for_attempt(Arc::clone(owner), true));
+                initial.start_native(budgets, None).unwrap();
+                let evidence = Evidence::new("run", run, None, None).unwrap();
+                run_attempts(
+                    owner,
+                    initial,
+                    &plan,
+                    &request,
+                    observer,
+                    &evidence,
+                    |attempt, control, remaining| {
+                        assert_eq!(attempt, 1);
+                        assert_eq!(remaining, None);
+                        assert_eq!(control.outer_deadline(), None);
+                        entered.send(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                        let stopped = control.check().unwrap_err();
+                        let accounting = json!({"complete":true,"frames":0,
+                            "expanded_input_events":0,"input_uncertain":false});
+                        Ok(json!({
+                            "run":run,"status":"FAIL","entry_outcome":"FailedOrNotStarted",
+                            "primary":Fault::new("TargetExited", "game exited")
+                                .with_context(json!({"exit_reason":"absent","stop":stopped})),
+                            "cleanup":{"clean":true},"forced":false,"exit_code":0,
+                            "observations":{"workflow_entered":true,"terminal_accounted":true,
+                                "child_reaped":true,"startup_settled":true,
+                                "snapshot_stage":"post_cleanup","accounting":accounting},
+                            "native_preparation":{"attempt":1,"status":"capture_ready",
+                                "phase":"settling","launch":"not_requested"}
+                        }))
+                    },
+                )
+            },
+        )
+        .unwrap();
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    controller.stop(&run).unwrap();
+    assert_eq!(controller.poll().state, "stopping");
+    release.send(()).unwrap();
+    let result = settled(&controller).result.unwrap();
+    assert_eq!(
+        result["primary"]["context"]["stop"]["category"],
+        "Cancelled"
+    );
+    assert_eq!(result["recovery_count"], 0);
+    assert_eq!(result["attempts"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn mapped_typescript_exit_survives_bounding_recovery_and_retention() {
     let mut plan = manual_plan().unwrap();
     plan.limits.duration_ms = 30_000;
@@ -835,44 +916,48 @@ fn predecessor_logs_survive_delivery_races_and_successor_startup_failure() {
         let (ready, observed) = mpsc::sync_channel(1);
         let (release, resume) = mpsc::sync_channel(1);
         controller
-            .reserve("run", None, move |run, _, observer, _, _| {
-                let first = json!({
-                    "run":run,"attempt":1,
-                    "observations":{"script_logs":[
-                        {"run":run,"attempt":1,"sequence":1,"message":"streamed-before-exit"},
-                        {"run":run,"attempt":1,"sequence":2,"message":"retained-at-exit"}
-                    ]}
-                });
-                observer
-                    .logs
-                    .try_send(first["observations"]["script_logs"][0].clone())
-                    .unwrap();
-                observer
-                    .attempts
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .push(first);
-                ready.send(()).unwrap();
-                resume.recv().unwrap();
-                if successor_fails {
-                    return Err(Fault::new(
-                        "EngineUnavailable",
-                        "successor refused before startup",
-                    ));
-                }
-                let second = json!({
-                    "run":run,"attempt":2,
-                    "observations":{"script_logs":[
-                        {"run":run,"attempt":2,"sequence":1,"message":"fresh-attempt-sequence"}
-                    ]}
-                });
-                observer
-                    .attempts
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .push(second.clone());
-                Ok(second)
-            })
+            .reserve(
+                "run",
+                Some(REPLAY_DURATION_MS),
+                move |run, _, observer, _, _| {
+                    let first = json!({
+                        "run":run,"attempt":1,
+                        "observations":{"script_logs":[
+                            {"run":run,"attempt":1,"sequence":1,"message":"streamed-before-exit"},
+                            {"run":run,"attempt":1,"sequence":2,"message":"retained-at-exit"}
+                        ]}
+                    });
+                    observer
+                        .logs
+                        .try_send(first["observations"]["script_logs"][0].clone())
+                        .unwrap();
+                    observer
+                        .attempts
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(first);
+                    ready.send(()).unwrap();
+                    resume.recv().unwrap();
+                    if successor_fails {
+                        return Err(Fault::new(
+                            "EngineUnavailable",
+                            "successor refused before startup",
+                        ));
+                    }
+                    let second = json!({
+                        "run":run,"attempt":2,
+                        "observations":{"script_logs":[
+                            {"run":run,"attempt":2,"sequence":1,"message":"fresh-attempt-sequence"}
+                        ]}
+                    });
+                    observer
+                        .attempts
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(second.clone());
+                    Ok(second)
+                },
+            )
             .unwrap();
         observed.recv_timeout(Duration::from_secs(5)).unwrap();
         let mut delivered = Vec::new();

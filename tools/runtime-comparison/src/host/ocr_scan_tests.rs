@@ -519,7 +519,7 @@ mod engine {
         let budgets = crate::model::NativeBudgets {
             startup_ms: 1_000,
             readiness_ms: 2_000,
-            workflow_ms: 2_000,
+            workflow: crate::model::NativeWorkflow::Finite { workflow_ms: 2_000 },
         };
         let inner = Arc::get_mut(&mut host.inner).unwrap();
         inner.plan.lane = "native".into();

@@ -118,6 +118,8 @@
     "nativeEnvironment": "Native needs a saved OCR environment. Configure its model, runtime and native-library locations in Settings; no missing dependency is substituted.",
     "nativeText": "Describe the intended operation and its visible postcondition on one line each.",
     "nativeWorkflow": "Correct the Workflow duration in Native review before approving or starting.",
+    "nativeLifecycle": "Continuous is only available for ordinary Native Run, with no exit recovery. Review the lifecycle again.",
+    "nativeOverall": "Enter positive whole seconds for the continuous overall deadline, or leave it blank for no overall deadline.",
     "nativeApproval": "Approve live capture and input for this Start.",
     "descriptorLimit": "The descriptor path exceeds {limit} bytes and cannot be retained by the host.",
     "profileBinding": "This saved profile belongs to a different package or schema. Reinspect; it cannot be rebound.",

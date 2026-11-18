@@ -116,30 +116,25 @@ mod platform {
 
     impl RetainedTarget {
         fn validate(&self, control: &Control) -> Result<(), Fault> {
+            let deadline = control.require_deadline()?;
             require_live(&self.process, control)?;
             let lifetime = process_lifetime(&self.process, control)?;
             if lifetime != self.lifetime {
                 return Err(lost());
             }
             checked(control, || {
-                self.executable.validate(
-                    &self.selected_path,
-                    &control.cancelled,
-                    control.deadline(),
-                )
+                self.executable
+                    .validate(&self.selected_path, &control.cancelled, deadline)
             })?;
             if self.image.canonical_path() != self.executable.canonical_path() {
                 checked(control, || {
-                    self.image.validate(
-                        self.image.canonical_path(),
-                        &control.cancelled,
-                        control.deadline(),
-                    )
+                    self.image
+                        .validate(self.image.canonical_path(), &control.cancelled, deadline)
                 })?;
             }
             checked(control, || {
                 self.executable
-                    .require_single_link(&control.cancelled, control.deadline())
+                    .require_single_link(&control.cancelled, deadline)
             })?;
             require_live(&self.process, control)
         }
@@ -167,18 +162,19 @@ mod platform {
             control: &Control,
         ) -> Result<Option<PreparedProcess>, Fault> {
             control.check()?;
+            let deadline = control.require_deadline()?;
             let configuration = &binding.binding.configuration;
             configuration.validate_declaration(&binding.declaration)?;
             let selected_path = Path::new(&configuration.game.path);
             let executable = checked(control, || {
-                WindowsExecutableGuard::open(selected_path, &control.cancelled, control.deadline())
+                WindowsExecutableGuard::open(selected_path, &control.cancelled, deadline)
             })?;
             require_saved_resolution(
                 executable.canonical_path(),
                 &binding.binding.resolution.game,
             )?;
             checked(control, || {
-                executable.require_single_link(&control.cancelled, control.deadline())
+                executable.require_single_link(&control.cancelled, deadline)
             })?;
             let name: Vec<u16> = executable
                 .canonical_path()
@@ -221,7 +217,7 @@ mod platform {
                         }
                     };
                     match checked(control, || {
-                        executable.same_file(&path, &control.cancelled, control.deadline())
+                        executable.same_file(&path, &control.cancelled, deadline)
                     }) {
                         Ok(true) => {}
                         Ok(false) => return Ok(Candidate::Unrelated),
@@ -238,11 +234,7 @@ mod platform {
                         executable.clone()
                     } else {
                         checked(control, || {
-                            WindowsExecutableGuard::open(
-                                &canonical,
-                                &control.cancelled,
-                                control.deadline(),
-                            )
+                            WindowsExecutableGuard::open(&canonical, &control.cancelled, deadline)
                         })?
                     };
                     if image.identity() != executable.identity() {
@@ -261,10 +253,10 @@ mod platform {
             )?;
             let Some(process) = process else {
                 checked(control, || {
-                    executable.validate(selected_path, &control.cancelled, control.deadline())
+                    executable.validate(selected_path, &control.cancelled, deadline)
                 })?;
                 checked(control, || {
-                    executable.require_single_link(&control.cancelled, control.deadline())
+                    executable.require_single_link(&control.cancelled, deadline)
                 })?;
                 return Ok(None);
             };

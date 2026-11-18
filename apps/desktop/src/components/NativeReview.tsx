@@ -9,7 +9,7 @@ import {useLocale} from '../locale.tsx';
 export default function NativeReview({bound, native, selectedProfile, valuesDirty, locked, nativeCapability, environment, handlers}: {
   bound:Bound; native:NativeFacts; selectedProfile:{name:string; id:string}|undefined; valuesDirty:boolean;
   locked:boolean; nativeCapability:NativeCapability|null; environment:OcrEnvironment|null;
-  handlers:{native:{edit:(field:'operation'|'postcondition'|'workflowSeconds', value:string)=>void; approve:(field:NativeConsent, value:boolean)=>void}};
+  handlers:{native:{edit:(field:'operation'|'postcondition'|'workflowSeconds'|'lifecycle'|'overallSeconds', value:string)=>void; approve:(field:NativeConsent, value:boolean)=>void}};
 }) {
   const t = messages[useLocale()].ui;
   const nativeBinding = native.binding;
@@ -18,18 +18,21 @@ export default function NativeReview({bound, native, selectedProfile, valuesDirt
   const recipe = native?.recipe ?? null;
   // Launch recipe validity is conditional on host-confirmed absence, not a gate on attaching.
   const approvalOpen = (native.block === null || native.block === 'nativeApproval') && !locked;
-  // Invalid Workflow text has no effective duration; never display a clamped or fallback budget.
-  const nativeLimits = nativeCapability?.default_limits ?? null;
-  const selectedLimits = native?.limits ?? null;
+  const continuous = native.lifecycle === 'continuous';
+  const nativeLimits = (continuous ? nativeCapability?.continuous_limits : nativeCapability?.default_limits) ?? null;
+  const selectedLimits = native.limits;
   const nativeBudgetRows = nativeLimits && [
-    [t.run.nativeStartup, nativeLimits.startup_ms], [t.run.nativeReadiness, nativeLimits.readiness_ms], [t.run.nativeWorkflow, selectedLimits?.workflow_ms ?? null],
+    [t.run.nativeStartup, nativeLimits.startup_ms], [t.run.nativeReadiness, nativeLimits.readiness_ms],
+    ...(!continuous ? [[t.run.nativeWorkflow, selectedLimits && 'workflow_ms' in selectedLimits ? selectedLimits.workflow_ms : null] as const] : []),
   ] as const;
-  const nativeDuration = selectedLimits ? (1 + (native.recovery ? 1 : 0)) * (selectedLimits.startup_ms + selectedLimits.readiness_ms + selectedLimits.workflow_ms) + (native.recovery ? 3000 : 0) : null;
+  const nativeDuration = selectedLimits && 'workflow_ms' in selectedLimits
+    ? (1 + (native.recovery ? 1 : 0)) * (selectedLimits.startup_ms + selectedLimits.readiness_ms + selectedLimits.workflow_ms) + (native.recovery ? 3000 : 0)
+    : selectedLimits && 'overall_ms' in selectedLimits ? selectedLimits.overall_ms ?? null : null;
   const nativeLimitRows = nativeLimits && [
-    [t.run.nativeFrames, String(nativeLimits.max_frames)],
-    [t.run.nativeWait, `${nativeLimits.wait_ms} ms`], [t.run.nativeInterval, `${nativeLimits.interval_ms} ms`],
-    [t.run.nativeActions, String(nativeLimits.max_actions)], [t.run.nativeCleanup, `${nativeLimits.cleanup_ms} ms`],
-    [t.run.nativeContainment, `${nativeLimits.containment_ms} ms`],
+    ...('max_frames' in nativeLimits ? [[t.run.nativeFrames, String(nativeLimits.max_frames)], [t.run.nativeActions, String(nativeLimits.max_actions)]]
+      : [[t.run.nativeBatchEvents, String(nativeLimits.max_batch_events)], [t.run.nativeEventInterval, `${nativeLimits.event_interval_ms} ms`]]),
+    [t.run.nativeWait, `${nativeLimits.wait_ms} ms`], [continuous ? t.run.nativeCaptureInterval : t.run.nativeInterval, `${nativeLimits.interval_ms} ms`],
+    [t.run.nativeCleanup, `${nativeLimits.cleanup_ms} ms`], [t.run.nativeContainment, `${nativeLimits.containment_ms} ms`],
   ];
   const identity:{term:string; value:ReactNode; id?:string; mono?:boolean}[] = [
     {term:t.run.nativePackage, value:`${bound.package.package_id} / ${selectedProfile && !valuesDirty ? `${selectedProfile.name} · ${selectedProfile.id}` : t.run.profileDraft}`},
@@ -56,18 +59,33 @@ export default function NativeReview({bound, native, selectedProfile, valuesDirt
         {recipe.workingDirectory !== null && <><code>{recipe.workingDirectory}</code> · </>}{t.run.nativeDirectories[recipe.directory]}</dd>
     </dl>
     {recipe.recipient === 'launcher' && <p className="field-help">{t.run.nativeForwarding}</p>}</>;
-  const workflowField = nativeCapability && <div className="field"><label htmlFor="native-workflow-seconds">{t.run.nativeWorkflowSeconds}</label>
+  const lifecycleField = nativeCapability && <fieldset className="field execution-options native-lifecycle" disabled={locked} aria-describedby="native-lifecycle-help">
+    <legend>{t.run.nativeLifecycle}</legend>
+    <label className="checkbox-label"><input id="native-lifecycle-finite" type="radio" name="native-lifecycle" value="finite" checked={!continuous}
+      onChange={() => handlers.native.edit('lifecycle', 'finite')}/>{t.run.nativeFinite}</label>
+    <label className="checkbox-label"><input id="native-lifecycle-continuous" type="radio" name="native-lifecycle" value="continuous" checked={continuous}
+      onChange={() => handlers.native.edit('lifecycle', 'continuous')}/>{t.run.nativeContinuous}</label>
+    <p className="field-help" id="native-lifecycle-help">{continuous ? t.run.nativeContinuousHelp : t.run.nativeFiniteHelp}</p>
+  </fieldset>;
+  const workflowField = nativeCapability && !continuous && <div className="field"><label htmlFor="native-workflow-seconds">{t.run.nativeWorkflowSeconds}</label>
     <input id="native-workflow-seconds" type="text" inputMode="numeric" value={native.workflowSeconds} disabled={locked} spellCheck={false}
       aria-invalid={native.workflowError} aria-describedby={`native-workflow-help${native.workflowError ? ' native-workflow-error' : ''}`}
       onChange={event => handlers.native.edit('workflowSeconds', event.target.value)}/>
     {native.workflowError && <p className="field-error" id="native-workflow-error">{t.run.nativeWorkflowError(nativeCapability.max_workflow_ms / 1000)}</p>}
     <p className="field-help" id="native-workflow-help">{t.run.nativeWorkflowHelp(nativeCapability.default_limits.workflow_ms / 1000, nativeCapability.max_workflow_ms / 1000)}</p></div>;
-  const budgets = nativeBudgetRows && <><span className="eyebrow">{t.run.nativeBudgets}<HelpTrigger title={t.run.nativeBudgets} hint={t.run.nativeBudgetHint}>
-    <p>{t.run.nativeBudgetHelp}</p><p>{t.run.nativeStartupHelp}</p>
+  const overallField = nativeCapability && continuous && <div className="field"><label htmlFor="native-overall-seconds">{t.run.nativeOverallSeconds}</label>
+    <input id="native-overall-seconds" type="text" inputMode="numeric" value={native.overallSeconds} disabled={locked} spellCheck={false}
+      aria-invalid={native.overallError} aria-describedby={`native-overall-help${native.overallError ? ' native-overall-error' : ''}`}
+      onChange={event => handlers.native.edit('overallSeconds', event.target.value)}/>
+    {native.overallError && <p className="field-error" id="native-overall-error">{t.run.nativeOverallError}</p>}
+    <p className="field-help" id="native-overall-help">{t.run.nativeOverallHelp}</p></div>;
+  const budgets = nativeBudgetRows && <><span className="eyebrow">{t.run.nativeBudgets}<HelpTrigger title={t.run.nativeBudgets} hint={continuous ? t.run.nativeContinuousBudgetHint : t.run.nativeBudgetHint}>
+    <p>{continuous ? t.run.nativeContinuousBudgetHelp : t.run.nativeBudgetHelp}</p><p>{t.run.nativeStartupHelp}</p>
   </HelpTrigger></span>
     <dl className="run-identity" id="native-budgets">{nativeBudgetRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value === null ? t.common.none : `${value} ms`}</dd></Fragment>)}</dl>
-    <dl className="run-identity"><dt>{t.run.nativeDuration}</dt><dd id="native-duration">{nativeDuration === null ? t.common.none : t.run.nativeEnvelope(nativeDuration)}</dd></dl></>;
-  const limits = nativeLimitRows && <><span className="eyebrow">{t.run.nativeLimits}</span>
+    <dl className="run-identity"><dt>{t.run.nativeDuration}</dt><dd id="native-duration">{nativeDuration === null
+      ? continuous && selectedLimits ? t.run.nativeNoOverall : t.common.none : t.run.nativeEnvelope(nativeDuration)}</dd></dl></>;
+  const limits = nativeLimitRows && <><span className="eyebrow">{continuous ? t.run.nativeContinuousLimits : t.run.nativeLimits}</span>
     <dl className="run-identity" id="native-limits">{nativeLimitRows.map(([term, value]) => <Fragment key={term}><dt>{term}</dt><dd>{value}</dd></Fragment>)}</dl></>;
   const statements = <>
     <div className="field"><label htmlFor="native-operation">{t.run.nativeOperation}</label>
@@ -90,16 +108,19 @@ export default function NativeReview({bound, native, selectedProfile, valuesDirt
   const launchRecovery = !windows && <><label className="checkbox-label"><input id="native-launch-consent" type="checkbox" checked={native.launch} disabled={!approvalOpen}
     onChange={event => handlers.native.approve('launch', event.target.checked)}/>{t.run.nativeLaunch}</label>
     <p className="field-help" id="native-launch-help">{t.run.nativeLaunchHelp}</p>
-    <label className="checkbox-label"><input id="native-recovery-consent" type="checkbox" checked={native.recovery} disabled={!approvalOpen || !native.launch}
+    {!continuous && <><label className="checkbox-label"><input id="native-recovery-consent" type="checkbox" checked={native.recovery} disabled={!approvalOpen || !native.launch}
       aria-describedby="native-recovery-help" onChange={event => handlers.native.approve('recovery', event.target.checked)}/>{t.run.nativeRecovery}</label>
-    <p className="field-help" id="native-recovery-help">{t.run.nativeRecoveryHelp}</p></>;
+      <p className="field-help" id="native-recovery-help">{t.run.nativeRecoveryHelp}</p></>}</>;
   const approvalHelp = <p className="field-help">{t.run.nativeApprovalHelp}</p>;
   return <div id="native-review">
     <h3>{t.run.nativeHeading}</h3>
     {help}
     <dl className="run-identity" id="native-target">{rows(identity)}</dl>
     {recipeSection}
+    {lifecycleField}
     {workflowField}
+    {overallField}
+    {continuous && <p className="field-help" id="native-continuous-recovery">{t.run.nativeContinuousRecovery}</p>}
     {budgets}
     {limits}
     {statements}

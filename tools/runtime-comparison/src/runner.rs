@@ -50,6 +50,8 @@ pub struct RunRecord {
     pub scenario: String,
     pub profile: String,
     pub plan_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_budgets: Option<crate::model::NativeBudgets>,
     pub inventory_identity: String,
     pub status: String,
     pub reason: String,

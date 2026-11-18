@@ -51,7 +51,7 @@ impl Package {
                 operation: "One reviewed workflow".into(),
                 visible_postcondition: "Reviewed result".into(),
             },
-            limits: native_limits(),
+            limits: native_limits().into(),
         });
         request
     }
@@ -79,7 +79,8 @@ fn refused_before_resolve(
             .budgets()
             .operation_ms(intent.max_exit_recoveries)
             .unwrap()
-            + intent.limits.containment_ms,
+            .expect("finite operation deadline")
+            + native_limits().containment_ms,
     );
     let controller = DesktopController::new("unused-controlled".into(), engine);
     let resolved = Arc::new(AtomicBool::new(false));

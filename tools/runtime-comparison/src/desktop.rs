@@ -10,7 +10,7 @@ mod recognition;
 mod test_support;
 
 use crate::inventory::{Inventory, TargetDeclaration};
-use crate::model::{Control, Fault, NativeBudgets, Plan};
+use crate::model::{Control, Fault, NativeBudgets, NativeWorkflow, Plan};
 use lifecycle::Lifecycle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -67,7 +67,7 @@ pub struct NativeIntent {
     #[serde(default)]
     pub max_exit_recoveries: u8,
     pub review: NativeReview,
-    pub limits: NativeLimits,
+    pub limits: NativeRunLimits,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -81,6 +81,7 @@ pub enum NativeReview {
     Script {},
 }
 
+/// Finite stage/lifetime limits, the default reviewed lifecycle.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeLimits {
@@ -100,8 +101,84 @@ impl NativeLimits {
         NativeBudgets {
             startup_ms: self.startup_ms,
             readiness_ms: self.readiness_ms,
-            workflow_ms: self.workflow_ms,
+            workflow: NativeWorkflow::Finite {
+                workflow_ms: self.workflow_ms,
+            },
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuousLifecycle {
+    Continuous,
+}
+
+/// Ordinary continuous Workflow: finite Startup/Readiness, bounded per-call waits
+/// and expanded-event pace, no Workflow lifetime, optional overall deadline.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuousLimits {
+    pub lifecycle: ContinuousLifecycle,
+    pub startup_ms: u64,
+    pub readiness_ms: u64,
+    pub wait_ms: u64,
+    pub interval_ms: u64,
+    pub cleanup_ms: u64,
+    pub containment_ms: u64,
+    pub max_batch_events: usize,
+    pub event_interval_ms: u64,
+    /// Absent means no overall deadline; never a sentinel value.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub overall_ms: Option<u64>,
+}
+
+fn present<'de, D: serde::Deserializer<'de>>(input: D) -> Result<Option<u64>, D::Error> {
+    u64::deserialize(input).map(Some)
+}
+
+impl ContinuousLimits {
+    pub fn budgets(&self) -> NativeBudgets {
+        NativeBudgets {
+            startup_ms: self.startup_ms,
+            readiness_ms: self.readiness_ms,
+            workflow: NativeWorkflow::Continuous {
+                overall_ms: self.overall_ms,
+            },
+        }
+    }
+}
+
+/// The finite object is unchanged; only `lifecycle: "continuous"` selects the other.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NativeRunLimits {
+    Continuous(ContinuousLimits),
+    Finite(NativeLimits),
+}
+
+impl NativeRunLimits {
+    pub fn budgets(&self) -> NativeBudgets {
+        match self {
+            Self::Continuous(limits) => limits.budgets(),
+            Self::Finite(limits) => limits.budgets(),
+        }
+    }
+}
+
+impl From<NativeLimits> for NativeRunLimits {
+    fn from(limits: NativeLimits) -> Self {
+        Self::Finite(limits)
+    }
+}
+
+impl From<ContinuousLimits> for NativeRunLimits {
+    fn from(limits: ContinuousLimits) -> Self {
+        Self::Continuous(limits)
     }
 }
 
@@ -110,12 +187,16 @@ impl NativeLimits {
 pub struct NativeCapability {
     pub default_limits: NativeLimits,
     pub max_workflow_ms: u64,
+    pub continuous_limits: ContinuousLimits,
 }
 
 pub fn native_capability() -> NativeCapability {
     NativeCapability {
         default_limits: native_limits(),
-        max_workflow_ms: NativeBudgets::CEILINGS.workflow_ms,
+        max_workflow_ms: NativeBudgets::CEILINGS
+            .workflow_ms()
+            .expect("finite workflow ceiling"),
+        continuous_limits: continuous_limits(),
     }
 }
 
@@ -124,13 +205,32 @@ pub fn native_limits() -> NativeLimits {
     NativeLimits {
         startup_ms: NativeBudgets::DEFAULT.startup_ms,
         readiness_ms: NativeBudgets::DEFAULT.readiness_ms,
-        workflow_ms: NativeBudgets::DEFAULT.workflow_ms,
+        workflow_ms: NativeBudgets::DEFAULT
+            .workflow_ms()
+            .expect("finite workflow default"),
         max_frames: 300,
         wait_ms: 1_000,
         interval_ms: 100,
         max_actions: 64,
         cleanup_ms: 1_000,
         containment_ms: 2_000,
+    }
+}
+
+/// Continuous template and ceilings; `overall_ms` is chosen per Start.
+pub fn continuous_limits() -> ContinuousLimits {
+    let finite = native_limits();
+    ContinuousLimits {
+        lifecycle: ContinuousLifecycle::Continuous,
+        startup_ms: finite.startup_ms,
+        readiness_ms: finite.readiness_ms,
+        wait_ms: finite.wait_ms,
+        interval_ms: finite.interval_ms,
+        cleanup_ms: finite.cleanup_ms,
+        containment_ms: finite.containment_ms,
+        max_batch_events: finite.max_actions,
+        event_interval_ms: 1_000,
+        overall_ms: None,
     }
 }
 

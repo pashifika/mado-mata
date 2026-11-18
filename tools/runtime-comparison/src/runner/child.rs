@@ -122,7 +122,6 @@ fn settled_primary(control: &Control, verdict: &OnceLock<()>, fault: Fault) -> F
 pub fn child() -> Result<bool, Fault> {
     let mut input = BufReader::new(std::io::stdin());
     let invocation = super::payload::read(&mut input)?;
-    invocation.plan.validate()?;
     invocation.inventory.validate()?;
     invocation.operation.validate(&invocation.plan)?;
     if !(1..=2).contains(&invocation.attempt) {
@@ -149,16 +148,7 @@ pub fn child() -> Result<bool, Fault> {
     // The supervisor's deadline is absolute on the shared clock: spawn, payload
     // transfer and validation above are already charged, and no Host or native
     // work starts before this bound exists.
-    let control = Arc::new(Control::with_deadline(
-        &invocation.plan.limits,
-        invocation.deadline.instant()?,
-    ));
-    if let Some(budgets) = invocation.plan.native_budgets {
-        let deadline = invocation
-            .startup_deadline
-            .ok_or_else(|| Fault::new("Transport", "Native startup deadline missing"))?;
-        control.start_native(budgets, Some(deadline.instant()?))?;
-    }
+    let control = Arc::new(invocation.child_control()?);
     if invocation.prepare_target
         && (invocation.plan.lane != "native" || invocation.plan.native_budgets.is_none())
     {

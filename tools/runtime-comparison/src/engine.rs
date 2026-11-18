@@ -34,6 +34,8 @@ pub use enabled::{Engine, release_runner_resources};
 #[cfg(feature = "engine")]
 mod enabled {
     #[cfg(test)]
+    mod continuous_tests;
+    #[cfg(test)]
     mod native_frame_tests;
     #[cfg(test)]
     mod native_wait_tests;
@@ -45,10 +47,11 @@ mod enabled {
     #[cfg(windows)]
     mod windows_process;
     use super::*;
-    use crate::desktop::NativeReview;
+    use crate::desktop::{NativeReview, continuous_limits};
     use crate::environment::{Configuration, Placement, ReplayConfig, canonical, validate_replay};
     use crate::host::{
-        Action, DragEvent, HandleBudget, HandlePermit, Managed, PointerButton, drag_events,
+        Action, DragEvent, EventWindow, HandleBudget, HandlePermit, Managed, PointerButton,
+        WorkflowScope, drag_events,
     };
     use crate::model::Limits;
     use mado_pilot as mp;
@@ -113,12 +116,32 @@ mod enabled {
         }
     }
 
+    // An explicit null is not an absent bound.
+    fn present<'de, T, D>(input: D) -> Result<Option<T>, D::Error>
+    where
+        T: Deserialize<'de>,
+        D: serde::Deserializer<'de>,
+    {
+        T::deserialize(input).map(Some)
+    }
+
     #[derive(Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
     struct CaptureAuthority {
         approved: bool,
-        duration_ms: u64,
-        max_frames: u64,
+        // Lifetime totals of a finite plan; absent in continuous Workflow.
+        #[serde(
+            default,
+            deserialize_with = "present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        duration_ms: Option<u64>,
+        #[serde(
+            default,
+            deserialize_with = "present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        max_frames: Option<u64>,
         wait_ms: u64,
         interval_ms: u64,
     }
@@ -127,8 +150,33 @@ mod enabled {
     #[serde(deny_unknown_fields)]
     struct InputAuthority {
         approved: bool,
-        duration_ms: u64,
-        max_actions: usize,
+        // Lifetime totals of a finite plan; absent in continuous Workflow.
+        #[serde(
+            default,
+            deserialize_with = "present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        duration_ms: Option<u64>,
+        #[serde(
+            default,
+            deserialize_with = "present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        max_actions: Option<usize>,
+        // Continuous Workflow pace: whole batches of at most `max_batch_events`
+        // expanded events, and at most that many per shared `event_interval_ms`.
+        #[serde(
+            default,
+            deserialize_with = "present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        max_batch_events: Option<usize>,
+        #[serde(
+            default,
+            deserialize_with = "present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        event_interval_ms: Option<u64>,
         route: String,
         focus: String,
         #[serde(default)]
@@ -152,6 +200,18 @@ mod enabled {
     }
 
     impl InputAuthority {
+        /// Expanded events one sequence may carry: one whole continuous batch,
+        /// or what the finite attempt total has left after `spent`.
+        fn event_room(&self, spent: usize) -> usize {
+            self.max_batch_events
+                .unwrap_or_else(|| self.max_actions.unwrap_or(0).saturating_sub(spent))
+        }
+
+        /// Continuous pace `(max_batch_events, event_interval_ms)`; `None` for a finite plan.
+        fn pace(&self) -> Option<(usize, u64)> {
+            self.max_batch_events.zip(self.event_interval_ms)
+        }
+
         fn authorize(&self, action: &Action) -> Result<(), Fault> {
             if self.package_approved
                 || self.representative_actions.iter().any(|allowed| {
@@ -277,6 +337,8 @@ mod enabled {
         captured_frames: u64,
         last_capture: Option<Instant>,
         input_events: usize,
+        // Continuous pace shared by every scope; an admitted batch is never refunded.
+        input_window: EventWindow,
         input_cleanup_incomplete: bool,
         input_uncertain: bool,
         placement: Option<mp::TargetPlacement>,
@@ -332,6 +394,10 @@ mod enabled {
             }
         }
     }
+
+    /// The caller's Workflow scope for one call; `None` for unscoped finite and
+    /// setup work.
+    type Scope<'a> = Option<&'a WorkflowScope>;
 
     struct InFlight<'a>(&'a AtomicUsize);
     impl Drop for InFlight<'_> {
@@ -454,11 +520,13 @@ mod enabled {
                 config
                     .native
                     .as_ref()
-                    .map(|native| native.capture.duration_ms),
+                    .and_then(|native| native.capture.duration_ms),
             )?;
+            // Initialization and session opening are finite preparation stages.
+            let deadline = control.require_deadline()?;
             let operation = mp::OperationContext::new()
                 .with_cancellation(bridge.token.clone())
-                .with_timeout(control.deadline().saturating_duration_since(Instant::now()))
+                .with_timeout(deadline.saturating_duration_since(control.now()))
                 .map_err(|error| engine_error("operation_context", error))?;
             let model = validate_ocr(&config, &control)?;
             let mut digest = Sha256::new();
@@ -616,6 +684,7 @@ mod enabled {
                     captured_frames: 0,
                     last_capture: None,
                     input_events: 0,
+                    input_window: EventWindow::default(),
                     input_cleanup_incomplete: false,
                     input_uncertain: false,
                     placement: None,
@@ -645,7 +714,7 @@ mod enabled {
             if state.session.is_some() {
                 return Ok(true);
             }
-            let operation = self.operation(self.limits.wait_ms)?;
+            let operation = self.operation(self.limits.wait_ms, None)?;
             let State {
                 native_process_started,
                 process_lifetime,
@@ -733,8 +802,8 @@ mod enabled {
             let open_operation = native
                 .map(|native| {
                     let remaining = control
-                        .deadline()
-                        .saturating_duration_since(Instant::now())
+                        .require_deadline()?
+                        .saturating_duration_since(control.now())
                         .as_millis() as u64;
                     self::operation(&bridge.token, native.capture.wait_ms.min(remaining))
                 })
@@ -823,6 +892,7 @@ mod enabled {
                     captured_frames: 0,
                     last_capture: None,
                     input_events: 0,
+                    input_window: EventWindow::default(),
                     input_cleanup_incomplete: false,
                     input_uncertain: false,
                     placement: None,
@@ -844,7 +914,18 @@ mod enabled {
         }
 
         pub fn call(&self, method: &str, args: Value) -> Result<Value, Fault> {
-            let result = self.call_inner(method, args);
+            self.call_scoped(method, args, None)
+        }
+
+        /// `scope` additionally bounds this call's admission, deadline, dispatch
+        /// and publication. It never replaces a Run check or outlives the call.
+        pub(crate) fn call_scoped(
+            &self,
+            method: &str,
+            args: Value,
+            scope: Option<&WorkflowScope>,
+        ) -> Result<Value, Fault> {
+            let result = self.call_inner(method, args, scope);
             if method != "release"
                 && self
                     .native
@@ -868,13 +949,31 @@ mod enabled {
             result
         }
 
-        fn call_inner(&self, method: &str, args: Value) -> Result<Value, Fault> {
+        fn call_inner(&self, method: &str, args: Value, scope: Scope<'_>) -> Result<Value, Fault> {
             if method != "release" {
-                self.check()?;
+                self.admit(scope)?;
             }
             let mut state = self.lock()?;
+            let charged = state.input_events;
+            let result = self.perform(&mut state, method, args, scope);
+            self.handles.store(owner_count(&state), Ordering::Release);
+            // Work that reached the input route is never a scope-local outcome.
+            if state.input_events == charged {
+                result.map_err(|fault| self.local(fault, scope))
+            } else {
+                result
+            }
+        }
+
+        fn perform(
+            &self,
+            state: &mut State,
+            method: &str,
+            args: Value,
+            scope: Scope<'_>,
+        ) -> Result<Value, Fault> {
             if method != "release" {
-                self.check_session(&state)?;
+                self.check_session(state, scope)?;
                 // Query waits may return a previously committed historical result.
                 // New query work performs its own SDK admission; never revoke that history.
                 if method != "query_wait"
@@ -885,26 +984,26 @@ mod enabled {
                         .session
                         .as_ref()
                         .unwrap()
-                        .commit_frame(frame, &self.operation(self.limits.wait_ms)?)
+                        .commit_frame(frame, &self.operation(self.limits.wait_ms, scope)?)
                         .map_err(|error| engine_error("capture_terminal", error))?;
                 }
             }
-            let result = match method {
+            match method {
                 "observe" => {
                     empty(&args)?;
-                    self.observe(&mut state, self.limits.wait_ms)
+                    self.observe(state, self.limits.wait_ms, scope)
                 }
                 "validate_observation" => {
                     let request: ObservationRequest = decode(args)?;
-                    let observation = self.observation(&state, &request.observation)?;
-                    let operation = self.operation(self.limits.wait_ms)?;
+                    let observation = self.observation(state, &request.observation)?;
+                    let operation = self.operation(self.limits.wait_ms, scope)?;
                     state
                         .session
                         .as_ref()
                         .ok_or_else(|| Fault::new("Closed", "session closed"))?
                         .commit_frame(&observation.frame, &operation)
                         .map_err(|error| engine_error("input_admission", error))?;
-                    self.check()?;
+                    self.admit(scope)?;
                     Ok(json!({"valid":true}))
                 }
                 "recognize" => {
@@ -912,9 +1011,11 @@ mod enabled {
                     if request.expected.is_some() {
                         return Err(argument("expected belongs to query"));
                     }
-                    self.recognize(&mut state, &request, self.limits.wait_ms)
+                    self.recognize(state, &request, self.limits.wait_ms, scope)
                 }
-                "scan_ocr_zones" => self.scan_ocr_zones(&state, decode(args)?, self.limits.wait_ms),
+                "scan_ocr_zones" => {
+                    self.scan_ocr_zones(state, decode(args)?, self.limits.wait_ms, scope)
+                }
                 "query" => {
                     let mut request: RecognitionRequest = decode(args)?;
                     if request
@@ -939,22 +1040,20 @@ mod enabled {
                             ));
                         }
                     }
-                    let source = self
-                        .observation(&state, &request.observation)?
-                        .frame
-                        .clone();
+                    let source = self.observation(state, &request.observation)?.frame.clone();
                     request.roi.rect(&source)?;
                     let mut permits = self.handle_budget.reserve(2)?;
-                    let id = next_id(&mut state, "query")?;
+                    let id = next_id(state, "query")?;
                     let deadline = Instant::now()
                         .checked_add(Duration::from_millis(self.limits.wait_ms))
                         .ok_or_else(|| argument("query deadline is not representable"))?;
-                    let operation = self.operation(self.limits.wait_ms)?;
+                    let operation = self.operation(self.limits.wait_ms, scope)?;
                     request.observation = self.retain_observation(
-                        &mut state,
+                        state,
                         source,
                         permits.split_one(),
                         &operation,
+                        scope,
                     )?;
                     state.queries.insert(
                         id.clone(),
@@ -969,8 +1068,8 @@ mod enabled {
                     );
                     Ok(json!({"id":id}))
                 }
-                "query_wait" => self.query_wait(&mut state, decode(args)?),
-                "postcondition" => self.postcondition(&state, decode(args)?),
+                "query_wait" => self.query_wait(state, decode(args)?, scope),
+                "postcondition" => self.postcondition(state, decode(args)?, scope),
                 "release" => {
                     let request: IdRequest = decode(args)?;
                     let query = state.queries.remove(&request.id);
@@ -994,19 +1093,20 @@ mod enabled {
                 }
                 "validate_input" => {
                     let request: DispatchRequest = decode(args)?;
-                    self.input_request(&state, &request)?;
+                    self.input_request(state, &request, scope)?;
                     Ok(json!({"valid":true}))
                 }
-                "dispatch" => self.dispatch(&mut state, decode(args)?),
+                "dispatch" => self.dispatch(state, decode(args)?, scope),
                 _ => Err(argument("unsupported engine operation")),
-            };
-            self.handles.store(owner_count(&state), Ordering::Release);
-            result
+            }
         }
 
         fn check(&self) -> Result<(), Fault> {
             if self.native.as_ref().is_some_and(|native| {
-                self.control.elapsed_us() / 1_000 >= native.capture.duration_ms
+                native
+                    .capture
+                    .duration_ms
+                    .is_some_and(|bound| self.control.elapsed_us() / 1_000 >= bound)
             }) {
                 return Err(Fault::new("Timeout", "native capture authority expired"));
             }
@@ -1015,6 +1115,26 @@ mod enabled {
                 return Err(Fault::new("Closed", "engine attempt is closing"));
             }
             Ok(())
+        }
+
+        /// Run liveness first, then the caller's scope: a Run Stop, deadline or
+        /// close is never reported as a scope-local outcome.
+        fn admit(&self, scope: Scope<'_>) -> Result<(), Fault> {
+            self.check()?;
+            scope.map_or(Ok(()), WorkflowScope::check)
+        }
+
+        /// Effect-free work ended by a deadline or cancellation is the scope's own
+        /// outcome while the Run is live. Every other fault is kept as it is.
+        fn local(&self, fault: Fault, scope: Scope<'_>) -> Fault {
+            if matches!(fault.category.as_str(), "Timeout" | "Cancelled")
+                && let Some(scope) = scope
+                && self.check().is_ok()
+                && let Err(local) = scope.check()
+            {
+                return local;
+            }
+            fault
         }
 
         // Only refines SDK TargetLost for approved recovery; never admits capture or input.
@@ -1043,8 +1163,8 @@ mod enabled {
             Ok(())
         }
 
-        fn check_session(&self, state: &State) -> Result<(), Fault> {
-            self.check()?;
+        fn check_session(&self, state: &State, scope: Scope<'_>) -> Result<(), Fault> {
+            self.admit(scope)?;
             if state.session.is_none() {
                 return Err(Fault::new("Closed", "session closed"));
             }
@@ -1060,25 +1180,47 @@ mod enabled {
                 .map_err(|_| internal("engine state poisoned"))
         }
 
-        fn operation(&self, bound: u64) -> Result<mp::OperationContext, Fault> {
-            self.check()?;
-            let elapsed = self.control.elapsed_us() / 1_000;
-            let duration = self
-                .native
-                .as_ref()
-                .map_or(self.limits.duration_ms, |native| {
-                    native.capture.duration_ms.min(self.limits.duration_ms)
-                });
-            let remaining = duration.saturating_sub(elapsed).min(
-                self.control
-                    .deadline()
-                    .saturating_duration_since(Instant::now())
-                    .as_millis() as u64,
-            );
-            if remaining == 0 {
+        /// Milliseconds left under finite lifetime authority and the effective Run
+        /// and scope deadlines. `None`: continuous Workflow with neither deadline,
+        /// where each call keeps only its own bound.
+        fn authority_ms(&self, input: bool, scope: Scope<'_>) -> Option<u64> {
+            let lifetime = match &self.native {
+                None => Some(self.limits.duration_ms),
+                Some(native) => native.capture.duration_ms.map(|capture| {
+                    let capture = capture.min(self.limits.duration_ms);
+                    match native.input.duration_ms {
+                        Some(duration) if input => duration.min(capture),
+                        _ => capture,
+                    }
+                }),
+            }
+            .map(|bound| bound.saturating_sub(self.control.elapsed_us() / 1_000));
+            let now = self.control.now();
+            let run = self
+                .control
+                .deadline_opt()
+                .map(|at| at.saturating_duration_since(now).as_millis() as u64);
+            // Rounded up, so an SDK expiry the scope caused never precedes the scope's own.
+            let local = scope.and_then(WorkflowScope::deadline).map(|at| {
+                at.saturating_duration_since(now)
+                    .as_micros()
+                    .div_ceil(1_000) as u64
+            });
+            [lifetime, run, local].into_iter().flatten().min()
+        }
+
+        fn operation(&self, bound: u64, scope: Scope<'_>) -> Result<mp::OperationContext, Fault> {
+            self.admit(scope)?;
+            let remaining = self.authority_ms(false, scope);
+            if remaining == Some(0) {
+                // A scope that expired meanwhile reports its own cause.
+                scope.map_or(Ok(()), WorkflowScope::check)?;
                 return Err(Fault::new("Timeout", "engine attempt deadline expired"));
             }
-            operation(&self.bridge.token, bound.min(remaining))
+            operation(
+                &self.bridge.token,
+                remaining.map_or(bound, |remaining| bound.min(remaining)),
+            )
         }
 
         fn active(&self) -> InFlight<'_> {
@@ -1086,7 +1228,12 @@ mod enabled {
             InFlight(&self.in_flight)
         }
 
-        fn observe(&self, state: &mut State, wait_ms: u64) -> Result<Value, Fault> {
+        fn observe(
+            &self,
+            state: &mut State,
+            wait_ms: u64,
+            scope: Scope<'_>,
+        ) -> Result<Value, Fault> {
             let permit = self.handle_budget.reserve(1)?;
             let started = Instant::now();
             let wait_ms = self
@@ -1094,7 +1241,11 @@ mod enabled {
                 .as_ref()
                 .map_or(wait_ms, |native| wait_ms.min(native.capture.wait_ms));
             if let Some(native) = &self.native {
-                if state.captured_frames >= native.capture.max_frames {
+                if native
+                    .capture
+                    .max_frames
+                    .is_some_and(|max| state.captured_frames >= max)
+                {
                     return Err(Fault::new(
                         "CaptureLimit",
                         "native frame authority is exhausted",
@@ -1103,7 +1254,7 @@ mod enabled {
                 while state.last_capture.is_some_and(|last| {
                     last.elapsed() < Duration::from_millis(native.capture.interval_ms)
                 }) {
-                    self.check_session(state)?;
+                    self.check_session(state, scope)?;
                     if started.elapsed() >= Duration::from_millis(wait_ms) {
                         return Err(Fault::new(
                             "Timeout",
@@ -1116,9 +1267,12 @@ mod enabled {
             let request = state
                 .latest
                 .map_or_else(mp::FrameRequest::latest, mp::FrameRequest::newer_than);
-            let operation = self.operation(remaining_ms_from(
-                Duration::from_millis(wait_ms).saturating_sub(started.elapsed()),
-            )?)?;
+            let operation = self.operation(
+                remaining_ms_from(
+                    Duration::from_millis(wait_ms).saturating_sub(started.elapsed()),
+                )?,
+                scope,
+            )?;
             let _active = self.active();
             let session = state
                 .session
@@ -1152,7 +1306,7 @@ mod enabled {
             };
             let stamp = frame.stamp();
             let native_frame = self.native.is_some().then(|| frame.clone());
-            let value = self.retain_observation(state, frame, permit, &operation)?;
+            let value = self.retain_observation(state, frame, permit, &operation, scope)?;
             // Latch only a committed frame; a rejected candidate establishes no baseline.
             state.placement = geometry;
             state.latest = Some(stamp);
@@ -1166,6 +1320,7 @@ mod enabled {
             frame: mp::Frame,
             permit: HandlePermit,
             operation: &mp::OperationContext,
+            scope: Scope<'_>,
         ) -> Result<Value, Fault> {
             let stamp = frame.stamp();
             let id = next_id(state, "observation")?;
@@ -1175,14 +1330,14 @@ mod enabled {
                 "session":format!("{}", stamp.stream()),"geometry":stamp.geometry().value(),
                 "frame":stamp.sequence().value(),"epoch":stamp.epoch().value(),
                 "width":extent.width(),"height":extent.height(),"coordinate_space":"capture-pixels"});
-            self.check_session(state)?;
+            self.check_session(state, scope)?;
             state
                 .session
                 .as_ref()
                 .ok_or_else(|| Fault::new("Closed", "session closed"))?
                 .commit_frame(&frame, operation)
                 .map_err(|error| engine_error("observation_publication", error))?;
-            self.check()?;
+            self.admit(scope)?;
             state.observations.insert(
                 id,
                 Managed::new(
@@ -1233,10 +1388,11 @@ mod enabled {
             state: &mut State,
             request: &RecognitionRequest,
             wait_ms: u64,
+            scope: Scope<'_>,
         ) -> Result<Value, Fault> {
             let permit = self.handle_budget.reserve(1)?;
             let observation = self.observation(state, &request.observation)?;
-            let operation = self.operation(wait_ms)?;
+            let operation = self.operation(wait_ms, scope)?;
             if request.kind == "ocr" {
                 self.wait_for_query_idle(&operation)?;
             }
@@ -1254,7 +1410,7 @@ mod enabled {
                 self.limits.log_bytes,
             )?
             .map(|(retained, value)| (Managed::new(retained, permit), value));
-            self.publish_recognition(state, request, found)
+            self.publish_recognition(state, request, found, scope)
         }
 
         fn publish_recognition(
@@ -1262,8 +1418,9 @@ mod enabled {
             state: &mut State,
             request: &RecognitionRequest,
             found: recognition::Recognized,
+            scope: Scope<'_>,
         ) -> Result<Value, Fault> {
-            self.check_session(state)?;
+            self.check_session(state, scope)?;
             let Some((retained, mut compact)) = found else {
                 return Ok(Value::Null);
             };
@@ -1302,10 +1459,11 @@ mod enabled {
             state: &mut State,
             request: &RecognitionRequest,
             deadline: Instant,
+            scope: Scope<'_>,
         ) -> Result<Value, Fault> {
             let token = mp::CancellationToken::new();
             let operation = self
-                .operation(remaining_ms(deadline)?)?
+                .operation(remaining_ms(deadline)?, scope)?
                 .with_cancellation(token.clone());
             self.wait_for_query_idle(&operation)?;
             let mut slot = self
@@ -1337,13 +1495,13 @@ mod enabled {
             )?;
             let result = (|| {
                 loop {
-                    self.check()?;
+                    self.admit(scope)?;
                     let _ = remaining_ms(deadline)?;
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     match receiver.recv_timeout(remaining.min(Duration::from_millis(1))) {
                         Ok(found) => {
                             let _ = remaining_ms(deadline)?;
-                            return self.publish_recognition(state, request, found?);
+                            return self.publish_recognition(state, request, found?, scope);
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -1361,6 +1519,7 @@ mod enabled {
             state: &State,
             request: crate::ocr_scan::Request,
             wait_ms: u64,
+            scope: Scope<'_>,
         ) -> Result<Value, Fault> {
             let observation = self.observation(state, &request.observation)?;
             let extent = observation.frame.descriptor().extent();
@@ -1385,7 +1544,7 @@ mod enabled {
                 .engine
                 .ocr_backend()
                 .ok_or_else(|| internal("OCR backend missing"))?;
-            let operation = self.operation(wait_ms)?;
+            let operation = self.operation(wait_ms, scope)?;
             self.wait_for_query_idle(&operation)?;
             let request = mp::OcrZoneScanRequest::new(
                 &observation.frame,
@@ -1396,7 +1555,7 @@ mod enabled {
                 &operation,
             )
             .map_err(|error| engine_error("ocr_request", error))?;
-            self.check_session(state)?;
+            self.check_session(state, scope)?;
             let session = state
                 .session
                 .as_ref()
@@ -1407,16 +1566,21 @@ mod enabled {
             let scanned = session
                 .scan_ocr_zones(request)
                 .map_err(|error| engine_error("ocr_recognition", error))?;
-            self.check_session(state)?;
+            self.check_session(state, scope)?;
             if scanned.stamp() != observation.frame.stamp() {
                 return Err(internal("recognition source correlation mismatch"));
             }
             let value = crate::ocr_scan::project(&scanned, &zones, Some(source))?;
-            self.check_session(state)?;
+            self.check_session(state, scope)?;
             Ok(value)
         }
 
-        fn query_wait(&self, state: &mut State, request: WaitRequest) -> Result<Value, Fault> {
+        fn query_wait(
+            &self,
+            state: &mut State,
+            request: WaitRequest,
+            scope: Scope<'_>,
+        ) -> Result<Value, Fault> {
             if request.timeout_ms == 0 || request.timeout_ms > self.limits.wait_ms {
                 return Err(argument("query wait requires a finite configured timeout"));
             }
@@ -1448,15 +1612,16 @@ mod enabled {
             state.active_queries += 1;
             let result = (|| {
                 loop {
-                    self.check_session(state)?;
-                    let value = self.query_recognize(state, &query.request, deadline)?;
+                    self.check_session(state, scope)?;
+                    let value = self.query_recognize(state, &query.request, deadline, scope)?;
                     if !value.is_null() {
                         return Ok(value);
                     }
                     if let Some(id) = query.request.observation["id"].as_str() {
                         state.observations.remove(id);
                     }
-                    query.request.observation = self.observe(state, remaining_ms(deadline)?)?;
+                    query.request.observation =
+                        self.observe(state, remaining_ms(deadline)?, scope)?;
                 }
             })();
             state.active_queries -= 1;
@@ -1474,6 +1639,7 @@ mod enabled {
             &self,
             state: &State,
             request: PostconditionRequest,
+            scope: Scope<'_>,
         ) -> Result<Value, Fault> {
             let current = self.observation(state, &request.observation)?;
             let checkpoint = self.observation(state, &request.checkpoint)?;
@@ -1499,7 +1665,7 @@ mod enabled {
                 },
                 None => mp::OcrRegion::FullFrame,
             };
-            let operation = self.operation(self.limits.wait_ms)?;
+            let operation = self.operation(self.limits.wait_ms, scope)?;
             self.wait_for_query_idle(&operation)?;
             let _active = self.active();
             let backend = self
@@ -1521,7 +1687,7 @@ mod enabled {
                     &operation,
                 ))
                 .map_err(|error| engine_error("postcondition_ocr", error))?;
-            self.check_session(state)?;
+            self.check_session(state, scope)?;
             if result.stamp() != now {
                 return Err(internal("recognition source correlation mismatch"));
             }
@@ -1531,10 +1697,11 @@ mod enabled {
             )
         }
 
+        /// Expanded input events: the finite attempt total, or one continuous batch.
         pub fn action_limit(&self) -> usize {
             self.native
                 .as_ref()
-                .map_or(self.limits.max_actions, |native| native.input.max_actions)
+                .map_or(self.limits.max_actions, |native| native.input.event_room(0))
         }
 
         pub(crate) fn action_event_count(&self, action: &Action) -> usize {
@@ -1565,6 +1732,7 @@ mod enabled {
             &self,
             state: &State,
             request: &DispatchRequest,
+            scope: Scope<'_>,
         ) -> Result<mp::InputRequest, Fault> {
             let native = self.native.as_ref().ok_or_else(|| {
                 blocked(
@@ -1584,21 +1752,31 @@ mod enabled {
                     "a prior input sequence may have left pressed state",
                 ));
             }
-            if self.control.elapsed_us() / 1_000 >= native.input.duration_ms {
+            if native
+                .input
+                .duration_ms
+                .is_some_and(|bound| self.control.elapsed_us() / 1_000 >= bound)
+            {
                 return Err(Fault::new("Timeout", "native input authority expired"));
             }
             let observation = self.observation(state, &request.observation)?;
             for action in &request.actions {
                 native.input.authorize(action)?;
             }
-            let remaining = self.input_remaining_ms(native);
             let sequence = native_sequence(
                 &request.actions,
                 Some(observation.frame.descriptor().extent()),
-                native.input.max_actions.saturating_sub(state.input_events),
+                native.input.event_room(state.input_events),
                 native.input.click_hold_ms,
-                Some((self.limits.wait_ms, remaining)),
+                Some((self.limits.wait_ms, self.authority_ms(true, None))),
             )?;
+            if let Some(scope) = scope {
+                // Scheduled holds must fit the scope before anything is sent.
+                scope.fits(Duration::from_millis(native_scheduled_wait_ms(
+                    &request.actions,
+                    native.input.click_hold_ms,
+                )?))?;
+            }
             let session = state
                 .session
                 .as_ref()
@@ -1618,36 +1796,31 @@ mod enabled {
             )))
         }
 
-        fn input_remaining_ms(&self, native: &NativeConfig) -> u64 {
-            native
-                .input
-                .duration_ms
-                .min(native.capture.duration_ms)
-                .min(self.limits.duration_ms)
-                .saturating_sub(self.control.elapsed_us() / 1_000)
-                .min(
-                    self.control
-                        .deadline()
-                        .saturating_duration_since(Instant::now())
-                        .as_millis() as u64,
-                )
-        }
-
-        fn dispatch(&self, state: &mut State, request: DispatchRequest) -> Result<Value, Fault> {
-            let input = self.input_request(state, &request)?;
+        fn dispatch(
+            &self,
+            state: &mut State,
+            request: DispatchRequest,
+            scope: Scope<'_>,
+        ) -> Result<Value, Fault> {
+            let input = self.input_request(state, &request, scope)?;
             let native = self
                 .native
                 .as_ref()
                 .ok_or_else(|| internal("native authority missing"))?;
-            let remaining = native
-                .input
-                .duration_ms
-                .saturating_sub(self.control.elapsed_us() / 1_000);
-            if remaining == 0 {
+            let scheduled = native_scheduled_wait_ms(&request.actions, native.input.click_hold_ms)?;
+            // Finite: what is left of the input lifetime. Continuous: the scheduled
+            // holds plus one bounded wait for the submission itself.
+            let bound = match native.input.duration_ms {
+                Some(duration) => duration.saturating_sub(self.control.elapsed_us() / 1_000),
+                None => scheduled
+                    .checked_add(self.limits.wait_ms)
+                    .ok_or_else(|| argument("scheduled input wait overflow"))?,
+            };
+            if bound == 0 {
                 return Err(Fault::new("Timeout", "native input authority expired"));
             }
-            let operation = self.operation(remaining)?;
-            self.check_session(state)?;
+            let operation = self.operation(bound, scope)?;
+            self.check_session(state, scope)?;
             if !self.control.admission.load(Ordering::Acquire) {
                 return Err(Fault::new(
                     "AdmissionClosed",
@@ -1656,11 +1829,18 @@ mod enabled {
             }
             validate_native_waits(
                 &request.actions,
-                native_scheduled_wait_ms(&request.actions, native.input.click_hold_ms)?,
+                scheduled,
                 self.limits.wait_ms,
-                self.input_remaining_ms(native),
+                self.authority_ms(true, None),
             )?;
-            state.input_events += input.sequence().len();
+            let events = input.sequence().len();
+            if let Some((batch, interval_ms)) = native.input.pace() {
+                // Refused whole and uncharged; an admitted batch is never refunded.
+                state
+                    .input_window
+                    .charge(self.control.now(), events, batch, interval_ms)?;
+            }
+            state.input_events += events;
             let _active = self.active();
             let session = state
                 .session
@@ -2073,9 +2253,10 @@ mod enabled {
                     control,
                     crate::desktop::NativePhase::WaitingForWindow,
                 );
+                let deadline = control.require_deadline()?;
                 thread::park_timeout(
                     Duration::from_millis(50)
-                        .min(control.deadline().saturating_duration_since(Instant::now())),
+                        .min(deadline.saturating_duration_since(control.now())),
                 );
             };
             #[cfg(windows)]
@@ -2421,7 +2602,8 @@ mod enabled {
         actions: &[Action],
         wait_ms: u64,
         wait_limit_ms: u64,
-        remaining_ms: u64,
+        // `None`: continuous Workflow without an overall deadline.
+        remaining_ms: Option<u64>,
     ) -> Result<(), Fault> {
         if actions
             .iter()
@@ -2430,7 +2612,7 @@ mod enabled {
             if wait_ms > wait_limit_ms {
                 return Err(argument("scheduled input waits exceed wait_ms"));
             }
-            if remaining_ms == 0 || wait_ms > remaining_ms {
+            if remaining_ms.is_some_and(|remaining| remaining == 0 || wait_ms > remaining) {
                 return Err(Fault::new(
                     "Timeout",
                     "scheduled input waits exceed remaining native execution authority",
@@ -2453,7 +2635,7 @@ mod enabled {
         extent: Option<mp::PixelExtent>,
         maximum: usize,
         click_hold_ms: u64,
-        wait_authority: Option<(u64, u64)>,
+        wait_authority: Option<(u64, Option<u64>)>,
     ) -> Result<mp::InputSequence, Fault> {
         let extent = extent.map(|extent| (f64::from(extent.width()), f64::from(extent.height())));
         for action in actions {
@@ -2639,7 +2821,7 @@ mod enabled {
                     Some(mp::PixelExtent::new(20, 10)),
                     8,
                     1_000,
-                    Some((100, 100)),
+                    Some((100, Some(100))),
                 )
                 .expect("exact bounded drag");
                 assert_eq!(
@@ -2691,7 +2873,7 @@ mod enabled {
                 50
             );
             assert_eq!(
-                native_sequence(&actions, extent, 10, 50, Some((50, 50)))
+                native_sequence(&actions, extent, 10, 50, Some((50, Some(50))))
                     .expect("exact event and time fit")
                     .len(),
                 10
@@ -2703,27 +2885,33 @@ mod enabled {
                 (10, 50, 0, "Timeout"),
             ] {
                 assert_eq!(
-                    native_sequence(&actions, extent, maximum, 50, Some((wait_limit, remaining)))
-                        .expect_err("bounded admission")
-                        .category,
+                    native_sequence(
+                        &actions,
+                        extent,
+                        maximum,
+                        50,
+                        Some((wait_limit, Some(remaining))),
+                    )
+                    .expect_err("bounded admission")
+                    .category,
                     category
                 );
             }
             let mut ceiling = vec![gesture; 64];
             assert_eq!(
-                native_sequence(&ceiling, extent, 4096, 0, Some((1, 1)))
+                native_sequence(&ceiling, extent, 4096, 0, Some((1, Some(1))))
                     .expect("256-event ceiling")
                     .len(),
                 256
             );
             ceiling.push(click.clone());
             assert_eq!(
-                native_sequence(&ceiling, extent, 4096, 0, Some((1, 1)))
+                native_sequence(&ceiling, extent, 4096, 0, Some((1, Some(1))))
                     .expect_err("no split above ceiling")
                     .category,
                 "ActionLimit"
             );
-            native_sequence(&[click.clone()], extent, 4, 50, Some((1, 0)))
+            native_sequence(&[click.clone()], extent, 4, 50, Some((1, Some(0))))
                 .expect("no-drag timing admission stays unchanged");
             assert_eq!(
                 native_scheduled_wait_ms(&[click.clone(), click], u64::MAX)
@@ -2770,11 +2958,11 @@ mod enabled {
                 extent,
                 12,
                 1000,
-                Some((5000, 5000)),
+                Some((5000, Some(5000))),
             )
             .expect("5000ms drag is independent of click_hold_ms");
             assert_eq!(
-                native_sequence(&[maximum_hold], extent, 12, 0, Some((5000, 4999)))
+                native_sequence(&[maximum_hold], extent, 12, 0, Some((5000, Some(4999))))
                     .expect_err("remaining duration is not shortened")
                     .category,
                 "Timeout"
@@ -3334,7 +3522,7 @@ mod enabled {
                 let sequence = native_sequence(
                     &input.representative_actions,
                     None,
-                    input.max_actions,
+                    input.event_room(0),
                     input.click_hold_ms,
                     None,
                 )
@@ -3731,17 +3919,48 @@ mod enabled {
                 "native templates require bounded package entries and aliases together",
             ));
         }
+        let continuous = plan
+            .native_budgets
+            .is_some_and(|budgets| budgets.continuous());
+        // The only continuous policy: an ordinary operation review without exit
+        // recovery, the published cadence and exactly the reviewed batch size.
+        let published = continuous_limits();
+        if continuous && config.confirm_process_exit {
+            return Err(blocked(
+                "native_authority_validation",
+                "continuous Workflow has no exit recovery",
+            ));
+        }
+        if continuous && !matches!(config.review, NativeReview::Operation { .. }) {
+            return Err(blocked(
+                "native_review",
+                "continuous Workflow requires an ordinary operation review",
+            ));
+        }
         let capture = &config.capture;
+        // The trusted plan lifecycle selects the shape; a contradicting
+        // configuration is refused, never translated.
+        if capture.duration_ms.is_some() == continuous
+            || capture.max_frames.is_some() == continuous
+            || (continuous && capture.interval_ms != published.interval_ms)
+        {
+            return Err(blocked(
+                "capture_authority",
+                "capture lifetime bounds or pacing contradict the plan lifecycle",
+            ));
+        }
         if !capture.approved
-            || capture.duration_ms == 0
-            || capture.duration_ms > plan.limits.duration_ms
-            || capture.max_frames == 0
+            || capture.duration_ms.is_some_and(|duration| {
+                duration == 0
+                    || duration > plan.limits.duration_ms
+                    || capture.wait_ms > duration
+                    || capture.interval_ms > duration
+            })
+            || capture.max_frames == Some(0)
             || capture.wait_ms == 0
             || capture.wait_ms > plan.limits.wait_ms
             || capture.interval_ms == 0
-            || capture.wait_ms > capture.duration_ms
             || capture.interval_ms > capture.wait_ms
-            || capture.interval_ms > capture.duration_ms
         {
             return Err(blocked(
                 "capture_authority",
@@ -3749,13 +3968,35 @@ mod enabled {
             ));
         }
         let input = &config.input;
+        if input.duration_ms.is_some() == continuous
+            || input.max_actions.is_some() == continuous
+            || input.max_batch_events.is_some() != continuous
+            || input.event_interval_ms.is_some() != continuous
+        {
+            return Err(blocked(
+                "input_authority",
+                "input lifetime or pace bounds contradict the plan lifecycle",
+            ));
+        }
+        if continuous
+            && (input.pace() != Some((plan.limits.max_actions, published.event_interval_ms))
+                || plan.limits.max_actions > published.max_batch_events
+                || !input.package_approved)
+        {
+            return Err(blocked(
+                "input_authority",
+                "continuous input must charge the reviewed batch at the published interval",
+            ));
+        }
+        let events = input.event_room(0);
         if !input.approved
-            || input.duration_ms == 0
-            || input.duration_ms > plan.limits.duration_ms
-            || input.max_actions == 0
-            || input.max_actions > plan.limits.max_actions
+            || input
+                .duration_ms
+                .is_some_and(|duration| duration == 0 || duration > plan.limits.duration_ms)
+            || events == 0
+            || events > plan.limits.max_actions
             || (input.representative_actions.is_empty() && !input.package_approved)
-            || input.representative_actions.len() > input.max_actions
+            || input.representative_actions.len() > events
         {
             return Err(blocked(
                 "input_authority",
@@ -3817,11 +4058,14 @@ mod enabled {
             native_sequence(
                 &input.representative_actions,
                 None,
-                input.max_actions,
+                events,
                 input.click_hold_ms,
                 Some((
                     plan.limits.wait_ms,
-                    input.duration_ms.min(config.capture.duration_ms),
+                    input
+                        .duration_ms
+                        .zip(capture.duration_ms)
+                        .map(|(input, capture)| input.min(capture)),
                 )),
             )
             .map_err(|fault| blocked("input_authority", &fault.message))?;

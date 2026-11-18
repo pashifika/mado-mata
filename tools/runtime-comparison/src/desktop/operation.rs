@@ -2,9 +2,9 @@ use super::lifecycle::{AdmissionRefusal, Progress, StopDecision};
 use super::packages::{runtime, select_profile};
 use super::{
     Active, ControllerView, DesktopController, LOG_CAPACITY, LaunchDisposition, NEXT_RUN,
-    NativePhase, NativeProgress, NativeTarget, NativeTargetStatus, PROGRESS_CAPACITY,
-    REPLAY_DURATION_MS, REQUEST_BYTES, SHUTDOWN_MS, StartPreparation, StartRequest, State,
-    manual_plan,
+    NativePhase, NativeProgress, NativeRunLimits, NativeTarget, NativeTargetStatus,
+    PROGRESS_CAPACITY, REPLAY_DURATION_MS, REQUEST_BYTES, SHUTDOWN_MS, StartPreparation,
+    StartRequest, State, manual_plan,
 };
 use crate::environment::{
     EnvironmentSnapshot, Library, OcrEnvironment, capture_environment, capture_replay,
@@ -297,15 +297,13 @@ impl DesktopController {
                     Fault::new("NativeRefused", "Native requires explicit per-Start review")
                 })?;
                 super::native::validate_intent(intent)?;
-                Some(
-                    intent
-                        .limits
-                        .budgets()
-                        .operation_ms(intent.max_exit_recoveries)?,
-                )
+                intent
+                    .limits
+                    .budgets()
+                    .operation_ms(intent.max_exit_recoveries)?
             }
             "replay" => Some(REPLAY_DURATION_MS),
-            _ => None,
+            _ => Some(manual_plan()?.limits.duration_ms),
         };
         self.reserve(
             "run",
@@ -313,7 +311,7 @@ impl DesktopController {
             move |app_run, owner, observer, controlled, engine| {
                 let initial_control;
                 let control = if request.lane == "native" {
-                    initial_control = Arc::new(Control::for_attempt(Arc::clone(owner), &manual_plan()?.limits, true));
+                    initial_control = Arc::new(Control::for_attempt(Arc::clone(owner), true));
                     &initial_control
                 } else {
                     owner
@@ -347,6 +345,10 @@ impl DesktopController {
                     evidence.fields["function"] = json!(request.function);
                     evidence.fields["package_readiness"] = json!(if request.function.is_some() { "not_invoked" } else { "script" });
                     let plan = requested_plan(&request)?;
+                    // Admitted limits carry lifecycle and optional deadline, never review or target text.
+                    if let Some(intent) = &request.native_intent {
+                        evidence.fields["native_limits"] = json!(intent.limits);
+                    }
                     if let Some(budgets) = plan.native_budgets {
                         control.start_native(budgets, None)?;
                         control.check()?;
@@ -407,7 +409,6 @@ impl DesktopController {
                         let environment = environment.clone();
                         let engine = engine.clone();
                         let request = Arc::clone(&request);
-                        let (frames, actions) = remaining.expect("native allowances");
                         Some(crate::runner::NativePreparation::new(Arc::clone(attempt_control), attempt, move |control, report| {
                             let report = |mut progress: NativeProgress| {
                                 progress.attempt = attempt;
@@ -427,9 +428,12 @@ impl DesktopController {
                                 &mut projected, &request, &target, &probe_executable, &probe_templates,
                                 environment.as_ref().expect("native environment").configuration.clone(),
                             )?;
-                            let config = projected.native_config.as_mut().expect("native projection");
-                            config["native"]["capture"]["max_frames"] = json!(frames);
-                            config["native"]["input"]["max_actions"] = json!(actions);
+                            // Finite attempts receive only the remaining aggregate allowance.
+                            if let Some((frames, actions)) = remaining {
+                                let config = projected.native_config.as_mut().expect("native projection");
+                                config["native"]["capture"]["max_frames"] = json!(frames);
+                                config["native"]["input"]["max_actions"] = json!(actions);
+                            }
                             verify()?;
                             Ok(projected.native_config.take())
                         }))
@@ -518,38 +522,44 @@ impl DesktopController {
         &self,
         capture: impl FnOnce(&Control) -> Result<Inventory, Fault> + Send + 'static,
     ) -> Result<String, Fault> {
-        self.reserve("authoring_validate", None, move |_, control, _, _, _| {
-            let outcome = (|| {
-                control.check()?;
-                let inventory = capture(control)?;
-                control.check()?;
-                let limits = manual_plan()?.limits;
-                match runtime(&inventory)?.as_str() {
-                    "typescript" => {
-                        crate::typescript::compile_with_control(&inventory, &limits, control)?;
+        let duration_ms = manual_plan()?.limits.duration_ms;
+        self.reserve(
+            "authoring_validate",
+            Some(duration_ms),
+            move |_, control, _, _, _| {
+                let outcome = (|| {
+                    control.check()?;
+                    let inventory = capture(control)?;
+                    control.check()?;
+                    let limits = manual_plan()?.limits;
+                    match runtime(&inventory)?.as_str() {
+                        "typescript" => {
+                            crate::typescript::compile_with_control(&inventory, &limits, control)?;
+                        }
+                        "javascript" => {
+                            crate::typescript::validate_javascript_modules(
+                                &Arc::new(inventory),
+                                &limits,
+                                control,
+                            )?;
+                        }
+                        _ => unreachable!("runtime admits only supported source languages"),
                     }
-                    "javascript" => {
-                        crate::typescript::validate_javascript_modules(
-                            &Arc::new(inventory),
-                            &limits,
-                            control,
-                        )?;
-                    }
-                    _ => unreachable!("runtime admits only supported source languages"),
-                }
-                control.check()
-            })();
-            let diagnostics = outcome.err().map(|mut error| {
-                error.bound_diagnostics();
-                error
-            });
-            Ok(json!({
-                "valid":diagnostics.is_none(),
-                "diagnostics":diagnostics.into_iter().collect::<Vec<_>>(),
-            }))
-        })
+                    control.check()
+                })();
+                let diagnostics = outcome.err().map(|mut error| {
+                    error.bound_diagnostics();
+                    error
+                });
+                Ok(json!({
+                    "valid":diagnostics.is_none(),
+                    "diagnostics":diagnostics.into_iter().collect::<Vec<_>>(),
+                }))
+            },
+        )
     }
 
+    /// `None` reserves without an outer deadline; only reviewed continuous Native passes it.
     pub(super) fn reserve(
         &self,
         operation: &'static str,
@@ -585,11 +595,7 @@ impl DesktopController {
             std::process::id(),
             NEXT_RUN.fetch_add(1, Ordering::Relaxed)
         );
-        let mut limits = manual_plan()?.limits;
-        if let Some(duration_ms) = duration_ms {
-            limits.duration_ms = duration_ms;
-        }
-        let control = Arc::new(Control::reserved(&limits)?);
+        let control = Arc::new(Control::reserved(duration_ms)?);
         let (progress_send, progress) = mpsc::sync_channel(PROGRESS_CAPACITY);
         let (log_send, logs) = mpsc::sync_channel(LOG_CAPACITY);
         let dropped_logs = Arc::new(AtomicU64::new(0));
@@ -722,10 +728,14 @@ fn run_attempts(
     mut execute_attempt: impl FnMut(u64, &Arc<Control>, Option<(u64, usize)>) -> Result<Value, Fault>,
 ) -> Result<Value, Fault> {
     let mut attempt = 1;
+    // Only finite Runs carry aggregate frame/event credits across attempts.
     let mut remaining = request
         .native_intent
         .as_ref()
-        .map(|intent| (intent.limits.max_frames, intent.limits.max_actions));
+        .and_then(|intent| match &intent.limits {
+            NativeRunLimits::Finite(limits) => Some((limits.max_frames, limits.max_actions)),
+            NativeRunLimits::Continuous(_) => None,
+        });
     let mut attempts = Vec::with_capacity(2);
     loop {
         let mut result = match execute_attempt(attempt, &attempt_control, remaining) {
@@ -786,8 +796,7 @@ fn run_attempts(
                 evidence.native_progress(progress, observer);
                 remaining = next;
                 attempt = 2;
-                attempt_control =
-                    Arc::new(Control::for_attempt(Arc::clone(owner), &plan.limits, false));
+                attempt_control = Arc::new(Control::for_attempt(Arc::clone(owner), false));
                 attempt_control.start_native(plan.native_budgets.expect("native budgets"), None)?;
                 evidence.native_progress(
                     NativeProgress {
@@ -816,14 +825,14 @@ pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
                 "Function execution rejects fixture scenarios",
             ));
         }
-        if request
-            .native_intent
-            .as_ref()
-            .is_some_and(|intent| intent.launch_approved || intent.max_exit_recoveries != 0)
-        {
+        if request.native_intent.as_ref().is_some_and(|intent| {
+            intent.launch_approved
+                || intent.max_exit_recoveries != 0
+                || intent.limits.budgets().continuous()
+        }) {
             return Err(Fault::new(
                 "NativeRefused",
-                "Function execution is attach-only and rejects launch and recovery",
+                "Function execution is finite and attach-only; it rejects launch, recovery and continuous Workflow",
             ));
         }
     }
@@ -875,15 +884,30 @@ pub(super) fn requested_plan(request: &StartRequest) -> Result<Plan, Fault> {
         plan.limits.duration_ms = REPLAY_DURATION_MS;
     }
     if let Some(intent) = &request.native_intent {
-        let limits = &intent.limits;
-        plan.native_budgets = Some(limits.budgets());
-        plan.limits.duration_ms = limits.budgets().total_ms()?;
-        plan.limits.readiness_ms = limits.readiness_ms;
-        plan.limits.wait_ms = limits.wait_ms;
+        let budgets = intent.limits.budgets();
+        plan.native_budgets = Some(budgets);
+        // Continuous plans keep only finite preparation time here, never a Workflow timer.
+        plan.limits.duration_ms = budgets.preparation_ms()?;
+        plan.limits.readiness_ms = budgets.readiness_ms;
         // Preserve reviewed expanded-input authority; VM work has its own bound.
-        plan.limits.max_actions = limits.max_actions;
-        plan.limits.cleanup_ms = limits.cleanup_ms;
-        plan.limits.containment_ms = limits.containment_ms;
+        let (wait_ms, max_actions, cleanup_ms, containment_ms) = match &intent.limits {
+            NativeRunLimits::Finite(limits) => (
+                limits.wait_ms,
+                limits.max_actions,
+                limits.cleanup_ms,
+                limits.containment_ms,
+            ),
+            NativeRunLimits::Continuous(limits) => (
+                limits.wait_ms,
+                limits.max_batch_events,
+                limits.cleanup_ms,
+                limits.containment_ms,
+            ),
+        };
+        plan.limits.wait_ms = wait_ms;
+        plan.limits.max_actions = max_actions;
+        plan.limits.cleanup_ms = cleanup_ms;
+        plan.limits.containment_ms = containment_ms;
     }
     plan.native_config = None;
     plan.samples = 1;

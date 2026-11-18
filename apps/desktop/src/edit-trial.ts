@@ -34,7 +34,7 @@ export function trialContext(context:AuthoringTrialContext, session:AuthoringSes
     : {...newDraft({packagePath:session.packagePath, package:context.package, profiles:context.profiles, profilesError:context.profiles_error,
       selectedId:null, name:'', preset:'', draft:{}, draftRevision:0,
       lane:context.package.target === null ? 'controlled' : 'native', scenario:'workflow', descriptorPath:'', touched:false, target:targetState(selection),
-      native:{operation:'', postcondition:'', workflowSeconds:null, capture:false, input:false, launch:false, recovery:false, key:null}}, preset), touched:false};
+      native:{operation:'', postcondition:'', lifecycle:'finite', overallSeconds:'', workflowSeconds:null, capture:false, input:false, launch:false, recovery:false, key:null}}, preset), touched:false};
   const target = old && old.target.context.declaration_identity === context.package.target_identity ? old.target : targetState(selection);
   base.target = context.target ? readTarget(target, context.target)
     : context.target_error ? targetReadFailed(target, context.target_error) : target;

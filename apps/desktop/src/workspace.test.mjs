@@ -1649,7 +1649,8 @@ test('a successful explicit retry carries the unrepaired draft and its issue to 
 });
 
 const nativeLimits={startup_ms:60000,readiness_ms:30000,workflow_ms:30000,max_frames:300,wait_ms:1000,interval_ms:100,max_actions:64,cleanup_ms:1000,containment_ms:2000};
-const nativeCapability={default_limits:nativeLimits,max_workflow_ms:900000};
+const continuousLimits={lifecycle:'continuous',startup_ms:60000,readiness_ms:30000,wait_ms:1000,interval_ms:100,cleanup_ms:1000,containment_ms:2000,max_batch_events:64,event_interval_ms:1000};
+const nativeCapability={default_limits:nativeLimits,max_workflow_ms:900000,continuous_limits:continuousLimits};
 const nativeEnvironment={profile:'environment-a'};
 function bundleConfiguration(input=targetConfiguration().input) {
   const configuration=targetConfiguration('/metadata/Game.app');
@@ -1680,7 +1681,7 @@ test('Workflow review resolves host defaults after capability loading without tr
   assert.equal(current.workflowError,false);
   assert.deepEqual(current.limits,nativeLimits);
   assert.equal(current.block,'nativeApproval');
-  const otherPolicy={default_limits:{...nativeLimits,workflow_ms:12000},max_workflow_ms:45000};
+  const otherPolicy={...nativeCapability,default_limits:{...nativeLimits,workflow_ms:12000},max_workflow_ms:45000};
   const fromHost=nativeOf(bound,nativeEnvironment,otherPolicy);
   assert.equal(fromHost.workflowSeconds,'12');
   assert.equal(fromHost.limits.workflow_ms,12000);
@@ -1792,6 +1793,97 @@ test('new and reopened bindings reset extended duration and every consent withou
     assert.equal(reviewed.intent,null);
   }
   assert.equal(nativeOf(previous.bound).intent.limits.workflow_ms,900000);
+});
+
+for (const {scenario,deadline,overall} of [
+  {scenario:'no overall deadline',deadline:'',overall:{}},
+  {scenario:'an explicit overall deadline',deadline:'1800',overall:{overall_ms:1800000}},
+]) test(`ordinary continuous Native forms exact work limits with ${scenario}, not finite lifetime credits`,()=>{
+  const finite=approveAllNative(nativeDraft().bound);
+  const continuous=editNativeReview(editNativeReview(finite,'lifecycle','continuous'),'overallSeconds',deadline);
+  assert.equal(nativeOf(continuous).intent,null);
+  assert.deepEqual([continuous.native.capture,continuous.native.input,continuous.native.launch,continuous.native.recovery,continuous.native.key],[false,false,false,false,null]);
+  const approved=approveNative(approve(continuous),'launch',true,nativeEnvironment,nativeCapability);
+  const captured=nativeOf(approved).intent;
+  assert.deepEqual(captured.limits,{lifecycle:'continuous',startup_ms:60000,readiness_ms:30000,wait_ms:1000,interval_ms:100,
+    cleanup_ms:1000,containment_ms:2000,max_batch_events:64,event_interval_ms:1000,...overall});
+  assert.equal(captured.launch_approved,true);
+  assert.equal(captured.max_exit_recoveries,0);
+  assert.equal(approveNative(approved,'recovery',true,nativeEnvironment,nativeCapability),approved);
+  // App spends this approval before IPC, so refusal cannot leave a reusable continuous request.
+  const spent=clearNativeApproval(approved);
+  assert.equal(nativeOf(spent).intent,null);
+  assert.equal(nativeOf(spent).launch,false);
+  const later=approve(editNativeReview(editNativeReview(spent,'lifecycle','finite'),'workflowSeconds','900'));
+  assert.equal(nativeOf(later).intent.limits.workflow_ms,900000);
+  assert.equal(nativeOf(later).intent.max_exit_recoveries,0);
+  assert.deepEqual(captured.limits,{lifecycle:'continuous',startup_ms:60000,readiness_ms:30000,wait_ms:1000,interval_ms:100,
+    cleanup_ms:1000,containment_ms:2000,max_batch_events:64,event_interval_ms:1000,...overall});
+});
+
+for (const draft of ['0','-1','0.5','30.00000000000000001','Infinity','NaN','1e309','1e3','9007199254741','later']) {
+  test(`invalid continuous overall time ${JSON.stringify(draft)} blocks consent and Start without a fallback deadline`,()=>{
+    const continuous=approve(editNativeReview(nativeDraft().bound,'lifecycle','continuous'));
+    const attempted=approve(editNativeReview(continuous,'overallSeconds',draft));
+    for (const locale of ['en','ja']) {
+      const facts=deriveBound(attempted,nativeEnvironment,locale,nativeCapability);
+      assert.equal(facts.native.overallSeconds,draft);
+      assert.equal(facts.native.overallError,true);
+      assert.equal(facts.native.limits,null);
+      assert.equal(facts.native.intent,null);
+      assert.equal(facts.native.block,'nativeOverall');
+      assert.ok(facts.startBlock);
+    }
+    assert.deepEqual([attempted.native.capture,attempted.native.input,attempted.native.launch,attempted.native.recovery,attempted.native.key],[false,false,false,false,null]);
+  });
+}
+
+test('continuous lifecycle, deadline edit-back and deadline removal each require fresh approval',()=>{
+  const approved=approveNative(approve(editNativeReview(nativeDraft().bound,'lifecycle','continuous')),'launch',true,nativeEnvironment,nativeCapability);
+  const withDeadline=approveNative(approve(editNativeReview(approved,'overallSeconds','120')),'launch',true,nativeEnvironment,nativeCapability);
+  const revised=[
+    editNativeReview(editNativeReview(approved,'lifecycle','finite'),'lifecycle','continuous'),
+    editNativeReview(editNativeReview(withDeadline,'overallSeconds','240'),'overallSeconds','120'),
+    editNativeReview(withDeadline,'overallSeconds',''),
+  ];
+  for (const bound of revised) {
+    assert.equal(nativeOf(bound).intent,null);
+    assert.deepEqual([bound.native.capture,bound.native.input,bound.native.launch,bound.native.recovery,bound.native.key],[false,false,false,false,null]);
+  }
+  const renewed=nativeOf(approve(revised[2])).intent;
+  assert.equal(Object.hasOwn(renewed.limits,'overall_ms'),false);
+  assert.equal(renewed.launch_approved,false);
+  assert.equal(renewed.max_exit_recoveries,0);
+});
+
+test('continuous approval binds host work policy and refuses recovery instead of stripping it',()=>{
+  const approved=approve(editNativeReview(nativeDraft().bound,'lifecycle','continuous'));
+  const changedPolicy={...nativeCapability,continuous_limits:{...continuousLimits,event_interval_ms:2000}};
+  assert.equal(nativeOf(approved,nativeEnvironment,changedPolicy).intent,null);
+  const incompatible={...approved,native:{...approved.native,recovery:true}};
+  assert.equal(nativeOf(incompatible).block,'nativeLifecycle');
+  assert.equal(nativeOf(incompatible).intent,null);
+  const finiteWithDeadline={...nativeDraft().bound,native:{...nativeDraft().bound.native,overallSeconds:'60'}};
+  assert.equal(nativeOf(finiteWithDeadline).block,'nativeLifecycle');
+  assert.equal(nativeOf(finiteWithDeadline).intent,null);
+});
+
+test('fresh/reopened workspaces and returning from another lane never restore a continuous choice or approval',()=>{
+  const previous=updateBound(nativeDraft(),bound=>approve(editNativeReview(editNativeReview(bound,'lifecycle','continuous'),'overallSeconds','1800')));
+  const fresh=bindSelection(previous,targetSelection('a'));
+  const reopened=workspaceFromView(view('a',{selection:targetSelection('a')}));
+  const returned=updateBound(previous,bound=>chooseLane(chooseLane(bound,'controlled'),'native'));
+  for (const workspace of [fresh,reopened,returned]) {
+    assert.equal(workspace.bound.native.lifecycle,'finite');
+    assert.equal(workspace.bound.native.overallSeconds,'');
+    assert.equal(workspace.bound.native.key,null);
+    assert.equal(nativeOf(chooseLane(workspace.bound,'native')).intent,null);
+  }
+  assert.equal(nativeOf(previous.bound).intent.limits.lifecycle,'continuous');
+  const windows=approve(editNativeReview(nativeDraft(loadedWindows()).bound,'lifecycle','continuous'));
+  assert.equal(nativeOf(windows).intent.limits.lifecycle,'continuous');
+  assert.equal(nativeOf(windows).intent.launch_approved,false);
+  assert.equal(nativeOf(windows).intent.max_exit_recoveries,0);
 });
 
 test('a Native intent names the current saved binding only after both separate consents for that exact request',()=>{

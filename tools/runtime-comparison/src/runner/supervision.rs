@@ -500,6 +500,7 @@ fn loader_prerequisite_record(
         scenario: plan.scenario.clone(),
         profile: plan.profile.clone(),
         plan_identity: identity(plan)?,
+        native_budgets: plan.native_budgets,
         inventory_identity: inventory.identity.clone(),
         status: "BLOCKED".into(),
         reason: primary.message.clone(),
@@ -551,6 +552,16 @@ fn supervise(
     preparation: Option<&super::PreparedExecution<'_>>,
 ) -> Result<RunRecord, Fault> {
     plan.validate()?;
+    if plan
+        .native_budgets
+        .is_some_and(|budgets| budgets.continuous())
+        && preparation.is_none()
+    {
+        return Err(Fault::new(
+            "NativeRefused",
+            "Continuous Native requires Desktop reservation",
+        ));
+    }
     inventory.validate()?;
     operation.validate(plan)?;
     if let Some(modules) = preparation.and_then(|prepared| prepared.modules) {
@@ -580,13 +591,16 @@ fn supervise(
         })));
     }
     let started = Instant::now();
-    let standalone_control = Control::new(&plan.limits);
-    let owner_control = preparation.map_or(&standalone_control, |prepared| prepared.control);
-    if preparation.is_none()
-        && let Some(budgets) = plan.native_budgets
-    {
-        owner_control.start_native(budgets, None)?;
-    }
+    let standalone_control;
+    let owner_control = if let Some(prepared) = preparation {
+        prepared.control
+    } else {
+        standalone_control = Control::new(&plan.limits);
+        if let Some(budgets) = plan.native_budgets {
+            standalone_control.start_native(budgets, None)?;
+        }
+        &standalone_control
+    };
     let startup = preparation.and_then(|prepared| prepared.startup);
     // One original bound for both processes: the child reads this absolute
     // deadline on the shared clock, so transfer time is never refunded.
@@ -599,13 +613,18 @@ fn supervise(
         inventory: inventory.clone(),
         observe_logs: observer.is_some(),
         prepared_modules: preparation.and_then(|prepared| prepared.modules.cloned()),
-        deadline: SharedDeadline::from_instant(deadline)?,
+        deadline: deadline.map(SharedDeadline::from_instant).transpose()?,
         startup_deadline: plan
             .native_budgets
-            .map(|_| SharedDeadline::from_instant(owner_control.deadline()))
+            .map(|budgets| {
+                owner_control
+                    .native_startup_deadline(budgets)
+                    .and_then(SharedDeadline::from_instant)
+            })
             .transpose()?,
         prepare_target: startup.is_some(),
     };
+    invocation.validate_projection()?;
     let bytes = super::payload::header(&mut invocation)?;
     let transfer_assets = invocation.inventory.assets.clone();
     let mut command = Command::new(executable);
@@ -674,6 +693,7 @@ fn supervise(
     let mut protocol_fault = None;
     let mut forced = false;
     let mut stop_sent_at = None;
+    let mut continuous_stop = None;
     let mut startup_us = None;
     let mut child_build = None;
     let mut system = System::new();
@@ -730,10 +750,25 @@ fn supervise(
                                 .as_u64()
                                 .and_then(|phase| u8::try_from(phase).ok())
                                 .ok_or_else(|| Fault::new("Transport", "invalid Native phase"))?;
-                            let deadline: SharedDeadline =
-                                serde_json::from_value(value["deadline"].clone())
-                                    .map_err(|error| Fault::new("Transport", error.to_string()))?;
-                            owner_control.native_transition(phase, Some(deadline.instant()?))?;
+                            let deadline: Option<SharedDeadline> = serde_json::from_value(
+                                value.get("deadline").cloned().ok_or_else(|| {
+                                    Fault::new("Transport", "Native transition lacks its deadline")
+                                })?,
+                            )
+                            .map_err(|error| Fault::new("Transport", error.to_string()))?;
+                            if deadline.is_none()
+                                != (phase == 2
+                                    && plan.native_budgets.is_some_and(|b| b.continuous()))
+                            {
+                                return Err(Fault::new(
+                                    "Transport",
+                                    "Native transition has incompatible stage deadline",
+                                ));
+                            }
+                            owner_control.native_transition(
+                                phase,
+                                deadline.map(SharedDeadline::instant).transpose()?,
+                            )?;
                             Ok(())
                         })();
                         if let Err(fault) = result {
@@ -816,7 +851,7 @@ fn supervise(
             None
         };
         let stop_due = stop_after_ms.map_or_else(
-            || Instant::now() >= deadline,
+            || deadline.is_some_and(|at| Instant::now() >= at),
             |millis| elapsed >= Duration::from_millis(millis),
         );
         let milestone_stop_due = stop_milestone.is_some_and(|(_, delay_ms)| {
@@ -835,13 +870,24 @@ fn supervise(
                 drop(commands.take());
             } else if let Some(sender) = commands.take() {
                 let reason = operator_requested.unwrap_or_else(|| {
-                    if stop_after_ms.is_none() && Instant::now() >= deadline {
+                    if stop_after_ms.is_none() && stop_due {
                         StopReason::Timeout
                     } else {
                         StopReason::Cancelled
                     }
                 });
                 owner_control.stop(reason);
+                if entry_settled.is_none()
+                    && protocol_fault.is_none()
+                    && plan
+                        .native_budgets
+                        .is_some_and(|budgets| budgets.continuous())
+                {
+                    // The watchdog may have to contain a blocked call before
+                    // the child can publish a primary. Keep the owner's cause,
+                    // without superseding an independently observed host fault.
+                    continuous_stop = owner_control.stop_reason();
+                }
                 let _ = sender.try_send(json!({"command":reason,"run":run,"attempt":attempt}));
             }
         }
@@ -849,7 +895,13 @@ fn supervise(
             .is_some_and(|stop| stop.elapsed() >= Duration::from_millis(plan.limits.cleanup_ms))
             || entry_settled
                 .is_some_and(|at| at.elapsed() >= Duration::from_millis(plan.limits.containment_ms))
-            || Instant::now() >= deadline + Duration::from_millis(plan.limits.containment_ms)
+            || deadline.is_some_and(|at| {
+                Instant::now()
+                    .checked_duration_since(at)
+                    .is_some_and(|elapsed| {
+                        elapsed >= Duration::from_millis(plan.limits.containment_ms)
+                    })
+            })
         {
             forced = true;
             child
@@ -988,6 +1040,7 @@ fn supervise(
             forced || exit.code() == Some(124),
         )
         .or_else(|| preparation_fault.clone())
+        .or_else(|| continuous_stop.and_then(|_| owner_control.check().err()))
     };
     let preparation_clean = preparation_fault
         .as_ref()
@@ -1060,6 +1113,9 @@ fn supervise(
     observations.insert("terminal_accounted".into(), json!(terminal_accounted));
     observations.insert("child_reaped".into(), json!(true));
     observations.insert("startup_settled".into(), json!(preparation_fault.is_none()));
+    if let Some(cause) = continuous_stop {
+        observations.insert("supervisor_stop".into(), json!(cause));
+    }
     if let Some(fault) = preparation_fault {
         observations.insert("native_preparation_fault".into(), json!(fault));
     }
@@ -1087,6 +1143,7 @@ fn supervise(
         scenario: plan.scenario.clone(),
         profile: plan.profile.clone(),
         plan_identity: identity(plan)?,
+        native_budgets: plan.native_budgets,
         inventory_identity: inventory.identity.clone(),
         status: status.into(),
         reason,
@@ -1142,7 +1199,7 @@ fn supervise(
 /// Candidate-independent cohort data; assets use the cached inventory-v2
 /// name/length/digest framing rather than streaming every byte as decimal JSON.
 pub(super) fn comparison_identity(plan: &Plan, inventory: &Inventory) -> Result<String, Fault> {
-    identity(&(
+    let cohort = (
         &plan.lane,
         &plan.scenario,
         &plan.profile,
@@ -1155,7 +1212,12 @@ pub(super) fn comparison_identity(plan: &Plan, inventory: &Inventory) -> Result<
         &inventory.schema,
         &inventory.profiles,
         inventory.asset_digest(),
-    ))
+    );
+    if let Some(budgets) = plan.native_budgets.filter(|budgets| budgets.continuous()) {
+        identity(&(cohort, budgets))
+    } else {
+        identity(&cohort)
+    }
 }
 
 // Call only after run/attempt correlation. Metadata is evidence, never a source
@@ -1225,6 +1287,16 @@ pub(super) fn terminal_primary(
 pub fn parent_probe(intentional: bool) -> Result<bool, Fault> {
     let mut input = BufReader::new(std::io::stdin());
     let mut invocation = super::payload::read(&mut input)?;
+    if invocation
+        .plan
+        .native_budgets
+        .is_some_and(|budgets| budgets.continuous())
+    {
+        return Err(Fault::new(
+            "NativeRefused",
+            "parent probe cannot forward continuous authority",
+        ));
+    }
     if intentional {
         let record = run_once_after_milestone(
             &invocation.plan,
@@ -1280,9 +1352,9 @@ pub fn parent_loss_evidence(plan: &Plan, inventory: &Inventory) -> Result<Value,
         inventory: inventory.clone(),
         observe_logs: false,
         prepared_modules: None,
-        deadline: SharedDeadline::from_instant(
+        deadline: Some(SharedDeadline::from_instant(
             Instant::now() + Duration::from_millis(plan.limits.duration_ms),
-        )?,
+        )?),
         startup_deadline: None,
         prepare_target: false,
     };
@@ -1387,9 +1459,9 @@ pub fn intentional_exit_evidence(plan: &Plan, inventory: &Inventory) -> Result<V
         inventory: inventory.clone(),
         observe_logs: false,
         prepared_modules: None,
-        deadline: SharedDeadline::from_instant(
+        deadline: Some(SharedDeadline::from_instant(
             Instant::now() + Duration::from_millis(plan.limits.duration_ms),
-        )?,
+        )?),
         startup_deadline: None,
         prepare_target: false,
     };

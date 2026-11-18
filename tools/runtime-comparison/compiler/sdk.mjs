@@ -1,9 +1,26 @@
-// mado-host-v1: JSON values only; native resources remain owned by Rust.
+// mado-host-v1: JSON operations and opaque Workflow contexts; resources stay in Rust.
 // The one SDK authority: completion declarations and discovery both read `methods`.
 // Entries are [argument type, result type, description, guidance]. Guidance holds
 // English/Japanese purpose terms, behavioral constraints, availability and example IDs.
 // Availability is static host admission (stage, lane, native authority), not readiness.
 export const methods = deepFreeze({
+  context: ["Record<string, never>", "MadoWorkflowContext",
+    "Get the current Workflow root. Pass a child to ordinary helpers and use its call method for scoped work.",
+    {
+      purpose: {
+        en: ["workflow context", "child timeout", "cancel search", "scope deadline"],
+        ja: ["ワークフローコンテキスト", "子コンテキスト", "検索の期限", "キャンセル"],
+      },
+      constraints: [
+        "child() shares this attempt and its work limits. Optionally supply one positive safe-integer timeout_ms (relative) or deadline_ms (monotonic milliseconds from the attempt's clock origin). No child outlives its parent.",
+        "deadline_ms is the effective deadline or null. done and cause report whether the context ended and its first cause. cancel(cause) and close() operate on children only; release children in finally. Closing a parent also releases descendant handles.",
+        "Use context.call for wait, observe, recognize, scan_ocr_zones, query, query_wait, submit, settle, postcondition and release. Handles belong to the scope that acquired them; do not transfer observations or queue IDs between scopes.",
+        "ScopeDeadline is a local expiry, not a Run timeout. Never retry partial or uncertain input. Stop, target/backend faults and unverified cleanup remain terminal regardless of catch.",
+        "ScopeBudget refuses scheduled input waits that cannot fit a still-live child. cancel accepts a nonempty cause of up to 256 UTF-8 bytes.",
+      ],
+      availability: { stages: ["workflow"], lanes: ["controlled", "replay", "native"], authority: "none" },
+      examples: ["scoped-search"],
+    }],
   target_start: ["Record<string, never>", "MadoNativeProgress",
     "Request target preparation once during Desktop Native Readiness using the saved binding and reviewed authority. Returns pending without waiting for a window; unavailable in other stages and lanes.",
     {
@@ -144,7 +161,8 @@ export const methods = deepFreeze({
         "Coordinates are finite capture pixels of this observation in [0, width) x [0, height); fractions are allowed. They are not preview or screen space: derive points from this observation.",
         "drag moves to path[0] and presses button, moves to each later point with the button held, then releases at the last point. Paths have 2 to 64 points and are sent as given: no interpolation; repeated and return-to-start points are kept.",
         "hold_ms is a whole number from 0 to 1000 (omitted means 0), waited after arriving at its point: after the press at the first point, before the release at the last. One drag's holds total at most 5000 ms; the target's click hold does not apply to drag.",
-        "Each action is charged its expanded events: key 1, click 3 (4 with a nonzero native click hold), drag points + 2 + nonzero holds. A batch containing drag is limited to 256 events and the attempt's remaining budget (ActionLimit); its waits must fit the run's wait limit (Argument) and the remaining run time (Timeout).",
+        "Each action is charged its expanded events: key 1, click 3 (4 with a nonzero native click hold), drag points + 2 + nonzero holds. Finite runs use the remaining attempt budget; a batch containing drag is also limited to 256 events. Continuous Workflow admits at most 64 expanded events per batch and per rolling 1000 ms across all dispatches. Refused batches are not split; partial input is not refunded.",
+        "Scheduled waits in a drag batch must fit the run's wait_ms and the remaining context and Run deadlines.",
         "The whole batch is validated before any input; malformed fields, points or holds are refused with Argument, never clamped, shortened or split.",
         "The observation must still be retained and current; route, focus and queue capacity are checked at admission.",
         "Controlled and replay runs use a non-native sink; native runs need separately reviewed input authority, and click authority does not cover drag.",
@@ -276,6 +294,33 @@ function settleOnce(id: string): MadoReceipt {
 // Complete package modules (main.ts with both entries) that compile with the pinned
 // compiler under any options schema. Reading them never runs them.
 const examples = deepFreeze({
+  "scoped-search": {
+    title: "Pass a bounded search context through an async helper",
+    source: `export function readiness(): MadoReady { return "Ready"; }
+
+async function readyVisible(scan: MadoWorkflowContext): Promise<boolean> {
+  await Promise.resolve();
+  const observation = scan.call("observe", {});
+  const match = scan.call("recognize", {
+    observation, kind: "ocr", roi: { x: 0, y: 0, width: observation.width, height: observation.height },
+  });
+  return match?.text === "READY";
+}
+
+export async function workflow(): Promise<void> {
+  const scan = host.call("context", {}).child({ timeout_ms: 500 });
+  let found = false;
+  try {
+    found = await readyVisible(scan);
+  } catch (error) {
+    if ((error as MadoHostFault).category !== "ScopeDeadline") throw error;
+  } finally {
+    scan.close(); // Releases the scoped observation and recognition on every exit.
+  }
+  host.call("log", { message: found ? "search: found" : "search: absent" });
+}
+`,
+  },
   "observation-lifetime": {
     title: "Retain and release an observation",
     source: `// Retain one observation, use it and release it on every exit path.
@@ -709,6 +754,20 @@ interface MadoCalls {
 ${Object.entries(methods).map(([method, [args, result, documentation]]) =>
   `  /** ${documentation} */\n  ${method}: { args: ${args}; result: ${result} };`).join("\n")}
 }
+type MadoContextMethod = "wait" | "observe" | "recognize" | "scan_ocr_zones" | "query" | "query_wait" | "submit" | "settle" | "postcondition" | "release";
+interface MadoWorkflowContext {
+  readonly deadline_ms: number | null;
+  readonly done: boolean;
+  readonly cause: string | null;
+  child(bounds?: { timeout_ms?: number; deadline_ms?: never } | { deadline_ms: number; timeout_ms?: never }): MadoChildContext;
+  call<K extends MadoContextMethod>(method: K, args: MadoCalls[K]["args"]): MadoCalls[K]["result"];
+}
+interface MadoChildContext extends MadoWorkflowContext {
+  /** Children only. Propagates the first cause to descendants. */
+  cancel(cause: string): void;
+  /** Children only. Repeated release is harmless. */
+  close(): void;
+}
 declare const host: {
   readonly options: MadoOptions;
   readonly state: Record<string, unknown>;
@@ -732,7 +791,7 @@ export const SDK_SEARCH_LIMITS = Object.freeze({
 const RULES = Object.freeze([
   "Search and detail never run code, discover native resources or grant authority; host stage, lane and authority checks still decide every call.",
   "desktop-native is the reviewed Desktop Native subset of native: methods listing native also apply there, subject to their declared stages, capabilities and authority.",
-  "Any host fault, including Timeout, ends the attempt with that typed fault; catching it does not restore admission, and host teardown releases what the Script still holds.",
+  "Local context expiry, cancellation, closure, scope mismatch and scope budget refusals can be caught. Other host faults, including a Run Timeout, end the attempt; catching them never restores authority.",
   "Release every returned handle id on normal and exceptional exits; release stays available after admission closes.",
 ]);
 

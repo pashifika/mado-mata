@@ -202,43 +202,95 @@ impl Limits {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct NativeBudgets {
     pub startup_ms: u64,
     pub readiness_ms: u64,
-    pub workflow_ms: u64,
+    #[serde(flatten)]
+    pub workflow: NativeWorkflow,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "lifecycle", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeWorkflow {
+    Continuous {
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_ms"
+        )]
+        overall_ms: Option<u64>,
+    },
+    // Keep the existing finite plan and its serialized identity unchanged.
+    #[serde(untagged)]
+    Finite { workflow_ms: u64 },
+}
+
+fn present_ms<'de, D: serde::Deserializer<'de>>(input: D) -> Result<Option<u64>, D::Error> {
+    u64::deserialize(input).map(Some)
+}
+
+// The review and the SDK carry milliseconds as JavaScript numbers. This
+// range is also representable on the shared u64-microsecond transport clock.
+const MAX_REVIEWED_MS: u64 = (1 << 53) - 1;
 
 impl NativeBudgets {
     pub const DEFAULT: Self = Self {
         startup_ms: 60_000,
         readiness_ms: 30_000,
-        workflow_ms: 30_000,
+        workflow: NativeWorkflow::Finite {
+            workflow_ms: 30_000,
+        },
     };
 
     pub const CEILINGS: Self = Self {
-        workflow_ms: 900_000,
+        workflow: NativeWorkflow::Finite {
+            workflow_ms: 900_000,
+        },
         ..Self::DEFAULT
     };
 
-    pub fn operation_ms(self, recoveries: u8) -> Result<u64, Fault> {
+    pub const fn continuous(self) -> bool {
+        matches!(self.workflow, NativeWorkflow::Continuous { .. })
+    }
+
+    pub const fn workflow_ms(self) -> Option<u64> {
+        match self.workflow {
+            NativeWorkflow::Finite { workflow_ms } => Some(workflow_ms),
+            NativeWorkflow::Continuous { .. } => None,
+        }
+    }
+
+    pub fn operation_ms(self, recoveries: u8) -> Result<Option<u64>, Fault> {
+        let preparation = self.preparation_ms()?;
+        if let NativeWorkflow::Continuous { overall_ms } = self.workflow {
+            return if recoveries == 0 {
+                Ok(overall_ms)
+            } else {
+                Err(Fault::new(
+                    "NativeRefused",
+                    "Continuous Native cannot recover",
+                ))
+            };
+        }
         if recoveries > 1 {
             return Err(Fault::new(
                 "NativeRefused",
                 "At most one exit recovery is supported",
             ));
         }
-        self.total_ms()?
+        preparation
             .checked_mul(1 + u64::from(recoveries))
             .and_then(|total| total.checked_add(u64::from(recoveries) * 3_000))
+            .map(Some)
             .ok_or_else(|| Fault::new("NativeRefused", "Native operation deadline overflows"))
     }
 
-    pub fn total_ms(self) -> Result<u64, Fault> {
+    /// Finite preparation/compilation limit. Only finite plans also use it
+    /// as their per-attempt execution budget.
+    pub fn preparation_ms(self) -> Result<u64, Fault> {
         for (value, ceiling) in [
             (self.startup_ms, Self::CEILINGS.startup_ms),
             (self.readiness_ms, Self::CEILINGS.readiness_ms),
-            (self.workflow_ms, Self::CEILINGS.workflow_ms),
         ] {
             if value == 0 || value > ceiling {
                 return Err(Fault::new(
@@ -247,10 +299,23 @@ impl NativeBudgets {
                 ));
             }
         }
-        self.startup_ms
-            .checked_add(self.readiness_ms)
-            .and_then(|sum| sum.checked_add(self.workflow_ms))
-            .ok_or_else(|| Fault::new("NativeRefused", "Native budget sum overflows"))
+        let preparation = self.startup_ms + self.readiness_ms;
+        match self.workflow {
+            NativeWorkflow::Finite { workflow_ms }
+                if (1..=Self::CEILINGS.workflow_ms().unwrap()).contains(&workflow_ms) =>
+            {
+                Ok(preparation + workflow_ms)
+            }
+            NativeWorkflow::Continuous { overall_ms }
+                if overall_ms.is_none_or(|ms| (1..=MAX_REVIEWED_MS).contains(&ms)) =>
+            {
+                Ok(preparation)
+            }
+            _ => Err(Fault::new(
+                "NativeRefused",
+                "Unsupported Native workflow budget",
+            )),
+        }
     }
 }
 
@@ -311,14 +376,33 @@ impl Plan {
         self.limits.validate()?;
         if let Some(budgets) = self.native_budgets {
             if self.lane != "native"
-                || budgets.total_ms()? != self.limits.duration_ms
+                || budgets.preparation_ms()? != self.limits.duration_ms
                 || budgets.readiness_ms != self.limits.readiness_ms
+                || (budgets.continuous()
+                    && (!matches!(self.candidate.as_str(), "javascript" | "typescript")
+                        || self.scenario != "success"
+                        || (self.samples, self.warmups, self.repetitions) != (1, 0, 1)))
             {
                 return Err(Fault::new(
                     "InvalidPlan",
                     "Native phase budgets do not match the plan",
                 ));
             }
+        }
+        if !self.native_budgets.is_some_and(NativeBudgets::continuous)
+            && self
+                .native_config
+                .as_ref()
+                .and_then(|config| config.get("native")?.get("input"))
+                .is_some_and(|input| {
+                    input.get("max_batch_events").is_some()
+                        || input.get("event_interval_ms").is_some()
+                })
+        {
+            return Err(Fault::new(
+                "NativeRefused",
+                "continuous input policy requires reviewed Native budgets",
+            ));
         }
         if !(1..=1000).contains(&self.samples)
             || self.warmups > 100
@@ -397,7 +481,9 @@ pub struct Control {
     // One outgoing successor: unscheduled, queued, admitted, or closed.
     transition: AtomicU8,
     started: Instant,
-    deadline: Instant,
+    deadline: Option<Instant>,
+    #[cfg(test)]
+    test_time: Mutex<Option<Instant>>,
     native_clock: Mutex<Option<NativeClock>>,
     owner: Option<std::sync::Arc<Control>>,
     admission_gate: Mutex<()>,
@@ -407,7 +493,7 @@ pub struct Control {
 struct NativeClock {
     budgets: NativeBudgets,
     phase: u8,
-    deadline: Instant,
+    deadline: Option<Instant>,
     settled: bool,
 }
 
@@ -430,10 +516,13 @@ impl StopReason {
 impl Control {
     pub fn new(limits: &Limits) -> Self {
         let started = Instant::now();
-        Self::from_deadline(started, started + Duration::from_millis(limits.duration_ms))
+        Self::from_deadline(
+            started,
+            Some(started + Duration::from_millis(limits.duration_ms)),
+        )
     }
 
-    fn from_deadline(started: Instant, deadline: Instant) -> Self {
+    fn from_deadline(started: Instant, deadline: Option<Instant>) -> Self {
         Self {
             cancelled: AtomicBool::new(false),
             admission: AtomicBool::new(false),
@@ -443,6 +532,8 @@ impl Control {
             transition: AtomicU8::new(0),
             started,
             deadline,
+            #[cfg(test)]
+            test_time: Mutex::new(None),
             native_clock: Mutex::new(None),
             owner: None,
             admission_gate: Mutex::new(()),
@@ -528,16 +619,29 @@ impl Control {
         }
         if self.cause.load(Ordering::Acquire) & 3 == 0 {
             let clock = self.native_clock.lock().unwrap_or_else(|e| e.into_inner());
-            if clock.is_some_and(|clock| !clock.settled && Instant::now() >= clock.deadline) {
-                // A phase deadline is an independently earned failure.
-                self.latch(2 | PHASE_TIMEOUT);
-            }
-        }
-        if self.cause.load(Ordering::Acquire) & 3 == 0 && Instant::now() >= self.deadline {
-            // The absolute deadline is provisional until the supervisor verdict.
-            self.latch(2 | DERIVED);
+            self.check_deadlines(clock.as_ref());
         }
         self.cause.load(Ordering::Acquire)
+    }
+
+    fn effective_deadline(&self, clock: Option<&NativeClock>) -> Option<(Instant, u8)> {
+        match clock
+            .filter(|clock| !clock.settled)
+            .and_then(|clock| clock.deadline)
+        {
+            Some(at) if self.deadline.is_none_or(|outer| at <= outer) => Some((at, PHASE_TIMEOUT)),
+            _ => self.deadline.map(|outer| (outer, DERIVED)),
+        }
+    }
+
+    fn check_deadlines(&self, clock: Option<&NativeClock>) {
+        if let Some((at, source)) = self.effective_deadline(clock)
+            && self.now() >= at
+        {
+            // A phase deadline is independently earned, unlike the absolute
+            // deadline, which the child reconciles with the supervisor's verdict.
+            self.latch(2 | source);
+        }
     }
 
     pub fn stop_reason(&self) -> Option<StopReason> {
@@ -616,40 +720,85 @@ impl Control {
             })
     }
 
-    pub fn deadline(&self) -> Instant {
+    pub fn require_deadline(&self) -> Result<Instant, Fault> {
+        self.deadline_opt().ok_or_else(|| {
+            Fault::new(
+                "ReadinessContract",
+                "operation requires a finite preparation deadline",
+            )
+        })
+    }
+
+    pub fn deadline_opt(&self) -> Option<Instant> {
+        let clock = self.native_clock.lock().unwrap_or_else(|e| e.into_inner());
+        self.effective_deadline(clock.as_ref()).map(|(at, _)| at)
+    }
+
+    pub(crate) fn continuous_lifecycle(&self) -> bool {
         self.native_clock
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .filter(|clock| !clock.settled)
-            .map_or(self.deadline, |clock| clock.deadline.min(self.deadline))
+            .as_ref()
+            .is_some_and(|clock| !clock.settled && clock.budgets.continuous())
     }
 
-    pub(crate) fn outer_deadline(&self) -> Instant {
+    pub(crate) fn continuous_workflow(&self) -> bool {
+        self.native_clock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|clock| !clock.settled && clock.phase == 2 && clock.budgets.continuous())
+    }
+
+    pub(crate) fn outer_deadline(&self) -> Option<Instant> {
         self.deadline
     }
 
     pub(crate) fn with_deadline(limits: &Limits, deadline: Instant) -> Self {
-        let mut control = Self::new(limits);
-        control.deadline = control.deadline.min(deadline);
-        control
+        let started = Instant::now();
+        Self::from_deadline(
+            started,
+            Some(deadline.min(started + Duration::from_millis(limits.duration_ms))),
+        )
     }
 
-    pub(crate) fn reserved(limits: &Limits) -> Result<Self, Fault> {
+    pub(crate) fn for_child(plan: &Plan, inherited: Option<Instant>) -> Result<Self, Fault> {
+        if plan.native_budgets.is_some_and(NativeBudgets::continuous) {
+            // Startup/Readiness have their own finite budgets; neither one
+            // is a whole-operation bound for a continuous child.
+            Ok(Self::from_deadline(Instant::now(), inherited))
+        } else {
+            let deadline =
+                inherited.ok_or_else(|| Fault::new("Transport", "finite child has no deadline"))?;
+            Ok(Self::with_deadline(&plan.limits, deadline))
+        }
+    }
+
+    pub(crate) fn reserved(duration_ms: Option<u64>) -> Result<Self, Fault> {
         let started = Instant::now();
-        let deadline = started
-            .checked_add(Duration::from_millis(limits.duration_ms))
-            .ok_or_else(|| Fault::new("Clock", "operation deadline overflows"))?;
+        let deadline = duration_ms
+            .map(|ms| {
+                if !(1..=MAX_REVIEWED_MS).contains(&ms) {
+                    return Err(Fault::new(
+                        "Clock",
+                        "operation duration is zero or exceeds clock range",
+                    ));
+                }
+                started
+                    .checked_add(Duration::from_millis(ms))
+                    .ok_or_else(|| Fault::new("Clock", "operation deadline overflows"))
+            })
+            .transpose()?;
         Ok(Self::from_deadline(started, deadline))
     }
 
-    pub(crate) fn for_attempt(owner: std::sync::Arc<Self>, limits: &Limits, initial: bool) -> Self {
-        let mut control = Self::new(limits);
-        control.deadline = owner.deadline;
-        if initial {
-            control.started = owner.started;
+    pub(crate) fn for_attempt(owner: std::sync::Arc<Self>, initial: bool) -> Self {
+        let started = if initial { owner.started } else { owner.now() };
+        let deadline = owner.deadline;
+        Self {
+            owner: Some(owner),
+            ..Self::from_deadline(started, deadline)
         }
-        control.owner = Some(owner);
-        control
     }
 
     /// Stop and the single successor admission share this short-held gate.
@@ -676,7 +825,24 @@ impl Control {
         budgets: NativeBudgets,
         inherited: Option<Instant>,
     ) -> Result<(), Fault> {
-        budgets.total_ms()?;
+        budgets.preparation_ms()?;
+        let matching = match (budgets.workflow, self.deadline) {
+            (NativeWorkflow::Finite { .. }, Some(_))
+            | (NativeWorkflow::Continuous { overall_ms: None }, None) => true,
+            (
+                NativeWorkflow::Continuous {
+                    overall_ms: Some(ms),
+                },
+                Some(at),
+            ) => at.saturating_duration_since(self.started) <= Duration::from_millis(ms),
+            _ => false,
+        };
+        if !matching {
+            return Err(Fault::new(
+                "NativeRefused",
+                "reservation and Native lifecycle disagree",
+            ));
+        }
         let mut clock = self.native_clock.lock().unwrap_or_else(|e| e.into_inner());
         if clock.is_some() {
             return Err(Fault::new(
@@ -687,12 +853,16 @@ impl Control {
         let deadline = self
             .started
             .checked_add(Duration::from_millis(budgets.startup_ms))
-            .ok_or_else(|| Fault::new("Clock", "startup deadline overflows"))?
-            .min(self.deadline);
+            .ok_or_else(|| Fault::new("Clock", "startup deadline overflows"))?;
+        let deadline = if budgets.continuous() {
+            deadline
+        } else {
+            self.deadline.map_or(deadline, |outer| deadline.min(outer))
+        };
         *clock = Some(NativeClock {
             budgets,
             phase: 0,
-            deadline: inherited.map_or(deadline, |at| at.min(deadline)),
+            deadline: Some(inherited.map_or(deadline, |at| at.min(deadline))),
             settled: false,
         });
         Ok(())
@@ -707,13 +877,28 @@ impl Control {
         }
     }
 
+    pub(crate) fn native_startup_deadline(&self, budgets: NativeBudgets) -> Result<Instant, Fault> {
+        self.native_clock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .filter(|clock| !clock.settled && clock.phase == 0 && clock.budgets == budgets)
+            .and_then(|clock| clock.deadline)
+            .ok_or_else(|| {
+                Fault::new(
+                    "NativeRefused",
+                    "Native plan does not match the reserved startup clock",
+                )
+            })
+    }
+
     /// Transition once, with a conservative absolute deadline from the child
     /// when called by its supervisor. No preceding stage's unused time is lent.
     pub(crate) fn native_transition(
         &self,
         phase: u8,
         inherited: Option<Instant>,
-    ) -> Result<Instant, Fault> {
+    ) -> Result<Option<Instant>, Fault> {
         self.check()?;
         let mut guard = self.native_clock.lock().unwrap_or_else(|e| e.into_inner());
         let clock = guard
@@ -725,9 +910,7 @@ impl Control {
                 "Native entry has already settled",
             ));
         }
-        if Instant::now() >= clock.deadline {
-            self.latch(2 | PHASE_TIMEOUT);
-        }
+        self.check_deadlines(Some(clock));
         if self.cause.load(Ordering::Acquire) & 3 != 0 {
             drop(guard);
             return Err(self.check().expect_err("latched stop cannot reopen"));
@@ -739,16 +922,26 @@ impl Control {
             ));
         }
         let budget = if phase == 1 {
-            clock.budgets.readiness_ms
+            Some(clock.budgets.readiness_ms)
         } else {
-            clock.budgets.workflow_ms
+            clock.budgets.workflow_ms()
         };
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(budget))
-            .ok_or_else(|| Fault::new("Clock", "phase deadline overflows"))?
-            .min(self.deadline);
+        let deadline = budget
+            .map(|ms| {
+                self.now()
+                    .checked_add(Duration::from_millis(ms))
+                    .ok_or_else(|| Fault::new("Clock", "phase deadline overflows"))
+            })
+            .transpose()?;
         clock.phase = phase;
-        clock.deadline = inherited.map_or(deadline, |at| at.min(deadline));
+        clock.deadline = deadline.map(|at| {
+            let stage = inherited.map_or(at, |received| at.min(received));
+            if clock.budgets.continuous() {
+                stage
+            } else {
+                self.deadline.map_or(stage, |outer| stage.min(outer))
+            }
+        });
         Ok(clock.deadline)
     }
 
@@ -778,8 +971,32 @@ impl Control {
         self.check()
     }
 
+    pub(crate) fn started(&self) -> Instant {
+        self.started
+    }
+
+    pub(crate) fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(at) = *self.test_time.lock().unwrap_or_else(|e| e.into_inner()) {
+            return at;
+        }
+        Instant::now()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_time(&self, at: Instant) {
+        let mut clock = self.test_time.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(at >= clock.unwrap_or(self.started));
+        *clock = Some(at);
+    }
+
     pub fn elapsed_us(&self) -> u64 {
-        u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX)
+        u64::try_from(
+            self.now()
+                .saturating_duration_since(self.started)
+                .as_micros(),
+        )
+        .unwrap_or(u64::MAX)
     }
 }
 
@@ -823,8 +1040,90 @@ mod tests {
     fn native_control(budgets: NativeBudgets) -> Control {
         let mut plan: Plan =
             serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
-        plan.limits.duration_ms = budgets.total_ms().unwrap();
+        plan.limits.duration_ms = budgets.preparation_ms().unwrap();
         Control::new(&plan.limits)
+    }
+
+    #[test]
+    fn native_budget_wire_requires_an_explicit_unambiguous_lifecycle() {
+        let finite = json!({"startup_ms":60_000,"readiness_ms":30_000,"workflow_ms":30_000});
+        assert_eq!(
+            serde_json::to_value(NativeBudgets::DEFAULT).unwrap(),
+            finite
+        );
+        for extra in [
+            json!({}),
+            json!({"lifecycle":"continuous","workflow_ms":100}),
+            json!({"lifecycle":"continuous","overall_ms":null}),
+            json!({"lifecycle":"finite","workflow_ms":100}),
+            json!({"overall_ms":100}),
+            json!({"workflow_ms":100,"overall_ms":100}),
+        ] {
+            let mut raw = json!({"startup_ms":60_000,"readiness_ms":30_000});
+            raw.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert!(
+                serde_json::from_value::<NativeBudgets>(raw.clone()).is_err(),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn continuous_outer_time_is_charged_from_reservation_not_workflow_entry() {
+        let budgets = NativeBudgets {
+            workflow: NativeWorkflow::Continuous {
+                overall_ms: Some(8_000),
+            },
+            ..NativeBudgets::DEFAULT
+        };
+        let owner =
+            std::sync::Arc::new(Control::reserved(budgets.operation_ms(0).unwrap()).unwrap());
+        let attempt = Control::for_attempt(owner.clone(), true);
+        owner.set_test_time(owner.started());
+        let origin = owner.started();
+        attempt.set_test_time(origin + Duration::from_secs(2));
+        attempt.start_native(budgets, None).unwrap();
+        assert!(attempt.continuous_lifecycle());
+        assert!(!attempt.continuous_workflow());
+        assert_eq!(
+            attempt.deadline_opt(),
+            Some(origin + Duration::from_secs(8))
+        );
+        attempt.native_transition(1, None).unwrap();
+        assert!(!attempt.continuous_workflow());
+        attempt.set_test_time(origin + Duration::from_secs(7));
+        attempt.native_transition(2, None).unwrap();
+        assert!(attempt.continuous_workflow());
+        attempt.check().unwrap();
+        attempt.set_test_time(origin + Duration::from_secs(8));
+        let fault = attempt.check().unwrap_err();
+        assert_eq!(fault.category, "Timeout");
+        assert!(
+            fault.is_provisional_timeout(),
+            "overall expiry is not a stage failure"
+        );
+        attempt.settle_native();
+        assert!(!attempt.continuous_lifecycle());
+        assert!(!attempt.continuous_workflow());
+        assert_eq!(attempt.stop_reason(), Some(StopReason::Timeout));
+        assert!(budgets.operation_ms(1).is_err());
+
+        owner.set_test_time(origin + Duration::from_secs(8));
+        let late = Control::for_attempt(owner, true);
+        late.start_native(budgets, None).unwrap();
+        assert_eq!(late.admit_launch().unwrap_err().category, "Timeout");
+        for ms in [0, MAX_REVIEWED_MS + 1, u64::MAX] {
+            let invalid = NativeBudgets {
+                workflow: NativeWorkflow::Continuous {
+                    overall_ms: Some(ms),
+                },
+                ..budgets
+            };
+            assert!(invalid.operation_ms(0).is_err());
+            assert!(Control::reserved(Some(ms)).is_err());
+        }
     }
 
     #[test]
@@ -833,8 +1132,8 @@ mod tests {
             (NativeBudgets::DEFAULT, 120_000, 243_000),
             (NativeBudgets::CEILINGS, 990_000, 1_983_000),
         ] {
-            assert_eq!(budgets.operation_ms(0).unwrap(), total);
-            assert_eq!(budgets.operation_ms(1).unwrap(), recovered);
+            assert_eq!(budgets.operation_ms(0).unwrap(), Some(total));
+            assert_eq!(budgets.operation_ms(1).unwrap(), Some(recovered));
             for recoveries in [2, u8::MAX] {
                 assert_eq!(
                     budgets.operation_ms(recoveries).unwrap_err().category,
@@ -845,10 +1144,11 @@ mod tests {
                 serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
             plan.limits.duration_ms = recovered;
             plan.limits.validate().unwrap();
-            let owner = std::sync::Arc::new(Control::reserved(&plan.limits).unwrap());
-            let outer = owner.started + Duration::from_millis(recovered);
+            let owner =
+                std::sync::Arc::new(Control::reserved(Some(plan.limits.duration_ms)).unwrap());
+            let outer = Some(owner.started + Duration::from_millis(recovered));
             assert_eq!(owner.outer_deadline(), outer);
-            let initial = Control::for_attempt(owner.clone(), &plan.limits, true);
+            let initial = Control::for_attempt(owner.clone(), true);
             initial.start_native(budgets, None).unwrap();
             initial.admit_launch().unwrap();
             initial.cancel();
@@ -857,7 +1157,7 @@ mod tests {
                 "attempt settlement must not cancel its owner"
             );
             owner.admit_recovery().unwrap();
-            let fresh = Control::for_attempt(owner.clone(), &plan.limits, false);
+            let fresh = Control::for_attempt(owner.clone(), false);
             fresh.start_native(budgets, None).unwrap();
             fresh.native_transition(1, None).unwrap();
             fresh.native_transition(2, None).unwrap();
@@ -882,7 +1182,10 @@ mod tests {
                 let mut raw = serde_json::to_value(NativeBudgets::DEFAULT).unwrap();
                 raw[field] = json!(value);
                 let budgets: NativeBudgets = serde_json::from_value(raw).unwrap();
-                assert_eq!(budgets.total_ms().unwrap_err().category, "NativeRefused");
+                assert_eq!(
+                    budgets.preparation_ms().unwrap_err().category,
+                    "NativeRefused"
+                );
                 assert_eq!(
                     budgets.operation_ms(1).unwrap_err().category,
                     "NativeRefused"
@@ -905,12 +1208,12 @@ mod tests {
         for expired in [false, true] {
             let mut owner = Control::new(&plan.limits);
             if expired {
-                owner.deadline = Instant::now() - Duration::from_millis(1);
+                owner.deadline = Some(Instant::now() - Duration::from_millis(1));
             } else {
                 owner.cancel();
             }
             let owner = std::sync::Arc::new(owner);
-            let fresh = Control::for_attempt(owner.clone(), &plan.limits, false);
+            let fresh = Control::for_attempt(owner.clone(), false);
             assert!(owner.admit_recovery().is_err());
             assert!(fresh.admit_launch().is_err());
             assert_eq!(fresh.outer_deadline(), owner.outer_deadline());
@@ -944,15 +1247,15 @@ mod tests {
             for capped in [false, true] {
                 let mut control = native_control(budgets);
                 if capped {
-                    control.deadline = Instant::now() + Duration::from_secs(10);
+                    control.deadline = Some(Instant::now() + Duration::from_secs(10));
                 }
-                let outer = control.outer_deadline();
+                let outer = control.outer_deadline().unwrap();
                 control.start_native(budgets, None).unwrap();
-                let startup = control.deadline();
+                let startup = control.require_deadline().unwrap();
                 assert!(control.start_native(budgets, None).is_err());
-                assert_eq!(control.deadline(), startup);
+                assert_eq!(control.deadline_opt(), Some(startup));
                 let before = Instant::now();
-                let ready = control.native_transition(1, None).unwrap();
+                let ready = control.native_transition(1, None).unwrap().unwrap();
                 let readiness = Duration::from_millis(budgets.readiness_ms);
                 assert!(ready >= (before + readiness).min(outer));
                 assert!(ready <= (Instant::now() + readiness).min(outer));
@@ -960,26 +1263,19 @@ mod tests {
                     assert!(ready < startup);
                 }
                 assert!(control.native_transition(1, None).is_err());
-                assert_eq!(control.deadline(), ready);
+                assert_eq!(control.deadline_opt(), Some(ready));
                 let before = Instant::now();
-                let workflow = control.native_transition(2, None).unwrap();
-                let duration = Duration::from_millis(budgets.workflow_ms);
+                let workflow = control.native_transition(2, None).unwrap().unwrap();
+                let duration = Duration::from_millis(budgets.workflow_ms().unwrap());
                 assert!(workflow >= (before + duration).min(outer));
                 assert!(workflow <= (Instant::now() + duration).min(outer));
                 assert!(control.native_transition(2, None).is_err());
                 for _ in 0..3 {
                     control.check().unwrap();
-                    assert_eq!(control.deadline(), workflow);
-                    assert_eq!(control.outer_deadline(), outer);
+                    assert_eq!(control.deadline_opt(), Some(workflow));
+                    assert_eq!(control.outer_deadline(), Some(outer));
                 }
-                // Advance the selected stage deterministically, not wall-clock time.
-                control
-                    .native_clock
-                    .get_mut()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_mut()
-                    .unwrap()
-                    .deadline = Instant::now() - Duration::from_millis(1);
+                control.set_test_time(workflow);
                 let fault = control.check().unwrap_err();
                 assert_eq!(fault.category, "Timeout");
                 assert_eq!(fault.context["stage"], "workflow");
@@ -987,7 +1283,7 @@ mod tests {
                 assert!(control.native_transition(2, None).is_err());
                 control.settle_native();
                 assert_eq!(control.check().unwrap_err().context["stage"], "workflow");
-                assert_eq!(control.outer_deadline(), outer);
+                assert_eq!(control.outer_deadline(), Some(outer));
             }
         }
     }
@@ -997,7 +1293,7 @@ mod tests {
         let budgets = NativeBudgets {
             startup_ms: 100,
             readiness_ms: 1_000,
-            workflow_ms: 1_000,
+            workflow: NativeWorkflow::Finite { workflow_ms: 1_000 },
         };
         let mut control = native_control(budgets);
         control.started -= Duration::from_millis(101);
@@ -1016,7 +1312,7 @@ mod tests {
         let budgets = NativeBudgets {
             startup_ms: 1_000,
             readiness_ms: 1_000,
-            workflow_ms: 1_000,
+            workflow: NativeWorkflow::Finite { workflow_ms: 1_000 },
         };
         let control = native_control(budgets);
         let outer = control.outer_deadline();
@@ -1024,7 +1320,7 @@ mod tests {
         let inherited = Instant::now() - Duration::from_millis(1);
         assert_eq!(
             control.native_transition(1, Some(inherited)).unwrap(),
-            inherited
+            Some(inherited)
         );
         let fault = control.check().unwrap_err();
         assert_eq!(fault.context["stage"], "readiness");
@@ -1093,7 +1389,7 @@ mod tests {
             serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
         let deadline = Instant::now() - Duration::from_millis(1);
         let control = Control::with_deadline(&plan.limits, deadline);
-        assert_eq!(control.deadline(), deadline);
+        assert_eq!(control.deadline_opt(), Some(deadline));
         assert_eq!(control.admit_launch().unwrap_err().category, "Timeout");
         control.cancel();
         assert_eq!(control.stop_reason(), Some(StopReason::Timeout));
@@ -1174,7 +1470,7 @@ mod tests {
         let budgets = NativeBudgets {
             startup_ms: 5_000,
             readiness_ms: 5_000,
-            workflow_ms: 5_000,
+            workflow: NativeWorkflow::Finite { workflow_ms: 5_000 },
         };
         let mut control = native_control(budgets);
         control.start_native(budgets, None).unwrap();
@@ -1189,13 +1485,13 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .as_mut()
             .unwrap()
-            .deadline = Instant::now() - Duration::from_millis(1);
+            .deadline = Some(Instant::now() - Duration::from_millis(1));
         control.settle_native();
         assert!(control.check().is_ok());
-        assert_eq!(control.deadline(), outer);
+        assert_eq!(control.deadline_opt(), outer);
         assert!(control.native_transition(2, None).is_err());
         assert!(control.start_native(budgets, None).is_err());
-        control.deadline = Instant::now() - Duration::from_millis(1);
+        control.deadline = Some(Instant::now() - Duration::from_millis(1));
         assert_eq!(control.check().unwrap_err().category, "Timeout");
     }
 
@@ -1204,12 +1500,10 @@ mod tests {
         let budgets = NativeBudgets {
             startup_ms: 5_000,
             readiness_ms: 5_000,
-            workflow_ms: 5_000,
+            workflow: NativeWorkflow::Finite { workflow_ms: 5_000 },
         };
-        let plan: Plan =
-            serde_json::from_str(include_str!("../fixtures/manual-plan.json")).unwrap();
         let owner = std::sync::Arc::new(native_control(budgets));
-        let attempt = Control::for_attempt(owner.clone(), &plan.limits, true);
+        let attempt = Control::for_attempt(owner.clone(), true);
         attempt.start_native(budgets, None).unwrap();
         attempt.native_transition(1, None).unwrap();
         attempt
@@ -1225,7 +1519,7 @@ mod tests {
         assert!(!retained.is_provisional_timeout());
         assert!(owner.check().is_ok());
 
-        let fresh = Control::for_attempt(owner.clone(), &plan.limits, false);
+        let fresh = Control::for_attempt(owner.clone(), false);
         fresh.start_native(budgets, None).unwrap();
         fresh.settle_native();
         owner.cancel();
