@@ -484,7 +484,7 @@ impl ProfileStore {
             .map(|(profile, bytes)| (profile, bytes.len()))
     }
 
-    fn read_record(&self, id: &str) -> Result<(Profile, Vec<u8>), Fault> {
+    pub(crate) fn read_record(&self, id: &str) -> Result<(Profile, Vec<u8>), Fault> {
         let result = (|| {
             validate_id(id)?;
             self.check_owner()?;
@@ -587,7 +587,7 @@ fn profile_validation_fault(mut fault: Fault, id: &str) -> Fault {
     profile_fault(fault, id)
 }
 
-fn validate_name(name: &str) -> Result<(), Fault> {
+pub(crate) fn validate_name(name: &str) -> Result<(), Fault> {
     if name.trim().is_empty()
         || name.len() > MAX_NAME_BYTES
         || name.chars().any(char::is_control)
@@ -647,6 +647,15 @@ fn check_binding(profile: &Profile, package_id: &str, schema_identity: &str) -> 
 }
 
 fn validate_values(inventory: &Inventory, values: Value) -> Result<Value, Fault> {
+    resolve_profile_values(inventory, values).map(|(supplied, _)| supplied)
+}
+
+/// Both projections pass the same portability and storage bounds. Save keeps
+/// the supplied options; sharing sends the effective defaults as well.
+pub(crate) fn resolve_profile_values(
+    inventory: &Inventory,
+    values: Value,
+) -> Result<(Value, Value), Fault> {
     portable_values(&values)?;
     encode(&values, MAX_PROFILE_BYTES)?;
     let mut wrapper = json!({
@@ -657,7 +666,7 @@ fn validate_values(inventory: &Inventory, values: Value) -> Result<Value, Fault>
     let resolved = resolve_options(&inventory.schema, &wrapper, &inventory.package_id)?;
     portable_values(&resolved)?;
     encode(&resolved, MAX_PROFILE_BYTES)?;
-    Ok(wrapper["options"].take())
+    Ok((wrapper["options"].take(), resolved))
 }
 
 pub(crate) fn portable_values(values: &Value) -> Result<(), Fault> {

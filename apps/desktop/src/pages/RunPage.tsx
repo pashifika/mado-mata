@@ -8,6 +8,9 @@ import TargetPanel from '../components/TargetPanel.tsx';
 import type {TargetHandlers} from '../components/TargetPanel.tsx';
 import NativeReview from '../components/NativeReview.tsx';
 import {FaultMessage} from '../components/ResultPanel.tsx';
+import ProfileSharePanels, {useProfileShare} from '../components/ProfileShare.tsx';
+import type {ShareHandlers} from '../components/ProfileShare.tsx';
+import {shareContext} from '../profile-share.ts';
 import {ButtonHint, HelpTrigger} from '../components/ContextualHelp.tsx';
 import type {RunView} from './ExecutionPage.tsx';
 import {UNSUPPORTED_SOURCE, busy, hasWorkspaceEdits} from '../workspace.ts';
@@ -30,6 +33,7 @@ export interface RunHandlers {
   native: {edit: (field: 'operation' | 'postcondition' | 'workflowSeconds' | 'lifecycle' | 'overallSeconds', value: string) => void; approve: (field: NativeConsent, value: boolean) => void};
   target: TargetHandlers;
   recovery: RecoveryHandlers;
+  share: ShareHandlers;
 }
 
 interface Props {
@@ -55,6 +59,10 @@ export default function RunPage({workspace, label, derived, run, locked, active,
   const [confirmReinspect, setConfirmReinspect] = useState(false);
   const [confirmEdit, setConfirmEdit] = useState(false);
   const a = t.authoring;
+  const s = t.profileShare;
+  const share = useProfileShare(handlers.share.client, shareContext(`${workspace.id}:${workspace.revision}`, bound, derived));
+  const exportOpen = share.state.export !== null;
+  const importOpen = share.state.import !== null;
   const editOwner = authoring.role === 'owner';
   // Installed releases reinspect by saved identity and have no Edit entry point.
   const installed = workspace.savedPackage?.source.kind === 'installed' ? workspace.savedPackage.source : null;
@@ -202,7 +210,12 @@ export default function RunPage({workspace, label, derived, run, locked, active,
             <button id="new-profile" disabled={locked} onClick={() => handlers.newDraft()}>{t.run.newDraft}</button>
             <button id="rename-profile" disabled={!bound.selectedId || locked || !bound.name.trim() || !profileBound} onClick={handlers.renameProfile}>{t.run.rename}</button>
             <button id="delete-profile" className="danger-text" disabled={!bound.selectedId || locked} onClick={handlers.deleteProfile}>{t.run.deleteProfile}</button>
+            <button id="profile-share-export" type="button" disabled={!exportOpen && (locked || !selectedProfile || !profileBound)} aria-expanded={exportOpen}
+              onClick={() => exportOpen ? share.session.closeExport() : share.session.openExport()}>{s.exportOpen}</button>
+            <button id="profile-share-import" type="button" disabled={!importOpen && locked} aria-expanded={importOpen}
+              onClick={() => importOpen ? share.session.cancelImport() : share.session.openImport()}>{s.importOpen}</button>
           </div>
+          <ProfileSharePanels share={share} locked={locked} draftDiffers={dirty} replacesEdits={bound.touched && dirty} onAdopt={handlers.share.adopt}/>
           <details className="legacy-import"><summary>{t.run.legacyHeading}</summary>
             <p className="field-help">{t.run.legacyHint}<HelpTrigger title={t.run.legacyHeading} hint={t.run.legacyHelpHint}>
               <p>{t.run.legacyHelp}</p><p>{t.bootstrap.converterHelp}</p>

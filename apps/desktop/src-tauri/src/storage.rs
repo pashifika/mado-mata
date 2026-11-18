@@ -15,7 +15,8 @@ pub(crate) use fs::{
     read_bytes, write_atomic,
 };
 pub(crate) use profiles::{
-    RecoveryRecord, portable_values, validate_import_transition, validate_profile,
+    RecoveryRecord, portable_values, resolve_profile_values, validate_import_transition,
+    validate_name as validate_profile_name, validate_profile,
 };
 pub(crate) use settings::validate_settings;
 pub(crate) use tabs::{validate_internal_name, validate_tab};

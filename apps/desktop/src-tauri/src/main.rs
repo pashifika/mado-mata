@@ -1,7 +1,8 @@
 use mado_mata_desktop::application::{
     AuthoringMutation, AuthoringRef, AuthoringValidation, AuthoringView, InspectionOutcome, Poll,
-    ProfileCatalog, RecoveryMutation, RecoveryRef, TargetApplicationResponse, TargetCheckResponse,
-    TargetSaveResponse, TargetView, TrialContext, WorkspaceCatalog, WorkspaceRef, WorkspaceView,
+    ProfileCatalog, ProfileSharePreview, RecoveryMutation, RecoveryRef, TargetApplicationResponse,
+    TargetCheckResponse, TargetSaveResponse, TargetView, TrialContext, WorkspaceCatalog,
+    WorkspaceRef, WorkspaceView,
 };
 use mado_mata_desktop::authoring::CatalogEdit;
 use mado_mata_desktop::backup::SnapshotReceipt;
@@ -23,6 +24,7 @@ use std::time::Duration;
 use tauri::{Emitter, Manager};
 
 mod cache_commands;
+mod clipboard;
 mod collaboration_commands;
 mod distribution_commands;
 mod ocr_setup_commands;
@@ -505,6 +507,27 @@ async fn import_legacy_profiles(
 }
 
 #[tauri::command]
+async fn export_profile_share_code(
+    workspace: WorkspaceRef,
+    id: String,
+    include_name: bool,
+    state: tauri::State<'_, Backend>,
+) -> Result<String, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.export_profile_share_code(&workspace, &id, include_name)).await
+}
+
+#[tauri::command]
+async fn decode_profile_share_code(
+    workspace: WorkspaceRef,
+    code: String,
+    state: tauri::State<'_, Backend>,
+) -> Result<ProfileSharePreview, Fault> {
+    let application = state.bootstrap.application()?;
+    background(move || application.decode_profile_share_code(&workspace, &code)).await
+}
+
+#[tauri::command]
 async fn save_profile(
     workspace: WorkspaceRef,
     id: Option<String>,
@@ -891,6 +914,9 @@ fn main() {
             check_running_application,
             cancel_running_application,
             import_legacy_profiles,
+            export_profile_share_code,
+            decode_profile_share_code,
+            clipboard::copy_profile_share_code,
             save_profile,
             rename_profile,
             delete_profile,

@@ -32,6 +32,8 @@ mod native_run;
 mod ocr_setup;
 mod operations;
 pub use ocr_setup::SetupOperation;
+mod profile_share;
+pub use profile_share::{MAX_PROFILE_SHARE_BYTES, PROFILE_SHARE_PREFIX, ProfileSharePreview};
 mod profiles;
 pub(crate) use profiles::check_webview_value;
 mod recovery;

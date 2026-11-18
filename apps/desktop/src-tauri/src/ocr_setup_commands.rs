@@ -113,17 +113,7 @@ fn open_link(url: &str) -> Result<(), Fault> {
 
 #[cfg(target_os = "macos")]
 fn copy_command(command: &str) -> Result<(), Fault> {
-    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-    use objc2_foundation::NSString;
-    let pasteboard = NSPasteboard::generalPasteboard();
-    // SAFETY: AppKit exports this immutable process-lifetime string type.
-    #[expect(
-        unsafe_code,
-        reason = "audited immutable AppKit pasteboard type constant"
-    )]
-    let text_type = unsafe { NSPasteboardTypeString };
-    pasteboard.clearContents();
-    if pasteboard.setString_forType(&NSString::from_str(command), text_type) {
+    if crate::clipboard::write_text(command) {
         Ok(())
     } else {
         Err(Fault::new(

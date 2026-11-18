@@ -96,6 +96,7 @@ function catalog(data: typeof enData) {
       nativeWorkflowHelp: (defaultSeconds: number, maxSeconds: number) => interpolate(data.run.nativeWorkflowHelp, {defaultSeconds, maxSeconds}),
       nativeWorkflowError: (maxSeconds: number) => interpolate(data.run.nativeWorkflowError, {maxSeconds}),
     },
+    profileShare: data.profileShare,
     target: {
       ...data.target,
       argument: (number: number) => interpolate(data.target.argument, {number}),
