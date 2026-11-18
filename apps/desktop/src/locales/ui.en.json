@@ -983,7 +983,7 @@
       "uncertain": "macOS did not confirm whether the launch request was accepted. The game may still open; nothing was submitted again.",
       "rejected": "macOS rejected the launch request. Nothing was submitted again."
     },
-    "capturedLimits": "Captured finite limits · unchanged by later edits",
+    "capturedLimits": "Captured limits · unchanged by later edits",
     "capturedBudgets": "Captured phase budgets",
     "immutable": "Immutable operation",
     "authority": "Submitted does not prove effect; Stop does not prove cleanup. Stop covers checks and runs alike.",
