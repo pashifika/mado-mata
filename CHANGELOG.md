@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add a continuous Workflow choice to ordinary Desktop Native Start and scoped
+  JS/TS deadlines for helpers. Finite review remains the default. Continuous
+  review replaces lifetime credits with paced, bounded work; it does not grant
+  exit recovery or change Windows attach-only policy.
+  A later Stop does not turn a confirmed earlier clean return into a failure.
+  A child search timeout does not discard a terminal recognition error.
+
 - Return empty OMP discovery for a missing data root without starting the Windows
   privacy helper. Bound the root probe and honor cancellation while it is pending.
   Keep full handle/ACL verification for existing roots; do not extend the helper

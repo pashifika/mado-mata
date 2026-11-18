@@ -5,7 +5,7 @@ import {mutatedRecovery, recoveryState, retriedRecovery, sameRecoveryContext, up
 import type {RecoveryState, RecoveryTicket} from './recovery.ts';
 import {targetDirty, targetExpectation, targetInputErrors, targetState} from './target.ts';
 import type {TargetState} from './target.ts';
-import type {ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, NativeCapability, NativeIntent, NativeLimits, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, TargetBinding, TargetLocation, WorkspaceRef, WorkspaceView} from './types.ts';
+import type {ContinuousNativeLimits, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, LogEntry, NativeCapability, NativeIntent, NativeLimits, OcrEnvironment, PackageInfo, PackageReference, Profile, ProfileCatalog, ProfileRecoveryOutcome, RecoveryMutation, Selection, TargetBinding, TargetLocation, WorkspaceRef, WorkspaceView} from './types.ts';
 
 export const WORKSPACE_LIMIT = 8;
 export const SAVED_LIMIT = 64;
@@ -50,6 +50,7 @@ export interface Bound {
 // Operator-authored intent plus separate capture, input, launch and recovery consent for this exact request.
 export interface NativeReview {
   operation:string; postcondition:string;
+  lifecycle:'finite'|'continuous'; overallSeconds:string;
   // Null is untouched: resolve the host default even when capability arrives after the binding. Empty text is invalid.
   workflowSeconds:string|null;
   capture:boolean; input:boolean; launch:boolean; recovery:boolean; key:string|null;
@@ -121,7 +122,7 @@ function fromSelection(selection:Selection, previous?:Bound):Bound {
     draftRevision: (previous?.draftRevision ?? 0) + 1,
     lane: previous?.lane ?? 'controlled', scenario: previous?.scenario ?? 'workflow', descriptorPath: previous?.descriptorPath ?? '',
     touched: false, target: targetState(selection),
-    native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', workflowSeconds: null, capture: false, input: false, launch: false, recovery: false, key: null},
+    native: {operation: previous?.native.operation ?? '', postcondition: previous?.native.postcondition ?? '', lifecycle:'finite', overallSeconds:'', workflowSeconds: null, capture: false, input: false, launch: false, recovery: false, key: null},
   };
 }
 
@@ -361,7 +362,7 @@ export interface Derived {
 const encoder = new TextEncoder();
 
 export type NativeTextError = 'blank'|'long'|'control';
-export type NativeBlock = 'nativeUnavailable'|'nativeWorkflow'|'nativeTarget'|'nativeBinding'|'nativePolicy'|'nativeAttachOnly'|'nativeTargetDirty'|'nativeEnvironment'|'nativeText'|'nativeApproval';
+export type NativeBlock = 'nativeUnavailable'|'nativeLifecycle'|'nativeOverall'|'nativeWorkflow'|'nativeTarget'|'nativeBinding'|'nativePolicy'|'nativeAttachOnly'|'nativeTargetDirty'|'nativeEnvironment'|'nativeText'|'nativeApproval';
 // The working directory a launch would give its recipient: macOS defines it for bundles, where an explicit directory is
 // refused rather than ignored; an executable launcher gets the explicit directory or its own parent folder.
 export type NativeDirectory = 'os'|'refused'|'explicit'|'parent';
@@ -372,7 +373,8 @@ export interface NativeRecipe {
 export interface NativeFacts {
   binding:TargetBinding|null; recipe:NativeRecipe|null; capture:boolean; input:boolean; launch:boolean; recovery:boolean;
   operationError:NativeTextError|null; postconditionError:NativeTextError|null;
-  workflowSeconds:string; workflowError:boolean; limits:NativeLimits|null;
+  lifecycle:'finite'|'continuous'; overallSeconds:string; overallError:boolean;
+  workflowSeconds:string; workflowError:boolean; limits:NativeLimits|ContinuousNativeLimits|null;
   block:NativeBlock|null; intent:NativeIntent|null;
 }
 
@@ -403,19 +405,33 @@ function nativeRecipe(binding:TargetBinding):NativeRecipe {
   return {recipient: configuration.launcher ? 'launcher' : 'game', location, arguments: configuration.arguments, directory, workingDirectory};
 }
 
-// The only editable budget is whole-second Workflow time; invalid text never becomes an effective tuple.
-function nativeDuration(review:NativeReview, capability:NativeCapability|null):{workflowSeconds:string; limits:NativeLimits|null} {
+// Blank continuous overall time means no deadline; numeric drafts must remain exact across IPC.
+function nativeDuration(review:NativeReview, capability:NativeCapability|null) {
   const workflowSeconds = review.workflowSeconds ?? (capability ? String(capability.default_limits.workflow_ms / 1000) : '');
   const seconds = Number(workflowSeconds);
-  const limits = capability && /^\d+$/.test(workflowSeconds.trim()) && Number.isFinite(seconds) && Number.isInteger(seconds)
-    && seconds >= 1 && seconds <= capability.max_workflow_ms / 1000
-    ? {...capability.default_limits, workflow_ms: seconds * 1000} : null;
-  return {workflowSeconds, limits};
+  const workflowError = review.lifecycle === 'finite' && capability !== null
+    && (!/^\d+$/.test(workflowSeconds.trim()) || !Number.isSafeInteger(seconds * 1000)
+      || seconds < 1 || seconds > capability.max_workflow_ms / 1000);
+  const overall = review.overallSeconds.trim();
+  const overallMs = Number(overall) * 1000;
+  const overallError = review.lifecycle === 'continuous' && overall !== ''
+    && (!/^\d+$/.test(overall) || !Number.isSafeInteger(overallMs) || overallMs < 1000);
+  const limits:NativeLimits|ContinuousNativeLimits|null = !capability || workflowError || overallError ? null
+    : review.lifecycle === 'continuous' ? {...capability.continuous_limits, ...(overall === '' ? {} : {overall_ms:overallMs})}
+    : {...capability.default_limits, workflow_ms:seconds * 1000};
+  return {workflowSeconds, workflowError, overallError, limits};
+}
+
+function nativeLifecycleError(bound:Bound, reviewKind:'operation'|'script'):boolean {
+  const review = bound.native;
+  return review.lifecycle !== 'finite' && review.lifecycle !== 'continuous'
+    || (review.lifecycle === 'continuous' && (reviewKind !== 'operation' || bound.lane !== 'native' || review.recovery))
+    || (review.lifecycle === 'finite' && review.overallSeconds.trim() !== '');
 }
 
 // Everything the consent covers. Revisions are monotonic, so an edited-back draft or reissued selection stays stale.
 // Script launch/recovery choices omit the package inventory: each explicit Run executes the latest saved Script.
-function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|null, reviewKind:'operation'|'script'):string {
+function nativeKey(bound:Bound, environment:OcrEnvironment|null, limits:NativeLimits|ContinuousNativeLimits|null, reviewKind:'operation'|'script'):string {
   const target = bound.target;
   return JSON.stringify([target.context, target.draftRevision, target.view?.record.revision ?? null, target.view?.record.binding ?? null,
     bound.packagePath, reviewKind === 'script' ? null : bound.package.inventory_identity, bound.package.schema_identity, bound.lane, bound.draftRevision,
@@ -428,6 +444,8 @@ export function approveNative(bound:Bound, field:NativeConsent, value:boolean, e
   reviewKind:'operation'|'script' = 'operation'):Bound {
   if (value && (field === 'launch' || field === 'recovery')
     && bound.target.view?.platform === 'windows') return bound;
+  if (nativeLifecycleError(bound, reviewKind)) return clearNativeApproval(bound);
+  if (field === 'recovery' && value && bound.native.lifecycle === 'continuous') return bound;
   const {limits} = nativeDuration(bound.native, capability);
   if (limits === null) return clearNativeApproval(bound);
   const key = nativeKey(bound, environment, limits, reviewKind);
@@ -442,13 +460,17 @@ export function clearNativeApproval(bound:Bound):Bound {
     : {...bound, native: {...review, capture: false, input: false, launch: false, recovery: false, key: null}};
 }
 
-export function editNativeReview(bound:Bound, field:'operation'|'postcondition'|'workflowSeconds', value:string):Bound {
+export function editNativeReview(bound:Bound, field:'operation'|'postcondition'|'workflowSeconds'|'lifecycle'|'overallSeconds', value:string):Bound {
+  if (field === 'lifecycle') {
+    if (value !== 'finite' && value !== 'continuous') return clearNativeApproval(bound);
+    return clearNativeApproval({...bound, native:{...bound.native, lifecycle:value, overallSeconds:''}});
+  }
   return clearNativeApproval({...bound, native: {...bound.native, [field]: value}});
 }
 
 // Leaving a lane withdraws its consent; returning never restores it.
 export function chooseLane(bound:Bound, lane:string):Bound {
-  return clearNativeApproval({...bound, lane});
+  return clearNativeApproval({...bound, lane, native:lane === 'native' ? bound.native : {...bound.native, lifecycle:'finite', overallSeconds:''}});
 }
 
 export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capability:NativeCapability|null, reviewKind:'operation'|'script' = 'operation'):NativeFacts {
@@ -456,8 +478,9 @@ export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capabi
   const binding = nativeBinding(target);
   const recipe = binding?.configuration.platform === 'macos' ? nativeRecipe(binding) : null;
   const review = bound.native;
-  const {workflowSeconds, limits} = nativeDuration(review, capability);
-  const workflowError = capability !== null && limits === null;
+  const {workflowSeconds, workflowError, overallError, limits:reviewedLimits} = nativeDuration(review, capability);
+  const lifecycleError = nativeLifecycleError(bound, reviewKind);
+  const limits = lifecycleError ? null : reviewedLimits;
   const current = limits !== null && review.key !== null && review.key === nativeKey(bound, environment, limits, reviewKind);
   // Script setup grants no capture/input authority; only an explicit Edit Run grants it, for that one request.
   const capture = reviewKind === 'operation' && current && review.capture;
@@ -467,6 +490,8 @@ export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capabi
   const operationError = reviewKind === 'operation' ? nativeTextError(review.operation) : null;
   const postconditionError = reviewKind === 'operation' ? nativeTextError(review.postcondition) : null;
   const block:NativeBlock|null = capability === null ? 'nativeUnavailable'
+    : lifecycleError ? 'nativeLifecycle'
+    : overallError ? 'nativeOverall'
     : workflowError ? 'nativeWorkflow'
     : targetExpectation(target) === null || target.operation !== null || target.review !== null ? 'nativeTarget'
     : binding === null ? 'nativeBinding'
@@ -483,7 +508,8 @@ export function nativeFacts(bound:Bound, environment:OcrEnvironment|null, capabi
     max_exit_recoveries: recovery ? 1 as const : 0 as const,
     review:reviewKind === 'script' ? {kind:'script'} : {kind:'operation', operation:review.operation, visible_postcondition:review.postcondition}, limits,
   } : null;
-  return {binding, recipe, capture, input, launch, recovery, operationError, postconditionError, workflowSeconds, workflowError, limits, block, intent};
+  return {binding, recipe, capture, input, launch, recovery, operationError, postconditionError,
+    lifecycle:review.lifecycle, overallSeconds:review.overallSeconds, overallError, workflowSeconds, workflowError, limits, block, intent};
 }
 
 export function deriveBound(bound:Bound, savedEnvironment:OcrEnvironment|null, locale:Locale = 'en', nativeCapability:NativeCapability|null = null, reviewKind:'operation'|'script' = 'operation'):Derived {

@@ -107,22 +107,128 @@ impl Action {
     }
 }
 
+/// Charge a whole expanded batch at dispatch, including a subsequently partial
+/// submission. Expiry, not release or scope churn, restores capacity.
+#[derive(Debug, Default)]
+pub(crate) struct EventWindow {
+    batches: std::collections::VecDeque<(Instant, usize)>,
+    used: usize,
+}
+
+impl EventWindow {
+    pub(crate) fn charge(
+        &mut self,
+        now: Instant,
+        count: usize,
+        max: usize,
+        interval_ms: u64,
+    ) -> Result<(), Fault> {
+        if count == 0 || count > max {
+            return Err(Fault::new(
+                "ActionLimit",
+                "expanded input batch exceeds its limit",
+            ));
+        }
+        let interval = Duration::from_millis(interval_ms);
+        while let Some(&(at, events)) = self.batches.front() {
+            if now.saturating_duration_since(at) < interval {
+                break;
+            }
+            self.used -= events;
+            self.batches.pop_front();
+        }
+        if self.used > max - count {
+            let mut needed = self.used - (max - count);
+            for &(at, events) in &self.batches {
+                if events >= needed {
+                    let retry = interval.saturating_sub(now.saturating_duration_since(at));
+                    return Err(Fault::new("InputRate", "expanded input batch exceeds the rolling rate")
+                        .with_context(json!({"stage":"input_rate","retry_after_ms":retry.as_nanos().div_ceil(1_000_000)})));
+                }
+                needed -= events;
+            }
+            unreachable!("charged events belong to retained batches");
+        }
+        self.batches.push_back((now, count));
+        self.used += count;
+        Ok(())
+    }
+}
+
 impl Host {
+    fn scope_id(&self) -> u64 {
+        self.scope.as_ref().map_or(0, super::WorkflowScope::id)
+    }
+
+    // The native engine charges immediately before send_input. The supervised
+    // non-native sink uses the same rolling-window rule at its dispatch edge.
+    fn charge_dispatch(&self, sequence: &Sequence) -> Result<(), Fault> {
+        if self.inner.plan.lane == "native" || !self.inner.control.continuous_workflow() {
+            return Ok(());
+        }
+        let limits = crate::desktop::continuous_limits();
+        let max_held = limits.max_batch_events;
+        let mut state = lock(&self.inner.state);
+        self.check_local()?;
+        // Native batches are balanced by the SDK. Bound the controlled sink's
+        // separately owned held keys before dispatching even one action.
+        if state.held_keys.len() + sequence.actions.len() > max_held {
+            let mut held: std::collections::BTreeSet<_> = state.held_keys.keys().collect();
+            for action in &sequence.actions {
+                match action {
+                    Action::KeyDown { key } => {
+                        held.insert(key);
+                    }
+                    Action::KeyUp { key } => {
+                        held.remove(key);
+                    }
+                    _ => {}
+                }
+                if held.len() > max_held {
+                    return Err(Fault::new("HandleLimit", "held input capacity exhausted"));
+                }
+            }
+        }
+        state.event_window.charge(
+            self.inner.control.now(),
+            sequence.event_count,
+            limits.max_batch_events,
+            limits.event_interval_ms,
+        )?;
+        state.admitted_actions = state.admitted_actions.saturating_add(sequence.event_count);
+        Ok(())
+    }
+
+    fn archive_receipt(&self, state: &mut State, id: String, value: Value) {
+        if self.inner.control.continuous_workflow() {
+            self.record_sample(&mut state.archived_receipts, value);
+        } else {
+            state.receipts.insert(
+                id,
+                Receipt {
+                    value,
+                    permit: None,
+                },
+            );
+        }
+    }
+
     fn check_input_time(&self, wait_ms: u64) -> Result<(), Fault> {
-        self.inner.control.check()?;
-        if Duration::from_millis(wait_ms)
-            > self
-                .inner
-                .control
-                .deadline()
-                .saturating_duration_since(Instant::now())
+        let control = &self.inner.control;
+        control.check()?;
+        let waits = Duration::from_millis(wait_ms);
+        if control
+            .deadline_opt()
+            .is_some_and(|at| waits > at.saturating_duration_since(control.now()))
         {
             return Err(Fault::new(
                 "Timeout",
                 "scheduled input waits exceed remaining execution time",
             ));
         }
-        Ok(())
+        self.scope
+            .as_ref()
+            .map_or(Ok(()), |scope| scope.fits(waits))
     }
 
     fn controlled_effect(
@@ -133,6 +239,7 @@ impl Host {
         self.input_check(&sequence.observation)?;
         self.inner.control.with_input_admission(|| {
             let mut state = lock(&self.inner.state);
+            self.check_local()?;
             if self.inner.plan.lane == "controlled" {
                 self.observation(&state, &sequence.observation)?;
             }
@@ -228,7 +335,7 @@ impl Host {
                 state.dispatches += 1;
             }
             effect["order"] = json!(sequence.order);
-            state.effects.push(effect);
+            self.record_sample(&mut state.effects, effect);
             Ok(())
         })
     }
@@ -301,7 +408,10 @@ impl Host {
                     }
                     match action {
                         Action::KeyDown { key } => {
-                            state.held_keys.entry(key.clone()).or_insert(sequence.order);
+                            state
+                                .held_keys
+                                .entry(key.clone())
+                                .or_insert((sequence.order, self.scope_id()));
                         }
                         Action::KeyUp { key } => {
                             if state.held_keys.remove(key).is_some()
@@ -322,7 +432,7 @@ impl Host {
                     }
                     let mut effect = json!(action);
                     effect["order"] = json!(sequence.order);
-                    state.effects.push(effect);
+                    self.record_sample(&mut state.effects, effect);
                     Ok(())
                 });
                 if let Err(error) = result {
@@ -357,7 +467,7 @@ impl Host {
         let mut cleanup: Vec<String> = state
             .held_keys
             .iter()
-            .filter(|(_, owner)| **owner == sequence.order)
+            .filter(|(_, (order, _))| *order == sequence.order)
             .map(|(key, _)| key.clone())
             .collect();
         let released = state
@@ -412,7 +522,19 @@ impl Host {
         let raw = map["actions"]
             .as_array()
             .ok_or_else(|| argument("actions must be an array"))?;
-        if raw.is_empty() || raw.len() > self.inner.plan.limits.max_actions {
+        let continuous = self.inner.control.continuous_workflow();
+        let batch_limit = if continuous && self.inner.plan.lane != "native" {
+            crate::desktop::continuous_limits().max_batch_events
+        } else {
+            self.inner.plan.limits.max_actions
+        };
+        if continuous && raw.len() > batch_limit {
+            return Err(Fault::new(
+                "ActionLimit",
+                "expanded input batch exceeds its limit",
+            ));
+        }
+        if raw.is_empty() || raw.len() > batch_limit {
             return Err(argument("action sequence must be nonempty and bounded"));
         }
         // Bound nested storage before cloning/deserializing caller-owned arrays.
@@ -479,7 +601,7 @@ impl Host {
                 .engine
                 .get()
                 .ok_or_else(|| Fault::new("Blocked", "native engine is unavailable"))?;
-            engine.call("validate_input", args.clone())?;
+            engine.call_scoped("validate_input", args.clone(), self.scope.as_ref())?;
         }
         #[cfg(test)]
         {
@@ -506,12 +628,18 @@ impl Host {
             return Err(Fault::new("QueueCapacity", "bounded input queue is full"));
         }
         let permit = self.inner.handle_budget.reserve(1)?;
-        let action_limit = self.inner.plan.limits.max_actions;
+        let action_limit = batch_limit;
         #[cfg(feature = "engine")]
         let action_limit = self.inner.engine.get().map_or(action_limit, |engine| {
             action_limit.min(engine.action_limit())
         });
-        if event_count > action_limit.saturating_sub(state.admitted_actions) {
+        if event_count
+            > if continuous {
+                action_limit
+            } else {
+                action_limit.saturating_sub(state.admitted_actions)
+            }
+        {
             return Err(Fault::new(
                 "ActionLimit",
                 "attempt action budget is exhausted",
@@ -522,6 +650,7 @@ impl Host {
             self.check_input_time(wait_ms)?;
         }
         self.inner.control.check()?;
+        self.check_local()?;
         if !self.inner.control.admission.load(Ordering::Acquire)
             || self.inner.terminating.load(Ordering::Acquire)
             || state.input_closed
@@ -532,13 +661,18 @@ impl Host {
             ));
         }
         let id = self.next_id(&mut state, "sequence");
-        let order = state.accepted.len() as u64 + 1;
-        state.admitted_actions += event_count;
-        state
-            .accepted
-            .push(json!({"id":id,"order":order,"actions":actions}));
+        state.sequence_count += 1;
+        let order = state.sequence_count;
+        if !continuous {
+            state.admitted_actions += event_count;
+        }
+        self.record_sample(
+            &mut state.accepted,
+            json!({"id":id,"order":order,"actions":actions}),
+        );
         state.queue.push_back(Sequence {
             id: id.clone(),
+            scope: self.scope.clone(),
             order,
             observation: map["observation"].clone(),
             actions,
@@ -591,12 +725,18 @@ impl Host {
                 return Err(Fault::new("Timeout", "input settlement wait expired"));
             }
             self.inner.control.check()?;
+            self.check_local()?;
             thread::sleep(Duration::from_millis(1));
         };
         loop {
+            self.check_local()?;
             let sequence = {
                 let mut state = lock(&self.inner.state);
-                if state.released_receipts.contains(id) {
+                if state
+                    .receipts
+                    .get(id)
+                    .is_some_and(|receipt| receipt.permit.is_none())
+                {
                     return Err(Fault::new("InvalidHandle", "sequence handle was released"));
                 }
                 if let Some(receipt) = state.receipts.get(id) {
@@ -612,14 +752,49 @@ impl Host {
                     .queue
                     .pop_front()
                     .ok_or_else(|| Fault::new("InvalidHandle", "sequence queue is empty"))?;
+                if !state.held_keys.is_empty() && !state.scopes.is_empty() {
+                    let owner = sequence.scope.as_ref().map_or(0, super::WorkflowScope::id);
+                    if sequence.actions.iter().any(|action| match action {
+                        Action::KeyDown { key } | Action::KeyUp { key } => state
+                            .held_keys
+                            .get(key)
+                            .is_some_and(|(_, held)| *held != owner),
+                        _ => false,
+                    }) {
+                        let value = self.receipt(
+                            &sequence,
+                            "Refused",
+                            0,
+                            Some("ScopeMismatch"),
+                            Vec::new(),
+                        );
+                        state.receipts.insert(
+                            sequence.id,
+                            Receipt {
+                                value,
+                                permit: Some(sequence.permit),
+                            },
+                        );
+                        continue;
+                    }
+                }
                 state.active = Some(sequence.id.clone());
                 sequence
             };
-            let receipt = match self.input_check(&sequence.observation).and_then(|()| {
-                sequence
-                    .scheduled_wait_ms
-                    .map_or(Ok(()), |wait_ms| self.check_input_time(wait_ms))
-            }) {
+            // Settling B may drain an earlier sequence A. Only A's captured
+            // context authorizes its dispatch, never B's context or a new root.
+            let dispatcher = Host {
+                inner: self.inner.clone(),
+                scope: sequence.scope.clone(),
+            };
+            let receipt = match dispatcher
+                .input_check(&sequence.observation)
+                .and_then(|()| {
+                    if let Some(wait_ms) = sequence.scheduled_wait_ms {
+                        dispatcher.check_input_time(wait_ms)?;
+                    }
+                    dispatcher.charge_dispatch(&sequence)
+                }) {
                 Err(error) => {
                     self.retain_terminal_fault(&error);
                     let mut receipt = self.receipt(
@@ -636,10 +811,37 @@ impl Host {
                     receipt["error"] = json!(error);
                     receipt
                 }
-                Ok(()) => self.dispatch_sequence(&sequence),
+                Ok(()) => dispatcher.dispatch_sequence(&sequence),
             };
             let mut state = lock(&self.inner.state);
             state.active = None;
+            let uncertain = matches!(receipt["status"].as_str(), Some("Partial" | "Uncertain"));
+            state.input_uncertain |= uncertain;
+            if (sequence.scope.is_some() || self.inner.control.continuous_workflow())
+                && (uncertain || receipt["cleanup"]["may_leave_state_held"] == true)
+            {
+                self.fail(
+                    Fault::new(
+                        "InputUncertain",
+                        "input did not settle under a live context",
+                    )
+                    .with_context(json!({"receipt":receipt})),
+                );
+            } else if receipt["status"] == "Submitted"
+                && dispatcher
+                    .check_local()
+                    .is_err_and(|error| super::local_fault(&error))
+            {
+                self.fail(super::scope::late_submission(&receipt));
+            }
+            let closed = sequence
+                .scope
+                .as_ref()
+                .is_some_and(|scope| scope.id() != 0 && !state.scopes.contains_key(&scope.id()));
+            if closed {
+                self.archive_receipt(&mut state, sequence.id, receipt);
+                continue;
+            }
             state.receipts.insert(
                 sequence.id,
                 Receipt {
@@ -659,11 +861,12 @@ impl Host {
                 .get()
                 .ok_or_else(|| Fault::new("Blocked", "native engine is unavailable"))
                 .and_then(|engine| {
-                    engine.call(
+                    engine.call_scoped(
                         "dispatch",
                         json!({
                             "observation":sequence.observation,"actions":sequence.actions
                         }),
+                        self.scope.as_ref(),
                     )
                 });
             return match result {
@@ -703,7 +906,9 @@ impl Host {
                         Vec::new(),
                     );
                     receipt["error"] = json!(error);
-                    self.fail(error);
+                    if !super::local_fault(&error) && error.category != "InputRate" {
+                        self.fail(error);
+                    }
                     receipt
                 }
             };
@@ -769,6 +974,11 @@ impl Host {
                 break;
             }
             let mut state = lock(&self.inner.state);
+            if let Err(error) = self.check_local() {
+                status = if submitted > 0 { "Partial" } else { "Refused" };
+                reason = Some(error.category);
+                break;
+            }
             // Fixture invalidation and effects linearize on the same short-held state lock.
             if self.inner.plan.lane == "controlled" {
                 if let Err(error) = self.observation(&state, &sequence.observation) {
@@ -792,7 +1002,10 @@ impl Host {
             }
             match action {
                 Action::KeyDown { key } => {
-                    state.held_keys.entry(key.clone()).or_insert(sequence.order);
+                    state
+                        .held_keys
+                        .entry(key.clone())
+                        .or_insert((sequence.order, self.scope_id()));
                 }
                 Action::KeyUp { key } => {
                     if state.held_keys.remove(key).is_some()
@@ -810,7 +1023,7 @@ impl Host {
             }
             let mut effect = json!(action);
             effect["order"] = json!(sequence.order);
-            state.effects.push(effect);
+            self.record_sample(&mut state.effects, effect);
             submitted += 1;
             if self.inner.plan.scenario == "partial" {
                 status = "Partial";
@@ -826,7 +1039,7 @@ impl Host {
         let cleanup = lock(&self.inner.state)
             .held_keys
             .iter()
-            .filter(|(_, order)| **order == sequence.order)
+            .filter(|(_, (order, _))| *order == sequence.order)
             .map(|(key, _)| key.clone())
             .collect();
         self.receipt(sequence, status, submitted, reason.as_deref(), cleanup)
@@ -839,9 +1052,13 @@ impl Host {
         if state.handles.remove(id).is_some() {
             return Ok(json!({"released":true}));
         }
-        if state.receipts.contains_key(id) && state.released_receipts.insert(id.into()) {
-            if let Some(receipt) = state.receipts.get_mut(id) {
-                receipt.permit = None;
+        if let Some(receipt) = state.receipts.get_mut(id) {
+            if receipt.permit.take().is_none() {
+                return Err(Fault::new("InvalidHandle", "sequence handle was released"));
+            }
+            if self.inner.control.continuous_workflow() {
+                let receipt = state.receipts.remove(id).expect("receipt present");
+                self.record_sample(&mut state.archived_receipts, receipt.value);
             }
             return Ok(json!({"released":true}));
         }
@@ -851,14 +1068,7 @@ impl Host {
                 .remove(index)
                 .ok_or_else(|| Fault::new("InvalidHandle", "sequence was already removed"))?;
             let receipt = self.receipt(&sequence, "Cancelled", 0, Some("Released"), Vec::new());
-            state.receipts.insert(
-                id.into(),
-                Receipt {
-                    value: receipt,
-                    permit: None,
-                },
-            );
-            state.released_receipts.insert(id.into());
+            self.archive_receipt(&mut state, id.into(), receipt);
             return Ok(json!({"released":true}));
         }
         drop(state);
@@ -913,6 +1123,11 @@ impl Host {
                 );
             }
             state.handles.clear();
+            for scope in state.scopes.values().chain(self.inner.root_scope.get()) {
+                scope.end(Fault::new("AdmissionClosed", "attempt has finished"));
+            }
+            state.scopes.clear();
+            state.scoped_handles.clear();
         }
         while self.startup_active() && started.elapsed() < Duration::from_millis(cleanup_ms) {
             self.reap_startup();
@@ -936,7 +1151,7 @@ impl Host {
         let active = state.active.is_some();
         if !active {
             let held = std::mem::take(&mut state.held_keys);
-            for (key, order) in held {
+            for (key, (order, _)) in held {
                 state.release_outcomes.push(
                     json!({"key":key,"order":order,"released":true,"sink":"controlled-non-native"}),
                 );
@@ -979,7 +1194,6 @@ impl Host {
         } else {
             result
         };
-        state.released_receipts = state.receipts.keys().cloned().collect();
         for receipt in state.receipts.values_mut() {
             receipt.permit = None;
         }

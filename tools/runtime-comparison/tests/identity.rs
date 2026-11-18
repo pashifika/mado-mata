@@ -325,12 +325,17 @@ fn external_cli_plans_cannot_claim_desktop_reviewed_authority() {
         "script_review",
         "native_budgets",
         "confirm_process_exit",
+        "continuous_budgets",
+        "max_batch_events",
+        "event_interval_ms",
     ] {
         let mut plan: Plan =
             serde_json::from_str(include_str!("../fixtures/controlled-plan.json")).unwrap();
+        plan.samples = 1;
+        plan.warmups = 0;
         plan.lane = "native".into();
-        plan.scenario = "workflow".into();
-        if form != "native_budgets" {
+        plan.scenario = "success".into();
+        if !matches!(form, "native_budgets" | "continuous_budgets") {
             plan.native_config = Some(serde_json::json!({
                 "native": {
                     "confirm_process_exit": form == "confirm_process_exit",
@@ -345,13 +350,21 @@ fn external_cli_plans_cannot_claim_desktop_reviewed_authority() {
                         "representative_actions":[{"kind":"click","x":1,"y":2,"button":"left"}]}
                 }
             }));
+            if matches!(form, "max_batch_events" | "event_interval_ms") {
+                plan.native_config.as_mut().unwrap()["native"]["input"][form] =
+                    serde_json::json!(64);
+            }
         } else {
-            let budgets = mado_runtime_comparison::model::NativeBudgets {
-                startup_ms: 60_000,
-                readiness_ms: 30_000,
-                workflow_ms: 30_000,
+            use mado_runtime_comparison::model::{NativeBudgets, NativeWorkflow};
+            let budgets = if form == "continuous_budgets" {
+                NativeBudgets {
+                    workflow: NativeWorkflow::Continuous { overall_ms: None },
+                    ..NativeBudgets::DEFAULT
+                }
+            } else {
+                NativeBudgets::DEFAULT
             };
-            plan.limits.duration_ms = budgets.total_ms().unwrap();
+            plan.limits.duration_ms = budgets.preparation_ms().unwrap();
             plan.limits.readiness_ms = budgets.readiness_ms;
             plan.native_budgets = Some(budgets);
         }

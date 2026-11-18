@@ -1,7 +1,7 @@
 //! Exercise the real child without native authority, libraries, capture or input.
 use mado_runtime_comparison::{
     inventory::Inventory,
-    model::{NativeBudgets, Plan},
+    model::{NativeBudgets, NativeWorkflow, Plan},
 };
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -56,9 +56,9 @@ impl OwnedProtocol {
         let budgets = NativeBudgets {
             startup_ms,
             readiness_ms,
-            workflow_ms: 1_000,
+            workflow: NativeWorkflow::Finite { workflow_ms: 1_000 },
         };
-        plan.limits.duration_ms = budgets.total_ms().unwrap();
+        plan.limits.duration_ms = budgets.preparation_ms().unwrap();
         plan.limits.readiness_ms = budgets.readiness_ms;
         plan.limits.wait_ms = 100;
         plan.native_budgets = native.then_some(budgets);

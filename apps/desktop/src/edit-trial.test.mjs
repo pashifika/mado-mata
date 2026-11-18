@@ -98,7 +98,7 @@ test('a declared target chooses Native without inventing intent, consent or a su
   const facts=deriveBound(initial.bound,null,'en',null);
   assert.equal(initial.bound.lane,'native');
   assert.equal(initial.profileChoice,'values');
-  assert.deepEqual(initial.bound.native,{operation:'',postcondition:'',workflowSeconds:null,capture:false,input:false,launch:false,recovery:false,key:null});
+  assert.deepEqual(initial.bound.native,{operation:'',postcondition:'',lifecycle:'finite',overallSeconds:'',workflowSeconds:null,capture:false,input:false,launch:false,recovery:false,key:null});
   assert.equal(facts.native.block,'nativeUnavailable');
   assert.equal(facts.native.intent,null);
   assert.ok(facts.startBlock);
@@ -126,7 +126,7 @@ test('another Edit owner receives independent package defaults and no previous N
   const initial=trialContext(context(),drafts.current(),'fixture',null);
   const configured={...initial,unit:'function',selected:functionKey(candidate),arguments:'[8]',profileChoice:'profile:profile-one',
     bound:{...selectProfile(initial.bound,profile.id),lane:'replay',descriptorPath:'/fixture/replay',
-      native:{operation:'Press once',postcondition:'Dialog is shown',workflowSeconds:'60',capture:true,input:true,launch:true,recovery:true,key:'previous-review'}}};
+      native:{operation:'Press once',postcondition:'Dialog is shown',lifecycle:'finite',overallSeconds:'',workflowSeconds:'60',capture:true,input:true,launch:true,recovery:true,key:'previous-review'}}};
   const otherOwner={...owner,token:'another-edit-lease'};
   const packaged={...packageInfo,profiles:{default:{options:{speed:6}}},target:{id:'game',window_title:'Other title'},target_identity:'target-2'};
   const next=trialContext(context('saved-1',{owner:otherOwner,package:packaged}),openSession(view('saved-1',otherOwner)),'fixture',configured);
@@ -139,7 +139,7 @@ test('another Edit owner receives independent package defaults and no previous N
   assert.equal(next.unit,'package');
   assert.equal(next.selected,null);
   assert.equal(next.arguments,'[]');
-  assert.deepEqual(next.bound.native,{operation:'',postcondition:'',workflowSeconds:null,capture:false,input:false,launch:false,recovery:false,key:null});
+  assert.deepEqual(next.bound.native,{operation:'',postcondition:'',lifecycle:'finite',overallSeconds:'',workflowSeconds:null,capture:false,input:false,launch:false,recovery:false,key:null});
   assert.equal(deriveBound(next.bound,null).native.intent,null);
 });
 
@@ -464,7 +464,8 @@ for(const phase of ['host_attachment','instantiation','function']) test(`${phase
 });
 
 const trialLimits={startup_ms:60000,readiness_ms:30000,workflow_ms:30000,max_frames:300,wait_ms:1000,interval_ms:100,max_actions:64,cleanup_ms:1000,containment_ms:2000};
-const trialCapability={default_limits:trialLimits,max_workflow_ms:900000};
+const trialCapability={default_limits:trialLimits,max_workflow_ms:900000,
+  continuous_limits:{lifecycle:'continuous',startup_ms:60000,readiness_ms:30000,wait_ms:1000,interval_ms:100,cleanup_ms:1000,containment_ms:2000,max_batch_events:64,event_interval_ms:1000}};
 const trialEnvironment={profile:'fixture',model:'fixture-model',language:'en',provider:'cpu',runtime_profile:'fixture-runtime',
   model_root:'/fixture/models',runtime_path:'/fixture/runtime',native_library_paths:[]};
 
@@ -532,6 +533,20 @@ for(const {scenario,change,block} of [
   assert.equal(deriveBound(input.state.bound,input.environment,'en',input.capability,'script').native.block,block);
   assert.equal(runRequest(input),'setupIncomplete');
 });
+
+for (const unit of ['package','function']) {
+  for (const overallSeconds of ['','1800']) test(`Edit ${unit} refuses continuous with ${overallSeconds || 'no'} overall deadline rather than downgrading to finite`,()=>{
+    const input=nativeRunContext();
+    input.state={...input.state,unit,selected:functionKey(candidate),arguments:'[1]',
+      bound:editNativeReview(editNativeReview(input.state.bound,'lifecycle','continuous'),'overallSeconds',overallSeconds)};
+    const facts=deriveBound(input.state.bound,input.environment,'en',input.capability,'script');
+    assert.equal(facts.native.block,'nativeLifecycle');
+    assert.equal(facts.native.intent,null);
+    assert.equal(runRequest(input),'setupIncomplete');
+    const finite={...input.state,bound:editNativeReview(input.state.bound,'lifecycle','finite')};
+    assert.deepEqual(runRequest(input,finite).request.native_intent.limits,trialLimits);
+  });
+}
 
 test('setup and its rereads grant no capture/input authority; only the request of one explicit Run carries it',()=>{
   const input=nativeRunContext();

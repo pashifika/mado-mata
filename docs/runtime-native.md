@@ -52,14 +52,14 @@ launch library, with separate launch approval and final resource, cancellation
 and discovery checks.
 The application derives process/lifetime/window authority; neither IPC nor Script
 can supply replacements. Script status probes drive bounded window preparation,
-never a duplicate launch or replacement lifetime within an attempt. Reviewed
+never a duplicate launch or replacement lifetime within an attempt. Finite
 budgets default to 60 s Startup, 30 s Readiness and 30 s Workflow. The host publishes
 those defaults separately from the 900 s Workflow ceiling. The actual Run page
 accepts 1–900 whole seconds only through fresh per-Start review; invalid values
 refuse before native effects. Every duration edit withdraws all Native consents,
 and the effective tuple is captured immutably. New/reopened bindings return to
 30 s without approval; saved package/profile/target schemas are unchanged.
-Recovery is default-off; separate one-recovery consent plus launch-if-absent approval allows
+Finite recovery is default-off; separate one-recovery consent plus launch-if-absent approval allows
 one fresh attempt only after a positively confirmed Workflow process exit and
 complete predecessor settlement. The same immutable Script reruns from entry.
 The original absolute deadline is the stage sum without recovery, or twice the
@@ -79,6 +79,12 @@ an allowed hold without enlarging Script waits or event budgets; Stop still
 cancels the in-flight operation.
 The larger ceiling does not qualify useful long-running Native work, late Stop,
 long-duration recovery or leak freedom; actual workload evidence remains separate.
+Ordinary Desktop Native can instead review continuous Workflow. Its optional
+overall deadline, if set, starts at reservation. After `"Ready"` it paces
+capture and expanded input on the same session rather than replenishing a
+finite plan or acquiring another session. Each native operation still has a
+finite bound. This mode never retries an exit and is not accepted from CLI
+plans or Edit trials.
 Typed attempt summaries retain the original exit, final Script result and cleanup;
 diagnostic truncation cannot discard the exit reason. An earlier capture fault
 outranks a later process exit. Window/permission/provider failure is not confirmed
@@ -524,6 +530,33 @@ click therefore needs four events of authority even though it is one logical hos
 action. Receipts count that logical action as submitted only after its Release
 event is completely submitted, never after Delay alone or a partial Release.
 Neither a complete submission receipt nor cleanup proves application effect.
+
+### Continuous Workflow authority
+
+Only the Desktop host projects this shape; a CLI plan carrying it is refused.
+`capture` omits `duration_ms` and `max_frames`. `input` omits `duration_ms` and
+`max_actions` and carries `max_batch_events` and `event_interval_ms`. The engine
+accepts it only when the plan's Native budgets select continuous Workflow, with
+an ordinary operation review, package input, no exit confirmation, the published
+100 ms capture interval and 1000 ms event interval, and `max_batch_events` equal
+to the plan's per-batch `max_actions`. A continuous plan with any finite key, a
+finite plan with either pace key, or an explicit `null` bound is refused; nothing
+is translated between the two.
+
+No frame, event or duration total applies during continuous Workflow. Capture
+keeps the same required pacing and bounded waits. One expanded batch holds at
+most `max_batch_events` events and is never split. Immediately before
+submission the whole batch is charged to one rolling `event_interval_ms` window
+shared by every context: a batch that does not fit is refused as `InputRate`
+with `retry_after_ms`, uncharged and unsubmitted, and a partially submitted batch
+keeps its full charge. Each SDK call is bounded by the earliest of its own wait,
+the passed context's deadline and the Run deadline; a dispatch is bounded by its
+scheduled holds plus `wait_ms`. Startup and session opening still require a
+finite stage deadline.
+
+A context that ends before anything reached the input route returns its own
+cause and leaves the Run live. A Run Stop or deadline, a target or backend
+fault, and every receipt or SDK error after submission are returned unchanged.
 
 ### Background-input qualification
 

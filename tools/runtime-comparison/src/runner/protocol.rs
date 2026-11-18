@@ -1,6 +1,6 @@
 use super::clock::SharedDeadline;
 use crate::inventory::Inventory;
-use crate::model::{Fault, MAX_TRANSPORT_BYTES, Plan, encode_bounded};
+use crate::model::{Control, Fault, MAX_TRANSPORT_BYTES, NativeWorkflow, Plan, encode_bounded};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::fs::File;
@@ -62,11 +62,56 @@ pub(super) struct Invocation {
     #[serde(default)]
     pub(super) prepared_modules: Option<crate::typescript::PreparedModules>,
     /// The supervisor's absolute deadline; the child derives no budget of its own.
-    pub(super) deadline: SharedDeadline,
+    pub(super) deadline: Option<SharedDeadline>,
     #[serde(default)]
     pub(super) startup_deadline: Option<SharedDeadline>,
     #[serde(default)]
     pub(super) prepare_target: bool,
+}
+
+impl Invocation {
+    pub(super) fn validate_projection(&self) -> Result<(), Fault> {
+        let budgets = self.plan.native_budgets;
+        if budgets.is_some_and(|budgets| budgets.continuous())
+            && (self.operation != Operation::Run
+                || self.attempt != 1
+                || !self.prepare_target
+                || !self
+                    .prepared_modules
+                    .as_ref()
+                    .is_some_and(|modules| modules.function.is_none()))
+        {
+            return Err(Fault::new(
+                "NativeRefused",
+                "Continuous authority requires the first ordinary Desktop Native invocation",
+            ));
+        }
+        let open_ended = matches!(
+            budgets.map(|b| b.workflow),
+            Some(NativeWorkflow::Continuous { overall_ms: None })
+        );
+        if self.deadline.is_none() != open_ended
+            || (budgets.is_some() && self.startup_deadline.is_none())
+        {
+            return Err(Fault::new(
+                "Transport",
+                "missing or contradictory invocation deadlines",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn child_control(&self) -> Result<Control, Fault> {
+        let inherited = self.deadline.map(SharedDeadline::instant).transpose()?;
+        let control = Control::for_child(&self.plan, inherited)?;
+        if let Some(budgets) = self.plan.native_budgets {
+            let startup = self
+                .startup_deadline
+                .ok_or_else(|| Fault::new("Transport", "Native startup deadline missing"))?;
+            control.start_native(budgets, Some(startup.instant()?))?;
+        }
+        Ok(control)
+    }
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path, bound: usize) -> Result<T, Fault> {

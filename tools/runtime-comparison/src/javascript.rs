@@ -4,15 +4,16 @@
 //! Options are recursively frozen; strict-mode mutation throws. VM work is
 //! bounded independently of input events; detached jobs die with the VM.
 
-use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use rquickjs::function::Args;
 use rquickjs::loader::{ImportAttributes, Loader, Resolver};
-use rquickjs::promise::PromiseHookType;
+use rquickjs::promise::{PromiseHookType, PromiseState};
 use rquickjs::{Context, Ctx, Exception, Function, Module, Object, Persistent, Runtime, Value};
 use serde_json::{Value as Json, json};
 
@@ -20,11 +21,102 @@ use crate::host::Host;
 use crate::inventory::{Entry, Inventory};
 use crate::model::{Control, Fault, Limits, RuntimeMetrics};
 
-// One work allowance per KiB of configured VM memory, not an allocation-size
-// estimate: 16 MiB permits 16,384 creations/jobs; the validated 256 MiB ceiling
-// permits 262,144. Counts span module loading and entries, even after GC.
-// Input authority (max_actions), allocator limits and deadlines stay separate.
+// Finite invocations retain their cumulative allowance, including module loading
+// and Readiness. Continuous Workflow renews it only at runner/VM checkpoints.
 const VM_WORK_BYTES: usize = 1024;
+const JOB_SLICE_LIMIT: usize = 256;
+const OUTSTANDING_PROMISE_LIMIT: usize = 1024;
+const REJECTION_LIMIT: usize = 64;
+
+type PendingPromises = HashSet<Persistent<Value<'static>>>;
+
+fn retain_pending(promises: &mut PendingPromises, ctx: &Ctx<'_>) {
+    promises.retain(|promise| {
+        promise.clone().restore(ctx).is_ok_and(|value| {
+            value
+                .as_promise()
+                .is_some_and(|promise| promise.state() == PromiseState::Pending)
+        })
+    });
+}
+
+struct VmWork {
+    limit: usize,
+    // Retention spans initialization; only Workflow renews the work allowance.
+    continuous_lifecycle: bool,
+    continuous: Cell<bool>,
+    creations: Cell<usize>,
+    promises: Cell<u64>,
+    slices: Cell<u64>,
+    peak_pending: Cell<usize>,
+    pending: RefCell<PendingPromises>,
+}
+
+impl VmWork {
+    fn new(limit: usize, continuous_lifecycle: bool) -> Self {
+        Self {
+            limit,
+            continuous_lifecycle,
+            continuous: Cell::new(false),
+            creations: Cell::new(0),
+            promises: Cell::new(0),
+            slices: Cell::new(0),
+            peak_pending: Cell::new(0),
+            pending: RefCell::new(HashSet::new()),
+        }
+    }
+
+    fn checkpoint(&self) {
+        if self.continuous.get() {
+            self.creations.set(0);
+            self.slices.set(self.slices.get().saturating_add(1));
+            std::thread::yield_now();
+        }
+    }
+
+    fn promise<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        event: PromiseHookType,
+        promise: Value<'js>,
+    ) -> Option<Fault> {
+        if event == PromiseHookType::Resolve && self.continuous_lifecycle {
+            self.pending
+                .borrow_mut()
+                .remove(&Persistent::save(ctx, promise));
+        } else if event == PromiseHookType::Init {
+            self.promises.set(self.promises.get().saturating_add(1));
+            let creations = self.creations.get();
+            self.creations.set(creations.saturating_add(1));
+            if creations >= self.limit {
+                return Some(Fault::new(
+                    "ResourceLimit",
+                    "JavaScript promise creation limit exceeded",
+                ));
+            }
+            if self.continuous_lifecycle {
+                let mut pending = self.pending.borrow_mut();
+                let limit = self.limit.min(OUTSTANDING_PROMISE_LIMIT);
+                if pending.len() >= limit {
+                    // Rejections do not emit QuickJS's Resolve hook, including
+                    // already-handled rejections. Reclaim those at checkpoints
+                    // and under pressure, without retaining completed history.
+                    retain_pending(&mut pending, ctx);
+                }
+                if pending.len() >= limit {
+                    return Some(Fault::new(
+                        "ResourceLimit",
+                        "JavaScript outstanding promise limit exceeded",
+                    ));
+                }
+                pending.insert(Persistent::save(ctx, promise));
+                self.peak_pending
+                    .set(self.peak_pending.get().max(pending.len()));
+            }
+        }
+        None
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -201,10 +293,10 @@ fn annotate(
         fault.context = json!({"cause":fault.context});
     }
     fault.context["inventory"] = json!(inventory.identity);
-    if let Some(stack) = stack {
-        if fault.context.get("stack").is_none() {
-            fault.context["stack"] = json!(stack);
-        }
+    if let Some(stack) = stack
+        && fault.context.get("stack").is_none()
+    {
+        fault.context["stack"] = Json::String(stack);
     }
     let origin = fault.context["stack"].as_str().and_then(|stack| {
         stack
@@ -286,12 +378,16 @@ fn exception_fault(
     )
 }
 
-fn check(host: &Host, deadline: &AtomicU64) -> Result<(), Fault> {
+fn check(host: &Host, deadline: &Cell<Option<Instant>>) -> Result<(), Fault> {
     if let Some(fault) = host.failure() {
         return Err(fault);
     }
-    host.control().check()?;
-    if host.control().elapsed_us() >= deadline.load(Ordering::Acquire) {
+    let control = host.control();
+    control.check()?;
+    if deadline
+        .get()
+        .is_some_and(|deadline| control.now() >= deadline)
+    {
         let fault = Fault::new("Timeout", "Runtime stage deadline expired");
         host.fail(fault.clone());
         return Err(fault);
@@ -303,10 +399,11 @@ fn settle<'js>(
     ctx: &Ctx<'js>,
     mut value: Value<'js>,
     host: &Host,
-    deadline: &AtomicU64,
+    deadline: &Cell<Option<Instant>>,
     jobs: &mut u64,
-    work_limit: usize,
+    work: &VmWork,
 ) -> Result<Value<'js>, Fault> {
+    let mut slice_jobs = 0;
     loop {
         check(host, deadline)?;
         let Some(promise) = value.as_promise() else {
@@ -316,7 +413,7 @@ fn settle<'js>(
             value = result.map_err(|error| Fault::new("Script", error.to_string()))?;
             continue;
         }
-        if *jobs >= work_limit as u64 {
+        if !work.continuous.get() && *jobs >= work.limit as u64 {
             return Err(Fault::new(
                 "ResourceLimit",
                 "JavaScript job execution limit exceeded",
@@ -332,7 +429,14 @@ fn settle<'js>(
                 "Entry promise cannot settle: no runnable inventory job",
             ));
         }
-        *jobs += 1;
+        *jobs = jobs.saturating_add(1);
+        slice_jobs += 1;
+        if work.continuous.get() && slice_jobs == JOB_SLICE_LIMIT {
+            check(host, deadline)?;
+            retain_pending(&mut work.pending.borrow_mut(), ctx);
+            work.checkpoint();
+            slice_jobs = 0;
+        }
     }
 }
 
@@ -438,14 +542,14 @@ fn host_call<'js>(
 ) -> rquickjs::Result<Function<'js>> {
     Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, method: String, args: Value<'js>| {
+        move |ctx: Ctx<'js>, id: u64, op: String, method: String, args: Value<'js>| {
             let args = ctx
                 .json_stringify(args)?
                 .ok_or_else(|| Exception::throw_type(&ctx, "Host arguments must be JSON"))?
                 .to_string()?;
             let args: Json = serde_json::from_str(&args)
                 .map_err(|error| Exception::throw_type(&ctx, &error.to_string()))?;
-            match host.call(&method, args) {
+            match host.context_rpc(id, &op, &method, args) {
                 Ok(value) => {
                     // A partial native receipt can latch failure while remaining a
                     // successful return value. Capture its still-live script caller.
@@ -461,11 +565,16 @@ fn host_call<'js>(
                 }
                 Err(fault) => {
                     let fault = annotate(fault, &inventory, "<host-call>", &method, None);
-                    halted.store(true, Ordering::Release);
-                    host.fail(fault.clone());
+                    let terminal = !crate::host::local_fault(&fault);
+                    if terminal {
+                        halted.store(true, Ordering::Release);
+                        host.fail(fault.clone());
+                    }
                     let exception = Exception::from_message(ctx.clone(), &fault.message)?;
                     let stack = exception.stack();
-                    host.set_failure_stack(stack.clone());
+                    if terminal {
+                        host.set_failure_stack(stack.clone());
+                    }
                     let fault = annotate(fault, &inventory, "<host-call>", &method, stack);
                     exception
                         .as_object()
@@ -549,8 +658,12 @@ fn run_with_parser(
     runtime.set_memory_limit(limits.vm_bytes);
     runtime.set_max_stack_size(256 * 1024);
     let halted = Arc::new(AtomicBool::new(false));
-    let deadline = Arc::new(AtomicU64::new(limits.duration_ms.saturating_mul(1000)));
     let control = host.control();
+    // Native stage transitions occur inside host calls; Control checks their
+    // current deadline. Do not retain Startup's deadline across attachment.
+    let deadline = Rc::new(Cell::new(control.outer_deadline()));
+    let work = Rc::new(VmWork::new(work_limit, control.continuous_lifecycle()));
+    let interrupt_work = work.clone();
     let interrupt_halted = halted.clone();
     let interrupt_deadline = deadline.clone();
     let vm_hook = Arc::new(AtomicBool::new(false));
@@ -560,10 +673,16 @@ fn run_with_parser(
         if interrupt_hook.load(Ordering::Acquire) && interrupt_hook.swap(false, Ordering::AcqRel) {
             crate::runner::emit_vm_hook_reached(&hook_host);
         }
-        interrupt_halted.load(Ordering::Acquire)
+        let stopped = interrupt_halted.load(Ordering::Acquire)
             || (hook_host.script_startup() && hook_host.failure().is_some())
             || control.check().is_err()
-            || control.elapsed_us() >= interrupt_deadline.load(Ordering::Acquire)
+            || interrupt_deadline
+                .get()
+                .is_some_and(|deadline| control.now() >= deadline);
+        if !stopped {
+            interrupt_work.checkpoint();
+        }
+        stopped
     })));
     let mut modules = Modules {
         inventory: inventory.clone(),
@@ -572,17 +691,13 @@ fn run_with_parser(
         compiled: Rc::new(RefCell::new(BTreeSet::new())),
     };
     runtime.set_loader(modules.clone(), modules.clone());
-    let promise_count = Arc::new(AtomicUsize::new(0));
-    let count = promise_count.clone();
+    let promise_work = work.clone();
     let promise_host = host.clone();
     let promise_halted = halted.clone();
-    runtime.set_promise_hook(Some(Box::new(move |_, event, _, _| {
-        if event == PromiseHookType::Init && count.fetch_add(1, Ordering::Relaxed) >= work_limit {
+    runtime.set_promise_hook(Some(Box::new(move |ctx, event, promise, _| {
+        if let Some(fault) = promise_work.promise(&ctx, event, promise) {
             promise_halted.store(true, Ordering::Release);
-            promise_host.fail(Fault::new(
-                "ResourceLimit",
-                "JavaScript promise creation limit exceeded",
-            ));
+            promise_host.fail(fault);
         }
     })));
     let rejections = Rc::new(RefCell::new(
@@ -591,16 +706,25 @@ fn run_with_parser(
     let rejected = rejections.clone();
     let rejection_inventory = inventory.clone();
     let rejection_host = host.clone();
+    let rejection_work = work.clone();
+    let rejection_halted = halted.clone();
     runtime.set_host_promise_rejection_tracker(Some(Box::new(
         move |ctx, promise, reason, handled| {
             // Retain exact identities: an unreferenced rejected promise can otherwise
             // be freed and its address reused before a later handler notification.
             let promise = Persistent::save(&ctx, promise);
+            rejection_work.pending.borrow_mut().remove(&promise);
             if handled {
                 rejected
                     .borrow_mut()
                     .retain(|(identity, _)| identity != &promise);
-            } else if rejected.borrow().len() < work_limit {
+            } else if rejected.borrow().len()
+                < if rejection_work.continuous_lifecycle {
+                    REJECTION_LIMIT
+                } else {
+                    work_limit
+                }
+            {
                 let (message, stack) = reason
                     .as_exception()
                     .map(|e| {
@@ -610,15 +734,20 @@ fn run_with_parser(
                         )
                     })
                     .unwrap_or_else(|| (format!("Rejected promise: {:?}", reason.type_of()), None));
-                let fault = annotate(
+                let mut fault = annotate(
                     Fault::new("Script", message),
                     &rejection_inventory,
                     "<promise>",
                     "job",
                     stack,
                 );
+                if rejection_work.continuous_lifecycle {
+                    fault.bound_diagnostics();
+                    fault.message.shrink_to_fit();
+                }
                 rejected.borrow_mut().push((promise, fault));
             } else {
+                rejection_halted.store(true, Ordering::Release);
                 rejection_host.fail(Fault::new(
                     "ResourceLimit",
                     "unhandled rejection capacity exceeded",
@@ -641,6 +770,8 @@ fn run_with_parser(
         host_object.set("state", Object::new(ctx.clone()).map_err(|error| exception_fault(&ctx, error, &inventory, "<host>", "setup"))?)
             .map_err(|error| exception_fault(&ctx, error, &inventory, "<host>", "setup"))?;
         ctx.globals().prop("host", host_object).map_err(|error| exception_fault(&ctx, error, &inventory, "<host>", "setup"))?;
+        ctx.eval::<(), _>(include_str!("javascript/context.js"))
+            .map_err(|error| exception_fault(&ctx, error, &inventory, "<host>", "context setup"))?;
         ctx.eval::<(), _>(r#"
             (() => {
                 function freeze(value) {
@@ -678,7 +809,7 @@ fn run_with_parser(
         for entry in &requested[..if selected.is_some() { 1 } else { 2 }] {
             let promise = Module::import(&ctx, entry.module.as_str())
                 .map_err(|error| exception_fault(&ctx, error, &inventory, &entry.module, "instantiation"))?;
-            let namespace = settle(&ctx, promise.into_value(), &host, &deadline, &mut jobs, work_limit).map_err(|fault| {
+            let namespace = settle(&ctx, promise.into_value(), &host, &deadline, &mut jobs, &work).map_err(|fault| {
                 if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &entry.module, "instantiation") } else { fault }
             })?;
             let namespace = namespace.into_object().ok_or_else(|| Fault::new("Entry", "Entry module has no namespace"))?;
@@ -691,10 +822,12 @@ fn run_with_parser(
         } else {
             host.begin_readiness()?;
             if !host.script_startup() {
-                deadline.store(host.control().elapsed_us().saturating_add(limits.readiness_ms.saturating_mul(1000)), Ordering::Release);
+                let at = host.control().now().checked_add(Duration::from_millis(limits.readiness_ms))
+                    .ok_or_else(|| Fault::new("Clock", "Readiness deadline overflows"))?;
+                deadline.set(Some(host.control().deadline_opt().map_or(at, |outer| at.min(outer))));
             }
             let ready: Value = entries[0].call(()).map_err(|error| exception_fault(&ctx, error, &inventory, &inventory.entries.readiness.module, "readiness"))?;
-            let ready = settle(&ctx, ready, &host, &deadline, &mut jobs, work_limit).map_err(|fault| {
+            let ready = settle(&ctx, ready, &host, &deadline, &mut jobs, &work).map_err(|fault| {
                 if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &inventory.entries.readiness.module, "readiness") } else { fault }
             })?;
             if ready.as_string().and_then(|value| value.to_string().ok()).as_deref() != Some("Ready") {
@@ -704,7 +837,9 @@ fn run_with_parser(
             host.begin_workflow()?;
             (&inventory.entries.workflow, &entries[1])
         };
-        deadline.store(limits.duration_ms.saturating_mul(1000), Ordering::Release);
+        deadline.set(host.control().deadline_opt());
+        work.continuous.set(function.is_none() && host.control().continuous_workflow());
+        work.checkpoint();
         let stage = if function.is_some() { "function" } else { "workflow" };
         let mut arguments = Args::new(ctx.clone(), function.map_or(0, |function| function.invocation.arguments.len()));
         if let Some(function) = function {
@@ -717,7 +852,7 @@ fn run_with_parser(
         }
         let value: Value = callable.call_arg(arguments)
             .map_err(|error| exception_fault(&ctx, error, &inventory, &entry.module, stage))?;
-        let value = settle(&ctx, value, &host, &deadline, &mut jobs, work_limit).map_err(|fault| {
+        let value = settle(&ctx, value, &host, &deadline, &mut jobs, &work).map_err(|fault| {
             if ctx.has_exception() { exception_fault(&ctx, rquickjs::Error::Exception, &inventory, &entry.module, stage) } else { fault }
         })?;
         // Entry settlement, not draining the job queue, ends ordinary authority.
@@ -726,25 +861,48 @@ fn run_with_parser(
         if let Some((_, fault)) = rejections.borrow().first() {
             return Err(fault.clone());
         }
+        retain_pending(&mut work.pending.borrow_mut(), &ctx);
         Ok(function.map(|_| return_summary(&ctx, &value, &slice)))
     });
     runtime.set_host_promise_rejection_tracker(None);
+    runtime.set_promise_hook(None);
     rejections.borrow_mut().clear();
+    let pending_at_settlement = work.pending.borrow().len();
+    work.pending.borrow_mut().clear();
     host.control().admission.store(false, Ordering::Release);
     if let Some(fault) = host.failure() {
         return Err(annotate(fault, &inventory, "<runtime>", "execution", None));
     }
     host.control().check()?;
-    if host.control().elapsed_us() >= deadline.load(Ordering::Acquire) {
+    if deadline
+        .get()
+        .is_some_and(|deadline| host.control().now() >= deadline)
+    {
         return Err(Fault::new("Timeout", "Runtime stage deadline expired"));
     }
     let return_summary = result?;
+    let mut diagnostic = json!({
+        "runtime":"rquickjs 0.14.0", "import_parser":parser, "cycles":"ECMAScript live bindings",
+        "detached_jobs":"discarded at entry settlement", "promises_created":work.promises.get(),
+        "jobs_executed":jobs,
+    });
+    if work.continuous.get() {
+        diagnostic["promise_slice_limit"] = json!(work_limit);
+        diagnostic["job_slice_limit"] = json!(JOB_SLICE_LIMIT);
+        diagnostic["finite_initialization_work_limit"] = json!(work_limit);
+        diagnostic["outstanding_promise_limit"] = json!(work_limit.min(OUTSTANDING_PROMISE_LIMIT));
+        diagnostic["outstanding_promises_peak"] = json!(work.peak_pending.get());
+        diagnostic["outstanding_promises_at_entry_settlement"] = json!(pending_at_settlement);
+        diagnostic["work_slices"] = json!(work.slices.get());
+        diagnostic["rejection_limit"] = json!(REJECTION_LIMIT);
+    } else {
+        diagnostic["promise_limit"] = json!(work_limit);
+        diagnostic["job_limit"] = json!(work_limit);
+    }
     Ok(RuntimeMetrics {
         vm_bytes: usize::try_from(runtime.memory_usage().memory_used_size).ok(),
         jobs_executed: jobs,
         return_summary,
-        source_diagnostic: Some(
-            json!({"runtime":"rquickjs 0.14.0", "import_parser":parser, "cycles":"ECMAScript live bindings", "detached_jobs":"discarded at entry settlement", "promise_limit":work_limit, "job_limit":work_limit}),
-        ),
+        source_diagnostic: Some(diagnostic),
     })
 }

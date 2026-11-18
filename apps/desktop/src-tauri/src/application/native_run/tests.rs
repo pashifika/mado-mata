@@ -88,7 +88,7 @@ fn inputs() -> (StartRequest, PackageInfo, TargetRecord) {
                 operation: "Click the declared button once".into(),
                 visible_postcondition: "The declared label changes".into(),
             },
-            limits: native_limits(),
+            limits: native_limits().into(),
         }),
     };
     (request, package, record)

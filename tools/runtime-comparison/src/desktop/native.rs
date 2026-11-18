@@ -1,4 +1,7 @@
-use super::{NativeIntent, NativeReview, NativeTarget, StartRequest, native_limits};
+use super::{
+    NativeIntent, NativeReview, NativeRunLimits, NativeTarget, StartRequest, continuous_limits,
+    native_limits,
+};
 use crate::inventory::Inventory;
 use crate::model::{Fault, Limits, Plan};
 use serde_json::{Value, json};
@@ -53,14 +56,64 @@ pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
         ));
     }
     intent.review.validate()?;
-    let limits = &intent.limits;
-    limits.budgets().total_ms()?;
+    intent.limits.budgets().preparation_ms()?;
     let ceiling = native_limits();
+    // Shared stage, wait, pacing and cleanup bounds; lifetime limits differ.
+    let (startup_ms, readiness_ms, wait_ms, interval_ms, cleanup_ms, containment_ms, events) =
+        match &intent.limits {
+            NativeRunLimits::Finite(limits) => {
+                if limits.max_frames == 0 || limits.max_frames > ceiling.max_frames {
+                    return Err(refused(
+                        "Native limits must be positive and within the displayed policy",
+                    ));
+                }
+                if limits.workflow_ms < limits.wait_ms {
+                    return Err(refused(
+                        "Native stage limits exceed their enclosing bound or fixed containment policy",
+                    ));
+                }
+                (
+                    limits.startup_ms,
+                    limits.readiness_ms,
+                    limits.wait_ms,
+                    limits.interval_ms,
+                    limits.cleanup_ms,
+                    limits.containment_ms,
+                    limits.max_actions,
+                )
+            }
+            NativeRunLimits::Continuous(limits) => {
+                if !matches!(intent.review, NativeReview::Operation { .. })
+                    || intent.max_exit_recoveries != 0
+                {
+                    return Err(refused(
+                        "Continuous Workflow is ordinary Native Start only and admits no exit recovery",
+                    ));
+                }
+                // The only supported continuous policy fixes capture and input cadence.
+                let published = continuous_limits();
+                if limits.interval_ms != published.interval_ms
+                    || limits.event_interval_ms != published.event_interval_ms
+                {
+                    return Err(refused(
+                        "Continuous capture and input pace must match the displayed policy",
+                    ));
+                }
+                (
+                    limits.startup_ms,
+                    limits.readiness_ms,
+                    limits.wait_ms,
+                    limits.interval_ms,
+                    limits.cleanup_ms,
+                    limits.containment_ms,
+                    limits.max_batch_events,
+                )
+            }
+        };
     for (value, maximum) in [
-        (limits.max_frames, ceiling.max_frames),
-        (limits.wait_ms, ceiling.wait_ms),
-        (limits.interval_ms, ceiling.interval_ms),
-        (limits.cleanup_ms, ceiling.cleanup_ms),
+        (wait_ms, ceiling.wait_ms),
+        (interval_ms, ceiling.interval_ms),
+        (cleanup_ms, ceiling.cleanup_ms),
     ] {
         if value == 0 || value > maximum {
             return Err(refused(
@@ -68,14 +121,13 @@ pub(super) fn validate_intent(intent: &NativeIntent) -> Result<(), Fault> {
             ));
         }
     }
-    if limits.max_actions == 0
-        || limits.max_actions > ceiling.max_actions
-        || limits.containment_ms != ceiling.containment_ms
-        || limits.wait_ms < limits.interval_ms
-        || limits.startup_ms < limits.wait_ms
-        || limits.readiness_ms < limits.wait_ms
-        || limits.workflow_ms < limits.wait_ms
-        || limits.cleanup_ms > limits.containment_ms
+    if events == 0
+        || events > ceiling.max_actions
+        || containment_ms != ceiling.containment_ms
+        || wait_ms < interval_ms
+        || startup_ms < wait_ms
+        || readiness_ms < wait_ms
+        || cleanup_ms > containment_ms
     {
         return Err(refused(
             "Native stage limits exceed their enclosing bound or fixed containment policy",
@@ -200,7 +252,43 @@ pub(super) fn project(
             "The fixed engine artifact cannot be resolved",
         )
     })?;
-    let limits = &intent.limits;
+    // Continuous Workflow has no lifetime duration, frame or action authority.
+    let (capture, mut input, cleanup_ms, containment_ms) = match &intent.limits {
+        NativeRunLimits::Finite(limits) => {
+            let duration_ms = limits.budgets().preparation_ms()?;
+            (
+                json!({"approved":true,"duration_ms":duration_ms,"max_frames":limits.max_frames,
+                    "wait_ms":limits.wait_ms,"interval_ms":limits.interval_ms}),
+                json!({"approved":true,"duration_ms":duration_ms,"max_actions":limits.max_actions}),
+                limits.cleanup_ms,
+                limits.containment_ms,
+            )
+        }
+        NativeRunLimits::Continuous(limits) => (
+            json!({"approved":true,"wait_ms":limits.wait_ms,"interval_ms":limits.interval_ms}),
+            json!({"approved":true,"max_batch_events":limits.max_batch_events,
+                "event_interval_ms":limits.event_interval_ms}),
+            limits.cleanup_ms,
+            limits.containment_ms,
+        ),
+    };
+    let fields = input.as_object_mut().expect("projected input object");
+    fields.insert("route".into(), json!(target.input.route));
+    fields.insert("focus".into(), json!(target.input.focus));
+    if !cfg!(windows) {
+        fields.insert(
+            "macos_process_pointer_mode".into(),
+            json!(
+                target
+                    .input
+                    .pointer_mode
+                    .as_deref()
+                    .unwrap_or("core_graphics")
+            ),
+        );
+    }
+    fields.insert("click_hold_ms".into(), json!(target.input.click_hold_ms));
+    fields.insert("package_approved".into(), json!(true));
     configuration["replay"] = Value::Null;
     configuration["native"] = json!({
         "executable_or_bundle":executable,
@@ -209,23 +297,12 @@ pub(super) fn project(
         "confirm_process_exit":intent.max_exit_recoveries != 0,
         "window_rule":target.window_title,"operating_system":std::env::consts::OS,
         "hardware":std::env::consts::ARCH,"permission_executable":permission_executable,
-        "capture":{"approved":true,"duration_ms":limits.budgets().total_ms()?,
-            "max_frames":limits.max_frames,"wait_ms":limits.wait_ms,"interval_ms":limits.interval_ms},
-        "input":{"approved":true,"duration_ms":limits.budgets().total_ms()?,"max_actions":limits.max_actions,
-            "route":target.input.route,"focus":target.input.focus,
-            "macos_process_pointer_mode":target.input.pointer_mode.as_deref().unwrap_or("core_graphics"),
-            "click_hold_ms":target.input.click_hold_ms,"package_approved":true},
+        "capture":capture,"input":input,
         "geometry":null,"recognition_language":configuration["ocr"]["language"],
         "review":intent.review,
-        "cleanup_ms":limits.cleanup_ms,"containment_ms":limits.containment_ms,
+        "cleanup_ms":cleanup_ms,"containment_ms":containment_ms,
         "package_entries":package_entries,"templates":templates
     });
-    if cfg!(windows) {
-        configuration["native"]["input"]
-            .as_object_mut()
-            .expect("projected input object")
-            .remove("macos_process_pointer_mode");
-    }
     plan.native_config = Some(configuration);
     plan.validate()?;
     Ok(())

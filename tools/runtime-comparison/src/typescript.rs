@@ -229,7 +229,7 @@ pub fn function_candidates(
     let result = serde_json::from_value(transport(
         &json!({"operation":"function-candidates", "sources":inventory.sources}),
         MAX_COMPILER_BYTES,
-        control.deadline(),
+        control.require_deadline()?,
         Some(control),
     )?)
     .map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
@@ -337,7 +337,7 @@ fn worker_deadline_fault(
 ) -> Fault {
     // Only the shared operation deadline can inherit the supervisor's Stop.
     control
-        .filter(|control| control.deadline() == deadline)
+        .filter(|control| control.deadline_opt() == Some(deadline))
         .and_then(|control| control.check().err())
         .unwrap_or_else(|| Fault::new("Timeout", message))
 }
@@ -648,7 +648,7 @@ impl PreparedModules {
                 }
                 let bridge: Bridge = serde_json::from_value(transport(
                     &json!({"operation":"bridge-javascript", "sources":inventory.sources, "function":invocation}),
-                    MAX_COMPILER_BYTES, control.deadline(), Some(control),
+                    MAX_COMPILER_BYTES, control.require_deadline()?, Some(control),
                 )?).map_err(|error| Fault::new("CompilerProtocol", error.to_string()))?;
                 let mut compiled = inventory.clone();
                 compiled.metadata["original_inventory"] = json!(inventory.identity);
@@ -716,7 +716,7 @@ fn inspect_javascript(
     link: bool,
 ) -> Result<Value, Fault> {
     control.check()?;
-    let deadline = control.deadline();
+    let deadline = control.require_deadline()?;
     let limit = limits
         .snapshot_bytes
         .saturating_mul(8)
@@ -824,7 +824,7 @@ fn compile_invocation(
     control.check()?;
     inventory.validate()?;
     limits.validate()?;
-    let deadline = control.deadline();
+    let deadline = control.require_deadline()?;
     let limit = limits
         .snapshot_bytes
         .saturating_mul(8)
@@ -1220,11 +1220,12 @@ mod tests {
 
     impl Serialize for StopDuringEncoding<'_> {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            assert!(Instant::now() < self.0.deadline());
+            let deadline = self.0.require_deadline().unwrap();
+            assert!(Instant::now() < deadline);
             self.0.cancel();
             // Expire the real deadline during encoding, before any worker spawn.
-            thread::sleep(self.0.deadline().saturating_duration_since(Instant::now()));
-            while Instant::now() < self.0.deadline() {
+            thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            while Instant::now() < deadline {
                 std::hint::spin_loop();
             }
             serializer.serialize_unit()
@@ -1239,7 +1240,7 @@ mod tests {
         let fault = transport(
             &StopDuringEncoding(&control),
             64,
-            control.deadline(),
+            control.require_deadline().unwrap(),
             Some(&control),
         )
         .unwrap_err();

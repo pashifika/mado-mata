@@ -1270,6 +1270,42 @@ authority availability and example source. Reading examples never runs them.
 Static availability does not establish configured capability or native consent.
 Examples cover finite waits, no-match/error distinctions and releasing retained
 observations; [CI](ci.md#local-check-scope) checks applicable controlled behavior.
+Use `/mado sdk_detail {"name":"context"}` for the Workflow context API and a
+typed search example. Pass the context to helpers just like any other argument.
+The following helper looks for a label without submitting input:
+
+```ts
+function findLabel(parent: MadoWorkflowContext, label: string) {
+  const search = parent.child({timeout_ms: 2000});
+  try {
+    for (;;) {
+      const frame = search.call("observe", {});
+      try {
+        const match = search.call("recognize", {
+          observation: frame, kind: "ocr",
+          roi: {x: 0, y: 0, width: frame.width, height: frame.height},
+        });
+        if (match) {
+          try { if (match.text === label) return true; }
+          finally { search.call("release", {id: match.id}); }
+        }
+      } finally { search.call("release", {id: frame.id}); }
+      search.call("wait", {duration_ms: 100});
+    }
+  } catch (error) {
+    if ((error as MadoHostFault).category === "ScopeDeadline") return false;
+    throw error;
+  } finally { search.close(); }
+}
+```
+
+In `workflow()`, call `findLabel(host.call("context", {}), "Ready")`.
+A child-only timeout lets the caller choose another search. Acquire a fresh
+observation before acting; the retired child's handles are not authority.
+For input, submit once and settle its receipt. Partial or uncertain submission
+is terminal: do not send the remaining actions from a different context.
+Even a submitted receipt needs a compatible, strictly newer observation to
+establish the intended effect. Stop and physical input release are separate.
 
 Snippet retrieval shares generation/admission with UI Copy but does not touch
 the clipboard or Script. Read Recognition context to obtain the exact active
@@ -2924,12 +2960,12 @@ executable. If startup identity is unavailable, it remains unknown (`null`) rath
 than being substituted with supervisor metadata.
 
 Controlled execution has a **10 s** operation deadline; replay, Check and
-saved-image trials use **30 s**, including input preparation. Desktop Native
-instead defaults to separate **60 s Startup**, **30 s Readiness** and **30 s Workflow**
-budgets. Per-Start review can select **1–900 whole seconds** for Workflow, under
-an outer deadline fixed at reservation. Timeout remains distinct
-from explicit Stop. Repeated parent/child resource verification is not skipped
-to fit an execution budget.
+saved-image trials use **30 s**, including input preparation. Finite Desktop
+Native defaults to **60 s Startup**, **30 s Readiness** and **30 s Workflow**;
+ordinary Run can select **1–900 whole seconds** for Workflow. Ordinary Native
+also offers continuous Workflow, with an optional overall deadline measured
+from reservation. Neither lifecycle extends Startup or Readiness. Timeout
+remains distinct from Stop; verification is not skipped to fit a budget.
 Cleanup remains **1 s** and containment **2 s**. Controller shutdown waits at most
 **14 s** for its owned worker. Ordinary window closure requests shutdown off the
 UI thread. Native macOS Quit can bypass that request callback, so the final exit
@@ -3000,8 +3036,9 @@ successful Check is not permission, native qualification, or proof of game effec
    enter the intended operation and what a newer frame must show. This text records
    the human review; the package must implement its recognition and postcondition.
    It is not a script sandbox or an automatic assertion generated from prose.
-4. Review **60 s Startup** from reservation and **30 s Readiness** from capture
-   availability. **Workflow duration (seconds)** defaults to **30** after `"Ready"`;
+4. Choose the lifecycle for this Start. Both use **60 s Startup** from
+   reservation and **30 s Readiness** from capture availability.
+   In **Finite** (default), **Workflow duration (seconds)** defaults to **30** after `"Ready"`;
    explicitly select **1–900 whole seconds** for this Start. Startup/Readiness
    defaults are also their ceilings. Blank, fractional, nonfinite or out-of-range
    duration drafts block approval and Start; invalid host tuples refuse rather
@@ -3019,7 +3056,7 @@ successful Check is not permission, native qualification, or proof of game effec
    Final cleanup retains its separate **1 s** cleanup and **2 s** containment bounds.
    A click consumes three events, or four with a hold; key press/release each
    consume one. A drag with `N` points and `D` positive waits consumes
-   `N + 2 + D`; the same aggregate allowance applies. See the
+   `N + 2 + D`. See the
    [Script action bounds](runtime-native.md#script-actions-and-drag-bounds).
    Producer frames and restricted cleanup releases are not ordinary
    acquisition/input budget entries. Any reviewed-tuple change withdraws consent.
@@ -3028,13 +3065,21 @@ successful Check is not permission, native qualification, or proof of game effec
    Native execution, late Stop, long-duration recovery or arbitrary-duration
    reliability. Those require separately authorized actual Desktop acceptance;
    deterministic tests and hosted CI cannot replace it.
+   In **Continuous**, Workflow runs until the Script returns or faults, the
+   operator stops it, or the optional overall deadline expires. A blank deadline
+   means no whole-Run timer; setting one includes Startup and Readiness, not just
+   time spent in Workflow. There is no exit recovery. Capture still requires
+   100 ms spacing, waits remain bounded, and at most 64 expanded input events
+   may dispatch in a rolling second across all helpers. A rejected batch is not
+   split. Switching lifecycle or editing the deadline spends every approval;
+   reopening the workspace restores finite review. Edit trials remain finite.
 5. Review the saved launch recipient and literal ordered arguments. The recipient
    is the separate launcher when configured, otherwise the outer game bundle.
    Bundle launch uses macOS `NSWorkspace`, not a shell or its inner executable;
    direct-executable launchers use their reviewed working-directory policy.
    The launcher owns onward game arguments/cwd; its PID or exit is not game
    identity or readiness. Approve **launch if absent** only when permitted.
-   Recovery is default-off and not saved. To allow one confirmed-exit recovery,
+   Recovery is finite-only, default-off and not saved. To allow one confirmed-exit recovery,
    separately approve **recovery** as well as **launch if absent**. The same
    captured readiness/workflow starts again from entry, not the interrupted
    statement; authors must make re-entry safe. No exactly-once business-action
@@ -3779,6 +3824,22 @@ recognition and independent usability/physical-cleanup evidence for success,
 success, active-wait Stop and explicit success. Missing authority or recognition
 leaves that gate open. Controlled repetition does not qualify Native reuse,
 longer uninterrupted Runs, Windows native operation or all M4.
+
+### Continuous Native acceptance
+
+Before Start, record the OS, build, package, approved target, permitted action
+and expected visible effect. Choose the optional overall deadline, active and
+settled memory/ownership bounds, sampling points and Stop timings before the
+trial. Keep target data and observations private.
+
+Use one Run, attempt, VM and target session. Sustain useful guarded work past
+900 s of Workflow, 300 acquired frames, 64 expanded input events and the finite
+Promise/job ceilings for that VM size. After crossing all four, require a fresh
+guard, a settled receipt and a compatible newer-frame effect. Record early,
+middle and late memory and live owners. Stop the owning Run and distinguish
+admission closure, physical cleanup and worker/child settlement. Only then
+review a separate clean Start. A virtual clock, multiple finite Starts or time
+spent idle does not qualify a native route.
 
 ### Recorded-replay acceptance
 

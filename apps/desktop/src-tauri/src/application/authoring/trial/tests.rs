@@ -78,7 +78,7 @@ fn script_intent() -> NativeIntent {
         launch_approved: false,
         max_exit_recoveries: 0,
         review: NativeReview::Script {},
-        limits: native_limits(),
+        limits: native_limits().into(),
     }
 }
 
@@ -468,7 +468,18 @@ fn native_trials_require_script_review_and_both_permissions_before_reservation()
         no_capture.capture_approved = false;
         let mut no_input = script_intent();
         no_input.input_approved = false;
-        for intent in [None, Some(operation), Some(no_capture), Some(no_input)] {
+        // Edit Whole and Function stay finite; continuous is ordinary Start only.
+        let continuous = NativeIntent {
+            limits: mado_runtime_comparison::desktop::continuous_limits().into(),
+            ..script_intent()
+        };
+        for intent in [
+            None,
+            Some(operation),
+            Some(no_capture),
+            Some(no_input),
+            Some(continuous),
+        ] {
             native.native_intent = intent;
             assert_eq!(
                 app.authoring_trial_start(

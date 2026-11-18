@@ -7,9 +7,9 @@ use mado_pilot_testkit::{ControlledInput, ControlledMatcher, ControlledProducer}
 const PROVIDER: mp::ProviderId = mp::ProviderId::new("controlled");
 
 #[derive(Debug)]
-struct Capture {
+pub(super) struct Capture {
     description: SessionDescription,
-    stream: StreamState,
+    pub(super) stream: StreamState,
     producer: ControlledProducer,
     lose_on_commit: AtomicBool,
 }
@@ -86,17 +86,32 @@ fn fixture(route: mp::InputDelivery) -> (Engine, Arc<Capture>, Arc<ControlledInp
     fixture_with_input(route, Behavior::Complete, Cleanup::Complete)
 }
 
+fn plan() -> Plan {
+    let mut plan: Plan =
+        serde_json::from_str(include_str!("../../../fixtures/manual-plan.json")).unwrap();
+    plan.lane = "replay".into();
+    plan
+}
+
 fn fixture_with_input(
     route: mp::InputDelivery,
     behavior: Behavior,
     cleanup: Cleanup,
 ) -> (Engine, Arc<Capture>, Arc<ControlledInput>) {
-    let mut plan: Plan =
-        serde_json::from_str(include_str!("../../../fixtures/manual-plan.json")).unwrap();
-    plan.lane = "replay".into();
+    let control = Arc::new(Control::new(&plan().limits));
+    fixture_on(control, route, behavior, cleanup)
+}
+
+pub(super) fn fixture_on(
+    control: Arc<Control>,
+    route: mp::InputDelivery,
+    behavior: Behavior,
+    cleanup: Cleanup,
+) -> (Engine, Arc<Capture>, Arc<ControlledInput>) {
+    let plan = plan();
     let mut engine = Engine::replay_for_test(
         &plan,
-        Arc::new(Control::new(&plan.limits)),
+        control,
         "native-frame-test",
         1,
         Arc::new(HandleBudget::new(plan.limits.handles)),
@@ -186,7 +201,7 @@ fn fixture_with_input(
     (engine, capture, input)
 }
 
-fn publish(capture: &Capture, continuity: mp::Continuity) {
+pub(super) fn publish(capture: &Capture, continuity: mp::Continuity) {
     capture
         .stream
         .publish_storage(
@@ -207,7 +222,7 @@ fn publish(capture: &Capture, continuity: mp::Continuity) {
         .unwrap();
 }
 
-fn click(observation: &Value) -> Value {
+pub(super) fn click(observation: &Value) -> Value {
     json!({"observation":observation,"actions":[{"kind":"click","x":1,"y":2,"button":"left"}]})
 }
 
@@ -413,7 +428,7 @@ fn route_refusal_never_falls_back_and_incomplete_release_closes_input_admission(
 #[test]
 fn released_native_frame_keeps_terminal_precedence_without_another_capture() {
     let (mut engine, capture, input) = fixture(mp::InputDelivery::System);
-    engine.native.as_mut().unwrap().capture.max_frames = 1;
+    engine.native.as_mut().unwrap().capture.max_frames = Some(1);
     let observation = engine.call("observe", json!({})).unwrap();
     engine
         .call("release", json!({"id":observation["id"]}))

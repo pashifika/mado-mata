@@ -247,7 +247,7 @@ fn native_request(selection: &crate::application::Selection) -> StartRequest {
             operation: "One reviewed click".into(),
             visible_postcondition: "The reviewed label changes".into(),
         },
-        limits: mado_runtime_comparison::desktop::native_limits(),
+        limits: mado_runtime_comparison::desktop::native_limits().into(),
     });
     request
 }
@@ -279,11 +279,17 @@ fn incompatible_recovery_review_refuses_before_capturing_a_saved_target() {
     declare_target(&package, Some("native-target"));
     let selection = inspect_named(application, "Main", &package).unwrap();
     let workspace = workspace_ref(&selection);
-    for (max_exit_recoveries, launch_approved) in [(1, false), (2, true)] {
+    // Continuous Workflow admits no recovery, even with launch approval.
+    for (max_exit_recoveries, launch_approved, continuous) in
+        [(1, false, false), (2, true, false), (1, true, true)]
+    {
         let mut request = native_request(&selection);
         let intent = request.native_intent.as_mut().unwrap();
         intent.max_exit_recoveries = max_exit_recoveries;
         intent.launch_approved = launch_approved;
+        if continuous {
+            intent.limits = mado_runtime_comparison::desktop::continuous_limits().into();
+        }
         assert_eq!(
             application.start(&workspace, request).unwrap_err().category,
             "NativeRefused"

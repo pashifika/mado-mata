@@ -11,6 +11,7 @@ pub(super) struct Job {
     pub operation: mp::OperationContext,
     pub text_limit: usize,
     pub permit: HandlePermit,
+    pub scoped: bool,
 }
 
 struct ActiveJob {
@@ -41,7 +42,7 @@ pub(super) struct Worker {
 }
 
 impl Worker {
-    pub fn new() -> Result<Self, Fault> {
+    pub fn new(scoped_fault: Arc<OnceLock<Fault>>) -> Result<Self, Fault> {
         let (sender, receiver) = mpsc::sync_channel::<Message>(1);
         let thread = thread::Builder::new()
             .name("query-recognition".into())
@@ -55,6 +56,7 @@ impl Worker {
                         operation,
                         text_limit,
                         permit,
+                        scoped,
                     } = message.job;
                     let result = recognize_frame(
                         &resources, &session, &frame, &request, &operation, text_limit,
@@ -62,8 +64,16 @@ impl Worker {
                     .map(|found| {
                         found.map(|(retained, value)| (Managed::new(retained, permit), value))
                     });
-                    // An expired caller drops its receiver; the late result and permit die here.
-                    let _ = message.reply.send(result);
+                    match result {
+                        Err(fault) if scoped && !interrupted(&fault) => {
+                            // This is the completion point, before waking (or losing)
+                            // the receiver. New input already sees the first cause.
+                            let _ = scoped_fault.set(fault);
+                        }
+                        other => {
+                            let _ = message.reply.send(other);
+                        }
+                    }
                 }
             })
             .map_err(|error| Fault::new("Initialization", error.to_string()))?;
@@ -131,6 +141,10 @@ impl Worker {
             .failed
             .then(|| Fault::new("Backend", "query recognition worker panicked")))
     }
+}
+
+pub(super) fn interrupted(fault: &Fault) -> bool {
+    matches!(fault.category.as_str(), "Timeout" | "Cancelled")
 }
 
 pub(super) fn recognize_frame(

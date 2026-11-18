@@ -394,7 +394,7 @@ impl PreparationPlatform for MacosPreparation {
             &binding.declaration,
             &binding.binding.resolution,
             &control.cancelled,
-            control.deadline(),
+            control.require_deadline()?,
         )
     }
 
@@ -408,7 +408,7 @@ impl PreparationPlatform for MacosPreparation {
             &binding.declaration,
             &binding.binding.resolution,
             &control.cancelled,
-            control.deadline(),
+            control.require_deadline()?,
         )?)
     }
 

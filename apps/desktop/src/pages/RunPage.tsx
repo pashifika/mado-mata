@@ -27,7 +27,7 @@ export interface RunHandlers {
   newDraft: (preset?: string) => void; selectProfile: (id: string) => void;
   reinspect: () => void; inspectPath: (value: string) => void; importLegacy: () => void; start: () => void;
   // Native review text edits withdraw consent; consent binds to the request as it is now.
-  native: {edit: (field: 'operation' | 'postcondition' | 'workflowSeconds', value: string) => void; approve: (field: NativeConsent, value: boolean) => void};
+  native: {edit: (field: 'operation' | 'postcondition' | 'workflowSeconds' | 'lifecycle' | 'overallSeconds', value: string) => void; approve: (field: NativeConsent, value: boolean) => void};
   target: TargetHandlers;
   recovery: RecoveryHandlers;
 }

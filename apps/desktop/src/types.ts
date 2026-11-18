@@ -117,14 +117,19 @@ export interface NativeLimits {
   startup_ms:number; readiness_ms:number; workflow_ms:number;
   max_frames:number; wait_ms:number; interval_ms:number; max_actions:number; cleanup_ms:number; containment_ms:number;
 }
+export interface ContinuousNativeLimits {
+  lifecycle:'continuous'; startup_ms:number; readiness_ms:number;
+  wait_ms:number; interval_ms:number; cleanup_ms:number; containment_ms:number;
+  max_batch_events:number; event_interval_ms:number; overall_ms?:number;
+}
 // `native_run_limits` returns this host policy, or null when this platform/build offers no Native lane.
-export interface NativeCapability {default_limits:NativeLimits; max_workflow_ms:number}
+export interface NativeCapability {default_limits:NativeLimits; max_workflow_ms:number; continuous_limits:ContinuousNativeLimits}
 export type NativeReview = {kind:'operation'; operation:string; visible_postcondition:string} | {kind:'script'};
 // Bounded per-Start operator intent. It names the reviewed saved target and carries no executable, process or plan.
 // On macOS, `launch_approved` permits one saved-recipe launch when the game is confirmed absent; Windows is attach-only.
 export interface NativeIntent {
   target_revision:number; target_binding_id:string; target_declaration_identity:string;
-  capture_approved:boolean; input_approved:boolean; launch_approved:boolean; review:NativeReview; limits:NativeLimits;
+  capture_approved:boolean; input_approved:boolean; launch_approved:boolean; review:NativeReview; limits:NativeLimits|ContinuousNativeLimits;
   max_exit_recoveries:0|1;
 }
 export interface FunctionInvocation {module:string; function:string; arguments:Json[]}
