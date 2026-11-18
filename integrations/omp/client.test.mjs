@@ -79,14 +79,15 @@ async function windowsFixtureAcl(paths, pipe, extraUser = false) {
       } finally { $client.Dispose() }
     }
   `;
+  // Fixture setup includes Windows PowerShell startup; the pipe connect has its own 5 s limit.
+  const timeout = 60_000;
   const child = spawn(join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {windowsHide: true, stdio: ['pipe', 'ignore', 'pipe']});
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {windowsHide: true, timeout, stdio: ['pipe', 'ignore', 'pipe']});
   let error = '';
   child.stderr.on('data', bytes => { error += bytes.toString(); });
-  const timer = setTimeout(() => child.kill(), 10_000);
   child.stdin.end(JSON.stringify({paths, pipe, extraUser}));
-  try { assert.equal((await once(child, 'close'))[0], 0, error); }
-  finally { clearTimeout(timer); }
+  const [code, signal] = await once(child, 'close');
+  assert.equal(code, 0, child.killed ? `Windows ACL fixture timed out after ${timeout} ms` : error || `Windows ACL fixture exited with ${signal ?? code}`);
 }
 async function peer(t, handler) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'mc-'));
