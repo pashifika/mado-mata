@@ -560,6 +560,16 @@ export function selectProfile(bound:Bound, id:string):Bound {
   return editDraft({...bound, selectedId: profile.id, name: profile.name, preset: ''}, structuredClone(profile.values));
 }
 
+// A save reply replaces only the record with its own ID, so a same-name record keeps its ID and values. The draft
+// takes the saved values only when no edit raced the save.
+export function applySavedProfile(bound:Bound, profile:Profile, checkedRevision:number):Bound {
+  return {
+    ...bound, profiles:[...bound.profiles.filter(entry => entry.id !== profile.id), profile].sort((a, b) => a.name.localeCompare(b.name)),
+    selectedId:profile.id, preset:'',
+    ...(bound.draftRevision === checkedRevision ? {draft:structuredClone(profile.values), touched:false} : {}),
+  };
+}
+
 export function workspaceRef(workspace:Pick<Workspace,'id'|'revision'>):WorkspaceRef {
   return {workspace_id: workspace.id, revision: workspace.revision};
 }

@@ -24,6 +24,17 @@
   margin-top: 0;
 }
 
+.profile-share {
+  margin: 4px 0 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.profile-share h3 { margin: 0 0 8px; font-size: 13px; }
+.profile-share h4 { margin: 12px 0 4px; font-size: 12px; }
+.profile-share textarea { font-family: var(--mono); font-size: 11px; resize: vertical; }
+
 @media (max-width: 1100px) {
   .run-summary.summary-panel {
     grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr);

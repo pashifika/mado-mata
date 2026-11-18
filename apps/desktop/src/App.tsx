@@ -74,8 +74,10 @@ import {saveFileDraft, saveFiles} from './authoring-publication.ts';
 import type {PublicationPorts, SaveSequence, SaveTarget} from './authoring-publication.ts';
 import {acceptExportReview, acceptImportReview, declaredRelease, exportConfirmable, exportReadiness, failExportPreparation, failImportPreparation, sameWorkspace, suggestedName} from './distribution.ts';
 import type {DistributionReview, ExportFlow, ImportFlow, InstalledRelease, Publication, SignerState, SigningInfo} from './distribution.ts';
-import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applyWorkspaceView, approveNative, busy, clearNativeApproval, closeWorkspace, commandValues, deriveBound, editNativeReview, hasWorkspaceEdits, importProfileCommand, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
+import {DESCRIPTOR_LIMIT, UNSUPPORTED_SOURCE, WORKSPACE_LIMIT, applyAuthoringExit, applyCommand, applyIfCurrent, applyInspection, applyInvalidatedViews, applyRecoveryMutation, applySavedProfile, applyWorkspaceView, approveNative, busy, clearNativeApproval, closeWorkspace, commandValues, deriveBound, editNativeReview, hasWorkspaceEdits, importProfileCommand, ingestResults, isBound, needsAttention, newDraft, originLabel, retainClosed, selectProfile, updateBound, updateWorkspace, workspaceFromView, workspaceLabel, workspaceRef} from './workspace.ts';
 import type {Bound, BoundWorkspace, ClosedWorkspace, Derived, LogFilter, LogScope, Origin, RetainedResult, Workspace, WorkspaceCommand} from './workspace.ts';
+import {adoptSharedProfile} from './profile-share.ts';
+import type {SharedProfile} from './profile-share.ts';
 import {beginApplicationPicker, beginRunningApplication, beginTarget, cancelRunningApplication, checkedTarget, completeApplicationPicker, completeRunningApplication, currentTargetDraft, discardTarget, editTarget, eligibleRunningApplication, failRunningApplication, invalidateApplicationPicker, invalidateRunningApplication, readTarget, readTargetDraft, removedTarget, savedTarget, targetFailed, targetReadFailed, targetTicket} from './target.ts';
 import type {TargetOperation, TargetPickerField, TargetPickerTicket, TargetState} from './target.ts';
 import type {AuthoringMutation, AuthoringRef, AuthoringTrialContext, AuthoringValidation, AuthoringView, BootstrapStatus, CatalogEdit, ControllerView, Fault, InspectionOutcome, Json, LegacyImport, Poll, Profile, ProfileCatalog, RecoveryMutation, Settings, SnapshotReceipt, StartRequest, TabRecord, TargetApplicationResponse, TargetCheckResponse, TargetResolution, TargetSaveResponse, TargetView, WorkspaceCatalog, WorkspaceRef, WorkspaceView} from './types.ts';
@@ -874,11 +876,8 @@ export default function App() {
           const values = valuesForCommand(workspace);
           const profile = await invoke<Profile>('save_profile', {workspace: ref, id: bound.selectedId, name: bound.name, values});
           const catalog = await readProfiles(ref);
-          return {catalog, update: item => ({...updateBound(item, current => ({
-            ...current, profiles: [...current.profiles.filter(entry => entry.id !== profile.id), profile].sort((a, b) => a.name.localeCompare(b.name)),
-            selectedId: profile.id, preset: '',
-            ...(current.draftRevision === checked ? {draft: structuredClone(profile.values), touched: false} : {}),
-          })), notice: {key: 'profileSaved', args: [profile.name, profile.id]}})};
+          return {catalog, update: item => ({...updateBound(item, current => applySavedProfile(current, profile, checked)),
+            notice: {key: 'profileSaved', args: [profile.name, profile.id]}})};
         });
       },
       renameProfile: () => {
@@ -907,6 +906,18 @@ export default function App() {
           update => setWorkspaces(list => applyIfCurrent(list, origin, update)),
           () => readProfiles(ref),
         )).then(() => bootstrapAction('refreshingStatus', () => invoke<BootstrapStatus>('bootstrap_status'), false));
+      },
+      // Review and copy are read-only for this Tab revision; Use replaces only the draft that was reviewed.
+      share: {
+        client: {
+          exportCode: (id, includeName) => invoke<string>('export_profile_share_code', {workspace: ref, id, includeName}),
+          decode: code => invoke<SharedProfile>('decode_profile_share_code', {workspace: ref, code}),
+          copy: code => invoke<void>('copy_profile_share_code', {code}),
+        },
+        adopt: (shared, reviewed) => {
+          if (locked) return;
+          setWorkspaces(list => applyIfCurrent(list, origin, item => adoptSharedProfile(item, shared, reviewed)));
+        },
       },
       // A saved installed release reinspects by its identity unless the operator typed another directory.
       reinspect: () => {

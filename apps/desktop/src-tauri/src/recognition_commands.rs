@@ -445,21 +445,10 @@ async fn publish_clipboard(
     revision: String,
     copied: RecognitionCopy,
 ) -> Result<RecognitionCopy, Fault> {
-    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-    use objc2_foundation::NSString;
     let (send, mut receive) = tauri::async_runtime::channel(1);
     app.run_on_main_thread(move || {
         let result = application.recognition_publish_copy(&owner, &revision, copied, |source| {
-            let pasteboard = NSPasteboard::generalPasteboard();
-            let text = NSString::from_str(source);
-            // SAFETY: AppKit exports this immutable process-lifetime string type.
-            #[expect(
-                unsafe_code,
-                reason = "audited immutable AppKit pasteboard type constant"
-            )]
-            let text_type = unsafe { NSPasteboardTypeString };
-            pasteboard.clearContents();
-            if pasteboard.setString_forType(&text, text_type) {
+            if crate::clipboard::write_text(source) {
                 Ok(())
             } else {
                 Err(Fault::new(

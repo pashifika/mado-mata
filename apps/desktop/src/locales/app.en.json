@@ -129,6 +129,7 @@
     "profileSaved": "Saved submitted values for “{name}” · {id}. Later edits remain unsaved; active runs are unchanged.",
     "profileRenamed": "Renamed saved profile to “{name}”. Draft values are unchanged.",
     "profileDeleted": "Saved profile deleted. Its values remain in this unsaved draft; active runs are unchanged.",
+    "sharedDraftReady": "Shared settings are now an unsaved draft in this workspace. Save new profile to keep them.",
     "profilesImported": "Legacy import · {imported} imported, {unchanged} already present. Source files were kept.",
     "profilesImportPartial": "Legacy import incomplete · {imported} imported, {unchanged} already present. Saved entries remain; retry skips identical ones and refuses conflicts.",
     "reinspected": "Package reinspected. The profile draft was reset to schema defaults; target setup reloads saved configuration without reusing earlier checks. Start will revalidate its identity.",
