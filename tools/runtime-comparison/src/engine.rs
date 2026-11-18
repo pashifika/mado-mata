@@ -59,7 +59,7 @@ mod enabled {
     use sha2::{Digest, Sha256};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Mutex, MutexGuard, TryLockError};
+    use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
@@ -417,6 +417,8 @@ mod enabled {
         closing: AtomicBool,
         in_flight: Arc<AtomicUsize>,
         query_worker: Mutex<Option<recognition::Worker>>,
+        scoped_query_fault: Arc<OnceLock<Fault>>,
+        query_wait_abandoned: AtomicBool,
         handles: AtomicUsize,
         handle_budget: Arc<HandleBudget>,
         native: Option<NativeConfig>,
@@ -697,6 +699,8 @@ mod enabled {
                 closing: AtomicBool::new(false),
                 in_flight: Arc::new(AtomicUsize::new(0)),
                 query_worker: Mutex::new(None),
+                scoped_query_fault: Arc::default(),
+                query_wait_abandoned: AtomicBool::new(false),
                 handles: AtomicUsize::new(0),
                 handle_budget,
                 native: config.native,
@@ -905,6 +909,8 @@ mod enabled {
                 closing: AtomicBool::new(false),
                 in_flight: Arc::new(AtomicUsize::new(0)),
                 query_worker: Mutex::new(None),
+                scoped_query_fault: Arc::default(),
+                query_wait_abandoned: AtomicBool::new(false),
                 handles: AtomicUsize::new(0),
                 handle_budget,
                 native: None,
@@ -934,6 +940,7 @@ mod enabled {
                 && result
                     .as_ref()
                     .is_err_and(|fault| fault.category == "TargetLost")
+                && self.missed_query_fault().is_none()
             {
                 let state = self.lock()?;
                 let process = self.check_bound_process(&state);
@@ -1101,6 +1108,12 @@ mod enabled {
             }
         }
 
+        pub(crate) fn missed_query_fault(&self) -> Option<&Fault> {
+            self.scoped_query_fault
+                .get()
+                .filter(|_| self.query_wait_abandoned.load(Ordering::Acquire))
+        }
+
         fn check(&self) -> Result<(), Fault> {
             if self.native.as_ref().is_some_and(|native| {
                 native
@@ -1121,13 +1134,16 @@ mod enabled {
         /// close is never reported as a scope-local outcome.
         fn admit(&self, scope: Scope<'_>) -> Result<(), Fault> {
             self.check()?;
+            if let Some(fault) = self.scoped_query_fault.get() {
+                return Err(fault.clone());
+            }
             scope.map_or(Ok(()), WorkflowScope::check)
         }
 
         /// Effect-free work ended by a deadline or cancellation is the scope's own
         /// outcome while the Run is live. Every other fault is kept as it is.
         fn local(&self, fault: Fault, scope: Scope<'_>) -> Fault {
-            if matches!(fault.category.as_str(), "Timeout" | "Cancelled")
+            if recognition::interrupted(&fault)
                 && let Some(scope) = scope
                 && self.check().is_ok()
                 && let Err(local) = scope.check()
@@ -1451,7 +1467,7 @@ mod enabled {
                         .min(Duration::from_millis(1)),
                 );
             }
-            Ok(())
+            self.admit(None)
         }
 
         fn query_recognize(
@@ -1471,11 +1487,18 @@ mod enabled {
                 .lock()
                 .map_err(|_| internal("query worker state poisoned"))?;
             if slot.is_none() {
-                *slot = Some(recognition::Worker::new()?);
+                *slot = Some(recognition::Worker::new(Arc::clone(
+                    &self.scoped_query_fault,
+                ))?);
             }
             let worker = slot.as_ref().unwrap();
             let permit = self.handle_budget.reserve(1)?;
             let frame = self.observation(state, &request.observation)?.frame.clone();
+            // Only one physical query can be outstanding. A prior scoped fault
+            // prevents reaching here, so this bit belongs to the new waiter.
+            if scope.is_some() {
+                self.query_wait_abandoned.store(false, Ordering::Release);
+            }
             let receiver = worker.submit(
                 recognition::Job {
                     resources: Arc::clone(&self.resources),
@@ -1490,28 +1513,38 @@ mod enabled {
                     operation,
                     text_limit: self.limits.log_bytes,
                     permit,
+                    scoped: scope.is_some(),
                 },
                 Arc::clone(&self.in_flight),
             )?;
             let result = (|| {
                 loop {
-                    self.admit(scope)?;
+                    self.check()?;
+                    scope.map_or(Ok(()), WorkflowScope::check)?;
                     let _ = remaining_ms(deadline)?;
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     match receiver.recv_timeout(remaining.min(Duration::from_millis(1))) {
                         Ok(found) => {
                             let _ = remaining_ms(deadline)?;
-                            return self.publish_recognition(state, request, found?, scope);
+                            return self
+                                .publish_recognition(state, request, found?, scope)
+                                .map(Some);
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                            return Err(Fault::new("Backend", "query recognition worker stopped"));
-                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
                     }
                 }
             })();
             token.cancel();
-            result
+            if scope.is_some() && !matches!(result, Ok(Some(_))) {
+                if let Some(fault) = self.scoped_query_fault.get() {
+                    self.check()?;
+                    return Err(fault.clone());
+                }
+                // A later completion has no caller to report it to the Host.
+                self.query_wait_abandoned.store(true, Ordering::Release);
+            }
+            result?.ok_or_else(|| Fault::new("Backend", "query recognition worker stopped"))
         }
 
         fn scan_ocr_zones(
@@ -1924,8 +1957,13 @@ mod enabled {
                         "native_owners":self.handles.load(Ordering::Acquire),
                         "physical_cleanup_confirmed":false,"worker_error":error});
                 }
-                Some(Ok(error)) => error,
-                None => None,
+                Some(Ok(Some(fault))) => {
+                    if self.scoped_query_fault.set(fault.clone()).is_ok() {
+                        self.query_wait_abandoned.store(true, Ordering::Release);
+                    }
+                    Some(fault)
+                }
+                Some(Ok(None)) | None => None,
             };
             state.queries.clear();
             state.results.clear();

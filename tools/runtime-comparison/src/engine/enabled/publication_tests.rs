@@ -37,6 +37,13 @@ fn replay(backend: Arc<ControlledOcr>) -> Engine {
 // Public deterministic capture supplies terminal ordering that finite replay
 // cannot inject. It owns no native capture, permissions, models or input.
 fn controlled(backend: Arc<ControlledOcr>) -> (Engine, Arc<ControlledCapture>) {
+    controlled_with_matcher(backend, ControlledMatcher::new(mp::PixelFormat::Rgba8))
+}
+
+fn controlled_with_matcher(
+    backend: Arc<ControlledOcr>,
+    matcher: ControlledMatcher,
+) -> (Engine, Arc<ControlledCapture>) {
     let mut engine = replay(backend.clone());
     let issuer = Arc::new(mado_pilot_core::IdentityIssuer::new());
     let capture = Arc::new(
@@ -50,7 +57,7 @@ fn controlled(backend: Arc<ControlledOcr>) -> (Engine, Arc<ControlledCapture>) {
     let facade = mp::Engine::new(EngineWiring {
         engine: issuer.engine(),
         capture: capture.clone(),
-        matcher: Matcher::new(Arc::new(ControlledMatcher::new(mp::PixelFormat::Rgba8))),
+        matcher: Matcher::new(Arc::new(matcher)),
         loader: PackageLoader::new(),
         ocr: Some(OcrRecognizer::new(backend)),
         input: None,
@@ -666,8 +673,82 @@ fn sdk_examples_release_engine_results_and_check_visible_readiness() {
 }
 
 #[test]
-fn template_no_match_is_historical_but_new_recognition_preserves_capture_terminal_cause() {
-    let (mut engine, capture) = controlled(Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8)));
+fn scoped_query_worker_fault_survives_cancellation_and_release() {
+    use mado_pilot_testkit::{Behavior, ScriptedMatchCall};
+
+    for (behavior, return_without_another_call) in [
+        (Behavior::Fail, false),
+        (Behavior::Fail, true),
+        (Behavior::Succeed, false),
+    ] {
+        let gate = Arc::new(CompletionGate::new());
+        let call = ScriptedMatchCall::new(vec![])
+            .with_behavior(behavior)
+            .with_completion_gate(gate.clone());
+        let matcher = ControlledMatcher::new(mp::PixelFormat::Rgba8).with_calls([call]);
+        let (mut engine, _) = controlled_with_matcher(
+            Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8)),
+            matcher,
+        );
+        declare_template(&mut engine);
+        let observation = engine.call("observe", json!({})).unwrap();
+        let child = WorkflowScope::new(1, 0, Arc::clone(&engine.control), None);
+        let query = engine
+            .call_scoped("query", template_request(&observation), Some(&child))
+            .unwrap();
+        thread::scope(|threads| {
+            let waiter = threads.spawn(|| {
+                engine.call_scoped(
+                    "query_wait",
+                    json!({"id":query["id"],"timeout_ms":5_000}),
+                    Some(&child),
+                )
+            });
+            let _release = gate.release_guard();
+            assert!(gate.wait_until_entered(Duration::from_secs(5)));
+            child.end(Fault::new("ScopeCancelled", "search ended"));
+            assert_eq!(
+                waiter.join().unwrap().unwrap_err().category,
+                "ScopeCancelled"
+            );
+            engine.call("release", json!({"id":query["id"]})).unwrap();
+            if return_without_another_call {
+                let finish = threads.spawn(|| engine.finish());
+                let until = Instant::now() + Duration::from_secs(5);
+                while !engine.closing.load(Ordering::Acquire) {
+                    assert!(Instant::now() < until, "cleanup did not start");
+                    thread::yield_now();
+                }
+                gate.release();
+                assert_eq!(finish.join().unwrap()["physical_cleanup_confirmed"], true);
+            }
+        });
+
+        let fault = if return_without_another_call {
+            engine.missed_query_fault().cloned()
+        } else {
+            let until = Instant::now() + Duration::from_secs(5);
+            while engine.in_flight.load(Ordering::Acquire) != 0 {
+                assert!(Instant::now() < until, "recognition did not settle");
+                thread::yield_now();
+            }
+            engine
+                .call("validate_observation", json!({"observation":observation}))
+                .err()
+        };
+        if behavior == Behavior::Fail {
+            let fault = fault.expect("terminal recognition fault");
+            assert_eq!(fault.category, "VisionFailed");
+            assert_eq!(fault.context["stage"], "template_recognition");
+        } else {
+            assert!(fault.is_none(), "{fault:?}");
+        }
+        assert_eq!(engine.finish()["physical_cleanup_confirmed"], true);
+        assert!(engine.handle_budget.reserve(engine.limits.handles).is_ok());
+    }
+}
+
+fn declare_template(engine: &mut Engine) {
     let source = mp::TemplateSource::new(mp::TemplateSourceRequest {
         id: mp::TemplateId::new("reviewed").unwrap(),
         encoding: mp::TemplateEncoding::Png,
@@ -687,9 +768,19 @@ fn template_no_match_is_historical_but_new_recognition_preserves_capture_termina
         .unwrap()
         .templates
         .insert("reviewed".into(), template);
+}
+
+fn template_request(observation: &Value) -> Value {
+    json!({"observation":observation,"kind":"template","asset":"reviewed",
+        "roi":{"x":0,"y":0,"width":8,"height":8}})
+}
+
+#[test]
+fn template_no_match_is_historical_but_new_recognition_preserves_capture_terminal_cause() {
+    let (mut engine, capture) = controlled(Arc::new(ControlledOcr::new(mp::PixelFormat::Rgba8)));
+    declare_template(&mut engine);
     let observation = engine.call("observe", json!({})).unwrap();
-    let request = json!({"observation":observation,"kind":"template","asset":"reviewed",
-        "roi":{"x":0,"y":0,"width":8,"height":8}});
+    let request = template_request(&observation);
     let historical = engine.call("recognize", request.clone()).unwrap();
     assert!(historical.is_null());
     capture.lose(capture.target());
@@ -1143,6 +1234,35 @@ fn only_positive_process_proof_refines_a_facade_target_loss() {
         }
         assert_eq!(engine.finish()["clean"], true);
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_delivered_scoped_query_fault_keeps_verified_exit_and_sdk_provenance() {
+    use super::super::lifetime::ProcessState;
+
+    let (mut engine, capture, observation) = controlled_native();
+    let scope = WorkflowScope::new(1, 0, Arc::clone(&engine.control), None);
+    let query = engine
+        .call_scoped("query", recognition(&observation), Some(&scope))
+        .unwrap();
+    capture.lose(capture.target());
+    script_process(&mut engine, Ok(ProcessState::Absent));
+    let fault = engine
+        .call_scoped(
+            "query_wait",
+            json!({"id":query["id"],"timeout_ms":5_000}),
+            Some(&scope),
+        )
+        .unwrap_err();
+    assert_eq!(fault.category, "TargetExited");
+    assert_eq!(fault.context["exit_reason"], "absent");
+    assert_eq!(fault.context["sdk_fault"]["category"], "TargetLost");
+    assert_eq!(
+        fault.context["sdk_fault"]["context"]["stage"],
+        "ocr_recognition"
+    );
+    assert_eq!(engine.finish()["physical_cleanup_confirmed"], true);
 }
 
 #[cfg(target_os = "macos")]

@@ -517,11 +517,33 @@ impl Host {
         self.close_admission();
         let mut first = lock(&self.inner.failure);
         if first.is_none() {
+            #[cfg(feature = "engine")]
+            let failure = self.missed_query_fault().cloned().unwrap_or(failure);
             *first = Some(failure);
         }
     }
 
+    #[cfg(feature = "engine")]
+    fn missed_query_fault(&self) -> Option<&Fault> {
+        self.inner.engine.get()?.missed_query_fault()
+    }
+
+    #[cfg(feature = "engine")]
+    pub(crate) fn retain_missed_query_fault(&self) -> Option<Fault> {
+        let missed = self.missed_query_fault()?;
+        let mut first = lock(&self.inner.failure);
+        let fault = first.get_or_insert_with(|| {
+            self.close_admission();
+            missed.clone()
+        });
+        Some(fault.clone())
+    }
+
     pub fn failure(&self) -> Option<Fault> {
+        #[cfg(feature = "engine")]
+        if let Some(failure) = self.retain_missed_query_fault() {
+            return Some(failure);
+        }
         let failure = lock(&self.inner.failure).clone();
         if failure.is_some() {
             return failure;
@@ -531,10 +553,8 @@ impl Host {
             .startup_link
             .get()
             .and_then(|link| link.failure());
-        if let Some(failure) = &failure {
-            self.fail(failure.clone());
-        }
-        failure
+        self.fail(failure?);
+        lock(&self.inner.failure).clone()
     }
 
     pub fn set_failure_stack(&self, stack: Option<String>) {

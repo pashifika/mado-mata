@@ -422,6 +422,16 @@ pub fn child() -> Result<bool, Fault> {
     // An emission error is secondary evidence, never an early return before
     // cleanup of accepted input, held keys, queued work, or native ownership.
     let mut cleanup = host.finish();
+    // A query may lose its caller before its worker returns. Finish joins the
+    // worker; its terminal cause is not a failure of physical cleanup.
+    #[cfg(feature = "engine")]
+    if primary.is_none()
+        && let Some(fault) = host.retain_missed_query_fault()
+    {
+        let mut fault = settled_primary(&control, &verdict, fault);
+        fault.bound_diagnostics();
+        primary = Some(fault);
+    }
     let mut observations = host.snapshot();
     observations["snapshot_stage"] = json!("post_cleanup");
     observations["workflow_entered"] = host.workflow_entered().into();
