@@ -13,6 +13,49 @@ fn plant(pixels: &mut [u8], x: usize, y: usize, patch: &[u8]) {
     }
 }
 
+fn replay_session(frames: Vec<mp::replay::ReplayFrame>) -> (mp::Engine, mp::Session) {
+    let source = mp::replay::ReplaySource::from_targets(vec![
+        mp::replay::ReplayTarget::new("template-matching", frames).unwrap(),
+    ])
+    .unwrap();
+    let facade = mp::replay_engine(mp::ReplayEngineRequest::new(source)).unwrap();
+    let operation = mp::OperationContext::new();
+    let targets = facade.discover(&operation).unwrap();
+    let session = facade
+        .open(targets[0].id(), &mp::OpenRequest::new(), &operation)
+        .unwrap();
+    (facade, session)
+}
+
+fn prepare_png(
+    facade: &mp::Engine,
+    extent: mp::PixelExtent,
+    color: png::ColorType,
+    pixels: &[u8],
+) -> mp::PreparedTemplate {
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, extent.width(), extent.height());
+        encoder.set_color(color);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(pixels).unwrap();
+        writer.finish().unwrap();
+    }
+    let source = mp::TemplateSource::new(mp::TemplateSourceRequest {
+        id: mp::TemplateId::new("reviewed").unwrap(),
+        encoding: mp::TemplateEncoding::Png,
+        extent,
+        space: mp::CoordinateSpace::CapturePixels,
+        defaults: mp::MatchDefaults::new(0.9, 8).unwrap(),
+        content: Arc::from(png),
+    })
+    .unwrap();
+    facade
+        .prepare_template(&source, &mp::OperationContext::new())
+        .unwrap()
+}
+
 fn replay(frames: Vec<Vec<u8>>, patch: &[u8]) -> Engine {
     let mut plan: Plan =
         serde_json::from_str(include_str!("../../../fixtures/manual-plan.json")).unwrap();
@@ -47,36 +90,14 @@ fn replay(frames: Vec<Vec<u8>>, patch: &[u8]) -> Engine {
             .unwrap()
         })
         .collect();
-    let source = mp::replay::ReplaySource::from_targets(vec![
-        mp::replay::ReplayTarget::new("template-matching", frames).unwrap(),
-    ])
-    .unwrap();
-    // The public replay factory wires the released SDK's real OpenCV matcher.
-    let facade = mp::replay_engine(mp::ReplayEngineRequest::new(source)).unwrap();
+    let (facade, session) = replay_session(frames);
     let operation = mp::OperationContext::new();
-    let targets = facade.discover(&operation).unwrap();
-    let session = facade
-        .open(targets[0].id(), &mp::OpenRequest::new(), &operation)
-        .unwrap();
-    let mut png = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut png, 4, 4);
-        encoder.set_color(png::ColorType::Grayscale);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().unwrap();
-        writer.write_image_data(patch).unwrap();
-        writer.finish().unwrap();
-    }
-    let source = mp::TemplateSource::new(mp::TemplateSourceRequest {
-        id: mp::TemplateId::new("reviewed").unwrap(),
-        encoding: mp::TemplateEncoding::Png,
-        extent: mp::PixelExtent::new(4, 4),
-        space: mp::CoordinateSpace::CapturePixels,
-        defaults: mp::MatchDefaults::new(0.9, 8).unwrap(),
-        content: Arc::from(png),
-    })
-    .unwrap();
-    let template = facade.prepare_template(&source, &operation).unwrap();
+    let template = prepare_png(
+        &facade,
+        mp::PixelExtent::new(4, 4),
+        png::ColorType::Grayscale,
+        patch,
+    );
     {
         let mut state = engine.lock().unwrap();
         state.session.take().unwrap().close(&operation).unwrap();
@@ -215,6 +236,77 @@ fn finish(engine: &Engine) {
     assert_eq!(engine.snapshot()["script_handles"], 0);
     assert!(engine.handle_budget.reserve(engine.limits.handles).is_ok());
     assert_eq!(engine.finish()["clean"], true);
+}
+
+#[test]
+fn observation_crop_finds_moved_patch_on_later_replay_frame() {
+    const R: [u8; 4] = [240, 10, 30, 255];
+    const G: [u8; 4] = [20, 210, 40, 255];
+    const B: [u8; 4] = [15, 35, 220, 255];
+    const ART: [[u8; 4]; 12] = [R, G, B, R, B, R, G, G, G, B, B, R];
+    let descriptor = mp::FrameDescriptor::new(
+        mp::PixelExtent::new(WIDTH, HEIGHT),
+        mp::PixelFormat::Bgra8,
+        72,
+    )
+    .unwrap();
+    let frame_at = |x: usize, y: usize, time| {
+        let mut bytes = vec![255; descriptor.byte_len()];
+        for (index, &[r, g, b, a]) in ART.iter().enumerate() {
+            let start = (y + index / 4) * descriptor.stride() + (x + index % 4) * 4;
+            bytes[start..start + 4].copy_from_slice(&[b, g, r, a]);
+        }
+        mp::replay::ReplayFrame::new(
+            descriptor,
+            mp::MonotonicInstant::from_origin(Duration::from_nanos(time)),
+            mp::Continuity::Continuous,
+            None,
+            bytes.into_boxed_slice(),
+        )
+        .unwrap()
+    };
+    let (facade, session) = replay_session(vec![frame_at(2, 1, 0), frame_at(10, 7, 1)]);
+    let operation = mp::OperationContext::new();
+    let rect = |x, y, w, h| {
+        mp::Rect::from_origin_size(mp::CoordinateSpace::CapturePixels, x, y, w, h).unwrap()
+    };
+    let (stamp, template) = {
+        let frame = session
+            .acquire_frame(&mp::FrameRequest::latest(), &operation)
+            .unwrap();
+        let crop = session
+            .map_region(
+                &frame,
+                rect(2., 1., 4., 3.),
+                mp::ClipPolicy::Reject,
+                mp::PixelFormat::Rgba8,
+                &operation,
+            )
+            .unwrap();
+        let extent = crop.descriptor().extent();
+        assert_eq!(extent, mp::PixelExtent::new(4, 3));
+        assert_eq!(crop.bytes(), ART.as_flattened());
+        (
+            frame.stamp(),
+            prepare_png(&facade, extent, png::ColorType::Rgba, crop.bytes()),
+        )
+    };
+    let later = session
+        .acquire_frame(&mp::FrameRequest::newer_than(stamp), &operation)
+        .unwrap();
+    let view = later
+        .view(rect(6., 4., 10., 8.), mp::ClipPolicy::Reject)
+        .unwrap();
+    let request = mp::FindRequest::view(
+        &view,
+        &template,
+        mp::MatchOptions::from_defaults(template.defaults()),
+    )
+    .unwrap();
+    let outcome = session.find_template(&request, &operation).unwrap();
+    assert_eq!(outcome.result().stamp(), later.stamp());
+    assert_eq!(bounds(&outcome), [[10, 7, 4, 3]]);
+    session.close(&operation).unwrap();
 }
 
 #[test]

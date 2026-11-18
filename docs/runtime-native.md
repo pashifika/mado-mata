@@ -199,6 +199,12 @@ They neither discover a live target nor capture/send native input, and need no
 game or OCR model installation. They are separate from the ordinary full CI
 command and do not qualify a native OS/workload.
 
+For the synthetic observation-crop probe alone, append
+`observation_crop_finds_moved_patch_on_later_replay_frame` after `--lib` above.
+It prepares a PNG from a padded BGRA replay frame's 4 × 3 region and checks
+the moved patch's capture-pixel bounds on a later frame. This checks pixel
+layout and coordinates, not recognition accuracy on game images.
+
 ### Accepted OCR content
 
 The pinned SDK [model catalog](https://github.com/pashifika/mado-pilot/blob/a97d8fdc5a197f31a477603d689569e4214846bc/crates/automation/ocr/resources/model-catalog.json)
