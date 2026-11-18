@@ -2294,8 +2294,8 @@ the selected package does not delete other saved package settings.
 
 ### Share settings between Tabs
 
-Select a saved profile to export it. Review the complete code before copying:
-it contains the saved values with defaults applied, not unsaved form edits.
+Select a saved profile and choose **Share code**. Review the complete code
+before copying: it contains the saved values with defaults applied, not unsaved form edits.
 The saved display name is optional and excluded by default. The code is
 readable text, not encryption. Check free-text options and the name for private
 information before sharing. Cancel leaves the clipboard and profile unchanged.
@@ -2307,8 +2307,8 @@ to `24`. Its review should show `24` and `priorities` in `["ocr","template"]`
 order. No local profile ID, package location, or execution permission travels
 with the code.
 
-In the receiving Tab, inspect the same package, paste the code, and choose
-**Decode**. Both package ID and schema identity must match exactly. Decode
+In the receiving Tab, inspect the same package and choose **Paste code**. Paste
+the text and choose **Decode**. Both package ID and schema identity must match exactly. Decode
 shows the effective settings without changing your edits. **Use as new draft**
 replaces those edits but does not save or start anything. Choose **Save new
 profile** to create a separate local record, even if its name matches an

@@ -1,5 +1,5 @@
 import {editDraft} from './workspace.ts';
-import type {Bound, Derived} from './workspace.ts';
+import type {Bound, Derived, Workspace} from './workspace.ts';
 import type {Json, Profile} from './types.ts';
 
 // Host projection of one decoded `MMP1:` code; `name` is only a suggestion.
@@ -187,9 +187,12 @@ export class ProfileShareSession {
 }
 
 // An unbound draft of this Tab only: with no saved ID, Save creates a new profile even under a matching name.
-// Null when the draft changed since review or the preview belongs to another package or schema.
-export function adoptSharedProfile(bound:Bound, shared:SharedProfile, reviewed:DraftStamp):Bound|null {
-  if (!sameDraft({draftRevision:bound.draftRevision, selectedId:bound.selectedId, name:bound.name}, reviewed)
-    || shared.package_id !== bound.package.package_id || shared.schema_identity !== bound.package.schema_identity) return null;
-  return editDraft({...bound, selectedId:null, preset:'', name:shared.name ?? ''}, structuredClone(shared.values));
+// Unchanged when the draft changed since review or the preview belongs to another package or schema; existing
+// faults and recovery stay visible.
+export function adoptSharedProfile(workspace:Workspace, shared:SharedProfile, reviewed:DraftStamp):Workspace {
+  const bound = workspace.bound;
+  if (!bound || !sameDraft({draftRevision:bound.draftRevision, selectedId:bound.selectedId, name:bound.name}, reviewed)
+    || shared.package_id !== bound.package.package_id || shared.schema_identity !== bound.package.schema_identity) return workspace;
+  return {...workspace, notice:{key:'sharedDraftReady'},
+    bound:editDraft({...bound, selectedId:null, preset:'', name:shared.name ?? ''}, structuredClone(shared.values))};
 }

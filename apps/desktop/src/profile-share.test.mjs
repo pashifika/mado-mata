@@ -166,13 +166,15 @@ test('refused, cancelled and stale decodes leave nothing to use',async()=>{
 });
 
 test('a reviewed code replaces only the reviewed draft as an unbound draft, and Save new profile keeps the same-name record',async()=>{
-  let tab=editedReceiver();
-  const before=tab.bound;
-  const facts=deriveBound(before,null);
-  assert.equal(before.touched&&facts.dirty,true,'Use is announced as discarding unsaved edits');
-  const pasted='  MMP1:{"package_id":"pkg"}\n';
-  const shared={package_id:'pkg',schema_identity:'schema-1',name:'Arena',
-    values:{priority:['ocr','template'],recognition:{roi:{x:40,y:8}},note:'sender text'}};
+  // An unrelated fault stays visible through the adoption.
+  const rejected={category:'ProfileRejected',message:'Some saved profiles are incompatible; their files were preserved',context:null};
+  let tab={...editedReceiver(),error:rejected};
+  const before=tab;
+  const facts=deriveBound(before.bound,null);
+  assert.equal(before.bound.touched&&facts.dirty,true,'Use is announced as discarding unsaved edits');
+  const shared={package_id:'pkg',schema_identity:'schema-1',
+    values:{priority:['ocr','template'],recognition:{roi:{x:40,y:8}},note:'sender text'},name:'Arena'};
+  const pasted=`MMP1:${JSON.stringify(shared)}\n`;
   const {session,view,calls,replies}=harness(contextOf(tab));
   session.openImport();
   session.edit(pasted);
@@ -180,11 +182,11 @@ test('a reviewed code replaces only the reviewed draft as an unbound draft, and 
   replies[0].resolve(shared);
   await decoding;
   assert.deepEqual(view.state.import.preview,shared);
-  assert.equal(tab.bound,before,'decoding leaves the draft alone');
+  assert.equal(tab,before,'decoding leaves the Tab alone');
 
   const taken=session.take();
   assert.equal(view.state.import,null);
-  assert.deepEqual(calls,[{kind:'decode',code:pasted}],'the original text is decoded; nothing is saved or started');
+  assert.deepEqual(calls,[{kind:'decode',code:pasted}],'the pasted text is forwarded unchanged');
 
   // Use is refused when the draft changed after review, even without a draft-counter change.
   for (const [scenario,changed] of [
@@ -194,15 +196,18 @@ test('a reviewed code replaces only the reviewed draft as an unbound draft, and 
     ['saved as another profile',updateBound(tab,bound=>applySavedProfile(bound,profile('P3','Arena',bound.draft),bound.draftRevision))],
     ['selected profile deleted',applyCatalog(tab,{profiles:[],profiles_error:null})],
   ]) {
-    assert.equal(adoptSharedProfile(changed.bound,taken.shared,taken.reviewed),null,scenario);
+    assert.equal(adoptSharedProfile(changed,taken.shared,taken.reviewed),changed,scenario);
   }
-  assert.equal(adoptSharedProfile(before,{...shared,schema_identity:'schema-0'},taken.reviewed),null,'another schema is never adopted');
+  assert.equal(adoptSharedProfile(before,{...shared,schema_identity:'schema-0'},taken.reviewed),before,'another schema is never adopted');
 
-  [tab]=applyIfCurrent([tab],{id:'a',revision:1},item=>({...item,bound:adoptSharedProfile(item.bound,taken.shared,taken.reviewed)}));
+  [tab]=applyIfCurrent([tab],{id:'a',revision:1},item=>adoptSharedProfile(item,taken.shared,taken.reviewed));
   assert.equal(tab.bound.selectedId,null);
   assert.equal(tab.bound.name,'Arena');
   assert.deepEqual(tab.bound.draft,shared.values);
-  assert.equal(tab.bound.profiles,before.profiles,'the saved catalog is untouched');
+  assert.equal(tab.bound.profiles,before.bound.profiles,'the saved catalog is untouched');
+  assert.equal(tab.error,rejected);
+  assert.equal(tab.recovery,before.recovery);
+  assert.deepEqual(tab.notice,{key:'sharedDraftReady'});
   const adopted=deriveBound(tab.bound,null);
   assert.equal(adopted.selectedProfile,undefined);
   assert.deepEqual(adopted.parsed.values,shared.values);

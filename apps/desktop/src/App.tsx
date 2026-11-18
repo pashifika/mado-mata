@@ -916,10 +916,7 @@ export default function App() {
         },
         adopt: (shared, reviewed) => {
           if (locked) return;
-          setWorkspaces(list => applyIfCurrent(list, origin, item => {
-            const next = item.bound && adoptSharedProfile(item.bound, shared, reviewed);
-            return next ? {...item, bound: next, error: null, notice: {key: 'sharedDraftReady'}} : item;
-          }));
+          setWorkspaces(list => applyIfCurrent(list, origin, item => adoptSharedProfile(item, shared, reviewed)));
         },
       },
       // A saved installed release reinspects by its identity unless the operator typed another directory.
