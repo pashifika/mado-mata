@@ -4,8 +4,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Write;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub const ENGINE_REVISION: &str = "a97d8fdc5a197f31a477603d689569e4214846bc";
@@ -478,6 +478,7 @@ pub struct Control {
     pub stop_us: AtomicU64,
     pub closed_us: AtomicU64,
     cause: AtomicU8,
+    cancel_lower_bound: OnceLock<Instant>,
     // One outgoing successor: unscheduled, queued, admitted, or closed.
     transition: AtomicU8,
     started: Instant,
@@ -529,6 +530,7 @@ impl Control {
             stop_us: AtomicU64::new(0),
             closed_us: AtomicU64::new(0),
             cause: AtomicU8::new(0),
+            cancel_lower_bound: OnceLock::new(),
             transition: AtomicU8::new(0),
             started,
             deadline,
@@ -549,7 +551,42 @@ impl Control {
             .admission_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if reason == StopReason::Cancelled
+            && self.owner.is_none()
+            && self.cause.load(Ordering::Acquire) & 3 == 0
+        {
+            // Sample before latching. A later observation (or receipt) is not
+            // evidence that the reservation accepted Stop after entry return.
+            let _ = self.cancel_lower_bound.set(self.now());
+        }
         self.latch(Self::cause_bits(reason));
+    }
+
+    pub(crate) fn authority_cancel_lower_bound(&self) -> Option<Instant> {
+        self.owner
+            .as_deref()
+            .unwrap_or(self)
+            .cancel_lower_bound
+            .get()
+            .copied()
+    }
+
+    /// The deadline that produced the latched Timeout, not an earlier deadline
+    /// still mirrored from a previous phase.
+    pub(crate) fn latched_timeout_deadline(&self) -> Option<Instant> {
+        let cause = self.cause.load(Ordering::Acquire);
+        if cause & 3 != 2 {
+            return None;
+        }
+        if cause & PHASE_TIMEOUT != 0 {
+            self.native_clock
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .and_then(|clock| clock.deadline)
+        } else {
+            self.deadline
+        }
     }
 
     /// The supervising process accepted this Stop for the same operation. Its

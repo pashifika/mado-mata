@@ -539,6 +539,95 @@ fn child_startup_fault(
     }))
 }
 
+fn native_transition_fields(
+    value: &Value,
+    native: bool,
+    settled: bool,
+    continuous: bool,
+) -> Result<(u8, Option<Instant>), Fault> {
+    if !native || settled {
+        return Err(Fault::new(
+            "Authority",
+            "Native transition outside admitted operation",
+        ));
+    }
+    let phase = value["phase"]
+        .as_u64()
+        .and_then(|phase| u8::try_from(phase).ok())
+        .ok_or_else(|| Fault::new("Transport", "invalid Native phase"))?;
+    let deadline: Option<SharedDeadline> = serde_json::from_value(
+        value
+            .get("deadline")
+            .cloned()
+            .ok_or_else(|| Fault::new("Transport", "Native transition lacks its deadline"))?,
+    )
+    .map_err(|error| Fault::new("Transport", error.to_string()))?;
+    if deadline.is_none() != (phase == 2 && continuous) {
+        return Err(Fault::new(
+            "Transport",
+            "Native transition has incompatible stage deadline",
+        ));
+    }
+    Ok((phase, deadline.map(SharedDeadline::instant).transpose()?))
+}
+
+#[derive(Default)]
+struct ContinuousMirror {
+    // Wire order still advances after the local clock closes admission.
+    phase: u8,
+    stop: Option<(StopReason, Option<SharedDeadline>)>,
+}
+
+impl ContinuousMirror {
+    fn retain_stop(&mut self, control: &Control, overall: Option<SharedDeadline>) -> bool {
+        if self.stop.is_none()
+            && let Some(cause) = control.stop_reason()
+        {
+            let boundary = match cause {
+                StopReason::Cancelled => control.authority_cancel_lower_bound(),
+                StopReason::Timeout => control.latched_timeout_deadline(),
+            };
+            // Preserve the original wire bound for an overall Timeout.
+            let boundary = if boundary == control.outer_deadline() {
+                overall
+            } else {
+                boundary.and_then(|at| SharedDeadline::from_instant(at).ok())
+            };
+            self.stop = Some((cause, boundary));
+        }
+        self.stop.is_some()
+    }
+
+    fn transition(
+        &mut self,
+        value: &Value,
+        settled: bool,
+        control: &Control,
+        overall: Option<SharedDeadline>,
+    ) -> Result<(), Fault> {
+        let (phase, deadline) = native_transition_fields(value, true, settled, true)?;
+        if phase != self.phase + 1 || phase > 2 {
+            return Err(Fault::new(
+                "Transport",
+                "invalid Native transition sequence",
+            ));
+        }
+        self.phase = phase;
+        match control.native_transition(phase, deadline) {
+            Ok(_) => Ok(()),
+            // The child already made this transition. A Stop that prevents
+            // mirroring it closes parent admission, not the evidence stream.
+            Err(fault)
+                if matches!(fault.category.as_str(), "Cancelled" | "Timeout")
+                    && self.retain_stop(control, overall) =>
+            {
+                Ok(())
+            }
+            Err(fault) => Err(fault),
+        }
+    }
+}
+
 fn supervise(
     plan: &Plan,
     inventory: &Inventory,
@@ -552,11 +641,11 @@ fn supervise(
     preparation: Option<&super::PreparedExecution<'_>>,
 ) -> Result<RunRecord, Fault> {
     plan.validate()?;
-    if plan
+    let mut continuous = plan
         .native_budgets
-        .is_some_and(|budgets| budgets.continuous())
-        && preparation.is_none()
-    {
+        .filter(|budgets| budgets.continuous())
+        .map(|_| ContinuousMirror::default());
+    if continuous.is_some() && preparation.is_none() {
         return Err(Fault::new(
             "NativeRefused",
             "Continuous Native requires Desktop reservation",
@@ -693,7 +782,6 @@ fn supervise(
     let mut protocol_fault = None;
     let mut forced = false;
     let mut stop_sent_at = None;
-    let mut continuous_stop = None;
     let mut startup_us = None;
     let mut child_build = None;
     let mut system = System::new();
@@ -739,38 +827,24 @@ fn supervise(
                         continue;
                     }
                     if value["event"] == "NativeTransition" {
-                        let result = (|| {
-                            if plan.lane != "native" || entry_settled.is_some() {
-                                return Err(Fault::new(
-                                    "Authority",
-                                    "Native transition outside admitted operation",
-                                ));
-                            }
-                            let phase = value["phase"]
-                                .as_u64()
-                                .and_then(|phase| u8::try_from(phase).ok())
-                                .ok_or_else(|| Fault::new("Transport", "invalid Native phase"))?;
-                            let deadline: Option<SharedDeadline> = serde_json::from_value(
-                                value.get("deadline").cloned().ok_or_else(|| {
-                                    Fault::new("Transport", "Native transition lacks its deadline")
-                                })?,
+                        let result = if let Some(mirror) = &mut continuous {
+                            mirror.transition(
+                                &value,
+                                entry_settled.is_some(),
+                                owner_control,
+                                invocation.deadline,
                             )
-                            .map_err(|error| Fault::new("Transport", error.to_string()))?;
-                            if deadline.is_none()
-                                != (phase == 2
-                                    && plan.native_budgets.is_some_and(|b| b.continuous()))
-                            {
-                                return Err(Fault::new(
-                                    "Transport",
-                                    "Native transition has incompatible stage deadline",
-                                ));
-                            }
-                            owner_control.native_transition(
-                                phase,
-                                deadline.map(SharedDeadline::instant).transpose()?,
-                            )?;
-                            Ok(())
-                        })();
+                        } else {
+                            native_transition_fields(
+                                &value,
+                                plan.lane == "native",
+                                entry_settled.is_some(),
+                                false,
+                            )
+                            .and_then(|(phase, deadline)| {
+                                owner_control.native_transition(phase, deadline).map(|_| ())
+                            })
+                        };
                         if let Err(fault) = result {
                             protocol_fault = Some(fault);
                         }
@@ -879,14 +953,10 @@ fn supervise(
                 owner_control.stop(reason);
                 if entry_settled.is_none()
                     && protocol_fault.is_none()
-                    && plan
-                        .native_budgets
-                        .is_some_and(|budgets| budgets.continuous())
+                    && let Some(mirror) = &mut continuous
                 {
-                    // The watchdog may have to contain a blocked call before
-                    // the child can publish a primary. Keep the owner's cause,
-                    // without superseding an independently observed host fault.
-                    continuous_stop = owner_control.stop_reason();
+                    // A blocked child may not emit a primary before containment.
+                    mirror.retain_stop(owner_control, invocation.deadline);
                 }
                 let _ = sender.try_send(json!({"command":reason,"run":run,"attempt":attempt}));
             }
@@ -965,6 +1035,7 @@ fn supervise(
         protocol_fault.get_or_insert(error);
     }
     let _ = reader.join();
+    let mut entry_settled = entry_settled.is_some();
     while let Ok(message) = receiver.try_recv() {
         match message {
             Ok(mut value) if value["run"] == run && value["attempt"] == attempt => {
@@ -972,7 +1043,15 @@ fn supervise(
                 if value["event"] == "TargetProbe" {
                     continue;
                 }
+                if value["event"] == "NativeTransition"
+                    && let Some(mirror) = &mut continuous
+                    && let Err(fault) =
+                        mirror.transition(&value, entry_settled, owner_control, invocation.deadline)
+                {
+                    protocol_fault = Some(fault);
+                }
                 if value["event"] == "EntrySettled" || value["event"] == "Terminal" {
+                    entry_settled = true;
                     if pending_probe.is_some() {
                         owner_control.cancel();
                     }
@@ -1014,6 +1093,7 @@ fn supervise(
             Fault::new("Transport", "terminal evidence lacks child build identity")
         });
     }
+    let continuous_stop = continuous.and_then(|mirror| mirror.stop);
     let terminal_accounted = terminal
         .as_ref()
         .is_some_and(|terminal| terminal["entry_emission_failure"].is_null())
@@ -1022,10 +1102,20 @@ fn supervise(
             .any(|value| value["event"] == "StopRequested")
         && protocol_fault.is_none()
         && preparation_fault.is_none()
+        && continuous_stop.is_none()
         && stop_sent_at.is_none()
         && exit.success()
         && !forced;
+    let received_terminal = terminal.is_some();
     let terminal = settled_evidence(terminal, &milestones);
+    let preparation_clean = preparation_fault
+        .as_ref()
+        .is_none_or(|fault| fault.context["native_cleanup"] != "unverified");
+    let clean = preparation_clean
+        && child_build.is_some()
+        && terminal["cleanup"]["clean"] == true
+        && exit.success()
+        && !forced;
     let primary = if child_build.is_none() {
         Some(child_startup_fault(
             exit.code(),
@@ -1040,16 +1130,29 @@ fn supervise(
             forced || exit.code() == Some(124),
         )
         .or_else(|| preparation_fault.clone())
-        .or_else(|| continuous_stop.and_then(|_| owner_control.check().err()))
+        .or_else(|| {
+            let (_, boundary) = continuous_stop?;
+            // An authenticated clean return can precede Stop even when its
+            // frame was still in transit. Keep the cause when timing or
+            // physical settlement is unverified.
+            if received_terminal
+                && clean
+                && terminal["entry_outcome"] == "Returned"
+                && terminal["workflow_finished_clock_us"]
+                    .as_u64()
+                    .is_some_and(|finished| {
+                        boundary.is_some_and(|at| finished < at.clock_us())
+                            && invocation
+                                .deadline
+                                .is_none_or(|at| finished < at.clock_us())
+                    })
+            {
+                None
+            } else {
+                owner_control.check().err()
+            }
+        })
     };
-    let preparation_clean = preparation_fault
-        .as_ref()
-        .is_none_or(|fault| fault.context["native_cleanup"] != "unverified");
-    let clean = preparation_clean
-        && child_build.is_some()
-        && terminal["cleanup"]["clean"] == true
-        && exit.success()
-        && !forced;
     let status = if primary.as_ref().is_some_and(|e| e.category == "Blocked") {
         "BLOCKED"
     } else if clean && primary.is_none() {
@@ -1113,7 +1216,7 @@ fn supervise(
     observations.insert("terminal_accounted".into(), json!(terminal_accounted));
     observations.insert("child_reaped".into(), json!(true));
     observations.insert("startup_settled".into(), json!(preparation_fault.is_none()));
-    if let Some(cause) = continuous_stop {
+    if let Some((cause, _)) = continuous_stop {
         observations.insert("supervisor_stop".into(), json!(cause));
     }
     if let Some(fault) = preparation_fault {

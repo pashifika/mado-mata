@@ -16,6 +16,10 @@ use std::time::{Duration, Instant};
 pub(super) struct SharedDeadline(u64);
 
 impl SharedDeadline {
+    pub(super) fn clock_us(self) -> u64 {
+        self.0
+    }
+
     /// Supervisor side. Rounds down, so the wire value never passes `deadline`.
     pub(super) fn from_instant(deadline: Instant) -> Result<Self, Fault> {
         // Shared clock first: the later Instant read only shrinks the remainder.
