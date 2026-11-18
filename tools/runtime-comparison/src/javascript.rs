@@ -27,8 +27,6 @@ const VM_WORK_BYTES: usize = 1024;
 const JOB_SLICE_LIMIT: usize = 256;
 const OUTSTANDING_PROMISE_LIMIT: usize = 1024;
 const REJECTION_LIMIT: usize = 64;
-const DIAGNOSTIC_MESSAGE_BYTES: usize = 4096;
-const DIAGNOSTIC_STACK_BYTES: usize = 16_384;
 
 type PendingPromises = HashSet<Persistent<Value<'static>>>;
 
@@ -117,17 +115,6 @@ impl VmWork {
             }
         }
         None
-    }
-}
-
-fn truncate_diagnostic(text: &mut String, limit: usize) {
-    if text.len() > limit {
-        let mut end = limit;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-        text.shrink_to_fit();
     }
 }
 
@@ -302,19 +289,14 @@ fn annotate(
     stage: &str,
     stack: Option<String>,
 ) -> Fault {
-    truncate_diagnostic(&mut fault.message, DIAGNOSTIC_MESSAGE_BYTES);
     if !fault.context.is_object() {
         fault.context = json!({"cause":fault.context});
     }
     fault.context["inventory"] = json!(inventory.identity);
-    if let Some(mut stack) = stack {
-        truncate_diagnostic(&mut stack, DIAGNOSTIC_STACK_BYTES);
-        if fault.context.get("stack").is_none() {
-            fault.context["stack"] = json!(stack);
-        }
-    }
-    if let Some(Json::String(stack)) = fault.context.get_mut("stack") {
-        truncate_diagnostic(stack, DIAGNOSTIC_STACK_BYTES);
+    if let Some(stack) = stack
+        && fault.context.get("stack").is_none()
+    {
+        fault.context["stack"] = Json::String(stack);
     }
     let origin = fault.context["stack"].as_str().and_then(|stack| {
         stack
@@ -752,13 +734,17 @@ fn run_with_parser(
                         )
                     })
                     .unwrap_or_else(|| (format!("Rejected promise: {:?}", reason.type_of()), None));
-                let fault = annotate(
+                let mut fault = annotate(
                     Fault::new("Script", message),
                     &rejection_inventory,
                     "<promise>",
                     "job",
                     stack,
                 );
+                if rejection_work.continuous_lifecycle {
+                    fault.bound_diagnostics();
+                    fault.message.shrink_to_fit();
+                }
                 rejected.borrow_mut().push((promise, fault));
             } else {
                 rejection_halted.store(true, Ordering::Release);
@@ -898,8 +884,7 @@ fn run_with_parser(
     let mut diagnostic = json!({
         "runtime":"rquickjs 0.14.0", "import_parser":parser, "cycles":"ECMAScript live bindings",
         "detached_jobs":"discarded at entry settlement", "promises_created":work.promises.get(),
-        "jobs_executed":jobs, "diagnostic_message_bytes":DIAGNOSTIC_MESSAGE_BYTES,
-        "diagnostic_stack_bytes":DIAGNOSTIC_STACK_BYTES,
+        "jobs_executed":jobs,
     });
     if work.continuous.get() {
         diagnostic["promise_slice_limit"] = json!(work_limit);

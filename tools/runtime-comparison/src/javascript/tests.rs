@@ -378,8 +378,15 @@ fn continuous_entry_settlement_discards_detached_jobs_and_bounds_diagnostics() {
         if let Some(category) = expected {
             let fault = result.unwrap_err();
             assert_eq!(fault.category, category);
-            assert_eq!(fault.message.len(), 4096);
-            assert!(fault.context["stack"].as_str().unwrap().len() <= 16_384);
+            let truncation = &fault.context["diagnostic_truncation"];
+            assert_eq!(
+                fault.message.len(),
+                truncation["field_byte_limit"].as_u64().unwrap() as usize
+            );
+            assert_eq!(
+                truncation["message_bytes_dropped"],
+                20_000 - fault.message.len()
+            );
         } else {
             let diagnostic = result.unwrap().source_diagnostic.unwrap();
             assert_eq!(diagnostic["outstanding_promises_at_entry_settlement"], 1);
