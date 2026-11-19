@@ -242,15 +242,15 @@ function settleOnce(ctx: MadoWorkflowContext, id: string): MadoReceipt {
   }
 }
 
-// A strictly newer compatible frame shows the act catalog.
-function actsShown(ctx: MadoWorkflowContext, before: MadoObservation): boolean {
+// Observe through the menu animation without repeating the click.
+export function confirmStoryPage(ctx: MadoWorkflowContext, before: MadoObservation, expected: "acts" | "fork"): boolean {
   try {
     for (let probe = 0; probe < confirmProbes; probe++) {
       ctx.call("wait", { duration_ms: probeDelayMs });
       const after = ctx.call("observe", {});
       try {
         if (!newer(before, after)) continue;
-        if (storyPage(ctx, after)?.kind === "acts") return true;
+        if (storyPage(ctx, after)?.kind === expected) return true;
       } finally {
         ctx.call("release", { id: after.id });
       }
@@ -288,7 +288,7 @@ export function story(ctx: MadoWorkflowContext, navigate: boolean): Outcome {
     if (!submittedClick(receipt)) {
       return { kind: "handoff", page: "story-fork", reason: "Story: open-story click did not settle completely (" + receipt.status + "); not retried." };
     }
-    return actsShown(ctx, before)
+    return confirmStoryPage(ctx, before, "acts")
       ? { kind: "progressed", page: "story-acts", action: "Story: act catalog opened; choose an act manually." }
       : { kind: "handoff", page: "story-fork", reason: "Story: act catalog not confirmed after one click; not retried." };
   } finally {

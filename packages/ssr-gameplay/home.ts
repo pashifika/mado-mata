@@ -1,5 +1,5 @@
-import { storyPage, type Outcome } from "./progression.js";
-import { newer, submittedClick } from "./screen.js";
+import { confirmStoryPage, type Outcome } from "./progression.js";
+import { submittedClick } from "./screen.js";
 
 const width = 2102, height = 1640;
 const basis: MadoRecognitionBasis = { frame_width: width, frame_height: height,
@@ -35,13 +35,8 @@ export function openStory(ctx: MadoWorkflowContext, navigate: boolean): Outcome 
         return handoff("Home: Story click did not settle completely; no retry.");
       }
     } finally { ctx.call("release", { id: sequence.id }); }
-    ctx.call("wait", { duration_ms: 800 });
-    const after = ctx.call("observe", {});
-    try {
-      if (newer(before, after) && storyPage(ctx, after)?.kind === "fork") {
-        return { kind: "progressed", page: "story-fork", action: "opened Story from home" };
-      }
-      return handoff("Home: Story fork not confirmed on a newer frame; no retry.");
-    } finally { ctx.call("release", { id: after.id }); }
+    return confirmStoryPage(ctx, before, "fork")
+      ? { kind: "progressed", page: "story-fork", action: "opened Story from home" }
+      : handoff("Home: Story fork not confirmed on a newer frame; no retry.");
   } finally { ctx.call("release", { id: before.id }); }
 }
