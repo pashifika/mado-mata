@@ -168,6 +168,7 @@ def node_tools(root):
 def check_runtime(root, results_directory, node, npm):
     """Exercise the controlled runtime without native authority."""
     run([npm, "test", "--prefix", "integrations/omp"], root)
+    run([node, "--test", "packages/tests/ssr-gameplay.test.mjs"], root)
     compiler = root / RUNTIME_ROOT / "compiler"
     run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], compiler)
     run([npm, "run", "self-check"], compiler)

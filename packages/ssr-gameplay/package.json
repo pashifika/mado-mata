@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "package_id": "ssr-gameplay",
+  "runtime": "typescript",
+  "sdk": "mado-host-v1",
+  "entry_contract": "ready-string-v1",
+  "entries": {
+    "readiness": {"module": "main.ts", "function": "readiness"},
+    "workflow": {"module": "main.ts", "function": "workflow"}
+  },
+  "sources": ["main.ts", "home.ts", "screen.ts", "hand.ts", "sortie.ts", "progression.ts"],
+  "schema": "schema.json",
+  "profiles": {"default": "profiles/default.json"},
+  "target": {"id": "ssr", "macos": {"bundle_id": "com.smilegate.chaoszero.stove.ios"}},
+  "assets": {},
+  "source_maps": {},
+  "dependencies": {}
+}

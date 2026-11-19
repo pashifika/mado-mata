@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add the [SSR gameplay Script](docs/ssr-gameplay.md) with ordered card and
+  removal recommendations, opt-in Story navigation and manual stage handoff.
+
 - Add a continuous Workflow choice to ordinary Desktop Native Start and scoped
   JS/TS deadlines for helpers. Finite review remains the default. Continuous
   review replaces lifetime credits with paced, bounded work; it does not grant

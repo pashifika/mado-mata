@@ -243,6 +243,8 @@ The full check has these responsibilities:
 - Exercise accepted/refused branch routes, malformed metadata, repository-policy
   failures, and gate outcomes through behavioral tests.
 - Install and check the trusted TypeScript compiler with package scripts disabled.
+- Run the [SSR Script](ssr-gameplay.md) policy tests, controlled execution and
+  Desktop saved-package validation/profile transfer without game data.
 - Run the checkout-owned OMP adapter tests without installing OMP or private
   plugins. These exercise registration/schema compatibility, explicit instance/
   owner selection, cancellation, session teardown, notice continuation and

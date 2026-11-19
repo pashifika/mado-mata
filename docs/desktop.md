@@ -8,6 +8,9 @@ Controlled runs need no OCR installation. Recorded replay uses real engine
 OCR/template recognition over explicitly selected, previously authorized frames.
 Both execution lanes retain the **controlled, non-native input sink**.
 
+The checkout includes an [SSR gameplay Script](ssr-gameplay.md) with ordered
+card recommendations, optional Story navigation and explicit manual handoffs.
+
 Recognition has a separate explicit, read-only native window acquisition path.
 It requires an authorized target and the fixed engine child; opening the editor
 does not capture, initialize OCR, or request permissions. Separately reviewed

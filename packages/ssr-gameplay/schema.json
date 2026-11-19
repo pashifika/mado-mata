@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode", "desktopStartup", "cardPriority", "excludedCards", "playMagneticField", "navigateStory", "removal"],
+  "properties": {
+    "mode": {"type": "string", "enum": ["sortie", "chaos", "story"], "default": "sortie"},
+    "desktopStartup": {"type": "boolean", "default": false},
+    "cardPriority": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 128}, "default": []},
+    "excludedCards": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 128}, "default": []},
+    "playMagneticField": {"type": "boolean", "default": false},
+    "navigateStory": {"type": "boolean", "default": false},
+    "removal": {
+      "type": "object", "additionalProperties": false, "required": ["priority", "preferBasic"],
+      "properties": {
+        "priority": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+        "preferBasic": {"type": "boolean"}
+      },
+      "default": {"priority": [], "preferBasic": false}
+    }
+  }
+}

@@ -66,6 +66,52 @@ fn saved_typescript_settings_round_trip_in_both_orders_without_writes() {
 }
 
 #[test]
+fn ssr_package_validates_and_shares_ordered_profile_settings_between_tabs() {
+    let fixture = Fixture::new();
+    let app = &fixture.application;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .unwrap()
+        .join("packages/ssr-gameplay");
+    let workspace = app.create_workspace("edit", "Edit").unwrap();
+    let editor = app.authoring_open(&view_ref(&workspace), &path).unwrap();
+    let validation = app.authoring_validate(&editor.owner, &editor.revision).unwrap();
+    assert!(validation.valid, "{:?}", validation.diagnostics);
+    app.authoring_exit(&editor.owner).unwrap();
+
+    let sender = workspace_ref(&inspect_named(app, "sender", &path).unwrap());
+    let receiver = workspace_ref(&inspect_named(app, "receiver", &path).unwrap());
+    let values = json!({"mode":"sortie","cardPriority":["Beta","Alpha"],"excludedCards":["Beta"]});
+    let saved = app.save_profile(&sender, None, "Battle", values).unwrap();
+    let code = app.export_profile_share_code(&sender, &saved.id, false).unwrap();
+    let preview = app.decode_profile_share_code(&receiver, &code).unwrap();
+    let imported = app.save_profile(&receiver, None, "Imported", preview.values).unwrap();
+    assert_eq!(imported.values["mode"], "sortie");
+    assert_eq!(imported.values["cardPriority"], json!(["Beta", "Alpha"]));
+    assert_eq!(imported.values["excludedCards"], json!(["Beta"]));
+    assert_ne!(imported.id, saved.id);
+
+    let decision = std::process::Command::new("node")
+        .current_dir(path.parent().unwrap())
+        .args(["--input-type=module", "--eval", r#"
+          import { chooseHand } from './ssr-gameplay/hand.ts';
+          import { hand } from './tests/hand-fixture.mjs';
+          const scan = hand();
+          console.log(JSON.stringify(process.argv.slice(1).map(arg => {
+            const p = JSON.parse(arg);
+            return chooseHand(scan, p.cardPriority, p.excludedCards).title.text;
+          })));
+        "#])
+        .arg(saved.values.to_string())
+        .arg(imported.values.to_string())
+        .output()
+        .unwrap();
+    assert!(decision.status.success(), "{}", String::from_utf8_lossy(&decision.stderr));
+    assert_eq!(serde_json::from_slice::<Value>(&decision.stdout).unwrap(), json!(["Alpha", "Alpha"]));
+}
+
+#[test]
 fn share_requires_the_inspected_workspace_and_its_own_current_record() {
     let fixture = Fixture::new();
     let app = &fixture.application;
